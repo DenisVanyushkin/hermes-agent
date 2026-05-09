@@ -1,0 +1,142 @@
+# Local customizations operational policy
+
+This Hermes install intentionally carries local behavior that is not guaranteed to exist upstream. To keep self-modification safe and maintainable, follow this operating model.
+
+## Goals
+
+- Keep the live checkout updateable.
+- Avoid dirty working trees as the steady state.
+- Make every intentional local behavior traceable to a commit.
+- Allow unattended upstream updates without silent patch drift.
+- Keep user-facing routing preferences stable across updates.
+
+## Branch model
+
+- Upstream tracking branch: `origin/main`
+- Local customization branch: `local/customizations`
+- Normal runtime branch: `local/customizations`
+
+Never use `main` as the branch for live local edits.
+
+## Steady-state invariants
+
+At rest, all of the following should be true:
+
+1. `git branch --show-current` is `local/customizations`
+2. `git status --short` is empty
+3. Local Hermes behavior changes exist as commits on `local/customizations`
+4. Generated/runtime artifacts do not live as untracked files inside the repo
+5. Config-only preferences are stored in `~/.hermes/config.yaml`, not hardcoded into source
+
+## Where changes belong
+
+### Config-only changes
+
+Use config for:
+- per-platform tool-progress visibility
+- runtime footer toggles
+- provider/model selection
+- delivery preferences
+
+Do not patch Python/JS source when config is enough.
+
+### Source changes
+
+Use source commits only for behavior that cannot be expressed in config, for example:
+- custom runtime footer logic
+- bridge normalization behavior
+- local maintenance helpers that need repo context
+
+### Out-of-repo artifacts
+
+Keep these outside the repo whenever the execution environment allows it:
+- cron helper scripts under `~/.hermes/scripts/`
+- user caches under `~/.hermes/cache/`
+- patch archives or notes under `~/.hermes/patches/`
+
+## Procedure for future self-modification
+
+When Hermes modifies itself intentionally:
+
+1. Confirm whether the desired behavior can be achieved by config first.
+2. If code changes are needed, edit the live repo on `local/customizations`.
+3. Run the smallest relevant verification available.
+4. Review `git diff` for accidental edits.
+5. Commit the change to `local/customizations` with a focused message.
+6. Return the repo to a clean state.
+7. If the procedure or pitfall is reusable, update the relevant skill/reference.
+
+Do not leave intentional changes uncommitted.
+
+## Commit conventions for this branch
+
+Prefer small, focused commits such as:
+- `feat: ...` for new local behavior
+- `fix: ...` for corrections to local behavior
+- `chore: ...` for maintenance helpers and local automation
+- `docs: ...` for operational policy and references
+
+## Update workflow
+
+The preferred update path is:
+
+1. Ensure repo is clean.
+2. `git fetch origin --prune`
+3. `git rebase origin/main` while on `local/customizations`
+4. Restart the gateway only if HEAD changed.
+5. If rebase conflicts, stop and report clearly.
+
+Avoid `hermes update` for this customized install, because its autostash behavior is a poor fit for a locally modified checkout.
+
+## Failure handling
+
+### If repo is dirty
+
+Do not auto-update.
+
+Instead:
+- inspect `git status --short`
+- either commit intentional edits
+- or revert accidental edits
+- only then retry the update flow
+
+### If rebase conflicts
+
+Do not force-continue.
+
+Instead:
+- keep the conflict visible
+- report which files conflicted
+- resolve manually or with supervised agent help
+- run verification again
+
+### If gateway restart fails after a successful rebase
+
+Treat the code update and service restart as separate states:
+- report that code updated successfully
+- report restart failure separately
+- do not mislabel the whole operation as a code failure
+
+## Messaging/routing policy
+
+For this install:
+- Telegram is the service channel for tool/progress/operational chatter
+- WhatsApp is the concise semantic user-facing channel
+
+Prefer config/platform overrides for this split instead of custom routing logic in business code.
+
+## Recommended periodic checks
+
+Occasionally verify:
+
+```bash
+git branch --show-current
+git status --short
+git log --oneline --decorate -5
+git rev-list --left-right --count origin/main...local/customizations
+```
+
+A healthy system usually shows:
+- current branch = `local/customizations`
+- clean status
+- a short, understandable stack of local commits on top of upstream
