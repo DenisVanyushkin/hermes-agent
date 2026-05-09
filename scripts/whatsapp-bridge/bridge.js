@@ -209,6 +209,17 @@ function redactWhatsAppId(value) {
   return `${suffix ? `…${suffix}` : '…'}${domainPart ? `@${domainPart}` : ''}`;
 }
 
+function normalizeChatIdForSend(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.includes('@')) return raw.replace(':', '@');
+  const digits = raw.replace(/^\+/, '');
+  if (/^\d{7,15}$/.test(digits)) {
+    return `${digits}@s.whatsapp.net`;
+  }
+  return raw;
+}
+
 function emitDebugEvent(payload) {
   if (!WHATSAPP_DEBUG) return;
   try {
@@ -814,7 +825,8 @@ app.post('/send', async (req, res) => {
   }
 
   const { chatId, message, replyTo } = req.body;
-  if (!chatId || !message) {
+  const normalizedChatId = normalizeChatIdForSend(chatId);
+  if (!normalizedChatId || !message) {
     return res.status(400).json({ error: 'chatId and message are required' });
   }
 
@@ -823,11 +835,10 @@ app.post('/send', async (req, res) => {
     const messageIds = [];
     for (let i = 0; i < chunks.length; i += 1) {
       const { content: payload, options } = buildTextSendPayload(chunks[i], {
-        chatId,
         replyTo: i === 0 ? replyTo : undefined,
         messageStore,
       });
-      const sent = await sendWithTimeout(chatId, payload, options);
+      const sent = await sendWithTimeout(normalizedChatId, payload, options);
       trackSentMessageId(sent);
       messageStore.remember(sent);
       if (sent?.key?.id) messageIds.push(sent.key.id);
@@ -853,19 +864,20 @@ app.post('/edit', async (req, res) => {
   }
 
   const { chatId, messageId, message } = req.body;
-  if (!chatId || !messageId || !message) {
+  const normalizedChatId = normalizeChatIdForSend(chatId);
+  if (!normalizedChatId || !messageId || !message) {
     return res.status(400).json({ error: 'chatId, messageId, and message are required' });
   }
 
   try {
-    const key = { id: messageId, fromMe: true, remoteJid: chatId };
+    const key = { id: messageId, fromMe: true, remoteJid: normalizedChatId };
     const chunks = splitLongMessage(formatOutgoingMessage(message));
     const messageIds = [];
 
-    await sendWithTimeout(chatId, { text: chunks[0], edit: key });
+    await sendWithTimeout(normalizedChatId, { text: chunks[0], edit: key });
     if (chunks.length > 1) {
       for (let i = 1; i < chunks.length; i += 1) {
-        const sent = await sendWithTimeout(chatId, { text: chunks[i] });
+        const sent = await sendWithTimeout(normalizedChatId, { text: chunks[i] });
         trackSentMessageId(sent);
         if (sent?.key?.id) messageIds.push(sent.key.id);
         if (i < chunks.length - 1) {
@@ -887,7 +899,8 @@ app.post('/send-media', async (req, res) => {
   }
 
   const { chatId, filePath, mediaType, caption, fileName } = req.body;
-  if (!chatId || !filePath) {
+  const normalizedChatId = normalizeChatIdForSend(chatId);
+  if (!normalizedChatId || !filePath) {
     return res.status(400).json({ error: 'chatId and filePath are required' });
   }
 
@@ -970,7 +983,7 @@ app.post('/send-media', async (req, res) => {
         break;
     }
 
-    const sent = await sendWithTimeout(chatId, msgPayload);
+    const sent = await sendWithTimeout(normalizedChatId, msgPayload);
     trackSentMessageId(sent);
     messageStore.remember(sent);
     res.json({ success: true, messageId: sent?.key?.id });
@@ -1032,10 +1045,11 @@ app.post('/typing', async (req, res) => {
   }
 
   const { chatId } = req.body;
-  if (!chatId) return res.status(400).json({ error: 'chatId required' });
+  const normalizedChatId = normalizeChatIdForSend(chatId);
+  if (!normalizedChatId) return res.status(400).json({ error: 'chatId required' });
 
   try {
-    await sock.sendPresenceUpdate('composing', chatId);
+    await sock.sendPresenceUpdate('composing', normalizedChatId);
     res.json({ success: true });
   } catch (err) {
     res.json({ success: false });
