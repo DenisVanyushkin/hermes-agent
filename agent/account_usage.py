@@ -525,7 +525,7 @@ def _fetch_codex_account_usage(
     payload = response.json() or {}
     rate_limit = payload.get("rate_limit") or {}
     windows: list[AccountUsageWindow] = []
-    for key, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):
+    for key, label in (("primary_window", "5h"), ("secondary_window", "Week")):
         window = rate_limit.get(key) or {}
         used = window.get("used_percent")
         if used is None:
