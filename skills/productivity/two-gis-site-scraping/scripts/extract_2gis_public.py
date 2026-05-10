@@ -17,6 +17,7 @@ import argparse
 import html
 from html.parser import HTMLParser
 import json
+import math
 import random
 import re
 import sys
@@ -148,6 +149,56 @@ def absolute_2gis_url(target: str, *, city: str | None = None) -> str:
         resolved_city = city or "almaty"
         return f"{BASE_HOST}/{resolved_city}/firm/{target}"
     raise ValueError(f"Cannot normalize target: {target}")
+
+
+def parse_origins(values: list[str] | None) -> list[dict[str, Any]]:
+    origins = []
+    for raw in values or []:
+        if ":" not in raw:
+            raise ValueError(f"Origin must look like label:lat,lon ; got {raw!r}")
+        label, coords = raw.split(":", 1)
+        if "," not in coords:
+            raise ValueError(f"Origin must look like label:lat,lon ; got {raw!r}")
+        lat_s, lon_s = coords.split(",", 1)
+        origins.append({
+            "label": label.strip() or "origin",
+            "lat": float(lat_s.strip()),
+            "lon": float(lon_s.strip()),
+        })
+    return origins
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius_m = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius_m * c
+
+
+def attach_distances(payload: dict[str, Any], origins: list[dict[str, Any]] | None) -> dict[str, Any]:
+    if not origins:
+        return payload
+    coords = payload.get("coordinates")
+    if not isinstance(coords, dict) or coords.get("lat") is None or coords.get("lon") is None:
+        payload["distances"] = []
+        return payload
+    lat = float(coords["lat"])
+    lon = float(coords["lon"])
+    distances = []
+    for origin in origins:
+        meters = haversine_m(origin["lat"], origin["lon"], lat, lon)
+        distances.append({
+            "label": origin["label"],
+            "straight_line_m": round(meters, 1),
+            "straight_line_km": round(meters / 1000.0, 3),
+            "origin": {"lat": origin["lat"], "lon": origin["lon"]},
+        })
+    payload["distances"] = distances
+    return payload
 
 
 def extract_title(html_text: str) -> str | None:
@@ -361,7 +412,7 @@ def search_firms(city: str, query: str, limit: int = 10) -> dict[str, Any]:
     }
 
 
-def lookup(city: str, query: str, search_limit: int = 10, firm_limit: int = 5) -> dict[str, Any]:
+def lookup(city: str, query: str, search_limit: int = 10, firm_limit: int = 5, origins: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     search_payload = search_firms(city=city, query=query, limit=search_limit)
     enriched = []
     for row in search_payload["results"][:firm_limit]:
@@ -371,6 +422,7 @@ def lookup(city: str, query: str, search_limit: int = 10, firm_limit: int = 5) -
         # Preserve the search-side display name if extraction title is noisy.
         if row.get("name") and not firm_data.get("name"):
             firm_data["name"] = row["name"]
+        attach_distances(firm_data, origins)
         enriched.append(firm_data)
     return {
         "status": "ok",
@@ -389,7 +441,9 @@ def cmd_search(args: argparse.Namespace) -> None:
 def cmd_firm(args: argparse.Namespace) -> None:
     url = absolute_2gis_url(args.target, city=args.city)
     html_text = fetch_text(url)
-    print_json(extract_firm(html_text, url))
+    payload = extract_firm(html_text, url)
+    attach_distances(payload, parse_origins(args.origin))
+    print_json(payload)
 
 
 def cmd_lookup(args: argparse.Namespace) -> None:
@@ -399,6 +453,7 @@ def cmd_lookup(args: argparse.Namespace) -> None:
             query=args.query,
             search_limit=args.search_limit,
             firm_limit=args.firm_limit,
+            origins=parse_origins(args.origin),
         )
     )
 
@@ -418,6 +473,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_firm = sub.add_parser("firm", help="Extract one public 2GIS firm page into structured JSON")
     p_firm.add_argument("target", help="Full URL, /city/firm/<id>, or bare numeric firm id")
     p_firm.add_argument("--city", default="almaty", help="Used only when target is a bare numeric id")
+    p_firm.add_argument(
+        "--origin",
+        action="append",
+        default=[],
+        help="Optional origin in label:lat,lon form, e.g. home:43.21,76.91 ; can repeat",
+    )
     p_firm.set_defaults(func=cmd_firm)
 
     p_lookup = sub.add_parser("lookup", help="Search then enrich top firm pages with detailed extraction")
@@ -425,6 +486,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_lookup.add_argument("--city", default="almaty", help="2GIS city alias")
     p_lookup.add_argument("--search-limit", type=int, default=10, help="How many search hits to collect")
     p_lookup.add_argument("--firm-limit", type=int, default=5, help="How many firm pages to enrich")
+    p_lookup.add_argument(
+        "--origin",
+        action="append",
+        default=[],
+        help="Optional origin in label:lat,lon form, e.g. office:43.24,76.93 ; can repeat",
+    )
     p_lookup.set_defaults(func=cmd_lookup)
 
     return parser
