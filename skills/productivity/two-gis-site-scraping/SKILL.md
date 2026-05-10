@@ -96,6 +96,17 @@ Returns structured JSON fields such as:
 - `contacts.websites`
 - `contacts.instagram`
 - `updated_at`
+- `distances` (when `--origin label:lat,lon` is provided)
+
+Distance example:
+
+```bash
+python "$TGIS" firm 70000001106087900 --city almaty \
+  --origin home:43.238,76.945 \
+  --origin office:43.256,76.928
+```
+
+This adds straight-line distance blocks for each supplied origin.
 
 ### 3) One-shot lookup workflow
 
@@ -103,6 +114,7 @@ Returns structured JSON fields such as:
 python "$TGIS" lookup "coffee" --city almaty --search-limit 10 --firm-limit 3
 python "$TGIS" lookup "барбершоп" --city almaty --search-limit 12 --firm-limit 5
 python "$TGIS" lookup "визовый центр" --city almaty --search-limit 8 --firm-limit 3
+python "$TGIS" lookup "автозвук" --city almaty --firm-limit 3 --origin home:43.238,76.945
 ```
 
 This is the default practical path when the user asks:
