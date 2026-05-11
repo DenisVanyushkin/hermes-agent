@@ -1,0 +1,8 @@
+name: whatsapp-policy
+version: 0.1.0
+description: "Owner-only WhatsApp control with scoped correspondent threads and hard tool gating."
+author: "Hermes Agent"
+hooks:
+  - pre_gateway_dispatch
+  - pre_tool_call
+  - post_tool_call

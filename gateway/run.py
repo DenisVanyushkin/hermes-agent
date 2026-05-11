@@ -10820,6 +10820,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         #   {"action": "allow"}   /   None          -> normal dispatch
         # Hook runs BEFORE auth so plugins can handle unauthorized senders
         # (e.g. customer handover ingest) without triggering the pairing flow.
+        _hook_bypass_auth = False
         if not is_internal:
             try:
                 from hermes_cli.plugins import invoke_hook as _invoke_hook
@@ -10837,6 +10838,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if not isinstance(_result, dict):
                     continue
                 _action = _result.get("action")
+                _hook_bypass_auth = _hook_bypass_auth or bool(_result.get("bypass_auth"))
                 if _action == "skip":
                     logger.info(
                         "pre_gateway_dispatch skip: reason=%s platform=%s chat=%s",
@@ -10854,7 +10856,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _action == "allow":
                     break
 
-        if is_internal:
+        if is_internal or _hook_bypass_auth:
             pass
         elif source.user_id is None:
             # Messages with no user identity (Telegram service messages,
@@ -11585,6 +11587,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             resolve_command as _resolve_cmd,
         )
 
+        # Messages admitted by a pre_gateway_dispatch hook via bypass_auth are
+        # allowed into the normal agent flow only. They must not gain access to
+        # the slash-command surface (built-ins, quick commands, plugin commands,
+        # or skill commands) merely because the rewritten text happens to start
+        # with '/'. Keep the text intact for the agent, but suppress command
+        # dispatch entirely for this turn.
+        if _hook_bypass_auth and command:
+            logger.info(
+                "Bypassing slash-command dispatch for hook-admitted message on %s",
+                source.platform.value if source.platform else "unknown",
+            )
+            command = None
+
         # Resolve aliases to canonical name so dispatch and hook names
         # don't depend on the exact alias the user typed.
         _cmd_def = _resolve_cmd(command) if command else None
@@ -12044,6 +12059,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Plugin-registered slash commands
         if command:
             try:
+                from gateway.session_context import clear_session_vars, set_session_vars
                 from hermes_cli.plugins import get_plugin_command_handler
                 # Normalize underscores to hyphens so Telegram's underscored
                 # autocomplete form matches plugin commands registered with
@@ -12051,9 +12067,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
                 if plugin_handler:
                     user_args = event.get_command_args().strip()
-                    result = plugin_handler(user_args)
-                    if asyncio.iscoroutine(result):
-                        result = await result
+                    _plugin_cmd_session_tokens = set_session_vars(
+                        platform=source.platform.value if source.platform else "",
+                        chat_id=source.chat_id or "",
+                        chat_name=source.chat_name or "",
+                        thread_id=str(source.thread_id) if source.thread_id else "",
+                        user_id=str(source.user_id) if source.user_id else "",
+                        user_name=str(source.user_name) if source.user_name else "",
+                        session_key=self._session_key_for_source(source),
+                    )
+                    try:
+                        result = plugin_handler(user_args)
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                    finally:
+                        clear_session_vars(_plugin_cmd_session_tokens)
                     return str(result) if result else None
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)

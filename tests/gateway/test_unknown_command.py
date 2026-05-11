@@ -14,6 +14,7 @@ import pytest
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
+from gateway.session_context import get_session_env
 
 
 def _make_source() -> SessionSource:
@@ -354,18 +355,18 @@ async def test_command_hook_fires_for_plugin_registered_command(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
-    """A rewrite decision should re-resolve the command and route to the new one."""
+async def test_command_hook_can_rewrite_to_plugin_command(monkeypatch):
+    """A command hook may rewrite /status into a plugin command."""
     import gateway.run as gateway_run
 
     runner = _make_runner()
     runner._run_agent = AsyncMock(
-        side_effect=AssertionError("rewritten command leaked to the agent")
+        side_effect=AssertionError("rewritten slash command leaked to the agent")
     )
 
     call_log = []
 
-    async def _emit_collect(event_type, ctx):
+    async def _emit_collect(event_type, payload):
         call_log.append(event_type)
         if event_type == "command:status":
             return [
@@ -401,3 +402,44 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     # First emit_collect fires on the original command; after rewrite the
     # dispatcher does NOT re-fire for the new command (one decision per turn).
     assert call_log == ["command:status"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_command_dispatch_sets_gateway_session_context(monkeypatch):
+    """Plugin slash handlers should see the current gateway session context."""
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError("plugin slash command leaked to the agent")
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    from hermes_cli import plugins as _plugins_mod
+
+    monkeypatch.setattr(
+        _plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: (
+            lambda args: "|".join(
+                [
+                    args,
+                    get_session_env("HERMES_SESSION_PLATFORM", ""),
+                    get_session_env("HERMES_SESSION_USER_ID", ""),
+                    get_session_env("HERMES_SESSION_USER_NAME", ""),
+                    get_session_env("HERMES_SESSION_CHAT_ID", ""),
+                ]
+            )
+        )
+        if name == "metricas"
+        else None,
+    )
+
+    result = await runner._handle_message(_make_event("/metricas dias:7"))
+
+    assert result == "dias:7|telegram|u1|tester|c1"
+    assert get_session_env("HERMES_SESSION_PLATFORM", "") == ""
+    assert get_session_env("HERMES_SESSION_USER_ID", "") == ""
+    runner._run_agent.assert_not_called()
