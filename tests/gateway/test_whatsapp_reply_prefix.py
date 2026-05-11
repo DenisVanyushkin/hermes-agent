@@ -113,6 +113,12 @@ class TestAdapterInit:
         assert adapter._reply_prefix is None
 
     def test_profile_photo_path_from_extra(self):
+        from plugins.platforms.whatsapp.adapter import WhatsAppAdapter
+        config = PlatformConfig(enabled=True, extra={"profile_photo_path": "/tmp/avatar.png"})
+        adapter = WhatsAppAdapter(config)
+        assert adapter._profile_photo_path == "/tmp/avatar.png"
+
+    def test_reply_prefix_empty_string(self):
         from gateway.platforms.whatsapp import WhatsAppAdapter
         config = PlatformConfig(enabled=True, extra={"profile_photo_path": "/tmp/avatar.png"})
         adapter = WhatsAppAdapter(config)
