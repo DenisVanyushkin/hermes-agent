@@ -196,7 +196,10 @@ function trackSentMessageId(sent) {
 
 function normalizeWhatsAppId(value) {
   if (!value) return '';
-  return String(value).replace(':', '@');
+  const raw = String(value).trim();
+  // Baileys may expose self IDs like 12345:10@s.whatsapp.net. Strip the
+  // device suffix before using the JID for profile updates and lookups.
+  return raw.replace(/:\d+@/, '@');
 }
 
 function redactWhatsAppId(value) {
@@ -218,6 +221,25 @@ function normalizeChatIdForSend(value) {
     return `${digits}@s.whatsapp.net`;
   }
   return raw;
+}
+
+function updateOwnProfilePhoto(filePath) {
+  if (!sock || connectionState !== 'connected') {
+    throw new Error('Not connected to WhatsApp');
+  }
+  const normalizedPath = String(filePath || '').trim();
+  if (!normalizedPath) {
+    throw new Error('filePath is required');
+  }
+  if (!existsSync(normalizedPath)) {
+    throw new Error(`File not found: ${normalizedPath}`);
+  }
+  const targetJid = normalizeWhatsAppId(sock.user?.id);
+  if (!targetJid) {
+    throw new Error('Unable to determine current WhatsApp account JID');
+  }
+  return sock.updateProfilePicture(targetJid, { url: normalizedPath })
+    .then(() => ({ success: true, jid: targetJid }));
 }
 
 function emitDebugEvent(payload) {
@@ -1016,6 +1038,31 @@ app.post('/send-poll', async (req, res) => {
   }
 });
 
+// Update the connected account's own profile photo
+app.post('/profile-photo', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const normalizedPath = String(req.body?.filePath || '').trim();
+  if (!normalizedPath) {
+    return res.status(400).json({ error: 'filePath is required' });
+  }
+  if (!path.isAbsolute(normalizedPath)) {
+    return res.status(400).json({ error: 'filePath must be an absolute path' });
+  }
+  if (!existsSync(normalizedPath)) {
+    return res.status(404).json({ error: `File not found: ${normalizedPath}` });
+  }
+
+  try {
+    const result = await updateOwnProfilePhoto(normalizedPath);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Send native WhatsApp location pin
 app.post('/send-location', async (req, res) => {
   if (!sock || connectionState !== 'connected') {
@@ -1037,7 +1084,6 @@ app.post('/send-location', async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
-
 // Typing indicator
 app.post('/typing', async (req, res) => {
   if (!sock || connectionState !== 'connected') {

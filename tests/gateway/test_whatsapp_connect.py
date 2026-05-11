@@ -53,6 +53,7 @@ def _make_adapter():
     adapter._bridge_log = None
     adapter._bridge_process = None
     adapter._reply_prefix = None
+    adapter._profile_photo_path = None
     adapter._running = False
     adapter._message_handler = None
     adapter._fatal_error_code = None
@@ -238,6 +239,39 @@ class TestConnectCleanup:
 
 class TestBridgeRuntimeFailure:
     """Verify runtime bridge death is surfaced as a fatal adapter error."""
+
+    @pytest.mark.asyncio
+    async def test_set_own_profile_photo_success(self):
+        adapter = _make_adapter()
+        adapter._bridge_process = None
+
+        tmp_file = Path('/tmp/test-avatar.png')
+        tmp_file.write_bytes(b'png')
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"success": True, "jid": "123@s.whatsapp.net"})
+        mock_http = MagicMock()
+        mock_http.post = MagicMock(return_value=_AsyncCM(mock_resp))
+        adapter._http_session = mock_http
+
+        result = await adapter._set_own_profile_photo(str(tmp_file))
+
+        assert result.success is True
+        mock_http.post.assert_called_once()
+        called_url = mock_http.post.call_args.args[0]
+        assert called_url.endswith('/profile-photo')
+        assert mock_http.post.call_args.kwargs['json'] == {"filePath": str(tmp_file)}
+
+    @pytest.mark.asyncio
+    async def test_apply_configured_profile_photo_invokes_setter(self):
+        adapter = _make_adapter()
+        adapter._profile_photo_path = '/tmp/test-avatar.png'
+        adapter._set_own_profile_photo = AsyncMock(return_value=MagicMock(success=True, error=None))
+
+        await adapter._apply_configured_profile_photo()
+
+        adapter._set_own_profile_photo.assert_awaited_once_with('/tmp/test-avatar.png')
 
     @pytest.mark.asyncio
     async def test_send_marks_retryable_fatal_when_managed_bridge_exits(self):
