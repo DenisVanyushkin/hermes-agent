@@ -133,6 +133,61 @@ async def test_hook_allow_falls_through_to_auth(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hook_rewrite_can_bypass_auth_and_reach_agent(monkeypatch):
+    """Scoped handover plugins can admit a message by rewriting it and bypassing auth."""
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("WHATSAPP_ALLOWED_USERS", raising=False)
+
+    seen_text = {}
+
+    def _fake_hook(name, **kwargs):
+        if name == "pre_gateway_dispatch":
+            return [{"action": "rewrite", "text": "SCOPED", "bypass_auth": True}]
+        return []
+
+    async def _capture(event, source, _quick_key, _run_generation):
+        seen_text["value"] = event.text
+        return "ok"
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_hook)
+
+    runner, _adapter = _make_runner(Platform.WHATSAPP)
+    runner._handle_message_with_agent = _capture  # noqa: SLF001
+
+    result = await runner._handle_message(_make_event("original"))
+
+    assert result == "ok"
+    assert seen_text.get("value") == "SCOPED"
+    runner.pairing_store.generate_code.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hook_bypass_auth_does_not_execute_slash_commands(monkeypatch):
+    """bypass_auth should admit into agent flow, not unlock the slash-command surface."""
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("WHATSAPP_ALLOWED_USERS", raising=False)
+
+    def _fake_hook(name, **kwargs):
+        if name == "pre_gateway_dispatch":
+            return [{"action": "rewrite", "text": "/status", "bypass_auth": True}]
+        return []
+
+    async def _capture(event, source, _quick_key, _run_generation):
+        return f"agent:{event.text}"
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_hook)
+
+    runner, _adapter = _make_runner(Platform.WHATSAPP)
+    runner._handle_message_with_agent = _capture  # noqa: SLF001
+    runner._handle_status_command = AsyncMock(side_effect=AssertionError("/status must not execute under bypass_auth"))  # noqa: SLF001
+
+    result = await runner._handle_message(_make_event("original"))
+
+    assert result == "agent:/status"
+    runner._handle_status_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_hook_exception_does_not_break_dispatch(monkeypatch):
     """A raising plugin hook does not break the gateway."""
     _clear_auth_env(monkeypatch)

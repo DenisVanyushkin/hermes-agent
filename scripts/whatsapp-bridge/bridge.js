@@ -855,6 +855,7 @@ app.post('/send', async (req, res) => {
   try {
     const chunks = splitLongMessage(formatOutgoingMessage(message));
     const messageIds = [];
+    let remoteJid = normalizedChatId;
     for (let i = 0; i < chunks.length; i += 1) {
       const { content: payload, options } = buildTextSendPayload(chunks[i], {
         replyTo: i === 0 ? replyTo : undefined,
@@ -864,6 +865,7 @@ app.post('/send', async (req, res) => {
       trackSentMessageId(sent);
       messageStore.remember(sent);
       if (sent?.key?.id) messageIds.push(sent.key.id);
+      if (sent?.key?.remoteJid) remoteJid = normalizeWhatsAppId(sent.key.remoteJid);
       if (chunks.length > 1 && i < chunks.length - 1) {
         await sleep(CHUNK_DELAY_MS);
       }
@@ -871,6 +873,9 @@ app.post('/send', async (req, res) => {
 
     res.json({
       success: true,
+      chatId: remoteJid,
+      normalizedChatId,
+      remoteJid,
       messageId: messageIds[messageIds.length - 1],
       messageIds,
     });
