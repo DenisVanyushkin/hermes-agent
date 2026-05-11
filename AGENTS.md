@@ -4,6 +4,17 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## Local Workflow Requirements (Denis)
+
+For this live checkout, all substantive code changes must follow the `denis-change-workflow` skill and these repo-local rules:
+
+- Load and follow the `denis-change-workflow` skill for code changes, bugfixes, refactors, configuration changes, and Hermes-internal modifications unless Denis explicitly asks for a different process.
+- Use the local customization branch `local/customizations` for Hermes changes unless Denis explicitly approves another branch.
+- After implementation, run relevant local verification, then perform an independent LLM code review, validate the review comments, and fix only confirmed issues.
+- Before finishing, ensure `git status` is clean for task-related work: do not leave uncommitted changes without Denis's explicit approval.
+- Final reports must include what changed, how it was verified, what code review found, and what was committed.
+
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a
