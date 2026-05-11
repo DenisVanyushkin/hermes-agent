@@ -2700,6 +2700,8 @@ DEFAULT_CONFIG = {
         # Default (None) uses the built-in "⚕ *Hermes Agent*" header.
         # Set to "" (empty string) to disable the header entirely.
         # Supports \n for newlines, e.g. "🤖 *My Bot*\n──────\n"
+        # profile_photo_path: optional absolute host path to an image Hermes
+        # should apply as the account's own WhatsApp avatar on connect.
     },
 
     # Telegram platform settings (gateway mode)

@@ -1544,6 +1544,8 @@ def load_gateway_config() -> GatewayConfig:
                     )
                 if "reply_prefix" in platform_cfg:
                     bridged["reply_prefix"] = platform_cfg["reply_prefix"]
+                if "profile_photo_path" in platform_cfg:
+                    bridged["profile_photo_path"] = platform_cfg["profile_photo_path"]
                 if "reply_in_thread" in platform_cfg:
                     bridged["reply_in_thread"] = platform_cfg["reply_in_thread"]
                 if "cron_continuable_surface" in platform_cfg:
