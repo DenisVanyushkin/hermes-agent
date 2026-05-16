@@ -66,6 +66,9 @@ DEFAULT_CONFIG = {
             "remote_friendly": 5,
             "executive_visibility": 15,
             "AI_or_modern_tech": 10,
+            "target_company": 18,
+            "career_page_signal": 10,
+            "growth_signal": 8,
         },
         "negative_signals": {
             "outsourcing_company": -40,
@@ -75,6 +78,8 @@ DEFAULT_CONFIG = {
             "pure_project_management": -30,
             "enterprise_bureaucracy": -15,
             "weak_product_culture": -20,
+            "generic_remote_noise": -25,
+            "unclear_ownership": -15,
         },
         "thresholds": {"exceptional_fit": 90, "strong_fit": 75, "possible_fit": 60, "weak_fit": 40, "reject_below": 40},
     },
@@ -83,9 +88,11 @@ DEFAULT_CONFIG = {
         "repost_detection": {"enabled": True, "repost_window_days": 45},
     },
     "runtime": {
-        "scheduler": {"search_frequency": "0 9 * * *", "timezone": "Asia/Almaty", "enrichment_review_days": 14},
-        "slack": {"channel": "C0B42K4H4KV", "alerts_channel": "C0B42K4H4KV", "batch_size": 5},
+        "scheduler": {"search_frequency": "0 9 * * *", "timezone": "Asia/Almaty", "enrichment_review_days": 14, "market_report_frequency": "0 11 * * 1"},
+        "slack": {"channel": "C0B42K4H4KV", "alerts_channel": "C0B42K4H4KV", "batch_size": 5, "market_channel": "C0B42K4H4KV"},
     },
+    "target_companies": {},
+    "company_red_flags": {},
 }
 
 
@@ -97,7 +104,15 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_config_bundle() -> dict[str, Any]:
-    bundle = {"candidate": {}, "search_criteria": {}, "scoring": {}, "deduplication": {}, "runtime": {}}
+    bundle = {
+        "candidate": {},
+        "search_criteria": {},
+        "scoring": {},
+        "deduplication": {},
+        "runtime": {},
+        "target_companies": {},
+        "company_red_flags": {},
+    }
     for key in bundle:
         path = SEED_DIR / f"{key}.yaml"
         loaded = load_yaml(path)

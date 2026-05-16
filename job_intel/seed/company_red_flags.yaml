@@ -1,0 +1,17 @@
+company_red_flags:
+  organizational:
+    - founder micromanagement
+    - weak product culture
+    - no strategic ownership
+    - excessive bureaucracy
+    - delivery-first mindset
+  business:
+    - unclear monetization
+    - declining business
+    - unstable funding
+    - low growth potential
+  hiring:
+    - vague responsibilities
+    - unclear reporting structure
+    - unrealistic expectations
+    - low autonomy

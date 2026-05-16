@@ -109,7 +109,26 @@ CREATE TABLE IF NOT EXISTS company_intelligence (
     summary TEXT NOT NULL,
     risk_flags_json TEXT NOT NULL,
     target_category TEXT,
+    website TEXT,
+    signals_json TEXT,
+    career_urls_json TEXT,
+    opening_count INTEGER NOT NULL DEFAULT 0,
+    last_scanned_at TEXT,
+    last_signal_at TEXT,
+    source_json TEXT,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS company_intelligence_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    source TEXT,
+    title TEXT,
+    url TEXT,
+    summary TEXT NOT NULL,
+    details_json TEXT,
+    seen_at TEXT NOT NULL
 );
 """
 
@@ -139,6 +158,13 @@ class JobIntelStore:
             self._ensure_column(conn, "notifications", "delivery_error", "TEXT")
             self._ensure_column(conn, "notifications", "delivery_attempts", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "notifications", "payload_json", "TEXT")
+            self._ensure_column(conn, "company_intelligence", "website", "TEXT")
+            self._ensure_column(conn, "company_intelligence", "signals_json", "TEXT")
+            self._ensure_column(conn, "company_intelligence", "career_urls_json", "TEXT")
+            self._ensure_column(conn, "company_intelligence", "opening_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "company_intelligence", "last_scanned_at", "TEXT")
+            self._ensure_column(conn, "company_intelligence", "last_signal_at", "TEXT")
+            self._ensure_column(conn, "company_intelligence", "source_json", "TEXT")
 
     def list_tables(self) -> list[str]:
         with self.connect() as conn:
@@ -457,3 +483,90 @@ class JobIntelStore:
         except json.JSONDecodeError:
             payload = {}
         return payload.get("source_statuses") or {}
+
+    def upsert_company_intelligence(
+        self,
+        company: str,
+        summary: str,
+        signals: dict[str, Any],
+        *,
+        target_category: str | None = None,
+        website: str | None = None,
+        career_urls: list[str] | None = None,
+        opening_count: int = 0,
+        source: str | None = None,
+        risk_flags: list[str] | None = None,
+        last_scanned_at: str | None = None,
+        last_signal_at: str | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO company_intelligence (
+                    company, summary, risk_flags_json, target_category, website, signals_json, career_urls_json,
+                    opening_count, last_scanned_at, last_signal_at, source_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(company) DO UPDATE SET
+                    summary=excluded.summary,
+                    risk_flags_json=excluded.risk_flags_json,
+                    target_category=excluded.target_category,
+                    website=excluded.website,
+                    signals_json=excluded.signals_json,
+                    career_urls_json=excluded.career_urls_json,
+                    opening_count=excluded.opening_count,
+                    last_scanned_at=excluded.last_scanned_at,
+                    last_signal_at=excluded.last_signal_at,
+                    source_json=excluded.source_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    company,
+                    summary,
+                    json.dumps(risk_flags or [], ensure_ascii=False),
+                    target_category,
+                    website,
+                    json.dumps(signals or {}, ensure_ascii=False),
+                    json.dumps(career_urls or [], ensure_ascii=False),
+                    opening_count,
+                    last_scanned_at or now,
+                    last_signal_at,
+                    json.dumps({"source": source or "system"}, ensure_ascii=False),
+                    now,
+                ),
+            )
+
+    def append_company_event(
+        self,
+        company: str,
+        event_type: str,
+        *,
+        source: str | None = None,
+        title: str | None = None,
+        url: str | None = None,
+        summary: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO company_intelligence_events (
+                    company, event_type, source, title, url, summary, details_json, seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    company,
+                    event_type,
+                    source,
+                    title,
+                    url,
+                    summary,
+                    json.dumps(details or {}, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def fetch_company_intelligence(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM company_intelligence ORDER BY datetime(updated_at) DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]

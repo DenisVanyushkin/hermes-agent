@@ -11,6 +11,7 @@ from typing import Any
 
 import requests
 
+from .company_intel import build_market_report, monitor_target_companies
 from .config import DEFAULT_CONFIG, load_config_bundle
 from .dedup import canonical_vacancy_key, description_similarity, is_duplicate
 from .digest import format_daily_digest, format_enrichment_questions, format_vacancy_summary
@@ -81,10 +82,23 @@ def _source_status_template(source: str, *, status: str, **details: Any) -> dict
 
 
 
-def _collect_vacancies() -> CollectedVacancies:
+def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies:
     cfg = load_config_bundle() or DEFAULT_CONFIG
+    store = store or _store()
+    store.bootstrap()
     vacancies: list[Vacancy] = []
     statuses: dict[str, dict[str, Any]] = {}
+
+    target_result = monitor_target_companies(store)
+    vacancies.extend(target_result.vacancies)
+    company_ok = any(status.get("status") == "ok" for status in target_result.company_statuses.values())
+    statuses["target_companies"] = _source_status_template(
+        "target-companies",
+        status="ok" if company_ok or target_result.vacancies else ("error" if target_result.company_statuses else "empty"),
+        hits=len(target_result.vacancies),
+        companies=len(target_result.company_statuses),
+        company_statuses=target_result.company_statuses,
+    )
 
     hh_queries = [
         "VP Product monetization B2C platform",
@@ -149,6 +163,12 @@ def _collect_vacancies() -> CollectedVacancies:
 
     return CollectedVacancies(vacancies=vacancies, source_statuses=statuses)
 
+
+def _collect_vacancies_compat(store: JobIntelStore | None = None) -> CollectedVacancies:
+    try:
+        return _coerce_collected(_collect_vacancies(store))
+    except TypeError:
+        return _coerce_collected(_collect_vacancies())
 
 
 def _slack_webhook_enabled() -> bool:
@@ -290,7 +310,7 @@ def run_daily() -> str:
     similarity_threshold = dedup_cfg["secondary_similarity"]["description_similarity_threshold"]
     repost_window_days = dedup_cfg["repost_detection"]["repost_window_days"]
 
-    collected = _coerce_collected(_collect_vacancies())
+    collected = _collect_vacancies_compat(store)
     vacancies = collected.vacancies
     source_statuses = collected.source_statuses
     accepted: list[tuple[Vacancy, Any, int]] = []
@@ -365,12 +385,30 @@ def run_enrichment() -> str:
 
 
 
+def run_market_report() -> str:
+    store = _store()
+    store.bootstrap()
+    run_id = store.start_run("market")
+    monitor_target_companies(store)
+    digest = build_market_report(store)
+    if digest != "[SILENT]":
+        channel = load_config_bundle().get("runtime", {}).get("slack", {}).get("market_channel", "C0B42K4H4KV")
+        notification_id = store.create_notification(run_id, channel, "market_report", digest, delivery_status="pending")
+        delivery = _deliver_to_slack(digest, channel)
+        store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
+        store.finish_run(run_id, status="ok", notes=f"report_length={len(digest)}", metadata={"delivery": delivery.__dict__})
+    else:
+        store.finish_run(run_id, status="ok", notes="report=silent", metadata={"report": "silent"})
+    return digest
+
+
+
 def run_alert_scan() -> str:
     store = _store()
     store.bootstrap()
     run_id = store.start_run("alert")
     cfg = load_config_bundle() or DEFAULT_CONFIG
-    collected = _coerce_collected(_collect_vacancies())
+    collected = _collect_vacancies_compat(store)
     vacancies = collected.vacancies
     source_statuses = collected.source_statuses
     exceptional: list[tuple[Vacancy, Any, int]] = []
@@ -432,7 +470,7 @@ def _source_statuses_for_doctor(store: JobIntelStore) -> dict[str, dict[str, Any
     if latest:
         return latest
     try:
-        return _coerce_collected(_collect_vacancies()).source_statuses
+        return _collect_vacancies_compat(store).source_statuses
     except Exception as exc:
         return {"headhunter": {"source": "headhunter", "status": "error", "errors": [str(exc)]}}
 
@@ -535,6 +573,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("daily")
     sub.add_parser("alert")
     sub.add_parser("enrichment")
+    sub.add_parser("market")
 
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(cmd="doctor")
@@ -567,6 +606,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "enrichment":
         print(run_enrichment())
+        return 0
+    if args.cmd == "market":
+        print(run_market_report())
         return 0
     if args.cmd == "doctor":
         print(doctor_report())
