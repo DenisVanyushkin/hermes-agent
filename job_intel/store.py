@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from .models import Evaluation, Vacancy, VacancyResult
+from .models import Evaluation, Vacancy
+from .runtime import parse_iso_datetime
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -18,7 +19,8 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at TEXT NOT NULL,
     finished_at TEXT,
     status TEXT NOT NULL,
-    notes TEXT
+    notes TEXT,
+    metadata_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS vacancies (
@@ -88,13 +90,18 @@ CREATE TABLE IF NOT EXISTS enrichment_questions (
 CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER,
+    vacancy_id INTEGER,
     channel TEXT NOT NULL,
     message_type TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     delivery_status TEXT NOT NULL,
+    delivery_error TEXT,
+    delivery_attempts INTEGER NOT NULL DEFAULT 0,
     sent_at TEXT NOT NULL,
     body TEXT NOT NULL,
-    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL
+    payload_json TEXT,
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL,
+    FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS company_intelligence (
@@ -118,9 +125,20 @@ class JobIntelStore:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {row[1] for row in rows}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
     def bootstrap(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._ensure_column(conn, "runs", "metadata_json", "TEXT")
+            self._ensure_column(conn, "notifications", "vacancy_id", "INTEGER")
+            self._ensure_column(conn, "notifications", "delivery_error", "TEXT")
+            self._ensure_column(conn, "notifications", "delivery_attempts", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "notifications", "payload_json", "TEXT")
 
     def list_tables(self) -> list[str]:
         with self.connect() as conn:
@@ -129,35 +147,55 @@ class JobIntelStore:
             ).fetchall()
         return [row[0] for row in rows]
 
-    def start_run(self, mode: str, notes: str | None = None) -> int:
+    def start_run(self, mode: str, notes: str | None = None, metadata: dict[str, Any] | None = None) -> int:
         self.bootstrap()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:
             cur = conn.execute(
-                "INSERT INTO runs (mode, started_at, status, notes) VALUES (?, ?, ?, ?)",
-                (mode, now, "running", notes),
+                "INSERT INTO runs (mode, started_at, status, notes, metadata_json) VALUES (?, ?, ?, ?, ?)",
+                (mode, now, "running", notes, json.dumps(metadata or {}, ensure_ascii=False)),
             )
             return int(cur.lastrowid)
 
-    def finish_run(self, run_id: int, status: str = "ok", notes: str | None = None) -> None:
+    def finish_run(
+        self,
+        run_id: int,
+        status: str = "ok",
+        notes: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         with self.connect() as conn:
+            row = conn.execute("SELECT metadata_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+            existing_metadata = json.loads(row[0]) if row and row[0] else {}
+            if metadata is not None:
+                existing_metadata.update(metadata)
             conn.execute(
-                "UPDATE runs SET finished_at = ?, status = ?, notes = COALESCE(?, notes) WHERE id = ?",
-                (datetime.utcnow().isoformat(), status, notes, run_id),
+                "UPDATE runs SET finished_at = ?, status = ?, notes = COALESCE(?, notes), metadata_json = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), status, notes, json.dumps(existing_metadata, ensure_ascii=False), run_id),
             )
 
-    def upsert_vacancy(self, vacancy: Vacancy, vacancy_key: str) -> None:
-        now = vacancy.scraped_at or datetime.utcnow().isoformat()
+    def latest_run(self) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT repost_count FROM vacancies WHERE vacancy_key = ?", (vacancy_key,)).fetchone()
+            row = conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def fetch_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_vacancy(self, vacancy: Vacancy, vacancy_key: str) -> int:
+        now = vacancy.scraped_at or datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            row = conn.execute("SELECT id, repost_count FROM vacancies WHERE vacancy_key = ?", (vacancy_key,)).fetchone()
             if row:
-                repost_count = int(row[0]) + 1
+                repost_count = int(row[1]) + 1
                 conn.execute(
                     """
                     UPDATE vacancies
                     SET source = ?, source_id = ?, company = ?, title = ?, location = ?, url = ?, description = ?,
                         posted_at = ?, scraped_at = ?, salary = ?, company_url = ?, metadata_json = ?,
-                        last_seen_at = ?, repost_count = ?
+                        last_seen_at = ?, repost_count = ?, status = 'active'
                     WHERE vacancy_key = ?
                     """,
                     (
@@ -178,32 +216,47 @@ class JobIntelStore:
                         vacancy_key,
                     ),
                 )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO vacancies (
-                        vacancy_key, source, source_id, company, title, location, url, description,
-                        posted_at, scraped_at, salary, company_url, metadata_json, first_seen_at, last_seen_at, repost_count, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'new')
-                    """,
-                    (
-                        vacancy_key,
-                        vacancy.source,
-                        vacancy.source_id,
-                        vacancy.company,
-                        vacancy.title,
-                        vacancy.location,
-                        vacancy.url,
-                        vacancy.description,
-                        vacancy.posted_at,
-                        vacancy.scraped_at,
-                        vacancy.salary,
-                        vacancy.company_url,
-                        json.dumps(vacancy.metadata, ensure_ascii=False),
-                        now,
-                        now,
-                    ),
-                )
+                return int(row[0])
+            cur = conn.execute(
+                """
+                INSERT INTO vacancies (
+                    vacancy_key, source, source_id, company, title, location, url, description,
+                    posted_at, scraped_at, salary, company_url, metadata_json, first_seen_at, last_seen_at, repost_count, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'new')
+                """,
+                (
+                    vacancy_key,
+                    vacancy.source,
+                    vacancy.source_id,
+                    vacancy.company,
+                    vacancy.title,
+                    vacancy.location,
+                    vacancy.url,
+                    vacancy.description,
+                    vacancy.posted_at,
+                    vacancy.scraped_at,
+                    vacancy.salary,
+                    vacancy.company_url,
+                    json.dumps(vacancy.metadata, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def set_vacancy_status(self, vacancy_id: int, status: str) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE vacancies SET status = ? WHERE id = ?", (status, vacancy_id))
+
+    def get_vacancy_by_key(self, vacancy_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM vacancies WHERE vacancy_key = ?", (vacancy_key,)).fetchone()
+        return dict(row) if row else None
+
+    def get_vacancy_by_id(self, vacancy_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM vacancies WHERE id = ?", (vacancy_id,)).fetchone()
+        return dict(row) if row else None
 
     def save_evaluation(self, vacancy_key: str, evaluation: Evaluation, run_id: int | None = None) -> None:
         with self.connect() as conn:
@@ -225,7 +278,7 @@ class JobIntelStore:
                     json.dumps(evaluation.concerns, ensure_ascii=False),
                     json.dumps(evaluation.reasons, ensure_ascii=False),
                     json.dumps(evaluation.raw_breakdown, ensure_ascii=False),
-                    datetime.utcnow().isoformat(),
+                    datetime.now(timezone.utc).isoformat(),
                 ),
             )
 
@@ -237,7 +290,7 @@ class JobIntelStore:
                     canonical_vacancy_key, duplicate_vacancy_key, reason, similarity, created_at
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (canonical_vacancy_key, duplicate_vacancy_key, reason, similarity, datetime.utcnow().isoformat()),
+                (canonical_vacancy_key, duplicate_vacancy_key, reason, similarity, datetime.now(timezone.utc).isoformat()),
             )
 
     def set_memory(self, key: str, value: str, source: str = "system", confidence: float = 1.0) -> None:
@@ -248,7 +301,7 @@ class JobIntelStore:
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, source=excluded.source, confidence=excluded.confidence, updated_at=excluded.updated_at
                 """,
-                (key, value, source, confidence, datetime.utcnow().isoformat()),
+                (key, value, source, confidence, datetime.now(timezone.utc).isoformat()),
             )
 
     def get_memory(self) -> dict[str, str]:
@@ -256,19 +309,92 @@ class JobIntelStore:
             rows = conn.execute("SELECT key, value FROM candidate_memory ORDER BY key").fetchall()
         return {row[0]: row[1] for row in rows}
 
-    def log_notification(self, run_id: int | None, channel: str, message_type: str, body: str, delivery_status: str = "sent") -> None:
+    def create_notification(
+        self,
+        run_id: int | None,
+        channel: str,
+        message_type: str,
+        body: str,
+        *,
+        vacancy_id: int | None = None,
+        payload: dict[str, Any] | None = None,
+        delivery_status: str = "pending",
+        delivery_error: str | None = None,
+        delivery_attempts: int = 0,
+    ) -> int:
         import hashlib
 
         content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
         with self.connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 INSERT INTO notifications (
-                    run_id, channel, message_type, content_hash, delivery_status, sent_at, body
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    run_id, vacancy_id, channel, message_type, content_hash, delivery_status,
+                    delivery_error, delivery_attempts, sent_at, body, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, channel, message_type, content_hash, delivery_status, datetime.utcnow().isoformat(), body),
+                (
+                    run_id,
+                    vacancy_id,
+                    channel,
+                    message_type,
+                    content_hash,
+                    delivery_status,
+                    delivery_error,
+                    delivery_attempts,
+                    datetime.now(timezone.utc).isoformat(),
+                    body,
+                    json.dumps(payload or {}, ensure_ascii=False),
+                ),
             )
+            return int(cur.lastrowid)
+
+    def mark_notification_delivery(
+        self,
+        notification_id: int,
+        delivery_status: str,
+        *,
+        attempts: int | None = None,
+        delivery_error: str | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT delivery_attempts FROM notifications WHERE id = ?", (notification_id,)).fetchone()
+            if not row:
+                return
+            current_attempts = int(row[0] or 0)
+            conn.execute(
+                """
+                UPDATE notifications
+                SET delivery_status = ?, delivery_error = ?, delivery_attempts = ?, sent_at = ?
+                WHERE id = ?
+                """,
+                (
+                    delivery_status,
+                    delivery_error,
+                    attempts if attempts is not None else current_attempts,
+                    datetime.now(timezone.utc).isoformat(),
+                    notification_id,
+                ),
+            )
+
+    def latest_notification_for_vacancy(self, vacancy_id: int, delivery_status: str | None = None) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            if delivery_status:
+                row = conn.execute(
+                    "SELECT * FROM notifications WHERE vacancy_id = ? AND delivery_status = ? ORDER BY id DESC LIMIT 1",
+                    (vacancy_id, delivery_status),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM notifications WHERE vacancy_id = ? ORDER BY id DESC LIMIT 1",
+                    (vacancy_id,),
+                ).fetchone()
+        return dict(row) if row else None
+
+    def fetch_notifications(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM notifications ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
 
     def fetch_recent_vacancies(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -292,3 +418,42 @@ class JobIntelStore:
                 (min_score, limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def retire_stale(self, *, days: int, archive_after_days: int | None = None) -> dict[str, int]:
+        archive_after_days = archive_after_days or max(days * 2, days + 1)
+        now = datetime.now(timezone.utc)
+        stale_before = (now - timedelta(days=days)).isoformat()
+        archive_before = (now - timedelta(days=archive_after_days)).isoformat()
+        with self.connect() as conn:
+            stale_candidates = conn.execute(
+                """
+                SELECT id FROM vacancies
+                WHERE status IN ('new', 'active', 'notified')
+                  AND last_seen_at < ?
+                """,
+                (stale_before,),
+            ).fetchall()
+            for row in stale_candidates:
+                conn.execute("UPDATE vacancies SET status = 'stale' WHERE id = ?", (int(row[0]),))
+
+            archived_candidates = conn.execute(
+                """
+                SELECT id FROM vacancies
+                WHERE status = 'stale'
+                  AND last_seen_at < ?
+                """,
+                (archive_before,),
+            ).fetchall()
+            for row in archived_candidates:
+                conn.execute("UPDATE vacancies SET status = 'archived' WHERE id = ?", (int(row[0]),))
+
+        return {"stale": len(stale_candidates), "archived": len(archived_candidates)}
+
+    def source_adapter_status_from_latest_run(self) -> dict[str, Any]:
+        latest = self.latest_run() or {}
+        metadata = latest.get("metadata_json") or "{}"
+        try:
+            payload = json.loads(metadata)
+        except json.JSONDecodeError:
+            payload = {}
+        return payload.get("source_statuses") or {}
