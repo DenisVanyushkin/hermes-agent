@@ -16,14 +16,18 @@ UPSTREAM_BRANCH="${HERMES_UPSTREAM_BRANCH:-main}"
 UPSTREAM_REF="$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
 
 resolve_hermes_bin() {
-  if [ -x "$REPO/venv/bin/hermes" ]; then
-    printf '%s\n' "$REPO/venv/bin/hermes"
-    return 0
-  fi
-  if command -v hermes >/dev/null 2>&1; then
-    command -v hermes
-    return 0
-  fi
+  can_run_hermes() {
+    [ -n "$1" ] && [ -x "$1" ] || return 1
+    "$1" --version >/dev/null 2>&1
+  }
+
+  for candidate in "${HERMES_BIN:-}" "$REPO/venv/bin/hermes" "$HOME/.local/bin/hermes" "$(command -v hermes 2>/dev/null || true)"; do
+    [ -n "$candidate" ] || continue
+    if can_run_hermes "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -61,11 +65,34 @@ fi
 
 git config --global --add safe.directory "$REPO" >/dev/null 2>&1 || true
 
-STATUS_BEFORE="$(git -C "$REPO" status --porcelain)"
-if [ -n "$STATUS_BEFORE" ]; then
-  echo "Refusing to update because repo is dirty:" >&2
-  printf '%s\n' "$STATUS_BEFORE" >&2
+if [ -d "$REPO/.git/rebase-merge" ] || [ -d "$REPO/.git/rebase-apply" ]; then
+  echo "Repo is already mid-rebase; resolve it before running update." >&2
   exit 1
+fi
+
+AUTOSTASH_CREATED=0
+AUTOSTASH_RESTORE_FAILED=0
+cleanup_autostash() {
+  local status="$1"
+  if [ "$AUTOSTASH_CREATED" -eq 1 ]; then
+    if git -C "$REPO" stash pop --index >/dev/null 2>&1; then
+      AUTOSTASH_CREATED=0
+    else
+      AUTOSTASH_RESTORE_FAILED=1
+      echo "Warning: autostash could not be restored cleanly; it remains in git stash." >&2
+    fi
+  fi
+  if [ "$status" -eq 0 ] && [ "$AUTOSTASH_RESTORE_FAILED" -eq 1 ]; then
+    exit 1
+  fi
+}
+
+STATUS_BEFORE="$(git -C "$REPO" status --porcelain --untracked-files=all)"
+if [ -n "$STATUS_BEFORE" ]; then
+  echo "Local changes detected — stashing before update..." >&2
+  git -C "$REPO" stash push --include-untracked -m "hermes-local-customizations-autostash-$(date +%Y%m%d-%H%M%S)" >/dev/null
+  AUTOSTASH_CREATED=1
+  trap 'cleanup_autostash "$?"' EXIT
 fi
 
 CURRENT_BRANCH="$(git -C "$REPO" branch --show-current)"
@@ -94,8 +121,9 @@ if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor
   exit 0
 fi
 
-trap abort_rebase_if_needed ERR
-REBASE_OUTPUT="$(git -C "$REPO" rebase "$UPSTREAM_REF" 2>&1)" || {
+REBASE_LOG="$(mktemp)"
+if ! git -C "$REPO" rebase "$UPSTREAM_REF" >"$REBASE_LOG" 2>&1; then
+  abort_rebase_if_needed
   echo "Hermes local-branch update failed during rebase." >&2
   echo "Repo: $REPO" >&2
   echo "Branch: $BRANCH" >&2
@@ -103,10 +131,11 @@ REBASE_OUTPUT="$(git -C "$REPO" rebase "$UPSTREAM_REF" 2>&1)" || {
   echo "Before: $BEFORE_HEAD" >&2
   echo "Fetched base: $BASE_AFTER" >&2
   echo "Rebase output:" >&2
-  printf '%s\n' "$REBASE_OUTPUT" >&2
+  cat "$REBASE_LOG" >&2
+  rm -f "$REBASE_LOG"
   exit 1
-}
-trap - ERR
+fi
+rm -f "$REBASE_LOG"
 
 AFTER_HEAD="$(git -C "$REPO" rev-parse --short HEAD)"
 if [ "$AFTER_HEAD" = "$BEFORE_HEAD" ]; then
