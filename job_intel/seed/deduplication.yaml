@@ -1,0 +1,6 @@
+deduplication:
+  secondary_similarity:
+    description_similarity_threshold: 0.82
+  repost_detection:
+    enabled: true
+    repost_window_days: 45

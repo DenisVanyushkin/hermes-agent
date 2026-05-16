@@ -1,0 +1,9 @@
+runtime:
+  scheduler:
+    search_frequency: "0 9 * * *"
+    timezone: "Asia/Almaty"
+    enrichment_review_days: 14
+  slack:
+    channel: "C0B42K4H4KV"
+    alerts_channel: "C0B42K4H4KV"
+    batch_size: 5
