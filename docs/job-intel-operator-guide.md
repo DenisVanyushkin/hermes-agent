@@ -29,6 +29,11 @@ From the repo root:
 
 All three are configured to deliver to the Slack thread plus `C0B42K4H4KV`.
 
+The shell wrappers are cwd-independent:
+- `JOB_INTEL_WORKDIR` defaults to `/home/hermes/.hermes/hermes-agent`
+- `JOB_INTEL_PYTHON` defaults to `$JOB_INTEL_WORKDIR/venv/bin/python`
+- each wrapper `cd`s into the workdir before invoking `python -m job_intel ...`
+
 ## Maintenance
 
 - Update `job_intel/seed/*.yaml` when candidate preferences or scoring rules change.
