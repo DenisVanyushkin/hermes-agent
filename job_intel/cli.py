@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-from dataclasses import asdict
+import os
 from pathlib import Path
-from typing import Iterable
+
+import requests
 
 from .config import DEFAULT_CONFIG, load_config_bundle
 from .dedup import canonical_vacancy_key, description_similarity, is_duplicate
 from .digest import format_daily_digest, format_enrichment_questions
-from .evaluator import score_vacancy, tier_for_score
+from .evaluator import score_vacancy
 from .enrichment import detect_high_value_questions
 from .models import Vacancy
 from .sources import discovery_queries, fetch_headhunter_vacancies, search_duckduckgo
@@ -59,6 +60,21 @@ def _guess_company(title: str) -> str:
     return parts[-1].strip() if parts else title[:80]
 
 
+def _deliver_to_slack(message: str, channel: str | None = None) -> bool:
+    webhook = os.getenv("JOB_INTEL_SLACK_WEBHOOK_URL", "").strip()
+    if not webhook or message == "[SILENT]":
+        return False
+    payload: dict[str, str] = {"text": message}
+    if channel:
+        payload["channel"] = channel
+    try:
+        response = requests.post(webhook, json=payload, timeout=20)
+        response.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
 def run_daily() -> str:
     store = _store()
     store.bootstrap()
@@ -71,29 +87,31 @@ def run_daily() -> str:
     vacancies = _collect_vacancies()
     accepted: list[tuple[Vacancy, object]] = []
     canonical_rows: list[Vacancy] = []
+    seen_keys: set[str] = set()
 
     for vacancy in vacancies:
         vacancy_key = canonical_vacancy_key(vacancy)
-        is_dup = False
-        dup_reason = None
-        for existing in canonical_rows:
-            if is_duplicate(vacancy, existing, similarity_threshold=similarity_threshold, repost_window_days=repost_window_days):
-                is_dup = True
-                dup_reason = canonical_vacancy_key(existing)
-                store.save_duplicate(canonical_vacancy_key(existing), vacancy_key, "semantic/repost match", description_similarity(vacancy.description, existing.description))
-                break
+        is_dup = vacancy_key in seen_keys
+        if not is_dup:
+            for existing in canonical_rows:
+                if is_duplicate(vacancy, existing, similarity_threshold=similarity_threshold, repost_window_days=repost_window_days):
+                    is_dup = True
+                    store.save_duplicate(canonical_vacancy_key(existing), vacancy_key, "semantic/repost match", description_similarity(vacancy.description, existing.description))
+                    break
         store.upsert_vacancy(vacancy, vacancy_key)
         evaluation = score_vacancy(vacancy)
         store.save_evaluation(vacancy_key, evaluation, run_id=run_id)
         if evaluation.recommendation != "reject" and not is_dup:
             accepted.append((vacancy, evaluation))
             canonical_rows.append(vacancy)
+            seen_keys.add(vacancy_key)
 
     accepted.sort(key=lambda item: item[1].score, reverse=True)
     digest_items = accepted[: cfg["runtime"]["slack"]["batch_size"]]
     digest = format_daily_digest(digest_items)
     if digest != "[SILENT]":
         store.log_notification(run_id, cfg["runtime"]["slack"]["channel"], "daily_digest", digest)
+        _deliver_to_slack(digest, cfg["runtime"]["slack"]["channel"])
     store.finish_run(run_id, status="ok", notes=f"found={len(vacancies)} accepted={len(accepted)}")
     return digest
 
@@ -107,6 +125,7 @@ def run_enrichment() -> str:
     digest = format_enrichment_questions(questions)
     if digest != "[SILENT]":
         store.log_notification(run_id, "C0B42K4H4KV", "enrichment_questions", digest)
+        _deliver_to_slack(digest, "C0B42K4H4KV")
     store.finish_run(run_id, status="ok", notes=f"questions={len(questions)}")
     return digest
 
@@ -118,14 +137,20 @@ def run_alert_scan() -> str:
     cfg = load_config_bundle() or DEFAULT_CONFIG
     vacancies = _collect_vacancies()
     exceptional: list[tuple[Vacancy, object]] = []
+    seen_keys: set[str] = set()
     for vacancy in vacancies:
+        vacancy_key = canonical_vacancy_key(vacancy)
+        if vacancy_key in seen_keys:
+            continue
         evaluation = score_vacancy(vacancy)
         if evaluation.tier == "exceptional_fit":
             exceptional.append((vacancy, evaluation))
+            seen_keys.add(vacancy_key)
     exceptional.sort(key=lambda item: item[1].score, reverse=True)
     digest = format_daily_digest(exceptional[:3], title="Exceptional executive job alert")
     if digest != "[SILENT]":
         store.log_notification(run_id, cfg["runtime"]["slack"]["alerts_channel"], "alert", digest)
+        _deliver_to_slack(digest, cfg["runtime"]["slack"]["alerts_channel"])
     store.finish_run(run_id, status="ok", notes=f"exceptional={len(exceptional)}")
     return digest
 

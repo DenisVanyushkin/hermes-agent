@@ -1,8 +1,12 @@
 from job_intel.enrichment import detect_high_value_questions
 
 
-def test_enrichment_only_asks_for_missing_high_value_gaps() -> None:
-    questions = detect_high_value_questions({"preferred_company_stage": "scale-up"})
+def test_enrichment_returns_no_questions_when_known_gaps_are_filled() -> None:
+    memory = {
+        "preferred_company_stage": "scale-up",
+        "travel_tolerance": "monthly",
+        "preferred_compensation_mix": "balanced",
+        "willingness_for_APAC_relocation": "no",
+    }
 
-    assert questions
-    assert all("stage" not in q.lower() for q in questions if "stage" in q.lower())
+    assert detect_high_value_questions(memory) == []
