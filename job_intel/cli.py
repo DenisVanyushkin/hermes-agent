@@ -13,6 +13,7 @@ import requests
 
 from .company_intel import build_market_report, monitor_target_companies
 from .config import DEFAULT_CONFIG, load_config_bundle
+from .strategic import build_strategic_report, update_strategic_layer
 from .dedup import canonical_vacancy_key, description_similarity, is_duplicate
 from .digest import format_daily_digest, format_enrichment_questions, format_vacancy_summary
 from .evaluator import score_vacancy
@@ -363,8 +364,11 @@ def run_daily() -> str:
         else:
             store.set_vacancy_status(vacancy_id, "active")
 
-    run_notes = f"found={len(vacancies)} accepted={len(accepted)} source_failures={sum(1 for s in source_statuses.values() if s.get('status') not in {'ok', 'empty'})}"
-    store.finish_run(run_id, status="ok", notes=run_notes, metadata={"source_statuses": source_statuses, "delivery": delivery.__dict__})
+    strategic = update_strategic_layer(store, persist=True)
+    strategy_count = len(strategic.predictions)
+
+    run_notes = f"found={len(vacancies)} accepted={len(accepted)} source_failures={sum(1 for s in source_statuses.values() if s.get('status') not in {'ok', 'empty'})} strategic_predictions={strategy_count}"
+    store.finish_run(run_id, status="ok", notes=run_notes, metadata={"source_statuses": source_statuses, "delivery": delivery.__dict__, "strategic_predictions": strategy_count})
     return digest
 
 
@@ -394,6 +398,23 @@ def run_market_report() -> str:
     if digest != "[SILENT]":
         channel = load_config_bundle().get("runtime", {}).get("slack", {}).get("market_channel", "C0B42K4H4KV")
         notification_id = store.create_notification(run_id, channel, "market_report", digest, delivery_status="pending")
+        delivery = _deliver_to_slack(digest, channel)
+        store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
+        store.finish_run(run_id, status="ok", notes=f"report_length={len(digest)}", metadata={"delivery": delivery.__dict__})
+    else:
+        store.finish_run(run_id, status="ok", notes="report=silent", metadata={"report": "silent"})
+    return digest
+
+
+
+def run_strategic_report() -> str:
+    store = _store()
+    store.bootstrap()
+    run_id = store.start_run("strategic")
+    digest = build_strategic_report(store)
+    if digest != "[SILENT]":
+        channel = load_config_bundle().get("runtime", {}).get("slack", {}).get("strategic_channel", "C0B42K4H4KV")
+        notification_id = store.create_notification(run_id, channel, "strategic_report", digest, delivery_status="pending")
         delivery = _deliver_to_slack(digest, channel)
         store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
         store.finish_run(run_id, status="ok", notes=f"report_length={len(digest)}", metadata={"delivery": delivery.__dict__})
@@ -574,6 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("alert")
     sub.add_parser("enrichment")
     sub.add_parser("market")
+    sub.add_parser("strategic")
 
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(cmd="doctor")
@@ -609,6 +631,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "market":
         print(run_market_report())
+        return 0
+    if args.cmd == "strategic":
+        print(run_strategic_report())
         return 0
     if args.cmd == "doctor":
         print(doctor_report())
