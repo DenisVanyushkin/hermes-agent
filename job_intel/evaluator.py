@@ -157,7 +157,7 @@ def score_vacancy(vacancy: Vacancy) -> Evaluation:
         concerns.append("sanctions risk")
 
     tier = tier_for_score(score)
-    recommendation = "reject" if tier == "reject" else tier
+    recommendation = "reject" if tier in {"reject", "weak_fit"} else tier
     if tier == "exceptional_fit":
         reasons.append("high-signal executive match")
     elif tier == "strong_fit":
