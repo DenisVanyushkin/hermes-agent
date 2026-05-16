@@ -39,6 +39,11 @@ The host-side wrappers are cwd-independent:
 - `JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN` and `JOB_INTEL_BROWSER_PROFILE_DIR_HH` point at the persistent browser profiles used for LinkedIn and HeadHunter acquisition
 - each wrapper `cd`s into the workdir before invoking `python -m job_intel ...`
 
+The shell wrappers are cwd-independent:
+- `JOB_INTEL_WORKDIR` defaults to `/home/hermes/.hermes/hermes-agent`
+- `JOB_INTEL_PYTHON` defaults to `$JOB_INTEL_WORKDIR/venv/bin/python`
+- each wrapper `cd`s into the workdir before invoking `python -m job_intel ...`
+
 ## Maintenance
 
 - Update `job_intel/seed/*.yaml` when candidate preferences or scoring rules change.
