@@ -8,4 +8,4 @@ def test_store_bootstrap_creates_expected_tables(tmp_path) -> None:
 
     tables = store.list_tables()
 
-    assert {"vacancies", "vacancy_evaluations", "duplicate_links", "candidate_memory", "runs"}.issubset(set(tables))
+    assert {"vacancies", "vacancy_evaluations", "duplicate_links", "candidate_memory", "runs", "company_intelligence", "company_intelligence_events"}.issubset(set(tables))

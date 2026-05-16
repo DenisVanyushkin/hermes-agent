@@ -1,0 +1,117 @@
+target_companies:
+  high_priority:
+    - name: Adapty
+      category: mobile subscription infrastructure
+      website: https://adapty.io
+      career_paths:
+        - /careers
+        - /jobs
+        - /openings
+        - /company/careers
+    - name: RevenueCat
+      category: subscription platform
+      website: https://www.revenuecat.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Bolt
+      category: superapp ecosystem
+      website: https://bolt.eu
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Revolut
+      category: fintech ecosystem
+      website: https://www.revolut.com
+      career_paths:
+        - /careers
+        - /jobs
+        - /careers/jobs
+    - name: Wise
+      category: fintech
+      website: https://wise.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Miro
+      category: SaaS platform
+      website: https://miro.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Sumsub
+      category: fintech infrastructure
+      website: https://sumsub.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Flo
+      category: consumer subscription app
+      website: https://flo.health
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Yassir
+      category: superapp
+      website: https://yassir.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Careem
+      category: superapp
+      website: https://careem.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Talabat
+      category: ecosystem platform
+      website: https://www.talabat.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: inDrive
+      category: mobility platform
+      website: https://indrive.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Dubizzle Group
+      category: marketplace ecosystem
+      website: https://dubizzle.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Glovo
+      category: platform business
+      website: https://glovoapp.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Delivery Hero
+      category: digital ecosystem
+      website: https://www.deliveryhero.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Airalo
+      category: telecom-adjacent digital platform
+      website: https://www.airalo.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Headway
+      category: subscription mobile products
+      website: https://headway.co
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Moniepoint
+      category: fintech scale-up
+      website: https://moniepoint.com
+      career_paths:
+        - /careers
+        - /jobs
+  lower_priority:
+    - enterprise telecom operators
+    - outsourcing companies
+    - legacy system integrators

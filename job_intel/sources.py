@@ -76,6 +76,19 @@ EXECUTIVE_ROLE_HINTS = (
     "saas",
     "partnership",
 )
+EXECUTIVE_TITLE_HINTS = (
+    "vp",
+    "vice president",
+    "director",
+    "head of",
+    "chief",
+    "cpo",
+    "gm",
+    "general manager",
+    "lead",
+    "monetization",
+    "growth",
+)
 LOW_SIGNAL_HINTS = (
     "sales development representative",
     "business development representative",
@@ -90,6 +103,9 @@ LOW_SIGNAL_HINTS = (
     "engineer",
     "qa engineer",
     "project manager",
+    "product manager",
+    "senior product manager",
+    "associate product manager",
 )
 
 
@@ -207,7 +223,10 @@ def _looks_strategic_role(*parts: object) -> bool:
         return False
     if any(hint in text for hint in LOW_SIGNAL_HINTS):
         return False
-    return any(hint in text for hint in EXECUTIVE_ROLE_HINTS)
+    title = _job_text(parts[0] if parts else "")
+    if any(hint in title for hint in EXECUTIVE_TITLE_HINTS):
+        return True
+    return False
 
 
 def normalize_remoteok_job(job: dict[str, object]) -> Vacancy:

@@ -43,6 +43,30 @@ REJECT_GEOS = {"russia", "belarus", "iran", "north korea", "syria", "crimea", "d
 REJECT_TITLES = {"scrum master", "project manager", "delivery manager", "product owner", "implementation manager"}
 
 
+def _target_company_names() -> set[str]:
+    cfg = _cfg().get("target_companies") or {}
+    names: set[str] = set()
+    for group in cfg.values():
+        if isinstance(group, dict):
+            iterables = group.values()
+        elif isinstance(group, list):
+            iterables = [group]
+        else:
+            continue
+        for item_group in iterables:
+            for item in item_group or []:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip().lower()
+                    if name:
+                        names.add(name)
+    return names
+
+
+def _company_signals(vacancy: Vacancy) -> dict[str, Any]:
+    raw = vacancy.metadata if isinstance(vacancy.metadata, dict) else {}
+    return raw
+
+
 def _cfg() -> dict[str, Any]:
     return load_config_bundle() or DEFAULT_CONFIG
 
@@ -134,6 +158,28 @@ def score_vacancy(vacancy: Vacancy) -> Evaluation:
         breakdown["AI_or_modern_tech"] += 10
         matched.append("AI / modern tech")
 
+    raw_metadata = vacancy.metadata if isinstance(vacancy.metadata, dict) else {}
+    company_signals = _company_signals(vacancy)
+    target_company_names = _target_company_names()
+    if raw_metadata.get("target_company") or vacancy.company.lower() in target_company_names:
+        score += 18
+        breakdown["target_company"] += 18
+        matched.append("target company")
+    if company_signals.get("signals"):
+        signal_count = len(company_signals.get("signals") or [])
+        bonus = min(10, signal_count * 3)
+        score += bonus
+        breakdown["career_page_signal"] += bonus
+        if bonus:
+            matched.append("career page activity")
+    if company_signals.get("opening_count"):
+        openings = int(company_signals.get("opening_count") or 0)
+        if openings:
+            bonus = min(8, openings)
+            score += bonus
+            breakdown["career_page_signal"] += bonus
+            matched.append("open leadership openings")
+
     for keyword, signal in NEGATIVE_KEYWORDS.items():
         if keyword in text:
             penalty = abs(cfg["negative_signals"][signal])
@@ -146,6 +192,12 @@ def score_vacancy(vacancy: Vacancy) -> Evaluation:
         score -= 30
         concerns.append("delivery/PM title")
         reasons.append("role title is outside executive product path")
+
+    if vacancy.source in {"remoteok", "remotive"} and not any(term in title for term in ["vp", "vice president", "director", "head of", "chief", "cpo", "gm", "general manager"]):
+        score -= 25
+        breakdown["generic_remote_noise"] -= 25
+        concerns.append("generic remote noise")
+        reasons.append("remote board result without executive title signal")
 
     if _has_any(text, REJECT_GEOS):
         score -= 60
