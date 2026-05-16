@@ -231,6 +231,30 @@ def _company_signals(vacancy: Vacancy) -> dict[str, Any]:
     return raw
 
 
+def _target_company_names() -> set[str]:
+    cfg = _cfg().get("target_companies") or {}
+    names: set[str] = set()
+    for group in cfg.values():
+        if isinstance(group, dict):
+            iterables = group.values()
+        elif isinstance(group, list):
+            iterables = [group]
+        else:
+            continue
+        for item_group in iterables:
+            for item in item_group or []:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip().lower()
+                    if name:
+                        names.add(name)
+    return names
+
+
+def _company_signals(vacancy: Vacancy) -> dict[str, Any]:
+    raw = vacancy.metadata if isinstance(vacancy.metadata, dict) else {}
+    return raw
+
+
 def _cfg() -> dict[str, Any]:
     return load_config_bundle() or DEFAULT_CONFIG
 
