@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+from collections import Counter
+import re
+from typing import Any
+
+from .config import DEFAULT_CONFIG, load_config_bundle
+from .models import Evaluation, Vacancy
+
+POSITIVE_KEYWORDS = {
+    "product ownership": "product_ownership",
+    "product strategy": "product_ownership",
+    "monetization": "monetization_responsibility",
+    "p&l": "PnL_ownership",
+    "profit and loss": "PnL_ownership",
+    "b2c": "B2C_platform",
+    "subscription": "subscriptions",
+    "retention": "product_ownership",
+    "growth": "executive_visibility",
+    "fintech": "fintech_or_telecom",
+    "telecom": "fintech_or_telecom",
+    "transformation": "org_transformation",
+    "international": "international_team",
+    "remote": "remote_friendly",
+    "ai": "AI_or_modern_tech",
+}
+
+NEGATIVE_KEYWORDS = {
+    "outsourcing": "outsourcing_company",
+    "outstaffing": "outsourcing_company",
+    "delivery": "delivery_only",
+    "ticket processing": "delivery_only",
+    "project manager": "pure_project_management",
+    "scrum master": "pure_project_management",
+    "bureaucracy": "enterprise_bureaucracy",
+    "support operations": "delivery_only",
+    "implementation partner": "outsourcing_company",
+    "low autonomy": "low_autonomy",
+    "weak product": "weak_product_culture",
+}
+
+REJECT_GEOS = {"russia", "belarus", "iran", "north korea", "syria", "crimea", "donetsk", "luhansk"}
+REJECT_TITLES = {"scrum master", "project manager", "delivery manager", "product owner", "implementation manager"}
+
+
+def _cfg() -> dict[str, Any]:
+    return load_config_bundle() or DEFAULT_CONFIG
+
+
+def _text(vacancy: Vacancy) -> str:
+    return " ".join([vacancy.company, vacancy.title, vacancy.location, vacancy.description]).lower()
+
+
+def _has_any(text: str, terms: list[str] | set[str]) -> bool:
+    return any(term in text for term in terms)
+
+
+def tier_for_score(score: int) -> str:
+    thresholds = _cfg()["scoring"]["thresholds"]
+    if score >= thresholds["exceptional_fit"]:
+        return "exceptional_fit"
+    if score >= thresholds["strong_fit"]:
+        return "strong_fit"
+    if score >= thresholds["possible_fit"]:
+        return "possible_fit"
+    if score >= thresholds["weak_fit"]:
+        return "weak_fit"
+    return "reject"
+
+
+def salary_tier_for(vacancy: Vacancy, score: int) -> str:
+    title = vacancy.title.lower()
+    if any(term in title for term in ["chief", "cpo", "vp", "vice president"]):
+        return "executive"
+    if any(term in title for term in ["director", "head of"]):
+        return "senior_leadership"
+    if score >= 75:
+        return "senior_leadership"
+    return "market"
+
+
+def score_vacancy(vacancy: Vacancy) -> Evaluation:
+    cfg = _cfg()["scoring"]
+    text = _text(vacancy)
+    score = 0
+    matched: list[str] = []
+    concerns: list[str] = []
+    reasons: list[str] = []
+    breakdown: Counter[str] = Counter()
+
+    title = vacancy.title.lower()
+    if any(term in title for term in ["vp", "vice president", "chief product officer", "director of product", "head of product", "gm"]):
+        score += 20
+        breakdown["executive_visibility"] += 20
+        matched.append("executive-level leadership")
+    if _has_any(text, ["product strategy", "product ownership"]):
+        score += 20
+        breakdown["product_ownership"] += 20
+        matched.append("product ownership")
+    if "monetization" in text:
+        score += 25
+        breakdown["monetization_responsibility"] += 25
+        matched.append("monetization")
+    if "p&l" in text or "profit and loss" in text:
+        score += 25
+        breakdown["PnL_ownership"] += 25
+        matched.append("P&L ownership")
+    if _has_any(text, ["b2c", "consumer", "subscription", "ecosystem", "platform"]):
+        score += 15
+        breakdown["B2C_platform"] += 15
+        matched.append("B2C/platform environment")
+    if _has_any(text, ["mobile", "app"]):
+        score += 10
+        breakdown["mobile_product"] += 10
+        matched.append("mobile product")
+    if _has_any(text, ["fintech", "telecom"]):
+        score += 15
+        breakdown["fintech_or_telecom"] += 15
+        matched.append("telecom/fintech adjacency")
+    if _has_any(text, ["transformation", "turnaround", "restructure"]):
+        score += 20
+        breakdown["org_transformation"] += 20
+        matched.append("organizational transformation")
+    if _has_any(text, ["international", "global", "cross-functional"]):
+        score += 10
+        breakdown["international_team"] += 10
+        matched.append("international / cross-functional scope")
+    if "remote" in text:
+        score += 5
+        breakdown["remote_friendly"] += 5
+        matched.append("remote friendly")
+    if "ai" in text or "machine learning" in text:
+        score += 10
+        breakdown["AI_or_modern_tech"] += 10
+        matched.append("AI / modern tech")
+
+    for keyword, signal in NEGATIVE_KEYWORDS.items():
+        if keyword in text:
+            penalty = abs(cfg["negative_signals"][signal])
+            score -= penalty
+            breakdown[signal] -= penalty
+            concerns.append(keyword)
+            reasons.append(f"negative signal: {keyword}")
+
+    if _has_any(text, REJECT_TITLES):
+        score -= 30
+        concerns.append("delivery/PM title")
+        reasons.append("role title is outside executive product path")
+
+    if _has_any(text, REJECT_GEOS):
+        score -= 60
+        concerns.append("restricted geography")
+        reasons.append("restricted geography or sanctions risk")
+
+    if "russia" in text or "belarus" in text:
+        score -= 60
+        concerns.append("sanctions risk")
+
+    tier = tier_for_score(score)
+    recommendation = "reject" if tier == "reject" else tier
+    if tier == "exceptional_fit":
+        reasons.append("high-signal executive match")
+    elif tier == "strong_fit":
+        reasons.append("good strategic fit")
+    elif tier == "possible_fit":
+        reasons.append("some fit, manual review recommended")
+    else:
+        reasons.append("insufficient fit")
+
+    return Evaluation(
+        score=max(-100, min(100, score)),
+        tier=tier,
+        recommendation=recommendation,
+        salary_tier=salary_tier_for(vacancy, score),
+        matched_signals=matched,
+        concerns=concerns,
+        reasons=reasons,
+        raw_breakdown=dict(breakdown),
+    )

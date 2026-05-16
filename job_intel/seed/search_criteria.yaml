@@ -1,0 +1,14 @@
+search_criteria:
+  role_titles:
+    high_priority:
+      - VP of Product
+      - Head of Product
+      - Chief Product Officer
+      - Director of Product
+      - Product & Growth Director
+      - Product Transformation Lead
+      - Director of Digital Products
+      - GM Digital
+      - Head of Monetization
+  business_models:
+    preferred: [B2C, subscriptions, mobile-first, ecosystems, platforms, fintech, SaaS]

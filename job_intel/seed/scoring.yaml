@@ -1,0 +1,29 @@
+scoring:
+  positive_signals:
+    product_ownership: 20
+    monetization_responsibility: 25
+    PnL_ownership: 25
+    B2C_platform: 20
+    mobile_product: 15
+    subscriptions: 10
+    fintech_or_telecom: 15
+    org_transformation: 20
+    scaling_product_org: 15
+    international_team: 10
+    remote_friendly: 5
+    executive_visibility: 15
+    AI_or_modern_tech: 10
+  negative_signals:
+    outsourcing_company: -40
+    delivery_only: -30
+    no_strategy: -25
+    low_autonomy: -20
+    pure_project_management: -30
+    enterprise_bureaucracy: -15
+    weak_product_culture: -20
+  thresholds:
+    exceptional_fit: 90
+    strong_fit: 75
+    possible_fit: 60
+    weak_fit: 40
+    reject_below: 40

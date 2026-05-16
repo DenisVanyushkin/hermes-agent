@@ -1,0 +1,37 @@
+# Job Intelligence Operator Guide
+
+## What it does
+
+This system continuously searches for executive product/business leadership roles for Denis Vanyushkin, scores them, deduplicates repeated postings, stores history in SQLite, and emits Slack-ready digests.
+
+## Where state lives
+
+- SQLite database: `~/.hermes/job_intel/job_intel.sqlite3`
+- Cron scripts: `~/.hermes/scripts/job_intel_*.sh`
+- Seed configs: `job_intel/seed/*.yaml`
+
+## CLI
+
+From the repo root:
+
+```bash
+./venv/bin/python -m job_intel bootstrap
+./venv/bin/python -m job_intel daily
+./venv/bin/python -m job_intel alert
+./venv/bin/python -m job_intel enrichment
+```
+
+## Cron jobs
+
+- Daily digest: `job-intel-daily`
+- Exceptional alerts: `job-intel-alert`
+- Candidate enrichment: `job-intel-enrichment`
+
+All three are configured to deliver to the Slack thread plus `C0B42K4H4KV`.
+
+## Maintenance
+
+- Update `job_intel/seed/*.yaml` when candidate preferences or scoring rules change.
+- Use the SQLite store as the source of history and deduplication state.
+- Add new job sources by extending `job_intel/sources.py` and the ingestion loop in `job_intel/cli.py`.
+- If alert volume is too high, raise the exceptional threshold or narrow search queries.
