@@ -130,6 +130,37 @@ CREATE TABLE IF NOT EXISTS company_intelligence_events (
     details_json TEXT,
     seen_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS strategic_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company TEXT NOT NULL,
+    signal_type TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    horizon_days INTEGER,
+    probability REAL,
+    rationale TEXT NOT NULL,
+    evidence_json TEXT,
+    source TEXT,
+    observed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(company, signal_type, horizon_days, observed_at)
+);
+
+CREATE TABLE IF NOT EXISTS strategic_predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company TEXT NOT NULL,
+    prediction_type TEXT NOT NULL,
+    probability REAL NOT NULL,
+    horizon_days INTEGER NOT NULL,
+    rationale TEXT NOT NULL,
+    evidence_json TEXT,
+    source TEXT,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolution_status TEXT NOT NULL DEFAULT 'open',
+    outcome_text TEXT,
+    observed_openings INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -165,6 +196,16 @@ class JobIntelStore:
             self._ensure_column(conn, "company_intelligence", "last_scanned_at", "TEXT")
             self._ensure_column(conn, "company_intelligence", "last_signal_at", "TEXT")
             self._ensure_column(conn, "company_intelligence", "source_json", "TEXT")
+            self._ensure_column(conn, "strategic_signals", "source", "TEXT")
+            self._ensure_column(conn, "strategic_signals", "evidence_json", "TEXT")
+            self._ensure_column(conn, "strategic_signals", "observed_at", "TEXT")
+            self._ensure_column(conn, "strategic_signals", "updated_at", "TEXT")
+            self._ensure_column(conn, "strategic_predictions", "evidence_json", "TEXT")
+            self._ensure_column(conn, "strategic_predictions", "source", "TEXT")
+            self._ensure_column(conn, "strategic_predictions", "resolved_at", "TEXT")
+            self._ensure_column(conn, "strategic_predictions", "resolution_status", "TEXT NOT NULL DEFAULT 'open'")
+            self._ensure_column(conn, "strategic_predictions", "outcome_text", "TEXT")
+            self._ensure_column(conn, "strategic_predictions", "observed_openings", "INTEGER NOT NULL DEFAULT 0")
 
     def list_tables(self) -> list[str]:
         with self.connect() as conn:
@@ -568,5 +609,141 @@ class JobIntelStore:
 
     def fetch_company_intelligence(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT * FROM company_intelligence ORDER BY datetime(updated_at) DESC LIMIT ?", (limit,)).fetchall()
+            rows = conn.execute("SELECT * FROM company_intelligence ORDER BY updated_at DESC, company ASC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
+
+    def fetch_company_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM company_intelligence_events ORDER BY seen_at DESC, company ASC, id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_strategic_signals(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM strategic_signals ORDER BY updated_at DESC, company ASC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_strategic_predictions(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM strategic_predictions ORDER BY created_at DESC, company ASC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_strategic_signal(
+        self,
+        company: str,
+        signal_type: str,
+        *,
+        confidence: float,
+        horizon_days: int | None,
+        probability: float | None,
+        rationale: str,
+        evidence: dict[str, Any] | None = None,
+        source: str | None = None,
+        observed_at: str | None = None,
+    ) -> None:
+        timestamp = observed_at or datetime.now(timezone.utc).date().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM strategic_signals WHERE company = ? AND signal_type = ? AND COALESCE(horizon_days, -1) = COALESCE(?, -1) AND observed_at = ?",
+                (company, signal_type, horizon_days, timestamp),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    """
+                    UPDATE strategic_signals
+                    SET confidence = ?, probability = ?, rationale = ?, evidence_json = ?, source = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        confidence,
+                        probability,
+                        rationale,
+                        json.dumps(evidence or {}, ensure_ascii=False),
+                        source,
+                        now,
+                        row[0],
+                    ),
+                )
+                return
+            conn.execute(
+                """
+                INSERT INTO strategic_signals (
+                    company, signal_type, confidence, horizon_days, probability, rationale, evidence_json, source, observed_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    company,
+                    signal_type,
+                    confidence,
+                    horizon_days,
+                    probability,
+                    rationale,
+                    json.dumps(evidence or {}, ensure_ascii=False),
+                    source,
+                    timestamp,
+                    now,
+                ),
+            )
+
+    def record_strategic_prediction(
+        self,
+        company: str,
+        prediction_type: str,
+        *,
+        probability: float,
+        horizon_days: int,
+        rationale: str,
+        evidence: dict[str, Any] | None = None,
+        source: str | None = None,
+        observed_openings: int = 0,
+        resolution_status: str = "open",
+        outcome_text: str | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        created_at_value = created_at or datetime.now(timezone.utc).date().isoformat()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM strategic_predictions WHERE company = ? AND prediction_type = ? AND horizon_days = ? AND created_at = ?",
+                (company, prediction_type, horizon_days, created_at_value),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    """
+                    UPDATE strategic_predictions
+                    SET probability = ?, rationale = ?, evidence_json = ?, source = ?, resolution_status = ?, outcome_text = ?, observed_openings = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        probability,
+                        rationale,
+                        json.dumps(evidence or {}, ensure_ascii=False),
+                        source,
+                        resolution_status,
+                        outcome_text,
+                        observed_openings,
+                        row[0],
+                    ),
+                )
+                return
+            conn.execute(
+                """
+                INSERT INTO strategic_predictions (
+                    company, prediction_type, probability, horizon_days, rationale, evidence_json, source,
+                    created_at, resolution_status, outcome_text, observed_openings
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    company,
+                    prediction_type,
+                    probability,
+                    horizon_days,
+                    rationale,
+                    json.dumps(evidence or {}, ensure_ascii=False),
+                    source,
+                    created_at_value,
+                    resolution_status,
+                    outcome_text,
+                    observed_openings,
+                ),
+            )
+
