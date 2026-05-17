@@ -200,15 +200,50 @@ mkdirs() {
     "${LOG_DIR}/chromium-${PROFILE}.log"
 }
 
+is_snap_path() {
+  local path="$1"
+  local resolved
+  resolved="$(readlink -f "$path" 2>/dev/null || printf '%s' "$path")"
+  [[ "${resolved}" == /snap/* || "${resolved}" == /var/lib/snapd/* ]]
+}
+
+resolve_non_snap_chromium_bin() {
+  local candidate resolved
+  for candidate in /usr/bin/chromium /usr/bin/chromium-browser; do
+    if [[ -x "${candidate}" ]]; then
+      if ! is_snap_path "${candidate}"; then
+        printf '%s\n' "${candidate}"
+        return 0
+      fi
+    fi
+  done
+
+  for candidate in chromium chromium-browser; do
+    if candidate="$(command -v "${candidate}" 2>/dev/null || true)" && [[ -n "${candidate}" ]]; then
+      if [[ -x "${candidate}" ]]; then
+        if ! is_snap_path "${candidate}"; then
+          printf '%s\n' "${candidate}"
+          return 0
+        fi
+      fi
+    fi
+  done
+
+  return 1
+}
+
 create_desktop_shortcuts() {
   need_root
   local desktop_dir="${BASE_DIR}/Desktop"
   local linked_in="${desktop_dir}/Chromium LinkedIn.desktop"
   local hh="${desktop_dir}/Chromium HH.desktop"
   local chromium_bin
-  chromium_bin="$(command -v chromium || command -v chromium-browser || true)"
+  chromium_bin="$(resolve_non_snap_chromium_bin || true)"
   if [[ -z "${chromium_bin}" ]]; then
-    chromium_bin="chromium"
+    echo "No non-snap Chromium binary was found while creating desktop shortcuts." >&2
+    echo "If the VPS only has /snap/bin/chromium, remove it and rerun:" >&2
+    echo "  sudo snap remove chromium" >&2
+    exit 1
   fi
 
   cat > "${linked_in}" <<EOF
@@ -375,9 +410,12 @@ if ! process_matches "websockify .*127.0.0.1:${NOVNC_PORT} .*127.0.0.1:${VNC_POR
   start_as_browser "${LOG_DIR}/websockify.log" websockify --web=/usr/share/novnc "127.0.0.1:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}"
 fi
 
-CHROMIUM_BIN="$(command -v chromium || command -v chromium-browser || true)"
+CHROMIUM_BIN="$(resolve_non_snap_chromium_bin || true)"
 if [[ -z "${CHROMIUM_BIN}" ]]; then
-  echo "Chromium binary not found after install." >&2
+  echo "No non-snap Chromium binary was found." >&2
+  echo "If the VPS only has /snap/bin/chromium, remove it and rerun:" >&2
+  echo "  sudo snap remove chromium" >&2
+  echo "Then rerun this bootstrap script so it can use /usr/bin/chromium." >&2
   exit 1
 fi
 
