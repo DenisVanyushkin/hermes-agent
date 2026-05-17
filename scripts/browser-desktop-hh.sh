@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec /home/hermes/.hermes/hermes-agent/scripts/browser-desktop-start.sh hh
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec bash "${SCRIPT_DIR}/browser-desktop-start.sh" hh
