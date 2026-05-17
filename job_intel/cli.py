@@ -11,6 +11,7 @@ from typing import Any
 
 import requests
 
+from .browser_sourcing import metrics_from_counts
 from .company_intel import build_market_report, monitor_target_companies
 from .config import DEFAULT_CONFIG, load_config_bundle
 from .strategic import build_strategic_report, update_strategic_layer
@@ -35,7 +36,9 @@ from .sources import (
     SourceFetchError,
     discovery_queries,
     extract_duckduckgo_destination_url,
+    fetch_company_career_vacancies,
     fetch_headhunter_vacancies,
+    fetch_linkedin_vacancies,
     normalize_search_hit,
     search_duckduckgo,
     search_remoteok_jobs,
@@ -101,6 +104,29 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
         company_statuses=target_result.company_statuses,
     )
 
+    linkedin_queries = [
+        "VP Product monetization B2C platform",
+        "Head of Product fintech telecom",
+    ]
+    linkedin_hits = 0
+    linkedin_errors: list[str] = []
+    for query in linkedin_queries:
+        try:
+            results = fetch_linkedin_vacancies(query, max_pages=1)
+            linkedin_hits += len(results)
+            vacancies.extend(results)
+        except Exception as exc:
+            linkedin_errors.append(str(exc))
+    if linkedin_hits:
+        linkedin_status = "ok"
+    elif linkedin_errors and any("Playwright" in error or "browser-native" in error for error in linkedin_errors):
+        linkedin_status = "blocked"
+    elif linkedin_errors:
+        linkedin_status = "error"
+    else:
+        linkedin_status = "empty"
+    statuses["linkedin"] = _source_status_template("linkedin", status=linkedin_status, hits=linkedin_hits, errors=linkedin_errors, acquisition="browser-native")
+
     hh_queries = [
         "VP Product monetization B2C platform",
         "Head of Product fintech telecom",
@@ -123,7 +149,7 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
         hh_status = "error"
     else:
         hh_status = "empty"
-    statuses["headhunter"] = _source_status_template("headhunter", status=hh_status, hits=hh_hits, errors=hh_errors)
+    statuses["headhunter"] = _source_status_template("headhunter", status=hh_status, hits=hh_hits, errors=hh_errors, acquisition="browser-native-first")
 
     ddg_hits = 0
     ddg_errors: list[str] = []
@@ -317,12 +343,24 @@ def run_daily() -> str:
     accepted: list[tuple[Vacancy, Any, int]] = []
     canonical_rows: list[Vacancy] = []
     seen_keys: set[str] = set()
+    source_counts: dict[str, dict[str, int]] = {}
+
+    def _count_source(vacancy: Vacancy, evaluation: Any) -> None:
+        stats = source_counts.setdefault(vacancy.source, {"found": 0, "executive_matches": 0, "accepted": 0, "rejected": 0})
+        stats["found"] += 1
+        if evaluation.tier in {"exceptional_fit", "strong_fit"}:
+            stats["executive_matches"] += 1
+        if evaluation.recommendation == "reject":
+            stats["rejected"] += 1
+        else:
+            stats["accepted"] += 1
 
     for vacancy in vacancies:
         vacancy_key = canonical_vacancy_key(vacancy)
         vacancy_id = store.upsert_vacancy(vacancy, vacancy_key)
         evaluation = score_vacancy(vacancy)
         store.save_evaluation(vacancy_key, evaluation, run_id=run_id)
+        _count_source(vacancy, evaluation)
 
         is_dup = vacancy_key in seen_keys
         if not is_dup:
@@ -353,6 +391,24 @@ def run_daily() -> str:
     digest_items = accepted[:batch_size]
     operator_footer = _source_footer(source_statuses)
     digest = format_daily_digest([(vacancy, evaluation) for vacancy, evaluation, _ in digest_items], operator_footer=operator_footer)
+
+    for source, stats in source_counts.items():
+        existing = dict(source_statuses.get(source, {"source": source, "status": "unknown"}))
+        hits = int(existing.get("hits") or stats["found"])
+        errors = list(existing.get("errors") or [])
+        anti_bot_failures = 1 if existing.get("status") == "blocked" else (len(errors) if errors else 0)
+        metrics = metrics_from_counts(
+            source=source,
+            found=stats["found"],
+            executive_matches=stats["executive_matches"],
+            accepted=stats["accepted"],
+            rejected=stats["rejected"],
+            extraction_successes=hits,
+            extraction_attempts=max(hits + len(errors), 1),
+            anti_bot_failures=anti_bot_failures,
+        )
+        existing["metrics"] = metrics.__dict__
+        source_statuses[source] = existing
 
     notification_ids = _prepare_notifications(store, run_id, cfg["runtime"]["slack"]["channel"], "daily_digest", digest_items)
     delivery = _deliver_to_slack(digest, cfg["runtime"]["slack"]["channel"])
@@ -521,6 +577,15 @@ def doctor_report() -> str:
     workdir_flags = file_access_flags(resolve_workdir())
     source_statuses = _collect_source_statuses(store)
     latest = store.latest_run() or {}
+    latest_statuses: dict[str, dict[str, Any]] = {}
+    metadata_json = latest.get("metadata_json") if isinstance(latest, dict) else None
+    if metadata_json:
+        try:
+            payload = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            latest_statuses = payload.get("source_statuses") or {}
     scripts = _cron_script_paths()
 
     lines = ["*Job-intel doctor*", ""]
@@ -550,11 +615,19 @@ def doctor_report() -> str:
         )
     lines.append("Source adapters:")
     for name, status in sorted(source_statuses.items()):
+        merged = dict(latest_statuses.get(name) or {})
+        merged.update(status)
+        status = merged
         extras = []
         if status.get("hits") is not None:
             extras.append(f"hits={status['hits']}")
         if status.get("errors"):
             extras.append(f"error={status['errors'][-1]}")
+        metrics = status.get("metrics") or {}
+        if metrics:
+            extras.append(f"exec_fit={metrics.get('executive_fit_ratio', 'n/a')}")
+            extras.append(f"reliability={metrics.get('source_reliability', 'n/a')}")
+            extras.append(f"quality={metrics.get('status', 'n/a')}")
         extra_text = f" ({', '.join(extras)})" if extras else ""
         lines.append(f"- {name}: {status.get('status', 'unknown')}{extra_text}")
     lines.append(f"Last run: {latest.get('status', 'none')} ({latest.get('mode', 'n/a')})")

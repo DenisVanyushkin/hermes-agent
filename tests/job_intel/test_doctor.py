@@ -24,7 +24,7 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
         run_id,
         status="ok",
         notes="found=1 accepted=1",
-        metadata={"source_statuses": {"headhunter": {"status": "blocked", "error": "403"}, "duckduckgo": {"status": "ok", "hits": 2}}},
+        metadata={"source_statuses": {"headhunter": {"status": "blocked", "error": "403", "metrics": {"executive_fit_ratio": 0.5, "source_reliability": 0.8, "status": "blocked"}}, "duckduckgo": {"status": "ok", "hits": 2, "metrics": {"executive_fit_ratio": 0.25, "source_reliability": 0.6, "status": "operational"}}}},
     )
 
     monkeypatch.setenv("JOB_INTEL_DB_PATH", str(db_path))
@@ -44,6 +44,9 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     assert "Slack delivery: webhook" in report
     assert "headhunter: blocked" in report
     assert "duckduckgo: ok" in report
+    assert "exec_fit=0.5" in report
+    assert "reliability=0.8" in report
+    assert "quality=blocked" in report
     assert "Last run: ok" in report
 
 

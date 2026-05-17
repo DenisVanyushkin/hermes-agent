@@ -8,6 +8,17 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit, urlu
 
 import requests
 
+from .browser_sourcing import (
+    BrowserAcquisitionConfig,
+    BrowserNativeUnavailable,
+    BrowserSourceClient,
+    browser_native_available,
+    extract_company_career_vacancies_from_html,
+    extract_headhunter_vacancies_from_html,
+    extract_linkedin_vacancies_from_html,
+    metrics_from_counts,
+    resolve_browser_config,
+)
 from .models import Vacancy
 from .runtime import retry_with_backoff, sha256_text
 
@@ -149,7 +160,7 @@ def _company_from_url(dest_url: str) -> str:
     if "remoteok.com" in host and parts:
         return _slug_to_company(parts[0])
     if "linkedin.com" in host and parts:
-        return _slug_to_company(parts[0])
+        return "Unknown"
     if "hh.ru" in host:
         return "HeadHunter"
     return host.split(":")[0].replace("www.", "").title() or "Unknown"
@@ -336,17 +347,64 @@ def search_remotive_jobs(max_results: int = 25) -> list[Vacancy]:
     return vacancies
 
 
+def _browser_config() -> BrowserAcquisitionConfig:
+    return resolve_browser_config()
+
+
+def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]:
+    if not browser_native_available():
+        raise SourceFetchError("Playwright is not installed, so LinkedIn browser-native acquisition is unavailable.")
+    config = _browser_config()
+    try:
+        with BrowserSourceClient(config) as client:
+            return client.search_linkedin(query, max_pages=max_pages)
+    except BrowserNativeUnavailable as exc:
+        raise SourceFetchError(str(exc)) from exc
+
+
+def fetch_company_career_vacancies(url: str) -> list[Vacancy]:
+    if browser_native_available():
+        config = _browser_config()
+        try:
+            with BrowserSourceClient(config) as client:
+                return client.crawl_company_page(url)
+        except BrowserNativeUnavailable:
+            pass
+    response = requests.get(
+        url,
+        timeout=20,
+        headers={
+            "User-Agent": os.getenv(
+                "JOB_INTEL_COMPANY_USER_AGENT",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    )
+    response.raise_for_status()
+    return extract_company_career_vacancies_from_html(response.text, page_url=url)
+
+
 def _request_json(url: str, *, params: dict[str, object], headers: dict[str, str]) -> dict:
     response = requests.get(url, params=params, timeout=30, headers=headers)
     if response.status_code == 403:
         raise SourceFetchError(
-            "HeadHunter API returned 403 Forbidden. Set JOB_INTEL_HH_ACCESS_TOKEN (Bearer token) if access is required for your account/app."
+            "HeadHunter API returned 403 Forbidden. Browser-native HH acquisition is preferred and does not require JOB_INTEL_HH_ACCESS_TOKEN."
         )
     response.raise_for_status()
     return response.json()
 
 
 def fetch_headhunter_vacancies(query: str, *, per_page: int = 20) -> list[Vacancy]:
+    if browser_native_available():
+        config = _browser_config()
+        try:
+            with BrowserSourceClient(config) as client:
+                return client.search_headhunter(query, max_pages=max(1, (per_page + 24) // 25))[:per_page]
+        except BrowserNativeUnavailable:
+            pass
+
     headers = {
         "User-Agent": os.getenv(
             "JOB_INTEL_HH_USER_AGENT",
