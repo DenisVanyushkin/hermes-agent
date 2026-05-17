@@ -203,6 +203,11 @@ create_desktop_shortcuts() {
   local desktop_dir="${BASE_DIR}/Desktop"
   local linked_in="${desktop_dir}/Chromium LinkedIn.desktop"
   local hh="${desktop_dir}/Chromium HH.desktop"
+  local chromium_bin
+  chromium_bin="$(command -v chromium || command -v chromium-browser || true)"
+  if [[ -z "${chromium_bin}" ]]; then
+    chromium_bin="chromium"
+  fi
 
   cat > "${linked_in}" <<EOF
 [Desktop Entry]
@@ -210,7 +215,7 @@ Version=1.0
 Type=Application
 Name=Chromium LinkedIn
 Comment=Open LinkedIn in the persistent Chromium profile
-Exec=chromium --user-data-dir=${BASE_DIR}/profiles/linkedin --profile-directory=Default --new-window https://www.linkedin.com/
+Exec=${chromium_bin} --user-data-dir=${BASE_DIR}/profiles/linkedin --profile-directory=Default --new-window https://www.linkedin.com/
 Icon=chromium
 Terminal=false
 Categories=Network;WebBrowser;
@@ -222,7 +227,7 @@ Version=1.0
 Type=Application
 Name=Chromium HH
 Comment=Open HH in the persistent Chromium profile
-Exec=chromium --user-data-dir=${BASE_DIR}/profiles/hh --profile-directory=Default --new-window https://hh.ru/
+Exec=${chromium_bin} --user-data-dir=${BASE_DIR}/profiles/hh --profile-directory=Default --new-window https://hh.ru/
 Icon=chromium
 Terminal=false
 Categories=Network;WebBrowser;
