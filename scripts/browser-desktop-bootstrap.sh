@@ -340,7 +340,7 @@ wait_for_display() {
 validate_profile_name
 apt-get update >/dev/null
 install_chromium_pkg
-ensure_pkg "${CHROMIUM_PKG}" xfce4 dbus-x11 x11vnc novnc websockify xvfb x11-utils xauth openssl iproute2 curl procps
+ensure_pkg "${CHROMIUM_PKG}" xfce4 dbus-x11 x11vnc novnc websockify xvfb x11-utils xauth openssl iproute2 curl procps dbus-user-session
 ensure_base_dir_safety
 ensure_user
 mkdirs
@@ -383,7 +383,7 @@ fi
 
 ensure_port_free_or_owned "${CDP_PORT}" "remote-debugging-port=${CDP_PORT}" "Chromium CDP"
 if ! process_matches "remote-debugging-port=${CDP_PORT}"; then
-  start_as_browser "${LOG_DIR}/chromium-${PROFILE}.log" "${CHROMIUM_BIN}" \
+  start_as_browser "${LOG_DIR}/chromium-${PROFILE}.log" dbus-run-session -- "${CHROMIUM_BIN}" \
     --user-data-dir="${BASE_DIR}/profiles/${PROFILE}" \
     --profile-directory=Default \
     --no-first-run \
