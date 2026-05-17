@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT="/home/hermes/.hermes/hermes-agent/scripts/browser-desktop-bootstrap.sh"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/browser-desktop-bootstrap.sh"
 
-if [[ ! -x "$SCRIPT" ]]; then
-  echo "Missing or non-executable bootstrap script: $SCRIPT" >&2
+if [[ ! -x "${BOOTSTRAP_SCRIPT}" ]]; then
+  BOOTSTRAP_SCRIPT="/home/hermes/.hermes/hermes-agent/scripts/browser-desktop-bootstrap.sh"
+fi
+
+if [[ ! -x "${BOOTSTRAP_SCRIPT}" ]]; then
+  echo "Missing or non-executable bootstrap script: ${BOOTSTRAP_SCRIPT}" >&2
   exit 1
 fi
 
@@ -20,18 +25,18 @@ case "$PROFILE" in
     ;;
   *)
     if [[ -z "$URL" ]]; then
-      echo "Usage: sudo $0 {linkedin|hh|custom-profile} [url]" >&2
+      echo "Usage: $0 {linkedin|hh|custom-profile} [url]" >&2
       echo "Examples:" >&2
-      echo "  sudo $0 linkedin" >&2
-      echo "  sudo $0 hh" >&2
-      echo "  sudo $0 custom-profile https://example.com/" >&2
+      echo "  $0 linkedin" >&2
+      echo "  $0 hh" >&2
+      echo "  $0 custom-profile https://example.com/" >&2
       exit 1
     fi
     ;;
 esac
 
 if [[ "${EUID}" -eq 0 ]]; then
-  exec bash "$SCRIPT" --profile "$PROFILE" --url "$URL"
+  exec bash "${BOOTSTRAP_SCRIPT}" --profile "$PROFILE" --url "$URL"
 else
-  exec sudo bash "$SCRIPT" --profile "$PROFILE" --url "$URL"
+  exec sudo bash "${BOOTSTRAP_SCRIPT}" --profile "$PROFILE" --url "$URL"
 fi
