@@ -43,6 +43,31 @@ validate_profile_name() {
   fi
 }
 
+select_ports() {
+  case "${PROFILE}" in
+    linkedin)
+      DISPLAY_NUM="99"
+      VNC_PORT="5901"
+      NOVNC_PORT="6080"
+      CDP_PORT="9222"
+      ;;
+    hh)
+      DISPLAY_NUM="100"
+      VNC_PORT="5902"
+      NOVNC_PORT="6081"
+      CDP_PORT="9223"
+      ;;
+    *)
+      local offset
+      offset="$(( ($(printf '%s' "${PROFILE}" | cksum | awk '{print $1}') % 50) + 1 ))"
+      DISPLAY_NUM="$((100 + offset))"
+      VNC_PORT="$((5900 + offset))"
+      NOVNC_PORT="$((6080 + offset))"
+      CDP_PORT="$((9222 + offset))"
+      ;;
+  esac
+}
+
 usage() {
   cat <<'EOF'
 Usage: sudo bash scripts/browser-desktop-bootstrap.sh [options]
@@ -89,6 +114,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_profile_name
+select_ports
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this script with sudo/root so it can install packages and configure the service user." >&2
