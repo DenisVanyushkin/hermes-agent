@@ -88,6 +88,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+validate_profile_name
+
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this script with sudo/root so it can install packages and configure the service user." >&2
   exit 1
@@ -122,6 +124,17 @@ ensure_user() {
   fi
 }
 
+ensure_base_dir_safety() {
+  if [[ -L "${BASE_DIR}" ]]; then
+    echo "${BASE_DIR} is a symlink; refusing to use it." >&2
+    exit 1
+  fi
+  if [[ -e "${BASE_DIR}" && ! -f "${BASE_DIR}/.browser-desktop-managed" ]]; then
+    echo "${BASE_DIR} already exists and is not marked as browser-desktop-managed. Refusing to modify it." >&2
+    exit 1
+  fi
+}
+
 mkdirs() {
   need_root
   install -d -o "${USER_NAME}" -g "${USER_NAME}" -m 0750 \
@@ -136,18 +149,21 @@ mkdirs() {
     "${BASE_DIR}/.cache" \
     "${BASE_DIR}/profiles/${PROFILE}"
   touch \
+    "${BASE_DIR}/.browser-desktop-managed" \
     "${LOG_DIR}/xvfb.log" \
     "${LOG_DIR}/xfce.log" \
     "${LOG_DIR}/x11vnc.log" \
     "${LOG_DIR}/websockify.log" \
     "${LOG_DIR}/chromium-${PROFILE}.log"
   chown "${USER_NAME}:${USER_NAME}" \
+    "${BASE_DIR}/.browser-desktop-managed" \
     "${LOG_DIR}/xvfb.log" \
     "${LOG_DIR}/xfce.log" \
     "${LOG_DIR}/x11vnc.log" \
     "${LOG_DIR}/websockify.log" \
     "${LOG_DIR}/chromium-${PROFILE}.log"
   chmod 0640 \
+    "${BASE_DIR}/.browser-desktop-managed" \
     "${LOG_DIR}/xvfb.log" \
     "${LOG_DIR}/xfce.log" \
     "${LOG_DIR}/x11vnc.log" \
@@ -219,9 +235,27 @@ port_listening() {
   ss -ltn | awk -v p=":${port}" '$4 ~ p"$" {found=1} END {exit !found}'
 }
 
-cleanup_stale_xvfb_lock() {
-  if ! pgrep -u "${USER_NAME}" -f "Xvfb :${DISPLAY_NUM}" >/dev/null 2>&1; then
-    rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}" 2>/dev/null || true
+process_matches() {
+  local pattern="$1"
+  pgrep -u "${USER_NAME}" -f "${pattern}" >/dev/null 2>&1
+}
+
+ensure_display_free() {
+  if [[ -e "/tmp/.X${DISPLAY_NUM}-lock" || -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]]; then
+    if ! process_matches "Xvfb :${DISPLAY_NUM}"; then
+      echo "Display :${DISPLAY_NUM} already appears to be in use. Stop the existing X server or choose another display number." >&2
+      exit 1
+    fi
+  fi
+}
+
+ensure_port_free_or_owned() {
+  local port="$1"
+  local pattern="$2"
+  local label="$3"
+  if port_listening "${port}" && ! process_matches "${pattern}"; then
+    echo "${label} port ${port} is already in use by another process." >&2
+    exit 1
   fi
 }
 
@@ -241,21 +275,23 @@ validate_profile_name
 apt-get update >/dev/null
 install_chromium_pkg
 ensure_pkg "${CHROMIUM_PKG}" xfce4 dbus-x11 x11vnc novnc websockify xvfb x11-utils xauth openssl iproute2 curl procps
+ensure_base_dir_safety
 ensure_user
 mkdirs
 PASSWORD="$(get_password)"
 
-cleanup_stale_xvfb_lock
-if ! pgrep -u "${USER_NAME}" -f "Xvfb :${DISPLAY_NUM}" >/dev/null 2>&1; then
+ensure_display_free
+if ! process_matches "Xvfb :${DISPLAY_NUM}"; then
   start_as_browser "${LOG_DIR}/xvfb.log" Xvfb ":${DISPLAY_NUM}" -screen 0 1920x1080x24 -nolisten tcp
 fi
 wait_for_display
 
-if ! pgrep -u "${USER_NAME}" -f "dbus-run-session -- startxfce4" >/dev/null 2>&1; then
+if ! process_matches "dbus-run-session -- startxfce4"; then
   start_as_browser "${LOG_DIR}/xfce.log" dbus-run-session -- startxfce4
 fi
 
-if ! port_listening "${VNC_PORT}"; then
+ensure_port_free_or_owned "${VNC_PORT}" "x11vnc .* -display :${DISPLAY_NUM} .* -rfbport ${VNC_PORT}" "VNC"
+if ! process_matches "x11vnc .* -display :${DISPLAY_NUM}"; then
   start_as_browser "${LOG_DIR}/x11vnc.log" x11vnc \
     -display ":${DISPLAY_NUM}" \
     -localhost \
@@ -267,7 +303,8 @@ if ! port_listening "${VNC_PORT}"; then
     -o "${LOG_DIR}/x11vnc.log"
 fi
 
-if ! port_listening "${NOVNC_PORT}"; then
+ensure_port_free_or_owned "${NOVNC_PORT}" "websockify .*127.0.0.1:${NOVNC_PORT} .*127.0.0.1:${VNC_PORT}" "noVNC"
+if ! process_matches "websockify .*127.0.0.1:${NOVNC_PORT} .*127.0.0.1:${VNC_PORT}"; then
   start_as_browser "${LOG_DIR}/websockify.log" websockify --web=/usr/share/novnc "127.0.0.1:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}"
 fi
 
@@ -277,7 +314,8 @@ if [[ -z "${CHROMIUM_BIN}" ]]; then
   exit 1
 fi
 
-if ! port_listening "${CDP_PORT}"; then
+ensure_port_free_or_owned "${CDP_PORT}" "remote-debugging-port=${CDP_PORT}" "Chromium CDP"
+if ! process_matches "remote-debugging-port=${CDP_PORT}"; then
   start_as_browser "${LOG_DIR}/chromium-${PROFILE}.log" "${CHROMIUM_BIN}" \
     --user-data-dir="${BASE_DIR}/profiles/${PROFILE}" \
     --profile-directory=Default \
