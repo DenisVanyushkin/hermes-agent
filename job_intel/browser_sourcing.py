@@ -1,0 +1,480 @@
+from __future__ import annotations
+
+import json
+import os
+import random
+import re
+import time
+from dataclasses import dataclass
+from html.parser import HTMLParser
+from importlib.util import find_spec
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote_plus, urljoin, urlparse
+
+from .models import Vacancy
+from .runtime import sha256_text
+
+
+_BROWSER_PROFILE_DEFAULT = Path.home() / ".hermes" / "job_intel" / "browser_profile"
+
+
+@dataclass(frozen=True)
+class BrowserAcquisitionConfig:
+    user_data_dir: Path = _BROWSER_PROFILE_DEFAULT
+    headless: bool = True
+    slow_mo_ms: int = 150
+    min_delay_ms: int = 700
+    max_delay_ms: int = 1800
+    scroll_pause_ms: int = 650
+    navigation_timeout_ms: int = 45_000
+    max_scrolls: int = 2
+
+
+@dataclass(frozen=True)
+class AcquisitionMetrics:
+    source: str
+    vacancies_found: int
+    executive_matches: int
+    accepted: int
+    rejected: int
+    extraction_successes: int
+    extraction_attempts: int
+    anti_bot_failures: int
+    executive_fit_ratio: float
+    accepted_rejected_ratio: float
+    extraction_success_rate: float
+    anti_bot_failure_rate: float
+    source_reliability: float
+    status: str
+
+
+class BrowserNativeUnavailable(RuntimeError):
+    pass
+
+
+class _LinkCapture(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[tuple[str, str]] = []
+        self._capture = False
+        self._href = ""
+        self._text: list[str] = []
+        self._in_title = False
+        self._title = ""
+        self.meta: dict[str, str] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_map = {key: value or "" for key, value in attrs}
+        if tag == "a" and attrs_map.get("href"):
+            self._capture = True
+            self._href = attrs_map["href"]
+            self._text = []
+        elif tag == "title":
+            self._in_title = True
+        elif tag == "meta":
+            key = (attrs_map.get("name") or attrs_map.get("property") or "").lower()
+            content = attrs_map.get("content") or ""
+            if key and content:
+                self.meta[key] = content
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._capture:
+            text = _normalize_whitespace("".join(self._text))
+            if text or self._href:
+                self.links.append((text, self._href))
+            self._capture = False
+            self._href = ""
+            self._text = []
+        elif tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._capture:
+            self._text.append(data)
+        if self._in_title:
+            self._title += data
+
+    @property
+    def title(self) -> str:
+        return _normalize_whitespace(self._title)
+
+
+_EXECUTIVE_ROLE_HINTS = (
+    "vp",
+    "vice president",
+    "director",
+    "head of",
+    "chief",
+    "cpo",
+    "gm",
+    "general manager",
+    "monetization",
+    "growth",
+    "platform",
+    "ecosystem",
+    "subscription",
+    "fintech",
+    "product",
+)
+
+_LOW_SIGNAL_HINTS = (
+    "support",
+    "customer success",
+    "customer support",
+    "recruiter",
+    "talent acquisition",
+    "project manager",
+    "product manager",
+    "scrum master",
+    "developer",
+    "engineer",
+    "designer",
+    "qa engineer",
+)
+
+
+def resolve_browser_config() -> BrowserAcquisitionConfig:
+    override = os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR", "").strip()
+    user_data_dir = Path(override).expanduser() if override else BrowserAcquisitionConfig().user_data_dir
+    headless = os.getenv("JOB_INTEL_BROWSER_HEADLESS", "1").strip().lower() not in {"0", "false", "no"}
+    slow_mo_ms = int(os.getenv("JOB_INTEL_BROWSER_SLOW_MO_MS", str(BrowserAcquisitionConfig().slow_mo_ms)))
+    min_delay_ms = int(os.getenv("JOB_INTEL_BROWSER_MIN_DELAY_MS", str(BrowserAcquisitionConfig().min_delay_ms)))
+    max_delay_ms = int(os.getenv("JOB_INTEL_BROWSER_MAX_DELAY_MS", str(BrowserAcquisitionConfig().max_delay_ms)))
+    scroll_pause_ms = int(os.getenv("JOB_INTEL_BROWSER_SCROLL_PAUSE_MS", str(BrowserAcquisitionConfig().scroll_pause_ms)))
+    navigation_timeout_ms = int(os.getenv("JOB_INTEL_BROWSER_NAV_TIMEOUT_MS", str(BrowserAcquisitionConfig().navigation_timeout_ms)))
+    max_scrolls = int(os.getenv("JOB_INTEL_BROWSER_MAX_SCROLLS", str(BrowserAcquisitionConfig().max_scrolls)))
+    return BrowserAcquisitionConfig(
+        user_data_dir=user_data_dir,
+        headless=headless,
+        slow_mo_ms=slow_mo_ms,
+        min_delay_ms=min_delay_ms,
+        max_delay_ms=max_delay_ms,
+        scroll_pause_ms=scroll_pause_ms,
+        navigation_timeout_ms=navigation_timeout_ms,
+        max_scrolls=max_scrolls,
+    )
+
+
+def browser_native_available() -> bool:
+    try:
+        return find_spec("playwright.sync_api") is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _strip_html(html: str) -> str:
+    return re.sub(r"<[^>]+>", " ", html or "")
+
+
+def _json_ld_objects(html: str) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    for match in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, flags=re.I | re.S):
+        raw = match.group(1).strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            objects.append(payload)
+        elif isinstance(payload, list):
+            objects.extend(item for item in payload if isinstance(item, dict))
+    return objects
+
+
+def _jobposting_objects(html: str) -> list[dict[str, Any]]:
+    jobpostings: list[dict[str, Any]] = []
+    for obj in _json_ld_objects(html):
+        obj_type = obj.get("@type")
+        types = {str(item).lower() for item in obj_type} if isinstance(obj_type, list) else {str(obj_type).lower()}
+        if "jobposting" in types:
+            jobpostings.append(obj)
+    return jobpostings
+
+
+def _company_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path_parts = [part for part in parsed.path.split("/") if part]
+    host_parts = [part for part in host.split(".") if part]
+    if "linkedin.com" in host:
+        return "Unknown"
+    if host.startswith(("careers.", "jobs.", "work.", "hiring.", "join.")) and len(host_parts) >= 3:
+        brand = host_parts[1]
+        return _normalize_whitespace(brand.replace("-", " ").replace("_", " ").title()) or "Unknown"
+    if ("greenhouse.io" in host or "boards.greenhouse.io" in host or "lever.co" in host or "ashbyhq.com" in host) and path_parts:
+        return _normalize_whitespace(path_parts[0].replace("-", " ").replace("_", " ").title())
+    if "hh.ru" in host:
+        return "HeadHunter"
+    if path_parts and path_parts[0] not in {"jobs", "vacancy", "careers", "roles", "positions", "openings"}:
+        return _normalize_whitespace(path_parts[0].replace("-", " ").replace("_", " ").title())
+    return _normalize_whitespace(host.replace("www.", "").split(":")[0].split(".")[0].title()) or "Unknown"
+
+
+def _location_from_jobposting(jobposting: dict[str, Any], body_text: str) -> str:
+    location = jobposting.get("jobLocation")
+    if isinstance(location, list) and location:
+        location = location[0]
+    if isinstance(location, dict):
+        address = location.get("address") or {}
+        if isinstance(address, dict):
+            parts = [address.get("addressLocality"), address.get("addressRegion"), address.get("addressCountry")]
+            rendered = ", ".join(str(part) for part in parts if part)
+            if rendered:
+                return rendered
+    text = body_text.lower()
+    if "remote" in text:
+        return "Remote"
+    return "Unknown"
+
+
+def _salary_from_jobposting(jobposting: dict[str, Any]) -> str | None:
+    salary = jobposting.get("baseSalary")
+    if not salary:
+        return None
+    if isinstance(salary, list) and salary:
+        salary = salary[0]
+    if isinstance(salary, dict):
+        value = salary.get("value") or {}
+        if isinstance(value, dict):
+            parts = [value.get("minValue"), value.get("maxValue"), value.get("unitText")]
+            rendered = " ".join(str(part) for part in parts if part)
+            return rendered or None
+    return None
+
+
+def _looks_executive(title: str, description: str = "") -> bool:
+    text = f"{title} {description}".lower()
+    if any(hint in text for hint in _LOW_SIGNAL_HINTS):
+        return False
+    return any(hint in text for hint in _EXECUTIVE_ROLE_HINTS)
+
+
+def _vacancy_source_id(source: str, url: str, title: str) -> str:
+    return sha256_text(f"{source}:{url}:{title}")[:16]
+
+
+def _vacancy_from_jobposting(jobposting: dict[str, Any], *, source: str, page_url: str, company_override: str | None = None) -> Vacancy:
+    title = _normalize_whitespace(str(jobposting.get("title") or jobposting.get("name") or "")) or "Vacancy"
+    description = _normalize_whitespace(_strip_html(str(jobposting.get("description") or "")))
+    url = str(jobposting.get("url") or page_url or "").strip()
+    company = company_override
+    hiring_org = jobposting.get("hiringOrganization") or {}
+    if not company and isinstance(hiring_org, dict):
+        company = str(hiring_org.get("name") or "").strip() or None
+    if not company and isinstance(hiring_org, str):
+        company = hiring_org.strip() or None
+    company = company or _company_from_url(url or page_url)
+    location = _location_from_jobposting(jobposting, description)
+    return Vacancy(
+        source=source,
+        source_id=_vacancy_source_id(source, url or page_url, title),
+        company=company,
+        title=title,
+        location=location,
+        url=url or page_url,
+        description=description or title,
+        posted_at=str(jobposting.get("datePosted") or jobposting.get("published_at") or "") or None,
+        salary=_salary_from_jobposting(jobposting),
+        metadata={"raw": jobposting, "source_url": page_url},
+    )
+
+
+def _dedupe_vacancies(vacancies: list[Vacancy]) -> list[Vacancy]:
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[Vacancy] = []
+    for vacancy in vacancies:
+        key = (vacancy.company.lower(), vacancy.title.lower(), vacancy.url)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(vacancy)
+    return deduped
+
+
+def _link_vacancies_from_html(html: str, *, source: str, page_url: str, company_override: str | None = None) -> list[Vacancy]:
+    parser = _LinkCapture()
+    parser.feed(html)
+    vacancies: list[Vacancy] = []
+    page_host = urlparse(page_url).netloc.lower()
+    for text, href in parser.links:
+        absolute = urljoin(page_url, href)
+        parsed = urlparse(absolute)
+        normalized = absolute.lower()
+        path_tokens = {token for token in parsed.path.lower().split("/") if token}
+        if not (
+            any(domain in normalized for domain in ("linkedin.com/jobs/view", "hh.ru/vacancy", "greenhouse.io", "lever.co", "ashbyhq.com"))
+            or any(token in path_tokens for token in {"careers", "jobs", "vacancy", "vacancies", "positions", "openings", "roles", "job"})
+            or any(token in page_host for token in ("careers", "jobs", "vacancies", "openings"))
+        ):
+            continue
+        title = _normalize_whitespace(text)
+        if not title:
+            continue
+        if not _looks_executive(title):
+            continue
+        company = company_override
+        if not company and source != "linkedin":
+            company = _company_from_url(absolute)
+        company = company or "Unknown"
+        vacancies.append(
+            Vacancy(
+                source=source,
+                source_id=_vacancy_source_id(source, absolute, title),
+                company=company,
+                title=title,
+                location="Unknown",
+                url=absolute,
+                description=title,
+                metadata={"source_url": page_url, "href": href},
+            )
+        )
+    return _dedupe_vacancies(vacancies)
+
+
+def extract_linkedin_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
+    vacancies = [_vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url) for jobposting in _jobposting_objects(html)]
+    if not vacancies:
+        vacancies = _link_vacancies_from_html(html, source="linkedin", page_url=page_url)
+    return _dedupe_vacancies(vacancies)
+
+
+def extract_headhunter_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
+    vacancies = [_vacancy_from_jobposting(jobposting, source="headhunter", page_url=page_url) for jobposting in _jobposting_objects(html)]
+    if not vacancies:
+        vacancies = _link_vacancies_from_html(html, source="headhunter", page_url=page_url)
+    return _dedupe_vacancies(vacancies)
+
+
+def extract_company_career_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
+    structured = [_vacancy_from_jobposting(jobposting, source="company_career", page_url=page_url) for jobposting in _jobposting_objects(html)]
+    link_vacancies = _link_vacancies_from_html(html, source="company_career", page_url=page_url)
+    return _dedupe_vacancies(structured + link_vacancies)
+
+
+class BrowserSourceClient:
+    def __init__(self, config: BrowserAcquisitionConfig | None = None):
+        self.config = config or BrowserAcquisitionConfig()
+        self._playwright = None
+        self._context = None
+
+    def __enter__(self) -> "BrowserSourceClient":
+        if not browser_native_available():
+            raise BrowserNativeUnavailable("Playwright is not installed. Install playwright to enable browser-native acquisition.")
+        from playwright.sync_api import sync_playwright  # type: ignore
+
+        self.config.user_data_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._playwright = sync_playwright().start()
+            self._context = self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self.config.user_data_dir),
+                headless=self.config.headless,
+                slow_mo=self.config.slow_mo_ms,
+                viewport={"width": 1440, "height": 1600},
+            )
+        except Exception as exc:
+            self._context = None
+            self._playwright = None
+            raise BrowserNativeUnavailable(f"Playwright browser launch failed: {exc}") from exc
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._context is not None:
+            self._context.close()
+        if self._playwright is not None:
+            self._playwright.stop()
+        self._context = None
+        self._playwright = None
+
+    def fetch_html(self, url: str, *, scrolls: int | None = None) -> str:
+        if self._context is None:
+            raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
+        scroll_count = self.config.max_scrolls if scrolls is None else max(0, scrolls)
+        try:
+            page = self._context.new_page()
+            try:
+                self._sleep()
+                page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                page.wait_for_timeout(self.config.scroll_pause_ms)
+                for _ in range(scroll_count):
+                    page.mouse.wheel(0, 1800)
+                    page.wait_for_timeout(self.config.scroll_pause_ms)
+                return page.content()
+            finally:
+                page.close()
+        except Exception as exc:
+            raise BrowserNativeUnavailable(f"Playwright browser fetch failed: {exc}") from exc
+
+    def _sleep(self) -> None:
+        delay = random.uniform(self.config.min_delay_ms, self.config.max_delay_ms) / 1000.0
+        time.sleep(delay)
+
+    def search_linkedin(self, query: str, *, max_pages: int = 1) -> list[Vacancy]:
+        url = f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(query)}"
+        vacancies: list[Vacancy] = []
+        for page_index in range(max_pages):
+            page_url = f"{url}&start={page_index * 25}" if page_index else url
+            html = self.fetch_html(page_url)
+            vacancies.extend(extract_linkedin_vacancies_from_html(html, page_url=page_url))
+        return _dedupe_vacancies(vacancies)
+
+    def search_headhunter(self, query: str, *, max_pages: int = 1) -> list[Vacancy]:
+        url = f"https://hh.ru/search/vacancy?text={quote_plus(query)}"
+        vacancies: list[Vacancy] = []
+        for page_index in range(max_pages):
+            page_url = f"{url}&page={page_index}" if page_index else url
+            html = self.fetch_html(page_url)
+            vacancies.extend(extract_headhunter_vacancies_from_html(html, page_url=page_url))
+        return _dedupe_vacancies(vacancies)
+
+    def crawl_company_page(self, url: str) -> list[Vacancy]:
+        html = self.fetch_html(url)
+        return extract_company_career_vacancies_from_html(html, page_url=url)
+
+
+def metrics_from_counts(
+    *,
+    source: str,
+    found: int,
+    executive_matches: int,
+    accepted: int,
+    rejected: int,
+    extraction_successes: int,
+    extraction_attempts: int,
+    anti_bot_failures: int = 0,
+) -> AcquisitionMetrics:
+    executive_fit_ratio = (executive_matches / found) if found else 0.0
+    accepted_rejected_ratio = (accepted / rejected) if rejected else float(accepted) if accepted else 0.0
+    extraction_success_rate = (extraction_successes / extraction_attempts) if extraction_attempts else 0.0
+    anti_bot_failure_rate = (anti_bot_failures / extraction_attempts) if extraction_attempts else 0.0
+    source_reliability = round(max(0.0, extraction_success_rate * (1.0 - anti_bot_failure_rate) * (0.5 + executive_fit_ratio / 2.0)), 4)
+    if found <= 0 and extraction_attempts > 0 and anti_bot_failures >= extraction_attempts / 2:
+        status = "blocked"
+    elif extraction_success_rate >= 0.8 and source_reliability >= 0.45:
+        status = "operational"
+    elif extraction_success_rate >= 0.4 or executive_fit_ratio >= 0.25:
+        status = "degraded"
+    else:
+        status = "low-signal"
+    return AcquisitionMetrics(
+        source=source,
+        vacancies_found=found,
+        executive_matches=executive_matches,
+        accepted=accepted,
+        rejected=rejected,
+        extraction_successes=extraction_successes,
+        extraction_attempts=extraction_attempts,
+        anti_bot_failures=anti_bot_failures,
+        executive_fit_ratio=executive_fit_ratio,
+        accepted_rejected_ratio=accepted_rejected_ratio,
+        extraction_success_rate=extraction_success_rate,
+        anti_bot_failure_rate=anti_bot_failure_rate,
+        source_reliability=source_reliability,
+        status=status,
+    )
