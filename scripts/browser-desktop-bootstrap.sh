@@ -34,6 +34,7 @@ USER_NAME="browser"
 USER_HOME="${BASE_DIR}"
 VNC_DIR="${BASE_DIR}/.vnc"
 LOG_DIR="${BASE_DIR}/logs"
+RUNTIME_DIR=""
 CHROMIUM_PKG="chromium"
 
 validate_profile_name() {
@@ -167,9 +168,10 @@ mkdirs() {
     "${BASE_DIR}" \
     "${BASE_DIR}/profiles" \
     "${LOG_DIR}" \
-    "${BASE_DIR}/runtime" \
     "${BASE_DIR}/downloads" \
     "${BASE_DIR}/Desktop"
+  RUNTIME_DIR="/run/user/$(id -u "${USER_NAME}")"
+  install -d -o "${USER_NAME}" -g "${USER_NAME}" -m 0700 "${RUNTIME_DIR}"
   install -d -o "${USER_NAME}" -g "${USER_NAME}" -m 0700 \
     "${VNC_DIR}" \
     "${BASE_DIR}/.config" \
@@ -280,20 +282,18 @@ get_password() {
   printf '%s\n' "${password}"
 }
 
-browser_env=(
-  "DISPLAY=:${DISPLAY_NUM}"
-  "HOME=${USER_HOME}"
-  "USER=${USER_NAME}"
-  "LOGNAME=${USER_NAME}"
-  "XDG_RUNTIME_DIR=${BASE_DIR}/runtime"
-  "XDG_CONFIG_HOME=${BASE_DIR}/.config"
-  "XDG_CACHE_HOME=${BASE_DIR}/.cache"
-)
-
 start_as_browser() {
   local log_file="$1"
   shift
-  nohup runuser -u "${USER_NAME}" -- env "${browser_env[@]}" "$@" >>"${log_file}" 2>&1 &
+  nohup runuser -u "${USER_NAME}" -- env \
+    "DISPLAY=:${DISPLAY_NUM}" \
+    "HOME=${USER_HOME}" \
+    "USER=${USER_NAME}" \
+    "LOGNAME=${USER_NAME}" \
+    "XDG_RUNTIME_DIR=${RUNTIME_DIR}" \
+    "XDG_CONFIG_HOME=${BASE_DIR}/.config" \
+    "XDG_CACHE_HOME=${BASE_DIR}/.cache" \
+    "$@" >>"${log_file}" 2>&1 &
 }
 
 port_listening() {
@@ -415,6 +415,12 @@ Chrome DevTools / Playwright CDP:
 
 Persistent profile directory:
   ${BASE_DIR}/profiles/${PROFILE}
+
+Stop this desktop:
+  sudo bash scripts/browser-desktop-stop.sh ${PROFILE}
+
+Stop all managed desktops:
+  sudo bash scripts/browser-desktop-stop.sh
 
 Logs:
   ${LOG_DIR}
