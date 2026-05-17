@@ -168,7 +168,8 @@ mkdirs() {
     "${BASE_DIR}/profiles" \
     "${LOG_DIR}" \
     "${BASE_DIR}/runtime" \
-    "${BASE_DIR}/downloads"
+    "${BASE_DIR}/downloads" \
+    "${BASE_DIR}/Desktop"
   install -d -o "${USER_NAME}" -g "${USER_NAME}" -m 0700 \
     "${VNC_DIR}" \
     "${BASE_DIR}/.config" \
@@ -195,6 +196,40 @@ mkdirs() {
     "${LOG_DIR}/x11vnc.log" \
     "${LOG_DIR}/websockify.log" \
     "${LOG_DIR}/chromium-${PROFILE}.log"
+}
+
+create_desktop_shortcuts() {
+  need_root
+  local desktop_dir="${BASE_DIR}/Desktop"
+  local linked_in="${desktop_dir}/Chromium LinkedIn.desktop"
+  local hh="${desktop_dir}/Chromium HH.desktop"
+
+  cat > "${linked_in}" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Chromium LinkedIn
+Comment=Open LinkedIn in the persistent Chromium profile
+Exec=chromium --user-data-dir=${BASE_DIR}/profiles/linkedin --profile-directory=Default --new-window https://www.linkedin.com/
+Icon=chromium
+Terminal=false
+Categories=Network;WebBrowser;
+EOF
+
+  cat > "${hh}" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Chromium HH
+Comment=Open HH in the persistent Chromium profile
+Exec=chromium --user-data-dir=${BASE_DIR}/profiles/hh --profile-directory=Default --new-window https://hh.ru/
+Icon=chromium
+Terminal=false
+Categories=Network;WebBrowser;
+EOF
+
+  chown "${USER_NAME}:${USER_NAME}" "${linked_in}" "${hh}"
+  chmod 0755 "${linked_in}" "${hh}"
 }
 
 install_chromium_pkg() {
@@ -304,6 +339,7 @@ ensure_pkg "${CHROMIUM_PKG}" xfce4 dbus-x11 x11vnc novnc websockify xvfb x11-uti
 ensure_base_dir_safety
 ensure_user
 mkdirs
+create_desktop_shortcuts
 PASSWORD="$(get_password)"
 
 ensure_display_free
