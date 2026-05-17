@@ -24,6 +24,21 @@ def test_normalize_search_hit_infers_remoteok_company_and_title() -> None:
 
 
 
+def test_normalize_search_hit_does_not_infer_bogus_linkedin_company() -> None:
+    hit = SearchHit(
+        title="VP Product",
+        url="https://www.linkedin.com/jobs/view/123",
+        snippet="Senior product leadership role",
+        source="duckduckgo",
+    )
+
+    vacancy = normalize_search_hit(hit)
+
+    assert vacancy.company == "Unknown"
+    assert vacancy.title == "VP Product"
+    assert vacancy.url == "https://www.linkedin.com/jobs/view/123"
+
+
 def test_normalize_remoteok_job_maps_fields() -> None:
     vacancy = normalize_remoteok_job(
         {

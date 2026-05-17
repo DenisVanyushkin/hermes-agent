@@ -1,0 +1,206 @@
+from __future__ import annotations
+
+from job_intel.browser_sourcing import (
+    AcquisitionMetrics,
+    BrowserAcquisitionConfig,
+    BrowserNativeUnavailable,
+    BrowserSourceClient,
+    browser_native_available,
+    extract_company_career_vacancies_from_html,
+    extract_headhunter_vacancies_from_html,
+    extract_linkedin_vacancies_from_html,
+    metrics_from_counts,
+    resolve_browser_config,
+)
+
+
+def test_extract_linkedin_vacancies_from_html_uses_jobposting_data() -> None:
+    html = """
+    <html>
+      <head>
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "JobPosting",
+          "title": "VP Product, Monetization",
+          "description": "Lead monetization and growth",
+          "datePosted": "2026-05-16",
+          "hiringOrganization": {"name": "Spark Mobility"},
+          "jobLocation": {"address": {"addressLocality": "Dubai", "addressCountry": "AE"}},
+          "url": "https://www.linkedin.com/jobs/view/123"
+        }
+        </script>
+      </head>
+      <body>
+        <a href="/jobs/view/123">VP Product, Monetization</a>
+      </body>
+    </html>
+    """
+
+    vacancies = extract_linkedin_vacancies_from_html(html, page_url="https://www.linkedin.com/jobs/search")
+
+    assert len(vacancies) == 1
+    vacancy = vacancies[0]
+    assert vacancy.source == "linkedin"
+    assert vacancy.company == "Spark Mobility"
+    assert vacancy.title == "VP Product, Monetization"
+    assert vacancy.location == "Dubai, AE"
+    assert vacancy.url == "https://www.linkedin.com/jobs/view/123"
+    assert "monetization" in vacancy.description.lower()
+
+
+def test_extract_headhunter_vacancies_from_html_supports_exec_roles_without_tokens() -> None:
+    html = """
+    <html>
+      <head>
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "JobPosting",
+          "title": "Head of Product",
+          "description": "Own monetization and product strategy",
+          "hiringOrganization": {"name": "Fintech Group"},
+          "jobLocation": {"address": {"addressLocality": "Almaty", "addressCountry": "KZ"}},
+          "url": "https://hh.ru/vacancy/456"
+        }
+        </script>
+      </head>
+      <body>
+        <a href="/vacancy/456">Head of Product</a>
+      </body>
+    </html>
+    """
+
+    vacancies = extract_headhunter_vacancies_from_html(html, page_url="https://hh.ru/search/vacancy")
+
+    assert len(vacancies) == 1
+    vacancy = vacancies[0]
+    assert vacancy.source == "headhunter"
+    assert vacancy.company == "Fintech Group"
+    assert vacancy.title == "Head of Product"
+    assert vacancy.location == "Almaty, KZ"
+    assert vacancy.url == "https://hh.ru/vacancy/456"
+
+
+def test_extract_company_career_vacancies_from_html_parses_common_ats_links() -> None:
+    html = """
+    <html>
+      <body>
+        <a href="https://boards.greenhouse.io/acme/jobs/789">Director of Product</a>
+        <a href="https://jobs.lever.co/acme/abc">VP Growth</a>
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "JobPosting",
+          "title": "Chief Product Officer",
+          "description": "Lead ecosystem and monetization",
+          "hiringOrganization": {"name": "Acme"},
+          "jobLocation": {"address": {"addressLocality": "London", "addressCountry": "GB"}},
+          "url": "https://acme.com/careers/cpo"
+        }
+        </script>
+      </body>
+    </html>
+    """
+
+    vacancies = extract_company_career_vacancies_from_html(html, page_url="https://acme.com/careers")
+
+    assert [v.title for v in vacancies] == ["Chief Product Officer", "Director of Product", "VP Growth"]
+    assert vacancies[0].source == "company_career"
+    assert vacancies[0].company == "Acme"
+    assert vacancies[0].location == "London, GB"
+
+
+def test_extract_company_career_vacancies_from_html_handles_custom_ats_domains() -> None:
+    html = """
+    <html>
+      <body>
+        <a href="https://careers.adapty.io/roles/vp-product">VP Product</a>
+      </body>
+    </html>
+    """
+
+    vacancies = extract_company_career_vacancies_from_html(html, page_url="https://careers.adapty.io")
+
+    assert len(vacancies) == 1
+    vacancy = vacancies[0]
+    assert vacancy.company == "Adapty"
+    assert vacancy.title == "VP Product"
+    assert vacancy.url == "https://careers.adapty.io/roles/vp-product"
+
+
+def test_extract_linkedin_vacancies_from_html_does_not_infer_wrong_company_from_view_path() -> None:
+    html = """
+    <html>
+      <body>
+        <a href="/jobs/view/123">VP Product</a>
+      </body>
+    </html>
+    """
+
+    vacancies = extract_linkedin_vacancies_from_html(html, page_url="https://www.linkedin.com/jobs/search")
+
+    assert len(vacancies) == 1
+    assert vacancies[0].company == "Unknown"
+
+
+def test_metrics_from_counts_calculates_quality_ratios() -> None:
+    metrics = metrics_from_counts(
+        source="linkedin",
+        found=20,
+        executive_matches=8,
+        accepted=5,
+        rejected=15,
+        extraction_successes=18,
+        extraction_attempts=20,
+        anti_bot_failures=2,
+    )
+
+    assert isinstance(metrics, AcquisitionMetrics)
+    assert metrics.source == "linkedin"
+    assert metrics.vacancies_found == 20
+    assert metrics.executive_fit_ratio == 0.4
+    assert metrics.accepted_rejected_ratio == (5 / 15)
+    assert metrics.extraction_success_rate == 0.9
+    assert metrics.anti_bot_failure_rate == 0.1
+    assert metrics.source_reliability > 0.0
+    assert metrics.status in {"operational", "degraded"}
+
+
+def test_resolve_browser_config_respects_env_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR", "/tmp/browser-profile")
+    monkeypatch.setenv("JOB_INTEL_BROWSER_HEADLESS", "0")
+    monkeypatch.setenv("JOB_INTEL_BROWSER_SLOW_MO_MS", "321")
+    monkeypatch.setenv("JOB_INTEL_BROWSER_MIN_DELAY_MS", "11")
+    monkeypatch.setenv("JOB_INTEL_BROWSER_MAX_DELAY_MS", "22")
+    monkeypatch.setenv("JOB_INTEL_BROWSER_SCROLL_PAUSE_MS", "33")
+    monkeypatch.setenv("JOB_INTEL_BROWSER_NAV_TIMEOUT_MS", "4444")
+    monkeypatch.setenv("JOB_INTEL_BROWSER_MAX_SCROLLS", "5")
+
+    config = resolve_browser_config()
+
+    assert config.user_data_dir.as_posix() == "/tmp/browser-profile"
+    assert config.headless is False
+    assert config.slow_mo_ms == 321
+    assert config.min_delay_ms == 11
+    assert config.max_delay_ms == 22
+    assert config.scroll_pause_ms == 33
+    assert config.navigation_timeout_ms == 4444
+    assert config.max_scrolls == 5
+
+
+def test_browser_client_fetch_html_wraps_runtime_failures() -> None:
+    client = BrowserSourceClient(BrowserAcquisitionConfig())
+
+    class _BrokenContext:
+        def new_page(self):
+            raise RuntimeError("boom")
+
+    client._context = _BrokenContext()  # type: ignore[attr-defined]
+
+    try:
+        client.fetch_html("https://example.com")
+    except BrowserNativeUnavailable as exc:
+        assert "Playwright browser fetch failed" in str(exc)
+    else:
+        raise AssertionError("expected BrowserNativeUnavailable")

@@ -10,6 +10,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from .browser_sourcing import BrowserAcquisitionConfig, BrowserNativeUnavailable, BrowserSourceClient, browser_native_available, resolve_browser_config
 from .config import DEFAULT_CONFIG, load_config_bundle
 from .models import Vacancy
 from .runtime import retry_with_backoff, sha256_text
@@ -168,6 +169,14 @@ def load_target_companies() -> list[_TargetCompanyRecord]:
 
 
 def _fetch_html(url: str) -> str:
+    if browser_native_available():
+        config = resolve_browser_config()
+        try:
+            with BrowserSourceClient(config) as client:
+                return client.fetch_html(url)
+        except BrowserNativeUnavailable:
+            pass
+
     def _request() -> requests.Response:
         return requests.get(
             url,
