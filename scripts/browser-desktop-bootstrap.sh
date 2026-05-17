@@ -36,6 +36,9 @@ VNC_DIR="${BASE_DIR}/.vnc"
 LOG_DIR="${BASE_DIR}/logs"
 RUNTIME_DIR=""
 CHROMIUM_PKG="chromium"
+CHROMIUM_BIN=""
+CHROMIUM_LAUNCHER="/usr/local/bin/browser-chromium"
+PLAYWRIGHT_VENV="${BASE_DIR}/playwright-venv"
 
 validate_profile_name() {
   if [[ ! "${PROFILE}" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -204,32 +207,106 @@ is_snap_path() {
   local path="$1"
   local resolved
   resolved="$(readlink -f "$path" 2>/dev/null || printf '%s' "$path")"
-  [[ "${resolved}" == /snap/* || "${resolved}" == /var/lib/snapd/* ]]
+  if [[ "${resolved}" == /snap/* || "${resolved}" == /var/lib/snapd/* ]]; then
+    return 0
+  fi
+
+  if [[ -r "${path}" ]] && grep -aEq 'snap (run|install) chromium|/snap/bin/chromium|chromium snap' "${path}" 2>/dev/null; then
+    return 0
+  fi
+
+  return 1
 }
 
 resolve_non_snap_chromium_bin() {
-  local candidate resolved
-  for candidate in /usr/bin/chromium /usr/bin/chromium-browser; do
-    if [[ -x "${candidate}" ]]; then
-      if ! is_snap_path "${candidate}"; then
-        printf '%s\n' "${candidate}"
-        return 0
+  local candidate resolved type
+
+  for candidate in /usr/bin/chromium /usr/bin/chromium-browser /usr/lib/chromium/chromium; do
+    if [[ ! -e "${candidate}" ]]; then
+      continue
+    fi
+
+    resolved="$(readlink -f "$candidate" 2>/dev/null || printf '%s' "$candidate")"
+    if [[ "${resolved}" == /snap/* || "${resolved}" == /var/lib/snapd/* ]]; then
+      continue
+    fi
+
+    type="$(file -b "${candidate}" 2>/dev/null || true)"
+    if [[ "${type}" == *"shell script"* ]]; then
+      if grep -aEq 'snap (run|install) chromium|/snap/bin/chromium|chromium snap' "${candidate}" 2>/dev/null; then
+        continue
       fi
+    fi
+
+    if [[ -x "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
     fi
   done
 
   for candidate in chromium chromium-browser; do
-    if candidate="$(command -v "${candidate}" 2>/dev/null || true)" && [[ -n "${candidate}" ]]; then
-      if [[ -x "${candidate}" ]]; then
-        if ! is_snap_path "${candidate}"; then
-          printf '%s\n' "${candidate}"
-          return 0
-        fi
+    candidate="$(command -v "${candidate}" 2>/dev/null || true)"
+    if [[ -n "${candidate}" ]] && [[ -x "${candidate}" ]]; then
+      resolved="$(readlink -f "$candidate" 2>/dev/null || printf '%s' "$candidate")"
+      if [[ "${resolved}" == /snap/* || "${resolved}" == /var/lib/snapd/* ]]; then
+        continue
       fi
+      type="$(file -b "${candidate}" 2>/dev/null || true)"
+      if [[ "${type}" == *"shell script"* ]] && grep -aEq 'snap (run|install) chromium|/snap/bin/chromium|chromium snap' "${candidate}" 2>/dev/null; then
+        continue
+      fi
+      printf '%s\n' "${candidate}"
+      return 0
     fi
   done
 
   return 1
+}
+
+ensure_playwright_chromium() {
+  need_root
+  ensure_pkg python3 python3-venv python3-pip
+
+  if [[ ! -x "${PLAYWRIGHT_VENV}/bin/python" ]]; then
+    python3 -m venv "${PLAYWRIGHT_VENV}"
+    chown -R "${USER_NAME}:${USER_NAME}" "${PLAYWRIGHT_VENV}"
+  fi
+
+  runuser -u "${USER_NAME}" -- env HOME="${USER_HOME}" XDG_CACHE_HOME="${BASE_DIR}/.cache" \
+    "${PLAYWRIGHT_VENV}/bin/pip" install --upgrade pip setuptools wheel playwright >/dev/null
+
+  runuser -u "${USER_NAME}" -- env HOME="${USER_HOME}" XDG_CACHE_HOME="${BASE_DIR}/.cache" \
+    "${PLAYWRIGHT_VENV}/bin/python" -m playwright install chromium >/dev/null
+
+  CHROMIUM_BIN="$(runuser -u "${USER_NAME}" -- env HOME="${USER_HOME}" XDG_CACHE_HOME="${BASE_DIR}/.cache" \
+    "${PLAYWRIGHT_VENV}/bin/python" - <<'PY'
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    print(p.chromium.executable_path)
+PY
+)"
+
+  if [[ -z "${CHROMIUM_BIN}" || ! -x "${CHROMIUM_BIN}" ]]; then
+    echo "Playwright Chromium was installed but the executable path could not be resolved." >&2
+    exit 1
+  fi
+}
+
+ensure_browser_binary() {
+  if CHROMIUM_BIN="$(resolve_non_snap_chromium_bin 2>/dev/null || true)" && [[ -n "${CHROMIUM_BIN}" ]]; then
+    return 0
+  fi
+
+  ensure_playwright_chromium
+}
+
+write_browser_launcher() {
+  need_root
+  cat > "${CHROMIUM_LAUNCHER}" <<EOF
+#!/usr/bin/env bash
+exec "${CHROMIUM_BIN}" "\$@"
+EOF
+  chmod 0755 "${CHROMIUM_LAUNCHER}"
 }
 
 create_desktop_shortcuts() {
@@ -237,14 +314,6 @@ create_desktop_shortcuts() {
   local desktop_dir="${BASE_DIR}/Desktop"
   local linked_in="${desktop_dir}/Chromium LinkedIn.desktop"
   local hh="${desktop_dir}/Chromium HH.desktop"
-  local chromium_bin
-  chromium_bin="$(resolve_non_snap_chromium_bin || true)"
-  if [[ -z "${chromium_bin}" ]]; then
-    echo "No non-snap Chromium binary was found while creating desktop shortcuts." >&2
-    echo "If the VPS only has /snap/bin/chromium, remove it and rerun:" >&2
-    echo "  sudo snap remove chromium" >&2
-    exit 1
-  fi
 
   cat > "${linked_in}" <<EOF
 [Desktop Entry]
@@ -252,7 +321,7 @@ Version=1.0
 Type=Application
 Name=Chromium LinkedIn
 Comment=Open LinkedIn in the persistent Chromium profile
-Exec=${chromium_bin} --user-data-dir=${BASE_DIR}/profiles/linkedin --profile-directory=Default --new-window https://www.linkedin.com/
+Exec=${CHROMIUM_LAUNCHER} --user-data-dir=${BASE_DIR}/profiles/linkedin --profile-directory=Default --new-window https://www.linkedin.com/
 Icon=chromium
 Terminal=false
 Categories=Network;WebBrowser;
@@ -264,7 +333,7 @@ Version=1.0
 Type=Application
 Name=Chromium HH
 Comment=Open HH in the persistent Chromium profile
-Exec=${chromium_bin} --user-data-dir=${BASE_DIR}/profiles/hh --profile-directory=Default --new-window https://hh.ru/
+Exec=${CHROMIUM_LAUNCHER} --user-data-dir=${BASE_DIR}/profiles/hh --profile-directory=Default --new-window https://hh.ru/
 Icon=chromium
 Terminal=false
 Categories=Network;WebBrowser;
@@ -375,10 +444,12 @@ wait_for_display() {
 validate_profile_name
 apt-get update >/dev/null
 install_chromium_pkg
-ensure_pkg "${CHROMIUM_PKG}" xfce4 dbus-x11 x11vnc novnc websockify xvfb x11-utils xauth openssl iproute2 curl procps dbus-user-session
+ensure_pkg "${CHROMIUM_PKG}" xfce4 dbus-x11 x11vnc novnc websockify xvfb x11-utils xauth openssl iproute2 curl procps dbus-user-session python3 python3-venv python3-pip
 ensure_base_dir_safety
 ensure_user
 mkdirs
+ensure_browser_binary
+write_browser_launcher
 create_desktop_shortcuts
 PASSWORD="$(get_password)"
 
@@ -410,12 +481,11 @@ if ! process_matches "websockify .*127.0.0.1:${NOVNC_PORT} .*127.0.0.1:${VNC_POR
   start_as_browser "${LOG_DIR}/websockify.log" websockify --web=/usr/share/novnc "127.0.0.1:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}"
 fi
 
-CHROMIUM_BIN="$(resolve_non_snap_chromium_bin || true)"
-if [[ -z "${CHROMIUM_BIN}" ]]; then
-  echo "No non-snap Chromium binary was found." >&2
-  echo "If the VPS only has /snap/bin/chromium, remove it and rerun:" >&2
-  echo "  sudo snap remove chromium" >&2
-  echo "Then rerun this bootstrap script so it can use /usr/bin/chromium." >&2
+# ensure_browser_binary() already resolved a usable Chromium.
+# On Ubuntu VPSes without a non-snap system Chromium package,
+# this falls back to Playwright's downloaded Chromium.
+if [[ -z "${CHROMIUM_BIN}" || ! -x "${CHROMIUM_BIN}" ]]; then
+  echo "Chromium binary is not available after installation/fallback." >&2
   exit 1
 fi
 
@@ -426,6 +496,8 @@ if ! process_matches "remote-debugging-port=${CDP_PORT}"; then
     --profile-directory=Default \
     --no-first-run \
     --disable-dev-shm-usage \
+    --no-sandbox \
+    --disable-setuid-sandbox \
     --remote-debugging-address=127.0.0.1 \
     --remote-debugging-port="${CDP_PORT}" \
     --new-window "${URL}"
