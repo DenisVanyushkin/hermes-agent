@@ -347,14 +347,14 @@ def search_remotive_jobs(max_results: int = 25) -> list[Vacancy]:
     return vacancies
 
 
-def _browser_config() -> BrowserAcquisitionConfig:
-    return resolve_browser_config()
+def _browser_config(source: str | None = None) -> BrowserAcquisitionConfig:
+    return resolve_browser_config(source)
 
 
 def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]:
     if not browser_native_available():
         raise SourceFetchError("Playwright is not installed, so LinkedIn browser-native acquisition is unavailable.")
-    config = _browser_config()
+    config = _browser_config("linkedin")
     try:
         with BrowserSourceClient(config) as client:
             return client.search_linkedin(query, max_pages=max_pages)
@@ -364,7 +364,7 @@ def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]
 
 def fetch_company_career_vacancies(url: str) -> list[Vacancy]:
     if browser_native_available():
-        config = _browser_config()
+        config = _browser_config("company_career")
         try:
             with BrowserSourceClient(config) as client:
                 return client.crawl_company_page(url)
@@ -398,7 +398,7 @@ def _request_json(url: str, *, params: dict[str, object], headers: dict[str, str
 
 def fetch_headhunter_vacancies(query: str, *, per_page: int = 20) -> list[Vacancy]:
     if browser_native_available():
-        config = _browser_config()
+        config = _browser_config("headhunter")
         try:
             with BrowserSourceClient(config) as client:
                 return client.search_headhunter(query, max_pages=max(1, (per_page + 24) // 25))[:per_page]

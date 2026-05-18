@@ -17,6 +17,12 @@ from .runtime import sha256_text
 
 
 _BROWSER_PROFILE_DEFAULT = Path.home() / ".hermes" / "job_intel" / "browser_profile"
+_BROWSER_PROFILE_DEFAULTS: dict[str, Path] = {
+    "linkedin": Path("/var/lib/browser-desktop/profiles/linkedin"),
+    "headhunter": Path("/var/lib/browser-desktop/profiles/hh"),
+    "hh": Path("/var/lib/browser-desktop/profiles/hh"),
+    "company_career": _BROWSER_PROFILE_DEFAULT,
+}
 
 
 @dataclass(frozen=True)
@@ -134,9 +140,21 @@ _LOW_SIGNAL_HINTS = (
 )
 
 
-def resolve_browser_config() -> BrowserAcquisitionConfig:
-    override = os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR", "").strip()
-    user_data_dir = Path(override).expanduser() if override else BrowserAcquisitionConfig().user_data_dir
+def resolve_browser_config(source: str | None = None) -> BrowserAcquisitionConfig:
+    source_key = (source or "").strip().lower().replace(" ", "_")
+    overrides = []
+    if source_key:
+        env_suffix = source_key.upper().replace("-", "_")
+        overrides.append(os.getenv(f"JOB_INTEL_BROWSER_PROFILE_DIR_{env_suffix}", "").strip())
+        if source_key == "headhunter":
+            overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", "").strip())
+        elif source_key == "hh":
+            overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", "").strip())
+        elif source_key == "linkedin":
+            overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN", "").strip())
+    overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR", "").strip())
+    default_dir = _BROWSER_PROFILE_DEFAULTS.get(source_key, BrowserAcquisitionConfig().user_data_dir)
+    user_data_dir = Path(next((override for override in overrides if override), default_dir)).expanduser()
     headless = os.getenv("JOB_INTEL_BROWSER_HEADLESS", "1").strip().lower() not in {"0", "false", "no"}
     slow_mo_ms = int(os.getenv("JOB_INTEL_BROWSER_SLOW_MO_MS", str(BrowserAcquisitionConfig().slow_mo_ms)))
     min_delay_ms = int(os.getenv("JOB_INTEL_BROWSER_MIN_DELAY_MS", str(BrowserAcquisitionConfig().min_delay_ms)))

@@ -167,6 +167,18 @@ def test_metrics_from_counts_calculates_quality_ratios() -> None:
     assert metrics.status in {"operational", "degraded"}
 
 
+def test_resolve_browser_config_uses_source_specific_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("JOB_INTEL_BROWSER_PROFILE_DIR", raising=False)
+    monkeypatch.delenv("JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN", raising=False)
+    monkeypatch.delenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", raising=False)
+
+    linkedin_config = resolve_browser_config("linkedin")
+    hh_config = resolve_browser_config("headhunter")
+
+    assert linkedin_config.user_data_dir.as_posix() == "/var/lib/browser-desktop/profiles/linkedin"
+    assert hh_config.user_data_dir.as_posix() == "/var/lib/browser-desktop/profiles/hh"
+
+
 def test_resolve_browser_config_respects_env_overrides(monkeypatch) -> None:
     monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR", "/tmp/browser-profile")
     monkeypatch.setenv("JOB_INTEL_BROWSER_HEADLESS", "0")
