@@ -19,6 +19,7 @@ From the repo root:
 ./venv/bin/python -m job_intel daily
 ./venv/bin/python -m job_intel alert
 ./venv/bin/python -m job_intel enrichment
+./venv/bin/python -m job_intel health
 ```
 
 ## Cron jobs
@@ -26,8 +27,9 @@ From the repo root:
 - Daily digest / source acquisition: `job-intel-daily` (runs in the twice-daily 09:00/17:00 windows)
 - Exceptional alerts: `job-intel-alert` (reads persisted inventory; does not re-scan sources)
 - Candidate enrichment: `job-intel-enrichment`
+- Nightly health report: `job-intel-health` (summarizes acquisition quality, signal quality, and session health)
 
-All three are configured to deliver to the Slack thread plus `C0B42K4H4KV`.
+All four are configured to deliver to the Slack thread plus `C0B42K4H4KV`.
 
 The shell wrappers are cwd-independent:
 - `JOB_INTEL_WORKDIR` defaults to `/home/hermes/.hermes/hermes-agent`
