@@ -216,3 +216,125 @@ def test_browser_client_fetch_html_wraps_runtime_failures() -> None:
         assert "Playwright browser fetch failed" in str(exc)
     else:
         raise AssertionError("expected BrowserNativeUnavailable")
+
+
+def test_search_linkedin_stops_when_login_wall_appears(monkeypatch) -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(
+            min_delay_ms=0,
+            max_delay_ms=0,
+            scroll_pause_ms=0,
+            max_scrolls=0,
+            noise_probability=0.0,
+            linkedin_followup_page_probability=1.0,
+            max_linkedin_pages=2,
+        )
+    )
+
+    page_urls: list[str] = []
+    first_page = """
+    <html>
+      <head>
+        <script type="application/ld+json">
+        {"@context": "https://schema.org", "@type": "JobPosting", "title": "VP Product", "description": "Own monetization", "url": "https://www.linkedin.com/jobs/view/123", "hiringOrganization": {"name": "Spark"}}
+        </script>
+      </head>
+      <body>
+        <a href="/jobs/view/123">VP Product</a>
+      </body>
+    </html>
+    """
+    login_wall = "<html><body>Sign in to view more jobs</body></html>"
+
+    def fake_fetch(url: str, *, scrolls=None):
+        page_urls.append(url)
+        return first_page if "start=25" not in url else login_wall
+
+    monkeypatch.setattr(client, "fetch_html", fake_fetch)
+
+    vacancies = client.search_linkedin("VP Product", max_pages=5)
+
+    assert len(vacancies) == 1
+    assert page_urls == [
+        "https://www.linkedin.com/jobs/search/?keywords=VP+Product",
+        "https://www.linkedin.com/jobs/search/?keywords=VP+Product&start=25",
+    ]
+    health = client.session_health_snapshot()
+    assert health["pages_fetched"] == 2
+    assert health["login_walls"] == 1
+    assert health["auth_redirects"] == 1
+    assert health["status"] in {"degraded", "blocked"}
+
+
+def test_search_linkedin_occasionally_opens_a_detail_page(monkeypatch) -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(
+            min_delay_ms=0,
+            max_delay_ms=0,
+            scroll_pause_ms=0,
+            max_scrolls=0,
+            noise_probability=1.0,
+            linkedin_followup_page_probability=0.0,
+            max_linkedin_pages=1,
+        )
+    )
+
+    page_urls: list[str] = []
+    search_page = """
+    <html>
+      <head>
+        <script type="application/ld+json">
+        {"@context": "https://schema.org", "@type": "JobPosting", "title": "VP Product", "description": "Own monetization", "url": "https://www.linkedin.com/jobs/view/123", "hiringOrganization": {"name": "Spark"}}
+        </script>
+      </head>
+      <body>
+        <a href="/jobs/view/123">VP Product</a>
+        <a href="/jobs/view/456">Director of Product</a>
+      </body>
+    </html>
+    """
+    detail_page = """
+    <html>
+      <head>
+        <script type="application/ld+json">
+        {"@context": "https://schema.org", "@type": "JobPosting", "title": "Director of Product", "description": "Lead ecosystem", "url": "https://www.linkedin.com/jobs/view/456", "hiringOrganization": {"name": "Spark"}}
+        </script>
+      </head>
+      <body>Director of Product</body>
+    </html>
+    """
+
+    def fake_fetch(url: str, *, scrolls=None):
+        page_urls.append(url)
+        return detail_page if url.endswith("/456") else search_page
+
+    monkeypatch.setattr(client, "fetch_html", fake_fetch)
+    monkeypatch.setattr("job_intel.browser_sourcing.random.choice", lambda items: items[1])
+
+    vacancies = client.search_linkedin("VP Product", max_pages=1)
+
+    assert any(url.endswith("/456") for url in page_urls)
+    assert client.session_health_snapshot()["detail_pages_opened"] == 1
+    assert len(vacancies) >= 1
+
+
+def test_metrics_from_counts_calculates_quality_score() -> None:
+    metrics = metrics_from_counts(
+        source="linkedin",
+        found=20,
+        executive_matches=8,
+        accepted=5,
+        rejected=15,
+        extraction_successes=18,
+        extraction_attempts=20,
+        anti_bot_failures=2,
+        normalization_quality=0.9,
+    )
+
+    assert isinstance(metrics, AcquisitionMetrics)
+    assert metrics.executive_density == 0.4
+    assert metrics.signal_noise_ratio == (5 / 15)
+    assert metrics.normalization_quality == 0.9
+    assert 0.0 <= metrics.acquisition_quality_score <= 1.0
+    assert metrics.source_reliability > 0.0
+    assert metrics.status in {"operational", "degraded"}

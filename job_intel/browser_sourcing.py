@@ -5,7 +5,8 @@ import os
 import random
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from importlib.util import find_spec
 from pathlib import Path
@@ -35,6 +36,46 @@ class BrowserAcquisitionConfig:
     scroll_pause_ms: int = 650
     navigation_timeout_ms: int = 45_000
     max_scrolls: int = 2
+    noise_probability: float = 0.18
+    linkedin_followup_page_probability: float = 0.35
+    max_linkedin_pages: int = 2
+    max_headhunter_pages: int = 2
+
+
+@dataclass
+class BrowserSessionHealth:
+    source: str
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    pages_fetched: int = 0
+    login_walls: int = 0
+    auth_redirects: int = 0
+    extraction_failures: int = 0
+    extraction_degradation: int = 0
+    detail_pages_opened: int = 0
+    last_url: str = ""
+    status: str = "healthy"
+
+    def snapshot(self) -> dict[str, Any]:
+        age_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
+        payload = asdict(self)
+        payload["started_at"] = self.started_at.isoformat()
+        payload["session_age_seconds"] = age_seconds
+        return payload
+
+    def update(self, *, url: str, html: str, vacancies_found: int, detail_page: bool = False) -> None:
+        self.pages_fetched += 1
+        self.last_url = url
+        if detail_page:
+            self.detail_pages_opened += 1
+        if _looks_like_auth_redirect(url, html):
+            self.auth_redirects += 1
+        if _looks_like_login_wall(url, html):
+            self.login_walls += 1
+        if vacancies_found <= 0 and _looks_like_extraction_failure(url, html):
+            self.extraction_failures += 1
+        elif vacancies_found <= 0 and _looks_like_degradation(url, html):
+            self.extraction_degradation += 1
+        self.status = _session_status(self)
 
 
 @dataclass(frozen=True)
@@ -51,6 +92,10 @@ class AcquisitionMetrics:
     accepted_rejected_ratio: float
     extraction_success_rate: float
     anti_bot_failure_rate: float
+    executive_density: float
+    signal_noise_ratio: float
+    normalization_quality: float
+    acquisition_quality_score: float
     source_reliability: float
     status: str
 
@@ -274,6 +319,48 @@ def _looks_executive(title: str, description: str = "") -> bool:
     return any(hint in text for hint in _EXECUTIVE_ROLE_HINTS)
 
 
+def _looks_like_login_wall(url: str, html: str) -> bool:
+    text = f"{url} {html}".lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "sign in to view more jobs",
+            "sign in",
+            "log in",
+            "login",
+            "checkpoint",
+            "authentication required",
+            "to view more jobs",
+            "continue to linkedin",
+        )
+    )
+
+
+def _looks_like_auth_redirect(url: str, html: str) -> bool:
+    lowered_url = url.lower()
+    return any(token in lowered_url for token in ("/login", "/checkpoint", "/signin", "/auth")) or _looks_like_login_wall(url, html)
+
+
+def _looks_like_extraction_failure(url: str, html: str) -> bool:
+    lowered = f"{url} {html}".lower()
+    return any(token in lowered for token in ("jobs/search", "search/vacancy", "jobs?", "vacancy"))
+
+
+def _looks_like_degradation(url: str, html: str) -> bool:
+    lowered = f"{url} {html}".lower()
+    return any(token in lowered for token in ("jobs/search", "search/vacancy", "vacancy", "jobs"))
+
+
+def _session_status(health: BrowserSessionHealth) -> str:
+    if health.login_walls >= 2 or health.auth_redirects >= 3:
+        return "blocked"
+    if health.login_walls >= 1 or health.auth_redirects >= 1:
+        return "degraded"
+    if health.extraction_failures >= 2 or health.extraction_degradation >= 3:
+        return "degraded"
+    return "healthy"
+
+
 def _vacancy_source_id(source: str, url: str, title: str) -> str:
     return sha256_text(f"{source}:{url}:{title}")[:16]
 
@@ -381,6 +468,7 @@ class BrowserSourceClient:
         self.config = config or BrowserAcquisitionConfig()
         self._playwright = None
         self._context = None
+        self._health = BrowserSessionHealth(source="browser")
 
     def __enter__(self) -> "BrowserSourceClient":
         if not browser_native_available():
@@ -410,6 +498,9 @@ class BrowserSourceClient:
         self._context = None
         self._playwright = None
 
+    def session_health_snapshot(self) -> dict[str, Any]:
+        return self._health.snapshot()
+
     def fetch_html(self, url: str, *, scrolls: int | None = None) -> str:
         if self._context is None:
             raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
@@ -433,27 +524,93 @@ class BrowserSourceClient:
         delay = random.uniform(self.config.min_delay_ms, self.config.max_delay_ms) / 1000.0
         time.sleep(delay)
 
+    def _observe_page(self, url: str, html: str, vacancies_found: int, *, detail_page: bool = False) -> None:
+        self._health.update(url=url, html=html, vacancies_found=vacancies_found, detail_page=detail_page)
+
+    def _detail_candidates(self, html: str, *, page_url: str, source: str) -> list[str]:
+        parser = _LinkCapture()
+        parser.feed(html)
+        candidates: list[str] = []
+        for text, href in parser.links:
+            absolute = urljoin(page_url, href)
+            normalized = absolute.lower()
+            if source == "linkedin" and "linkedin.com/jobs/view" in normalized:
+                candidates.append(absolute)
+            elif source == "headhunter" and "hh.ru/vacancy" in normalized:
+                candidates.append(absolute)
+            elif source == "company_career" and any(domain in normalized for domain in ("greenhouse.io", "lever.co", "ashbyhq.com", "careers", "jobs", "vacancy", "openings")):
+                candidates.append(absolute)
+        return list(dict.fromkeys(candidates))
+
+    def _maybe_open_noise_page(self, *, page_url: str, html: str, source: str) -> list[Vacancy]:
+        if random.random() > self.config.noise_probability:
+            return []
+        candidates = self._detail_candidates(html, page_url=page_url, source=source)
+        if not candidates:
+            return []
+        detail_url = random.choice(candidates)
+        detail_html = self.fetch_html(detail_url, scrolls=0)
+        detail_vacancies = {
+            "linkedin": extract_linkedin_vacancies_from_html,
+            "headhunter": extract_headhunter_vacancies_from_html,
+            "company_career": extract_company_career_vacancies_from_html,
+        }[source](detail_html, page_url=detail_url)
+        self._observe_page(detail_url, detail_html, len(detail_vacancies), detail_page=True)
+        return detail_vacancies
+
+    def _linkedin_page_plan(self, max_pages: int) -> list[int]:
+        allowed_pages = max(1, min(max_pages, self.config.max_linkedin_pages))
+        plan = [0]
+        if allowed_pages > 1 and random.random() < self.config.linkedin_followup_page_probability:
+            followups = list(range(1, allowed_pages))
+            random.shuffle(followups)
+            plan.extend(followups[:1])
+        return plan
+
+    def _headhunter_page_plan(self, max_pages: int) -> list[int]:
+        allowed_pages = max(1, min(max_pages, self.config.max_headhunter_pages))
+        plan = [0]
+        if allowed_pages > 1 and random.random() < 0.25:
+            followups = list(range(1, allowed_pages))
+            random.shuffle(followups)
+            plan.extend(followups[:1])
+        return plan
+
     def search_linkedin(self, query: str, *, max_pages: int = 1) -> list[Vacancy]:
         url = f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(query)}"
         vacancies: list[Vacancy] = []
-        for page_index in range(max_pages):
+        self._health.source = "linkedin"
+        for page_index in self._linkedin_page_plan(max_pages):
             page_url = f"{url}&start={page_index * 25}" if page_index else url
             html = self.fetch_html(page_url)
-            vacancies.extend(extract_linkedin_vacancies_from_html(html, page_url=page_url))
+            page_vacancies = extract_linkedin_vacancies_from_html(html, page_url=page_url)
+            self._observe_page(page_url, html, len(page_vacancies))
+            vacancies.extend(page_vacancies)
+            if self._health.login_walls or self._health.auth_redirects:
+                break
+            vacancies.extend(self._maybe_open_noise_page(page_url=page_url, html=html, source="linkedin"))
         return _dedupe_vacancies(vacancies)
 
     def search_headhunter(self, query: str, *, max_pages: int = 1) -> list[Vacancy]:
         url = f"https://hh.ru/search/vacancy?text={quote_plus(query)}"
         vacancies: list[Vacancy] = []
-        for page_index in range(max_pages):
+        self._health.source = "headhunter"
+        for page_index in self._headhunter_page_plan(max_pages):
             page_url = f"{url}&page={page_index}" if page_index else url
             html = self.fetch_html(page_url)
-            vacancies.extend(extract_headhunter_vacancies_from_html(html, page_url=page_url))
+            page_vacancies = extract_headhunter_vacancies_from_html(html, page_url=page_url)
+            self._observe_page(page_url, html, len(page_vacancies))
+            vacancies.extend(page_vacancies)
+            if self._health.login_walls or self._health.auth_redirects:
+                break
         return _dedupe_vacancies(vacancies)
 
     def crawl_company_page(self, url: str) -> list[Vacancy]:
+        self._health.source = "company_career"
         html = self.fetch_html(url)
-        return extract_company_career_vacancies_from_html(html, page_url=url)
+        vacancies = extract_company_career_vacancies_from_html(html, page_url=url)
+        self._observe_page(url, html, len(vacancies))
+        return vacancies
 
 
 def metrics_from_counts(
@@ -466,17 +623,31 @@ def metrics_from_counts(
     extraction_successes: int,
     extraction_attempts: int,
     anti_bot_failures: int = 0,
+    normalization_quality: float = 1.0,
 ) -> AcquisitionMetrics:
     executive_fit_ratio = (executive_matches / found) if found else 0.0
     accepted_rejected_ratio = (accepted / rejected) if rejected else float(accepted) if accepted else 0.0
     extraction_success_rate = (extraction_successes / extraction_attempts) if extraction_attempts else 0.0
     anti_bot_failure_rate = (anti_bot_failures / extraction_attempts) if extraction_attempts else 0.0
-    source_reliability = round(max(0.0, extraction_success_rate * (1.0 - anti_bot_failure_rate) * (0.5 + executive_fit_ratio / 2.0)), 4)
+    executive_density = executive_fit_ratio
+    signal_noise_ratio = (accepted / rejected) if rejected else float(accepted) if accepted else 0.0
+    normalization_quality = max(0.0, min(1.0, normalization_quality))
+    anti_bot_resilience = max(0.0, 1.0 - anti_bot_failure_rate)
+    acceptance_rate = accepted / (accepted + rejected) if (accepted + rejected) else 0.0
+    acquisition_quality_score = round(
+        (executive_density * 0.25)
+        + (acceptance_rate * 0.20)
+        + (extraction_success_rate * 0.25)
+        + (anti_bot_resilience * 0.20)
+        + (normalization_quality * 0.10),
+        4,
+    )
+    source_reliability = round(max(0.0, extraction_success_rate * anti_bot_resilience * (0.5 + executive_fit_ratio / 2.0)), 4)
     if found <= 0 and extraction_attempts > 0 and anti_bot_failures >= extraction_attempts / 2:
         status = "blocked"
-    elif extraction_success_rate >= 0.8 and source_reliability >= 0.45:
+    elif acquisition_quality_score >= 0.7 and extraction_success_rate >= 0.8:
         status = "operational"
-    elif extraction_success_rate >= 0.4 or executive_fit_ratio >= 0.25:
+    elif extraction_success_rate >= 0.4 or executive_fit_ratio >= 0.25 or acquisition_quality_score >= 0.45:
         status = "degraded"
     else:
         status = "low-signal"
@@ -493,6 +664,10 @@ def metrics_from_counts(
         accepted_rejected_ratio=accepted_rejected_ratio,
         extraction_success_rate=extraction_success_rate,
         anti_bot_failure_rate=anti_bot_failure_rate,
+        executive_density=executive_density,
+        signal_noise_ratio=signal_noise_ratio,
+        normalization_quality=normalization_quality,
+        acquisition_quality_score=acquisition_quality_score,
         source_reliability=source_reliability,
         status=status,
     )

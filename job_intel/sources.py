@@ -352,22 +352,28 @@ def _browser_config(source: str | None = None) -> BrowserAcquisitionConfig:
 
 
 def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]:
+    fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
     if not browser_native_available():
         raise SourceFetchError("Playwright is not installed, so LinkedIn browser-native acquisition is unavailable.")
     config = _browser_config("linkedin")
     try:
         with BrowserSourceClient(config) as client:
-            return client.search_linkedin(query, max_pages=max_pages)
+            vacancies = client.search_linkedin(query, max_pages=max_pages)
+            fetch_linkedin_vacancies.last_health = client.session_health_snapshot()  # type: ignore[attr-defined]
+            return vacancies
     except BrowserNativeUnavailable as exc:
         raise SourceFetchError(str(exc)) from exc
 
 
 def fetch_company_career_vacancies(url: str) -> list[Vacancy]:
+    fetch_company_career_vacancies.last_health = None  # type: ignore[attr-defined]
     if browser_native_available():
         config = _browser_config("company_career")
         try:
             with BrowserSourceClient(config) as client:
-                return client.crawl_company_page(url)
+                vacancies = client.crawl_company_page(url)
+                fetch_company_career_vacancies.last_health = client.session_health_snapshot()  # type: ignore[attr-defined]
+                return vacancies
         except BrowserNativeUnavailable:
             pass
     response = requests.get(
@@ -397,11 +403,14 @@ def _request_json(url: str, *, params: dict[str, object], headers: dict[str, str
 
 
 def fetch_headhunter_vacancies(query: str, *, per_page: int = 20) -> list[Vacancy]:
+    fetch_headhunter_vacancies.last_health = None  # type: ignore[attr-defined]
     if browser_native_available():
         config = _browser_config("headhunter")
         try:
             with BrowserSourceClient(config) as client:
-                return client.search_headhunter(query, max_pages=max(1, (per_page + 24) // 25))[:per_page]
+                vacancies = client.search_headhunter(query, max_pages=max(1, (per_page + 24) // 25))[:per_page]
+                fetch_headhunter_vacancies.last_health = client.session_health_snapshot()  # type: ignore[attr-defined]
+                return vacancies
         except BrowserNativeUnavailable:
             pass
 

@@ -475,10 +475,46 @@ class JobIntelStore:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT v.*, e.score, e.tier, e.recommendation, e.salary_tier, e.matched_signals_json, e.concerns_json, e.reasons_json
+                WITH latest_evaluations AS (
+                    SELECT e.*
+                    FROM vacancy_evaluations e
+                    JOIN (
+                        SELECT vacancy_key, MAX(id) AS max_id
+                        FROM vacancy_evaluations
+                        WHERE score >= ?
+                        GROUP BY vacancy_key
+                    ) latest ON latest.vacancy_key = e.vacancy_key AND latest.max_id = e.id
+                )
+                SELECT
+                    v.id AS vacancy_id,
+                    v.vacancy_key,
+                    v.source,
+                    v.source_id,
+                    v.company,
+                    v.title,
+                    v.location,
+                    v.url,
+                    v.description,
+                    v.posted_at,
+                    v.scraped_at,
+                    v.salary,
+                    v.company_url,
+                    v.metadata_json,
+                    v.first_seen_at,
+                    v.last_seen_at,
+                    v.repost_count,
+                    v.status,
+                    e.id AS evaluation_id,
+                    e.score,
+                    e.tier,
+                    e.recommendation,
+                    e.salary_tier,
+                    e.matched_signals_json,
+                    e.concerns_json,
+                    e.reasons_json,
+                    e.raw_breakdown_json
                 FROM vacancies v
-                JOIN vacancy_evaluations e ON e.vacancy_key = v.vacancy_key
-                WHERE e.score >= ?
+                JOIN latest_evaluations e ON e.vacancy_key = v.vacancy_key
                 ORDER BY e.score DESC, datetime(v.last_seen_at) DESC
                 LIMIT ?
                 """,
