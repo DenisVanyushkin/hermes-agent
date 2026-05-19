@@ -19,7 +19,7 @@ from .dedup import canonical_vacancy_key, description_similarity, is_duplicate
 from .digest import format_daily_digest, format_enrichment_questions, format_vacancy_summary
 from .evaluator import score_vacancy
 from .enrichment import detect_high_value_questions
-from .models import Vacancy
+from .models import Evaluation, Vacancy
 from .runtime import (
     file_access_flags,
     parse_iso_datetime,
@@ -125,7 +125,11 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
         linkedin_status = "error"
     else:
         linkedin_status = "empty"
-    statuses["linkedin"] = _source_status_template("linkedin", status=linkedin_status, hits=linkedin_hits, errors=linkedin_errors, acquisition="browser-native")
+    linkedin_source_status = _source_status_template("linkedin", status=linkedin_status, hits=linkedin_hits, errors=linkedin_errors, acquisition="browser-native")
+    linkedin_health = getattr(fetch_linkedin_vacancies, "last_health", None)
+    if linkedin_health:
+        linkedin_source_status["session_health"] = linkedin_health
+    statuses["linkedin"] = linkedin_source_status
 
     hh_queries = [
         "VP Product monetization B2C platform",
@@ -149,7 +153,11 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
         hh_status = "error"
     else:
         hh_status = "empty"
-    statuses["headhunter"] = _source_status_template("headhunter", status=hh_status, hits=hh_hits, errors=hh_errors, acquisition="browser-native-first")
+    hh_source_status = _source_status_template("headhunter", status=hh_status, hits=hh_hits, errors=hh_errors, acquisition="browser-native-first")
+    hh_health = getattr(fetch_headhunter_vacancies, "last_health", None)
+    if hh_health:
+        hh_source_status["session_health"] = hh_health
+    statuses["headhunter"] = hh_source_status
 
     ddg_hits = 0
     ddg_errors: list[str] = []
@@ -328,6 +336,36 @@ def _finalize_notifications(store: JobIntelStore, notification_ids: list[int], d
 
 
 
+def _vacancy_evaluation_from_row(row: dict[str, Any]) -> tuple[Vacancy, Evaluation, int]:
+    vacancy = Vacancy(
+        source=str(row.get("source") or ""),
+        source_id=str(row.get("source_id") or ""),
+        company=str(row.get("company") or "Unknown"),
+        title=str(row.get("title") or "Vacancy"),
+        location=str(row.get("location") or "Unknown"),
+        url=str(row.get("url") or ""),
+        description=str(row.get("description") or ""),
+        posted_at=row.get("posted_at"),
+        scraped_at=row.get("scraped_at"),
+        salary=row.get("salary"),
+        company_url=row.get("company_url"),
+        metadata=json.loads(row.get("metadata_json") or "{}") if row.get("metadata_json") else {},
+    )
+    evaluation = Evaluation(
+        score=int(row.get("score") or 0),
+        tier=str(row.get("tier") or "reject"),
+        recommendation=str(row.get("recommendation") or "reject"),
+        salary_tier=row.get("salary_tier"),
+        matched_signals=json.loads(row.get("matched_signals_json") or "[]") if row.get("matched_signals_json") else [],
+        concerns=json.loads(row.get("concerns_json") or "[]") if row.get("concerns_json") else [],
+        reasons=json.loads(row.get("reasons_json") or "[]") if row.get("reasons_json") else [],
+        raw_breakdown=json.loads(row.get("raw_breakdown_json") or "{}") if row.get("raw_breakdown_json") else {},
+    )
+    vacancy_id = int(row.get("vacancy_id") or row.get("id") or 0)
+    return vacancy, evaluation, vacancy_id
+
+
+
 def run_daily() -> str:
     store = _store()
     store.bootstrap()
@@ -485,23 +523,16 @@ def run_alert_scan() -> str:
     store.bootstrap()
     run_id = store.start_run("alert")
     cfg = load_config_bundle() or DEFAULT_CONFIG
-    collected = _collect_vacancies_compat(store)
-    vacancies = collected.vacancies
-    source_statuses = collected.source_statuses
-    exceptional: list[tuple[Vacancy, Any, int]] = []
+    exceptional: list[tuple[Vacancy, Evaluation, int]] = []
     seen_keys: set[str] = set()
-    dedup_cfg = cfg["deduplication"]
-    similarity_threshold = dedup_cfg["secondary_similarity"]["description_similarity_threshold"]
-    repost_window_days = dedup_cfg["repost_detection"]["repost_window_days"]
+    rows = store.fetch_top_evaluations(min_score=cfg["scoring"]["thresholds"]["exceptional_fit"], limit=10)
+    repost_window_days = cfg["deduplication"]["repost_detection"]["repost_window_days"]
 
-    for vacancy in vacancies:
+    for row in rows:
+        vacancy, evaluation, vacancy_id = _vacancy_evaluation_from_row(row)
         vacancy_key = canonical_vacancy_key(vacancy)
-        if vacancy_key in seen_keys:
+        if vacancy_key in seen_keys or evaluation.tier != "exceptional_fit":
             continue
-        evaluation = score_vacancy(vacancy)
-        if evaluation.tier != "exceptional_fit":
-            continue
-        vacancy_id = store.upsert_vacancy(vacancy, vacancy_key)
         if not _should_notify_vacancy(store, vacancy_id, vacancy, evaluation, repost_window_days):
             store.set_vacancy_status(vacancy_id, "notified")
             continue
@@ -509,17 +540,25 @@ def run_alert_scan() -> str:
         seen_keys.add(vacancy_key)
 
     exceptional.sort(key=lambda item: item[1].score, reverse=True)
-    operator_footer = _source_footer(source_statuses)
-    digest = format_daily_digest([(vacancy, evaluation) for vacancy, evaluation, _ in exceptional[:3]], title="Exceptional executive job alert", operator_footer=operator_footer)
-    notification_ids = _prepare_notifications(store, run_id, cfg["runtime"]["slack"]["alerts_channel"], "alert", exceptional[:3])
+    digest_items = exceptional[:3]
+    if not digest_items:
+        store.finish_run(run_id, status="ok", notes="exceptional=0", metadata={"alert_mode": "persisted_inventory", "delivery": {"success": True, "attempts": 0}})
+        return "[SILENT]"
+
+    digest = format_daily_digest(
+        [(vacancy, evaluation) for vacancy, evaluation, _ in digest_items],
+        title="Exceptional executive job alert",
+        operator_footer="Operator note: alert scan uses persisted inventory; source acquisition runs on the twice-daily daily job.",
+    )
+    notification_ids = _prepare_notifications(store, run_id, cfg["runtime"]["slack"]["alerts_channel"], "alert", digest_items)
     delivery = _deliver_to_slack(digest, cfg["runtime"]["slack"]["alerts_channel"])
     _finalize_notifications(store, notification_ids, delivery)
-    for vacancy, evaluation, vacancy_id in exceptional[:3]:
+    for vacancy, evaluation, vacancy_id in digest_items:
         if delivery.success:
             store.set_vacancy_status(vacancy_id, "notified")
         else:
             store.set_vacancy_status(vacancy_id, "active")
-    store.finish_run(run_id, status="ok", notes=f"exceptional={len(exceptional)}", metadata={"source_statuses": source_statuses, "delivery": delivery.__dict__})
+    store.finish_run(run_id, status="ok", notes=f"exceptional={len(exceptional)}", metadata={"alert_mode": "persisted_inventory", "delivery": delivery.__dict__})
     return digest
 
 
@@ -628,6 +667,11 @@ def doctor_report() -> str:
             extras.append(f"exec_fit={metrics.get('executive_fit_ratio', 'n/a')}")
             extras.append(f"reliability={metrics.get('source_reliability', 'n/a')}")
             extras.append(f"quality={metrics.get('status', 'n/a')}")
+            extras.append(f"quality_score={metrics.get('acquisition_quality_score', 'n/a')}")
+        if status.get("session_health"):
+            health = status["session_health"]
+            extras.append(f"session={health.get('status', 'n/a')}")
+            extras.append(f"login_walls={health.get('login_walls', 0)}")
         extra_text = f" ({', '.join(extras)})" if extras else ""
         lines.append(f"- {name}: {status.get('status', 'unknown')}{extra_text}")
     lines.append(f"Last run: {latest.get('status', 'none')} ({latest.get('mode', 'n/a')})")

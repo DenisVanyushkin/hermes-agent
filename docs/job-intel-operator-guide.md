@@ -23,8 +23,8 @@ From the repo root:
 
 ## Cron jobs
 
-- Daily digest: `job-intel-daily`
-- Exceptional alerts: `job-intel-alert`
+- Daily digest / source acquisition: `job-intel-daily` (runs in the twice-daily 09:00/17:00 windows)
+- Exceptional alerts: `job-intel-alert` (reads persisted inventory; does not re-scan sources)
 - Candidate enrichment: `job-intel-enrichment`
 
 All three are configured to deliver to the Slack thread plus `C0B42K4H4KV`.
