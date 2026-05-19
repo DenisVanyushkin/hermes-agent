@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -563,6 +565,491 @@ def run_alert_scan() -> str:
 
 
 
+def _recent_runs_by_mode(store: JobIntelStore, mode: str, *, limit: int = 2) -> list[dict[str, Any]]:
+    with store.connect() as conn:
+        rows = conn.execute("SELECT * FROM runs WHERE mode = ? ORDER BY id DESC LIMIT ?", (mode, limit)).fetchall()
+    return [dict(row) for row in rows]
+
+
+
+def _run_evaluations_for_summary(store: JobIntelStore, run_id: int) -> list[dict[str, Any]]:
+    with store.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                e.id AS evaluation_id,
+                e.vacancy_key,
+                v.id AS vacancy_id,
+                v.source,
+                v.source_id,
+                v.company,
+                v.title,
+                v.location,
+                v.url,
+                v.description,
+                v.posted_at,
+                v.scraped_at,
+                v.salary,
+                v.company_url,
+                v.metadata_json,
+                v.status,
+                v.repost_count,
+                e.score,
+                e.tier,
+                e.recommendation,
+                e.salary_tier,
+                e.matched_signals_json,
+                e.concerns_json,
+                e.reasons_json,
+                e.raw_breakdown_json
+            FROM vacancy_evaluations e
+            JOIN vacancies v ON v.vacancy_key = e.vacancy_key
+            WHERE e.run_id = ?
+            ORDER BY e.score DESC, v.last_seen_at DESC, e.id DESC
+            """,
+            (run_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+
+def _json_loads(value: Any, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+
+def _looks_like_allowed_geo(location: str) -> bool:
+    text = (location or "").lower()
+    return any(token in text for token in ("remote", "almaty", "kazakhstan", "kz", "dubai", "uae", "emea", "europe", "central asia", "mena"))
+
+
+
+def _role_bucket(title: str) -> str | None:
+    text = (title or "").lower()
+    if any(token in text for token in ("vice president", "\bvp\b", "vp ", " vp", "v.p.")):
+        return "vp_roles"
+    if "director" in text:
+        return "director_roles"
+    if "head of" in text or text.startswith("head "):
+        return "head_roles"
+    if "product manager" in text or "manager" in text or re.search(r"\bpm\b", text):
+        return "manager_roles" if "manager" in text else "generic_pm_roles"
+    return None
+
+
+
+def _industry_buckets(text: str) -> list[str]:
+    lowered = (text or "").lower()
+    buckets: list[str] = []
+    for bucket, tokens in {
+        "fintech_ratio": ("fintech", "payments", "wallet", "bank", "lending", "credit"),
+        "telecom_ratio": ("telecom", "telco", "carrier", "network operator"),
+        "saas_ratio": ("saas", "subscription", "software as a service"),
+        "ai_ratio": ("ai", "artificial intelligence", "machine learning", "llm", "ml"),
+        "ecosystem_ratio": ("ecosystem", "platform", "marketplace", "super app"),
+    }.items():
+        if any(token in lowered for token in tokens):
+            buckets.append(bucket)
+    return buckets
+
+
+
+def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[str, Any]:
+    metadata = _json_loads(run.get("metadata_json"), {})
+    source_statuses = metadata.get("source_statuses") or {}
+    rows = _run_evaluations_for_summary(store, int(run["id"]))
+
+    per_source: dict[str, dict[str, Any]] = {}
+    overall_roles = Counter()
+    overall_industries = Counter()
+    accepted_rows: list[dict[str, Any]] = []
+    normalization_failures = 0
+    blocked_geo_hits = 0
+    allowed_geo_hits = 0
+    generic_remote_roles_rejected = 0
+
+    for row in rows:
+        source = str(row.get("source") or "unknown")
+        stats = per_source.setdefault(
+            source,
+            {
+                "source": source,
+                "vacancies_found": 0,
+                "vacancies_normalized": 0,
+                "normalization_failures": 0,
+                "duplicate_count": 0,
+                "new_unique_vacancies": 0,
+                "reposts_detected": 0,
+                "detail_pages_opened": 0,
+                "executive_roles_detected": 0,
+                "accepted_count": 0,
+                "rejected_count": 0,
+                "source_status": "unknown",
+                "session_health": {},
+                "metrics": {},
+                "accepted_roles_by_source": 0,
+            },
+        )
+        stats["vacancies_found"] += 1
+        stats["vacancies_normalized"] += 1
+        stats["accepted_roles_by_source"] += 1 if row.get("recommendation") != "reject" else 0
+        if row.get("status") == "duplicate":
+            stats["duplicate_count"] += 1
+            stats["reposts_detected"] += 1
+        else:
+            stats["new_unique_vacancies"] += 1
+        if row.get("recommendation") == "reject":
+            stats["rejected_count"] += 1
+            title_text = f"{row.get('title') or ''} {row.get('location') or ''} {row.get('description') or ''}"
+            if any(token in title_text.lower() for token in ("remote", "product manager", "project manager", "pm ")):
+                generic_remote_roles_rejected += 1
+        else:
+            stats["accepted_count"] += 1
+            accepted_rows.append(row)
+            if row.get("tier") in {"exceptional_fit", "strong_fit"}:
+                stats["executive_roles_detected"] += 1
+                overall_roles[_role_bucket(str(row.get("title") or "")) or "other"] += 1
+            for bucket in _industry_buckets(f"{row.get('title') or ''} {row.get('description') or ''} {row.get('company') or ''}"):
+                overall_industries[bucket] += 1
+            if _looks_like_allowed_geo(str(row.get("location") or "")):
+                allowed_geo_hits += 1
+            else:
+                blocked_geo_hits += 1
+
+    for source, status in sorted(source_statuses.items()):
+        stats = per_source.setdefault(
+            source,
+            {
+                "source": source,
+                "vacancies_found": 0,
+                "vacancies_normalized": 0,
+                "normalization_failures": 0,
+                "duplicate_count": 0,
+                "new_unique_vacancies": 0,
+                "reposts_detected": 0,
+                "detail_pages_opened": 0,
+                "executive_roles_detected": 0,
+                "accepted_count": 0,
+                "rejected_count": 0,
+                "source_status": "unknown",
+                "session_health": {},
+                "metrics": {},
+                "accepted_roles_by_source": 0,
+            },
+        )
+        stats["source_status"] = str(status.get("status") or "unknown")
+        session = status.get("session_health") or {}
+        metrics = status.get("metrics") or {}
+        stats["session_health"] = session
+        stats["metrics"] = metrics
+        stats["detail_pages_opened"] = int(session.get("detail_pages_opened") or stats["detail_pages_opened"])
+        stats["normalization_failures"] = int(status.get("normalization_failures") or 0)
+        stats["vacancies_found"] = int(stats["vacancies_found"])
+        stats["vacancies_normalized"] = int(stats["vacancies_normalized"])
+        stats["duplicate_rate"] = round(stats["duplicate_count"] / stats["vacancies_found"], 3) if stats["vacancies_found"] else 0.0
+        stats["extraction_success_rate"] = round((session.get("successful_extractions") or 0) / (session.get("pages_fetched") or 1), 3) if session else 0.0
+
+    for stats in per_source.values():
+        stats.setdefault("duplicate_rate", round(stats["duplicate_count"] / stats["vacancies_found"], 3) if stats["vacancies_found"] else 0.0)
+        stats.setdefault("extraction_success_rate", 0.0)
+        stats.setdefault("pages_fetched", 0)
+        stats.setdefault("successful_extractions", 0)
+        stats.setdefault("failed_extractions", 0)
+        stats.setdefault("pagination_depth_reached", 0)
+        stats.setdefault("avg_page_load_time", 0.0)
+        stats.setdefault("anti_bot_events", 0)
+        stats.setdefault("login_walls", 0)
+        stats.setdefault("auth_redirects", 0)
+        stats.setdefault("session_status", stats.get("source_status", "unknown"))
+        stats.setdefault("session_age_hours", 0.0)
+        stats.setdefault("last_successful_authenticated_request", None)
+        stats.setdefault("login_wall_frequency", 0.0)
+
+    total_found = sum(stats["vacancies_found"] for stats in per_source.values())
+    total_accepted = sum(stats["accepted_count"] for stats in per_source.values())
+    total_rejected = sum(stats["rejected_count"] for stats in per_source.values())
+    total_duplicates = sum(stats["duplicate_count"] for stats in per_source.values())
+    total_exec = sum(stats["executive_roles_detected"] for stats in per_source.values())
+    source_quality_scores: list[tuple[float, int]] = []
+    source_reliability_scores: list[tuple[float, int]] = []
+    normalization_scores: list[tuple[float, int]] = []
+    for source, stats in per_source.items():
+        session = stats["session_health"] or {}
+        metrics = stats["metrics"] or {}
+        found = stats["vacancies_found"]
+        accepted = stats["accepted_count"]
+        rejected = stats["rejected_count"]
+        exec_matches = stats["executive_roles_detected"]
+        extraction_successes = int(session.get("successful_extractions") or found or 0)
+        extraction_attempts = int(session.get("pages_fetched") or max(found, 1))
+        anti_bot_failures = int(session.get("anti_bot_events") or (int(session.get("login_walls") or 0) + int(session.get("auth_redirects") or 0)))
+        if metrics:
+            quality = float(metrics.get("acquisition_quality_score") or 0.0)
+            reliability = float(metrics.get("source_reliability") or 0.0)
+            norm_quality = float(metrics.get("normalization_quality") or 0.0)
+        else:
+            computed = metrics_from_counts(
+                source=source,
+                found=found,
+                executive_matches=exec_matches,
+                accepted=accepted,
+                rejected=rejected,
+                extraction_successes=extraction_successes,
+                extraction_attempts=extraction_attempts,
+                anti_bot_failures=anti_bot_failures,
+                normalization_quality=1.0,
+            )
+            quality = computed.acquisition_quality_score
+            reliability = computed.source_reliability
+            norm_quality = computed.normalization_quality
+            stats["metrics"] = computed.__dict__
+        source_quality_scores.append((quality, max(found, 1)))
+        source_reliability_scores.append((reliability, max(found, 1)))
+        normalization_scores.append((norm_quality, max(found, 1)))
+        session_status = str(session.get("status") or stats["source_status"] or "unknown")
+        stats["session_status"] = session_status
+        stats["session_age_hours"] = float(session.get("session_age_hours") or 0.0)
+        stats["last_successful_authenticated_request"] = session.get("last_successful_authenticated_request") or session.get("last_url")
+        stats["login_wall_frequency"] = round((int(session.get("login_walls") or 0) / (int(session.get("pages_fetched") or 1))), 3) if session else 0.0
+        stats["auth_redirects"] = int(session.get("auth_redirects") or 0)
+        stats["login_walls"] = int(session.get("login_walls") or 0)
+        stats["pages_fetched"] = int(session.get("pages_fetched") or 0)
+        stats["successful_extractions"] = int(session.get("successful_extractions") or 0)
+        stats["failed_extractions"] = int(session.get("failed_extractions") or 0)
+        stats["extraction_success_rate"] = round(stats["successful_extractions"] / stats["pages_fetched"], 3) if stats["pages_fetched"] else 0.0
+        stats["pagination_depth_reached"] = int(session.get("pagination_depth_reached") or stats["pages_fetched"] or 0)
+        stats["avg_page_load_time"] = round(float(session.get("avg_page_load_time_seconds") or 0.0), 3)
+        stats["anti_bot_events"] = int(session.get("anti_bot_events") or 0)
+
+    overall_quality = round(sum(score * weight for score, weight in source_quality_scores) / sum(weight for _, weight in source_quality_scores), 4) if source_quality_scores else 0.0
+    overall_reliability = round(sum(score * weight for score, weight in source_reliability_scores) / sum(weight for _, weight in source_reliability_scores), 4) if source_reliability_scores else 0.0
+    accepted_ratio = round(total_accepted / total_found, 3) if total_found else 0.0
+    duplicate_rate = round(total_duplicates / total_found, 3) if total_found else 0.0
+    normalization_quality = round(sum(score * weight for score, weight in normalization_scores) / sum(weight for _, weight in normalization_scores), 4) if normalization_scores else 0.0
+    executive_density = round(total_exec / total_found, 3) if total_found else 0.0
+    signal_noise_ratio = round(total_accepted / total_rejected, 3) if total_rejected else float(total_accepted) if total_accepted else 0.0
+    target_company_hits = int((source_statuses.get("target_companies") or {}).get("hits") or 0)
+    delivery_window_start = run.get("started_at") or ""
+    with store.connect() as conn:
+        notification_rows = conn.execute(
+            "SELECT message_type, delivery_status, COUNT(*) AS count FROM notifications WHERE sent_at >= ? GROUP BY message_type, delivery_status",
+            (delivery_window_start,),
+        ).fetchall()
+        digest_rows = conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE sent_at >= ? AND message_type = 'daily_digest' AND delivery_status = 'sent'",
+            (delivery_window_start,),
+        ).fetchone()
+        alert_rows = conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE sent_at >= ? AND message_type = 'alert' AND delivery_status = 'sent'",
+            (delivery_window_start,),
+        ).fetchone()
+    delivery_counts = {"alerts_sent": int(alert_rows[0] or 0), "digests_sent": int(digest_rows[0] or 0), "delivery_failures": 0, "digest_empty_days": 0}
+    for row in notification_rows:
+        if row["delivery_status"] == "failed":
+            delivery_counts["delivery_failures"] += int(row["count"] or 0)
+    delivery_counts["digest_empty_days"] = 1 if delivery_counts["digests_sent"] == 0 else 0
+
+    top_accepted = [
+        {
+            "company": row.get("company"),
+            "title": row.get("title"),
+            "location": row.get("location"),
+            "source": row.get("source"),
+            "score": int(row.get("score") or 0),
+            "tier": row.get("tier"),
+            "recommendation": row.get("recommendation"),
+        }
+        for row in rows
+        if row.get("recommendation") != "reject"
+    ][:5]
+
+    return {
+        "run": run,
+        "rows": rows,
+        "source_statuses": source_statuses,
+        "per_source": per_source,
+        "overall": {
+            "vacancies_found": total_found,
+            "vacancies_normalized": total_found,
+            "normalization_failures": normalization_failures,
+            "duplicate_rate": duplicate_rate,
+            "new_unique_vacancies": total_found - total_duplicates,
+            "reposts_detected": total_duplicates,
+            "detail_pages_opened": sum(stats["detail_pages_opened"] for stats in per_source.values()),
+            "executive_roles_detected": total_exec,
+            "executive_density": executive_density,
+            "signal_noise_ratio": signal_noise_ratio,
+            "normalization_quality": normalization_quality,
+            "acquisition_quality_score": overall_quality,
+            "source_reliability": overall_reliability,
+            "accepted_ratio": accepted_ratio,
+            "exceptional_fit_count": sum(1 for row in rows if row.get("tier") == "exceptional_fit"),
+            "strong_fit_count": sum(1 for row in rows if row.get("tier") == "strong_fit"),
+            "possible_fit_count": sum(1 for row in rows if row.get("tier") == "possible_fit"),
+            "reject_count": total_rejected,
+            "generic_remote_roles_rejected": generic_remote_roles_rejected,
+            "target_company_hits": target_company_hits,
+            "allowed_geography_ratio": round(allowed_geo_hits / (allowed_geo_hits + blocked_geo_hits), 3) if (allowed_geo_hits + blocked_geo_hits) else 0.0,
+            "blocked_geography_hits": blocked_geo_hits,
+        },
+        "roles": {
+            "vp_roles": overall_roles.get("vp_roles", 0),
+            "director_roles": overall_roles.get("director_roles", 0),
+            "head_roles": overall_roles.get("head_roles", 0),
+            "manager_roles": overall_roles.get("manager_roles", 0),
+            "generic_pm_roles": overall_roles.get("generic_pm_roles", 0),
+        },
+        "industries": {
+            "fintech_ratio": round(overall_industries.get("fintech_ratio", 0) / total_found, 3) if total_found else 0.0,
+            "telecom_ratio": round(overall_industries.get("telecom_ratio", 0) / total_found, 3) if total_found else 0.0,
+            "saas_ratio": round(overall_industries.get("saas_ratio", 0) / total_found, 3) if total_found else 0.0,
+            "ai_ratio": round(overall_industries.get("ai_ratio", 0) / total_found, 3) if total_found else 0.0,
+            "ecosystem_ratio": round(overall_industries.get("ecosystem_ratio", 0) / total_found, 3) if total_found else 0.0,
+        },
+        "delivery": delivery_counts,
+        "top_accepted": top_accepted,
+    }
+
+
+
+def _format_delta(curr: float | int | None, prev: float | int | None) -> str:
+    if curr is None or prev is None:
+        return "n/a"
+    diff = curr - prev
+    if isinstance(diff, float):
+        return f"{diff:+.3f}".rstrip("0").rstrip(".")
+    return f"{diff:+d}"
+
+
+
+def _format_health_report(curr: dict[str, Any], prev: dict[str, Any] | None) -> str:
+    run = curr["run"]
+    previous_run = (prev or {}).get("run") or {}
+    lines = ["*Nightly Executive Intelligence Health Report*", ""]
+    lines.append(f"Latest daily run: #{run.get('id')} {run.get('started_at')} ({run.get('status')})")
+    if previous_run:
+        lines.append(f"Previous daily run: #{previous_run.get('id')} {previous_run.get('started_at')} ({previous_run.get('status')})")
+    lines.append("")
+
+    lines.append("*Source health summary*")
+    for source, stats in sorted(curr["per_source"].items(), key=lambda item: (item[1]["vacancies_found"], item[0]), reverse=True):
+        lines.append(
+            f"- {source}: source_status={stats['source_status']}, pages_fetched={stats['pages_fetched']}, successful_extractions={stats['successful_extractions']}, failed_extractions={stats['failed_extractions']}, extraction_success_rate={stats['extraction_success_rate']}, pagination_depth_reached={stats['pagination_depth_reached']}, avg_page_load_time={stats['avg_page_load_time']}s, anti_bot_events={stats['anti_bot_events']}, login_wall_hits={stats['login_walls']}, auth_redirects={stats['auth_redirects']}"
+        )
+    lines.append("")
+
+    lines.append("*Session/auth health summary*")
+    for source, stats in sorted(curr["per_source"].items(), key=lambda item: item[0]):
+        if not stats.get("session_health"):
+            continue
+        lines.append(
+            f"- {source}: session_status={stats['session_status']}, session_age_hours={stats['session_age_hours']}, last_successful_authenticated_request={stats['last_successful_authenticated_request'] or 'n/a'}, login_wall_frequency={stats['login_wall_frequency']}"
+        )
+    lines.append("")
+
+    lines.append("*Acquisition summary*")
+    for source, stats in sorted(curr["per_source"].items(), key=lambda item: (item[1]["vacancies_found"], item[0]), reverse=True):
+        lines.append(
+            f"- {source}: vacancies_found={stats['vacancies_found']}, vacancies_normalized={stats['vacancies_normalized']}, normalization_failures={stats['normalization_failures']}, duplicate_rate={stats['duplicate_rate']}, new_unique_vacancies={stats['new_unique_vacancies']}, reposts_detected={stats['reposts_detected']}, detail_pages_opened={stats['detail_pages_opened']}, executive_roles_detected={stats['executive_roles_detected']}"
+        )
+    lines.append("")
+
+    lines.append("*Signal quality summary*")
+    lines.append(
+        f"- executive_density={curr['overall']['executive_density']}, signal_noise_ratio={curr['overall']['signal_noise_ratio']}, normalization_quality={curr['overall']['normalization_quality']}, acquisition_quality_score={curr['overall']['acquisition_quality_score']}"
+    )
+    lines.append(
+        f"- roles: vp_roles={curr['roles']['vp_roles']}, director_roles={curr['roles']['director_roles']}, head_roles={curr['roles']['head_roles']}, manager_roles={curr['roles']['manager_roles']}, generic_pm_roles={curr['roles']['generic_pm_roles']}"
+    )
+    lines.append(
+        f"- industry: fintech_ratio={curr['industries']['fintech_ratio']}, telecom_ratio={curr['industries']['telecom_ratio']}, saas_ratio={curr['industries']['saas_ratio']}, ai_ratio={curr['industries']['ai_ratio']}, ecosystem_ratio={curr['industries']['ecosystem_ratio']}"
+    )
+    lines.append(
+        f"- geography: allowed_geography_ratio={curr['overall']['allowed_geography_ratio']}, blocked_geography_hits={curr['overall']['blocked_geography_hits']}"
+    )
+    lines.append("")
+
+    lines.append("*Pipeline metrics*")
+    lines.append(
+        f"- exceptional_fit_count={curr['overall']['exceptional_fit_count']}, strong_fit_count={curr['overall']['strong_fit_count']}, possible_fit_count={curr['overall']['possible_fit_count']}, reject_count={curr['overall']['reject_count']}, accepted_ratio={curr['overall']['accepted_ratio']}, generic_remote_roles_rejected={curr['overall']['generic_remote_roles_rejected']}, target_company_hits={curr['overall']['target_company_hits']}"
+    )
+    accepted_by_source = ", ".join(f"{source}:{stats['accepted_count']}" for source, stats in sorted(curr['per_source'].items()) if stats["accepted_count"])
+    lines.append(f"- accepted_roles_by_source={accepted_by_source or 'none'}")
+    lines.append("")
+
+    lines.append("*Delivery metrics*")
+    lines.append(
+        f"- alerts_sent={curr['delivery']['alerts_sent']}, digests_sent={curr['delivery']['digests_sent']}, delivery_failures={curr['delivery']['delivery_failures']}, digest_empty_days={curr['delivery']['digest_empty_days']}"
+    )
+    lines.append("")
+
+    lines.append("*Top accepted opportunities*")
+    if curr["top_accepted"]:
+        for idx, row in enumerate(curr["top_accepted"], 1):
+            lines.append(
+                f"{idx}. {row['company']} — {row['title']} | {row['location']} | source={row['source']} | score={row['score']} | tier={row['tier']}"
+            )
+    else:
+        lines.append("- none in the latest daily run")
+    lines.append("")
+
+    warnings: list[str] = []
+    for source, stats in curr["per_source"].items():
+        if stats["source_status"] not in {"ok", "empty"}:
+            warnings.append(f"{source}={stats['source_status']}")
+        if stats["pages_fetched"] and stats["extraction_success_rate"] < 0.5:
+            warnings.append(f"{source} extraction_success_rate={stats['extraction_success_rate']}")
+    if curr["delivery"]["delivery_failures"]:
+        warnings.append(f"delivery_failures={curr['delivery']['delivery_failures']}")
+    if curr["delivery"]["digest_empty_days"]:
+        warnings.append("digest_empty_days=1")
+    lines.append("*Failures / warnings*")
+    lines.append("- " + (", ".join(warnings) if warnings else "none detected"))
+    lines.append("")
+
+    if prev:
+        prev_overall = prev["overall"]
+        lines.append("*Metric deltas vs previous daily run*")
+        for key in ["vacancies_found", "accepted_ratio", "duplicate_rate", "executive_density", "acquisition_quality_score", "target_company_hits"]:
+            lines.append(f"- {key}: {curr['overall'][key]} (Δ {_format_delta(curr['overall'][key], prev_overall.get(key))})")
+        for source in sorted(set(curr["per_source"]) & set(prev["per_source"])):
+            curr_stats = curr["per_source"][source]
+            prev_stats = prev["per_source"][source]
+            lines.append(
+                f"- {source}: status {prev_stats['source_status']} → {curr_stats['source_status']}, pages_fetched Δ {_format_delta(curr_stats['pages_fetched'], prev_stats['pages_fetched'])}, extraction_success_rate Δ {_format_delta(curr_stats['extraction_success_rate'], prev_stats['extraction_success_rate'])}, login_walls Δ {_format_delta(curr_stats['login_walls'], prev_stats['login_walls'])}"
+            )
+    else:
+        lines.append("*Metric deltas vs previous daily run*\n- n/a")
+    return "\n".join(lines).rstrip()
+
+
+
+def run_health_report() -> str:
+    store = _store()
+    store.bootstrap()
+    run_id = store.start_run("health")
+    daily_runs = _recent_runs_by_mode(store, "daily", limit=2)
+    if not daily_runs:
+        store.finish_run(run_id, status="ok", notes="report=silent", metadata={"report": "silent"})
+        return "[SILENT]"
+    current = _health_summary_for_run(store, daily_runs[0])
+    previous = _health_summary_for_run(store, daily_runs[1]) if len(daily_runs) > 1 else None
+    digest = _format_health_report(current, previous)
+    cfg = load_config_bundle() or DEFAULT_CONFIG
+    channel = cfg["runtime"]["slack"]["alerts_channel"]
+    notification_id = store.create_notification(run_id, channel, "health_report", digest, delivery_status="pending")
+    delivery = _deliver_to_slack(digest, channel)
+    store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
+    store.finish_run(run_id, status="ok", notes=f"report_length={len(digest)}", metadata={"report_type": "health", "latest_daily_run_id": daily_runs[0].get('id'), "previous_daily_run_id": daily_runs[1].get('id') if len(daily_runs) > 1 else None, "delivery": delivery.__dict__})
+    return digest
+
+
+
 def retire_stale_vacancies(days: int | None = None) -> dict[str, int]:
     cfg = load_config_bundle() or DEFAULT_CONFIG
     resolved_days = days if days is not None else int(os.getenv("JOB_INTEL_STALE_DAYS", cfg["runtime"].get("stale_after_days", 30)))
@@ -713,7 +1200,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("enrichment")
     sub.add_parser("market")
     sub.add_parser("strategic")
-
+    sub.add_parser("health")
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(cmd="doctor")
 
@@ -751,6 +1238,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "strategic":
         print(run_strategic_report())
+        return 0
+    if args.cmd == "health":
+        print(run_health_report())
         return 0
     if args.cmd == "doctor":
         print(doctor_report())

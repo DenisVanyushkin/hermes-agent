@@ -51,8 +51,13 @@ class BrowserSessionHealth:
     auth_redirects: int = 0
     extraction_failures: int = 0
     extraction_degradation: int = 0
+    successful_extractions: int = 0
+    failed_extractions: int = 0
     detail_pages_opened: int = 0
+    pagination_depth_reached: int = 0
+    total_page_load_seconds: float = 0.0
     last_url: str = ""
+    last_successful_authenticated_request: str | None = None
     status: str = "healthy"
 
     def snapshot(self) -> dict[str, Any]:
@@ -60,21 +65,37 @@ class BrowserSessionHealth:
         payload = asdict(self)
         payload["started_at"] = self.started_at.isoformat()
         payload["session_age_seconds"] = age_seconds
+        payload["session_age_hours"] = round(age_seconds / 3600.0, 3)
+        payload["avg_page_load_time_seconds"] = round(self.total_page_load_seconds / self.pages_fetched, 3) if self.pages_fetched else 0.0
+        payload["anti_bot_events"] = max(self.login_walls, self.auth_redirects) + self.extraction_degradation
         return payload
 
-    def update(self, *, url: str, html: str, vacancies_found: int, detail_page: bool = False) -> None:
+    def update(self, *, url: str, html: str, vacancies_found: int, detail_page: bool = False, page_load_seconds: float | None = None, page_depth: int | None = None) -> None:
         self.pages_fetched += 1
         self.last_url = url
+        if page_load_seconds is not None:
+            self.total_page_load_seconds += max(0.0, page_load_seconds)
         if detail_page:
             self.detail_pages_opened += 1
+        if page_depth is not None:
+            self.pagination_depth_reached = max(self.pagination_depth_reached, page_depth)
+        else:
+            self.pagination_depth_reached = max(self.pagination_depth_reached, self.pages_fetched)
         if _looks_like_auth_redirect(url, html):
             self.auth_redirects += 1
         if _looks_like_login_wall(url, html):
             self.login_walls += 1
-        if vacancies_found <= 0 and _looks_like_extraction_failure(url, html):
-            self.extraction_failures += 1
-        elif vacancies_found <= 0 and _looks_like_degradation(url, html):
-            self.extraction_degradation += 1
+        if vacancies_found > 0:
+            self.successful_extractions += 1
+            if not _looks_like_login_wall(url, html) and not _looks_like_auth_redirect(url, html):
+                self.last_successful_authenticated_request = url
+        else:
+            if _looks_like_extraction_failure(url, html):
+                self.failed_extractions += 1
+                self.extraction_failures += 1
+            elif _looks_like_degradation(url, html):
+                self.failed_extractions += 1
+                self.extraction_degradation += 1
         self.status = _session_status(self)
 
 
@@ -343,12 +364,36 @@ def _looks_like_auth_redirect(url: str, html: str) -> bool:
 
 def _looks_like_extraction_failure(url: str, html: str) -> bool:
     lowered = f"{url} {html}".lower()
-    return any(token in lowered for token in ("jobs/search", "search/vacancy", "jobs?", "vacancy"))
+    return any(
+        phrase in lowered
+        for phrase in (
+            "no vacancies found",
+            "no results found",
+            "nothing found",
+            "something went wrong",
+            "access denied",
+            "forbidden",
+            "captcha",
+            "verify you are human",
+            "service unavailable",
+            "temporarily unavailable",
+        )
+    )
 
 
 def _looks_like_degradation(url: str, html: str) -> bool:
     lowered = f"{url} {html}".lower()
-    return any(token in lowered for token in ("jobs/search", "search/vacancy", "vacancy", "jobs"))
+    return any(
+        phrase in lowered
+        for phrase in (
+            "partial results",
+            "limited results",
+            "results may be incomplete",
+            "slow down",
+            "rate limit",
+            "blocked",
+        )
+    )
 
 
 def _session_status(health: BrowserSessionHealth) -> str:
@@ -505,6 +550,7 @@ class BrowserSourceClient:
         if self._context is None:
             raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
         scroll_count = self.config.max_scrolls if scrolls is None else max(0, scrolls)
+        start = time.perf_counter()
         try:
             page = self._context.new_page()
             try:
@@ -519,13 +565,22 @@ class BrowserSourceClient:
                 page.close()
         except Exception as exc:
             raise BrowserNativeUnavailable(f"Playwright browser fetch failed: {exc}") from exc
+        finally:
+            self._last_fetch_seconds = max(0.0, time.perf_counter() - start)
 
     def _sleep(self) -> None:
         delay = random.uniform(self.config.min_delay_ms, self.config.max_delay_ms) / 1000.0
         time.sleep(delay)
 
-    def _observe_page(self, url: str, html: str, vacancies_found: int, *, detail_page: bool = False) -> None:
-        self._health.update(url=url, html=html, vacancies_found=vacancies_found, detail_page=detail_page)
+    def _observe_page(self, url: str, html: str, vacancies_found: int, *, detail_page: bool = False, page_depth: int | None = None) -> None:
+        self._health.update(
+            url=url,
+            html=html,
+            vacancies_found=vacancies_found,
+            detail_page=detail_page,
+            page_load_seconds=getattr(self, "_last_fetch_seconds", None),
+            page_depth=page_depth,
+        )
 
     def _detail_candidates(self, html: str, *, page_url: str, source: str) -> list[str]:
         parser = _LinkCapture()
