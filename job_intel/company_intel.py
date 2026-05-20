@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -169,18 +170,21 @@ def load_target_companies() -> list[_TargetCompanyRecord]:
 
 
 def _fetch_html(url: str) -> str:
-    if browser_native_available():
-        config = resolve_browser_config()
+    use_browser = os.getenv("JOB_INTEL_TARGET_COMPANY_BROWSER", "0").strip().lower() in {"1", "true", "yes"}
+    if use_browser and browser_native_available():
+        config = resolve_browser_config("company_career")
         try:
             with BrowserSourceClient(config) as client:
                 return client.fetch_html(url)
         except BrowserNativeUnavailable:
             pass
 
+    timeout = float(os.getenv("JOB_INTEL_TARGET_HTTP_TIMEOUT_SECONDS", "8"))
+
     def _request() -> requests.Response:
         return requests.get(
             url,
-            timeout=12,
+            timeout=timeout,
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1061,10 +1062,150 @@ def retire_stale_vacancies(days: int | None = None) -> dict[str, int]:
 
 def _cron_script_paths() -> list[Path]:
     scripts_dir = resolve_scripts_dir()
-    names = ["job_intel_daily.sh", "job_intel_alert.sh", "job_intel_enrichment.sh"]
+    names = ["job_intel_daily.sh", "job_intel_alert.sh", "job_intel_enrichment.sh", "job_intel_browser_health.sh"]
     if scripts_dir and scripts_dir.exists():
         return [scripts_dir / name for name in names]
     return [runtime_home() / ".hermes" / "scripts" / name for name in names]
+
+
+
+def _browser_desktop_base_dir() -> Path:
+    browser_python = os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip()
+    if browser_python:
+        browser_python_path = Path(browser_python)
+        try:
+            if browser_python_path.name == "python" and browser_python_path.parent.name == "bin" and browser_python_path.parent.parent.name == "playwright-venv":
+                return browser_python_path.parent.parent.parent
+        except IndexError:
+            pass
+    return Path(os.getenv("BROWSER_DESKTOP_BASE_DIR", "/var/lib/browser-desktop"))
+
+
+
+def _browser_desktop_health() -> dict[str, Any]:
+    base_dir = _browser_desktop_base_dir()
+    venv_python = Path(os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip() or (base_dir / "playwright-venv" / "bin" / "python"))
+    scripts_dir = resolve_scripts_dir()
+    helper_candidates = [
+        (scripts_dir / "browser-desktop-ensure-playwright.sh") if scripts_dir else None,
+        runtime_home() / ".hermes" / "scripts" / "browser-desktop-ensure-playwright.sh",
+    ]
+    helper_path = next((candidate for candidate in helper_candidates if candidate and candidate.exists()), helper_candidates[-1])
+
+    result: dict[str, Any] = {
+        "status": "healthy",
+        "base_dir": str(base_dir),
+        "helper_script": str(helper_path),
+        "playwright_venv_python": str(venv_python),
+        "chromium_executable": None,
+        "issues": [],
+        "checks": {},
+    }
+
+    def mark(name: str, ok: bool, detail: str | None = None) -> None:
+        result["checks"][name] = {"ok": ok}
+        if detail is not None:
+            result["checks"][name]["detail"] = detail
+        if not ok and detail:
+            result["issues"].append(detail)
+        elif not ok:
+            result["issues"].append(name)
+
+    mark("base_dir", base_dir.exists(), None if base_dir.exists() else f"{base_dir} missing")
+    mark("helper_script", helper_path.exists() and os.access(helper_path, os.X_OK), None if helper_path.exists() and os.access(helper_path, os.X_OK) else f"{helper_path} missing or not executable")
+    mark("playwright_venv_python", venv_python.exists() and os.access(venv_python, os.X_OK), None if venv_python.exists() and os.access(venv_python, os.X_OK) else f"{venv_python} missing or not executable")
+
+    browser_env = os.environ.copy()
+    browser_env.setdefault("HOME", str(base_dir))
+    browser_env.setdefault("XDG_CACHE_HOME", str(base_dir / ".cache"))
+
+    chromium_executable: str | None = None
+    if result["checks"]["playwright_venv_python"]["ok"]:
+        try:
+            probe = subprocess.run(
+                [str(venv_python), "-c", "from playwright.sync_api import sync_playwright\nwith sync_playwright() as p:\n    print(p.chromium.executable_path)"],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+                env=browser_env,
+            )
+            probe_output = (probe.stdout or "").strip()
+            chromium_executable = probe_output or None
+            if probe.returncode == 0 and chromium_executable:
+                mark("playwright_import", True, chromium_executable)
+            else:
+                stderr = (probe.stderr or probe.stdout or "Playwright import probe failed").strip()
+                mark("playwright_import", False, stderr)
+        except subprocess.TimeoutExpired:
+            mark("playwright_import", False, "Playwright import probe timed out after 45s")
+
+    if chromium_executable:
+        try:
+            launch = subprocess.run(
+                [
+                    str(venv_python),
+                    "-c",
+                    (
+                        "from playwright.sync_api import sync_playwright\n"
+                        "with sync_playwright() as p:\n"
+                        "    browser = p.chromium.launch(headless=True)\n"
+                        "    page = browser.new_page()\n"
+                        "    page.goto('data:text/html,<title>job-intel-browser-health</title>')\n"
+                        "    print(page.title())\n"
+                        "    browser.close()\n"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+                env=browser_env,
+            )
+            launch_output = (launch.stdout or "").strip()
+            if launch.returncode == 0 and launch_output == "job-intel-browser-health":
+                mark("chromium_launch", True, launch_output)
+            else:
+                stderr = (launch.stderr or launch.stdout or "Chromium smoke test failed").strip()
+                mark("chromium_launch", False, stderr)
+        except subprocess.TimeoutExpired:
+            mark("chromium_launch", False, "Chromium smoke test timed out after 60s")
+    else:
+        mark("chromium_launch", False, "chromium executable could not be resolved")
+
+    for profile_name in ("linkedin", "hh"):
+        profile_dir = base_dir / "profiles" / profile_name
+        profile_ok = profile_dir.exists() and profile_dir.is_dir()
+        mark(
+            f"profile_{profile_name}",
+            profile_ok,
+            None if profile_ok else f"{profile_dir} missing",
+        )
+
+    result["chromium_executable"] = chromium_executable
+    result["status"] = "healthy" if not result["issues"] else "degraded"
+    return result
+
+
+
+def _format_browser_desktop_health(health: dict[str, Any]) -> str:
+    lines = ["*Browser desktop health*", ""]
+    lines.append(f"Status: {health['status']}")
+    lines.append(f"Base dir: {health['base_dir']}")
+    lines.append(f"Helper script: {health['helper_script']}")
+    lines.append(f"Playwright venv: {health['playwright_venv_python']}")
+    lines.append(f"Chromium executable: {health['chromium_executable'] or 'n/a'}")
+    lines.append("Checks:")
+    for name, check in health["checks"].items():
+        detail = f" ({check['detail']})" if check.get("detail") else ""
+        lines.append(f"- {name}: {'ok' if check['ok'] else 'fail'}{detail}")
+    if health["issues"]:
+        lines.append("Issues:")
+        for issue in health["issues"]:
+            lines.append(f"- {issue}")
+    else:
+        lines.append("Issues: none")
+    return "\n".join(lines)
 
 
 
@@ -1139,6 +1280,15 @@ def doctor_report() -> str:
         lines.append(
             f"- {script.name}: {status}, readable={'yes' if flags['readable'] else 'no'}, writable={'yes' if flags['writable'] else 'no'}"
         )
+    lines.append("Browser desktop:")
+    browser_health = _browser_desktop_health()
+    lines.append(f"- status: {browser_health['status']}")
+    lines.append(f"- helper_script: {browser_health['helper_script']}")
+    lines.append(f"- playwright_venv: {browser_health['playwright_venv_python']}")
+    lines.append(f"- chromium_executable: {browser_health['chromium_executable'] or 'n/a'}")
+    if browser_health["issues"]:
+        for issue in browser_health["issues"]:
+            lines.append(f"- issue: {issue}")
     lines.append("Source adapters:")
     for name, status in sorted(source_statuses.items()):
         merged = dict(latest_statuses.get(name) or {})
@@ -1204,6 +1354,9 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(cmd="doctor")
 
+    browser_health = sub.add_parser("browser-health")
+    browser_health.set_defaults(cmd="browser-health")
+
     send_test = sub.add_parser("send-test")
     send_test.add_argument("--channel", required=True)
     send_test.set_defaults(cmd="send-test")
@@ -1245,6 +1398,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "doctor":
         print(doctor_report())
         return 0
+    if args.cmd == "browser-health":
+        health = _browser_desktop_health()
+        print(_format_browser_desktop_health(health))
+        return 0 if health["status"] == "healthy" else 1
     if args.cmd == "send-test":
         print(send_test_message(args.channel))
         return 0
