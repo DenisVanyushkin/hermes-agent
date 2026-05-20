@@ -30,6 +30,8 @@ VNC_PORT="5901"
 NOVNC_PORT="6080"
 CDP_PORT="9222"
 BASE_DIR="/var/lib/browser-desktop"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PLAYWRIGHT_HELPER="${SCRIPT_DIR}/browser-desktop-ensure-playwright.sh"
 USER_NAME="browser"
 USER_HOME="${BASE_DIR}"
 VNC_DIR="${BASE_DIR}/.vnc"
@@ -218,6 +220,14 @@ is_snap_path() {
   return 1
 }
 
+python_has_playwright() {
+  local python_bin="$1"
+  "$python_bin" - <<'PY' >/dev/null 2>&1
+from importlib.util import find_spec
+raise SystemExit(0 if find_spec('playwright.sync_api') is not None else 1)
+PY
+}
+
 resolve_non_snap_chromium_bin() {
   local candidate resolved type
 
@@ -263,11 +273,33 @@ resolve_non_snap_chromium_bin() {
   return 1
 }
 
+playwright_chromium_executable() {
+  local python_bin="$1"
+  runuser -u "${USER_NAME}" -- env HOME="${USER_HOME}" XDG_CACHE_HOME="${BASE_DIR}/.cache" \
+    "$python_bin" - <<'PY'
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    print(p.chromium.executable_path)
+PY
+}
+
 ensure_playwright_chromium() {
   need_root
+  local playwright_python=""
+  if [[ -x "${PLAYWRIGHT_HELPER}" ]]; then
+    playwright_python="$("${PLAYWRIGHT_HELPER}")"
+    if [[ -n "${playwright_python}" && -x "${playwright_python}" ]] && python_has_playwright "${playwright_python}"; then
+      CHROMIUM_BIN="$(playwright_chromium_executable "${playwright_python}")"
+      if [[ -n "${CHROMIUM_BIN}" && -x "${CHROMIUM_BIN}" ]]; then
+        return 0
+      fi
+    fi
+  fi
+
   ensure_pkg python3 python3-venv python3-pip
 
-  if [[ ! -x "${PLAYWRIGHT_VENV}/bin/python" ]]; then
+  if [[ ! -x "${PLAYWRIGHT_VENV}/bin/python" ]] || ! python_has_playwright "${PLAYWRIGHT_VENV}/bin/python"; then
+    rm -rf "${PLAYWRIGHT_VENV}"
     python3 -m venv "${PLAYWRIGHT_VENV}"
     chown -R "${USER_NAME}:${USER_NAME}" "${PLAYWRIGHT_VENV}"
   fi
@@ -278,13 +310,9 @@ ensure_playwright_chromium() {
   runuser -u "${USER_NAME}" -- env HOME="${USER_HOME}" XDG_CACHE_HOME="${BASE_DIR}/.cache" \
     "${PLAYWRIGHT_VENV}/bin/python" -m playwright install chromium >/dev/null
 
-  CHROMIUM_BIN="$(runuser -u "${USER_NAME}" -- env HOME="${USER_HOME}" XDG_CACHE_HOME="${BASE_DIR}/.cache" \
-    "${PLAYWRIGHT_VENV}/bin/python" - <<'PY'
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    print(p.chromium.executable_path)
-PY
-)"
+  "${PLAYWRIGHT_VENV}/bin/python" -m playwright install-deps chromium >/dev/null
+
+  CHROMIUM_BIN="$(playwright_chromium_executable "${PLAYWRIGHT_VENV}/bin/python")"
 
   if [[ -z "${CHROMIUM_BIN}" || ! -x "${CHROMIUM_BIN}" ]]; then
     echo "Playwright Chromium was installed but the executable path could not be resolved." >&2

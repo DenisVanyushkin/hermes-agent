@@ -14,7 +14,7 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     workdir.mkdir(parents=True)
     (workdir / "job_intel").mkdir()
     scripts_dir.mkdir()
-    for name in ["job_intel_daily.sh", "job_intel_alert.sh", "job_intel_enrichment.sh"]:
+    for name in ["job_intel_daily.sh", "job_intel_alert.sh", "job_intel_enrichment.sh", "job_intel_browser_health.sh"]:
         (scripts_dir / name).write_text("#!/bin/sh\n", encoding="utf-8")
 
     store = JobIntelStore(db_path)
@@ -33,6 +33,27 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     monkeypatch.setenv("JOB_INTEL_ENVIRONMENT", "test")
     monkeypatch.setenv("JOB_INTEL_SLACK_WEBHOOK_URL", "https://hooks.slack.test/example")
     monkeypatch.setattr(cli, "_collect_source_statuses", lambda store: {"headhunter": {"status": "blocked", "error": "403"}, "duckduckgo": {"status": "ok", "hits": 2}})
+    monkeypatch.setattr(
+        cli,
+        "_browser_desktop_health",
+        lambda: {
+            "status": "degraded",
+            "base_dir": "/var/lib/browser-desktop",
+            "helper_script": "/root/.hermes/scripts/browser-desktop-ensure-playwright.sh",
+            "playwright_venv_python": "/var/lib/browser-desktop/playwright-venv/bin/python",
+            "chromium_executable": "/opt/chromium/chrome",
+            "issues": ["playwright venv missing"],
+            "checks": {
+                "base_dir": {"ok": True},
+                "helper_script": {"ok": True},
+                "playwright_venv_python": {"ok": False, "detail": "missing"},
+                "playwright_import": {"ok": False, "detail": "missing"},
+                "chromium_launch": {"ok": False, "detail": "missing"},
+                "profile_linkedin": {"ok": True},
+                "profile_hh": {"ok": True},
+            },
+        },
+    )
 
     report = cli.doctor_report()
 
@@ -47,6 +68,9 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     assert "exec_fit=0.5" in report
     assert "reliability=0.8" in report
     assert "quality=blocked" in report
+    assert "Browser desktop:" in report
+    assert "status: degraded" in report
+    assert "playwright venv missing" in report
     assert "Last run: ok" in report
 
 
