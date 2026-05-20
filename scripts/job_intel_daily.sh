@@ -133,26 +133,14 @@ if [[ "$current_hour" != "09" && "$current_hour" != "17" ]]; then
   exit 0
 fi
 
-# Random one-shot delay inside the allowed hour (up to 1h, but never crossing hour boundary).
-# This is applied once per (date,hour) window and persisted via a marker file.
-jitter_mark="$state_dir/job_intel_daily.${today_key}.${current_hour}.jitter.done"
-if [[ ! -f "$jitter_mark" ]]; then
-  max_jitter="${JOB_INTEL_MAX_JITTER_SECONDS:-3599}"
-  minute_now=$((10#$(TZ="$almaty_tz" date +%M)))
-  second_now=$((10#$(TZ="$almaty_tz" date +%S)))
-  seconds_left_in_hour=$((3599 - (minute_now * 60 + second_now)))
-  effective_max_jitter="$max_jitter"
-  if (( effective_max_jitter > seconds_left_in_hour )); then
-    effective_max_jitter="$seconds_left_in_hour"
-  fi
-  jitter_seconds=$((RANDOM % (effective_max_jitter + 1)))
-  sleep "$jitter_seconds"
-  : > "$jitter_mark"
-fi
-
-# Safety re-check: never run outside target wall-clock hours.
-post_sleep_hour="$(TZ="$almaty_tz" date +%H)"
-if [[ "$post_sleep_hour" != "09" && "$post_sleep_hour" != "17" ]]; then
+# In-hour jitter without sleeping: pick a deterministic target minute (0..59)
+# for the current date+hour, and run only when we are at/after that minute.
+# This avoids long sleeps that can exceed cron script timeout.
+seed="${JOB_INTEL_JITTER_SEED:-${today_key}:${current_hour}}"
+minute_hex="$(printf '%s' "$seed" | sha256sum | cut -c1-8)"
+target_minute=$((16#$minute_hex % 60))
+current_minute=$((10#$(TZ="$almaty_tz" date +%M)))
+if (( current_minute < target_minute )); then
   exit 0
 fi
 
