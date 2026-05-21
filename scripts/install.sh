@@ -1777,6 +1777,16 @@ EOF
     log_success "hermes command ready"
 }
 
+sync_runtime_scripts() {
+    log_info "Syncing runtime scripts to ~/.hermes/scripts..."
+    if [ -x "$INSTALL_DIR/scripts/sync-runtime-scripts.sh" ]; then
+        "$INSTALL_DIR/scripts/sync-runtime-scripts.sh"
+        log_success "Runtime scripts synced to ~/.hermes/scripts/"
+    else
+        log_warn "Runtime script sync helper not found: $INSTALL_DIR/scripts/sync-runtime-scripts.sh"
+    fi
+}
+
 copy_config_templates() {
     log_info "Setting up configuration files..."
 
@@ -3099,6 +3109,7 @@ main() {
     install_node_deps
     setup_path
     copy_config_templates
+    sync_runtime_scripts
     run_setup_wizard
     maybe_start_gateway
 
