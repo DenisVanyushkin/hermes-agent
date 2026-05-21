@@ -64,13 +64,20 @@ def resolve_workdir() -> Path:
     return Path.cwd()
 
 
+def _safe_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def resolve_scripts_dir() -> Path | None:
     override = os.getenv("JOB_INTEL_SCRIPTS_DIR", "").strip()
     if override:
         path = Path(override).expanduser()
-        return path if path.exists() else path
+        return path if _safe_exists(path) else path
     for candidate in DEFAULT_SCRIPTS_CANDIDATES:
-        if candidate.exists():
+        if _safe_exists(candidate):
             return candidate
     return None
 
