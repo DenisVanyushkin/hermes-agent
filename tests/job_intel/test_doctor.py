@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from job_intel import cli
+from job_intel import cli, runtime
 from job_intel.models import Vacancy
 from job_intel.store import JobIntelStore
 
@@ -72,6 +72,26 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     assert "status: degraded" in report
     assert "playwright venv missing" in report
     assert "Last run: ok" in report
+
+
+def test_resolve_scripts_dir_skips_permission_denied_candidates(monkeypatch, tmp_path) -> None:
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    denied = Path("/root/.hermes/scripts")
+
+    monkeypatch.delenv("JOB_INTEL_SCRIPTS_DIR", raising=False)
+    monkeypatch.setattr(runtime, "DEFAULT_SCRIPTS_CANDIDATES", (denied, scripts_dir))
+
+    original_exists = Path.exists
+
+    def fake_exists(self: Path) -> bool:
+        if self == denied:
+            raise PermissionError("permission denied")
+        return original_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    assert runtime.resolve_scripts_dir() == scripts_dir
 
 
 def test_send_test_message_includes_runtime_context(monkeypatch, tmp_path) -> None:
