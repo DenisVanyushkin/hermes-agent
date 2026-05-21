@@ -17,9 +17,11 @@ DEFAULT_WORKDIR_CANDIDATES = (
     Path("/workspace/live-hermes"),
     Path.cwd(),
 )
+REPO_SCRIPTS_CANDIDATE = Path(__file__).resolve().parents[1] / "scripts"
 DEFAULT_SCRIPTS_CANDIDATES = (
     Path("/home/hermes/.hermes/scripts"),
     Path("/root/.hermes/scripts"),
+    REPO_SCRIPTS_CANDIDATE,
 )
 
 

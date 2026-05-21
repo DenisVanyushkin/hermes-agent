@@ -143,6 +143,14 @@ if [ "$AFTER_HEAD" = "$BEFORE_HEAD" ]; then
   exit 0
 fi
 
+SYNC_HELPER="$REPO/scripts/sync-runtime-scripts.sh"
+if [ -x "$SYNC_HELPER" ]; then
+  "$SYNC_HELPER" >/dev/null
+else
+  echo "Updated repo, but could not find runtime script sync helper: $SYNC_HELPER" >&2
+  exit 1
+fi
+
 HERMES_BIN="$(resolve_hermes_bin || true)"
 if [ -z "$HERMES_BIN" ]; then
   echo "Updated repo, but could not find hermes executable to restart gateway." >&2
