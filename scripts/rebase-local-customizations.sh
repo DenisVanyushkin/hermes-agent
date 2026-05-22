@@ -63,6 +63,35 @@ if [ ! -d "$REPO/.git" ]; then
   exit 1
 fi
 
+REPO_UID="$(stat -c '%u' "$REPO")"
+REPO_GID="$(stat -c '%g' "$REPO")"
+CURRENT_UID="$(id -u)"
+if [ "$CURRENT_UID" -eq 0 ] && [ "$REPO_UID" != "0" ]; then
+  echo "Running as root against non-root-owned repo; repairing ownership and re-running as repo owner..." >&2
+  find "$REPO/.git" \( -user root -o -group root \) -exec chown -h "$REPO_UID:$REPO_GID" {} +
+  find "$REPO" -path "$REPO/.git" -prune -o \( -user root -o -group root \) -exec chown -h "$REPO_UID:$REPO_GID" {} +
+  REPO_USER="$(getent passwd "$REPO_UID" | cut -d: -f1 || true)"
+  if [ -z "$REPO_USER" ]; then
+    echo "Could not resolve repo owner UID $REPO_UID to a user; refusing to run git as root." >&2
+    exit 1
+  fi
+  REEXEC_SCRIPT="$REPO/scripts/rebase-local-customizations.sh"
+  if [ ! -r "$REEXEC_SCRIPT" ]; then
+    echo "Repo-owned updater is not readable: $REEXEC_SCRIPT" >&2
+    exit 1
+  fi
+  printf -v REEXEC_CMD 'cd %q && exec bash %q' "$REPO" "$REEXEC_SCRIPT"
+  exec su -s /bin/bash "$REPO_USER" -c "$REEXEC_CMD"
+fi
+
+if [ "$CURRENT_UID" -ne 0 ]; then
+  ROOT_OWNED_SAMPLE="$(find "$REPO/.git" \( -user root -o -group root \) -print -quit 2>/dev/null || true)"
+  if [ -n "$ROOT_OWNED_SAMPLE" ]; then
+    echo "Repo contains root-owned git files; repair ownership before updating: $ROOT_OWNED_SAMPLE" >&2
+    exit 1
+  fi
+fi
+
 git config --global --add safe.directory "$REPO" >/dev/null 2>&1 || true
 
 if [ -d "$REPO/.git/rebase-merge" ] || [ -d "$REPO/.git/rebase-apply" ]; then
