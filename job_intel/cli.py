@@ -20,7 +20,7 @@ from .config import DEFAULT_CONFIG, load_config_bundle
 from .strategic import build_strategic_report, update_strategic_layer
 from .dedup import canonical_vacancy_key, description_similarity, is_duplicate
 from .digest import format_daily_digest, format_enrichment_questions, format_vacancy_summary
-from .evaluator import score_vacancy
+from .evaluator import classify_vacancy, score_vacancy
 from .enrichment import detect_high_value_questions
 from .models import Evaluation, Vacancy
 from .runtime import (
@@ -43,6 +43,7 @@ from .sources import (
     fetch_headhunter_vacancies,
     fetch_linkedin_vacancies,
     normalize_search_hit,
+    rotating_source_queries,
     search_duckduckgo,
     search_remoteok_jobs,
     search_remotive_jobs,
@@ -107,15 +108,12 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
         company_statuses=target_result.company_statuses,
     )
 
-    linkedin_queries = [
-        "VP Product monetization B2C platform",
-        "Head of Product fintech telecom",
-    ]
+    linkedin_queries = rotating_source_queries("linkedin", limit=6)
     linkedin_hits = 0
     linkedin_errors: list[str] = []
     for query in linkedin_queries:
         try:
-            results = fetch_linkedin_vacancies(query, max_pages=1)
+            results = fetch_linkedin_vacancies(query, max_pages=2)
             linkedin_hits += len(results)
             vacancies.extend(results)
         except Exception as exc:
@@ -134,11 +132,7 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
         linkedin_source_status["session_health"] = linkedin_health
     statuses["linkedin"] = linkedin_source_status
 
-    hh_queries = [
-        "VP Product monetization B2C platform",
-        "Head of Product fintech telecom",
-        "Director of Product ecosystem growth",
-    ]
+    hh_queries = rotating_source_queries("headhunter", limit=6)
     hh_hits = 0
     hh_errors: list[str] = []
     for query in hh_queries:
@@ -255,6 +249,50 @@ def _source_footer(source_statuses: dict[str, dict[str, Any]]) -> str | None:
     if not issues:
         return None
     return f"Operator note: source issues detected — {', '.join(issues)}"
+
+
+
+def _search_report_channel(cfg: dict[str, Any]) -> str:
+    runtime = cfg.get("runtime", {}).get("slack", {})
+    return str(runtime.get("search_report_channel") or runtime.get("channel") or "C0B3ZV4BUKC")
+
+
+
+def _bool_text(value: Any) -> str:
+    return "yes" if bool(value) else "no"
+
+
+
+def _search_technical_report(source_statuses: dict[str, dict[str, Any]], *, channel: str | None = None) -> str:
+    cfg = load_config_bundle() or DEFAULT_CONFIG
+    resolved_channel = channel or _search_report_channel(cfg)
+    lines = ["*Technical search report*", ""]
+    lines.append(
+        f"Runtime: user={runtime_user()} | environment={resolve_environment_name()} | workdir={resolve_workdir()} | db={resolve_db_path()}"
+    )
+    lines.append(f"Slack channel: {resolved_channel}")
+    lines.append("")
+    lines.append("*Acquisition details*")
+    for source, status in sorted(source_statuses.items()):
+        session = status.get("session_health") or {}
+        browser_profile = str(session.get("browser_profile") or "n/a")
+        login_detected = bool(session.get("auth_attempted") or session.get("login_walls") or session.get("auth_redirects"))
+        email_challenge_attempted = bool(session.get("email_challenge_attempted"))
+        email_challenge_resolved = bool(session.get("email_challenge_resolved"))
+        acquisition = str(status.get("acquisition") or status.get("source") or "n/a")
+        lines.append(
+            "- "
+            f"{source}: acquisition={acquisition}, status={status.get('status', 'unknown')}, profile={browser_profile}, "
+            f"login={_bool_text(login_detected)}, email_challenge={_bool_text(email_challenge_attempted)}"
+            + (f" (resolved={_bool_text(email_challenge_resolved)})" if email_challenge_attempted else "")
+            + f", pages_fetched={session.get('pages_fetched', 0)}, login_walls={session.get('login_walls', 0)}, auth_redirects={session.get('auth_redirects', 0)}, session_status={session.get('status', 'n/a')}"
+        )
+    return "\n".join(lines).rstrip()
+
+
+
+def _search_report_payload(source_statuses: dict[str, dict[str, Any]]) -> str:
+    return _search_technical_report(source_statuses)
 
 
 
@@ -431,10 +469,19 @@ def run_daily() -> str:
     batch_size = cfg["runtime"]["slack"]["batch_size"]
     digest_items = accepted[:batch_size]
     operator_footer = _source_footer(source_statuses)
-    digest = format_daily_digest([(vacancy, evaluation) for vacancy, evaluation, _ in digest_items], operator_footer=operator_footer)
+    search_channel = _search_report_channel(cfg)
+    technical_footer = _search_technical_report(source_statuses, channel=search_channel)
+    digest = format_daily_digest(
+        [(vacancy, evaluation) for vacancy, evaluation, _ in digest_items],
+        operator_footer=operator_footer,
+        technical_footer=technical_footer,
+    )
+
+    target_company_hits = int((source_statuses.get("target_companies") or {}).get("hits") or 0)
 
     for source, stats in source_counts.items():
         existing = dict(source_statuses.get(source, {"source": source, "status": "unknown"}))
+        session = existing.get("session_health") or {}
         hits = int(existing.get("hits") or stats["found"])
         errors = list(existing.get("errors") or [])
         anti_bot_failures = 1 if existing.get("status") == "blocked" else (len(errors) if errors else 0)
@@ -447,12 +494,14 @@ def run_daily() -> str:
             extraction_successes=hits,
             extraction_attempts=max(hits + len(errors), 1),
             anti_bot_failures=anti_bot_failures,
+            detail_pages_opened=int(session.get("detail_pages_opened") or 0),
+            target_company_hits=target_company_hits,
         )
         existing["metrics"] = metrics.__dict__
         source_statuses[source] = existing
 
-    notification_ids = _prepare_notifications(store, run_id, cfg["runtime"]["slack"]["channel"], "daily_digest", digest_items)
-    delivery = _deliver_to_slack(digest, cfg["runtime"]["slack"]["channel"])
+    notification_ids = _prepare_notifications(store, run_id, search_channel, "daily_digest", digest_items)
+    delivery = _deliver_to_slack(digest, search_channel)
     _finalize_notifications(store, notification_ids, delivery)
 
     for vacancy, evaluation, vacancy_id in digest_items:
@@ -492,15 +541,20 @@ def run_market_report() -> str:
     run_id = store.start_run("market")
     monitor_target_companies(store)
     digest = build_market_report(store)
-    if digest != "[SILENT]":
-        channel = load_config_bundle().get("runtime", {}).get("slack", {}).get("market_channel", "C0B42K4H4KV")
-        notification_id = store.create_notification(run_id, channel, "market_report", digest, delivery_status="pending")
-        delivery = _deliver_to_slack(digest, channel)
+    cfg = load_config_bundle() or DEFAULT_CONFIG
+    channel = _search_report_channel(cfg)
+    technical_footer = _search_technical_report(store.source_adapter_status_from_latest_run(), channel=channel)
+    message = digest if digest != "[SILENT]" else ""
+    if technical_footer:
+        message = f"{message}\n\n{technical_footer}".strip() if message else technical_footer
+    if message and message != "[SILENT]":
+        notification_id = store.create_notification(run_id, channel, "market_report", message, delivery_status="pending")
+        delivery = _deliver_to_slack(message, channel)
         store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
-        store.finish_run(run_id, status="ok", notes=f"report_length={len(digest)}", metadata={"delivery": delivery.__dict__})
+        store.finish_run(run_id, status="ok", notes=f"report_length={len(message)}", metadata={"delivery": delivery.__dict__})
     else:
         store.finish_run(run_id, status="ok", notes="report=silent", metadata={"report": "silent"})
-    return digest
+    return message or "[SILENT]"
 
 
 
@@ -509,15 +563,20 @@ def run_strategic_report() -> str:
     store.bootstrap()
     run_id = store.start_run("strategic")
     digest = build_strategic_report(store)
-    if digest != "[SILENT]":
-        channel = load_config_bundle().get("runtime", {}).get("slack", {}).get("strategic_channel", "C0B42K4H4KV")
-        notification_id = store.create_notification(run_id, channel, "strategic_report", digest, delivery_status="pending")
-        delivery = _deliver_to_slack(digest, channel)
+    cfg = load_config_bundle() or DEFAULT_CONFIG
+    channel = _search_report_channel(cfg)
+    technical_footer = _search_technical_report(store.source_adapter_status_from_latest_run(), channel=channel)
+    message = digest if digest != "[SILENT]" else ""
+    if technical_footer:
+        message = f"{message}\n\n{technical_footer}".strip() if message else technical_footer
+    if message and message != "[SILENT]":
+        notification_id = store.create_notification(run_id, channel, "strategic_report", message, delivery_status="pending")
+        delivery = _deliver_to_slack(message, channel)
         store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
-        store.finish_run(run_id, status="ok", notes=f"report_length={len(digest)}", metadata={"delivery": delivery.__dict__})
+        store.finish_run(run_id, status="ok", notes=f"report_length={len(message)}", metadata={"delivery": delivery.__dict__})
     else:
         store.finish_run(run_id, status="ok", notes="report=silent", metadata={"report": "silent"})
-    return digest
+    return message or "[SILENT]"
 
 
 
@@ -632,12 +691,16 @@ def _looks_like_allowed_geo(location: str) -> bool:
 
 def _role_bucket(title: str) -> str | None:
     text = (title or "").lower()
-    if any(token in text for token in ("vice president", "\bvp\b", "vp ", " vp", "v.p.")):
+    if re.search(r"\b(vp|vice president)\b", text):
         return "vp_roles"
+    if "chief product officer" in text or re.search(r"\bcpo\b", text):
+        return "cpo_roles"
     if "director" in text:
         return "director_roles"
     if "head of" in text or text.startswith("head "):
         return "head_roles"
+    if any(token in text for token in ("growth", "monetization", "strategy", "platform", "ecosystem", "digital products")):
+        return "growth_strategy_roles"
     if "product manager" in text or "manager" in text or re.search(r"\bpm\b", text):
         return "manager_roles" if "manager" in text else "generic_pm_roles"
     return None
@@ -669,6 +732,7 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
     overall_roles = Counter()
     overall_industries = Counter()
     accepted_rows: list[dict[str, Any]] = []
+    sample_rows_by_source: dict[str, list[dict[str, Any]]] = {"linkedin": [], "headhunter": []}
     normalization_failures = 0
     blocked_geo_hits = 0
     allowed_geo_hits = 0
@@ -696,9 +760,27 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
                 "accepted_roles_by_source": 0,
             },
         )
+        metadata = _json_loads(row.get("metadata_json"), {})
+        vacancy = Vacancy(
+            source=source,
+            source_id=str(row.get("source_id") or ""),
+            company=str(row.get("company") or "Unknown"),
+            title=str(row.get("title") or "Vacancy"),
+            location=str(row.get("location") or "Unknown"),
+            url=str(row.get("url") or ""),
+            description=str(row.get("description") or ""),
+            posted_at=row.get("posted_at"),
+            scraped_at=row.get("scraped_at"),
+            salary=row.get("salary"),
+            company_url=row.get("company_url"),
+            metadata=metadata if isinstance(metadata, dict) else {},
+        )
+        classification = classify_vacancy(vacancy)
         stats["vacancies_found"] += 1
         stats["vacancies_normalized"] += 1
         stats["accepted_roles_by_source"] += 1 if row.get("recommendation") != "reject" else 0
+        stats["executive_roles_detected"] += 1 if classification["executive_detected"] else 0
+        overall_roles[str(classification["classification"] or "other")] += 1
         if row.get("status") == "duplicate":
             stats["duplicate_count"] += 1
             stats["reposts_detected"] += 1
@@ -712,15 +794,23 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
         else:
             stats["accepted_count"] += 1
             accepted_rows.append(row)
-            if row.get("tier") in {"exceptional_fit", "strong_fit"}:
-                stats["executive_roles_detected"] += 1
-                overall_roles[_role_bucket(str(row.get("title") or "")) or "other"] += 1
             for bucket in _industry_buckets(f"{row.get('title') or ''} {row.get('description') or ''} {row.get('company') or ''}"):
                 overall_industries[bucket] += 1
             if _looks_like_allowed_geo(str(row.get("location") or "")):
                 allowed_geo_hits += 1
             else:
                 blocked_geo_hits += 1
+        if source in sample_rows_by_source and len(sample_rows_by_source[source]) < 20:
+            sample_rows_by_source[source].append(
+                {
+                    "raw_title": classification["raw_title"],
+                    "normalized_title": classification["normalized_title"],
+                    "classification": classification["classification"],
+                    "executive_detected": classification["executive_detected"],
+                    "company": row.get("company"),
+                    "location": row.get("location"),
+                }
+            )
 
     for source, status in sorted(source_statuses.items()):
         stats = per_source.setdefault(
@@ -804,6 +894,8 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
                 extraction_attempts=extraction_attempts,
                 anti_bot_failures=anti_bot_failures,
                 normalization_quality=1.0,
+                detail_pages_opened=int(session.get("detail_pages_opened") or 0),
+                target_company_hits=int((source_statuses.get("target_companies") or {}).get("hits") or 0),
             )
             quality = computed.acquisition_quality_score
             reliability = computed.source_reliability
@@ -899,12 +991,22 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
             "blocked_geography_hits": blocked_geo_hits,
         },
         "roles": {
-            "vp_roles": overall_roles.get("vp_roles", 0),
-            "director_roles": overall_roles.get("director_roles", 0),
-            "head_roles": overall_roles.get("head_roles", 0),
-            "manager_roles": overall_roles.get("manager_roles", 0),
+            "chief_product_officer": overall_roles.get("chief_product_officer", 0),
+            "vp_product": overall_roles.get("vp_product", 0),
+            "director_product": overall_roles.get("director_product", 0),
+            "head_product": overall_roles.get("head_product", 0),
+            "product_lead": overall_roles.get("product_lead", 0),
+            "consumer_product_lead": overall_roles.get("consumer_product_lead", 0),
+            "growth_product_lead": overall_roles.get("growth_product_lead", 0),
+            "monetization_product_lead": overall_roles.get("monetization_product_lead", 0),
+            "platform_ecosystem_product_lead": overall_roles.get("platform_ecosystem_product_lead", 0),
+            "product_strategy_lead": overall_roles.get("product_strategy_lead", 0),
+            "product_strategy_and_growth": overall_roles.get("product_strategy_and_growth", 0),
+            "executive_product_leadership": overall_roles.get("executive_product_leadership", 0),
             "generic_pm_roles": overall_roles.get("generic_pm_roles", 0),
+            "other": overall_roles.get("other", 0),
         },
+        "samples": sample_rows_by_source,
         "industries": {
             "fintech_ratio": round(overall_industries.get("fintech_ratio", 0) / total_found, 3) if total_found else 0.0,
             "telecom_ratio": round(overall_industries.get("telecom_ratio", 0) / total_found, 3) if total_found else 0.0,
@@ -965,7 +1067,7 @@ def _format_health_report(curr: dict[str, Any], prev: dict[str, Any] | None) -> 
         f"- executive_density={curr['overall']['executive_density']}, signal_noise_ratio={curr['overall']['signal_noise_ratio']}, normalization_quality={curr['overall']['normalization_quality']}, acquisition_quality_score={curr['overall']['acquisition_quality_score']}"
     )
     lines.append(
-        f"- roles: vp_roles={curr['roles']['vp_roles']}, director_roles={curr['roles']['director_roles']}, head_roles={curr['roles']['head_roles']}, manager_roles={curr['roles']['manager_roles']}, generic_pm_roles={curr['roles']['generic_pm_roles']}"
+        f"- roles: chief_product_officer={curr['roles']['chief_product_officer']}, vp_product={curr['roles']['vp_product']}, director_product={curr['roles']['director_product']}, head_product={curr['roles']['head_product']}, product_lead={curr['roles']['product_lead']}, consumer_product_lead={curr['roles']['consumer_product_lead']}, growth_product_lead={curr['roles']['growth_product_lead']}, monetization_product_lead={curr['roles']['monetization_product_lead']}, platform_ecosystem_product_lead={curr['roles']['platform_ecosystem_product_lead']}, product_strategy_lead={curr['roles']['product_strategy_lead']}, product_strategy_and_growth={curr['roles']['product_strategy_and_growth']}, executive_product_leadership={curr['roles']['executive_product_leadership']}, generic_pm_roles={curr['roles']['generic_pm_roles']}, other={curr['roles']['other']}"
     )
     lines.append(
         f"- industry: fintech_ratio={curr['industries']['fintech_ratio']}, telecom_ratio={curr['industries']['telecom_ratio']}, saas_ratio={curr['industries']['saas_ratio']}, ai_ratio={curr['industries']['ai_ratio']}, ecosystem_ratio={curr['industries']['ecosystem_ratio']}"
@@ -973,6 +1075,16 @@ def _format_health_report(curr: dict[str, Any], prev: dict[str, Any] | None) -> 
     lines.append(
         f"- geography: allowed_geography_ratio={curr['overall']['allowed_geography_ratio']}, blocked_geography_hits={curr['overall']['blocked_geography_hits']}"
     )
+    lines.append("")
+
+    lines.append("*Normalized vacancy samples*")
+    for source in ("linkedin", "headhunter"):
+        source_samples = (curr.get("samples") or {}).get(source) or []
+        lines.append(f"- {source}: {len(source_samples)} sample(s)")
+        for idx, sample in enumerate(source_samples[:20], start=1):
+            lines.append(
+                f"  {idx}. raw={sample.get('raw_title')} | normalized={sample.get('normalized_title')} | class={sample.get('classification')} | exec={sample.get('executive_detected')} | company={sample.get('company')} | location={sample.get('location')}"
+            )
     lines.append("")
 
     lines.append("*Pipeline metrics*")
@@ -1042,7 +1154,7 @@ def run_health_report() -> str:
     previous = _health_summary_for_run(store, daily_runs[1]) if len(daily_runs) > 1 else None
     digest = _format_health_report(current, previous)
     cfg = load_config_bundle() or DEFAULT_CONFIG
-    channel = cfg["runtime"]["slack"]["alerts_channel"]
+    channel = _search_report_channel(cfg)
     notification_id = store.create_notification(run_id, channel, "health_report", digest, delivery_status="pending")
     delivery = _deliver_to_slack(digest, channel)
     store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)

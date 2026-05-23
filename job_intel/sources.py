@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit, urlunsplit
 
@@ -18,6 +20,7 @@ from .browser_sourcing import (
     extract_linkedin_vacancies_from_html,
     metrics_from_counts,
     resolve_browser_config,
+    _ensure_required_browser_profile,
 )
 from .models import Vacancy
 from .runtime import retry_with_backoff, sha256_text
@@ -356,6 +359,7 @@ def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]
     if not browser_native_available():
         raise SourceFetchError("Playwright is not installed, so LinkedIn browser-native acquisition is unavailable.")
     config = _browser_config("linkedin")
+    _ensure_required_browser_profile("linkedin", config)
     try:
         with BrowserSourceClient(config) as client:
             vacancies = client.search_linkedin(query, max_pages=max_pages)
@@ -406,6 +410,7 @@ def fetch_headhunter_vacancies(query: str, *, per_page: int = 20) -> list[Vacanc
     fetch_headhunter_vacancies.last_health = None  # type: ignore[attr-defined]
     if browser_native_available():
         config = _browser_config("headhunter")
+        _ensure_required_browser_profile("headhunter", config)
         try:
             with BrowserSourceClient(config) as client:
                 vacancies = client.search_headhunter(query, max_pages=max(1, (per_page + 24) // 25))[:per_page]
@@ -471,13 +476,80 @@ def _format_salary(salary: dict | None) -> str | None:
     return " ".join(str(part) for part in parts if part)
 
 
+ROLE_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
+    ("core_executive_product", ("VP Product", "Head of Product", "Director Product", "Chief Product Officer", "Product Lead")),
+    ("growth_monetization", ("Growth Product Lead", "Monetization Product Lead", "Product Strategy Lead", "Product Growth Lead")),
+    ("platform_ecosystem", ("Platform Product Lead", "Ecosystem Product Lead", "Digital Products Lead", "Consumer Product Lead")),
+    ("consumer_digital", ("VP Product", "Head of Product", "Director Product", "Product Lead")),
+]
+
+CONTEXT_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
+    ("fintech_telecom", ("fintech", "telecom", "payments", "wallet", "banking")),
+    ("consumer_platform", ("consumer", "B2C", "platform", "superapp", "digital products")),
+    ("growth_revenue", ("growth", "monetization", "subscriptions", "marketplace", "engagement")),
+    ("ai_products", ("AI products", "artificial intelligence", "machine learning")),
+]
+
+GEO_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
+    ("global_remote", ("remote", "Europe")),
+    ("emea", ("UAE", "MENA", "Germany", "UK")),
+    ("eu_apac", ("Netherlands", "Poland", "Singapore", "Kazakhstan")),
+]
+
+
+def _query_rng(source: str) -> random.Random:
+    source_seed = sum(ord(ch) for ch in source.lower())
+    date_seed = int(datetime.now(timezone.utc).strftime("%Y%m%d%H"))
+    entropy = random.SystemRandom().randint(0, 2**31 - 1)
+    return random.Random(source_seed ^ date_seed ^ entropy)
+
+
+def _join_group(terms: tuple[str, ...]) -> str:
+    if len(terms) == 1:
+        return terms[0]
+    return " OR ".join(terms)
+
+
+def rotating_source_queries(source: str, *, limit: int = 6) -> list[str]:
+    rng = _query_rng(source)
+    combos = [(role, context, geo) for role in ROLE_FAMILIES for context in CONTEXT_FAMILIES for geo in GEO_FAMILIES]
+    rng.shuffle(combos)
+    queries: list[str] = []
+    for role, context, geo in combos:
+        role_expr = f"({_join_group(role[1])})"
+        context_expr = f"({_join_group(context[1])})"
+        geo_expr = f"({_join_group(geo[1])})"
+        query = f"{role_expr} {context_expr} {geo_expr}".strip()
+        if query not in queries:
+            queries.append(query)
+        if len(queries) >= limit:
+            break
+    return queries
+
+
 def discovery_queries() -> list[tuple[str, str]]:
-    return [
-        ("linkedin", 'site:linkedin.com/jobs/view (VP Product OR Head of Product OR Chief Product Officer) (monetization OR platform OR ecosystem) (remote OR Europe OR UAE)'),
-        ("wellfound", 'site:wellfound.com/jobs (superapp OR subscription OR fintech OR product)'),
-        ("greenhouse", 'site:boards.greenhouse.io (VP Product OR Director of Product OR Head of Monetization)'),
-        ("lever", 'site:jobs.lever.co (VP Product OR Director of Product OR Head of Product)'),
-        ("ashby", 'site:jobs.ashbyhq.com (product director OR head of product OR chief product officer)'),
-        ("remoteok", 'site:remoteok.com remote VP Product monetization'),
-        ("company", '(VP Product OR Head of Product) (monetization OR ecosystem OR platform) (company careers)'),
+    rng = _query_rng("duckduckgo")
+    source_templates = [
+        ("linkedin", 'site:linkedin.com/jobs/view'),
+        ("wellfound", 'site:wellfound.com/jobs'),
+        ("greenhouse", 'site:boards.greenhouse.io'),
+        ("lever", 'site:jobs.lever.co'),
+        ("ashby", 'site:jobs.ashbyhq.com'),
+        ("remoteok", 'site:remoteok.com'),
+        ("company", 'company careers'),
     ]
+    role_groups = [group for _, group in ROLE_FAMILIES]
+    context_groups = [group for _, group in CONTEXT_FAMILIES]
+    geo_groups = [group for _, group in GEO_FAMILIES]
+    combos = [(site, role, context, geo) for site in source_templates for role in role_groups for context in context_groups for geo in geo_groups]
+    rng.shuffle(combos)
+    queries: list[tuple[str, str]] = []
+    for source_label, site_prefix in source_templates:
+        queries.append((source_label, f"{site_prefix} ({_join_group(role_groups[0])}) ({_join_group(context_groups[0])}) ({_join_group(geo_groups[0])})"))
+    for site_label, role, context, geo in combos:
+        query = f"{site_label[1]} ({_join_group(role)}) ({_join_group(context)}) ({_join_group(geo)})"
+        if (site_label[0], query) not in queries:
+            queries.append((site_label[0], query))
+        if len(queries) >= 7:
+            break
+    return queries

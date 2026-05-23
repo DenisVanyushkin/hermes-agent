@@ -79,6 +79,59 @@ def _has_any(text: str, terms: list[str] | set[str]) -> bool:
     return any(term in text for term in terms)
 
 
+_ROLE_CLASSIFICATION_PATTERNS: list[tuple[str, tuple[str, ...], bool]] = [
+    ("chief_product_officer", (r"\bchief product officer\b", r"\bcpo\b"), True),
+    ("vp_product", (r"\bvice president\b.*\bproduct\b", r"\bvp\b(?:[\s,/-]+(?:product|product & growth|product growth|growth product|products))?\b"), True),
+    ("director_product", (r"\bdirector\b.*\bproduct\b", r"\bproduct director\b"), True),
+    ("head_product", (r"\bhead of\b.*\bproduct\b", r"\bhead\b.*\bproduct\b"), True),
+    ("product_strategy_lead", (r"\bproduct strategy\b", r"\bstrategy lead\b.*\bproduct\b"), True),
+    ("growth_product_lead", (r"\bgrowth\b.*\bproduct\b", r"\bproduct growth\b"), True),
+    ("monetization_product_lead", (r"\bmonetization\b.*\bproduct\b", r"\bproduct monetization\b"), True),
+    ("consumer_product_lead", (r"\bconsumer\b.*\bproduct\b", r"\bb2c\b.*\bproduct\b"), True),
+    ("platform_ecosystem_product_lead", (r"\bplatform\b.*\bproduct\b", r"\becosystem\b.*\bproduct\b", r"\bdigital products\b", r"\bsuperapp\b"), True),
+    ("product_lead", (r"\bproduct lead\b", r"\blead product\b", r"\bproduct leader\b"), True),
+    ("generic_product_manager", (r"\bproduct manager\b", r"\bsenior product manager\b", r"\bassociate product manager\b"), False),
+]
+
+
+def classify_vacancy(vacancy: Vacancy) -> dict[str, Any]:
+    title = re.sub(r"\s+", " ", vacancy.title or "").strip()
+    text = _text(vacancy)
+    title_lower = title.lower()
+    text_lower = text.lower()
+
+    role_classification = "other"
+    executive_detected = False
+    matched_signals: list[str] = []
+
+    for name, patterns, is_leadership_signal in _ROLE_CLASSIFICATION_PATTERNS:
+        if any(re.search(pattern, title_lower) or re.search(pattern, text_lower) for pattern in patterns):
+            role_classification = name
+            executive_detected = is_leadership_signal
+            break
+
+    if role_classification == "other":
+        if any(token in title_lower for token in ("vp", "vice president", "director", "head of", "chief", "cpo", "gm", "general manager")):
+            role_classification = "executive_product_leadership"
+            executive_detected = True
+        elif _has_any(text_lower, ["product strategy", "monetization", "growth", "platform", "ecosystem", "digital products", "superapp"]):
+            role_classification = "product_strategy_and_growth"
+            executive_detected = any(token in title_lower for token in ("lead", "director", "head", "vp", "chief", "gm"))
+
+    if any(token in text_lower for token in ("monetization", "growth", "product strategy", "platform", "ecosystem", "digital products", "b2c", "consumer", "subscription", "marketplace")):
+        matched_signals.append("strategic_product_scope")
+    if any(token in text_lower for token in ("vp", "vice president", "director", "head of", "chief", "cpo", "gm", "general manager", "lead")):
+        matched_signals.append("leadership_scope")
+
+    return {
+        "raw_title": vacancy.title,
+        "normalized_title": title,
+        "classification": role_classification,
+        "executive_detected": executive_detected,
+        "matched_signals": matched_signals,
+    }
+
+
 def tier_for_score(score: int) -> str:
     thresholds = _cfg()["scoring"]["thresholds"]
     if score >= thresholds["exceptional_fit"]:
@@ -106,6 +159,7 @@ def salary_tier_for(vacancy: Vacancy, score: int) -> str:
 def score_vacancy(vacancy: Vacancy) -> Evaluation:
     cfg = _cfg()["scoring"]
     text = _text(vacancy)
+    classification = classify_vacancy(vacancy)
     score = 0
     matched: list[str] = []
     concerns: list[str] = []
@@ -113,10 +167,22 @@ def score_vacancy(vacancy: Vacancy) -> Evaluation:
     breakdown: Counter[str] = Counter()
 
     title = vacancy.title.lower()
-    if any(term in title for term in ["vp", "vice president", "chief product officer", "director of product", "head of product", "gm"]):
+    if classification["executive_detected"]:
         score += 20
         breakdown["executive_visibility"] += 20
         matched.append("executive-level leadership")
+    if classification["classification"] in {
+        "product_strategy_lead",
+        "growth_product_lead",
+        "monetization_product_lead",
+        "platform_ecosystem_product_lead",
+        "consumer_product_lead",
+        "product_lead",
+        "product_strategy_and_growth",
+    }:
+        score += 12
+        breakdown["growth_signal"] += 12
+        matched.append("growth/strategy/product leadership")
     if _has_any(text, ["product strategy", "product ownership"]):
         score += 20
         breakdown["product_ownership"] += 20
