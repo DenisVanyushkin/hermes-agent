@@ -254,7 +254,7 @@ def _source_footer(source_statuses: dict[str, dict[str, Any]]) -> str | None:
 
 def _search_report_channel(cfg: dict[str, Any]) -> str:
     runtime = cfg.get("runtime", {}).get("slack", {})
-    return str(runtime.get("search_report_channel") or runtime.get("channel") or "C0B3ZV4BUKC")
+    return str(runtime.get("search_report_channel") or runtime.get("channel") or "executive_search_report")
 
 
 
@@ -656,12 +656,14 @@ def run_enrichment() -> str:
     store = _store()
     store.bootstrap()
     run_id = store.start_run("enrichment")
+    cfg = load_config_bundle() or DEFAULT_CONFIG
+    channel = _search_report_channel(cfg)
     memory = store.get_memory()
     questions = detect_high_value_questions(memory)
     digest = format_enrichment_questions(questions)
     if digest != "[SILENT]":
-        notification_id = store.create_notification(run_id, "C0B42K4H4KV", "enrichment_questions", digest, delivery_status="pending")
-        delivery = _deliver_to_slack(digest, "C0B42K4H4KV")
+        notification_id = store.create_notification(run_id, channel, "enrichment_questions", digest, delivery_status="pending")
+        delivery = _deliver_to_slack(digest, channel)
         store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
     store.finish_run(run_id, status="ok", notes=f"questions={len(questions)}", metadata={"questions": questions})
     return digest
