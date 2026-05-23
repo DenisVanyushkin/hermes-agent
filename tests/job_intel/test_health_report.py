@@ -153,10 +153,10 @@ def test_health_report_summarizes_daily_pipeline_and_deltas(monkeypatch, tmp_pat
     assert "Top accepted opportunities" in report
     assert "Metric deltas vs previous daily run" in report
     assert "linkedin: source_status=blocked" in report
-    assert "head_roles" in report or "head_roles=" in report
+    assert "headhunter" in report
     assert "acquisition_quality_score=" in report
     assert "alerts_sent=1" in report
     assert "digests_sent=1" in report
     assert "delivery_failures=1" in report
-    assert captured["channel"] == "C0B42K4H4KV"
+    assert captured["channel"] == "C0B3ZV4BUKC"
     assert "Nightly Executive Intelligence Health Report" in captured["message"]

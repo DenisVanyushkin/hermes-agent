@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import imaplib
 import json
 import os
 import random
 import re
 import time
+from email import message_from_bytes
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -58,6 +60,10 @@ class BrowserSessionHealth:
     total_page_load_seconds: float = 0.0
     last_url: str = ""
     last_successful_authenticated_request: str | None = None
+    browser_profile: str = ""
+    auth_attempted: bool = False
+    email_challenge_attempted: bool = False
+    email_challenge_resolved: bool = False
     status: str = "healthy"
 
     def snapshot(self) -> dict[str, Any]:
@@ -238,6 +244,24 @@ def resolve_browser_config(source: str | None = None) -> BrowserAcquisitionConfi
         navigation_timeout_ms=navigation_timeout_ms,
         max_scrolls=max_scrolls,
     )
+
+
+def _browser_profile_is_populated(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    try:
+        return any(path.iterdir())
+    except OSError:
+        return False
+
+
+def _ensure_required_browser_profile(source: str, config: BrowserAcquisitionConfig) -> None:
+    if source not in {"linkedin", "headhunter", "hh"}:
+        return
+    if not _browser_profile_is_populated(config.user_data_dir):
+        raise BrowserNativeUnavailable(
+            f"{source} browser profile directory {config.user_data_dir} is missing or empty; refusing to fall back to a shared or blank profile."
+        )
 
 
 def browser_native_available() -> bool:
@@ -514,6 +538,7 @@ class BrowserSourceClient:
         self._playwright = None
         self._context = None
         self._health = BrowserSessionHealth(source="browser")
+        self._health.browser_profile = str(self.config.user_data_dir)
 
     def __enter__(self) -> "BrowserSourceClient":
         if not browser_native_available():
@@ -542,6 +567,189 @@ class BrowserSourceClient:
             self._playwright.stop()
         self._context = None
         self._playwright = None
+
+    def _page_contains_any(self, html: str, markers: tuple[str, ...]) -> bool:
+        lowered = html.lower()
+        return any(marker in lowered for marker in markers)
+
+    def _validate_authenticated_html(
+        self,
+        *,
+        source: str,
+        url: str,
+        html: str,
+        required_markers: tuple[str, ...],
+        login_markers: tuple[str, ...],
+    ) -> None:
+        if _looks_like_login_wall(url, html) or _looks_like_auth_redirect(url, html):
+            self._health.update(url=url, html=html, vacancies_found=0)
+            raise BrowserNativeUnavailable(f"{source} authentication validation landed on a login wall or redirect at {url}")
+        if not self._page_contains_any(html, required_markers):
+            if login_markers and self._page_contains_any(html, login_markers):
+                self._health.update(url=url, html=html, vacancies_found=0)
+                raise BrowserNativeUnavailable(f"{source} authentication validation found sign-in markers at {url}")
+            if source == "linkedin":
+                raise BrowserNativeUnavailable(f"{source} authenticated feed/profile markers were not visible at {url}")
+        self._health.last_successful_authenticated_request = url
+
+    @staticmethod
+    def _extract_message_text(message: Any) -> str:
+        parts: list[str] = []
+        if getattr(message, "is_multipart", lambda: False)():
+            for part in message.walk():
+                if part.get_content_maintype() != "text":
+                    continue
+                try:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        parts.append(payload.decode(part.get_content_charset() or "utf-8", errors="ignore"))
+                except Exception:
+                    continue
+        else:
+            try:
+                payload = message.get_payload(decode=True)
+                if payload:
+                    parts.append(payload.decode(message.get_content_charset() or "utf-8", errors="ignore"))
+            except Exception:
+                body = message.get_payload()
+                if isinstance(body, str):
+                    parts.append(body)
+        try:
+            subject = message.get("Subject") or ""
+        except Exception:
+            subject = ""
+        if subject:
+            parts.append(str(subject))
+        return "\n".join(parts)
+
+    def _read_headhunter_otp_from_gmail(self) -> str | None:
+        gmail_account = os.getenv("JOB_INTEL_GMAIL_ADDRESS", "").strip() or os.getenv("JOB_INTEL_GMAIL_USERNAME", "").strip()
+        gmail_password = os.getenv("JOB_INTEL_GMAIL_APP_PASSWORD", "").strip() or os.getenv("JOB_INTEL_GMAIL_PASSWORD", "").strip()
+        if not gmail_account or not gmail_password:
+            return None
+        host = os.getenv("JOB_INTEL_GMAIL_IMAP_HOST", "imap.gmail.com").strip()
+        port = int(os.getenv("JOB_INTEL_GMAIL_IMAP_PORT", "993"))
+        sender_hint = os.getenv("JOB_INTEL_HH_OTP_FROM", "hh.ru").strip() or "hh.ru"
+        subject_hint = os.getenv("JOB_INTEL_HH_OTP_SUBJECT_HINT", "code").strip() or "code"
+        try:
+            with imaplib.IMAP4_SSL(host, port) as client:
+                client.login(gmail_account, gmail_password)
+                client.select("INBOX")
+                status, data = client.search(None, f'(FROM "{sender_hint}" SUBJECT "{subject_hint}")')
+                if status != "OK":
+                    status, data = client.search(None, 'ALL')
+                ids = [item for item in (data[0].split() if data and data[0] else []) if item]
+                for message_id in reversed(ids[-10:]):
+                    fetch_status, payload = client.fetch(message_id, "(RFC822)")
+                    if fetch_status != "OK" or not payload or not payload[0]:
+                        continue
+                    raw_bytes = payload[0][1]
+                    if not raw_bytes:
+                        continue
+                    message = message_from_bytes(raw_bytes)
+                    body = self._extract_message_text(message)
+                    match = re.search(r"\b(\d{4,8})\b", body)
+                    if match:
+                        return match.group(1)
+        except Exception:
+            return None
+        return None
+
+    def _attempt_headhunter_otp_recovery(self, login_url: str) -> bool:
+        if self._context is None:
+            raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
+        self._health.email_challenge_attempted = True
+        page = self._context.new_page()
+        try:
+            page.goto(login_url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+            page.wait_for_timeout(self.config.scroll_pause_ms)
+            login_email = os.getenv("JOB_INTEL_HH_LOGIN_EMAIL", "").strip() or os.getenv("JOB_INTEL_GMAIL_ADDRESS", "").strip()
+            if login_email:
+                for selector in (
+                    "input[type='email']",
+                    "input[name*='email']",
+                    "input[name='login']",
+                    "input[name*='login']",
+                ):
+                    locator = page.locator(selector)
+                    if locator.count():
+                        locator.first.fill(login_email)
+                        break
+            otp_code = self._read_headhunter_otp_from_gmail()
+            if not otp_code:
+                return False
+            for selector in (
+                "input[name*='code']",
+                "input[name*='otp']",
+                "input[type='tel']",
+                "input[inputmode='numeric']",
+                "input[autocomplete='one-time-code']",
+            ):
+                locator = page.locator(selector)
+                if locator.count():
+                    locator.first.fill(otp_code)
+                    break
+            for selector in (
+                "button:has-text('Verify')",
+                "button:has-text('Continue')",
+                "button:has-text('Submit')",
+                "button:has-text('Sign in')",
+                "button[type='submit']",
+            ):
+                locator = page.locator(selector)
+                if locator.count():
+                    locator.first.click()
+                    break
+            else:
+                page.keyboard.press("Enter")
+            page.wait_for_timeout(self.config.scroll_pause_ms)
+            self._health.email_challenge_resolved = True
+            return True
+        except Exception:
+            return False
+        finally:
+            page.close()
+
+    def _validate_linkedin_auth(self) -> None:
+        url = "https://www.linkedin.com/feed/"
+        self._health.auth_attempted = True
+        html = self.fetch_html(url, scrolls=0)
+        self._validate_authenticated_html(
+            source="linkedin",
+            url=url,
+            html=html,
+            required_markers=(
+                "global-nav__me",
+                "feed-identity-module",
+                "nav-item__profile-member-photo",
+                "profile-photo",
+                "my network",
+                "feed",
+            ),
+            login_markers=("sign in", "log in", "join linkedin", "create a new account"),
+        )
+
+    def _validate_headhunter_auth(self) -> None:
+        url = "https://hh.ru/"
+        self._health.auth_attempted = True
+        html = self.fetch_html(url, scrolls=0)
+        if _looks_like_login_wall(url, html) or _looks_like_auth_redirect(url, html):
+            if self._attempt_headhunter_otp_recovery("https://hh.ru/account/login?backurl=https%3A%2F%2Fhh.ru%2Fsearch%2Fvacancy"):
+                html = self.fetch_html(url, scrolls=0)
+        self._validate_authenticated_html(
+            source="headhunter",
+            url=url,
+            html=html,
+            required_markers=(
+                "profile",
+                "avatar",
+                "logout",
+                "vacancy search",
+                "search",
+                "resume",
+            ),
+            login_markers=("sign in", "log in", "authorize", "verification code", "otp", "captcha"),
+        )
 
     def session_health_snapshot(self) -> dict[str, Any]:
         return self._health.snapshot()
@@ -613,6 +821,21 @@ class BrowserSourceClient:
         self._observe_page(detail_url, detail_html, len(detail_vacancies), detail_page=True)
         return detail_vacancies
 
+    def _maybe_open_detail_vacancy(self, *, source: str, vacancies: list[Vacancy]) -> list[Vacancy]:
+        if not vacancies or random.random() > max(0.25, self.config.noise_probability):
+            return []
+        candidate = next((vacancy for vacancy in vacancies if vacancy.url), None)
+        if candidate is None:
+            return []
+        detail_url = candidate.url
+        detail_html = self.fetch_html(detail_url, scrolls=0)
+        detail_vacancies = {
+            "linkedin": extract_linkedin_vacancies_from_html,
+            "headhunter": extract_headhunter_vacancies_from_html,
+        }.get(source, extract_company_career_vacancies_from_html)(detail_html, page_url=detail_url)
+        self._observe_page(detail_url, detail_html, len(detail_vacancies), detail_page=True)
+        return detail_vacancies
+
     def _linkedin_page_plan(self, max_pages: int) -> list[int]:
         allowed_pages = max(1, min(max_pages, self.config.max_linkedin_pages))
         plan = [0]
@@ -635,12 +858,14 @@ class BrowserSourceClient:
         url = f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(query)}"
         vacancies: list[Vacancy] = []
         self._health.source = "linkedin"
+        self._validate_linkedin_auth()
         for page_index in self._linkedin_page_plan(max_pages):
             page_url = f"{url}&start={page_index * 25}" if page_index else url
             html = self.fetch_html(page_url)
             page_vacancies = extract_linkedin_vacancies_from_html(html, page_url=page_url)
             self._observe_page(page_url, html, len(page_vacancies))
             vacancies.extend(page_vacancies)
+            vacancies.extend(self._maybe_open_detail_vacancy(source="linkedin", vacancies=page_vacancies))
             if self._health.login_walls or self._health.auth_redirects:
                 break
             vacancies.extend(self._maybe_open_noise_page(page_url=page_url, html=html, source="linkedin"))
@@ -650,12 +875,14 @@ class BrowserSourceClient:
         url = f"https://hh.ru/search/vacancy?text={quote_plus(query)}"
         vacancies: list[Vacancy] = []
         self._health.source = "headhunter"
+        self._validate_headhunter_auth()
         for page_index in self._headhunter_page_plan(max_pages):
             page_url = f"{url}&page={page_index}" if page_index else url
             html = self.fetch_html(page_url)
             page_vacancies = extract_headhunter_vacancies_from_html(html, page_url=page_url)
             self._observe_page(page_url, html, len(page_vacancies))
             vacancies.extend(page_vacancies)
+            vacancies.extend(self._maybe_open_detail_vacancy(source="headhunter", vacancies=page_vacancies))
             if self._health.login_walls or self._health.auth_redirects:
                 break
         return _dedupe_vacancies(vacancies)
@@ -679,6 +906,8 @@ def metrics_from_counts(
     extraction_attempts: int,
     anti_bot_failures: int = 0,
     normalization_quality: float = 1.0,
+    detail_pages_opened: int = 0,
+    target_company_hits: int = 0,
 ) -> AcquisitionMetrics:
     executive_fit_ratio = (executive_matches / found) if found else 0.0
     accepted_rejected_ratio = (accepted / rejected) if rejected else float(accepted) if accepted else 0.0
@@ -689,20 +918,27 @@ def metrics_from_counts(
     normalization_quality = max(0.0, min(1.0, normalization_quality))
     anti_bot_resilience = max(0.0, 1.0 - anti_bot_failure_rate)
     acceptance_rate = accepted / (accepted + rejected) if (accepted + rejected) else 0.0
+    signal_noise_quality = max(0.0, min(1.0, signal_noise_ratio))
+    behavioral_browsing_quality = min(1.0, detail_pages_opened / max(extraction_attempts, 1))
+    target_company_signal = min(1.0, target_company_hits / max(found, 1)) if found else 0.0
+    auth_session_health = max(0.0, min(1.0, (anti_bot_resilience * 0.7) + (extraction_success_rate * 0.3)))
     acquisition_quality_score = round(
-        (executive_density * 0.25)
-        + (acceptance_rate * 0.20)
-        + (extraction_success_rate * 0.25)
-        + (anti_bot_resilience * 0.20)
-        + (normalization_quality * 0.10),
+        (executive_density * 0.28)
+        + (acceptance_rate * 0.16)
+        + (signal_noise_quality * 0.10)
+        + (auth_session_health * 0.22)
+        + (behavioral_browsing_quality * 0.08)
+        + (target_company_signal * 0.10)
+        + (extraction_success_rate * 0.03)
+        + (normalization_quality * 0.03),
         4,
     )
-    source_reliability = round(max(0.0, extraction_success_rate * anti_bot_resilience * (0.5 + executive_fit_ratio / 2.0)), 4)
+    source_reliability = round(max(0.0, extraction_success_rate * anti_bot_resilience * (0.45 + executive_fit_ratio / 2.0 + target_company_signal / 4.0)), 4)
     if found <= 0 and extraction_attempts > 0 and anti_bot_failures >= extraction_attempts / 2:
         status = "blocked"
-    elif acquisition_quality_score >= 0.7 and extraction_success_rate >= 0.8:
+    elif acquisition_quality_score >= 0.68 and extraction_success_rate >= 0.75 and anti_bot_resilience >= 0.75 and behavioral_browsing_quality >= 0.15:
         status = "operational"
-    elif extraction_success_rate >= 0.4 or executive_fit_ratio >= 0.25 or acquisition_quality_score >= 0.45:
+    elif extraction_success_rate >= 0.35 or executive_fit_ratio >= 0.2 or acquisition_quality_score >= 0.4 or anti_bot_resilience < 0.75:
         status = "degraded"
     else:
         status = "low-signal"

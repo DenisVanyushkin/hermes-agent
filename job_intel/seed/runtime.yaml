@@ -7,3 +7,5 @@ runtime:
     channel: "C0B42K4H4KV"
     alerts_channel: "C0B42K4H4KV"
     batch_size: 5
+    market_channel: "C0B42K4H4KV"
+    search_report_channel: "C0B3ZV4BUKC"
