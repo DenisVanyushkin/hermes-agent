@@ -377,6 +377,128 @@ def _finalize_notifications(store: JobIntelStore, notification_ids: list[int], d
 
 
 
+def _normalize_source_notification_key(source: str) -> str:
+    return "target_companies" if source == "target-company" else source
+
+
+
+def _source_search_notification_payload(
+    source: str,
+    source_status: dict[str, Any],
+    *,
+    stats: dict[str, int],
+    accepted_rows: list[tuple[Vacancy, Any, int]],
+) -> dict[str, Any]:
+    ranked_rows = sorted(accepted_rows, key=lambda item: item[1].score, reverse=True)
+    top_matches = [
+        {
+            "vacancy_id": vacancy_id,
+            "company": vacancy.company,
+            "title": vacancy.title,
+            "location": vacancy.location,
+            "score": evaluation.score,
+            "tier": evaluation.tier,
+            "recommendation": evaluation.recommendation,
+        }
+        for vacancy, evaluation, vacancy_id in ranked_rows[:3]
+    ]
+    return {
+        "source": source,
+        "status": source_status.get("status", "unknown"),
+        "hits": int(source_status.get("hits") or 0),
+        "errors": list(source_status.get("errors") or []),
+        "acquisition": source_status.get("acquisition"),
+        "found": stats.get("found", 0),
+        "executive_matches": stats.get("executive_matches", 0),
+        "accepted": stats.get("accepted", 0),
+        "rejected": stats.get("rejected", 0),
+        "top_matches": top_matches,
+    }
+
+
+
+def _format_source_search_notification(
+    source: str,
+    source_status: dict[str, Any],
+    *,
+    stats: dict[str, int],
+    accepted_rows: list[tuple[Vacancy, Any, int]],
+    channel: str,
+) -> str:
+    lines = [f"*Search source update* — {source}", ""]
+    lines.append(f"Channel: {channel}")
+    lines.append(f"Status: {source_status.get('status', 'unknown')}")
+    acquisition = source_status.get("acquisition")
+    if acquisition:
+        lines.append(f"Acquisition: {acquisition}")
+    if source_status.get("hits") is not None:
+        lines.append(f"Hits: {int(source_status.get('hits') or 0)}")
+    lines.append(
+        "Found: "
+        f"{stats.get('found', 0)} | accepted: {stats.get('accepted', 0)} | rejected: {stats.get('rejected', 0)} | executive_matches: {stats.get('executive_matches', 0)}"
+    )
+    if source_status.get("errors"):
+        lines.append(f"Errors: {', '.join(str(error) for error in source_status['errors'])}")
+    session = source_status.get("session_health") or {}
+    if session:
+        browser_profile = session.get("browser_profile") or "n/a"
+        lines.append(
+            f"Session: profile={browser_profile} | pages_fetched={session.get('pages_fetched', 0)} | login_walls={session.get('login_walls', 0)} | auth_redirects={session.get('auth_redirects', 0)}"
+        )
+    lines.append("")
+    if accepted_rows:
+        lines.append("*Top accepted matches*")
+        ranked_rows = sorted(accepted_rows, key=lambda item: item[1].score, reverse=True)
+        for idx, (vacancy, evaluation, vacancy_id) in enumerate(ranked_rows[:3], start=1):
+            lines.append(
+                f"{idx}. {vacancy.company} — {vacancy.title} | {vacancy.location} | score={evaluation.score} | tier={evaluation.tier} | vacancy_id={vacancy_id}"
+            )
+    else:
+        lines.append("Top accepted matches: none")
+    return "\n".join(lines).rstrip()
+
+
+
+def _deliver_source_notifications(
+    store: JobIntelStore,
+    run_id: int,
+    channel: str,
+    source_statuses: dict[str, dict[str, Any]],
+    source_counts: dict[str, dict[str, int]],
+    accepted_by_source: dict[str, list[tuple[Vacancy, Any, int]]],
+) -> list[dict[str, Any]]:
+    deliveries: list[dict[str, Any]] = []
+    for source in sorted(source_statuses):
+        source_status = source_statuses[source]
+        stats = source_counts.get(source, {"found": 0, "executive_matches": 0, "accepted": 0, "rejected": 0})
+        accepted_rows = accepted_by_source.get(source, [])
+        body = _format_source_search_notification(
+            source,
+            source_status,
+            stats=stats,
+            accepted_rows=accepted_rows,
+            channel=channel,
+        )
+        notification_id = store.create_notification(
+            run_id,
+            channel,
+            "source_search",
+            body,
+            payload=_source_search_notification_payload(source, source_status, stats=stats, accepted_rows=accepted_rows),
+            delivery_status="pending",
+        )
+        delivery = _deliver_to_slack(body, channel)
+        store.mark_notification_delivery(
+            notification_id,
+            "sent" if delivery.success else "failed",
+            attempts=delivery.attempts,
+            delivery_error=delivery.error,
+        )
+        deliveries.append({"source": source, "notification_id": notification_id, "delivery": delivery.__dict__})
+    return deliveries
+
+
+
 def _vacancy_evaluation_from_row(row: dict[str, Any]) -> tuple[Vacancy, Evaluation, int]:
     vacancy = Vacancy(
         source=str(row.get("source") or ""),
@@ -423,9 +545,11 @@ def run_daily() -> str:
     canonical_rows: list[Vacancy] = []
     seen_keys: set[str] = set()
     source_counts: dict[str, dict[str, int]] = {}
+    accepted_by_source: dict[str, list[tuple[Vacancy, Any, int]]] = {}
 
     def _count_source(vacancy: Vacancy, evaluation: Any) -> None:
-        stats = source_counts.setdefault(vacancy.source, {"found": 0, "executive_matches": 0, "accepted": 0, "rejected": 0})
+        source_key = _normalize_source_notification_key(vacancy.source)
+        stats = source_counts.setdefault(source_key, {"found": 0, "executive_matches": 0, "accepted": 0, "rejected": 0})
         stats["found"] += 1
         if evaluation.tier in {"exceptional_fit", "strong_fit"}:
             stats["executive_matches"] += 1
@@ -459,6 +583,7 @@ def run_daily() -> str:
 
         if _should_notify_vacancy(store, vacancy_id, vacancy, evaluation, repost_window_days):
             accepted.append((vacancy, evaluation, vacancy_id))
+            accepted_by_source.setdefault(_normalize_source_notification_key(vacancy.source), []).append((vacancy, evaluation, vacancy_id))
         else:
             store.set_vacancy_status(vacancy_id, "notified")
 
@@ -500,6 +625,14 @@ def run_daily() -> str:
         existing["metrics"] = metrics.__dict__
         source_statuses[source] = existing
 
+    source_notifications = _deliver_source_notifications(
+        store,
+        run_id,
+        search_channel,
+        source_statuses,
+        source_counts,
+        accepted_by_source,
+    )
     notification_ids = _prepare_notifications(store, run_id, search_channel, "daily_digest", digest_items)
     delivery = _deliver_to_slack(digest, search_channel)
     _finalize_notifications(store, notification_ids, delivery)
@@ -514,7 +647,7 @@ def run_daily() -> str:
     strategy_count = len(strategic.predictions)
 
     run_notes = f"found={len(vacancies)} accepted={len(accepted)} source_failures={sum(1 for s in source_statuses.values() if s.get('status') not in {'ok', 'empty'})} strategic_predictions={strategy_count}"
-    store.finish_run(run_id, status="ok", notes=run_notes, metadata={"source_statuses": source_statuses, "delivery": delivery.__dict__, "strategic_predictions": strategy_count})
+    store.finish_run(run_id, status="ok", notes=run_notes, metadata={"source_statuses": source_statuses, "delivery": delivery.__dict__, "strategic_predictions": strategy_count, "source_notifications": source_notifications})
     return digest
 
 
