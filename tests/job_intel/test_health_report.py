@@ -124,9 +124,9 @@ def test_health_report_summarizes_daily_pipeline_and_deltas(monkeypatch, tmp_pat
     store.upsert_vacancy(target_good, key4)
     store.save_evaluation(key4, _evaluation(88, "strong_fit", "strong_fit"), run_id=current_run)
 
-    store.create_notification(current_run, "C0B42K4H4KV", "daily_digest", "daily digest body", delivery_status="sent")
-    store.create_notification(current_run, "C0B42K4H4KV", "alert", "alert body", delivery_status="sent")
-    failed_id = store.create_notification(current_run, "C0B42K4H4KV", "alert", "failed alert body", delivery_status="pending")
+    store.create_notification(current_run, "executive_search_report", "daily_digest", "daily digest body", delivery_status="sent")
+    store.create_notification(current_run, "executive_search_report", "alert", "alert body", delivery_status="sent")
+    failed_id = store.create_notification(current_run, "executive_search_report", "alert", "failed alert body", delivery_status="pending")
     store.mark_notification_delivery(failed_id, "failed", attempts=2, delivery_error="boom")
     store.finish_run(current_run, status="ok", notes="current cycle")
 
@@ -158,5 +158,5 @@ def test_health_report_summarizes_daily_pipeline_and_deltas(monkeypatch, tmp_pat
     assert "alerts_sent=1" in report
     assert "digests_sent=1" in report
     assert "delivery_failures=1" in report
-    assert captured["channel"] == "C0B3ZV4BUKC"
+    assert captured["channel"] == "executive_search_report"
     assert "Nightly Executive Intelligence Health Report" in captured["message"]
