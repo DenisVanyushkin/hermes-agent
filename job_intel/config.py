@@ -90,11 +90,11 @@ DEFAULT_CONFIG = {
     "runtime": {
         "scheduler": {"search_frequency": "0 9 * * *", "timezone": "Asia/Almaty", "enrichment_review_days": 14, "market_report_frequency": "0 11 * * 1"},
         "slack": {
-            "channel": "C0B42K4H4KV",
-            "alerts_channel": "C0B42K4H4KV",
+            "channel": "executive_search_report",
+            "alerts_channel": "executive_search_report",
             "batch_size": 5,
-            "market_channel": "C0B42K4H4KV",
-            "search_report_channel": "C0B3ZV4BUKC",
+            "market_channel": "executive_search_report",
+            "search_report_channel": "executive_search_report",
         },
     },
     "target_companies": {},
