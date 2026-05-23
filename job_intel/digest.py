@@ -23,8 +23,9 @@ def format_daily_digest(
     *,
     title: str = "Daily executive job digest",
     operator_footer: str | None = None,
+    technical_footer: str | None = None,
 ) -> str:
-    if not items and not operator_footer:
+    if not items and not operator_footer and not technical_footer:
         return "[SILENT]"
     lines = [f"*{title}*", f"Matches: {len(items)}", ""]
     for idx, (vacancy, evaluation) in enumerate(items, 1):
@@ -33,6 +34,10 @@ def format_daily_digest(
     if operator_footer:
         lines.append("—")
         lines.append(operator_footer)
+    if technical_footer:
+        if operator_footer:
+            lines.append("")
+        lines.append(technical_footer)
     return "\n".join(lines).rstrip()
 
 

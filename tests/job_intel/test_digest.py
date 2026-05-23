@@ -6,6 +6,14 @@ def test_daily_digest_returns_silent_when_empty() -> None:
     assert format_daily_digest([]) == "[SILENT]"
 
 
+def test_daily_digest_includes_technical_footer_even_without_matches() -> None:
+    digest = format_daily_digest([], technical_footer="*Technical search report*\n- linkedin: ok")
+
+    assert digest != "[SILENT]"
+    assert "Technical search report" in digest
+    assert "linkedin: ok" in digest
+
+
 def test_daily_digest_includes_key_fields() -> None:
     vacancy = Vacancy(
         source="headhunter",
