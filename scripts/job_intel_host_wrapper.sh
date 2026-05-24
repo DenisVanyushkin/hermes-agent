@@ -3,6 +3,10 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 env_file="${JOB_INTEL_ENV_FILE:-/etc/job-intel/job-intel.env}"
+: "${JOB_INTEL_SERVICE_USER:=pn}"
+export JOB_INTEL_SERVICE_USER
+source "$script_dir/job_intel_service_user.sh"
+job_intel_require_service_user
 
 fail() {
   printf 'job-intel-host-wrapper: %s\n' "$*" >&2
