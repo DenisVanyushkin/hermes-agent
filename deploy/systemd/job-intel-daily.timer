@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule job-intel daily
+
+[Timer]
+OnCalendar=*-*-* 09,17:00/5
+Persistent=true
+Unit=job-intel-daily.service
+
+[Install]
+WantedBy=timers.target

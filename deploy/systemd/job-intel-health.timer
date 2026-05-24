@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule job-intel health
+
+[Timer]
+OnCalendar=*-*-* 02:15
+Persistent=true
+Unit=job-intel-health.service
+
+[Install]
+WantedBy=timers.target

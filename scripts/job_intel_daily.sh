@@ -6,12 +6,17 @@ source "$script_dir/job_intel_service_user.sh"
 job_intel_require_service_user
 
 resolve_workdir() {
+  local repo_root
   local candidates=(
     "${JOB_INTEL_WORKDIR:-}"
-    "/home/hermes/.hermes/hermes-agent"
-    "/workspace/live-hermes"
     "$PWD"
   )
+  if repo_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"; then
+    [[ -n "$repo_root" ]] && candidates+=("$repo_root")
+  fi
+  if [[ -d "$script_dir/../job_intel" ]]; then
+    candidates+=("$(cd -- "$script_dir/.." && pwd)")
+  fi
   local candidate
   for candidate in "${candidates[@]}"; do
     [[ -n "${candidate:-}" ]] || continue
@@ -94,7 +99,7 @@ resolve_python() {
 }
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-: "${JOB_INTEL_SERVICE_USER:=pn}"
+: "${JOB_INTEL_SERVICE_USER:=hermes}"
 export JOB_INTEL_SERVICE_USER
 source "$script_dir/job_intel_service_user.sh"
 job_intel_require_service_user
@@ -120,6 +125,7 @@ export JOB_INTEL_ENVIRONMENT="${JOB_INTEL_ENVIRONMENT:-production}"
 export JOB_INTEL_SCRIPTS_DIR="${JOB_INTEL_SCRIPTS_DIR:-$script_dir}"
 export JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN="${JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN:-$browser_base_dir/profiles/linkedin}"
 export JOB_INTEL_BROWSER_PROFILE_DIR_HH="${JOB_INTEL_BROWSER_PROFILE_DIR_HH:-$browser_base_dir/profiles/hh}"
+export JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER="${JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER:-$browser_base_dir/profiles/company-career}"
 export JOB_INTEL_TARGET_COMPANY_BROWSER="${JOB_INTEL_TARGET_COMPANY_BROWSER:-0}"
 export JOB_INTEL_TARGET_HTTP_TIMEOUT_SECONDS="${JOB_INTEL_TARGET_HTTP_TIMEOUT_SECONDS:-8}"
 
