@@ -20,6 +20,7 @@ This deployment moves job-intel acquisition out of the Hermes cron sandbox and i
 
 Every job-intel command must fail loudly unless:
 
+- `JOB_INTEL_SERVICE_USER` is set and matches the current service account
 - `JOB_INTEL_WORKDIR` exists and points at the canonical checkout
 - `JOB_INTEL_DB_PATH` is writable
 - `JOB_INTEL_STATE_DIR` is writable
@@ -28,6 +29,8 @@ Every job-intel command must fail loudly unless:
 - the runtime git HEAD matches `JOB_INTEL_EXPECTED_GIT_COMMIT`
 
 The company-career browser profile is tracked in runtime provenance for observability, but it is not a hard deployment prerequisite because company-page acquisition falls back to plain HTTP when browser-native browsing is unavailable.
+
+Each timer or wrapper must run under the configured service user (default: `pn`) and export that value explicitly so the runtime provenance can detect user mismatches.
 
 ## Scheduler
 

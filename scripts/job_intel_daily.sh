@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/job_intel_service_user.sh"
+job_intel_require_service_user
+
 resolve_workdir() {
   local candidates=(
     "${JOB_INTEL_WORKDIR:-}"
@@ -90,6 +94,10 @@ resolve_python() {
 }
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+: "${JOB_INTEL_SERVICE_USER:=pn}"
+export JOB_INTEL_SERVICE_USER
+source "$script_dir/job_intel_service_user.sh"
+job_intel_require_service_user
 : > "$script_dir/job_intel_daily.last.err"
 exec 2> >(tee -a "$script_dir/job_intel_daily.last.err" >&2)
 trap 'ec=$?; if (( ec != 0 )); then echo "job_intel_daily failed: exit=$ec line=$LINENO user=$(id -un 2>/dev/null || true) pwd=$(pwd) workdir=${workdir:-unset} helper=${helper:-unset} python=${python_bin:-unset}" >&2; fi' EXIT

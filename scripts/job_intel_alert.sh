@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+: "${JOB_INTEL_SERVICE_USER:=pn}"
+export JOB_INTEL_SERVICE_USER
+source "$script_dir/job_intel_service_user.sh"
+job_intel_require_service_user
+
 resolve_workdir() {
   local candidates=(
     "${JOB_INTEL_WORKDIR:-}"

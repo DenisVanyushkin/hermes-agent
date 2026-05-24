@@ -4,6 +4,7 @@ import getpass
 import importlib.util
 import json
 import os
+import pwd
 import socket
 import subprocess
 import sys
@@ -50,6 +51,10 @@ class RuntimePaths:
 
 def runtime_user() -> str:
     return os.getenv("JOB_INTEL_RUNTIME_USER") or getpass.getuser()
+
+
+def resolve_service_user() -> str:
+    return os.getenv("JOB_INTEL_SERVICE_USER") or runtime_user()
 
 
 def runtime_home() -> Path:
@@ -226,6 +231,7 @@ def build_runtime_contract() -> dict[str, Any]:
     state_dir = resolve_state_dir()
     db_path = resolve_db_path()
     browser_profile_dir = resolve_browser_profile_base()
+    service_user = resolve_service_user()
     browser_profile_paths = _browser_profile_paths()
     required_browser_profile_names = ("linkedin", "headhunter", "hh")
     required_browser_profile_paths = {
@@ -254,6 +260,8 @@ def build_runtime_contract() -> dict[str, Any]:
         "state_dir": str(state_dir),
         "db_path": str(db_path),
         "browser_profile_dir": str(browser_profile_dir),
+        "service_user": service_user,
+        "runtime_user": runtime_user(),
         "browser_profile_paths": browser_profile_paths,
         "required_browser_profile_paths": required_browser_profile_paths,
         "optional_browser_profile_paths": optional_browser_profile_paths,
@@ -267,6 +275,22 @@ def build_runtime_contract() -> dict[str, Any]:
         "db_parent_flags": file_access_flags(db_path.parent),
     }
     issues: list[str] = []
+    if not os.getenv("JOB_INTEL_SERVICE_USER", "").strip():
+        issues.append("JOB_INTEL_SERVICE_USER is not set")
+    try:
+        service_user_record = pwd.getpwnam(service_user)
+    except KeyError:
+        service_user_record = None
+        issues.append(f"service user missing: {service_user}")
+    else:
+        contract["service_user_home"] = service_user_record.pw_dir
+        contract["service_user_uid"] = service_user_record.pw_uid
+        contract["service_user_gid"] = service_user_record.pw_gid
+        if service_user_record.pw_dir and not _safe_exists(Path(service_user_record.pw_dir)):
+            issues.append(f"service user home missing: {service_user_record.pw_dir}")
+    current_user = runtime_user()
+    if service_user and current_user != service_user:
+        issues.append(f"runtime user mismatch: expected service user {service_user}, got {current_user}")
     if not _safe_exists(workdir):
         issues.append(f"workdir missing: {workdir}")
     if _safe_exists(workdir) and not workdir.is_dir():
@@ -355,6 +379,7 @@ def capture_runtime_provenance(
         "runtime_mirror_paths": _runtime_mirror_paths(),
         "runtime_home": str(runtime_home()),
         "runtime_user_env": os.getenv("JOB_INTEL_RUNTIME_USER", ""),
+        "service_user_env": os.getenv("JOB_INTEL_SERVICE_USER", ""),
         "runtime_contract": contract,
     }
     return provenance
