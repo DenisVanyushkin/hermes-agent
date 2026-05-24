@@ -258,7 +258,7 @@ def _browser_profile_is_populated(path: Path) -> bool:
 
 
 def _ensure_required_browser_profile(source: str, config: BrowserAcquisitionConfig) -> None:
-    if source not in {"linkedin", "headhunter", "hh"}:
+    if source not in {"linkedin", "headhunter", "hh", "company_career"}:
         return
     if not _browser_profile_is_populated(config.user_data_dir):
         raise BrowserNativeUnavailable(
@@ -548,7 +548,7 @@ class BrowserSourceClient:
         from playwright.sync_api import sync_playwright  # type: ignore
 
         profile_name = self.config.source_name.strip().lower().replace("-", "_")
-        if profile_name in {"linkedin", "headhunter", "hh"}:
+        if profile_name in {"linkedin", "headhunter", "hh", "company_career"}:
             _ensure_required_browser_profile(profile_name, self.config)
 
         self.config.user_data_dir.mkdir(parents=True, exist_ok=True)

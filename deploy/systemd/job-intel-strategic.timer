@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule job-intel strategic
+
+[Timer]
+OnCalendar=Sun 11:30
+Persistent=true
+Unit=job-intel-strategic.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule job-intel enrichment
+
+[Timer]
+OnCalendar=*-*-* 03:20
+Persistent=true
+Unit=job-intel-enrichment.service
+
+[Install]
+WantedBy=timers.target

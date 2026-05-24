@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from pathlib import Path
 
 from job_intel import runtime
 
 
 def test_capture_runtime_provenance_includes_expected_topology(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("JOB_INTEL_RUNTIME_USER", "pn")
-    monkeypatch.setenv("JOB_INTEL_SERVICE_USER", "pn")
+    monkeypatch.setenv("JOB_INTEL_RUNTIME_USER", "hermes")
+    monkeypatch.delenv("JOB_INTEL_SERVICE_USER", raising=False)
     monkeypatch.setenv("JOB_INTEL_WORKDIR", "/workspace/live-hermes")
     monkeypatch.setenv("JOB_INTEL_DB_PATH", str(tmp_path / "state" / "job_intel.sqlite3"))
     monkeypatch.setenv("JOB_INTEL_STATE_DIR", str(tmp_path / "state"))
@@ -23,15 +22,15 @@ def test_capture_runtime_provenance_includes_expected_topology(monkeypatch, tmp_
     (tmp_path / "profiles" / "linkedin").mkdir(parents=True)
     (tmp_path / "profiles" / "hh").mkdir(parents=True)
     monkeypatch.setattr(runtime.pwd, "getpwnam", lambda name: SimpleNamespace(pw_dir=str(tmp_path / "home" / name), pw_uid=1000, pw_gid=1000))
-    (tmp_path / "home" / "pn").mkdir(parents=True)
+    (tmp_path / "home" / "hermes").mkdir(parents=True)
     monkeypatch.setattr(runtime.socket, "gethostname", lambda: "host-1")
     monkeypatch.setattr(runtime, "_git_commit_hash", lambda *args: "abc123")
     monkeypatch.setattr(runtime, "_module_origin", lambda name: f"/workspace/live-hermes/{name.replace('.', '/')}.py" if name in {"job_intel.runtime", "job_intel.store", "job_intel.browser_sourcing", "job_intel.cli", "requests"} else None)
 
     provenance = runtime.capture_runtime_provenance()
 
-    assert provenance["whoami"] == "pn"
-    assert provenance["service_user_env"] == "pn"
+    assert provenance["whoami"] == "hermes"
+    assert provenance["service_user_env"] == ""
     assert provenance["hostname"] == "host-1"
     assert provenance["pwd"] == str(tmp_path)
     assert provenance["effective_workdir"] == "/workspace/live-hermes"
@@ -48,9 +47,9 @@ def test_capture_runtime_provenance_includes_expected_topology(monkeypatch, tmp_
     assert provenance["runtime_contract"]["optional_browser_profile_paths"] == {
         "company_career": str(tmp_path / "profiles"),
     }
-    assert provenance["runtime_contract"]["service_user"] == "pn"
-    assert provenance["runtime_contract"]["runtime_user"] == "pn"
-    assert provenance["runtime_contract"]["service_user_home"] == str(tmp_path / "home" / "pn")
+    assert provenance["runtime_contract"]["service_user"] == "hermes"
+    assert provenance["runtime_contract"]["runtime_user"] == "hermes"
+    assert provenance["runtime_contract"]["service_user_home"] == str(tmp_path / "home" / "hermes")
     assert provenance["env_overrides"]["JOB_INTEL_CUSTOM"] == "visible-value"
     assert provenance["env_overrides"]["JOB_INTEL_API_TOKEN"] == "[REDACTED]"
     assert provenance["git_commit_hash"] == "abc123"
@@ -62,10 +61,10 @@ def test_capture_runtime_provenance_includes_expected_topology(monkeypatch, tmp_
     assert provenance["runtime_contract"]["issues"] == []
 
 
-def test_build_runtime_contract_requires_explicit_service_user(monkeypatch, tmp_path) -> None:
+def test_build_runtime_contract_defaults_service_user_to_hermes(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("JOB_INTEL_SERVICE_USER", raising=False)
-    monkeypatch.setenv("JOB_INTEL_RUNTIME_USER", "pn")
+    monkeypatch.setenv("JOB_INTEL_RUNTIME_USER", "hermes")
     monkeypatch.setenv("JOB_INTEL_WORKDIR", "/workspace/live-hermes")
     monkeypatch.setenv("JOB_INTEL_DB_PATH", str(tmp_path / "state" / "job_intel.sqlite3"))
     monkeypatch.setenv("JOB_INTEL_STATE_DIR", str(tmp_path / "state"))
@@ -77,11 +76,11 @@ def test_build_runtime_contract_requires_explicit_service_user(monkeypatch, tmp_
     (tmp_path / "profiles" / "linkedin").mkdir(parents=True)
     (tmp_path / "profiles" / "hh").mkdir(parents=True)
     monkeypatch.setattr(runtime.pwd, "getpwnam", lambda name: SimpleNamespace(pw_dir=str(tmp_path / "home" / name), pw_uid=1000, pw_gid=1000))
-    (tmp_path / "home" / "pn").mkdir(parents=True)
+    (tmp_path / "home" / "hermes").mkdir(parents=True)
     monkeypatch.setattr(runtime, "_git_commit_hash", lambda *args: "abc123")
     monkeypatch.setattr(runtime, "_module_origin", lambda name: f"/workspace/live-hermes/{name.replace('.', '/')}.py" if name in {"job_intel.runtime", "job_intel.store", "job_intel.browser_sourcing", "job_intel.cli", "requests"} else None)
 
     contract = runtime.build_runtime_contract()
 
-    assert contract["service_user"] == "pn"
-    assert "JOB_INTEL_SERVICE_USER is not set" in contract["issues"]
+    assert contract["service_user"] == "hermes"
+    assert contract["issues"] == []

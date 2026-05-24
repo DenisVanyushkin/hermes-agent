@@ -1,0 +1,24 @@
+[Unit]
+Description=Job-intel market timer worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__JOB_INTEL_SERVICE_USER__
+Group=__JOB_INTEL_SERVICE_GROUP__
+EnvironmentFile=__JOB_INTEL_ENV_FILE__
+Environment=JOB_INTEL_SERVICE_USER=__JOB_INTEL_SERVICE_USER__
+Environment=JOB_INTEL_SERVICE_GROUP=__JOB_INTEL_SERVICE_GROUP__
+Environment=JOB_INTEL_WORKDIR=__JOB_INTEL_REPO_ROOT__
+WorkingDirectory=__JOB_INTEL_REPO_ROOT__
+ExecStart=/usr/bin/env bash __JOB_INTEL_REPO_ROOT__/scripts/job_intel_host_wrapper.sh market
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/job-intel /var/log/job-intel /etc/job-intel /var/lib/browser-desktop
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
