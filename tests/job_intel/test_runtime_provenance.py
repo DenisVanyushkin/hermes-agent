@@ -35,6 +35,14 @@ def test_capture_runtime_provenance_includes_expected_topology(monkeypatch, tmp_
     assert provenance["browser_profile_dir"] == str(tmp_path / "profiles")
     assert provenance["browser_profile_paths"]["linkedin"] == str(tmp_path / "profiles" / "linkedin")
     assert provenance["browser_profile_paths"]["headhunter"] == str(tmp_path / "profiles" / "hh")
+    assert provenance["runtime_contract"]["required_browser_profile_paths"] == {
+        "linkedin": str(tmp_path / "profiles" / "linkedin"),
+        "headhunter": str(tmp_path / "profiles" / "hh"),
+        "hh": str(tmp_path / "profiles" / "hh"),
+    }
+    assert provenance["runtime_contract"]["optional_browser_profile_paths"] == {
+        "company_career": str(tmp_path / "profiles"),
+    }
     assert provenance["env_overrides"]["JOB_INTEL_CUSTOM"] == "visible-value"
     assert provenance["env_overrides"]["JOB_INTEL_API_TOKEN"] == "[REDACTED]"
     assert provenance["git_commit_hash"] == "abc123"

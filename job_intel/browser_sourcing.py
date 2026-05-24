@@ -30,6 +30,7 @@ _BROWSER_PROFILE_DEFAULTS: dict[str, Path] = {
 
 @dataclass(frozen=True)
 class BrowserAcquisitionConfig:
+    source_name: str = ""
     user_data_dir: Path = _BROWSER_PROFILE_DEFAULT
     headless: bool = True
     slow_mo_ms: int = 150
@@ -235,6 +236,7 @@ def resolve_browser_config(source: str | None = None) -> BrowserAcquisitionConfi
     navigation_timeout_ms = int(os.getenv("JOB_INTEL_BROWSER_NAV_TIMEOUT_MS", str(BrowserAcquisitionConfig().navigation_timeout_ms)))
     max_scrolls = int(os.getenv("JOB_INTEL_BROWSER_MAX_SCROLLS", str(BrowserAcquisitionConfig().max_scrolls)))
     return BrowserAcquisitionConfig(
+        source_name=source_key,
         user_data_dir=user_data_dir,
         headless=headless,
         slow_mo_ms=slow_mo_ms,
@@ -544,6 +546,10 @@ class BrowserSourceClient:
         if not browser_native_available():
             raise BrowserNativeUnavailable("Playwright is not installed. Install playwright to enable browser-native acquisition.")
         from playwright.sync_api import sync_playwright  # type: ignore
+
+        profile_name = self.config.source_name.strip().lower().replace("-", "_")
+        if profile_name in {"linkedin", "headhunter", "hh"}:
+            _ensure_required_browser_profile(profile_name, self.config)
 
         self.config.user_data_dir.mkdir(parents=True, exist_ok=True)
         try:
