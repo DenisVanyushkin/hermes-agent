@@ -42,6 +42,8 @@ The company-career browser profile is tracked in runtime provenance for observab
 
 Each timer or wrapper must run under the configured service user (default: `hermes`) and export that value explicitly so the runtime provenance can detect user mismatches. If `JOB_INTEL_SERVICE_USER` is set, the installer / wrapper must verify that both the user and its primary group exist before proceeding.
 
+Each timer or wrapper must run under the configured service user (default: `pn`) and export that value explicitly so the runtime provenance can detect user mismatches.
+
 ## Scheduler
 
 Hermes cron jobs are deprecated for job-intel acquisition.
