@@ -479,6 +479,7 @@ def finalize_turn(
         "response_transformed": _response_transformed,
         "response_previewed": getattr(agent, "_response_was_previewed", False),
         "model": agent.model,
+        "requested_model": getattr(agent, "_requested_model", None) or agent.model,
         "provider": agent.provider,
         "base_url": agent.base_url,
         "input_tokens": agent.session_input_tokens,
