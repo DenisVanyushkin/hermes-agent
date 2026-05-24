@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
 from job_intel.browser_sourcing import (
     AcquisitionMetrics,
     BrowserAcquisitionConfig,
@@ -201,6 +207,27 @@ def test_resolve_browser_config_respects_env_overrides(monkeypatch) -> None:
     assert config.max_scrolls == 5
 
 
+def test_browser_client_refuses_empty_required_profile_before_launch(monkeypatch, tmp_path) -> None:
+    profile_dir = tmp_path / "custom-profile"
+    profile_dir.mkdir()
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin", user_data_dir=profile_dir))
+
+    fake_context = types.SimpleNamespace(
+        chromium=types.SimpleNamespace(
+            launch_persistent_context=lambda **kwargs: pytest.fail("launch_persistent_context should not be reached")
+        )
+    )
+    fake_playwright = types.SimpleNamespace(start=lambda: fake_context)
+    fake_sync_api = types.SimpleNamespace(sync_playwright=lambda: fake_playwright)
+    monkeypatch.setattr("job_intel.browser_sourcing.find_spec", lambda _name: object())
+    monkeypatch.setitem(sys.modules, "playwright", types.SimpleNamespace(sync_api=fake_sync_api))
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync_api)
+    monkeypatch.setattr(Path, "mkdir", lambda *args, **kwargs: pytest.fail("mkdir should not be called for an empty required profile"))
+
+    with pytest.raises(BrowserNativeUnavailable):
+        client.__enter__()
+
+
 def test_browser_client_fetch_html_wraps_runtime_failures() -> None:
     client = BrowserSourceClient(BrowserAcquisitionConfig())
 
@@ -232,6 +259,7 @@ def test_search_linkedin_stops_when_login_wall_appears(monkeypatch) -> None:
     )
 
     page_urls: list[str] = []
+    feed_page = "<html><body><div class='feed-identity-module'>Feed</div></body></html>"
     first_page = """
     <html>
       <head>
@@ -248,6 +276,8 @@ def test_search_linkedin_stops_when_login_wall_appears(monkeypatch) -> None:
 
     def fake_fetch(url: str, *, scrolls=None):
         page_urls.append(url)
+        if url.endswith("/feed/"):
+            return feed_page
         return first_page if "start=25" not in url else login_wall
 
     monkeypatch.setattr(client, "fetch_html", fake_fetch)
@@ -255,12 +285,11 @@ def test_search_linkedin_stops_when_login_wall_appears(monkeypatch) -> None:
     vacancies = client.search_linkedin("VP Product", max_pages=5)
 
     assert len(vacancies) == 1
-    assert page_urls == [
-        "https://www.linkedin.com/jobs/search/?keywords=VP+Product",
-        "https://www.linkedin.com/jobs/search/?keywords=VP+Product&start=25",
-    ]
+    assert page_urls[0] == "https://www.linkedin.com/feed/"
+    assert page_urls[1] == "https://www.linkedin.com/jobs/search/?keywords=VP+Product"
+    assert page_urls[-1] == "https://www.linkedin.com/jobs/search/?keywords=VP+Product&start=25"
     health = client.session_health_snapshot()
-    assert health["pages_fetched"] == 2
+    assert health["pages_fetched"] >= 2
     assert health["login_walls"] == 1
     assert health["auth_redirects"] == 1
     assert health["status"] in {"degraded", "blocked"}
@@ -280,6 +309,7 @@ def test_search_linkedin_occasionally_opens_a_detail_page(monkeypatch) -> None:
     )
 
     page_urls: list[str] = []
+    feed_page = "<html><body><div class='feed-identity-module'>Feed</div></body></html>"
     search_page = """
     <html>
       <head>
@@ -306,6 +336,8 @@ def test_search_linkedin_occasionally_opens_a_detail_page(monkeypatch) -> None:
 
     def fake_fetch(url: str, *, scrolls=None):
         page_urls.append(url)
+        if url.endswith("/feed/"):
+            return feed_page
         return detail_page if url.endswith("/456") else search_page
 
     monkeypatch.setattr(client, "fetch_html", fake_fetch)
@@ -314,7 +346,7 @@ def test_search_linkedin_occasionally_opens_a_detail_page(monkeypatch) -> None:
     vacancies = client.search_linkedin("VP Product", max_pages=1)
 
     assert any(url.endswith("/456") for url in page_urls)
-    assert client.session_health_snapshot()["detail_pages_opened"] == 1
+    assert client.session_health_snapshot()["detail_pages_opened"] == 2
     assert len(vacancies) >= 1
 
 

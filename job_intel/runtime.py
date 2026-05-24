@@ -227,6 +227,17 @@ def build_runtime_contract() -> dict[str, Any]:
     db_path = resolve_db_path()
     browser_profile_dir = resolve_browser_profile_base()
     browser_profile_paths = _browser_profile_paths()
+    required_browser_profile_names = ("linkedin", "headhunter", "hh")
+    required_browser_profile_paths = {
+        name: path_str
+        for name, path_str in browser_profile_paths.items()
+        if name in required_browser_profile_names
+    }
+    optional_browser_profile_paths = {
+        name: path_str
+        for name, path_str in browser_profile_paths.items()
+        if name not in required_browser_profile_names
+    }
     expected_git_commit = os.getenv("JOB_INTEL_EXPECTED_GIT_COMMIT", "").strip()
     module_origins = {
         module_name: origin
@@ -244,6 +255,8 @@ def build_runtime_contract() -> dict[str, Any]:
         "db_path": str(db_path),
         "browser_profile_dir": str(browser_profile_dir),
         "browser_profile_paths": browser_profile_paths,
+        "required_browser_profile_paths": required_browser_profile_paths,
+        "optional_browser_profile_paths": optional_browser_profile_paths,
         "browser_python": os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip() or str(Path("/var/lib/browser-desktop/playwright-venv/bin/python")),
         "expected_git_commit": expected_git_commit,
         "actual_git_commit": _git_commit_hash(workdir),
@@ -260,7 +273,7 @@ def build_runtime_contract() -> dict[str, Any]:
         issues.append(f"workdir is not a directory: {workdir}")
     if not _safe_exists(workdir / "job_intel"):
         issues.append(f"job_intel package missing from workdir: {workdir / 'job_intel'}")
-    for name, path_str in browser_profile_paths.items():
+    for name, path_str in required_browser_profile_paths.items():
         path = Path(path_str)
         if not _safe_exists(path):
             issues.append(f"browser profile missing: {name}={path}")

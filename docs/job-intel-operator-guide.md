@@ -6,9 +6,11 @@ This system continuously searches for executive product/business leadership role
 
 ## Where state lives
 
-- SQLite database: `~/.hermes/job_intel/job_intel.sqlite3`
-- Cron scripts: `~/.hermes/scripts/job_intel_*.sh`
+- SQLite database: `/var/lib/job-intel/state/job_intel.sqlite3`
+- Host runtime state: `/var/lib/job-intel/state`
+- Host wrapper scripts: `/workspace/live-hermes/scripts/job_intel_host_wrapper.sh` and `/root/.hermes/scripts/job_intel_*.sh`
 - Seed configs: `job_intel/seed/*.yaml`
+- Deployment/runbook: [`docs/job-intel-host-runtime.md`](job-intel-host-runtime.md)
 
 ## CLI
 
@@ -22,7 +24,7 @@ From the repo root:
 ./venv/bin/python -m job_intel health
 ```
 
-## Cron jobs
+## Host timers
 
 - Daily digest / source acquisition: `job-intel-daily` (runs in the twice-daily 09:00/17:00 windows)
 - Exceptional alerts: `job-intel-alert` (reads persisted inventory; does not re-scan sources)
@@ -31,9 +33,10 @@ From the repo root:
 
 All four are configured to deliver to the Slack thread plus `C0B42K4H4KV`.
 
-The shell wrappers are cwd-independent:
-- `JOB_INTEL_WORKDIR` defaults to `/home/hermes/.hermes/hermes-agent`
+The host-side wrappers are cwd-independent:
+- `JOB_INTEL_WORKDIR` defaults to `/workspace/live-hermes`
 - `JOB_INTEL_PYTHON` defaults to `$JOB_INTEL_WORKDIR/venv/bin/python`
+- `JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN` and `JOB_INTEL_BROWSER_PROFILE_DIR_HH` point at the persistent browser profiles used for LinkedIn and HeadHunter acquisition
 - each wrapper `cd`s into the workdir before invoking `python -m job_intel ...`
 
 ## Maintenance

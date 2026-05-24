@@ -10,6 +10,7 @@ This deployment moves job-intel acquisition out of the Hermes cron sandbox and i
 - Browser profiles:
   - LinkedIn: `/var/lib/browser-desktop/profiles/linkedin`
   - HeadHunter: `/var/lib/browser-desktop/profiles/hh`
+  - Company career: `/var/lib/browser-desktop/profiles/company-career` (optional; used when browser-native company-page crawling is enabled)
   - Base: `/var/lib/browser-desktop/profiles`
 - Browser runtime: `/var/lib/browser-desktop`
 - Env file: `/etc/job-intel/job-intel.env`
@@ -25,6 +26,8 @@ Every job-intel command must fail loudly unless:
 - the LinkedIn / HH browser profile directories exist
 - job-intel imports resolve from `JOB_INTEL_WORKDIR`
 - the runtime git HEAD matches `JOB_INTEL_EXPECTED_GIT_COMMIT`
+
+The company-career browser profile is tracked in runtime provenance for observability, but it is not a hard deployment prerequisite because company-page acquisition falls back to plain HTTP when browser-native browsing is unavailable.
 
 ## Scheduler
 
