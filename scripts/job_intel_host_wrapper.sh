@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 env_file="${JOB_INTEL_ENV_FILE:-/etc/job-intel/job-intel.env}"
-: "${JOB_INTEL_SERVICE_USER:=pn}"
+: "${JOB_INTEL_SERVICE_USER:=hermes}"
 export JOB_INTEL_SERVICE_USER
 source "$script_dir/job_intel_service_user.sh"
 job_intel_require_service_user
@@ -14,12 +14,17 @@ fail() {
 }
 
 resolve_workdir() {
+  local repo_root
   local candidates=(
     "${JOB_INTEL_WORKDIR:-}"
-    "/workspace/live-hermes"
-    "/home/hermes/.hermes/hermes-agent"
     "$PWD"
   )
+  if repo_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"; then
+    [[ -n "$repo_root" ]] && candidates+=("$repo_root")
+  fi
+  if [[ -d "$script_dir/../job_intel" ]]; then
+    candidates+=("$(cd -- "$script_dir/.." && pwd)")
+  fi
   local candidate
   for candidate in "${candidates[@]}"; do
     [[ -n "${candidate:-}" ]] || continue
@@ -116,6 +121,7 @@ export JOB_INTEL_DB_PATH="$db_path"
 export JOB_INTEL_BROWSER_PROFILE_DIR="$browser_profile_dir"
 export JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN="${JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN:-$browser_profile_dir/linkedin}"
 export JOB_INTEL_BROWSER_PROFILE_DIR_HH="${JOB_INTEL_BROWSER_PROFILE_DIR_HH:-$browser_profile_dir/hh}"
+export JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER="${JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER:-$browser_profile_dir/company-career}"
 export JOB_INTEL_BROWSER_PYTHON="${JOB_INTEL_BROWSER_PYTHON:-/var/lib/browser-desktop/playwright-venv/bin/python}"
 export JOB_INTEL_SCRIPTS_DIR="${JOB_INTEL_SCRIPTS_DIR:-$script_dir}"
 export JOB_INTEL_BROWSER_RUNTIME_DIR="${JOB_INTEL_BROWSER_RUNTIME_DIR:-/var/lib/browser-desktop}"

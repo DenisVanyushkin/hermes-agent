@@ -2,19 +2,29 @@
 
 This deployment moves job-intel acquisition out of the Hermes cron sandbox and into a single host-managed runtime namespace.
 
+## Deployment bundle
+
+The repo includes deployable host artifacts under `deploy/`:
+
+- `deploy/install_job_intel_host_runtime.sh`
+- `deploy/verify_job_intel_host_runtime.sh`
+- `deploy/env/job-intel.env.example`
+- `deploy/systemd/*.service`
+- `deploy/systemd/*.timer`
+
 ## Canonical locations
 
-- Repo / workdir: `/workspace/live-hermes`
+- Repo / workdir: repository checkout root (resolved from the wrapper location / git top-level)
 - DB: `/var/lib/job-intel/state/job_intel.sqlite3`
 - State dir: `/var/lib/job-intel/state`
 - Browser profiles:
   - LinkedIn: `/var/lib/browser-desktop/profiles/linkedin`
   - HeadHunter: `/var/lib/browser-desktop/profiles/hh`
-  - Company career: `/var/lib/browser-desktop/profiles/company-career` (optional; used when browser-native company-page crawling is enabled)
+  - Company career: `/var/lib/browser-desktop/profiles/company-career` (optional; created by the installer and required only when browser-native company crawling is enabled)
   - Base: `/var/lib/browser-desktop/profiles`
 - Browser runtime: `/var/lib/browser-desktop`
 - Env file: `/etc/job-intel/job-intel.env`
-- Host wrapper: `/workspace/live-hermes/scripts/job_intel_host_wrapper.sh`
+- Host wrapper: `<repo-root>/scripts/job_intel_host_wrapper.sh`
 
 ## Host contract
 
@@ -28,9 +38,9 @@ Every job-intel command must fail loudly unless:
 - job-intel imports resolve from `JOB_INTEL_WORKDIR`
 - the runtime git HEAD matches `JOB_INTEL_EXPECTED_GIT_COMMIT`
 
-The company-career browser profile is tracked in runtime provenance for observability, but it is not a hard deployment prerequisite because company-page acquisition falls back to plain HTTP when browser-native browsing is unavailable.
+The company-career browser profile is tracked in runtime provenance for observability. It is not a hard deployment prerequisite, but if browser-native company-page crawling is enabled then the profile must be populated; otherwise the runtime will fall back to plain HTTP.
 
-Each timer or wrapper must run under the configured service user (default: `pn`) and export that value explicitly so the runtime provenance can detect user mismatches.
+Each timer or wrapper must run under the configured service user (default: `hermes`) and export that value explicitly so the runtime provenance can detect user mismatches. If `JOB_INTEL_SERVICE_USER` is set, the installer / wrapper must verify that both the user and its primary group exist before proceeding.
 
 ## Scheduler
 
@@ -44,7 +54,7 @@ Use host-side systemd timers instead:
 - `job-intel-market`
 - `job-intel-strategic`
 
-Each timer loads `/etc/job-intel/job-intel.env` and executes the host wrapper under the `pn` user.
+Each timer loads `/etc/job-intel/job-intel.env` and executes the host wrapper under the configured service user.
 
 ## State migration
 

@@ -38,13 +38,13 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR", str(browser_profiles))
     monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN", str(browser_profiles / "linkedin"))
     monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", str(browser_profiles / "hh"))
-    monkeypatch.setenv("JOB_INTEL_RUNTIME_USER", "pn")
-    monkeypatch.setenv("JOB_INTEL_SERVICE_USER", "pn")
+    monkeypatch.setenv("JOB_INTEL_RUNTIME_USER", "hermes")
+    monkeypatch.delenv("JOB_INTEL_SERVICE_USER", raising=False)
     monkeypatch.setenv("JOB_INTEL_EXPECTED_GIT_COMMIT", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
     monkeypatch.setenv("JOB_INTEL_ENVIRONMENT", "test")
     monkeypatch.setenv("JOB_INTEL_SLACK_WEBHOOK_URL", "https://hooks.slack.test/example")
     monkeypatch.setattr(runtime.pwd, "getpwnam", lambda name: SimpleNamespace(pw_dir=str(tmp_path / "home" / name), pw_uid=1000, pw_gid=1000))
-    (tmp_path / "home" / "pn").mkdir(parents=True)
+    (tmp_path / "home" / "hermes").mkdir(parents=True)
     monkeypatch.setattr(runtime, "_git_commit_hash", lambda _workdir: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
     monkeypatch.setattr(runtime, "_module_origin", lambda module_name, origin=None: str(workdir / module_name.replace('.', '/') / "__init__.py") if origin is None else str(workdir / "job_intel" / f"{module_name.split('.')[-1]}.py"))
     monkeypatch.setattr(cli, "_collect_source_statuses", lambda store: {"headhunter": {"status": "blocked", "error": "403"}, "duckduckgo": {"status": "ok", "hits": 2}})
@@ -73,7 +73,7 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     report = cli.doctor_report()
 
     assert "Current user:" in report
-    assert "Configured service user: pn" in report
+    assert "Configured service user: hermes" in report
     assert f"DB path: {db_path}" in report
     assert "DB readable: yes" in report
     assert "DB writable: yes" in report

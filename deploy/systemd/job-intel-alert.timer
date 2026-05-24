@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule job-intel alert
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=job-intel-alert.service
+
+[Install]
+WantedBy=timers.target

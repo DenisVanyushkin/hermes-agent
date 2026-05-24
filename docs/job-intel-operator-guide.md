@@ -8,7 +8,7 @@ This system continuously searches for executive product/business leadership role
 
 - SQLite database: `/var/lib/job-intel/state/job_intel.sqlite3`
 - Host runtime state: `/var/lib/job-intel/state`
-- Host wrapper scripts: `/workspace/live-hermes/scripts/job_intel_host_wrapper.sh` and `/root/.hermes/scripts/job_intel_*.sh`
+- Host wrapper scripts: `<repo-root>/scripts/job_intel_host_wrapper.sh` and `/root/.hermes/scripts/job_intel_*.sh`
 - Seed configs: `job_intel/seed/*.yaml`
 - Deployment/runbook: [`docs/job-intel-host-runtime.md`](job-intel-host-runtime.md)
 
@@ -34,7 +34,7 @@ From the repo root:
 All four are configured to deliver to the Slack thread plus `C0B42K4H4KV`.
 
 The host-side wrappers are cwd-independent:
-- `JOB_INTEL_WORKDIR` defaults to `/workspace/live-hermes`
+- `JOB_INTEL_WORKDIR` defaults to the repository checkout root discovered from the wrapper location / git top-level
 - `JOB_INTEL_PYTHON` defaults to `$JOB_INTEL_WORKDIR/venv/bin/python`
 - `JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN` and `JOB_INTEL_BROWSER_PROFILE_DIR_HH` point at the persistent browser profiles used for LinkedIn and HeadHunter acquisition
 - each wrapper `cd`s into the workdir before invoking `python -m job_intel ...`

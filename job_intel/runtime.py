@@ -20,11 +20,7 @@ T = TypeVar("T")
 DEFAULT_RUNTIME_BASE = Path("/var/lib/job-intel")
 DEFAULT_STATE_DIR = DEFAULT_RUNTIME_BASE / "state"
 DEFAULT_DB_PATH = DEFAULT_STATE_DIR / "job_intel.sqlite3"
-DEFAULT_WORKDIR_CANDIDATES = (
-    Path("/workspace/live-hermes"),
-    Path("/home/hermes/.hermes/hermes-agent"),
-    Path.cwd(),
-)
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_SCRIPTS_CANDIDATE = Path(__file__).resolve().parents[1] / "scripts"
 DEFAULT_SCRIPTS_CANDIDATES = (
     Path("/root/.hermes/scripts"),
@@ -54,7 +50,7 @@ def runtime_user() -> str:
 
 
 def resolve_service_user() -> str:
-    return os.getenv("JOB_INTEL_SERVICE_USER") or runtime_user()
+    return os.getenv("JOB_INTEL_SERVICE_USER", "hermes").strip() or "hermes"
 
 
 def runtime_home() -> Path:
@@ -76,7 +72,7 @@ def resolve_workdir() -> Path:
     override = os.getenv("JOB_INTEL_WORKDIR", "").strip()
     if override:
         return Path(override).expanduser()
-    for candidate in DEFAULT_WORKDIR_CANDIDATES:
+    for candidate in (DEFAULT_REPO_ROOT, Path.cwd()):
         try:
             if (candidate / "job_intel").is_dir():
                 return candidate
@@ -275,8 +271,6 @@ def build_runtime_contract() -> dict[str, Any]:
         "db_parent_flags": file_access_flags(db_path.parent),
     }
     issues: list[str] = []
-    if not os.getenv("JOB_INTEL_SERVICE_USER", "").strip():
-        issues.append("JOB_INTEL_SERVICE_USER is not set")
     try:
         service_user_record = pwd.getpwnam(service_user)
     except KeyError:

@@ -2,18 +2,23 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-: "${JOB_INTEL_SERVICE_USER:=pn}"
+: "${JOB_INTEL_SERVICE_USER:=hermes}"
 export JOB_INTEL_SERVICE_USER
 source "$script_dir/job_intel_service_user.sh"
 job_intel_require_service_user
 
 resolve_workdir() {
+  local repo_root
   local candidates=(
     "${JOB_INTEL_WORKDIR:-}"
-    "/home/hermes/.hermes/hermes-agent"
-    "/workspace/live-hermes"
     "$PWD"
   )
+  if repo_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"; then
+    [[ -n "$repo_root" ]] && candidates+=("$repo_root")
+  fi
+  if [[ -d "$script_dir/../job_intel" ]]; then
+    candidates+=("$(cd -- "$script_dir/.." && pwd)")
+  fi
   local candidate
   for candidate in "${candidates[@]}"; do
     [[ -n "${candidate:-}" ]] || continue
