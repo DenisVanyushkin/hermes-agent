@@ -100,6 +100,17 @@ def resolve_footer_config(
     return resolved
 
 
+def _format_model_pair(requested_model: Optional[str], effective_model: Optional[str]) -> str:
+    """Render requested/effective model names for the footer."""
+    requested_raw = str(requested_model or "").strip()
+    effective_raw = str(effective_model or "").strip()
+    requested = _model_short(requested_raw)
+    effective = _model_short(effective_raw)
+    if requested_raw and effective_raw and requested_raw != effective_raw:
+        return f"{requested or requested_raw} → {effective or effective_raw}"
+    return effective or requested
+
+
 def format_runtime_footer(
     *,
     model: Optional[str],
@@ -107,6 +118,7 @@ def format_runtime_footer(
     context_length: Optional[int],
     cwd: Optional[str] = None,
     fields: Iterable[str] = _DEFAULT_FIELDS,
+    requested_model: Optional[str] = None,
 ) -> str:
     """Render the footer line, or return "" if no fields have data.
 
@@ -116,13 +128,13 @@ def format_runtime_footer(
     parts: list[str] = []
     for field in fields:
         if field == "model":
-            m = _model_short(model)
+            m = _format_model_pair(requested_model, model)
             if m:
                 parts.append(m)
         elif field == "context_pct":
             if context_length and context_length > 0 and context_tokens >= 0:
                 pct = max(0, min(100, round((context_tokens / context_length) * 100)))
-                parts.append(f"{pct}%")
+                parts.append(f"ctx {pct}%")
         elif field == "cwd":
             rel = _home_relative_cwd(cwd or os.environ.get("TERMINAL_CWD", ""))
             if rel:
@@ -194,6 +206,7 @@ def build_footer_line(
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
+    requested_model: Optional[str] = None,
 ) -> str:
     """Top-level entry point used by gateway/run.py.
 
@@ -207,6 +220,7 @@ def build_footer_line(
 
     runtime_footer = format_runtime_footer(
         model=model,
+        requested_model=requested_model,
         context_tokens=context_tokens,
         context_length=context_length,
         cwd=cwd,

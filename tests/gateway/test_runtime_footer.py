@@ -62,12 +62,25 @@ def test_format_footer_all_fields(monkeypatch, tmp_path):
     (tmp_path / "projects" / "hermes").mkdir(parents=True)
     out = format_runtime_footer(
         model="openrouter/openai/gpt-5.4",
+        requested_model="gpt-5.5",
         context_tokens=68000,
         context_length=100000,
         cwd=None,  # falls back to TERMINAL_CWD env var
         fields=("model", "context_pct", "cwd"),
     )
-    assert out == "gpt-5.4 · 68% · ~/projects/hermes"
+    assert out == "gpt-5.5 → gpt-5.4 · ctx 68% · ~/projects/hermes"
+
+
+def test_format_footer_shows_requested_vs_effective_even_when_short_names_match():
+    out = format_runtime_footer(
+        model="openai/gpt-5.4",
+        requested_model="openrouter/openai/gpt-5.4",
+        context_tokens=0,
+        context_length=None,
+        cwd="",
+        fields=("model",),
+    )
+    assert out == "gpt-5.4 → gpt-5.4"
 
 
 def test_format_footer_skips_missing_context_length():
@@ -92,7 +105,7 @@ def test_format_footer_context_pct_clamped_to_100():
         cwd="",
         fields=("context_pct",),
     )
-    assert out == "100%"
+    assert out == "ctx 100%"
 
 
 def test_format_footer_context_pct_never_negative():
@@ -124,8 +137,7 @@ def test_format_footer_drops_cwd_when_empty(monkeypatch):
         fields=("model", "context_pct", "cwd"),
     )
     # cwd silently dropped; model + pct remain
-    assert out == "gpt-5.4 · 50%"
-
+    assert out == "gpt-5.4 · ctx 50%"
 
 def test_format_footer_custom_field_order():
     out = format_runtime_footer(
@@ -134,7 +146,7 @@ def test_format_footer_custom_field_order():
         cwd="/opt/project",
         fields=("context_pct", "model"),  # swapped + no cwd
     )
-    assert out == "50% · gpt-5.4"
+    assert out == "ctx 50% · gpt-5.4"
 
 
 def test_format_footer_unknown_field_silently_ignored():
@@ -144,8 +156,7 @@ def test_format_footer_unknown_field_silently_ignored():
         cwd="/x",
         fields=("model", "bogus", "context_pct"),
     )
-    assert out == "gpt-5.4 · 50%"
-
+    assert out == "gpt-5.4 · ctx 50%"
 
 # ---------------------------------------------------------------------------
 # resolve_footer_config
@@ -153,7 +164,7 @@ def test_format_footer_unknown_field_silently_ignored():
 
 def test_resolve_defaults_off_empty_config():
     cfg = resolve_footer_config({}, "telegram")
-    assert cfg == {"enabled": False, "fields": ["model", "context_pct", "cwd"]}
+    assert cfg == {"enabled": False, "fields": ["model", "context_pct", "cwd"], "account_usage": False}
 
 
 def test_resolve_global_enable():
@@ -222,13 +233,15 @@ def test_build_footer_returns_rendered_when_enabled(monkeypatch, tmp_path):
     out = build_footer_line(
         user_config={"display": {"runtime_footer": {"enabled": True}}},
         platform_key="telegram",
-        model="openai/gpt-5.4",
-        context_tokens=25, context_length=100,
+        model="openrouter/openai/gpt-5.4",
+        requested_model="openrouter/openai/gpt-5.5",
+        context_tokens=25,
+        context_length=100,
         cwd=str(tmp_path / "proj"),
     )
     (tmp_path / "proj").mkdir(exist_ok=True)
-    assert "gpt-5.4" in out
-    assert "25%" in out
+    assert "gpt-5.5 → gpt-5.4" in out
+    assert "ctx 25%" in out
 
 
 def test_build_footer_per_platform_off_suppresses():
