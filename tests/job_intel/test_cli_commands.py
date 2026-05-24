@@ -51,3 +51,20 @@ def test_search_technical_report_includes_browser_profile_and_auth_details() -> 
     assert "email_challenge=no" in report
     assert "/var/lib/browser-desktop/profiles/hh" in report
     assert "email_challenge=yes (resolved=yes)" in report
+
+
+def test_runtime_provenance_summary_exposes_runtime_topology() -> None:
+    summary = cli._runtime_provenance_summary(
+        {
+            "provenance_json": '{"whoami": "pn", "hostname": "host-1", "pwd": "/cwd", "effective_workdir": "/workspace/live-hermes", "git_commit_hash": "abc123", "python_executable": "/usr/bin/python3", "db_path": "/tmp/job_intel.sqlite3", "state_dir": "/tmp/state", "browser_profile_paths": {"linkedin": "/profiles/linkedin"}, "runtime_mirror_paths": {"resolved_scripts_dir": "/root/.hermes/scripts"}, "env_overrides": {"JOB_INTEL_DB_PATH": "/tmp/job_intel.sqlite3"}, "imported_module_locations": {"job_intel.runtime": "/workspace/live-hermes/job_intel/runtime.py"}}'
+        }
+    )
+
+    assert summary is not None
+    assert summary["whoami"] == "pn"
+    assert summary["hostname"] == "host-1"
+    assert summary["effective_workdir"] == "/workspace/live-hermes"
+    assert summary["browser_profile_paths"]["linkedin"] == "/profiles/linkedin"
+    assert summary["runtime_mirror_paths"]["resolved_scripts_dir"] == "/root/.hermes/scripts"
+    assert summary["env_overrides_count"] == 1
+    assert "job_intel.runtime" in summary["imported_modules"]

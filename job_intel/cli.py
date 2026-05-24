@@ -24,6 +24,7 @@ from .evaluator import classify_vacancy, score_vacancy
 from .enrichment import detect_high_value_questions
 from .models import Evaluation, Vacancy
 from .runtime import (
+    assert_runtime_contract,
     file_access_flags,
     parse_iso_datetime,
     resolve_db_path,
@@ -530,6 +531,7 @@ def _vacancy_evaluation_from_row(row: dict[str, Any]) -> tuple[Vacancy, Evaluati
 
 
 def run_daily() -> str:
+    assert_runtime_contract()
     store = _store()
     store.bootstrap()
     run_id = store.start_run("daily")
@@ -653,6 +655,7 @@ def run_daily() -> str:
 
 
 def run_enrichment() -> str:
+    assert_runtime_contract()
     store = _store()
     store.bootstrap()
     run_id = store.start_run("enrichment")
@@ -671,6 +674,7 @@ def run_enrichment() -> str:
 
 
 def run_market_report() -> str:
+    assert_runtime_contract()
     store = _store()
     store.bootstrap()
     run_id = store.start_run("market")
@@ -694,6 +698,7 @@ def run_market_report() -> str:
 
 
 def run_strategic_report() -> str:
+    assert_runtime_contract()
     store = _store()
     store.bootstrap()
     run_id = store.start_run("strategic")
@@ -716,6 +721,7 @@ def run_strategic_report() -> str:
 
 
 def run_alert_scan() -> str:
+    assert_runtime_contract()
     store = _store()
     store.bootstrap()
     run_id = store.start_run("alert")
@@ -1155,6 +1161,35 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
 
 
 
+def _runtime_provenance_summary(run: dict[str, Any]) -> dict[str, Any] | None:
+    provenance = _json_loads(run.get("provenance_json"), {})
+    if not provenance:
+        return None
+    browser_profiles = provenance.get("browser_profile_paths") or {}
+    mirror_paths = provenance.get("runtime_mirror_paths") or {}
+    contract = provenance.get("runtime_contract") or {}
+    return {
+        "whoami": provenance.get("whoami"),
+        "hostname": provenance.get("hostname"),
+        "pwd": provenance.get("pwd"),
+        "effective_workdir": provenance.get("effective_workdir"),
+        "git_commit_hash": provenance.get("git_commit_hash"),
+        "python_executable": provenance.get("python_executable"),
+        "db_path": provenance.get("db_path"),
+        "state_dir": provenance.get("state_dir"),
+        "browser_profile_dir": provenance.get("browser_profile_dir"),
+        "browser_profile_paths": browser_profiles,
+        "browser_python": contract.get("browser_python"),
+        "expected_git_commit": contract.get("expected_git_commit"),
+        "actual_git_commit": contract.get("actual_git_commit"),
+        "runtime_contract_issues": list(contract.get("issues") or []),
+        "runtime_mirror_paths": mirror_paths,
+        "env_overrides_count": len(provenance.get("env_overrides") or {}),
+        "imported_modules": sorted((provenance.get("imported_module_locations") or {}).keys()),
+    }
+
+
+
 def _format_delta(curr: float | int | None, prev: float | int | None) -> str:
     if curr is None or prev is None:
         return "n/a"
@@ -1172,6 +1207,24 @@ def _format_health_report(curr: dict[str, Any], prev: dict[str, Any] | None) -> 
     lines.append(f"Latest daily run: #{run.get('id')} {run.get('started_at')} ({run.get('status')})")
     if previous_run:
         lines.append(f"Previous daily run: #{previous_run.get('id')} {previous_run.get('started_at')} ({previous_run.get('status')})")
+    latest_started = parse_iso_datetime(run.get("started_at"))
+    if latest_started:
+        age = datetime.now(timezone.utc) - latest_started
+        lines.append(f"Latest daily run age: {age.days}d {age.seconds // 3600:02d}h {(age.seconds % 3600) // 60:02d}m")
+    provenance_summary = _runtime_provenance_summary(run)
+    if provenance_summary:
+        browser_profiles = provenance_summary.get("browser_profile_paths") or {}
+        mirror_paths = provenance_summary.get("runtime_mirror_paths") or {}
+        lines.append(
+            "Runtime provenance: "
+            f"whoami={provenance_summary.get('whoami')} | hostname={provenance_summary.get('hostname')} | pwd={provenance_summary.get('pwd')} | "
+            f"effective_workdir={provenance_summary.get('effective_workdir')} | git={provenance_summary.get('git_commit_hash')} | "
+            f"expected_git={provenance_summary.get('expected_git_commit') or 'n/a'} | actual_git={provenance_summary.get('actual_git_commit') or 'n/a'} | "
+            f"python={provenance_summary.get('python_executable')} | browser_python={provenance_summary.get('browser_python') or 'n/a'} | db={provenance_summary.get('db_path')} | state_dir={provenance_summary.get('state_dir')} | "
+            f"browser_profile_dir={provenance_summary.get('browser_profile_dir') or 'n/a'} | browser_profiles={', '.join(f'{key}:{value}' for key, value in sorted(browser_profiles.items())) or 'n/a'} | "
+            f"mirror_scripts={mirror_paths.get('resolved_scripts_dir') or 'n/a'} | env_overrides={provenance_summary.get('env_overrides_count', 0)} | "
+            f"imported_modules={', '.join(provenance_summary.get('imported_modules') or []) or 'n/a'} | contract_issues={len(provenance_summary.get('runtime_contract_issues') or [])}"
+        )
     lines.append("")
 
     lines.append("*Source health summary*")
@@ -1278,6 +1331,7 @@ def _format_health_report(curr: dict[str, Any], prev: dict[str, Any] | None) -> 
 
 
 def run_health_report() -> str:
+    assert_runtime_contract()
     store = _store()
     store.bootstrap()
     run_id = store.start_run("health")
@@ -1473,12 +1527,18 @@ def _collect_source_statuses(store: JobIntelStore) -> dict[str, dict[str, Any]]:
 
 
 def doctor_report() -> str:
+    contract = assert_runtime_contract()
     paths = {
         "Current user": runtime_user(),
         "Home directory": str(runtime_home()),
         "Environment": resolve_environment_name(),
         "Workdir": str(resolve_workdir()),
         "DB path": str(resolve_db_path()),
+        "State dir": contract.get("state_dir"),
+        "Browser profile dir": contract.get("browser_profile_dir"),
+        "Browser python": contract.get("browser_python"),
+        "Expected git commit": contract.get("expected_git_commit"),
+        "Actual git commit": contract.get("actual_git_commit"),
         "Slack delivery": "webhook" if _slack_webhook_enabled() else "disabled",
     }
     store = _store()
@@ -1618,6 +1678,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    assert_runtime_contract()
 
     if args.cmd == "bootstrap":
         store = _store()

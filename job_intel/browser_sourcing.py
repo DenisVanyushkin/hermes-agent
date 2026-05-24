@@ -16,14 +16,14 @@ from typing import Any
 from urllib.parse import quote_plus, urljoin, urlparse
 
 from .models import Vacancy
-from .runtime import sha256_text
+from .runtime import resolve_browser_profile_base, sha256_text
 
 
-_BROWSER_PROFILE_DEFAULT = Path.home() / ".hermes" / "job_intel" / "browser_profile"
+_BROWSER_PROFILE_DEFAULT = resolve_browser_profile_base() / "company-career"
 _BROWSER_PROFILE_DEFAULTS: dict[str, Path] = {
-    "linkedin": Path("/var/lib/browser-desktop/profiles/linkedin"),
-    "headhunter": Path("/var/lib/browser-desktop/profiles/hh"),
-    "hh": Path("/var/lib/browser-desktop/profiles/hh"),
+    "linkedin": resolve_browser_profile_base() / "linkedin",
+    "headhunter": resolve_browser_profile_base() / "hh",
+    "hh": resolve_browser_profile_base() / "hh",
     "company_career": _BROWSER_PROFILE_DEFAULT,
 }
 
