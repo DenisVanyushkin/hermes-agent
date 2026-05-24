@@ -1530,6 +1530,7 @@ def doctor_report() -> str:
     contract = assert_runtime_contract()
     paths = {
         "Current user": runtime_user(),
+        "Configured service user": contract.get("service_user"),
         "Home directory": str(runtime_home()),
         "Environment": resolve_environment_name(),
         "Workdir": str(resolve_workdir()),
