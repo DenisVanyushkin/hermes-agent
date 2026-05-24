@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Evaluation, Vacancy
-from .runtime import parse_iso_datetime
+from .runtime import capture_runtime_provenance, parse_iso_datetime
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at TEXT,
     status TEXT NOT NULL,
     notes TEXT,
-    metadata_json TEXT
+    metadata_json TEXT,
+    provenance_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS vacancies (
@@ -185,6 +186,7 @@ class JobIntelStore:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
             self._ensure_column(conn, "runs", "metadata_json", "TEXT")
+            self._ensure_column(conn, "runs", "provenance_json", "TEXT")
             self._ensure_column(conn, "notifications", "vacancy_id", "INTEGER")
             self._ensure_column(conn, "notifications", "delivery_error", "TEXT")
             self._ensure_column(conn, "notifications", "delivery_attempts", "INTEGER NOT NULL DEFAULT 0")
@@ -214,13 +216,27 @@ class JobIntelStore:
             ).fetchall()
         return [row[0] for row in rows]
 
-    def start_run(self, mode: str, notes: str | None = None, metadata: dict[str, Any] | None = None) -> int:
+    def start_run(
+        self,
+        mode: str,
+        notes: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
+    ) -> int:
         self.bootstrap()
         now = datetime.now(timezone.utc).isoformat()
+        runtime_provenance = provenance or capture_runtime_provenance(db_path=self.db_path)
         with self.connect() as conn:
             cur = conn.execute(
-                "INSERT INTO runs (mode, started_at, status, notes, metadata_json) VALUES (?, ?, ?, ?, ?)",
-                (mode, now, "running", notes, json.dumps(metadata or {}, ensure_ascii=False)),
+                "INSERT INTO runs (mode, started_at, status, notes, metadata_json, provenance_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    mode,
+                    now,
+                    "running",
+                    notes,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    json.dumps(runtime_provenance, ensure_ascii=False),
+                ),
             )
             return int(cur.lastrowid)
 
@@ -230,15 +246,26 @@ class JobIntelStore:
         status: str = "ok",
         notes: str | None = None,
         metadata: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
     ) -> None:
         with self.connect() as conn:
-            row = conn.execute("SELECT metadata_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+            row = conn.execute("SELECT metadata_json, provenance_json FROM runs WHERE id = ?", (run_id,)).fetchone()
             existing_metadata = json.loads(row[0]) if row and row[0] else {}
+            existing_provenance = json.loads(row[1]) if row and row[1] else {}
             if metadata is not None:
                 existing_metadata.update(metadata)
+            if provenance is not None:
+                existing_provenance.update(provenance)
             conn.execute(
-                "UPDATE runs SET finished_at = ?, status = ?, notes = COALESCE(?, notes), metadata_json = ? WHERE id = ?",
-                (datetime.now(timezone.utc).isoformat(), status, notes, json.dumps(existing_metadata, ensure_ascii=False), run_id),
+                "UPDATE runs SET finished_at = ?, status = ?, notes = COALESCE(?, notes), metadata_json = ?, provenance_json = ? WHERE id = ?",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    status,
+                    notes,
+                    json.dumps(existing_metadata, ensure_ascii=False),
+                    json.dumps(existing_provenance, ensure_ascii=False),
+                    run_id,
+                ),
             )
 
     def latest_run(self) -> dict[str, Any] | None:

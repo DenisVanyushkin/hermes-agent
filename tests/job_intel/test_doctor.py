@@ -11,9 +11,12 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     db_path = tmp_path / "state" / "job_intel.sqlite3"
     workdir = tmp_path / "workdir"
     scripts_dir = tmp_path / "scripts"
+    browser_profiles = tmp_path / "profiles"
     workdir.mkdir(parents=True)
     (workdir / "job_intel").mkdir()
     scripts_dir.mkdir()
+    (browser_profiles / "linkedin").mkdir(parents=True)
+    (browser_profiles / "hh").mkdir(parents=True)
     for name in ["job_intel_daily.sh", "job_intel_alert.sh", "job_intel_enrichment.sh", "job_intel_browser_health.sh"]:
         (scripts_dir / name).write_text("#!/bin/sh\n", encoding="utf-8")
 
@@ -30,8 +33,14 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     monkeypatch.setenv("JOB_INTEL_DB_PATH", str(db_path))
     monkeypatch.setenv("JOB_INTEL_WORKDIR", str(workdir))
     monkeypatch.setenv("JOB_INTEL_SCRIPTS_DIR", str(scripts_dir))
+    monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR", str(browser_profiles))
+    monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN", str(browser_profiles / "linkedin"))
+    monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", str(browser_profiles / "hh"))
+    monkeypatch.setenv("JOB_INTEL_EXPECTED_GIT_COMMIT", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
     monkeypatch.setenv("JOB_INTEL_ENVIRONMENT", "test")
     monkeypatch.setenv("JOB_INTEL_SLACK_WEBHOOK_URL", "https://hooks.slack.test/example")
+    monkeypatch.setattr(runtime, "_git_commit_hash", lambda _workdir: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+    monkeypatch.setattr(runtime, "_module_origin", lambda module_name, origin=None: str(workdir / module_name.replace('.', '/') / "__init__.py") if origin is None else str(workdir / "job_intel" / f"{module_name.split('.')[-1]}.py"))
     monkeypatch.setattr(cli, "_collect_source_statuses", lambda store: {"headhunter": {"status": "blocked", "error": "403"}, "duckduckgo": {"status": "ok", "hits": 2}})
     monkeypatch.setattr(
         cli,
