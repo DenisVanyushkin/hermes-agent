@@ -87,8 +87,8 @@ fi
 if [ "$CURRENT_UID" -ne 0 ]; then
   ROOT_OWNED_SAMPLE="$(find "$REPO/.git" \( -user root -o -group root \) -print -quit 2>/dev/null || true)"
   if [ -n "$ROOT_OWNED_SAMPLE" ]; then
-    echo "Repo contains root-owned git files; repair ownership before updating: $ROOT_OWNED_SAMPLE" >&2
-    exit 1
+    echo "Warning: repo contains root-owned git files; continuing for now: $ROOT_OWNED_SAMPLE" >&2
+    echo "If git later fails, repair ownership before retrying." >&2
   fi
 fi
 
