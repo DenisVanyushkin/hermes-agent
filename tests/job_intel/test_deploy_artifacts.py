@@ -35,6 +35,8 @@ def test_deploy_bundle_contains_required_artifacts() -> None:
 def test_install_script_enforces_secure_env_and_fail_closed_cleanup() -> None:
     script = (DEPLOY / "install_job_intel_host_runtime.sh").read_text(encoding="utf-8")
     assert "install -D -m 0600" in script
+    assert 'chmod 0600 "$env_file" || fail' in script
+    assert "systemd-analyze verify" in script
     assert "disable_timers_on_failure" in script
     assert "verify_installed_contract" in script
     assert "JOB_INTEL_DISABLE_ON_VERIFY_FAILURE" in script
@@ -53,6 +55,7 @@ def test_verifier_checks_env_mode_and_required_contract_fields() -> None:
     assert "stat -c '%a'" in script
     assert "env file mode must be 0600" in script
     assert "JOB_INTEL_EXPECTED_GIT_COMMIT" in script
+    assert "get_env_value \"$env_file\" JOB_INTEL_EXPECTED_GIT_COMMIT \"\"" in script
     assert "JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER" in script
     assert "cleanup_on_failure" in script
     assert "User=$service_user" in script
@@ -62,6 +65,9 @@ def test_verifier_checks_env_mode_and_required_contract_fields() -> None:
     assert "job-intel-strategic:strategic" in script
     assert "fail()" in script and "cleanup_on_failure" in script
     assert 'source "$env_file"' not in script
+    assert "systemctl start --wait job-intel-health.service" in script
+    assert "journalctl -u job-intel-health.service --no-pager -o cat -n 200" in script
+    assert ".venv/bin/python" in script
 
 
 def test_daily_timer_schedule_is_not_doubly_prefixed() -> None:

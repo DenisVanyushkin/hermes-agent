@@ -180,7 +180,7 @@ if [[ -z "$expected_commit" ]]; then
 fi
 
 if [[ -e "$env_file" && $force -eq 0 ]]; then
-  chmod 0600 "$env_file" || true
+  chmod 0600 "$env_file" || fail "unable to enforce mode 0600 on existing env file: $env_file"
 else
   env_tmp="$(mktemp)"
   cat >"$env_tmp" <<EOF
@@ -225,6 +225,26 @@ timer_templates=(
 for template in "${service_templates[@]}" "${timer_templates[@]}"; do
   render_template "$script_dir/systemd/$template" "$systemd_dir/$template"
 done
+
+if command -v systemd-analyze >/dev/null 2>&1; then
+  systemd_units=(
+    "$systemd_dir/job-intel-daily.service"
+    "$systemd_dir/job-intel-daily.timer"
+    "$systemd_dir/job-intel-alert.service"
+    "$systemd_dir/job-intel-alert.timer"
+    "$systemd_dir/job-intel-health.service"
+    "$systemd_dir/job-intel-health.timer"
+    "$systemd_dir/job-intel-enrichment.service"
+    "$systemd_dir/job-intel-enrichment.timer"
+    "$systemd_dir/job-intel-market.service"
+    "$systemd_dir/job-intel-market.timer"
+    "$systemd_dir/job-intel-strategic.service"
+    "$systemd_dir/job-intel-strategic.timer"
+  )
+  systemd-analyze verify "${systemd_units[@]}"
+else
+  fail "systemd-analyze is required to validate job-intel unit files"
+fi
 
 systemctl daemon-reload
 

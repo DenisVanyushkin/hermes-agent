@@ -50,6 +50,7 @@ def test_capture_runtime_provenance_includes_expected_topology(monkeypatch, tmp_
     assert provenance["runtime_contract"]["service_user"] == "hermes"
     assert provenance["runtime_contract"]["runtime_user"] == "hermes"
     assert provenance["runtime_contract"]["service_user_home"] == str(tmp_path / "home" / "hermes")
+    assert provenance["runtime_contract"]["status"] == "healthy"
     assert provenance["env_overrides"]["JOB_INTEL_CUSTOM"] == "visible-value"
     assert provenance["env_overrides"]["JOB_INTEL_API_TOKEN"] == "[REDACTED]"
     assert provenance["git_commit_hash"] == "abc123"
