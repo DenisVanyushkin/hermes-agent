@@ -50,15 +50,10 @@ ensure_personal_remote_https() {
 push_personal_branch() {
   ensure_personal_remote_https
   github_token="$(load_github_token || true)"
-  if [ -z "$github_token" ]; then
-    echo "Updated repo, but could not find GITHUB_TOKEN for HTTPS push to GitHub." >&2
-    echo "Expected env var GITHUB_TOKEN or readable env file: $HERMES_ENV_FILE" >&2
-    exit 1
-  fi
-
-  askpass_dir="$(mktemp -d)"
-  askpass_script="$askpass_dir/askpass.sh"
-  cat >"$askpass_script" <<'EOF'
+  if [ -n "$github_token" ]; then
+    askpass_dir="$(mktemp -d)"
+    askpass_script="$askpass_dir/askpass.sh"
+    cat >"$askpass_script" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   *Username*) printf '%s\n' "x-access-token" ;;
@@ -66,9 +61,13 @@ case "$1" in
   *) printf '\n' ;;
 esac
 EOF
-  chmod 700 "$askpass_script"
-  GIT_ASKPASS="$askpass_script" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$github_token" git -C "$REPO" push --force-with-lease "$PERSONAL_REMOTE" "$BRANCH" >/dev/null
-  rm -rf "$askpass_dir"
+    chmod 700 "$askpass_script"
+    GIT_ASKPASS="$askpass_script" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$github_token" git -C "$REPO" push --force-with-lease "$PERSONAL_REMOTE" "$BRANCH" >/dev/null
+    rm -rf "$askpass_dir"
+    return 0
+  fi
+
+  GIT_TERMINAL_PROMPT=0 git -C "$REPO" push --force-with-lease "$PERSONAL_REMOTE" "$BRANCH" >/dev/null
 }
 
 resolve_hermes_bin() {
