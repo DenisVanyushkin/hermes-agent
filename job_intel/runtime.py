@@ -321,6 +321,7 @@ def build_runtime_contract() -> dict[str, Any]:
         if not _path_within(Path(origin), workdir):
             issues.append(f"module outside workdir: {module_name} -> {origin}")
     contract["issues"] = issues
+    contract["status"] = "healthy" if not issues else "degraded"
     return contract
 
 
