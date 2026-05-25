@@ -16,6 +16,7 @@ UPSTREAM_BRANCH="${HERMES_UPSTREAM_BRANCH:-main}"
 UPSTREAM_REF="$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
 PERSONAL_REMOTE="${HERMES_PERSONAL_REMOTE:-personal}"
 PERSONAL_REMOTE_URL="${HERMES_PERSONAL_REMOTE_URL:-https://github.com/DenisVanyushkin/hermes-agent.git}"
+UPSTREAM_FETCH_URL="${HERMES_UPSTREAM_FETCH_URL:-https://github.com/NousResearch/hermes-agent.git}"
 HERMES_ENV_FILE="${HERMES_ENV_FILE:-$HOME/.hermes/.env}"
 
 load_github_token() {
@@ -102,6 +103,7 @@ EOF
 }
 
 report_success() {
+  local restarted="${3:-yes}"
   cat <<EOF
 Hermes local-branch update succeeded.
 Repo: $REPO
@@ -109,7 +111,7 @@ Branch: $BRANCH
 Base: $UPSTREAM_REF
 Before: $1
 After: $2
-Gateway restarted: yes
+Gateway restarted: $restarted
 EOF
 }
 
@@ -197,7 +199,7 @@ fi
 BEFORE_HEAD="$(git -C "$REPO" rev-parse --short HEAD)"
 BASE_BEFORE="$(git -C "$REPO" rev-parse --short "$UPSTREAM_REF" 2>/dev/null || true)"
 
-git -C "$REPO" fetch "$UPSTREAM_REMOTE" --prune >/dev/null
+git -C "$REPO" fetch --prune "$UPSTREAM_FETCH_URL" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH" >/dev/null
 
 BASE_AFTER="$(git -C "$REPO" rev-parse --short "$UPSTREAM_REF")"
 if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_REF" HEAD; then
@@ -241,23 +243,25 @@ push_personal_branch
 
 HERMES_BIN="$(resolve_hermes_bin || true)"
 if [ -z "$HERMES_BIN" ]; then
-  echo "Updated repo, but could not find hermes executable to restart gateway." >&2
+  echo "Updated repo and pushed changes, but could not find hermes executable to restart gateway; skipping restart." >&2
   echo "Repo: $REPO" >&2
   echo "Branch: $BRANCH" >&2
   echo "Before: $BEFORE_HEAD" >&2
   echo "After: $AFTER_HEAD" >&2
-  exit 1
+  report_success "$BEFORE_HEAD" "$AFTER_HEAD" "no"
+  exit 0
 fi
 
 RESTART_OUTPUT="$($HERMES_BIN gateway restart 2>&1)" || {
-  echo "Updated repo, but gateway restart failed." >&2
+  echo "Updated repo and pushed changes, but gateway restart failed; continuing." >&2
   echo "Repo: $REPO" >&2
   echo "Branch: $BRANCH" >&2
   echo "Before: $BEFORE_HEAD" >&2
   echo "After: $AFTER_HEAD" >&2
   echo "Restart output:" >&2
   printf '%s\n' "$RESTART_OUTPUT" >&2
-  exit 1
+  report_success "$BEFORE_HEAD" "$AFTER_HEAD" "no"
+  exit 0
 }
 
 report_success "$BEFORE_HEAD" "$AFTER_HEAD"
