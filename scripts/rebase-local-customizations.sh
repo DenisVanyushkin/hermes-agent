@@ -14,6 +14,62 @@ BRANCH="${HERMES_LOCAL_BRANCH:-local/customizations}"
 UPSTREAM_REMOTE="${HERMES_UPSTREAM_REMOTE:-origin}"
 UPSTREAM_BRANCH="${HERMES_UPSTREAM_BRANCH:-main}"
 UPSTREAM_REF="$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
+PERSONAL_REMOTE="${HERMES_PERSONAL_REMOTE:-personal}"
+PERSONAL_REMOTE_URL="${HERMES_PERSONAL_REMOTE_URL:-https://github.com/DenisVanyushkin/hermes-agent.git}"
+HERMES_ENV_FILE="${HERMES_ENV_FILE:-$HOME/.hermes/.env}"
+
+load_github_token() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    printf '%s\n' "$GITHUB_TOKEN"
+    return 0
+  fi
+  if [ -r "$HERMES_ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    set -a
+    . "$HERMES_ENV_FILE"
+    set +a
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+      printf '%s\n' "$GITHUB_TOKEN"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+ensure_personal_remote_https() {
+  current_url="$(git -C "$REPO" remote get-url "$PERSONAL_REMOTE" 2>/dev/null || true)"
+  if [ -z "$current_url" ]; then
+    echo "Personal remote not found: $PERSONAL_REMOTE" >&2
+    exit 1
+  fi
+  if [ "$current_url" != "$PERSONAL_REMOTE_URL" ]; then
+    git -C "$REPO" remote set-url "$PERSONAL_REMOTE" "$PERSONAL_REMOTE_URL" >/dev/null
+  fi
+}
+
+push_personal_branch() {
+  ensure_personal_remote_https
+  github_token="$(load_github_token || true)"
+  if [ -z "$github_token" ]; then
+    echo "Updated repo, but could not find GITHUB_TOKEN for HTTPS push to GitHub." >&2
+    echo "Expected env var GITHUB_TOKEN or readable env file: $HERMES_ENV_FILE" >&2
+    exit 1
+  fi
+
+  askpass_dir="$(mktemp -d)"
+  askpass_script="$askpass_dir/askpass.sh"
+  cat >"$askpass_script" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  *Username*) printf '%s\n' "x-access-token" ;;
+  *Password*) printf '%s\n' "$GITHUB_TOKEN" ;;
+  *) printf '\n' ;;
+esac
+EOF
+  chmod 700 "$askpass_script"
+  GIT_ASKPASS="$askpass_script" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$github_token" git -C "$REPO" push --force-with-lease "$PERSONAL_REMOTE" "$BRANCH" >/dev/null
+  rm -rf "$askpass_dir"
+}
 
 resolve_hermes_bin() {
   can_run_hermes() {
@@ -146,6 +202,7 @@ git -C "$REPO" fetch "$UPSTREAM_REMOTE" --prune >/dev/null
 
 BASE_AFTER="$(git -C "$REPO" rev-parse --short "$UPSTREAM_REF")"
 if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_REF" HEAD; then
+  push_personal_branch
   report_noop "$BEFORE_HEAD"
   exit 0
 fi
@@ -168,6 +225,7 @@ rm -f "$REBASE_LOG"
 
 AFTER_HEAD="$(git -C "$REPO" rev-parse --short HEAD)"
 if [ "$AFTER_HEAD" = "$BEFORE_HEAD" ]; then
+  push_personal_branch
   report_noop "$BEFORE_HEAD"
   exit 0
 fi
@@ -179,6 +237,8 @@ else
   echo "Updated repo, but could not find runtime script sync helper: $SYNC_HELPER" >&2
   exit 1
 fi
+
+push_personal_branch
 
 HERMES_BIN="$(resolve_hermes_bin || true)"
 if [ -z "$HERMES_BIN" ]; then
