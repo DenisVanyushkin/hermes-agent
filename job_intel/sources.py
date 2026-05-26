@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit, urlunsplit
 
 import requests
@@ -354,6 +358,65 @@ def _browser_config(source: str | None = None) -> BrowserAcquisitionConfig:
     return resolve_browser_config(source)
 
 
+def _browser_runtime_base_dir() -> Path:
+    configured = os.getenv("JOB_INTEL_BROWSER_RUNTIME_DIR", "").strip() or os.getenv("BROWSER_DESKTOP_BASE_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    browser_python = os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip()
+    if browser_python:
+        path = Path(browser_python).expanduser()
+        if path.name == "python" and path.parent.name == "bin" and path.parent.parent.name == "playwright-venv":
+            return path.parent.parent.parent
+    return Path("/var/lib/browser-desktop")
+
+
+def _browser_worker_env() -> dict[str, str]:
+    env = os.environ.copy()
+    base_dir = _browser_runtime_base_dir()
+    cache_dir = Path(env.get("XDG_CACHE_HOME", "").strip() or (base_dir / ".cache"))
+    browsers_path = Path(env.get("PLAYWRIGHT_BROWSERS_PATH", "").strip() or (cache_dir / "ms-playwright"))
+    env["JOB_INTEL_BROWSER_RUNTIME_DIR"] = str(base_dir)
+    env["BROWSER_DESKTOP_BASE_DIR"] = str(base_dir)
+    env["HOME"] = str(base_dir)
+    env["XDG_CACHE_HOME"] = str(cache_dir)
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_path)
+    return env
+
+
+def _browser_worker_payload(command: str, *args: str, timeout: int = 240) -> dict[str, Any]:
+    browser_python = Path(os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip() or "/var/lib/browser-desktop/playwright-venv/bin/python").expanduser()
+    if not browser_python.exists():
+        raise SourceFetchError(f"browser worker python missing: {browser_python}")
+    proc = subprocess.run(
+        [str(browser_python), "-m", "job_intel.browser_worker", command, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env=_browser_worker_env(),
+    )
+    payload = None
+    stdout = (proc.stdout or "").strip()
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            payload = json.loads(line)
+            break
+        except json.JSONDecodeError:
+            continue
+    if not isinstance(payload, dict):
+        detail = (proc.stderr or stdout or f"browser worker failed with exit code {proc.returncode}").strip()
+        raise SourceFetchError(detail)
+    if not payload.get("ok"):
+        detail = str(payload.get("error") or proc.stderr or stdout or "browser worker failed")
+        if payload.get("error_type") == "BrowserNativeUnavailable":
+            raise BrowserNativeUnavailable(detail)
+        raise SourceFetchError(detail)
+    return payload
+
+
 def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]:
     fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
     if not browser_native_available():
@@ -361,10 +424,9 @@ def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]
     config = _browser_config("linkedin")
     _ensure_required_browser_profile("linkedin", config)
     try:
-        with BrowserSourceClient(config) as client:
-            vacancies = client.search_linkedin(query, max_pages=max_pages)
-            fetch_linkedin_vacancies.last_health = client.session_health_snapshot()  # type: ignore[attr-defined]
-            return vacancies
+        payload = _browser_worker_payload("linkedin", query, str(max_pages))
+        fetch_linkedin_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
+        return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]
     except BrowserNativeUnavailable as exc:
         raise SourceFetchError(str(exc)) from exc
 
@@ -408,63 +470,16 @@ def _request_json(url: str, *, params: dict[str, object], headers: dict[str, str
 
 def fetch_headhunter_vacancies(query: str, *, per_page: int = 20) -> list[Vacancy]:
     fetch_headhunter_vacancies.last_health = None  # type: ignore[attr-defined]
-    if browser_native_available():
-        config = _browser_config("headhunter")
-        _ensure_required_browser_profile("headhunter", config)
-        try:
-            with BrowserSourceClient(config) as client:
-                vacancies = client.search_headhunter(query, max_pages=max(1, (per_page + 24) // 25))[:per_page]
-                fetch_headhunter_vacancies.last_health = client.session_health_snapshot()  # type: ignore[attr-defined]
-                return vacancies
-        except BrowserNativeUnavailable:
-            pass
-
-    headers = {
-        "User-Agent": os.getenv(
-            "JOB_INTEL_HH_USER_AGENT",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
-        ),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
-        "Referer": "https://hh.ru/",
-        "Origin": "https://hh.ru",
-    }
-    token = os.getenv("JOB_INTEL_HH_ACCESS_TOKEN", "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    data = retry_with_backoff(
-        lambda: _request_json(
-            "https://api.hh.ru/vacancies",
-            params={"text": query, "per_page": per_page, "page": 0, "order_by": "publication_time_desc"},
-            headers=headers,
-        ),
-        attempts=3,
-        base_delay=1.5,
-        exceptions=(requests.RequestException,),
-    )
-    items = []
-    for item in data.get("items", []):
-        items.append(
-            Vacancy(
-                source="headhunter",
-                source_id=str(item.get("id", "")),
-                company=(item.get("employer") or {}).get("name", ""),
-                title=item.get("name", ""),
-                location=(item.get("area") or {}).get("name", "Remote"),
-                url=item.get("alternate_url", ""),
-                description=re.sub(
-                    r"\s+",
-                    " ",
-                    ((item.get("snippet") or {}).get("responsibility", "") + " " + (item.get("snippet") or {}).get("requirement", "")),
-                ).strip(),
-                posted_at=item.get("published_at"),
-                salary=_format_salary(item.get("salary")),
-                company_url=(item.get("employer") or {}).get("alternate_url"),
-                metadata={"raw": item},
-            )
-        )
-    return items
+    if not browser_native_available():
+        raise SourceFetchError("Playwright is not installed, so HeadHunter browser-native acquisition is unavailable.")
+    config = _browser_config("headhunter")
+    _ensure_required_browser_profile("headhunter", config)
+    try:
+        payload = _browser_worker_payload("headhunter", query, str(per_page))
+        fetch_headhunter_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
+        return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]
+    except BrowserNativeUnavailable as exc:
+        raise SourceFetchError(str(exc)) from exc
 
 
 def _format_salary(salary: dict | None) -> str | None:

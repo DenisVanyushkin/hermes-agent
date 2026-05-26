@@ -203,6 +203,12 @@ mkdirs() {
     "${LOG_DIR}/x11vnc.log" \
     "${LOG_DIR}/websockify.log" \
     "${LOG_DIR}/chromium-${PROFILE}.log"
+
+  if id -u hermes >/dev/null 2>&1; then
+    setfacl -m u:hermes:r-x,m:r-x "${BASE_DIR}" "${BASE_DIR}/profiles"
+    setfacl -m u:hermes:rwx,m:rwx "${BASE_DIR}/profiles/${PROFILE}"
+    setfacl -d -m u:hermes:rwx,m:rwx "${BASE_DIR}/profiles/${PROFILE}"
+  fi
 }
 
 is_snap_path() {
