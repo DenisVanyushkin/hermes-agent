@@ -701,6 +701,21 @@ def main(argv: list[str] | None = None) -> None:
     compare_parser.add_argument("--candidate-journal-path", type=Path, required=True)
     compare_parser.add_argument("--candidate-session-id", required=True)
 
+    monitor_parser = subparsers.add_parser("monitor", help="Build a read-only monitoring dashboard from journaled observer data")
+    monitor_parser.add_argument("--journal-path", type=Path, required=True, help="Path to the observer journal")
+    monitor_parser.add_argument("--session-id", required=True, help="Session correlation id to analyze")
+    monitor_parser.add_argument(
+        "--operational-mode",
+        choices=("observer", "entry-disabled", "live"),
+        default="observer",
+        help="Explicit operational mode indicator to surface in the dashboard",
+    )
+    monitor_parser.add_argument("--format", choices=("json", "markdown"), default="json", help="Render format for the dashboard")
+    monitor_parser.add_argument("--compare-reference-journal-path", type=Path, default=None, help="Optional reference journal for comparison")
+    monitor_parser.add_argument("--compare-reference-session-id", default=None, help="Reference session id for comparison")
+    monitor_parser.add_argument("--compare-candidate-journal-path", type=Path, default=None, help="Optional candidate journal for comparison")
+    monitor_parser.add_argument("--compare-candidate-session-id", default=None, help="Candidate session id for comparison")
+
     args = parser.parse_args(argv)
 
     if args.command in {"audit", "replay"}:
@@ -731,6 +746,40 @@ def main(argv: list[str] | None = None) -> None:
         candidate = build_observer_audit_report(AppendOnlyJournal(args.candidate_journal_path), session_id=args.candidate_session_id)
         comparison = compare_observer_audit_reports(reference, candidate)
         print(format_observer_comparison_report(comparison))
+        return
+    if args.command == "monitor":
+        from .audit import build_observer_audit_report, build_observer_replay_report, compare_observer_audit_reports
+        from .monitoring import build_observer_monitoring_report, format_observer_monitoring_report, render_observer_monitoring_dashboard
+
+        journal = AppendOnlyJournal(args.journal_path)
+        audit_report = build_observer_audit_report(journal, session_id=args.session_id)
+        replay_report = build_observer_replay_report(journal, session_id=args.session_id)
+        comparison_report = None
+        if args.compare_reference_journal_path is not None or args.compare_candidate_journal_path is not None:
+            if not all(
+                [
+                    args.compare_reference_journal_path,
+                    args.compare_reference_session_id,
+                    args.compare_candidate_journal_path,
+                    args.compare_candidate_session_id,
+                ]
+            ):
+                raise SystemExit("comparison requires both reference and candidate journal/session arguments")
+            reference = build_observer_audit_report(AppendOnlyJournal(args.compare_reference_journal_path), session_id=args.compare_reference_session_id)
+            candidate = build_observer_audit_report(AppendOnlyJournal(args.compare_candidate_journal_path), session_id=args.compare_candidate_session_id)
+            comparison_report = compare_observer_audit_reports(reference, candidate)
+        report = build_observer_monitoring_report(
+            journal,
+            session_id=args.session_id,
+            operational_mode=args.operational_mode,
+            audit_report=audit_report,
+            replay_report=replay_report,
+            comparison_report=comparison_report,
+        )
+        if args.format == "markdown":
+            print(render_observer_monitoring_dashboard(report))
+        else:
+            print(format_observer_monitoring_report(report))
         return
 
     policy = _demo_policy()
