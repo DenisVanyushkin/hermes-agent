@@ -14,6 +14,8 @@ from typing import Any
 
 import requests
 
+from tools.send_message_tool import send_message_tool
+
 from .browser_sourcing import metrics_from_counts
 from .company_intel import build_market_report, monitor_target_companies
 from .config import DEFAULT_CONFIG, load_config_bundle
@@ -60,6 +62,7 @@ class SlackDeliveryResult:
     success: bool
     attempts: int
     error: str | None = None
+    status: str = "sent"
 
 
 @dataclass(frozen=True)
@@ -211,10 +214,21 @@ def _slack_webhook_enabled() -> bool:
 
 def _deliver_to_slack(message: str, channel: str | None = None, *, retries: int = 3) -> SlackDeliveryResult:
     webhook = os.getenv("JOB_INTEL_SLACK_WEBHOOK_URL", "").strip()
-    if not webhook:
-        return SlackDeliveryResult(success=False, attempts=0, error="JOB_INTEL_SLACK_WEBHOOK_URL is not set")
     if message == "[SILENT]":
-        return SlackDeliveryResult(success=True, attempts=0, error=None)
+        return SlackDeliveryResult(success=True, attempts=0, error=None, status="sent")
+
+    if not webhook:
+        target = (f"slack:{channel}" if (channel and channel.startswith("C")) else ("slack:C0B4MM6D52A" if channel == "executive_search_report" else (f"slack:{channel}" if channel else "slack")))
+        try:
+            raw = send_message_tool({"target": target, "message": message})
+            payload = json.loads(raw) if raw else {}
+        except Exception as exc:
+            return SlackDeliveryResult(success=False, attempts=1, error=f"live adapter delivery error: {exc}", status="failed")
+        if payload.get("error"):
+            return SlackDeliveryResult(success=False, attempts=1, error=str(payload.get("error")), status="failed")
+        if payload.get("success"):
+            return SlackDeliveryResult(success=True, attempts=1, error=None, status="sent")
+        return SlackDeliveryResult(success=False, attempts=1, error=f"unexpected live adapter response: {payload}", status="failed")
 
     payload: dict[str, str] = {"text": message}
     if channel:
@@ -230,13 +244,12 @@ def _deliver_to_slack(message: str, channel: str | None = None, *, retries: int 
         attempts = attempt
         try:
             _send_once()
-            return SlackDeliveryResult(success=True, attempts=attempts)
+            return SlackDeliveryResult(success=True, attempts=attempts, status="sent")
         except Exception as exc:
             last_error = exc
             if attempt < retries:
                 continue
-    return SlackDeliveryResult(success=False, attempts=attempts, error=str(last_error) if last_error else None)
-
+    return SlackDeliveryResult(success=False, attempts=attempts, error=str(last_error) if last_error else None, status="failed")
 
 
 def _source_footer(source_statuses: dict[str, dict[str, Any]]) -> str | None:
@@ -343,6 +356,13 @@ def _should_notify_vacancy(store: JobIntelStore, vacancy_id: int, vacancy: Vacan
 
 
 
+
+
+def _delivery_db_status(delivery: SlackDeliveryResult) -> str:
+    if delivery.success:
+        return "sent"
+    return delivery.status if delivery.status in {"failed", "skipped"} else "failed"
+
 def _prepare_notifications(
     store: JobIntelStore,
     run_id: int,
@@ -371,7 +391,7 @@ def _prepare_notifications(
 
 
 def _finalize_notifications(store: JobIntelStore, notification_ids: list[int], delivery: SlackDeliveryResult) -> None:
-    status = "sent" if delivery.success else "failed"
+    status = _delivery_db_status(delivery)
     error = None if delivery.success else delivery.error
     for notification_id in notification_ids:
         store.mark_notification_delivery(notification_id, status, attempts=delivery.attempts, delivery_error=error)
@@ -491,7 +511,7 @@ def _deliver_source_notifications(
         delivery = _deliver_to_slack(body, channel)
         store.mark_notification_delivery(
             notification_id,
-            "sent" if delivery.success else "failed",
+            _delivery_db_status(delivery),
             attempts=delivery.attempts,
             delivery_error=delivery.error,
         )
@@ -667,7 +687,7 @@ def run_enrichment() -> str:
     if digest != "[SILENT]":
         notification_id = store.create_notification(run_id, channel, "enrichment_questions", digest, delivery_status="pending")
         delivery = _deliver_to_slack(digest, channel)
-        store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
+        store.mark_notification_delivery(notification_id, _delivery_db_status(delivery), attempts=delivery.attempts, delivery_error=delivery.error)
     store.finish_run(run_id, status="ok", notes=f"questions={len(questions)}", metadata={"questions": questions})
     return digest
 
@@ -689,7 +709,7 @@ def run_market_report() -> str:
     if message and message != "[SILENT]":
         notification_id = store.create_notification(run_id, channel, "market_report", message, delivery_status="pending")
         delivery = _deliver_to_slack(message, channel)
-        store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
+        store.mark_notification_delivery(notification_id, _delivery_db_status(delivery), attempts=delivery.attempts, delivery_error=delivery.error)
         store.finish_run(run_id, status="ok", notes=f"report_length={len(message)}", metadata={"delivery": delivery.__dict__})
     else:
         store.finish_run(run_id, status="ok", notes="report=silent", metadata={"report": "silent"})
@@ -712,7 +732,7 @@ def run_strategic_report() -> str:
     if message and message != "[SILENT]":
         notification_id = store.create_notification(run_id, channel, "strategic_report", message, delivery_status="pending")
         delivery = _deliver_to_slack(message, channel)
-        store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
+        store.mark_notification_delivery(notification_id, _delivery_db_status(delivery), attempts=delivery.attempts, delivery_error=delivery.error)
         store.finish_run(run_id, status="ok", notes=f"report_length={len(message)}", metadata={"delivery": delivery.__dict__})
     else:
         store.finish_run(run_id, status="ok", notes="report=silent", metadata={"report": "silent"})
@@ -1346,7 +1366,7 @@ def run_health_report() -> str:
     channel = _search_report_channel(cfg)
     notification_id = store.create_notification(run_id, channel, "health_report", digest, delivery_status="pending")
     delivery = _deliver_to_slack(digest, channel)
-    store.mark_notification_delivery(notification_id, "sent" if delivery.success else "failed", attempts=delivery.attempts, delivery_error=delivery.error)
+    store.mark_notification_delivery(notification_id, _delivery_db_status(delivery), attempts=delivery.attempts, delivery_error=delivery.error)
     store.finish_run(run_id, status="ok", notes=f"report_length={len(digest)}", metadata={"report_type": "health", "latest_daily_run_id": daily_runs[0].get('id'), "previous_daily_run_id": daily_runs[1].get('id') if len(daily_runs) > 1 else None, "delivery": delivery.__dict__})
     return digest
 
@@ -1419,6 +1439,7 @@ def _browser_desktop_health() -> dict[str, Any]:
     browser_env = os.environ.copy()
     browser_env.setdefault("HOME", str(base_dir))
     browser_env.setdefault("XDG_CACHE_HOME", str(base_dir / ".cache"))
+    browser_env.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path(browser_env["XDG_CACHE_HOME"]) / "ms-playwright"))
 
     chromium_executable: str | None = None
     if result["checks"]["playwright_venv_python"]["ok"]:
@@ -1441,38 +1462,47 @@ def _browser_desktop_health() -> dict[str, Any]:
         except subprocess.TimeoutExpired:
             mark("playwright_import", False, "Playwright import probe timed out after 45s")
 
-    if chromium_executable:
+    def worker_probe(source: str) -> tuple[bool, str]:
         try:
-            launch = subprocess.run(
-                [
-                    str(venv_python),
-                    "-c",
-                    (
-                        "from playwright.sync_api import sync_playwright\n"
-                        "with sync_playwright() as p:\n"
-                        "    browser = p.chromium.launch(headless=True)\n"
-                        "    page = browser.new_page()\n"
-                        "    page.goto('data:text/html,<title>job-intel-browser-health</title>')\n"
-                        "    print(page.title())\n"
-                        "    browser.close()\n"
-                    ),
-                ],
+            probe = subprocess.run(
+                [str(venv_python), "-m", "job_intel.browser_worker", "probe", source],
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=180,
                 check=False,
                 env=browser_env,
             )
-            launch_output = (launch.stdout or "").strip()
-            if launch.returncode == 0 and launch_output == "job-intel-browser-health":
-                mark("chromium_launch", True, launch_output)
-            else:
-                stderr = (launch.stderr or launch.stdout or "Chromium smoke test failed").strip()
-                mark("chromium_launch", False, stderr)
         except subprocess.TimeoutExpired:
-            mark("chromium_launch", False, "Chromium smoke test timed out after 60s")
-    else:
-        mark("chromium_launch", False, "chromium executable could not be resolved")
+            return False, f"{source} CDP probe timed out after 180s"
+        payload = None
+        stdout = (probe.stdout or "").strip()
+        for line in reversed(stdout.splitlines()):
+            line = line.strip()
+            if not (line.startswith("{") and line.endswith("}")):
+                continue
+            try:
+                payload = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+        if isinstance(payload, dict) and payload.get("ok"):
+            return True, str(payload.get("session_health") or source)
+        detail = payload.get("error") if isinstance(payload, dict) else None
+        return False, str(detail or probe.stderr or stdout or f"{source} CDP probe failed")
+
+    cdp_ports = {"linkedin": 9222, "headhunter": 9223}
+    for source in ("linkedin", "headhunter"):
+        ok, detail = worker_probe(source)
+        mark(f"cdp_probe_{source}", ok, detail)
+        port = cdp_ports[source]
+        try:
+            response = requests.get(f"http://127.0.0.1:{port}/json/version", timeout=5)
+            response.raise_for_status()
+            payload = response.json()
+            browser = payload.get("Browser") or payload.get("browser") or f"127.0.0.1:{port}"
+            mark(f"cdp_endpoint_{source}", True, str(browser))
+        except Exception as exc:
+            mark(f"cdp_endpoint_{source}", False, f"CDP endpoint {port} unavailable: {exc}")
 
     for profile_name in ("linkedin", "hh"):
         profile_dir = base_dir / "profiles" / profile_name
@@ -1486,7 +1516,6 @@ def _browser_desktop_health() -> dict[str, Any]:
     result["chromium_executable"] = chromium_executable
     result["status"] = "healthy" if not result["issues"] else "degraded"
     return result
-
 
 
 def _format_browser_desktop_health(health: dict[str, Any]) -> str:
