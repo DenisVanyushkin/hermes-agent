@@ -6,9 +6,11 @@ import os
 import random
 import re
 import time
+from contextlib import suppress
 from email import message_from_bytes
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from html import unescape
 from html.parser import HTMLParser
 from importlib.util import find_spec
 from pathlib import Path
@@ -88,13 +90,18 @@ class BrowserSessionHealth:
             self.pagination_depth_reached = max(self.pagination_depth_reached, page_depth)
         else:
             self.pagination_depth_reached = max(self.pagination_depth_reached, self.pages_fetched)
-        if _looks_like_auth_redirect(url, html):
+        auth_redirect = _looks_like_auth_redirect(url, html)
+        login_wall = _looks_like_login_wall(url, html)
+        if vacancies_found > 0 and _page_has_source_results(self.source, url, html):
+            auth_redirect = False
+            login_wall = False
+        if auth_redirect:
             self.auth_redirects += 1
-        if _looks_like_login_wall(url, html):
+        if login_wall:
             self.login_walls += 1
         if vacancies_found > 0:
             self.successful_extractions += 1
-            if not _looks_like_login_wall(url, html) and not _looks_like_auth_redirect(url, html):
+            if not login_wall and not auth_redirect:
                 self.last_successful_authenticated_request = url
         else:
             if _looks_like_extraction_failure(url, html):
@@ -281,6 +288,39 @@ def _strip_html(html: str) -> str:
     return re.sub(r"<[^>]+>", " ", html or "")
 
 
+def _clean_html_text(value: str) -> str:
+    return _normalize_whitespace(unescape(_strip_html(value or "")))
+
+
+def _looks_like_linkedin_results_page(url: str, html: str) -> bool:
+    lowered_url = url.lower()
+    lowered_html = html.lower()
+    return "linkedin.com/jobs/search" in lowered_url and (
+        "job-card-container__link" in lowered_html
+        or "job-card-list__title--link" in lowered_html
+        or "artdeco-entity-lockup__subtitle" in lowered_html
+    )
+
+
+def _looks_like_headhunter_results_page(url: str, html: str) -> bool:
+    lowered_url = url.lower()
+    lowered_html = html.lower()
+    return "hh.ru/search/vacancy" in lowered_url and (
+        'data-qa="serp-item__title"' in lowered_html
+        or 'data-qa="vacancy-serp__vacancy-employer-text"' in lowered_html
+        or 'data-qa="vacancy-serp__vacancy-address"' in lowered_html
+    )
+
+
+def _page_has_source_results(source: str, url: str, html: str) -> bool:
+    source_key = (source or "").strip().lower()
+    if source_key == "linkedin":
+        return _looks_like_linkedin_results_page(url, html)
+    if source_key in {"headhunter", "hh"}:
+        return _looks_like_headhunter_results_page(url, html)
+    return False
+
+
 def _json_ld_objects(html: str) -> list[dict[str, Any]]:
     objects: list[dict[str, Any]] = []
     for match in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, flags=re.I | re.S):
@@ -327,6 +367,20 @@ def _company_from_url(url: str) -> str:
     return _normalize_whitespace(host.replace("www.", "").split(":")[0].split(".")[0].title()) or "Unknown"
 
 
+def _normalize_location_text(value: str) -> str:
+    normalized = _clean_html_text(value)
+    if not normalized:
+        return "Unknown"
+    lowered = normalized.lower()
+    if "remote" in lowered:
+        return "Remote"
+    if "," in normalized:
+        primary = normalized.split(",", 1)[0].strip()
+        if primary:
+            return primary
+    return normalized
+
+
 def _location_from_jobposting(jobposting: dict[str, Any], body_text: str) -> str:
     location = jobposting.get("jobLocation")
     if isinstance(location, list) and location:
@@ -337,7 +391,7 @@ def _location_from_jobposting(jobposting: dict[str, Any], body_text: str) -> str
             parts = [address.get("addressLocality"), address.get("addressRegion"), address.get("addressCountry")]
             rendered = ", ".join(str(part) for part in parts if part)
             if rendered:
-                return rendered
+                return _normalize_location_text(rendered)
     text = body_text.lower()
     if "remote" in text:
         return "Remote"
@@ -474,6 +528,87 @@ def _dedupe_vacancies(vacancies: list[Vacancy]) -> list[Vacancy]:
     return deduped
 
 
+def _vacancy_identity(vacancy: Vacancy) -> tuple[str, str]:
+    return (vacancy.url, vacancy.title.lower())
+
+
+def _merge_vacancy_lists(primary: list[Vacancy], secondary: list[Vacancy]) -> list[Vacancy]:
+    merged: dict[tuple[str, str], Vacancy] = {_vacancy_identity(v): v for v in primary}
+    for vacancy in secondary:
+        key = _vacancy_identity(vacancy)
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = vacancy
+            continue
+        if existing.company == "Unknown" and vacancy.company != "Unknown":
+            existing.company = vacancy.company
+        if existing.location == "Unknown" and vacancy.location != "Unknown":
+            existing.location = vacancy.location
+        if len(vacancy.title) < len(existing.title) and vacancy.title:
+            existing.title = vacancy.title
+        if (not existing.description or existing.description == existing.title) and vacancy.description:
+            existing.description = vacancy.description
+    return _dedupe_vacancies(list(merged.values()))
+
+
+def _linkedin_card_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
+    vacancies: list[Vacancy] = []
+    pattern = re.compile(
+        r'<a[^>]+href="(?P<href>/jobs/view/[^"]+)"[^>]*class="[^"]*job-card-container__link[^"]*"[^>]*>.*?<strong><!---->(?P<title>.*?)<!----></strong>.*?</a>(?P<tail>.{0,2500}?)job-card-list__footer-wrapper',
+        flags=re.S,
+    )
+    for match in pattern.finditer(html):
+        title = _clean_html_text(match.group("title"))
+        if not title or not _looks_executive(title):
+            continue
+        tail = match.group("tail")
+        company_match = re.search(r'artdeco-entity-lockup__subtitle[^>]*>.*?<span[^>]*>\s*<!---->(?P<company>.*?)<!---->\s*</span>', tail, flags=re.S)
+        location_match = re.search(r'job-card-container__metadata-wrapper.*?<li[^>]*>\s*<span[^>]*>\s*<!---->(?P<location>.*?)<!---->\s*</span>', tail, flags=re.S)
+        company = _clean_html_text(company_match.group("company")) if company_match else "Unknown"
+        location = _normalize_location_text(location_match.group("location")) if location_match else "Unknown"
+        absolute = urljoin(page_url, match.group("href"))
+        vacancies.append(Vacancy(
+            source="linkedin",
+            source_id=_vacancy_source_id("linkedin", absolute, title),
+            company=company or "Unknown",
+            title=title,
+            location=location or "Unknown",
+            url=absolute,
+            description=title,
+            metadata={"source_url": page_url, "href": match.group("href")},
+        ))
+    return _dedupe_vacancies(vacancies)
+
+
+def _headhunter_card_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
+    vacancies: list[Vacancy] = []
+    title_pattern = re.compile(
+        r'<a[^>]+data-qa="serp-item__title"[^>]+href="(?P<href>(?:https://hh\.ru)?/vacancy/[^"]+)"[^>]*>.*?<span[^>]+data-qa="serp-item__title-text"[^>]*>(?P<title>.*?)</span>.*?</a>',
+        flags=re.S,
+    )
+    for match in title_pattern.finditer(html):
+        title = _clean_html_text(match.group("title"))
+        if not title or not _looks_executive(title):
+            continue
+        tail = html[match.end():match.end() + 4000]
+        company_match = re.search(r'data-qa="vacancy-serp__vacancy-employer-text"[^>]*>(?P<company>.*?)</span>', tail, flags=re.S)
+        location_match = re.search(r'data-qa="vacancy-serp__vacancy-address"[^>]*>(?P<location>.*?)</span>', tail, flags=re.S)
+        company = _clean_html_text(company_match.group("company")) if company_match else _company_from_url(match.group("href"))
+        location = _normalize_location_text(location_match.group("location")) if location_match else "Unknown"
+        absolute = urljoin(page_url, match.group("href"))
+        vacancies.append(Vacancy(
+            source="headhunter",
+            source_id=_vacancy_source_id("headhunter", absolute, title),
+            company=company or "Unknown",
+            title=title,
+            location=location or "Unknown",
+            url=absolute,
+            description=title,
+            metadata={"source_url": page_url, "href": match.group("href")},
+        ))
+    return _dedupe_vacancies(vacancies)
+
+
 def _link_vacancies_from_html(html: str, *, source: str, page_url: str, company_override: str | None = None) -> list[Vacancy]:
     parser = _LinkCapture()
     parser.feed(html)
@@ -515,17 +650,17 @@ def _link_vacancies_from_html(html: str, *, source: str, page_url: str, company_
 
 
 def extract_linkedin_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
-    vacancies = [_vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url) for jobposting in _jobposting_objects(html)]
-    if not vacancies:
-        vacancies = _link_vacancies_from_html(html, source="linkedin", page_url=page_url)
-    return _dedupe_vacancies(vacancies)
+    card_vacancies = _linkedin_card_vacancies_from_html(html, page_url=page_url)
+    structured = [_vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url) for jobposting in _jobposting_objects(html)]
+    fallback = _link_vacancies_from_html(html, source="linkedin", page_url=page_url) if not card_vacancies and not structured else []
+    return _merge_vacancy_lists(card_vacancies or structured, structured + fallback)
 
 
 def extract_headhunter_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
-    vacancies = [_vacancy_from_jobposting(jobposting, source="headhunter", page_url=page_url) for jobposting in _jobposting_objects(html)]
-    if not vacancies:
-        vacancies = _link_vacancies_from_html(html, source="headhunter", page_url=page_url)
-    return _dedupe_vacancies(vacancies)
+    card_vacancies = _headhunter_card_vacancies_from_html(html, page_url=page_url)
+    structured = [_vacancy_from_jobposting(jobposting, source="headhunter", page_url=page_url) for jobposting in _jobposting_objects(html)]
+    fallback = _link_vacancies_from_html(html, source="headhunter", page_url=page_url) if not card_vacancies and not structured else []
+    return _merge_vacancy_lists(card_vacancies or structured, structured + fallback)
 
 
 def extract_company_career_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
@@ -538,9 +673,13 @@ class BrowserSourceClient:
     def __init__(self, config: BrowserAcquisitionConfig | None = None):
         self.config = config or BrowserAcquisitionConfig()
         self._playwright = None
+        self._browser = None
         self._context = None
+        self._cdp_attached = False
         self._health = BrowserSessionHealth(source="browser")
         self._health.browser_profile = str(self.config.user_data_dir)
+        diagnostics_root = os.getenv("JOB_INTEL_BROWSER_DIAGNOSTICS_DIR", "").strip()
+        self._diagnostics_dir = Path(diagnostics_root).expanduser() if diagnostics_root else None
 
     def __enter__(self) -> "BrowserSourceClient":
         if not browser_native_available():
@@ -551,32 +690,117 @@ class BrowserSourceClient:
         if profile_name in {"linkedin", "headhunter", "hh", "company_career"}:
             _ensure_required_browser_profile(profile_name, self.config)
 
-        self.config.user_data_dir.mkdir(parents=True, exist_ok=True)
+        cdp_url = os.getenv("JOB_INTEL_BROWSER_CDP_URL", "").strip()
         try:
             self._playwright = sync_playwright().start()
-            self._context = self._playwright.chromium.launch_persistent_context(
-                user_data_dir=str(self.config.user_data_dir),
-                headless=self.config.headless,
-                slow_mo=self.config.slow_mo_ms,
-                viewport={"width": 1440, "height": 1600},
-            )
+            if cdp_url:
+                self._browser = self._playwright.chromium.connect_over_cdp(cdp_url)
+                contexts = list(getattr(self._browser, "contexts", []) or [])
+                if not contexts:
+                    raise BrowserNativeUnavailable(f"Playwright CDP attach at {cdp_url} did not expose a persistent browser context.")
+                self._context = contexts[0]
+                self._cdp_attached = True
+                return self
+
+            self.config.user_data_dir.mkdir(parents=True, exist_ok=True)
+            launch_kwargs: dict[str, Any] = {
+                "user_data_dir": str(self.config.user_data_dir),
+                "headless": self.config.headless,
+                "slow_mo": self.config.slow_mo_ms,
+                "viewport": {"width": 1440, "height": 1600},
+            }
+            browser_executable = os.getenv("JOB_INTEL_BROWSER_EXECUTABLE", "").strip()
+            if browser_executable:
+                launch_kwargs["executable_path"] = browser_executable
+            browser_channel = os.getenv("JOB_INTEL_BROWSER_CHANNEL", "").strip()
+            if browser_channel:
+                launch_kwargs["channel"] = browser_channel
+            self._context = self._playwright.chromium.launch_persistent_context(**launch_kwargs)
         except Exception as exc:
+            try:
+                if self._playwright is not None:
+                    self._playwright.stop()
+            except Exception:
+                pass
+            self._browser = None
             self._context = None
             self._playwright = None
-            raise BrowserNativeUnavailable(f"Playwright browser launch failed: {exc}") from exc
+            self._cdp_attached = False
+            mode = "attach" if cdp_url else "launch"
+            raise BrowserNativeUnavailable(f"Playwright browser {mode} failed: {exc}") from exc
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if self._context is not None:
+        if self._context is not None and not self._cdp_attached:
             self._context.close()
         if self._playwright is not None:
             self._playwright.stop()
+        self._browser = None
         self._context = None
         self._playwright = None
+        self._cdp_attached = False
 
     def _page_contains_any(self, html: str, markers: tuple[str, ...]) -> bool:
         lowered = html.lower()
         return any(marker in lowered for marker in markers)
+
+    def _diagnostic_slug(self, label: str) -> str:
+        slug = re.sub(r"[^a-z0-9._-]+", "-", (label or "page").lower()).strip("-")
+        return slug or "page"
+
+    def _capture_page_diagnostics(self, *, page: Any, label: str, html: str | None = None, extra: dict[str, Any] | None = None) -> None:
+        if self._diagnostics_dir is None:
+            return
+        try:
+            self._diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        slug = self._diagnostic_slug(label)
+        base = self._diagnostics_dir / f"{timestamp}-{slug}"
+        screenshot_path = base.with_suffix(".png")
+        html_path = base.with_suffix(".html")
+        meta_path = base.with_suffix(".json")
+        try:
+            page.screenshot(path=str(screenshot_path), full_page=True)
+        except Exception:
+            screenshot_path = None
+        if html is None:
+            with suppress(Exception):
+                html = page.content()
+        if html is not None:
+            with suppress(Exception):
+                html_path.write_text(html)
+        payload: dict[str, Any] = {
+            "label": label,
+            "source": self.config.source_name or self._health.source,
+            "requested_profile": str(self.config.user_data_dir),
+            "page_url": getattr(page, "url", ""),
+            "page_title": "",
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "screenshot_path": str(screenshot_path) if screenshot_path else None,
+            "html_path": str(html_path) if html is not None else None,
+            "diagnostics_dir": str(self._diagnostics_dir),
+        }
+        with suppress(Exception):
+            payload["page_title"] = page.title()
+        if html is not None:
+            lowered = html.lower()
+            payload["markers"] = {
+                "sign_in": "sign in" in lowered,
+                "log_in": "log in" in lowered,
+                "join_linkedin": "join linkedin" in lowered,
+                "verification_code": "verification code" in lowered,
+                "otp": "otp" in lowered,
+                "captcha": "captcha" in lowered,
+                "gmail": "gmail" in lowered,
+                "hermes_at_vanyushk": "hermes@vanyushk.in" in lowered,
+            }
+            payload["html_excerpt"] = html[:4000]
+        if extra:
+            payload["extra"] = extra
+        with suppress(Exception):
+            meta_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2))
 
     def _validate_authenticated_html(
         self,
@@ -587,15 +811,18 @@ class BrowserSourceClient:
         required_markers: tuple[str, ...],
         login_markers: tuple[str, ...],
     ) -> None:
+        has_required_markers = self._page_contains_any(html, required_markers)
+        if has_required_markers:
+            self._health.last_successful_authenticated_request = url
+            return
         if _looks_like_login_wall(url, html) or _looks_like_auth_redirect(url, html):
             self._health.update(url=url, html=html, vacancies_found=0)
             raise BrowserNativeUnavailable(f"{source} authentication validation landed on a login wall or redirect at {url}")
-        if not self._page_contains_any(html, required_markers):
-            if login_markers and self._page_contains_any(html, login_markers):
-                self._health.update(url=url, html=html, vacancies_found=0)
-                raise BrowserNativeUnavailable(f"{source} authentication validation found sign-in markers at {url}")
-            if source == "linkedin":
-                raise BrowserNativeUnavailable(f"{source} authenticated feed/profile markers were not visible at {url}")
+        if login_markers and self._page_contains_any(html, login_markers):
+            self._health.update(url=url, html=html, vacancies_found=0)
+            raise BrowserNativeUnavailable(f"{source} authentication validation found sign-in markers at {url}")
+        if source == "linkedin":
+            raise BrowserNativeUnavailable(f"{source} authenticated feed/profile markers were not visible at {url}")
         self._health.last_successful_authenticated_request = url
 
     @staticmethod
@@ -719,7 +946,7 @@ class BrowserSourceClient:
     def _validate_linkedin_auth(self) -> None:
         url = "https://www.linkedin.com/feed/"
         self._health.auth_attempted = True
-        html = self.fetch_html(url, scrolls=0)
+        html = self.fetch_html(url, scrolls=0, capture_label="linkedin-auth")
         self._validate_authenticated_html(
             source="linkedin",
             url=url,
@@ -736,31 +963,32 @@ class BrowserSourceClient:
         )
 
     def _validate_headhunter_auth(self) -> None:
-        url = "https://hh.ru/"
+        search_url = "https://hh.ru/search/vacancy?text=Head+of+Product"
         self._health.auth_attempted = True
-        html = self.fetch_html(url, scrolls=0)
-        if _looks_like_login_wall(url, html) or _looks_like_auth_redirect(url, html):
+        search_html = self.fetch_html(search_url, scrolls=0, capture_label="headhunter-auth-search")
+        if _looks_like_login_wall(search_url, search_html) or _looks_like_auth_redirect(search_url, search_html):
             if self._attempt_headhunter_otp_recovery("https://hh.ru/account/login?backurl=https%3A%2F%2Fhh.ru%2Fsearch%2Fvacancy"):
-                html = self.fetch_html(url, scrolls=0)
+                search_html = self.fetch_html(search_url, scrolls=0, capture_label="headhunter-auth-search-after-otp")
         self._validate_authenticated_html(
             source="headhunter",
-            url=url,
-            html=html,
+            url=search_url,
+            html=search_html,
             required_markers=(
-                "profile",
-                "avatar",
-                "logout",
+                "hh.ru/search/vacancy",
+                "vacancy_search",
                 "vacancy search",
-                "search",
+                "поиск вакансий",
+                "найдено",
                 "resume",
+                "резюме",
             ),
-            login_markers=("sign in", "log in", "authorize", "verification code", "otp", "captcha"),
+            login_markers=("sign in", "log in", "authorize", "verification code"),
         )
 
     def session_health_snapshot(self) -> dict[str, Any]:
         return self._health.snapshot()
 
-    def fetch_html(self, url: str, *, scrolls: int | None = None) -> str:
+    def fetch_html(self, url: str, *, scrolls: int | None = None, capture_label: str | None = None) -> str:
         if self._context is None:
             raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
         scroll_count = self.config.max_scrolls if scrolls is None else max(0, scrolls)
@@ -768,23 +996,72 @@ class BrowserSourceClient:
         try:
             page = self._context.new_page()
             try:
-                self._sleep()
+                self._sleep(source=self.config.source_name)
                 page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
                 page.wait_for_timeout(self.config.scroll_pause_ms)
+                self._humanize_page(page, url=url)
                 for _ in range(scroll_count):
                     page.mouse.wheel(0, 1800)
                     page.wait_for_timeout(self.config.scroll_pause_ms)
-                return page.content()
+                html = page.content()
+                if capture_label:
+                    self._capture_page_diagnostics(page=page, label=capture_label, html=html, extra={"requested_url": url, "scroll_count": scroll_count})
+                return html
             finally:
                 page.close()
         except Exception as exc:
+            with suppress(Exception):
+                self._capture_page_diagnostics(page=page, label=capture_label or "fetch-exception", extra={"requested_url": url, "error": str(exc)})
             raise BrowserNativeUnavailable(f"Playwright browser fetch failed: {exc}") from exc
         finally:
             self._last_fetch_seconds = max(0.0, time.perf_counter() - start)
 
-    def _sleep(self) -> None:
-        delay = random.uniform(self.config.min_delay_ms, self.config.max_delay_ms) / 1000.0
+    def _sleep(self, *, source: str | None = None, extra_bias_ms: tuple[int, int] | None = None) -> None:
+        source_key = (source or self.config.source_name or "").strip().lower()
+        min_delay = self.config.min_delay_ms
+        max_delay = self.config.max_delay_ms
+        if source_key in {"headhunter", "hh"}:
+            min_delay += 250
+            max_delay += 1200
+        elif source_key == "linkedin":
+            min_delay += 200
+            max_delay += 900
+        if extra_bias_ms:
+            min_delay += extra_bias_ms[0]
+            max_delay += extra_bias_ms[1]
+        delay = random.uniform(min_delay, max_delay) / 1000.0
         time.sleep(delay)
+
+    def _humanize_page(self, page: Any, *, url: str) -> None:
+        source_key = (self.config.source_name or "").strip().lower()
+        lowered_url = url.lower()
+        try:
+            if source_key in {"headhunter", "hh"} and "hh.ru" in lowered_url:
+                if random.random() < 0.65:
+                    page.wait_for_timeout(random.randint(450, 1800))
+                if random.random() < 0.45:
+                    page.mouse.wheel(0, random.randint(180, 900))
+                    page.wait_for_timeout(random.randint(250, 900))
+                if random.random() < 0.18:
+                    page.mouse.wheel(0, -random.randint(120, 420))
+                    page.wait_for_timeout(random.randint(150, 700))
+                return
+            if source_key == "linkedin" and "linkedin.com/jobs" in lowered_url:
+                if random.random() < 0.75:
+                    page.wait_for_timeout(random.randint(700, 2400))
+                if random.random() < 0.50:
+                    page.mouse.wheel(0, random.randint(220, 1100))
+                    page.wait_for_timeout(random.randint(300, 1100))
+                if random.random() < 0.22:
+                    page.mouse.wheel(0, -random.randint(120, 360))
+                    page.wait_for_timeout(random.randint(180, 800))
+                return
+            if source_key == "linkedin" and "linkedin.com/feed" in lowered_url:
+                if random.random() < 0.60:
+                    page.wait_for_timeout(random.randint(500, 1800))
+                return
+        except Exception:
+            return
 
     def _observe_page(self, url: str, html: str, vacancies_found: int, *, detail_page: bool = False, page_depth: int | None = None) -> None:
         self._health.update(
@@ -812,6 +1089,8 @@ class BrowserSourceClient:
         return list(dict.fromkeys(candidates))
 
     def _maybe_open_noise_page(self, *, page_url: str, html: str, source: str) -> list[Vacancy]:
+        if source in {"linkedin", "headhunter"}:
+            return []
         if random.random() > self.config.noise_probability:
             return []
         candidates = self._detail_candidates(html, page_url=page_url, source=source)
@@ -828,6 +1107,8 @@ class BrowserSourceClient:
         return detail_vacancies
 
     def _maybe_open_detail_vacancy(self, *, source: str, vacancies: list[Vacancy]) -> list[Vacancy]:
+        if source in {"linkedin", "headhunter"}:
+            return []
         if not vacancies or random.random() > max(0.25, self.config.noise_probability):
             return []
         candidate = next((vacancy for vacancy in vacancies if vacancy.url), None)
@@ -866,8 +1147,9 @@ class BrowserSourceClient:
         self._health.source = "linkedin"
         self._validate_linkedin_auth()
         for page_index in self._linkedin_page_plan(max_pages):
+            self._sleep(source="linkedin", extra_bias_ms=(250, 1300))
             page_url = f"{url}&start={page_index * 25}" if page_index else url
-            html = self.fetch_html(page_url)
+            html = self.fetch_html(page_url, capture_label=f"linkedin-search-page-{page_index}")
             page_vacancies = extract_linkedin_vacancies_from_html(html, page_url=page_url)
             self._observe_page(page_url, html, len(page_vacancies))
             vacancies.extend(page_vacancies)
@@ -883,8 +1165,9 @@ class BrowserSourceClient:
         self._health.source = "headhunter"
         self._validate_headhunter_auth()
         for page_index in self._headhunter_page_plan(max_pages):
+            self._sleep(source="headhunter", extra_bias_ms=(300, 1600))
             page_url = f"{url}&page={page_index}" if page_index else url
-            html = self.fetch_html(page_url)
+            html = self.fetch_html(page_url, capture_label=f"headhunter-search-page-{page_index}")
             page_vacancies = extract_headhunter_vacancies_from_html(html, page_url=page_url)
             self._observe_page(page_url, html, len(page_vacancies))
             vacancies.extend(page_vacancies)
