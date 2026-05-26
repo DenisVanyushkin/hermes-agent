@@ -47,6 +47,19 @@ from .strategy import (
     StrategyProposalValidationError,
     StrategyRunContext,
 )
+from .monitoring import (
+    AlertSeverity,
+    AnomalyThrottle,
+    MONITORING_SCHEMA_VERSION,
+    MonitoringAlert,
+    MonitoringMetric,
+    MonitoringReport,
+    MonitoringSection,
+    MonitoringSignal,
+    build_observer_monitoring_report,
+    format_observer_monitoring_report,
+    render_observer_monitoring_dashboard,
+)
 
 BOOT_REPORT_VERSION = "1.0.0"
 
@@ -93,6 +106,8 @@ __all__ = [
     "StrategyProposalValidationError",
     "StrategyRunContext",
     "RISK_SCHEMA_VERSION",
+    "AlertSeverity",
+    "AnomalyThrottle",
     "ReplayContext",
     "ReplayResult",
     "RiskDecision",
@@ -112,6 +127,17 @@ __all__ = [
     "StateDomain",
     "TradeIntent",
     "TradeSide",
+    "MONITORING_SCHEMA_VERSION",
+    "AlertSeverity",
+    "AnomalyThrottle",
+    "MonitoringAlert",
+    "MonitoringMetric",
+    "MonitoringReport",
+    "MonitoringSection",
+    "MonitoringSignal",
+    "build_observer_monitoring_report",
+    "format_observer_monitoring_report",
+    "render_observer_monitoring_dashboard",
     "normalize_market_snapshot",
 ]
 
