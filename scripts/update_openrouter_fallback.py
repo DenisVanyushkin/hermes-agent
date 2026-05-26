@@ -114,9 +114,19 @@ def _find_block(lines: list[str], key: str) -> tuple[int | None, int | None]:
         return None, None
 
     end = start + 1
+    top_level_sequence_item = re.compile(r"^-\s")
     while end < len(lines):
         line = lines[end]
-        if line.startswith(" ") or line.startswith("\t") or line.strip() == "":
+        if line.strip() == "" or line.startswith(" ") or line.startswith("\t"):
+            end += 1
+            continue
+        # YAML permits block sequences to be written flush-left after the key
+        # (for example ``toolsets:\n- hermes-cli``). Also, if a previous updater
+        # produced orphaned top-level list entries after fallback_providers,
+        # include them in the block so the next run repairs the config instead
+        # of preserving invalid YAML. Any other flush-left line starts the next
+        # top-level construct and must be preserved.
+        if top_level_sequence_item.match(line):
             end += 1
             continue
         break
