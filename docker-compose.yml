@@ -35,7 +35,9 @@ services:
     network_mode: host
     volumes:
       - ~/.hermes:/opt/data
+      - /home/hermes/.config/trading-autopilot/binance.env:/run/secrets/binance.env:ro
     environment:
+      - TRADING_AUTOPILOT_SECRET_FILE=/run/secrets/binance.env
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
       # To expose the OpenAI-compatible API server beyond localhost,
