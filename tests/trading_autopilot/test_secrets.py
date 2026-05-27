@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import os
-import stat
-import tempfile
 from pathlib import Path
 
 import pytest
 
+import trading_autopilot.secrets as secrets_module
 from trading_autopilot.secrets import (
     CredentialError,
     CredentialLeakError,
@@ -102,16 +100,16 @@ class TestLoadCredentials:
     def test_wrong_file_permissions(self, creds_dir: Path):
         f = creds_dir / "binance.env"
         f.write_text("BINANCE_API_KEY=key\nBINANCE_API_SECRET=secret\n")
-        f.chmod(0o644)
-        with pytest.raises(CredentialError, match="permissions"):
+        f.chmod(0o666)
+        with pytest.raises(CredentialError, match="writable"):
             load_credentials(str(f))
 
     def test_wrong_dir_permissions(self, creds_dir: Path):
-        creds_dir.chmod(0o755)
+        creds_dir.chmod(0o777)
         f = creds_dir / "binance.env"
         f.write_text("BINANCE_API_KEY=key\nBINANCE_API_SECRET=secret\n")
         f.chmod(0o600)
-        with pytest.raises(CredentialError, match="permissions"):
+        with pytest.raises(CredentialError, match="writable"):
             load_credentials(str(f))
 
     def test_strips_quotes(self, creds_dir: Path):
@@ -141,6 +139,21 @@ class TestLoadCredentials:
         creds1 = load_credentials(str(creds_file), use_cache=True)
         creds2 = load_credentials(str(creds_file), use_cache=True)
         assert creds1 == creds2
+
+    def test_explicit_env_override_wins_without_home(self, creds_file: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("HOME", raising=False)
+        monkeypatch.setenv("TRADING_AUTOPILOT_SECRET_FILE", str(creds_file))
+        creds = load_credentials()
+        assert creds["BINANCE_API_KEY"] == "test_key_abc123"
+        assert creds["BINANCE_API_SECRET"] == "test_secret_xyz789"
+
+    def test_fallback_to_run_secrets_path_when_env_unset(self, creds_file: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("TRADING_AUTOPILOT_SECRET_FILE", raising=False)
+        monkeypatch.setattr(secrets_module, "DEFAULT_SECRET_PATHS", (creds_file,))
+        monkeypatch.delenv("HOME", raising=False)
+        creds = load_credentials()
+        assert creds["BINANCE_API_KEY"] == "test_key_abc123"
+        assert creds["BINANCE_API_SECRET"] == "test_secret_xyz789"
 
 
 class TestGetApiCredentials:
