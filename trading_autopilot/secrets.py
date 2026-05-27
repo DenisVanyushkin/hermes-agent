@@ -8,13 +8,16 @@ If credentials accidentally leak into any output, the run is failed as a securit
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import Final
 
-DEFAULT_ENV_PATH: Final[str] = os.path.expanduser("~/.config/trading-autopilot/binance.env")
-
-CREDS_PATH_DIR_PERMS: Final[int] = 0o700
-CREDS_PATH_FILE_PERMS: Final[int] = 0o600
+TRADING_AUTOPILOT_SECRET_FILE_ENV: Final[str] = "TRADING_AUTOPILOT_SECRET_FILE"
+DEFAULT_SECRET_PATHS: Final[tuple[Path, ...]] = (
+    Path("/run/secrets/binance.env"),
+    Path("/home/hermes/.config/trading-autopilot/binance.env"),
+    Path("/root/.config/trading-autopilot/binance.env"),
+)
 
 _SECRETS_CACHE: dict[str, str] | None = None
 
@@ -52,34 +55,26 @@ def load_credentials(
 ) -> dict[str, str]:
     """Load credentials from a .env file.
 
-    The file must:
-    - live under a directory with chmod 700
-    - have chmod 600 itself
-    - contain KEY=VALUE lines (one per line)
+    Resolution order:
+    1. Explicit env_path argument (programmatic override)
+    2. TRADING_AUTOPILOT_SECRET_FILE environment variable
+    3. Container/dev fallback paths
 
     Secret values are:
     - stripped of surrounding quotes
     - NOT logged, NOT journaled, NOT printed
     - only returned for programmatic use at runtime
-
-    Args:
-        env_path: Path to .env file. Defaults to ~/.config/trading-autopilot/binance.env
-        use_cache: If True, return cached credentials after first load.
     """
     global _SECRETS_CACHE
 
     if use_cache and _SECRETS_CACHE is not None:
         return _SECRETS_CACHE
 
-    path = Path(env_path or DEFAULT_ENV_PATH)
-
-    if not path.exists():
-        raise CredentialError(f"Credential file not found: {path}")
-
-    _validate_file_permissions(path)
+    path = _resolve_secret_path(env_path)
+    _validate_secret_path(path)
 
     credentials: dict[str, str] = {}
-    with open(path, "r") as fh:
+    with open(path, "r", encoding="utf-8") as fh:
         for lineno, line in enumerate(fh, start=1):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -118,26 +113,50 @@ def clear_cache() -> None:
     _SECRETS_CACHE = None
 
 
-def _validate_file_permissions(path: Path) -> None:
-    dir_path = path.parent
+def _resolve_secret_path(env_path: str | None = None) -> Path:
+    if env_path:
+        return Path(env_path)
+
+    explicit_env = os.environ.get(TRADING_AUTOPILOT_SECRET_FILE_ENV, "").strip()
+    if explicit_env:
+        return Path(explicit_env)
+
+    for candidate in DEFAULT_SECRET_PATHS:
+        if candidate.exists():
+            return candidate
+
+    candidates = ", ".join(str(path) for path in DEFAULT_SECRET_PATHS)
+    raise CredentialError(
+        f"Credential file not found. Set {TRADING_AUTOPILOT_SECRET_FILE_ENV} or create one of: {candidates}"
+    )
+
+
+def _validate_secret_path(path: Path) -> None:
+    if not path.exists():
+        raise CredentialError(f"Credential file not found: {path}")
+    if not path.is_file():
+        raise CredentialError(f"Credential path is not a regular file: {path}")
+    if path.is_symlink():
+        raise CredentialError(f"Credential file must not be a symlink: {path}")
+
     file_stat = path.stat()
-    dir_stat = dir_path.stat()
+    dir_stat = path.parent.stat()
 
-    import stat as stat_mod
+    file_mode = stat.S_IMODE(file_stat.st_mode)
+    dir_mode = stat.S_IMODE(dir_stat.st_mode)
 
-    file_mode = stat_mod.S_IMODE(file_stat.st_mode)
-    dir_mode = stat_mod.S_IMODE(dir_stat.st_mode)
-
-    if dir_mode != CREDS_PATH_DIR_PERMS:
+    if file_mode & 0o022:
         raise CredentialError(
-            f"Credential directory {dir_path} has permissions {oct(file_mode)}, "
-            f"expected {oct(CREDS_PATH_DIR_PERMS)}. Run: chmod 700 {dir_path}"
+            f"Credential file {path} is group/other-writable (mode {oct(file_mode)}). "
+            f"Run: chmod go-w {path}"
         )
-    if file_mode != CREDS_PATH_FILE_PERMS:
+    if dir_mode & 0o022:
         raise CredentialError(
-            f"Credential file {path} has permissions {oct(file_mode)}, "
-            f"expected {oct(CREDS_PATH_FILE_PERMS)}. Run: chmod 600 {path}"
+            f"Credential directory {path.parent} is group/other-writable (mode {oct(dir_mode)}). "
+            f"Run: chmod go-w {path.parent}"
         )
+    if not os.access(path, os.R_OK):
+        raise CredentialError(f"Credential file is not readable by the current runtime user: {path}")
 
 
 def redact_secrets(text: str, *, replacement: str = "<redacted>") -> str:
