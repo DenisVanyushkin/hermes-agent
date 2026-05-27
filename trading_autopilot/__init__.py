@@ -60,6 +60,32 @@ from .monitoring import (
     format_observer_monitoring_report,
     render_observer_monitoring_dashboard,
 )
+from .secrets import (
+    CredentialError,
+    CredentialLeakError,
+    assert_no_credential_leak,
+    get_api_credentials,
+    load_credentials,
+    redact_secrets,
+)
+from .live_read import (
+    BinanceApiError,
+    BinanceLiveReadOnlyClient,
+    LIVE_READ_OPERATIONAL_MODE,
+    LIVE_READ_SCHEMA_VERSION,
+    LIVE_READ_SOURCE_KIND,
+    LiveAccountBalance,
+    LiveAccountSnapshot,
+    LiveExecutionProof,
+    LiveMarketObservation,
+    LiveReadOnlyError,
+    LiveReadOnlyReport,
+    LiveReadOnlySessionRequest,
+    LiveReadOnlySessionError,
+    LiveSymbolMetadata,
+    build_live_read_only_report,
+    format_live_read_only_report,
+)
 
 BOOT_REPORT_VERSION = "1.0.0"
 
@@ -138,6 +164,28 @@ __all__ = [
     "build_observer_monitoring_report",
     "format_observer_monitoring_report",
     "render_observer_monitoring_dashboard",
+    "CredentialError",
+    "CredentialLeakError",
+    "assert_no_credential_leak",
+    "get_api_credentials",
+    "load_credentials",
+    "redact_secrets",
+    "BinanceApiError",
+    "BinanceLiveReadOnlyClient",
+    "LIVE_READ_OPERATIONAL_MODE",
+    "LIVE_READ_SCHEMA_VERSION",
+    "LIVE_READ_SOURCE_KIND",
+    "LiveAccountBalance",
+    "LiveAccountSnapshot",
+    "LiveExecutionProof",
+    "LiveMarketObservation",
+    "LiveReadOnlyError",
+    "LiveReadOnlyReport",
+    "LiveReadOnlySessionRequest",
+    "LiveReadOnlySessionError",
+    "LiveSymbolMetadata",
+    "build_live_read_only_report",
+    "format_live_read_only_report",
     "normalize_market_snapshot",
 ]
 
