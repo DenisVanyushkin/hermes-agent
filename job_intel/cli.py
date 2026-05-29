@@ -17,6 +17,16 @@ import requests
 from tools.send_message_tool import send_message_tool
 
 from .browser_sourcing import metrics_from_counts
+from .ats_sources import (
+    fetch_ashby,
+    fetch_greenhouse,
+    fetch_lever,
+    fetch_personio,
+    fetch_recruitee,
+    fetch_smartrecruiters,
+    fetch_teamtailor,
+    status_from_hits_errors,
+)
 from .company_intel import build_market_report, monitor_target_companies
 from .config import DEFAULT_CONFIG, load_config_bundle
 from .strategic import build_strategic_report, update_strategic_layer
@@ -93,6 +103,65 @@ def _source_status_template(source: str, *, status: str, **details: Any) -> dict
     return payload
 
 
+def _is_timeout_only_error(message: str) -> bool:
+    lowered = (message or "").lower()
+    return "connecttimeout" in lowered or "timed out" in lowered or "read timed out" in lowered
+
+
+_SOURCE_FILTER_ALIASES = {
+    "target_companies": "target_companies",
+    "target-companies": "target_companies",
+    "linkedin": "linkedin",
+    "headhunter": "headhunter",
+    "hh": "headhunter",
+    "greenhouse": "greenhouse",
+    "lever": "lever",
+    "ashby": "ashby",
+    "teamtailor": "teamtailor",
+    "smartrecruiters": "smartrecruiters",
+    "personio": "personio",
+    "recruitee": "recruitee",
+    "duckduckgo": "duckduckgo",
+    "remoteok": "remoteok",
+    "remotive": "remotive",
+}
+
+
+def _enabled_sources() -> set[str] | None:
+    raw = os.getenv("JOB_INTEL_ENABLED_SOURCES", "").strip()
+    if not raw:
+        # Safe-by-default production path.
+        # RemoteOK/Remotive are intentionally excluded (executive density is too low).
+        return {
+            "target_companies",
+            "linkedin",
+            "headhunter",
+            "greenhouse",
+            "lever",
+            "ashby",
+            "teamtailor",
+            "smartrecruiters",
+            "personio",
+            "recruitee",
+        }
+    enabled: set[str] = set()
+    for part in raw.split(','):
+        key = _SOURCE_FILTER_ALIASES.get(part.strip().lower())
+        if key:
+            enabled.add(key)
+    return enabled
+
+
+def _source_enabled(enabled: set[str] | None, source: str) -> bool:
+    return enabled is None or source in enabled
+
+
+def _skipped_source_status(source: str, *, acquisition: str | None = None) -> dict[str, Any]:
+    payload = _source_status_template(source, status="skipped", hits=0, errors=[], acquisition=acquisition or source)
+    payload["reason"] = "disabled by JOB_INTEL_ENABLED_SOURCES"
+    return payload
+
+
 
 def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies:
     cfg = load_config_bundle() or DEFAULT_CONFIG
@@ -100,102 +169,152 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
     store.bootstrap()
     vacancies: list[Vacancy] = []
     statuses: dict[str, dict[str, Any]] = {}
+    enabled_sources = _enabled_sources()
 
-    target_result = monitor_target_companies(store)
-    vacancies.extend(target_result.vacancies)
-    company_ok = any(status.get("status") == "ok" for status in target_result.company_statuses.values())
-    statuses["target_companies"] = _source_status_template(
-        "target-companies",
-        status="ok" if company_ok or target_result.vacancies else ("error" if target_result.company_statuses else "empty"),
-        hits=len(target_result.vacancies),
-        companies=len(target_result.company_statuses),
-        company_statuses=target_result.company_statuses,
-    )
-
-    linkedin_queries = rotating_source_queries("linkedin", limit=6)
-    linkedin_hits = 0
-    linkedin_errors: list[str] = []
-    for query in linkedin_queries:
-        try:
-            results = fetch_linkedin_vacancies(query, max_pages=2)
-            linkedin_hits += len(results)
-            vacancies.extend(results)
-        except Exception as exc:
-            linkedin_errors.append(str(exc))
-    if linkedin_hits:
-        linkedin_status = "ok"
-    elif linkedin_errors and any("Playwright" in error or "browser-native" in error for error in linkedin_errors):
-        linkedin_status = "blocked"
-    elif linkedin_errors:
-        linkedin_status = "error"
+    if _source_enabled(enabled_sources, "target_companies"):
+        target_result = monitor_target_companies(store)
+        vacancies.extend(target_result.vacancies)
+        company_ok = any(status.get("status") == "ok" for status in target_result.company_statuses.values())
+        statuses["target_companies"] = _source_status_template(
+            "target-companies",
+            status="ok" if company_ok or target_result.vacancies else ("error" if target_result.company_statuses else "empty"),
+            hits=len(target_result.vacancies),
+            companies=len(target_result.company_statuses),
+            company_statuses=target_result.company_statuses,
+        )
     else:
-        linkedin_status = "empty"
-    linkedin_source_status = _source_status_template("linkedin", status=linkedin_status, hits=linkedin_hits, errors=linkedin_errors, acquisition="browser-native")
-    linkedin_health = getattr(fetch_linkedin_vacancies, "last_health", None)
-    if linkedin_health:
-        linkedin_source_status["session_health"] = linkedin_health
-    statuses["linkedin"] = linkedin_source_status
+        statuses["target_companies"] = _skipped_source_status("target-companies", acquisition="target-companies")
 
-    hh_queries = rotating_source_queries("headhunter", limit=6)
-    hh_hits = 0
-    hh_errors: list[str] = []
-    for query in hh_queries:
-        try:
-            results = fetch_headhunter_vacancies(query, per_page=10)
-            hh_hits += len(results)
-            vacancies.extend(results)
-        except Exception as exc:
-            hh_errors.append(str(exc))
-    if hh_hits:
-        hh_status = "ok"
-    elif hh_errors and any("403" in error for error in hh_errors):
-        hh_status = "blocked"
-    elif hh_errors:
-        hh_status = "error"
+    if not _source_enabled(enabled_sources, "linkedin"):
+        statuses["linkedin"] = _skipped_source_status("linkedin", acquisition="browser-native")
     else:
-        hh_status = "empty"
-    hh_source_status = _source_status_template("headhunter", status=hh_status, hits=hh_hits, errors=hh_errors, acquisition="browser-native-first")
-    hh_health = getattr(fetch_headhunter_vacancies, "last_health", None)
-    if hh_health:
-        hh_source_status["session_health"] = hh_health
-    statuses["headhunter"] = hh_source_status
+        linkedin_queries = rotating_source_queries("linkedin", limit=6)
+        linkedin_hits = 0
+        linkedin_errors: list[str] = []
+        for query in linkedin_queries:
+            try:
+                results = fetch_linkedin_vacancies(query, max_pages=2)
+                linkedin_hits += len(results)
+                vacancies.extend(results)
+            except Exception as exc:
+                linkedin_errors.append(str(exc))
+        if linkedin_hits:
+            linkedin_status = "ok"
+        elif linkedin_errors and any("Playwright" in error or "browser-native" in error for error in linkedin_errors):
+            linkedin_status = "blocked"
+        elif linkedin_errors:
+            linkedin_status = "error"
+        else:
+            linkedin_status = "empty"
+        linkedin_source_status = _source_status_template("linkedin", status=linkedin_status, hits=linkedin_hits, errors=linkedin_errors, acquisition="browser-native")
+        linkedin_health = getattr(fetch_linkedin_vacancies, "last_health", None)
+        if linkedin_health:
+            linkedin_source_status["session_health"] = linkedin_health
+        statuses["linkedin"] = linkedin_source_status
 
-    ddg_hits = 0
-    ddg_errors: list[str] = []
-    for _, query in discovery_queries():
-        try:
-            for hit in search_duckduckgo(query, max_results=5):
-                vacancies.append(normalize_search_hit(hit))
-                ddg_hits += 1
-        except Exception as exc:
-            ddg_errors.append(str(exc))
-    if ddg_hits:
-        ddg_status = "ok"
-    elif ddg_errors:
-        ddg_status = "error"
+    if not _source_enabled(enabled_sources, "headhunter"):
+        statuses["headhunter"] = _skipped_source_status("headhunter", acquisition="browser-native-first")
     else:
-        ddg_status = "empty"
-    statuses["duckduckgo"] = _source_status_template("duckduckgo", status=ddg_status, hits=ddg_hits, errors=ddg_errors)
+        hh_query_limit = max(1, int(os.getenv("JOB_INTEL_HEADHUNTER_QUERY_LIMIT", "6")))
+        hh_per_page = max(1, int(os.getenv("JOB_INTEL_HEADHUNTER_PER_PAGE", "10")))
+        hh_queries = rotating_source_queries("headhunter", limit=hh_query_limit)
+        hh_hits = 0
+        hh_errors: list[str] = []
+        for query in hh_queries:
+            try:
+                results = fetch_headhunter_vacancies(query, per_page=hh_per_page)
+                hh_hits += len(results)
+                vacancies.extend(results)
+            except Exception as exc:
+                hh_errors.append(str(exc))
+        if hh_hits:
+            hh_status = "ok"
+        elif hh_errors and any("403" in error for error in hh_errors):
+            hh_status = "blocked"
+        elif hh_errors:
+            hh_status = "error"
+        else:
+            hh_status = "empty"
+        hh_source_status = _source_status_template("headhunter", status=hh_status, hits=hh_hits, errors=hh_errors, acquisition="browser-native-first")
+        hh_health = getattr(fetch_headhunter_vacancies, "last_health", None)
+        if hh_health:
+            hh_source_status["session_health"] = hh_health
+        statuses["headhunter"] = hh_source_status
 
-    remoteok_hits = 0
-    remoteok_errors: list[str] = []
-    try:
-        remoteok_vacancies = search_remoteok_jobs(max_results=25)
-        vacancies.extend(remoteok_vacancies)
-        remoteok_hits = len(remoteok_vacancies)
-    except Exception as exc:
-        remoteok_errors.append(str(exc))
-    statuses["remoteok"] = _source_status_template("remoteok", status="ok" if remoteok_hits else ("error" if remoteok_errors else "empty"), hits=remoteok_hits, errors=remoteok_errors)
+    # ATS Wave 1 (production sources). These must not fail the whole run.
+    def _collect_ats(source: str, *, fetcher, acquisition: str) -> None:
+        if not _source_enabled(enabled_sources, source):
+            statuses[source] = _skipped_source_status(source, acquisition=acquisition)
+            return
+        queries = rotating_source_queries(source, limit=6)
+        try:
+            result = fetcher(queries)
+            vacancies.extend(result.vacancies)
+            hits = len(result.vacancies)
+            errors = list(result.errors or [])
+            status = status_from_hits_errors(hits, errors)
+            payload = _source_status_template(source, status=status, hits=hits, errors=errors, acquisition=acquisition)
+            payload["discovered_companies"] = int(result.discovered_companies or 0)
+            payload["pages_fetched"] = int(result.pages_fetched or 0)
+            statuses[source] = payload
+        except Exception as exc:
+            statuses[source] = _source_status_template(source, status="error", hits=0, errors=[str(exc)], acquisition=acquisition)
 
-    remotive_hits = 0
-    remotive_errors: list[str] = []
-    try:
-        remotive_vacancies = search_remotive_jobs(max_results=25)
-        vacancies.extend(remotive_vacancies)
-        remotive_hits = len(remotive_vacancies)
-    except Exception as exc:
-        remotive_errors.append(str(exc))
-    statuses["remotive"] = _source_status_template("remotive", status="ok" if remotive_hits else ("error" if remotive_errors else "empty"), hits=remotive_hits, errors=remotive_errors)
+    _collect_ats("greenhouse", fetcher=fetch_greenhouse, acquisition="ats-api")
+    _collect_ats("lever", fetcher=fetch_lever, acquisition="ats-api")
+    _collect_ats("ashby", fetcher=fetch_ashby, acquisition="ats-api")
+    _collect_ats("teamtailor", fetcher=fetch_teamtailor, acquisition="ats-web")
+    _collect_ats("smartrecruiters", fetcher=fetch_smartrecruiters, acquisition="ats-api")
+    _collect_ats("personio", fetcher=fetch_personio, acquisition="ats-xml")
+    _collect_ats("recruitee", fetcher=fetch_recruitee, acquisition="ats-xml")
+
+    if not _source_enabled(enabled_sources, "duckduckgo"):
+        statuses["duckduckgo"] = _skipped_source_status("duckduckgo")
+    else:
+        ddg_hits = 0
+        ddg_errors: list[str] = []
+        for _, query in discovery_queries():
+            try:
+                for hit in search_duckduckgo(query, max_results=5):
+                    vacancies.append(normalize_search_hit(hit))
+                    ddg_hits += 1
+            except Exception as exc:
+                ddg_errors.append(str(exc))
+        if ddg_hits:
+            ddg_status = "ok"
+        elif ddg_errors and all(_is_timeout_only_error(error) for error in ddg_errors):
+            ddg_status = "empty"
+        elif ddg_errors:
+            ddg_status = "error"
+        else:
+            ddg_status = "empty"
+        statuses["duckduckgo"] = _source_status_template("duckduckgo", status=ddg_status, hits=ddg_hits, errors=ddg_errors)
+
+    if not _source_enabled(enabled_sources, "remoteok"):
+        statuses["remoteok"] = _skipped_source_status("remoteok")
+    else:
+        remoteok_hits = 0
+        remoteok_errors: list[str] = []
+        try:
+            remoteok_vacancies = search_remoteok_jobs(max_results=25)
+            vacancies.extend(remoteok_vacancies)
+            remoteok_hits = len(remoteok_vacancies)
+        except Exception as exc:
+            remoteok_errors.append(str(exc))
+        statuses["remoteok"] = _source_status_template("remoteok", status="ok" if remoteok_hits else ("error" if remoteok_errors else "empty"), hits=remoteok_hits, errors=remoteok_errors)
+
+    if not _source_enabled(enabled_sources, "remotive"):
+        statuses["remotive"] = _skipped_source_status("remotive")
+    else:
+        remotive_hits = 0
+        remotive_errors: list[str] = []
+        try:
+            remotive_vacancies = search_remotive_jobs(max_results=25)
+            vacancies.extend(remotive_vacancies)
+            remotive_hits = len(remotive_vacancies)
+        except Exception as exc:
+            remotive_errors.append(str(exc))
+        statuses["remotive"] = _source_status_template("remotive", status="ok" if remotive_hits else ("error" if remotive_errors else "empty"), hits=remotive_hits, errors=remotive_errors)
 
     return CollectedVacancies(vacancies=vacancies, source_statuses=statuses)
 
@@ -255,7 +374,7 @@ def _deliver_to_slack(message: str, channel: str | None = None, *, retries: int 
 def _source_footer(source_statuses: dict[str, dict[str, Any]]) -> str | None:
     issues: list[str] = []
     for name, status in source_statuses.items():
-        if status.get("status") not in {"ok", "empty"}:
+        if status.get("status") not in {"ok", "empty", "skipped"}:
             message = status.get("status", "unknown")
             if status.get("errors"):
                 message = f"{message}: {status['errors'][-1]}"
@@ -566,26 +685,64 @@ def run_daily() -> str:
     accepted: list[tuple[Vacancy, Any, int]] = []
     canonical_rows: list[Vacancy] = []
     seen_keys: set[str] = set()
-    source_counts: dict[str, dict[str, int]] = {}
+    source_counts: dict[str, dict[str, Any]] = {}
     accepted_by_source: dict[str, list[tuple[Vacancy, Any, int]]] = {}
 
-    def _count_source(vacancy: Vacancy, evaluation: Any) -> None:
+    def _count_source(vacancy: Vacancy, classification: dict[str, Any], evaluation: Any) -> None:
         source_key = _normalize_source_notification_key(vacancy.source)
-        stats = source_counts.setdefault(source_key, {"found": 0, "executive_matches": 0, "accepted": 0, "rejected": 0})
+        stats = source_counts.setdefault(
+            source_key,
+            {
+                "found": 0,
+                "executive_matches": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "found_count": 0,
+                "executive_detected_count": 0,
+                "scored_count": 0,
+                "accepted_count": 0,
+                "notified_count": 0,
+                "rejected_count": 0,
+                "vacancies_deduped": 0,
+                "score_list": [],
+                "accepted_score_list": [],
+                "company_known": 0,
+                "location_known": 0,
+                "salary_known": 0,
+                "seniority_confident": 0,
+            },
+        )
+        stats["found_count"] += 1
         stats["found"] += 1
-        if evaluation.tier in {"exceptional_fit", "strong_fit"}:
+        stats["scored_count"] += 1
+        if getattr(evaluation, "tier", None) in {"exceptional_fit", "strong_fit"}:
             stats["executive_matches"] += 1
+        if classification.get("executive_detected"):
+            stats["executive_detected_count"] += 1
+        score = int(getattr(evaluation, "score", 0) or 0)
+        stats["score_list"].append(score)
+        if vacancy.company and vacancy.company != "Unknown":
+            stats["company_known"] += 1
+        if vacancy.location and vacancy.location != "Unknown":
+            stats["location_known"] += 1
+        if vacancy.salary:
+            stats["salary_known"] += 1
+        # Placeholder: seniority confidence is not computed yet.
         if evaluation.recommendation == "reject":
+            stats["rejected_count"] += 1
             stats["rejected"] += 1
         else:
+            stats["accepted_count"] += 1
             stats["accepted"] += 1
+            stats["accepted_score_list"].append(score)
 
     for vacancy in vacancies:
         vacancy_key = canonical_vacancy_key(vacancy)
         vacancy_id = store.upsert_vacancy(vacancy, vacancy_key)
+        classification = classify_vacancy(vacancy)
         evaluation = score_vacancy(vacancy)
         store.save_evaluation(vacancy_key, evaluation, run_id=run_id)
-        _count_source(vacancy, evaluation)
+        _count_source(vacancy, classification, evaluation)
 
         is_dup = vacancy_key in seen_keys
         if not is_dup:
@@ -599,6 +756,9 @@ def run_daily() -> str:
             store.set_vacancy_status(vacancy_id, "duplicate")
             continue
 
+        # Survived global dedup for this run.
+        source_counts[_normalize_source_notification_key(vacancy.source)]["vacancies_deduped"] += 1
+
         if evaluation.recommendation == "reject":
             store.set_vacancy_status(vacancy_id, "rejected")
             continue
@@ -611,7 +771,6 @@ def run_daily() -> str:
 
         canonical_rows.append(vacancy)
         seen_keys.add(vacancy_key)
-
     accepted.sort(key=lambda item: item[1].score, reverse=True)
     batch_size = cfg["runtime"]["slack"]["batch_size"]
     digest_items = accepted[:batch_size]
@@ -665,12 +824,187 @@ def run_daily() -> str:
         else:
             store.set_vacancy_status(vacancy_id, "active")
 
+
+    # Persist per-source KPI rows (per run_id, per source).
+    notified_raw = store.count_notified_vacancies_by_source(run_id, delivery_status="sent")
+    notified_by_source: dict[str, int] = {}
+    for raw_source, cnt in (notified_raw or {}).items():
+        notified_by_source[_normalize_source_notification_key(raw_source)] = notified_by_source.get(_normalize_source_notification_key(raw_source), 0) + int(cnt or 0)
+    for source, cnt in notified_by_source.items():
+        stats = source_counts.setdefault(source, {})
+        stats["notified_count"] = int(cnt or 0)
+        stats["notified"] = int(cnt or 0)
+
+    def _pctl(values: list[int], p: float) -> int | None:
+        if not values:
+            return None
+        xs = sorted(values)
+        if len(xs) == 1:
+            return int(xs[0])
+        k = int(round((p / 100.0) * (len(xs) - 1)))
+        k = max(0, min(len(xs) - 1, k))
+        return int(xs[k])
+
+    for source, src_status in source_statuses.items():
+        stats = source_counts.get(source) or {}
+        found = int(stats.get("found_count") or 0)
+        scores = list(stats.get("score_list") or [])
+        accepted_scores = list(stats.get("accepted_score_list") or [])
+        avg_score = (sum(scores) / len(scores)) if scores else None
+        session = (src_status.get("session_health") or {})
+        # Prefer BrowserSessionHealth keys when present; otherwise store NULLs.
+        pages_fetched = session.get("pages_fetched")
+        login_walls = session.get("login_walls")
+        auth_redirects = session.get("auth_redirects")
+        anti_bot_events = session.get("anti_bot_events")
+        extraction_failures = session.get("extraction_failures")
+
+        denom = found if found else 0
+        pct_company_known = (float(stats.get("company_known") or 0) / denom) if denom else None
+        pct_location_known = (float(stats.get("location_known") or 0) / denom) if denom else None
+        pct_salary_known = (float(stats.get("salary_known") or 0) / denom) if denom else None
+        pct_seniority_confident = None  # reserved
+
+        store.upsert_source_kpi_run(
+            run_id,
+            source,
+            {
+                "source_status": src_status.get("status"),
+                "acquisition_mode": src_status.get("acquisition"),
+                "runtime_seconds": None,
+                "attempts": None,
+                "pages_fetched": pages_fetched,
+                "login_walls": login_walls,
+                "auth_redirects": auth_redirects,
+                "anti_bot_events": anti_bot_events,
+                "extraction_failures": extraction_failures,
+                "found_count": found,
+                "executive_detected_count": int(stats.get("executive_detected_count") or 0),
+                "scored_count": int(stats.get("scored_count") or 0),
+                "accepted_count": int(stats.get("accepted_count") or 0),
+                "notified_count": int(stats.get("notified_count") or 0),
+                "vacancies_deduped": int(stats.get("vacancies_deduped") or 0),
+                "rejected_count": int(stats.get("rejected_count") or 0),
+                "avg_vacancy_score": avg_score,
+                "vacancy_score_p50": _pctl(scores, 50),
+                "vacancy_score_p90": _pctl(scores, 90),
+                "accepted_score_p50": _pctl(accepted_scores, 50),
+                "pct_company_known": pct_company_known,
+                "pct_location_known": pct_location_known,
+                "pct_salary_known": pct_salary_known,
+                "pct_seniority_confident": pct_seniority_confident,
+                "company_score_avg": None,
+                "company_score_p90": None,
+                "industry_fit_avg": None,
+                "tier1_company_count": None,
+                "tier2_company_count": None,
+                "interview_generated_count": None,
+                "error_class": None,
+                "error_fingerprint": None,
+                "error_message_truncated": None,
+            },
+        )
+
     strategic = update_strategic_layer(store, persist=True)
     strategy_count = len(strategic.predictions)
 
-    run_notes = f"found={len(vacancies)} accepted={len(accepted)} source_failures={sum(1 for s in source_statuses.values() if s.get('status') not in {'ok', 'empty'})} strategic_predictions={strategy_count}"
+    run_notes = f"found={len(vacancies)} accepted={len(accepted)} source_failures={sum(1 for s in source_statuses.values() if s.get('status') not in {'ok', 'empty', 'skipped'})} strategic_predictions={strategy_count}"
     store.finish_run(run_id, status="ok", notes=run_notes, metadata={"source_statuses": source_statuses, "delivery": delivery.__dict__, "strategic_predictions": strategy_count, "source_notifications": source_notifications})
     return digest
+
+
+
+
+
+def run_weekly_kpi_report() -> str:
+    """Compute weekly KPI rollup from source_kpi_run and deliver it (delivery failures must not fail the run)."""
+    assert_runtime_contract()
+    store = _store()
+    store.bootstrap()
+    run_id = store.start_run("weekly_kpi")
+    cfg = load_config_bundle() or DEFAULT_CONFIG
+    channel = _search_report_channel(cfg)
+
+    now = datetime.now(timezone.utc)
+    # Last fully completed week [week_start, week_end)
+    this_week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_end = this_week_start
+    week_start = week_end - timedelta(days=7)
+
+    sql = """
+    SELECT
+      k.source AS source,
+      COUNT(*) AS rows,
+      SUM(CASE WHEN k.source_status IN ('ok','empty','error') THEN 1 ELSE 0 END) AS attempts,
+      SUM(CASE WHEN k.source_status IN ('ok','empty') THEN 1 ELSE 0 END) AS ok,
+      SUM(CASE WHEN k.source_status = 'error' THEN 1 ELSE 0 END) AS error,
+      SUM(COALESCE(k.found_count, 0)) AS found,
+      SUM(COALESCE(k.executive_detected_count, 0)) AS exec_detected,
+      SUM(COALESCE(k.scored_count, 0)) AS scored,
+      SUM(COALESCE(k.accepted_count, 0)) AS accepted,
+      SUM(COALESCE(k.notified_count, 0)) AS notified,
+      CASE WHEN SUM(COALESCE(k.found_count, 0)) > 0
+        THEN SUM(COALESCE(k.pct_company_known, 0.0) * COALESCE(k.found_count, 0)) / SUM(COALESCE(k.found_count, 0))
+        ELSE NULL END AS pct_company_known_w,
+      CASE WHEN SUM(COALESCE(k.found_count, 0)) > 0
+        THEN SUM(COALESCE(k.pct_location_known, 0.0) * COALESCE(k.found_count, 0)) / SUM(COALESCE(k.found_count, 0))
+        ELSE NULL END AS pct_location_known_w
+    FROM source_kpi_run k
+    JOIN runs r ON r.id = k.run_id
+    WHERE r.run_type = 'production'
+      AND k.source_status != 'skipped'
+      AND datetime(k.created_at) >= datetime(?)
+      AND datetime(k.created_at) < datetime(?)
+    GROUP BY k.source
+    ORDER BY exec_detected DESC, found DESC
+    """
+
+    with store.connect() as conn:
+        rows = conn.execute(sql, (week_start.isoformat(), week_end.isoformat())).fetchall()
+
+    header = "*Job-intel weekly source KPIs*\n" + f"Week: {week_start.date().isoformat()} -> {week_end.date().isoformat()} (UTC)"
+    if not rows:
+        message = header + "\nNo KPI rows found for this period."
+    else:
+        out = [header, "", "source | ok_rate | exec | accepted | accept_rate | notified | found | company_known | location_known"]
+        for row in rows:
+            attempts = int(row["attempts"] or 0)
+            ok = int(row["ok"] or 0)
+            ok_rate = (ok / attempts) if attempts else 0.0
+            exec_detected = int(row["exec_detected"] or 0)
+            accepted = int(row["accepted"] or 0)
+            accept_rate = (accepted / exec_detected) if exec_detected else 0.0
+            ck = row["pct_company_known_w"]
+            lk = row["pct_location_known_w"]
+            ck_s = f"{ck:.2f}" if ck is not None else "n/a"
+            lk_s = f"{lk:.2f}" if lk is not None else "n/a"
+            out.append(
+                f"{row['source']} | {ok_rate:.2f} | {exec_detected} | {accepted} | {accept_rate:.2f} | {int(row['notified'] or 0)} | {int(row['found'] or 0)} | {ck_s} | {lk_s}"
+            )
+        message = "\n".join(out)
+
+    # Delivery is best-effort. A delivery failure must not flip run.status to error.
+    notification_id = store.create_notification(run_id, channel, "weekly_kpi", message, delivery_status="pending")
+    delivery = _deliver_to_slack(message, channel)
+    store.mark_notification_delivery(
+        notification_id,
+        _delivery_db_status(delivery),
+        attempts=delivery.attempts,
+        delivery_error=delivery.error,
+    )
+
+    store.finish_run(
+        run_id,
+        status="ok",
+        notes=f"sources={len(rows) if rows else 0}",
+        metadata={
+            "delivery": delivery.__dict__,
+            "week_start": week_start.isoformat(),
+            "week_end": week_end.isoformat(),
+            "source_rows": len(rows) if rows else 0,
+        },
+    )
+    return message
 
 
 
@@ -1688,6 +2022,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("market")
     sub.add_parser("strategic")
     sub.add_parser("health")
+    sub.add_parser("weekly-kpi")
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(cmd="doctor")
 
@@ -1732,6 +2067,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "health":
         print(run_health_report())
+        return 0
+    if args.cmd == "weekly-kpi":
+        print(run_weekly_kpi_report())
         return 0
     if args.cmd == "doctor":
         print(doctor_report())
