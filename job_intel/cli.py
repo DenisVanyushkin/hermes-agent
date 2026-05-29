@@ -31,7 +31,12 @@ from .company_intel import build_market_report, monitor_target_companies
 from .config import DEFAULT_CONFIG, load_config_bundle
 from .strategic import build_strategic_report, update_strategic_layer
 from .dedup import canonical_vacancy_key, description_similarity, is_duplicate
-from .digest import format_daily_digest, format_enrichment_questions, format_vacancy_summary
+from .digest import (
+    format_daily_digest,
+    format_enrichment_questions,
+    format_executive_opportunity_report,
+    reject_reason_bucket,
+)
 from .evaluator import classify_vacancy, score_vacancy
 from .enrichment import detect_high_value_questions
 from .models import Evaluation, Vacancy
@@ -683,6 +688,7 @@ def run_daily() -> str:
     vacancies = collected.vacancies
     source_statuses = collected.source_statuses
     accepted: list[tuple[Vacancy, Any, int]] = []
+    scored_rows: list[tuple[Vacancy, Any, dict[str, Any], int, bool]] = []  # (vacancy, evaluation, classification, vacancy_id, duplicate)
     canonical_rows: list[Vacancy] = []
     seen_keys: set[str] = set()
     source_counts: dict[str, dict[str, Any]] = {}
@@ -754,6 +760,7 @@ def run_daily() -> str:
 
         if is_dup:
             store.set_vacancy_status(vacancy_id, "duplicate")
+            scored_rows.append((vacancy, evaluation, classification, vacancy_id, True))
             continue
 
         # Survived global dedup for this run.
@@ -761,6 +768,7 @@ def run_daily() -> str:
 
         if evaluation.recommendation == "reject":
             store.set_vacancy_status(vacancy_id, "rejected")
+            scored_rows.append((vacancy, evaluation, classification, vacancy_id, False))
             continue
 
         if _should_notify_vacancy(store, vacancy_id, vacancy, evaluation, repost_window_days):
@@ -769,6 +777,7 @@ def run_daily() -> str:
         else:
             store.set_vacancy_status(vacancy_id, "notified")
 
+        scored_rows.append((vacancy, evaluation, classification, vacancy_id, False))
         canonical_rows.append(vacancy)
         seen_keys.add(vacancy_key)
     accepted.sort(key=lambda item: item[1].score, reverse=True)
@@ -777,11 +786,7 @@ def run_daily() -> str:
     operator_footer = _source_footer(source_statuses)
     search_channel = _search_report_channel(cfg)
     technical_footer = _search_technical_report(source_statuses, channel=search_channel)
-    digest = format_daily_digest(
-        [(vacancy, evaluation) for vacancy, evaluation, _ in digest_items],
-        operator_footer=operator_footer,
-        technical_footer=technical_footer,
-    )
+    digest = ""
 
     target_company_hits = int((source_statuses.get("target_companies") or {}).get("hits") or 0)
 
@@ -814,26 +819,124 @@ def run_daily() -> str:
         source_counts,
         accepted_by_source,
     )
+    # Compute "planned notified" counts (actual becomes 0 if delivery fails).
+    planned_notified_by_source: dict[str, int] = {}
+    for vacancy, _, _ in digest_items:
+        key = _normalize_source_notification_key(vacancy.source)
+        planned_notified_by_source[key] = planned_notified_by_source.get(key, 0) + 1
+
+    # Executive Opportunity Report (user-facing).
+    per_source_funnel: list[dict[str, object]] = []
+    # Populate notified_count with planned values for reporting pre-delivery.
+    for source, cnt in planned_notified_by_source.items():
+        stats = source_counts.setdefault(source, {})
+        stats["notified_count"] = int(cnt or 0)
+        stats["notified"] = int(cnt or 0)
+
+    for source in sorted(source_counts.keys()):
+        stats = source_counts.get(source) or {}
+        per_source_funnel.append(
+            {
+                "source": source,
+                "found": int(stats.get("found_count") or 0),
+                "exec_detected": int(stats.get("executive_detected_count") or 0),
+                "scored": int(stats.get("scored_count") or 0),
+                "accepted": int(stats.get("accepted_count") or 0),
+                "notified": int(stats.get("notified_count") or 0),
+            }
+        )
+
+    # Top scored opportunities (include rejected; exclude duplicates).
+    nondup_scored = [(v, e, c, vid, dup) for (v, e, c, vid, dup) in scored_rows if not dup]
+    nondup_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
+    top_scored = [(v, e) for (v, e, _, _, _) in nondup_scored[:20]]
+
+    # Rejection intelligence buckets.
+    rejected_reason_counts: dict[str, int] = {}
+    for v, e, _, _, dup in scored_rows:
+        if dup:
+            bucket = reject_reason_bucket(v, e, duplicate=True)
+            rejected_reason_counts[bucket] = rejected_reason_counts.get(bucket, 0) + 1
+            continue
+        if getattr(e, "recommendation", None) == "reject":
+            bucket = reject_reason_bucket(v, e, duplicate=False)
+            rejected_reason_counts[bucket] = rejected_reason_counts.get(bucket, 0) + 1
+
+    def _country(loc: str) -> str:
+        text = (loc or "").strip()
+        if not text or text == "Unknown":
+            return "Unknown"
+        if text.lower() == "remote":
+            return "Remote"
+        if "," in text:
+            tail = text.rsplit(",", 1)[-1].strip()
+            return tail or text
+        return text
+
+    # Market intelligence (deduped, non-duplicate rows).
+    title_counts = Counter()
+    country_counts = Counter()
+    company_counts = Counter()
+    for v, _, _, _, dup in scored_rows:
+        if dup:
+            continue
+        title = (v.title or "").strip() or "Unknown"
+        company = (v.company or "").strip() or "Unknown"
+        location = (v.location or "").strip() or "Unknown"
+        title_counts[title] += 1
+        company_counts[company] += 1
+        country_counts[_country(location)] += 1
+
+    market_titles = [(k, int(v)) for k, v in title_counts.most_common(8)]
+    market_countries = [(k, int(v)) for k, v in country_counts.most_common(8)]
+    market_companies = [(k, int(v)) for k, v in company_counts.most_common(10)]
+
+    # Scoring calibration: top rejected by score (exclude duplicates).
+    rejected_scored = [(v, e) for (v, e, _, _, dup) in scored_rows if (not dup and getattr(e, "recommendation", None) == "reject")]
+    rejected_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
+    top_rejected_high_score = rejected_scored[:10] if not accepted else rejected_scored[:0]
+
+    report = format_executive_opportunity_report(
+        run_id=run_id,
+        title="Executive Opportunity Report (Daily)",
+        per_source_funnel=per_source_funnel,
+        top_scored=top_scored,
+        rejected_reason_counts=rejected_reason_counts,
+        market_titles=market_titles,
+        market_countries=market_countries,
+        market_companies=market_companies,
+        top_rejected_high_score=top_rejected_high_score,
+        operator_footer=operator_footer,
+    )
+
+    # Send the user-facing report, then send technical KPI report separately.
+    delivery_report = _deliver_to_slack(report, search_channel)
+
     notification_ids = _prepare_notifications(store, run_id, search_channel, "daily_digest", digest_items)
-    delivery = _deliver_to_slack(digest, search_channel)
-    _finalize_notifications(store, notification_ids, delivery)
+    _finalize_notifications(store, notification_ids, delivery_report)
 
     for vacancy, evaluation, vacancy_id in digest_items:
-        if delivery.success:
+        if delivery_report.success:
             store.set_vacancy_status(vacancy_id, "notified")
         else:
             store.set_vacancy_status(vacancy_id, "active")
 
+    # Update per-source notified_count based on actual delivery outcome.
+    if delivery_report.success:
+        for source, cnt in planned_notified_by_source.items():
+            stats = source_counts.setdefault(source, {})
+            stats["notified_count"] = int(cnt or 0)
+            stats["notified"] = int(cnt or 0)
+    else:
+        for source in list(planned_notified_by_source.keys()):
+            stats = source_counts.setdefault(source, {})
+            stats["notified_count"] = 0
+            stats["notified"] = 0
 
-    # Persist per-source KPI rows (per run_id, per source).
-    notified_raw = store.count_notified_vacancies_by_source(run_id, delivery_status="sent")
-    notified_by_source: dict[str, int] = {}
-    for raw_source, cnt in (notified_raw or {}).items():
-        notified_by_source[_normalize_source_notification_key(raw_source)] = notified_by_source.get(_normalize_source_notification_key(raw_source), 0) + int(cnt or 0)
-    for source, cnt in notified_by_source.items():
-        stats = source_counts.setdefault(source, {})
-        stats["notified_count"] = int(cnt or 0)
-        stats["notified"] = int(cnt or 0)
+    _deliver_to_slack(technical_footer, search_channel)
+
+    # Return user-facing report for CLI output.
+    digest = report
 
     def _pctl(values: list[int], p: float) -> int | None:
         if not values:
