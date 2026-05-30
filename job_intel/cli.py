@@ -21,6 +21,7 @@ from .ats_sources import (
     fetch_ashby,
     fetch_greenhouse,
     fetch_lever,
+    discover_ats_seeds_from_career_urls,
     fetch_personio,
     fetch_recruitee,
     fetch_smartrecruiters,
@@ -178,6 +179,8 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
     vacancies: list[Vacancy] = []
     statuses: dict[str, dict[str, Any]] = {}
     enabled_sources = _enabled_sources()
+    ats_seed_urls: list[str] = []
+    ats_seeds: dict[str, list[str]] = {}
 
     if _source_enabled(enabled_sources, "target_companies"):
         target_result = monitor_target_companies(store)
@@ -190,8 +193,22 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             companies=len(target_result.company_statuses),
             company_statuses=target_result.company_statuses,
         )
+        # ATS seeds: reuse links already discovered via target company monitoring.
+        try:
+            for v in target_result.vacancies or []:
+                if getattr(v, "url", ""):
+                    ats_seed_urls.append(str(v.url))
+            for st in (target_result.company_statuses or {}).values():
+                for u in (st.get("career_urls") or []):
+                    ats_seed_urls.append(str(u))
+        except Exception:
+            pass
     else:
         statuses["target_companies"] = _skipped_source_status("target-companies", acquisition="target-companies")
+
+    ats_seed_urls = [u for u in ats_seed_urls if isinstance(u, str) and u.strip()][:200]
+    if ats_seed_urls:
+        ats_seeds = discover_ats_seeds_from_career_urls(ats_seed_urls, max_pages=60)
 
     if not _source_enabled(enabled_sources, "linkedin"):
         statuses["linkedin"] = _skipped_source_status("linkedin", acquisition="browser-native")
@@ -256,7 +273,8 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             return
         queries = rotating_source_queries(source, limit=6)
         try:
-            result = fetcher(queries)
+            companies = (ats_seeds.get(source) or None) if isinstance(ats_seeds, dict) else None
+            result = fetcher(queries, companies=companies)
             vacancies.extend(result.vacancies)
             hits = len(result.vacancies)
             errors = list(result.errors or [])
@@ -709,6 +727,10 @@ def run_daily() -> str:
                 "found_count": 0,
                 "executive_detected_count": 0,
                 "scored_count": 0,
+                "strong_fit_count": 0,
+                "potential_fit_count": 0,
+                "near_miss_count": 0,
+                "reject_count": 0,
                 "accepted_count": 0,
                 "notified_count": 0,
                 "rejected_count": 0,
@@ -737,13 +759,25 @@ def run_daily() -> str:
         if vacancy.salary:
             stats["salary_known"] += 1
         # Placeholder: seniority confidence is not computed yet.
-        if evaluation.recommendation == "reject":
-            stats["rejected_count"] += 1
-            stats["rejected"] += 1
+        reco = str(getattr(evaluation, 'recommendation', 'reject') or 'reject')
+        if reco == 'strong_fit':
+            stats['strong_fit_count'] += 1
+            stats['accepted_count'] += 1
+            stats['accepted'] += 1
+            stats['accepted_score_list'].append(score)
+        elif reco == 'potential_fit':
+            stats['potential_fit_count'] += 1
+            stats['accepted_count'] += 1
+            stats['accepted'] += 1
+            stats['accepted_score_list'].append(score)
+        elif reco == 'near_miss':
+            stats['near_miss_count'] += 1
+            stats['rejected_count'] += 1
+            stats['rejected'] += 1
         else:
-            stats["accepted_count"] += 1
-            stats["accepted"] += 1
-            stats["accepted_score_list"].append(score)
+            stats['reject_count'] += 1
+            stats['rejected_count'] += 1
+            stats['rejected'] += 1
 
     def _normalize_job_url(url: str) -> str:
         """Normalize URLs for within-run dedup.
@@ -799,6 +833,14 @@ def run_daily() -> str:
         if evaluation.recommendation == "reject":
             store.set_vacancy_status(vacancy_id, "rejected")
             scored_rows.append((vacancy, evaluation, classification, vacancy_id, False))
+            continue
+
+        if evaluation.recommendation == "near_miss":
+            # Visible in daily report, but must not trigger alerts/notifications.
+            store.set_vacancy_status(vacancy_id, "near_miss")
+            scored_rows.append((vacancy, evaluation, classification, vacancy_id, False))
+            canonical_rows.append(vacancy)
+            seen_keys.add(vacancy_key)
             continue
 
         if _should_notify_vacancy(store, vacancy_id, vacancy, evaluation, repost_window_days):
@@ -883,6 +925,15 @@ def run_daily() -> str:
     nondup_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
     top_scored = [(v, e) for (v, e, _, _, _) in nondup_scored[:20]]
 
+    # Decision buckets (non-duplicate only).
+    decision_counts = Counter()
+    for v, e, _, _, _ in nondup_scored:
+        decision_counts[str(getattr(e, 'recommendation', 'reject') or 'reject')] += 1
+
+    near_miss_scored = [(v, e) for (v, e, _, _, _) in nondup_scored if str(getattr(e, 'recommendation', None) or '') == 'near_miss']
+    near_miss_scored.sort(key=lambda row: int(getattr(row[1], 'score', 0) or 0), reverse=True)
+
+
     # Rejection intelligence buckets.
     rejected_reason_counts: dict[str, int] = {}
     for v, e, _, _, dup in scored_rows:
@@ -926,14 +977,23 @@ def run_daily() -> str:
     # Scoring calibration: top rejected by score (exclude duplicates).
     rejected_scored = [(v, e) for (v, e, _, _, dup) in scored_rows if (not dup and getattr(e, "recommendation", None) == "reject")]
     rejected_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
-    top_rejected_high_score = rejected_scored[:10] if not accepted else rejected_scored[:0]
-
-    digest = format_daily_digest(
-        [(vacancy, evaluation) for vacancy, evaluation, _ in digest_items],
-        title="Daily executive job digest",
+    top_rejected_high_score = near_miss_scored[:10] if (int(decision_counts.get('strong_fit') or 0) + int(decision_counts.get('potential_fit') or 0) == 0) else []
+    # User-facing opportunity report (review-mode buckets + near-miss visibility).
+    digest = format_executive_opportunity_report(
+        run_id=run_id,
+        title='Daily executive opportunity report',
+        per_source_funnel=per_source_funnel,
+        top_scored=top_scored,
+        rejected_reason_counts=rejected_reason_counts,
+        market_titles=market_titles,
+        market_countries=market_countries,
+        market_companies=market_companies,
+        decision_counts=dict(decision_counts),
+        top_near_miss=top_rejected_high_score,
         operator_footer=operator_footer if digest_items else None,
-        technical_footer=technical_footer if digest_items else None,
     )
+    if technical_footer:
+        digest = (digest + "\n\n" + technical_footer).rstrip()
 
     delivery_report = _deliver_to_slack(digest, search_channel)
 
@@ -1313,26 +1373,65 @@ def _json_loads(value: Any, default: Any) -> Any:
 
 
 def _looks_like_allowed_geo(location: str) -> bool:
-    text = (location or "").lower()
-    return any(
-        token in text
-        for token in (
-            "remote",
-            "almaty",
-            "astana",
-            "kazakhstan",
-            "kz",
-            "central asia",
-            "emea",
-            "europe",
-            "mena",
-            "apac",
-            "asia",
-            "singapore",
-            "uae",
-            "dubai",
-        )
+    text = (location or "").lower().strip()
+    if not text or text == "unknown":
+        return False
+    if "remote" in text:
+        return True
+
+    # Tier 1: Remote, Europe, GCC, APAC + explicit countries.
+    tier1_tokens = (
+        "europe",
+        "gcc",
+        "apac",
+        "singapore",
+        "uae",
+        "united arab emirates",
+        "saudi",
+        "saudi arabia",
+        "uk",
+        "united kingdom",
+        "germany",
+        "netherlands",
+        "indonesia",
+        "malaysia",
+        "thailand",
+        "dubai",
+        "abu dhabi",
     )
+
+    # Tier 2
+    tier2_tokens = (
+        "kazakhstan",
+        "kz",
+        "almaty",
+        "astana",
+        "poland",
+        "australia",
+        "sydney",
+        "melbourne",
+    )
+
+    blocked_tokens = (
+        "russia",
+        "belarus",
+        "iran",
+        "north korea",
+        "syria",
+        "crimea",
+        "donetsk",
+        "luhansk",
+    )
+
+    if any(tok in text for tok in blocked_tokens):
+        return False
+
+    if any(tok in text for tok in tier1_tokens):
+        return True
+    if any(tok in text for tok in tier2_tokens):
+        return True
+
+    return False
 
 
 
@@ -1425,7 +1524,7 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
         classification = classify_vacancy(vacancy)
         stats["vacancies_found"] += 1
         stats["vacancies_normalized"] += 1
-        stats["accepted_roles_by_source"] += 1 if row.get("recommendation") != "reject" else 0
+        stats["accepted_roles_by_source"] += 1 if row.get("recommendation") in {"strong_fit", "potential_fit"} else 0
         stats["executive_roles_detected"] += 1 if classification["executive_detected"] else 0
         overall_roles[str(classification["classification"] or "other")] += 1
         if row.get("status") == "duplicate":
@@ -1443,7 +1542,7 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
             else:
                 blocked_geo_hits += 1
 
-        if row.get("recommendation") == "reject":
+        if row.get("recommendation") in {"reject", "near_miss"}:
             stats["rejected_count"] += 1
             title_text = f"{row.get('title') or ''} {row.get('location') or ''} {row.get('description') or ''}"
             if any(token in title_text.lower() for token in ("remote", "product manager", "project manager", "pm ")):
