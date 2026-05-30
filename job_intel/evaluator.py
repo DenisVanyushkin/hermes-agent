@@ -104,37 +104,65 @@ def classify_vacancy(vacancy: Vacancy) -> dict[str, Any]:
     executive_detected = False
     matched_signals: list[str] = []
 
+    # Hard blocklist: sales/marketing/CS "Executive" roles must NOT be treated as exec product roles.
+    if re.search(r"\b(account|sales|customer success|marketing|business development)\s+executive\b", title_lower):
+        return {
+            "raw_title": vacancy.title,
+            "normalized_title": title,
+            "classification": "non_product_executive_title",
+            "executive_detected": False,
+            "matched_signals": ["non_product_exec_title_blocked"],
+        }
+
+    # High-precision pattern-based classification.
     for name, patterns, is_leadership_signal in _ROLE_CLASSIFICATION_PATTERNS:
         if any(re.search(pattern, title_lower) or re.search(pattern, text_lower) for pattern in patterns):
             role_classification = name
             executive_detected = is_leadership_signal
             break
 
+    # Executive product leadership requires BOTH product-domain signal AND seniority signal.
     if role_classification == "other":
-        # Guardrail: leadership tokens alone are too noisy (e.g. "Head of Finance").
-        # Require a product-domain signal in title or surrounding text.
         product_domain = any(
             token in title_lower or token in text_lower
             for token in (
                 "product",
-                "growth",
-                "monetization",
-                "strategy",
                 "platform",
                 "ecosystem",
-                "subscription",
-                "marketplace",
-                "superapp",
+                "monetization",
+                "growth product",
+                "consumer product",
+                "digital product",
                 "digital products",
+                "product strategy",
+                "product management",
+                "product manager",
             )
         )
-        if product_domain and any(token in title_lower for token in ("vp", "vice president", "director", "head of", "chief", "cpo", "gm", "general manager")):
+
+        seniority_signal = any(
+            re.search(pat, title_lower)
+            for pat in (
+                r"\bchief product officer\b",
+                r"\bcpo\b",
+                r"\bvp\b\s*product\b",
+                r"\bvice president\b.*\bproduct\b",
+                r"\bhead of\b.*\bproduct\b",
+                r"\bproduct\s+director\b",
+                r"\bdirector\b.*\bproduct\b",
+                r"\bgm\b\s*product\b",
+                r"\bgeneral manager\b.*\bproduct\b",
+                r"\bproduct\s+lead\b",
+            )
+        )
+
+        if product_domain and seniority_signal:
             role_classification = "executive_product_leadership"
             executive_detected = True
-        elif _has_any(text_lower, ["product strategy", "monetization", "growth", "platform", "ecosystem", "digital products", "superapp"]):
-            role_classification = "product_strategy_and_growth"
-            executive_detected = any(token in title_lower for token in ("lead", "director", "head", "vp", "chief", "gm"))
+            matched_signals.append("product_domain")
+            matched_signals.append("executive_seniority")
 
+    # Transparency-only signals.
     if any(token in text_lower for token in ("monetization", "growth", "product strategy", "platform", "ecosystem", "digital products", "b2c", "consumer", "subscription", "marketplace")):
         matched_signals.append("strategic_product_scope")
     if any(token in text_lower for token in ("vp", "vice president", "director", "head of", "chief", "cpo", "gm", "general manager", "lead")):
@@ -292,7 +320,16 @@ def score_vacancy(vacancy: Vacancy) -> Evaluation:
         concerns.append("sanctions risk")
 
     tier = tier_for_score(score)
-    recommendation = "reject" if tier in {"reject", "weak_fit"} else tier
+
+    # Review-mode buckets (user-facing). Near-miss must be visible in daily report, but must NOT alert.
+    if score >= 75:
+        recommendation = "strong_fit"
+    elif score >= 60:
+        recommendation = "potential_fit"
+    elif score >= 40:
+        recommendation = "near_miss"
+    else:
+        recommendation = "reject"
     if tier == "exceptional_fit":
         reasons.append("high-signal executive match")
     elif tier == "strong_fit":

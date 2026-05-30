@@ -111,6 +111,20 @@ def reject_reason_bucket(vacancy: Vacancy, evaluation: Evaluation, *, duplicate:
     return "other"
 
 
+
+
+def _unknown_fields(vacancy: Vacancy) -> list[str]:
+    text = (vacancy.description or '').lower()
+    out: list[str] = []
+    loc = (vacancy.location or '').strip().lower()
+    if not loc or loc == 'unknown':
+        out.append('location_unknown')
+    if not vacancy.salary:
+        out.append('salary_unknown')
+    if 'p&l' not in text and 'profit and loss' not in text:
+        out.append('pnl_unknown')
+    return out
+
 def _country_from_location(location: str) -> str:
     text = (location or "").strip()
     if not text or text.lower() == "unknown":
@@ -133,10 +147,19 @@ def format_executive_opportunity_report(
     market_titles: list[tuple[str, int]],
     market_countries: list[tuple[str, int]],
     market_companies: list[tuple[str, int]],
-    top_rejected_high_score: list[tuple[Vacancy, Evaluation]],
+    decision_counts: dict[str, int],
+    top_near_miss: list[tuple[Vacancy, Evaluation]],
     operator_footer: str | None = None,
 ) -> str:
     lines: list[str] = [f"*{title}*", f"run_id: {run_id}", ""]
+
+    lines.append('*Decision buckets*')
+    strong = int(decision_counts.get('strong_fit') or 0)
+    potential = int(decision_counts.get('potential_fit') or 0)
+    near = int(decision_counts.get('near_miss') or 0)
+    rej = int(decision_counts.get('reject') or 0)
+    lines.append(f"strong_fit={strong} | potential_fit={potential} | near_miss={near} | reject={rej}")
+    lines.append('')
 
     lines.append("*Per-source funnel*")
     lines.append("source | found | exec_detected | scored | accepted | notified")
@@ -185,22 +208,21 @@ def format_executive_opportunity_report(
         for name, cnt in market_companies[:10]:
             lines.append(f"- {name}: {cnt}")
     lines.append("")
-
-    if top_rejected_high_score:
-        lines.append("*Scoring calibration: top rejected by score*")
-        for idx, (vacancy, evaluation) in enumerate(top_rejected_high_score[:10], 1):
+    if top_near_miss and (int(decision_counts.get('strong_fit') or 0) + int(decision_counts.get('potential_fit') or 0) == 0):
+        lines.append('*Top near_miss (review queue)*')
+        for idx, (vacancy, evaluation) in enumerate(top_near_miss[:10], 1):
+            unknown = _unknown_fields(vacancy)
+            blockers = list(evaluation.concerns or [])
             lines.append(
-                f"{idx}. {vacancy.company} | {vacancy.title} | {vacancy.location} | {vacancy.source} | score={evaluation.score} | exec_conf={_executive_confidence(vacancy)}"
+                f"{idx}. {vacancy.company} | {vacancy.title} | {vacancy.location} | {vacancy.source} | score={evaluation.score} | unknown={', '.join(unknown) or '-'} | blockers={', '.join(blockers) or '-'}"
             )
             breakdown_lines = _format_breakdown(evaluation, limit=6)
             if breakdown_lines:
-                lines.append("Breakdown:")
+                lines.append('Breakdown:')
                 for b in breakdown_lines:
                     lines.append(f"- {b}")
-            if evaluation.concerns:
-                lines.append(f"Concerns: {', '.join(evaluation.concerns)}")
             lines.append(f"URL: {vacancy.url}")
-            lines.append("")
+            lines.append('')
 
     if operator_footer:
         lines.append("—")

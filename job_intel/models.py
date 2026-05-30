@@ -29,7 +29,7 @@ class Vacancy(BaseModel):
 class Evaluation(BaseModel):
     score: int
     tier: Literal["exceptional_fit", "strong_fit", "possible_fit", "weak_fit", "reject"]
-    recommendation: Literal["exceptional_fit", "strong_fit", "possible_fit", "reject"]
+    recommendation: Literal["exceptional_fit", "strong_fit", "possible_fit", "potential_fit", "near_miss", "reject"]
     salary_tier: str | None = None
     matched_signals: list[str] = Field(default_factory=list)
     concerns: list[str] = Field(default_factory=list)
