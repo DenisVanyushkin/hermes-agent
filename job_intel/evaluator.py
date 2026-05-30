@@ -111,7 +111,24 @@ def classify_vacancy(vacancy: Vacancy) -> dict[str, Any]:
             break
 
     if role_classification == "other":
-        if any(token in title_lower for token in ("vp", "vice president", "director", "head of", "chief", "cpo", "gm", "general manager")):
+        # Guardrail: leadership tokens alone are too noisy (e.g. "Head of Finance").
+        # Require a product-domain signal in title or surrounding text.
+        product_domain = any(
+            token in title_lower or token in text_lower
+            for token in (
+                "product",
+                "growth",
+                "monetization",
+                "strategy",
+                "platform",
+                "ecosystem",
+                "subscription",
+                "marketplace",
+                "superapp",
+                "digital products",
+            )
+        )
+        if product_domain and any(token in title_lower for token in ("vp", "vice president", "director", "head of", "chief", "cpo", "gm", "general manager")):
             role_classification = "executive_product_leadership"
             executive_detected = True
         elif _has_any(text_lower, ["product strategy", "monetization", "growth", "platform", "ecosystem", "digital products", "superapp"]):

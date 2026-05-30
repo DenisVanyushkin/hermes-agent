@@ -89,7 +89,7 @@ def reject_reason_bucket(vacancy: Vacancy, evaluation: Evaluation, *, duplicate:
     if any(tok in concerns for tok in ("generic remote noise", "delivery/pm title")):
         return "title mismatch"
 
-    # Seniority proxy.
+    # Seniority.
     if not any(tok in title for tok in ("vp", "vice president", "director", "head of", "chief", "cpo", "gm", "general manager")):
         if "product manager" in title or "product owner" in title:
             return "insufficient seniority"
@@ -97,8 +97,14 @@ def reject_reason_bucket(vacancy: Vacancy, evaluation: Evaluation, *, duplicate:
             return "insufficient seniority"
 
     # Industry mismatch proxy: missing sector signals + low score.
-    if int(breakdown.get("fintech_or_telecom", 0) or 0) == 0 and int(breakdown.get("B2C_platform", 0) or 0) == 0 and evaluation.score < 55:
+    if int(breakdown.get("fintech_or_telecom", 0) or 0) == 0 and int(breakdown.get("B2C_platform", 0) or 0) == 0 and int(breakdown.get("AI_or_modern_tech", 0) or 0) == 0 and evaluation.score < 55:
         return "industry mismatch"
+
+    # Missing core executive evidence buckets (heuristics; we do not change scoring here).
+    if int(breakdown.get("product_ownership", 0) or 0) == 0 and evaluation.score < 70:
+        return "no product ownership"
+    if int(breakdown.get("PnL_ownership", 0) or 0) == 0 and evaluation.score < 80:
+        return "no P&L"
 
     if "insufficient fit" in reasons or evaluation.score < 60:
         return "low confidence"

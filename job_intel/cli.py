@@ -35,13 +35,16 @@ from .digest import (
     format_daily_digest,
     format_enrichment_questions,
     format_executive_opportunity_report,
+    format_vacancy_summary,
     reject_reason_bucket,
 )
 from .evaluator import classify_vacancy, score_vacancy
 from .enrichment import detect_high_value_questions
+from .observability import JobIntelObservabilityExporter, record_daily_observability
 from .models import Evaluation, Vacancy
 from .runtime import (
     assert_runtime_contract,
+    build_runtime_contract,
     file_access_flags,
     parse_iso_datetime,
     resolve_db_path,
@@ -742,7 +745,26 @@ def run_daily() -> str:
             stats["accepted"] += 1
             stats["accepted_score_list"].append(score)
 
+    def _normalize_job_url(url: str) -> str:
+        """Normalize URLs for within-run dedup.
+
+        Drops query/fragment (tracking params) and trims trailing slash.
+        """
+        try:
+            from urllib.parse import urlsplit, urlunsplit
+
+            parsed = urlsplit((url or "").strip())
+            if not parsed.scheme or not parsed.netloc:
+                return (url or "").strip().rstrip("/")
+            normalized = urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+            return normalized.rstrip("/")
+        except Exception:
+            return (url or "").strip().rstrip("/")
+
+    seen_urls: dict[str, str] = {}  # normalized_url -> canonical_vacancy_key of first seen
+
     for vacancy in vacancies:
+        vacancy.url = _normalize_job_url(vacancy.url)
         vacancy_key = canonical_vacancy_key(vacancy)
         vacancy_id = store.upsert_vacancy(vacancy, vacancy_key)
         classification = classify_vacancy(vacancy)
@@ -751,6 +773,14 @@ def run_daily() -> str:
         _count_source(vacancy, classification, evaluation)
 
         is_dup = vacancy_key in seen_keys
+        if not is_dup and vacancy.url:
+            url_key = vacancy.url
+            canonical_for_url = seen_urls.get(url_key)
+            if canonical_for_url is not None:
+                is_dup = True
+                store.save_duplicate(canonical_for_url, vacancy_key, "url match", 1.0)
+            else:
+                seen_urls[url_key] = vacancy_key
         if not is_dup:
             for existing in canonical_rows:
                 if is_duplicate(vacancy, existing, similarity_threshold=similarity_threshold, repost_window_days=repost_window_days):
@@ -811,14 +841,16 @@ def run_daily() -> str:
         existing["metrics"] = metrics.__dict__
         source_statuses[source] = existing
 
-    source_notifications = _deliver_source_notifications(
-        store,
-        run_id,
-        search_channel,
-        source_statuses,
-        source_counts,
-        accepted_by_source,
-    )
+    source_notifications: list[dict[str, Any]] = []
+    if len(source_statuses) > 2:
+        source_notifications = _deliver_source_notifications(
+            store,
+            run_id,
+            search_channel,
+            source_statuses,
+            source_counts,
+            accepted_by_source,
+        )
     # Compute "planned notified" counts (actual becomes 0 if delivery fails).
     planned_notified_by_source: dict[str, int] = {}
     for vacancy, _, _ in digest_items:
@@ -896,21 +928,14 @@ def run_daily() -> str:
     rejected_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
     top_rejected_high_score = rejected_scored[:10] if not accepted else rejected_scored[:0]
 
-    report = format_executive_opportunity_report(
-        run_id=run_id,
-        title="Executive Opportunity Report (Daily)",
-        per_source_funnel=per_source_funnel,
-        top_scored=top_scored,
-        rejected_reason_counts=rejected_reason_counts,
-        market_titles=market_titles,
-        market_countries=market_countries,
-        market_companies=market_companies,
-        top_rejected_high_score=top_rejected_high_score,
-        operator_footer=operator_footer,
+    digest = format_daily_digest(
+        [(vacancy, evaluation) for vacancy, evaluation, _ in digest_items],
+        title="Daily executive job digest",
+        operator_footer=operator_footer if digest_items else None,
+        technical_footer=technical_footer if digest_items else None,
     )
 
-    # Send the user-facing report, then send technical KPI report separately.
-    delivery_report = _deliver_to_slack(report, search_channel)
+    delivery_report = _deliver_to_slack(digest, search_channel)
 
     notification_ids = _prepare_notifications(store, run_id, search_channel, "daily_digest", digest_items)
     _finalize_notifications(store, notification_ids, delivery_report)
@@ -933,11 +958,17 @@ def run_daily() -> str:
             stats["notified_count"] = 0
             stats["notified"] = 0
 
-    _deliver_to_slack(technical_footer, search_channel)
+    notified_vacancy_ids = {vacancy_id for _, _, vacancy_id in digest_items} if delivery_report.success else set()
+    accepted_vacancy_ids = {vacancy_id for _, _, vacancy_id in accepted}
+    record_daily_observability(
+        store,
+        run_id,
+        scored_rows,
+        accepted_vacancy_ids=accepted_vacancy_ids,
+        notified_vacancy_ids=notified_vacancy_ids,
+    )
 
     # Return user-facing report for CLI output.
-    digest = report
-
     def _pctl(values: list[int], p: float) -> int | None:
         if not values:
             return None
@@ -1012,7 +1043,7 @@ def run_daily() -> str:
     strategy_count = len(strategic.predictions)
 
     run_notes = f"found={len(vacancies)} accepted={len(accepted)} source_failures={sum(1 for s in source_statuses.values() if s.get('status') not in {'ok', 'empty', 'skipped'})} strategic_predictions={strategy_count}"
-    store.finish_run(run_id, status="ok", notes=run_notes, metadata={"source_statuses": source_statuses, "delivery": delivery.__dict__, "strategic_predictions": strategy_count, "source_notifications": source_notifications})
+    store.finish_run(run_id, status="ok", notes=run_notes, metadata={"source_statuses": source_statuses, "delivery": delivery_report.__dict__, "strategic_predictions": strategy_count, "source_notifications": source_notifications})
     return digest
 
 
@@ -1283,7 +1314,25 @@ def _json_loads(value: Any, default: Any) -> Any:
 
 def _looks_like_allowed_geo(location: str) -> bool:
     text = (location or "").lower()
-    return any(token in text for token in ("remote", "almaty", "kazakhstan", "kz", "dubai", "uae", "emea", "europe", "central asia", "mena"))
+    return any(
+        token in text
+        for token in (
+            "remote",
+            "almaty",
+            "astana",
+            "kazakhstan",
+            "kz",
+            "central asia",
+            "emea",
+            "europe",
+            "mena",
+            "apac",
+            "asia",
+            "singapore",
+            "uae",
+            "dubai",
+        )
+    )
 
 
 
@@ -1384,6 +1433,16 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
             stats["reposts_detected"] += 1
         else:
             stats["new_unique_vacancies"] += 1
+        # Industry/geography stats should describe the market, not only accepted rows.
+        # Count them for all non-duplicate vacancies.
+        if row.get("status") != "duplicate":
+            for bucket in _industry_buckets(f"{row.get('title') or ''} {row.get('description') or ''} {row.get('company') or ''}"):
+                overall_industries[bucket] += 1
+            if _looks_like_allowed_geo(str(row.get("location") or "")):
+                allowed_geo_hits += 1
+            else:
+                blocked_geo_hits += 1
+
         if row.get("recommendation") == "reject":
             stats["rejected_count"] += 1
             title_text = f"{row.get('title') or ''} {row.get('location') or ''} {row.get('description') or ''}"
@@ -1392,12 +1451,6 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
         else:
             stats["accepted_count"] += 1
             accepted_rows.append(row)
-            for bucket in _industry_buckets(f"{row.get('title') or ''} {row.get('description') or ''} {row.get('company') or ''}"):
-                overall_industries[bucket] += 1
-            if _looks_like_allowed_geo(str(row.get("location") or "")):
-                allowed_geo_hits += 1
-            else:
-                blocked_geo_hits += 1
         if source in sample_rows_by_source and len(sample_rows_by_source[source]) < 20:
             sample_rows_by_source[source].append(
                 {
@@ -1788,7 +1841,7 @@ def _format_health_report(curr: dict[str, Any], prev: dict[str, Any] | None) -> 
 
 
 def run_health_report() -> str:
-    assert_runtime_contract()
+    runtime_contract = build_runtime_contract()
     store = _store()
     store.bootstrap()
     run_id = store.start_run("health")
@@ -1798,6 +1851,9 @@ def run_health_report() -> str:
         return "[SILENT]"
     current = _health_summary_for_run(store, daily_runs[0])
     previous = _health_summary_for_run(store, daily_runs[1]) if len(daily_runs) > 1 else None
+    if runtime_contract.get("issues"):
+        current.setdefault("runtime", {})
+        current["runtime"]["contract_issues"] = runtime_contract["issues"]
     digest = _format_health_report(current, previous)
     cfg = load_config_bundle() or DEFAULT_CONFIG
     channel = _search_report_channel(cfg)
@@ -2126,6 +2182,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("strategic")
     sub.add_parser("health")
     sub.add_parser("weekly-kpi")
+    metrics_exporter = sub.add_parser("metrics-exporter")
+    metrics_exporter.add_argument("--host", default="0.0.0.0")
+    metrics_exporter.add_argument("--port", type=int, default=9899)
+    metrics_exporter.set_defaults(cmd="metrics-exporter")
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(cmd="doctor")
 
@@ -2146,6 +2206,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.cmd == "metrics-exporter":
+        exporter = JobIntelObservabilityExporter(_store())
+        exporter.serve(host=args.host, port=args.port)
+        return 0
     assert_runtime_contract()
 
     if args.cmd == "bootstrap":
