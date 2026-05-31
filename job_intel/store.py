@@ -561,14 +561,23 @@ class JobIntelStore:
         confidence: float | None,
         is_duplicate: bool,
         created_at: str | None = None,
+        company: str | None = None,
+        title: str | None = None,
+        location: str | None = None,
+        url: str | None = None,
+        score_v1: int | None = None,
+        score_v2: int | None = None,
+        active_score: int | None = None,
+        recommendation: str | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO vacancy_observability (
                     run_id, vacancy_key, source, role_bucket, geo_bucket, industry_bucket,
-                    executive_detected, accepted, notified, score, score_band, confidence, is_duplicate, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    executive_detected, accepted, notified, score, score_band, confidence, is_duplicate, created_at,
+                    company, title, location, url, score_v1, score_v2, active_score, recommendation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id, vacancy_key) DO UPDATE SET
                     source=excluded.source,
                     role_bucket=excluded.role_bucket,
@@ -581,7 +590,15 @@ class JobIntelStore:
                     score_band=excluded.score_band,
                     confidence=excluded.confidence,
                     is_duplicate=excluded.is_duplicate,
-                    created_at=excluded.created_at
+                    created_at=excluded.created_at,
+                    company=excluded.company,
+                    title=excluded.title,
+                    location=excluded.location,
+                    url=excluded.url,
+                    score_v1=excluded.score_v1,
+                    score_v2=excluded.score_v2,
+                    active_score=excluded.active_score,
+                    recommendation=excluded.recommendation
                 """,
                 (
                     run_id,
@@ -598,6 +615,14 @@ class JobIntelStore:
                     confidence,
                     int(is_duplicate),
                     created_at or datetime.now(timezone.utc).isoformat(),
+                    company,
+                    title,
+                    location,
+                    url,
+                    score_v1,
+                    score_v2,
+                    active_score if active_score is not None else score,
+                    recommendation,
                 ),
             )
 
@@ -614,14 +639,23 @@ class JobIntelStore:
         rejection_reason_count: int,
         top_rejection_reason: str | None,
         created_at: str | None = None,
+        recommendation: str | None = None,
+        real_blocker_count: int = 0,
+        unknown_count: int = 0,
+        warning_count: int = 0,
+        top_real_blocker: str | None = None,
+        top_unknown_reason: str | None = None,
+        top_warning: str | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO vacancy_rejection_summary (
                     run_id, vacancy_key, source, score, score_band, accepted, is_duplicate,
-                    rejection_reason_count, top_rejection_reason, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    rejection_reason_count, top_rejection_reason, created_at,
+                    recommendation, real_blocker_count, unknown_count, warning_count,
+                    top_real_blocker, top_unknown_reason, top_warning
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id, vacancy_key) DO UPDATE SET
                     source=excluded.source,
                     score=excluded.score,
@@ -630,7 +664,14 @@ class JobIntelStore:
                     is_duplicate=excluded.is_duplicate,
                     rejection_reason_count=excluded.rejection_reason_count,
                     top_rejection_reason=excluded.top_rejection_reason,
-                    created_at=excluded.created_at
+                    created_at=excluded.created_at,
+                    recommendation=excluded.recommendation,
+                    real_blocker_count=excluded.real_blocker_count,
+                    unknown_count=excluded.unknown_count,
+                    warning_count=excluded.warning_count,
+                    top_real_blocker=excluded.top_real_blocker,
+                    top_unknown_reason=excluded.top_unknown_reason,
+                    top_warning=excluded.top_warning
                 """,
                 (
                     run_id,
@@ -643,6 +684,13 @@ class JobIntelStore:
                     int(rejection_reason_count),
                     top_rejection_reason,
                     created_at or datetime.now(timezone.utc).isoformat(),
+                    recommendation,
+                    int(real_blocker_count),
+                    int(unknown_count),
+                    int(warning_count),
+                    top_real_blocker,
+                    top_unknown_reason,
+                    top_warning,
                 ),
             )
 
@@ -654,8 +702,9 @@ class JobIntelStore:
                 """
                 INSERT INTO vacancy_rejection_events (
                     run_id, vacancy_key, source, role_bucket, geo_bucket, industry_bucket,
-                    score, score_band, confidence, rejection_reason, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    score, score_band, confidence, rejection_reason, created_at,
+                    reason_type, severity
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -670,6 +719,8 @@ class JobIntelStore:
                         row.get("confidence"),
                         row["rejection_reason"],
                         row.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                        row.get("reason_type"),
+                        row.get("severity"),
                     )
                     for row in rows
                 ],
