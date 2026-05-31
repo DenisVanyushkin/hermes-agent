@@ -668,6 +668,8 @@ def _deliver_source_notifications(
     source_counts: dict[str, dict[str, int]],
     accepted_by_source: dict[str, list[tuple[Vacancy, Any, int]]],
 ) -> list[dict[str, Any]]:
+    if os.getenv("JOB_INTEL_SEND_SOURCE_SEARCH_UPDATES", "0").strip() != "1":
+        return []
     deliveries: list[dict[str, Any]] = []
     for source in sorted(source_statuses):
         source_status = source_statuses[source]
