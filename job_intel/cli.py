@@ -36,6 +36,7 @@ from .digest import (
     format_daily_digest,
     format_enrichment_questions,
     format_executive_opportunity_report,
+    format_health_warning,
     format_vacancy_summary,
     reject_reason_bucket,
 )
@@ -2033,6 +2034,72 @@ def _format_health_report(curr: dict[str, Any], prev: dict[str, Any] | None) -> 
 
 
 
+def _check_health_conditions(store: "JobIntelStore") -> list[str]:
+    """Returns list of health problem descriptions. Empty list = healthy."""
+    problems = []
+    with store.connect(read_only=True) as conn:
+        # 1. No successful daily run in last 26h
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=26)).isoformat()
+        row = conn.execute(
+            "SELECT started_at FROM runs WHERE mode='daily' AND status='ok' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not row or row[0] < cutoff:
+            last = row[0] if row else "never"
+            problems.append(f"No successful daily run since {last}")
+
+        # 2. Last daily run failed
+        row = conn.execute(
+            "SELECT id, status, notes FROM runs WHERE mode='daily' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row and row[1] not in ("ok", "partial"):
+            problems.append(f"Last daily run {row[0]} status={row[1]}: {row[2] or ''}")
+
+        # 3. Tier-1 source failure in last daily run
+        last_run_id = (conn.execute(
+            "SELECT MAX(id) FROM runs WHERE mode='daily'"
+        ).fetchone() or [None])[0]
+        if last_run_id:
+            tier1_failures = conn.execute(
+                "SELECT source, source_status FROM source_kpi_run "
+                "WHERE run_id=? AND source IN ('linkedin','headhunter','target_companies') "
+                "AND source_status NOT IN ('ok','empty')",
+                (last_run_id,)
+            ).fetchall()
+            for src, status in tier1_failures:
+                problems.append(f"Tier-1 source {src}: {status}")
+
+            # 4. Login wall on Tier-1
+            login_walls = conn.execute(
+                "SELECT source, login_walls FROM source_kpi_run "
+                "WHERE run_id=? AND source IN ('linkedin','headhunter','target_companies') "
+                "AND login_walls > 0",
+                (last_run_id,)
+            ).fetchall()
+            for src, walls in login_walls:
+                problems.append(f"Login wall: {src} ({walls} events)")
+
+            # 5. Daily digest delivery failure
+            fail = conn.execute(
+                "SELECT delivery_error FROM notifications "
+                "WHERE run_id=? AND message_type='daily_digest' AND delivery_status='failed' LIMIT 1",
+                (last_run_id,)
+            ).fetchone()
+            if fail:
+                problems.append(f"Daily digest delivery failed: {fail[0] or 'unknown error'}")
+
+        # 6. ATS source empty for 5+ consecutive runs
+        ats_sources = ["greenhouse", "lever", "ashby", "teamtailor", "smartrecruiters", "personio", "recruitee"]
+        for src in ats_sources:
+            recent = conn.execute(
+                "SELECT source_status FROM source_kpi_run WHERE source=? ORDER BY run_id DESC LIMIT 5",
+                (src,)
+            ).fetchall()
+            if len(recent) >= 5 and all(r[0] == "empty" for r in recent):
+                problems.append(f"ATS source {src}: empty for 5+ consecutive runs")
+
+    return problems
+
+
 def run_health_report() -> str:
     runtime_contract = build_runtime_contract()
     store = _store()
@@ -2047,13 +2114,24 @@ def run_health_report() -> str:
     if runtime_contract.get("issues"):
         current.setdefault("runtime", {})
         current["runtime"]["contract_issues"] = runtime_contract["issues"]
-    digest = _format_health_report(current, previous)
+    problems = _check_health_conditions(store)
+    send_ok = os.getenv("JOB_INTEL_SEND_HEALTH_OK_REPORTS", "0").strip() == "1"
+
+    if not problems and not send_ok:
+        logger.info("Health check passed — all systems healthy. Skipping Slack (set JOB_INTEL_SEND_HEALTH_OK_REPORTS=1 to send anyway).")
+        store.finish_run(run_id, status="ok", notes="report=skipped_healthy", metadata={"report_type": "health", "skipped": True})
+        return "[SILENT]"
+
+    if problems:
+        digest = format_health_warning(problems)
+    else:
+        digest = _format_health_report(current, previous)
     cfg = load_config_bundle() or DEFAULT_CONFIG
     channel = _search_report_channel(cfg)
     notification_id = store.create_notification(run_id, channel, "health_report", digest, delivery_status="pending")
     delivery = _deliver_to_slack(digest, channel)
     store.mark_notification_delivery(notification_id, _delivery_db_status(delivery), attempts=delivery.attempts, delivery_error=delivery.error)
-    store.finish_run(run_id, status="ok", notes=f"report_length={len(digest)}", metadata={"report_type": "health", "latest_daily_run_id": daily_runs[0].get('id'), "previous_daily_run_id": daily_runs[1].get('id') if len(daily_runs) > 1 else None, "delivery": delivery.__dict__})
+    store.finish_run(run_id, status="ok", notes=f"report_length={len(digest)}", metadata={"report_type": "health", "latest_daily_run_id": daily_runs[0].get('id'), "previous_daily_run_id": daily_runs[1].get('id') if len(daily_runs) > 1 else None, "delivery": delivery.__dict__, "problems_found": len(problems)})
     return digest
 
 

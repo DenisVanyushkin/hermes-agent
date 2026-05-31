@@ -361,3 +361,17 @@ def format_enrichment_questions(questions: list[str]) -> str:
     for idx, q in enumerate(questions, 1):
         lines.append(f"{idx}. {q}")
     return "\n".join(lines)
+
+
+def format_health_warning(problems: list[str]) -> str:
+    """Compact health warning message — only sent when something is wrong."""
+    from datetime import date
+    lines = [
+        f"⚠️ *System Health Warning* — {date.today().strftime('%d %b %Y')}",
+        "",
+    ]
+    for problem in problems:
+        lines.append(f"• {problem}")
+    lines.append("")
+    lines.append("_Check logs or run `job_intel health` for details._")
+    return "\n".join(lines)
