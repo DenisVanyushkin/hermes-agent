@@ -822,9 +822,11 @@ def record_daily_observability(
     *,
     accepted_vacancy_ids: set[int] | None = None,
     notified_vacancy_ids: set[int] | None = None,
+    dual_scores_by_url: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     accepted_vacancy_ids = accepted_vacancy_ids or set()
     notified_vacancy_ids = notified_vacancy_ids or set()
+    dual_scores_by_url = dual_scores_by_url or {}
     rejection_events: list[dict[str, Any]] = []
     for vacancy, evaluation, classification, vacancy_id, duplicate in scored_rows:
         score = int(getattr(evaluation, "score", 0) or 0)
@@ -839,6 +841,11 @@ def record_daily_observability(
         confidence = float(score / 100.0) if score is not None else None
         created_at = getattr(vacancy, "scraped_at", None) or datetime.now(timezone.utc).isoformat()
         vacancy_key = canonical_vacancy_key(vacancy)
+        recommendation = str(getattr(evaluation, "recommendation", None) or "") or None
+        # Dual-score fields: look up by vacancy URL if dual scoring was active
+        dual = dual_scores_by_url.get(getattr(vacancy, "url", None) or "")
+        score_v1: int | None = int(dual["score_v1"]) if dual and dual.get("score_v1") is not None else None
+        score_v2: int | None = int(dual["score_v2"]) if dual and dual.get("score_v2") is not None else None
         store.upsert_vacancy_observability(
             run_id=run_id,
             vacancy_key=vacancy_key,
@@ -854,9 +861,25 @@ def record_daily_observability(
             confidence=confidence,
             is_duplicate=bool(duplicate),
             created_at=created_at,
+            company=str(getattr(vacancy, "company", None) or "") or None,
+            title=str(getattr(vacancy, "title", None) or "") or None,
+            location=str(getattr(vacancy, "location", None) or "") or None,
+            url=str(getattr(vacancy, "url", None) or "") or None,
+            score_v1=score_v1,
+            score_v2=score_v2,
+            active_score=score,
+            recommendation=recommendation,
         )
         reasons = rejection_reasons_for(vacancy, evaluation, classification, duplicate=duplicate)
         top_reason = reasons[0] if reasons else None
+        # Classify each rejection reason for summary counts
+        classified = [classify_rejection_reason(r) for r in reasons]
+        real_blockers = [r for r, (rt, _) in zip(reasons, classified) if rt == "blocker"]
+        unknowns = [r for r, (rt, _) in zip(reasons, classified) if rt == "unknown"]
+        warnings = [r for r, (rt, _) in zip(reasons, classified) if rt == "warning"]
+        top_real_blocker = max(set(real_blockers), key=real_blockers.count) if real_blockers else None
+        top_unknown_reason = max(set(unknowns), key=unknowns.count) if unknowns else None
+        top_warning = max(set(warnings), key=warnings.count) if warnings else None
         store.upsert_vacancy_rejection_summary(
             run_id=run_id,
             vacancy_key=vacancy_key,
@@ -868,9 +891,16 @@ def record_daily_observability(
             rejection_reason_count=len(reasons),
             top_rejection_reason=top_reason,
             created_at=created_at,
+            recommendation=recommendation,
+            real_blocker_count=len(real_blockers),
+            unknown_count=len(unknowns),
+            warning_count=len(warnings),
+            top_real_blocker=top_real_blocker,
+            top_unknown_reason=top_unknown_reason,
+            top_warning=top_warning,
         )
         if reasons:
-            for reason in reasons:
+            for reason, (reason_type, severity) in zip(reasons, classified):
                 rejection_events.append(
                     {
                         "run_id": run_id,
@@ -884,6 +914,8 @@ def record_daily_observability(
                         "confidence": confidence,
                         "rejection_reason": reason,
                         "created_at": created_at,
+                        "reason_type": reason_type,
+                        "severity": severity,
                     }
                 )
     store.insert_vacancy_rejection_events(rejection_events)
