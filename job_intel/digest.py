@@ -375,3 +375,63 @@ def format_health_warning(problems: list[str]) -> str:
     lines.append("")
     lines.append("_Check logs or run `job_intel health` for details._")
     return "\n".join(lines)
+
+
+def format_weekly_source_quality(rows: list[dict], week_label: str | None = None) -> str:
+    """
+    Compact weekly source quality table.
+    rows keys: source, found, exec_detected, strong_fit, potential_fit, near_miss,
+               accepted, notified, runs_ok, runs_total, enabled, last_status
+    Only renders enabled sources (enabled != 0).
+    """
+    from datetime import date
+    week = week_label or f"Week of {date.today().strftime('%d %b %Y')}"
+    lines = [f"📈 *Weekly Source Quality* — {week}", ""]
+
+    enabled_rows = [r for r in rows if r.get("enabled", 1) != 0]
+    if not enabled_rows:
+        lines.append("No data for enabled sources this week.")
+        return "\n".join(lines)
+
+    lines.append("```")
+    lines.append(f"{'Source':<20} {'Found':>6} {'Exec':>5} {'Strong':>7} {'Pot':>5} {'Miss':>5} {'Accept':>7} {'Rel%':>5}")
+    lines.append("-" * 62)
+    for r in sorted(enabled_rows, key=lambda x: -(x.get("strong_fit", 0) + x.get("potential_fit", 0))):
+        src = r["source"][:20]
+        runs_ok = r.get("runs_ok", 0)
+        runs_total = max(r.get("runs_total", 1), 1)
+        reliability = int(100 * runs_ok / runs_total)
+        flag = " ⚠" if r.get("last_status") in ("error", "blocked") else ""
+        lines.append(
+            f"{src:<20} {r.get('found', 0):>6} {r.get('exec_detected', 0):>5} "
+            f"{r.get('strong_fit', 0):>7} {r.get('potential_fit', 0):>5} "
+            f"{r.get('near_miss', 0):>5} {r.get('accepted', 0):>7} {reliability:>4}%{flag}"
+        )
+    lines.append("```")
+    lines.append("")
+
+    # Top sources by useful opportunities
+    useful = [
+        (r["source"], r.get("strong_fit", 0) + r.get("potential_fit", 0) + r.get("near_miss", 0))
+        for r in enabled_rows
+        if r.get("strong_fit", 0) + r.get("potential_fit", 0) > 0
+    ]
+    if useful:
+        useful.sort(key=lambda x: -x[1])
+        lines.append("*Top sources by opportunity:*")
+        for src, n in useful[:3]:
+            lines.append(f"• {src}: {n} useful opportunities")
+        lines.append("")
+
+    # Sources to watch
+    watch = [
+        r for r in enabled_rows
+        if r.get("runs_total", 0) >= 3
+        and r.get("runs_ok", r.get("runs_total", 1)) / max(r.get("runs_total", 1), 1) < 0.6
+    ]
+    if watch:
+        lines.append("*Sources to watch:*")
+        for r in watch:
+            lines.append(f"• {r['source']}: {r.get('runs_ok', 0)}/{r.get('runs_total', 0)} runs ok")
+
+    return "\n".join(lines)
