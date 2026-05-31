@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,6 +10,8 @@ from typing import Any
 
 from .models import Evaluation, Vacancy
 from .runtime import capture_runtime_provenance, parse_iso_datetime
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -71,6 +75,56 @@ CREATE TABLE IF NOT EXISTS duplicate_links (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS vacancy_observability (
+    run_id INTEGER NOT NULL,
+    vacancy_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    role_bucket TEXT NOT NULL,
+    geo_bucket TEXT NOT NULL,
+    industry_bucket TEXT NOT NULL,
+    executive_detected INTEGER NOT NULL DEFAULT 0,
+    accepted INTEGER NOT NULL DEFAULT 0,
+    notified INTEGER NOT NULL DEFAULT 0,
+    score INTEGER NOT NULL,
+    score_band TEXT NOT NULL,
+    confidence REAL,
+    is_duplicate INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, vacancy_key),
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS vacancy_rejection_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    vacancy_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    role_bucket TEXT NOT NULL,
+    geo_bucket TEXT NOT NULL,
+    industry_bucket TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    score_band TEXT NOT NULL,
+    confidence REAL,
+    rejection_reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS vacancy_rejection_summary (
+    run_id INTEGER NOT NULL,
+    vacancy_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    score_band TEXT NOT NULL,
+    accepted INTEGER NOT NULL DEFAULT 0,
+    is_duplicate INTEGER NOT NULL DEFAULT 0,
+    rejection_reason_count INTEGER NOT NULL DEFAULT 0,
+    top_rejection_reason TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, vacancy_key),
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS candidate_memory (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -103,6 +157,58 @@ CREATE TABLE IF NOT EXISTS notifications (
     payload_json TEXT,
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL,
     FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE SET NULL
+);
+
+
+CREATE TABLE IF NOT EXISTS source_kpi_run (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+
+    source_status TEXT,
+    acquisition_mode TEXT,
+    runtime_seconds REAL,
+    attempts INTEGER,
+
+    pages_fetched INTEGER,
+    login_walls INTEGER,
+    auth_redirects INTEGER,
+    anti_bot_events INTEGER,
+    extraction_failures INTEGER,
+
+    found_count INTEGER,
+    executive_detected_count INTEGER,
+    scored_count INTEGER,
+    accepted_count INTEGER,
+    notified_count INTEGER,
+
+    vacancies_deduped INTEGER,
+    rejected_count INTEGER,
+
+    avg_vacancy_score REAL,
+    vacancy_score_p50 INTEGER,
+    vacancy_score_p90 INTEGER,
+    accepted_score_p50 INTEGER,
+
+    pct_company_known REAL,
+    pct_location_known REAL,
+    pct_salary_known REAL,
+    pct_seniority_confident REAL,
+
+    company_score_avg REAL,
+    company_score_p90 REAL,
+    industry_fit_avg REAL,
+    tier1_company_count INTEGER,
+    tier2_company_count INTEGER,
+    interview_generated_count INTEGER,
+
+    error_class TEXT,
+    error_fingerprint TEXT,
+    error_message_truncated TEXT,
+
+    UNIQUE(run_id, source),
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS company_intelligence (
@@ -170,8 +276,26 @@ class JobIntelStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+    def connect(self, *, read_only: bool = False) -> sqlite3.Connection:
+        if read_only:
+            strategies = (
+                ("ro", lambda: sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)),
+                ("immutable", lambda: sqlite3.connect(f"file:{self.db_path}?mode=ro&immutable=1", uri=True)),
+                ("plain", lambda: sqlite3.connect(self.db_path)),
+            )
+            last_error: sqlite3.OperationalError | None = None
+            for strategy_name, open_conn in strategies:
+                try:
+                    conn = open_conn()
+                    logger.debug("job-intel sqlite read-only connect strategy=%s db_path=%s", strategy_name, self.db_path)
+                    break
+                except sqlite3.OperationalError as exc:
+                    last_error = exc
+            else:
+                assert last_error is not None
+                raise last_error
+        else:
+            conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
@@ -187,6 +311,7 @@ class JobIntelStore:
             conn.executescript(SCHEMA)
             self._ensure_column(conn, "runs", "metadata_json", "TEXT")
             self._ensure_column(conn, "runs", "provenance_json", "TEXT")
+            self._ensure_column(conn, "runs", "run_type", "TEXT NOT NULL DEFAULT 'production'")
             self._ensure_column(conn, "notifications", "vacancy_id", "INTEGER")
             self._ensure_column(conn, "notifications", "delivery_error", "TEXT")
             self._ensure_column(conn, "notifications", "delivery_attempts", "INTEGER NOT NULL DEFAULT 0")
@@ -208,9 +333,29 @@ class JobIntelStore:
             self._ensure_column(conn, "strategic_predictions", "resolution_status", "TEXT NOT NULL DEFAULT 'open'")
             self._ensure_column(conn, "strategic_predictions", "outcome_text", "TEXT")
             self._ensure_column(conn, "strategic_predictions", "observed_openings", "INTEGER NOT NULL DEFAULT 0")
+            # Phase 3 observability migrations
+            self._ensure_column(conn, "vacancy_observability", "company", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "title", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "location", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "url", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "score_v1", "INTEGER")
+            self._ensure_column(conn, "vacancy_observability", "score_v2", "INTEGER")
+            self._ensure_column(conn, "vacancy_observability", "active_score", "INTEGER")
+            self._ensure_column(conn, "vacancy_observability", "recommendation", "TEXT")
+            self._ensure_column(conn, "vacancy_rejection_events", "reason_type", "TEXT")
+            self._ensure_column(conn, "vacancy_rejection_events", "severity", "TEXT")
+            self._ensure_column(conn, "vacancy_rejection_summary", "recommendation", "TEXT")
+            self._ensure_column(conn, "vacancy_rejection_summary", "real_blocker_count", "INTEGER")
+            self._ensure_column(conn, "vacancy_rejection_summary", "unknown_count", "INTEGER")
+            self._ensure_column(conn, "vacancy_rejection_summary", "warning_count", "INTEGER")
+            self._ensure_column(conn, "vacancy_rejection_summary", "top_real_blocker", "TEXT")
+            self._ensure_column(conn, "vacancy_rejection_summary", "top_unknown_reason", "TEXT")
+            self._ensure_column(conn, "vacancy_rejection_summary", "top_warning", "TEXT")
+            self._ensure_column(conn, "source_kpi_run", "enabled", "INTEGER DEFAULT 1")
+            self._ensure_column(conn, "source_kpi_run", "skip_reason", "TEXT")
 
-    def list_tables(self) -> list[str]:
-        with self.connect() as conn:
+    def list_tables(self, *, read_only: bool = False) -> list[str]:
+        with self.connect(read_only=read_only) as conn:
             rows = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
             ).fetchall()
@@ -226,16 +371,28 @@ class JobIntelStore:
         self.bootstrap()
         now = datetime.now(timezone.utc).isoformat()
         runtime_provenance = provenance or capture_runtime_provenance(db_path=self.db_path)
+        run_type = os.getenv("JOB_INTEL_RUN_TYPE", "production")
+        scoring_model_version = (os.getenv("SCORING_MODEL_VERSION", "v1") or "v1").strip().lower()
+        merged_metadata = dict(metadata or {})
+        merged_metadata.setdefault("scoring_model_version", scoring_model_version)
+        merged_notes = notes
+        # Also include in notes for stable SQL filtering without JSON parsing extensions.
+        if merged_notes:
+            if "scoring_model_version=" not in merged_notes:
+                merged_notes = (merged_notes + f" scoring_model_version={scoring_model_version}").strip()
+        else:
+            merged_notes = f"scoring_model_version={scoring_model_version}"
         with self.connect() as conn:
             cur = conn.execute(
-                "INSERT INTO runs (mode, started_at, status, notes, metadata_json, provenance_json) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO runs (mode, started_at, status, notes, metadata_json, provenance_json, run_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     mode,
                     now,
                     "running",
-                    notes,
-                    json.dumps(metadata or {}, ensure_ascii=False),
+                    merged_notes,
+                    json.dumps(merged_metadata, ensure_ascii=False),
                     json.dumps(runtime_provenance, ensure_ascii=False),
+                    run_type,
                 ),
             )
             return int(cur.lastrowid)
@@ -387,6 +544,137 @@ class JobIntelStore:
                 (canonical_vacancy_key, duplicate_vacancy_key, reason, similarity, datetime.now(timezone.utc).isoformat()),
             )
 
+    def upsert_vacancy_observability(
+        self,
+        *,
+        run_id: int,
+        vacancy_key: str,
+        source: str,
+        role_bucket: str,
+        geo_bucket: str,
+        industry_bucket: str,
+        executive_detected: bool,
+        accepted: bool,
+        notified: bool,
+        score: int,
+        score_band: str,
+        confidence: float | None,
+        is_duplicate: bool,
+        created_at: str | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO vacancy_observability (
+                    run_id, vacancy_key, source, role_bucket, geo_bucket, industry_bucket,
+                    executive_detected, accepted, notified, score, score_band, confidence, is_duplicate, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, vacancy_key) DO UPDATE SET
+                    source=excluded.source,
+                    role_bucket=excluded.role_bucket,
+                    geo_bucket=excluded.geo_bucket,
+                    industry_bucket=excluded.industry_bucket,
+                    executive_detected=excluded.executive_detected,
+                    accepted=excluded.accepted,
+                    notified=excluded.notified,
+                    score=excluded.score,
+                    score_band=excluded.score_band,
+                    confidence=excluded.confidence,
+                    is_duplicate=excluded.is_duplicate,
+                    created_at=excluded.created_at
+                """,
+                (
+                    run_id,
+                    vacancy_key,
+                    source,
+                    role_bucket,
+                    geo_bucket,
+                    industry_bucket,
+                    int(executive_detected),
+                    int(accepted),
+                    int(notified),
+                    int(score),
+                    score_band,
+                    confidence,
+                    int(is_duplicate),
+                    created_at or datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def upsert_vacancy_rejection_summary(
+        self,
+        *,
+        run_id: int,
+        vacancy_key: str,
+        source: str,
+        score: int,
+        score_band: str,
+        accepted: bool,
+        is_duplicate: bool,
+        rejection_reason_count: int,
+        top_rejection_reason: str | None,
+        created_at: str | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO vacancy_rejection_summary (
+                    run_id, vacancy_key, source, score, score_band, accepted, is_duplicate,
+                    rejection_reason_count, top_rejection_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, vacancy_key) DO UPDATE SET
+                    source=excluded.source,
+                    score=excluded.score,
+                    score_band=excluded.score_band,
+                    accepted=excluded.accepted,
+                    is_duplicate=excluded.is_duplicate,
+                    rejection_reason_count=excluded.rejection_reason_count,
+                    top_rejection_reason=excluded.top_rejection_reason,
+                    created_at=excluded.created_at
+                """,
+                (
+                    run_id,
+                    vacancy_key,
+                    source,
+                    int(score),
+                    score_band,
+                    int(accepted),
+                    int(is_duplicate),
+                    int(rejection_reason_count),
+                    top_rejection_reason,
+                    created_at or datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def insert_vacancy_rejection_events(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        with self.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO vacancy_rejection_events (
+                    run_id, vacancy_key, source, role_bucket, geo_bucket, industry_bucket,
+                    score, score_band, confidence, rejection_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["run_id"],
+                        row["vacancy_key"],
+                        row["source"],
+                        row["role_bucket"],
+                        row["geo_bucket"],
+                        row["industry_bucket"],
+                        row["score"],
+                        row["score_band"],
+                        row.get("confidence"),
+                        row["rejection_reason"],
+                        row.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                    )
+                    for row in rows
+                ],
+            )
+
     def set_memory(self, key: str, value: str, source: str = "system", confidence: float = 1.0) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -470,6 +758,46 @@ class JobIntelStore:
                     notification_id,
                 ),
             )
+
+
+    def upsert_source_kpi_run(self, run_id: int, source: str, kpi: dict[str, Any]) -> None:
+        """Persist per-run/per-source KPIs. Missing keys are stored as NULL."""
+        self.bootstrap()
+        now = datetime.now(timezone.utc).isoformat()
+        # Fixed column set to keep schema stable and queries simple.
+        columns = [
+            "run_id","source","created_at",
+            "source_status","acquisition_mode","runtime_seconds","attempts",
+            "pages_fetched","login_walls","auth_redirects","anti_bot_events","extraction_failures",
+            "found_count","executive_detected_count","scored_count","accepted_count","notified_count",
+            "vacancies_deduped","rejected_count",
+            "avg_vacancy_score","vacancy_score_p50","vacancy_score_p90","accepted_score_p50",
+            "pct_company_known","pct_location_known","pct_salary_known","pct_seniority_confident",
+            "company_score_avg","company_score_p90","industry_fit_avg","tier1_company_count","tier2_company_count","interview_generated_count",
+            "error_class","error_fingerprint","error_message_truncated",
+        ]
+        payload: dict[str, Any] = {"run_id": run_id, "source": source, "created_at": now}
+        payload.update(kpi or {})
+        values = [payload.get(c) for c in columns]
+        placeholders = ",".join(["?"] * len(columns))
+        col_sql = ",".join(columns)
+        update_sql = ",".join([f"{c}=excluded.{c}" for c in columns if c not in {"run_id","source"}])
+        sql = f"INSERT INTO source_kpi_run ({col_sql}) VALUES ({placeholders}) ON CONFLICT(run_id,source) DO UPDATE SET {update_sql}"
+        with self.connect() as conn:
+            conn.execute(sql, values)
+
+    def count_notified_vacancies_by_source(self, run_id: int, *, delivery_status: str = "sent") -> dict[str, int]:
+        """Return count of distinct notified vacancy_ids by vacancy.source for a run."""
+        sql = (
+            "SELECT v.source AS source, COUNT(DISTINCT n.vacancy_id) AS c "
+            "FROM notifications n "
+            "JOIN vacancies v ON v.id = n.vacancy_id "
+            "WHERE n.run_id = ? AND n.delivery_status = ? AND n.vacancy_id IS NOT NULL "
+            "GROUP BY v.source"
+        )
+        with self.connect() as conn:
+            rows = conn.execute(sql, (run_id, delivery_status)).fetchall()
+        return {str(row["source"]): int(row["c"] or 0) for row in rows}
 
     def latest_notification_for_vacancy(self, vacancy_id: int, delivery_status: str | None = None) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -809,4 +1137,3 @@ class JobIntelStore:
                     observed_openings,
                 ),
             )
-
