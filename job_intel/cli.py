@@ -39,7 +39,7 @@ from .digest import (
     format_vacancy_summary,
     reject_reason_bucket,
 )
-from .evaluator import classify_vacancy, score_vacancy
+from .evaluator import classify_vacancy, score_vacancy, score_vacancy_with_version
 from .enrichment import detect_high_value_questions
 from .observability import JobIntelObservabilityExporter, record_daily_observability
 from .models import Evaluation, Vacancy
@@ -500,6 +500,41 @@ def _should_notify_vacancy(store: JobIntelStore, vacancy_id: int, vacancy: Vacan
     return False
 
 
+def _dual_score_rollout_enabled(store: JobIntelStore, run_id: int) -> bool:
+    """Enable dual-score reporting for the first 7 production daily runs after switching to v2.
+
+    Implementation note:
+    - Prefers `runs.metadata_json` (written in store.start_run and preserved/merged on finish_run)
+      because `runs.notes` may be overwritten with end-of-run summaries.
+    - Uses LIKE rather than sqlite JSON functions to keep the dependency surface small.
+    """
+    if (os.getenv("SCORING_MODEL_VERSION", "v1") or "v1").strip().lower() != "v2":
+        return False
+    if (os.getenv("JOB_INTEL_RUN_TYPE", "production") or "production").strip().lower() != "production":
+        return False
+    try:
+        with store.connect(read_only=True) as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM runs
+                WHERE id <= ?
+                  AND run_type = 'production'
+                  AND mode = 'daily'
+                  AND (
+                        notes LIKE '%scoring_model_version=v2%'
+                     OR metadata_json LIKE '%\"scoring_model_version\": \"v2\"%'
+                  )
+                """,
+                (run_id,),
+            ).fetchone()
+            n = int(row[0] or 0) if row else 0
+            return n > 0 and n <= 7
+    except Exception:
+        # Never fail the run due to reporting logic.
+        return False
+
+
 
 
 
@@ -797,12 +832,27 @@ def run_daily() -> str:
 
     seen_urls: dict[str, str] = {}  # normalized_url -> canonical_vacancy_key of first seen
 
+    dual_score_enabled = _dual_score_rollout_enabled(store, run_id)
+    dual_scores_by_url: dict[str, dict[str, object]] = {} if dual_score_enabled else {}
+    scoring_model_version = (os.getenv("SCORING_MODEL_VERSION", "v1") or "v1").strip().lower()
+
     for vacancy in vacancies:
         vacancy.url = _normalize_job_url(vacancy.url)
         vacancy_key = canonical_vacancy_key(vacancy)
         vacancy_id = store.upsert_vacancy(vacancy, vacancy_key)
         classification = classify_vacancy(vacancy)
-        evaluation = score_vacancy(vacancy)
+        if dual_score_enabled:
+            ev1 = score_vacancy_with_version(vacancy, "v1")
+            ev2 = score_vacancy_with_version(vacancy, "v2")
+            evaluation = ev2 if scoring_model_version == "v2" else ev1
+            dual_scores_by_url[vacancy.url] = {
+                "score_v1": int(getattr(ev1, "score", 0) or 0),
+                "rec_v1": str(getattr(ev1, "recommendation", "reject") or "reject"),
+                "score_v2": int(getattr(ev2, "score", 0) or 0),
+                "rec_v2": str(getattr(ev2, "recommendation", "reject") or "reject"),
+            }
+        else:
+            evaluation = score_vacancy(vacancy)
         store.save_evaluation(vacancy_key, evaluation, run_id=run_id)
         _count_source(vacancy, classification, evaluation)
 
@@ -977,20 +1027,22 @@ def run_daily() -> str:
     # Scoring calibration: top rejected by score (exclude duplicates).
     rejected_scored = [(v, e) for (v, e, _, _, dup) in scored_rows if (not dup and getattr(e, "recommendation", None) == "reject")]
     rejected_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
-    top_rejected_high_score = near_miss_scored[:10] if (int(decision_counts.get('strong_fit') or 0) + int(decision_counts.get('potential_fit') or 0) == 0) else []
-    # User-facing opportunity report (review-mode buckets + near-miss visibility).
+
+    # User-facing opportunity report (review-mode buckets; near-miss visible but never alerts).
     digest = format_executive_opportunity_report(
         run_id=run_id,
         title='Daily executive opportunity report',
         per_source_funnel=per_source_funnel,
         top_scored=top_scored,
+        top_rejected=rejected_scored[:20],
         rejected_reason_counts=rejected_reason_counts,
         market_titles=market_titles,
         market_countries=market_countries,
         market_companies=market_companies,
         decision_counts=dict(decision_counts),
-        top_near_miss=top_rejected_high_score,
+        top_near_miss=near_miss_scored,
         operator_footer=operator_footer if digest_items else None,
+        dual_scores=dual_scores_by_url if dual_score_enabled else None,
     )
     if technical_footer:
         digest = (digest + "\n\n" + technical_footer).rstrip()
@@ -999,6 +1051,45 @@ def run_daily() -> str:
 
     notification_ids = _prepare_notifications(store, run_id, search_channel, "daily_digest", digest_items)
     _finalize_notifications(store, notification_ids, delivery_report)
+
+    # Always write one run-level daily_digest summary row, regardless of accepted count.
+    # This ensures delivery tracking is never missing from the DB for zero-accepted runs.
+    if not digest_items:
+        _dd_found = len(vacancies)
+        _dd_accepted = len(accepted)
+        _dd_strong = int(decision_counts.get("strong_fit", 0))
+        _dd_potential = int(decision_counts.get("potential_fit", 0))
+        _dd_near_miss = int(decision_counts.get("near_miss", 0))
+        _dd_rejected = int(decision_counts.get("reject", 0))
+        _dd_body = (
+            f"daily_digest run_id={run_id} found={_dd_found} "
+            f"accepted={_dd_accepted} strong_fit={_dd_strong} "
+            f"potential_fit={_dd_potential} near_miss={_dd_near_miss} rejected={_dd_rejected}"
+        )
+        _dd_payload = {
+            "found": _dd_found,
+            "accepted": _dd_accepted,
+            "strong_fit": _dd_strong,
+            "potential_fit": _dd_potential,
+            "near_miss": _dd_near_miss,
+            "rejected": _dd_rejected,
+        }
+        _dd_id = store.create_notification(
+            run_id,
+            search_channel,
+            "daily_digest",
+            _dd_body,
+            vacancy_id=None,
+            payload=_dd_payload,
+            delivery_status="pending",
+            delivery_attempts=0,
+        )
+        store.mark_notification_delivery(
+            _dd_id,
+            _delivery_db_status(delivery_report),
+            attempts=delivery_report.attempts,
+            delivery_error=None if delivery_report.success else delivery_report.error,
+        )
 
     for vacancy, evaluation, vacancy_id in digest_items:
         if delivery_report.success:
