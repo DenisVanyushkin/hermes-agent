@@ -69,6 +69,36 @@ SOURCE_ALIASES = {
     "personio": "Personio",
     "recruitee": "Recruitee",
 }
+_REASON_TYPES: dict[str, tuple[str, str]] = {
+    # blocker — high
+    "non_product_role":             ("blocker", "high"),
+    "low_seniority":                ("blocker", "high"),
+    "blocked_geography":            ("blocker", "high"),
+    "onsite_requirement_mismatch":  ("blocker", "high"),
+    "duplicate":                    ("blocker", "high"),
+    "sales_role":                   ("blocker", "high"),
+    # blocker — medium
+    "marketing_role":               ("blocker", "medium"),
+    "business_development_role":    ("blocker", "medium"),
+    "analyst_role":                 ("blocker", "medium"),
+    "low_company_tier":             ("blocker", "medium"),
+    # unknown — low
+    "salary_unknown":               ("unknown", "low"),
+    "pnl_unknown":                  ("unknown", "low"),
+    "company_score_unknown":        ("unknown", "low"),
+    "hiring_likelihood_unknown":    ("unknown", "low"),
+    "location_unknown":             ("unknown", "low"),
+    # warning — low
+    "weak_company_signal":          ("warning", "low"),
+    "low_confidence":               ("warning", "low"),
+    "unclear_scope":                ("warning", "low"),
+    "missing_product_ownership_evidence": ("warning", "low"),
+}
+
+
+def classify_rejection_reason(reason: str) -> tuple[str, str]:
+    """Returns (reason_type, severity). Unknown reasons default to ('unknown', 'low')."""
+    return _REASON_TYPES.get(reason, ("unknown", "low"))
 
 logger = logging.getLogger(__name__)
 _COUNTRY_HINTS: list[tuple[str, str]] = [
