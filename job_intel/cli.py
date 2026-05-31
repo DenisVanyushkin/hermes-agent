@@ -38,6 +38,7 @@ from .digest import (
     format_executive_opportunity_report,
     format_health_warning,
     format_vacancy_summary,
+    format_weekly_source_quality,
     reject_reason_bucket,
 )
 from .evaluator import classify_vacancy, score_vacancy, score_vacancy_with_version
@@ -1206,7 +1207,7 @@ def run_daily() -> str:
 
 
 def run_weekly_kpi_report() -> str:
-    """Compute weekly KPI rollup from source_kpi_run and deliver it (delivery failures must not fail the run)."""
+    """Compact weekly source quality report: last 7 days of daily runs, opportunity-ranked."""
     assert_runtime_contract()
     store = _store()
     store.bootstrap()
@@ -1214,63 +1215,37 @@ def run_weekly_kpi_report() -> str:
     cfg = load_config_bundle() or DEFAULT_CONFIG
     channel = _search_report_channel(cfg)
 
-    now = datetime.now(timezone.utc)
-    # Last fully completed week [week_start, week_end)
-    this_week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-    week_end = this_week_start
-    week_start = week_end - timedelta(days=7)
+    with store.connect(read_only=True) as conn:
+        db_rows = conn.execute("""
+            SELECT
+                skr.source,
+                SUM(skr.found_count) as found,
+                SUM(skr.executive_detected_count) as exec_detected,
+                SUM(CASE WHEN vo.recommendation IN ('strong_fit','exceptional_fit') THEN 1 ELSE 0 END) as strong_fit,
+                SUM(CASE WHEN vo.recommendation = 'potential_fit' THEN 1 ELSE 0 END) as potential_fit,
+                SUM(CASE WHEN vo.recommendation = 'near_miss' THEN 1 ELSE 0 END) as near_miss,
+                SUM(skr.accepted_count) as accepted,
+                SUM(skr.notified_count) as notified,
+                SUM(CASE WHEN skr.source_status = 'ok' THEN 1 ELSE 0 END) as runs_ok,
+                COUNT(*) as runs_total,
+                MAX(COALESCE(skr.enabled, 1)) as enabled,
+                MAX(skr.source_status) as last_status
+            FROM source_kpi_run skr
+            JOIN runs r ON r.id = skr.run_id
+            LEFT JOIN vacancy_observability vo
+                ON vo.run_id = skr.run_id AND vo.source = skr.source AND vo.is_duplicate = 0
+            WHERE r.mode = 'daily'
+              AND r.run_type = 'production'
+              AND r.started_at >= datetime('now', '-7 days')
+            GROUP BY skr.source
+            ORDER BY found DESC
+        """).fetchall()
 
-    sql = """
-    SELECT
-      k.source AS source,
-      COUNT(*) AS rows,
-      SUM(CASE WHEN k.source_status IN ('ok','empty','error') THEN 1 ELSE 0 END) AS attempts,
-      SUM(CASE WHEN k.source_status IN ('ok','empty') THEN 1 ELSE 0 END) AS ok,
-      SUM(CASE WHEN k.source_status = 'error' THEN 1 ELSE 0 END) AS error,
-      SUM(COALESCE(k.found_count, 0)) AS found,
-      SUM(COALESCE(k.executive_detected_count, 0)) AS exec_detected,
-      SUM(COALESCE(k.scored_count, 0)) AS scored,
-      SUM(COALESCE(k.accepted_count, 0)) AS accepted,
-      SUM(COALESCE(k.notified_count, 0)) AS notified,
-      CASE WHEN SUM(COALESCE(k.found_count, 0)) > 0
-        THEN SUM(COALESCE(k.pct_company_known, 0.0) * COALESCE(k.found_count, 0)) / SUM(COALESCE(k.found_count, 0))
-        ELSE NULL END AS pct_company_known_w,
-      CASE WHEN SUM(COALESCE(k.found_count, 0)) > 0
-        THEN SUM(COALESCE(k.pct_location_known, 0.0) * COALESCE(k.found_count, 0)) / SUM(COALESCE(k.found_count, 0))
-        ELSE NULL END AS pct_location_known_w
-    FROM source_kpi_run k
-    JOIN runs r ON r.id = k.run_id
-    WHERE r.run_type = 'production'
-      AND k.source_status != 'skipped'
-      AND datetime(k.created_at) >= datetime(?)
-      AND datetime(k.created_at) < datetime(?)
-    GROUP BY k.source
-    ORDER BY exec_detected DESC, found DESC
-    """
+    cols = ["source", "found", "exec_detected", "strong_fit", "potential_fit", "near_miss",
+            "accepted", "notified", "runs_ok", "runs_total", "enabled", "last_status"]
+    data = [dict(zip(cols, row)) for row in db_rows]
 
-    with store.connect() as conn:
-        rows = conn.execute(sql, (week_start.isoformat(), week_end.isoformat())).fetchall()
-
-    header = "*Job-intel weekly source KPIs*\n" + f"Week: {week_start.date().isoformat()} -> {week_end.date().isoformat()} (UTC)"
-    if not rows:
-        message = header + "\nNo KPI rows found for this period."
-    else:
-        out = [header, "", "source | ok_rate | exec | accepted | accept_rate | notified | found | company_known | location_known"]
-        for row in rows:
-            attempts = int(row["attempts"] or 0)
-            ok = int(row["ok"] or 0)
-            ok_rate = (ok / attempts) if attempts else 0.0
-            exec_detected = int(row["exec_detected"] or 0)
-            accepted = int(row["accepted"] or 0)
-            accept_rate = (accepted / exec_detected) if exec_detected else 0.0
-            ck = row["pct_company_known_w"]
-            lk = row["pct_location_known_w"]
-            ck_s = f"{ck:.2f}" if ck is not None else "n/a"
-            lk_s = f"{lk:.2f}" if lk is not None else "n/a"
-            out.append(
-                f"{row['source']} | {ok_rate:.2f} | {exec_detected} | {accepted} | {accept_rate:.2f} | {int(row['notified'] or 0)} | {int(row['found'] or 0)} | {ck_s} | {lk_s}"
-            )
-        message = "\n".join(out)
+    message = format_weekly_source_quality(data)
 
     # Delivery is best-effort. A delivery failure must not flip run.status to error.
     notification_id = store.create_notification(run_id, channel, "weekly_kpi", message, delivery_status="pending")
@@ -1285,12 +1260,10 @@ def run_weekly_kpi_report() -> str:
     store.finish_run(
         run_id,
         status="ok",
-        notes=f"sources={len(rows) if rows else 0}",
+        notes=f"sources={len(data)}",
         metadata={
             "delivery": delivery.__dict__,
-            "week_start": week_start.isoformat(),
-            "week_end": week_end.isoformat(),
-            "source_rows": len(rows) if rows else 0,
+            "source_rows": len(data),
         },
     )
     return message
