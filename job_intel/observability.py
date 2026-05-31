@@ -828,6 +828,11 @@ def record_daily_observability(
     notified_vacancy_ids = notified_vacancy_ids or set()
     dual_scores_by_url = dual_scores_by_url or {}
     rejection_events: list[dict[str, Any]] = []
+    # Track (vacancy_key, url) pairs already inserted for this run to avoid
+    # the UNIQUE(run_id, vacancy_key, url) constraint silently collapsing
+    # URL-duplicate rows into the canonical row. Duplicates that collide get
+    # a sentinel URL so every scraped vacancy produces its own obs row.
+    seen_obs_keys: set[tuple[str, str]] = set()
     for vacancy, evaluation, classification, vacancy_id, duplicate in scored_rows:
         score = int(getattr(evaluation, "score", 0) or 0)
         score_band = score_band_for(score)
@@ -846,6 +851,14 @@ def record_daily_observability(
         dual = dual_scores_by_url.get(getattr(vacancy, "url", None) or "")
         score_v1: int | None = int(dual["score_v1"]) if dual and dual.get("score_v1") is not None else None
         score_v2: int | None = int(dual["score_v2"]) if dual and dual.get("score_v2") is not None else None
+        # Ensure each scraped vacancy gets its own row: if a duplicate vacancy
+        # collides on (vacancy_key, url) with the already-recorded canonical entry,
+        # use a sentinel URL so the row is preserved with is_duplicate=1.
+        obs_url = str(getattr(vacancy, "url", None) or "") or None
+        obs_url_key = (vacancy_key, obs_url or "")
+        if duplicate and obs_url_key in seen_obs_keys:
+            obs_url = (obs_url or "") + f"#dup:{vacancy_id}"
+        seen_obs_keys.add((vacancy_key, obs_url or ""))
         store.upsert_vacancy_observability(
             run_id=run_id,
             vacancy_key=vacancy_key,
@@ -864,7 +877,7 @@ def record_daily_observability(
             company=str(getattr(vacancy, "company", None) or "") or None,
             title=str(getattr(vacancy, "title", None) or "") or None,
             location=str(getattr(vacancy, "location", None) or "") or None,
-            url=str(getattr(vacancy, "url", None) or "") or None,
+            url=obs_url,
             score_v1=score_v1,
             score_v2=score_v2,
             active_score=score,
