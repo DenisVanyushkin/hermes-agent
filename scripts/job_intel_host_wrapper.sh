@@ -105,9 +105,10 @@ should_skip_enrichment() {
 
 command="${1:-}"
 shift || true
-[[ -n "$command" ]] || fail "usage: $0 <daily|alert|health|enrichment|market|strategic|doctor|browser-health> [args...]"
+[[ -n "$command" ]] || fail "usage: $0 <daily|alert|health|enrichment|market|strategic|doctor|browser-health|weekly-kpi|metrics-exporter> [args...]"
 
 maybe_source_env_file
+export HERMES_HOME="${HERMES_HOME:-/home/hermes/.hermes}"
 workdir="$(resolve_workdir)"
 state_dir="${JOB_INTEL_STATE_DIR:-/var/lib/job-intel/state}"
 db_path="${JOB_INTEL_DB_PATH:-$state_dir/job_intel.sqlite3}"
@@ -115,6 +116,16 @@ browser_profile_dir="${JOB_INTEL_BROWSER_PROFILE_DIR:-/var/lib/browser-desktop/p
 
 export JOB_INTEL_RUNTIME_USER="${JOB_INTEL_RUNTIME_USER:-$(id -un)}"
 export JOB_INTEL_ENVIRONMENT="${JOB_INTEL_ENVIRONMENT:-host-managed}"
+
+# Tag runs so production KPI ignores manual/smoke/backfill executions.
+# systemd sets INVOCATION_ID; local/manual invocations typically do not.
+if [[ -z "${JOB_INTEL_RUN_TYPE:-}" ]]; then
+  if [[ -n "${INVOCATION_ID:-}" ]]; then
+    export JOB_INTEL_RUN_TYPE="production"
+  else
+    export JOB_INTEL_RUN_TYPE="manual"
+  fi
+fi
 export JOB_INTEL_WORKDIR="$workdir"
 export JOB_INTEL_STATE_DIR="$state_dir"
 export JOB_INTEL_DB_PATH="$db_path"
@@ -130,24 +141,32 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$JOB_INTEL_BROWSER_RUNTIME_DIR/.cache}"
 export PYTHONPATH="$workdir${PYTHONPATH:+:$PYTHONPATH}"
 export JOB_INTEL_LOG_DIR="${JOB_INTEL_LOG_DIR:-/var/log/job-intel}"
 
-expected_commit="${JOB_INTEL_EXPECTED_GIT_COMMIT:-$(git -C "$workdir" rev-parse HEAD)}"
-export JOB_INTEL_EXPECTED_GIT_COMMIT="$expected_commit"
+expected_commit="${JOB_INTEL_EXPECTED_GIT_COMMIT:-}"
 actual_commit="$(git -C "$workdir" rev-parse HEAD)"
-[[ "$actual_commit" == "$expected_commit" ]] || fail "git commit mismatch: expected $expected_commit got $actual_commit"
+export JOB_INTEL_ACTUAL_GIT_COMMIT="$actual_commit"
+if [[ -n "$expected_commit" ]]; then
+  export JOB_INTEL_EXPECTED_GIT_COMMIT="$expected_commit"
+  if [[ "$actual_commit" != "$expected_commit" ]]; then
+    printf 'job-intel-host-wrapper: warning: git commit mismatch: expected %s got %s
+' "$expected_commit" "$actual_commit" >&2
+  fi
+fi
 
 [[ -d "$workdir/job_intel" ]] || fail "job_intel package missing from workdir: $workdir"
 ensure_writable_dir "$state_dir"
 ensure_writable_dir "$JOB_INTEL_LOG_DIR"
 ensure_dir "$(dirname -- "$db_path")"
-[[ -d "$browser_profile_dir" ]] || fail "browser profile base missing: $browser_profile_dir"
-[[ -d "$JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN" ]] || fail "LinkedIn profile dir missing: $JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN"
-[[ -d "$JOB_INTEL_BROWSER_PROFILE_DIR_HH" ]] || fail "HH profile dir missing: $JOB_INTEL_BROWSER_PROFILE_DIR_HH"
+if [[ "$command" != "metrics-exporter" ]]; then
+  [[ -d "$browser_profile_dir" ]] || fail "browser profile base missing: $browser_profile_dir"
+  [[ -d "$JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN" ]] || fail "LinkedIn profile dir missing: $JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN"
+  [[ -d "$JOB_INTEL_BROWSER_PROFILE_DIR_HH" ]] || fail "HH profile dir missing: $JOB_INTEL_BROWSER_PROFILE_DIR_HH"
+fi
 
 python_bin="$(resolve_python "$workdir")"
 cd "$workdir"
 
 case "$command" in
-  bootstrap|daily|alert|health|market|strategic|doctor|browser-health)
+  bootstrap|daily|alert|health|market|strategic|doctor|browser-health|weekly-kpi|metrics-exporter)
     ;;
   enrichment)
     enrichment_marker="$state_dir/job_intel_enrichment.last_success"
