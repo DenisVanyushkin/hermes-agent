@@ -1119,6 +1119,7 @@ def run_daily() -> str:
         scored_rows,
         accepted_vacancy_ids=accepted_vacancy_ids,
         notified_vacancy_ids=notified_vacancy_ids,
+        dual_scores_by_url=dual_scores_by_url if dual_score_enabled else None,
     )
 
     # Return user-facing report for CLI output.
