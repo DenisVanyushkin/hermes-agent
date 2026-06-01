@@ -1,12 +1,25 @@
-.DS_Store
-/venv/
-/venv.old/
-/_pycache/
-*.pyc*
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+.installed.cfg
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
+
+# ── Virtual environments ───────────────────────────────────────────────────────
 .venv/
 .venv
-.vscode/
+venv.old/
+venv/
 .env
 .op.env
 .env.local
@@ -27,33 +40,15 @@ __pycache__/model_tools.cpython-310.pyc
 __pycache__/web_tools.cpython-310.pyc
 logs/
 data/
+
+# ── Testing ───────────────────────────────────────────────────────────────────
 .pytest_cache/
-test_durations.json
 .pytest-cache/
-tmp/
-temp_vision_images/
-hermes-*/*
-examples/
-tests/quick_test_dataset.jsonl
-tests/sample_dataset.jsonl
-run_datagen_kimik2-thinking.sh
-run_datagen_megascience_glm4-6.sh
-run_datagen_sonnet.sh
-source-data/*
-run_datagen_megascience_glm4-6.sh
-data/*
-node_modules/
-browser-use/
-agent-browser/
-# Private keys
-*.ppk
-*.pem
-privvy*
-images/
-__pycache__/
-hermes_agent.egg-info/
-wandb/
-testlogs
+test_durations.json
+.coverage
+.coverage.*
+htmlcov/
+.tox/
 
 # CLI config (may contain sensitive SSH paths)
 cli-config.yaml
@@ -108,6 +103,8 @@ website/static/api/automation-blueprints-index.json
 models-dev-upstream/
 
 # Local editor / agent tooling (machine-specific; keep in global config, not the repo)
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.vscode/
 .codex/
 .cursor/
 .gemini/
@@ -115,13 +112,30 @@ models-dev-upstream/
 .mcp.json
 opencode.json
 config/mcporter.json
+.DS_Store
 
+# ── Node / frontend build ─────────────────────────────────────────────────────
+node_modules/
 hermes_cli/tui_dist/*
+hermes_cli/web_dist/
 hermes_cli/scripts/
-docs/superpowers/*
-# Working directory for the Hermes Agent's session state (~/.hermes/ at runtime;
-# also created in-repo when an agent operates in this checkout). Plans, audit
-# logs, and per-session caches are never artifacts of the codebase.
+apps/desktop/build/
+apps/desktop/dist/
+apps/desktop/release/
+apps/desktop/*.tsbuildinfo
+web/public/fonts/
+web/public/ds-assets/
+
+# ── Secrets / local config ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+privvy*
+*.ppk
+*.pem
+cli-config.yaml
+
+# ── Hermes runtime artifacts ──────────────────────────────────────────────────
 .hermes/
 
 # Desktop/bootstrap install marker written into the managed checkout root by the
@@ -161,3 +175,55 @@ infographic/
 
 # Runtime lock files and ephemeral artifacts created by hermes sandboxes
 .artifacts/
+logs/
+data/
+tmp/
+temp_vision_images/
+images/
+wandb/
+testlogs
+export*
+source-data/*
+
+# ── Hermes local dev helpers ──────────────────────────────────────────────────
+compose.hermes.local.yml
+.hermes-docker/
+.notebooklm-home/
+.notebooklm-cli-venv/
+.notebooklm-playwright/
+.pip-cache/
+.uv-cache/
+browser-use/
+agent-browser/
+mini-swe-agent/
+models-dev-upstream/
+ignored/
+.worktrees/
+environments/benchmarks/evals/
+hermes-*/*
+examples/
+docs/superpowers/*
+
+# ── Dataset / run scripts (upstream local dev) ────────────────────────────────
+tests/quick_test_dataset.jsonl
+tests/sample_dataset.jsonl
+run_datagen_*.sh
+
+# ── Plugins ───────────────────────────────────────────────────────────────────
+skills/.hub/
+
+# ── Website build output ──────────────────────────────────────────────────────
+website/static/api/skills-index.json
+website/static/api/skills.json
+website/static/api/skills-meta.json
+
+# ── Nix ───────────────────────────────────────────────────────────────────────
+.direnv/
+.nix-stamps/
+result
+
+# ── Release temp files ────────────────────────────────────────────────────────
+.release_notes.md
+
+# ── Tool Search live-test harness ─────────────────────────────────────────────
+scripts/out/
