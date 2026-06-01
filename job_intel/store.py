@@ -90,7 +90,8 @@ CREATE TABLE IF NOT EXISTS vacancy_observability (
     confidence REAL,
     is_duplicate INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    UNIQUE(run_id, vacancy_key),
+    url TEXT NOT NULL DEFAULT '',
+    UNIQUE(run_id, vacancy_key, url),
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
 
@@ -342,6 +343,7 @@ class JobIntelStore:
             self._ensure_column(conn, "vacancy_observability", "score_v2", "INTEGER")
             self._ensure_column(conn, "vacancy_observability", "active_score", "INTEGER")
             self._ensure_column(conn, "vacancy_observability", "recommendation", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "canonical_url", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_events", "reason_type", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_events", "severity", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_summary", "recommendation", "TEXT")
@@ -353,6 +355,68 @@ class JobIntelStore:
             self._ensure_column(conn, "vacancy_rejection_summary", "top_warning", "TEXT")
             self._ensure_column(conn, "source_kpi_run", "enabled", "INTEGER DEFAULT 1")
             self._ensure_column(conn, "source_kpi_run", "skip_reason", "TEXT")
+            # Phase 3.8: fix URL-dedup gap — widen unique key to (run_id, vacancy_key, url)
+            self._migrate_vacancy_observability_unique_key(conn)
+
+    def _migrate_vacancy_observability_unique_key(self, conn: "sqlite3.Connection") -> None:
+        """Idempotent migration: widen UNIQUE(run_id, vacancy_key) to
+        UNIQUE(run_id, vacancy_key, url) so each distinct URL gets its own
+        observability row within a run, closing the found_count gap.
+
+        Safe to call on every bootstrap — detects the old constraint via the
+        stored schema string and skips if already migrated.
+        """
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vacancy_observability'"
+        ).fetchone()
+        if row is None:
+            return  # table not yet created; fresh install will use new SCHEMA
+        existing_sql = (row[0] or "").replace(" ", "").replace("\n", "")
+        if "UNIQUE(run_id,vacancy_key,url)" in existing_sql:
+            return  # already migrated
+        logger.info("Migrating vacancy_observability unique key to (run_id, vacancy_key, url)")
+        conn.executescript("""
+PRAGMA foreign_keys=OFF;
+BEGIN;
+ALTER TABLE vacancy_observability RENAME TO _vacancy_observability_old;
+CREATE TABLE vacancy_observability (
+    run_id INTEGER NOT NULL,
+    vacancy_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    role_bucket TEXT NOT NULL,
+    geo_bucket TEXT NOT NULL,
+    industry_bucket TEXT NOT NULL,
+    executive_detected INTEGER NOT NULL DEFAULT 0,
+    accepted INTEGER NOT NULL DEFAULT 0,
+    notified INTEGER NOT NULL DEFAULT 0,
+    score INTEGER NOT NULL,
+    score_band TEXT NOT NULL,
+    confidence REAL,
+    is_duplicate INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    url TEXT NOT NULL DEFAULT '',
+    company TEXT,
+    title TEXT,
+    location TEXT,
+    score_v1 INTEGER,
+    score_v2 INTEGER,
+    active_score INTEGER,
+    recommendation TEXT,
+    UNIQUE(run_id, vacancy_key, url),
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+INSERT INTO vacancy_observability
+    SELECT run_id, vacancy_key, source, role_bucket, geo_bucket, industry_bucket,
+           executive_detected, accepted, notified, score, score_band, confidence,
+           is_duplicate, created_at,
+           COALESCE(url, '') AS url,
+           company, title, location, score_v1, score_v2, active_score, recommendation
+    FROM _vacancy_observability_old;
+DROP TABLE _vacancy_observability_old;
+COMMIT;
+PRAGMA foreign_keys=ON;
+""")
+        logger.info("vacancy_observability migration complete")
 
     def list_tables(self, *, read_only: bool = False) -> list[str]:
         with self.connect(read_only=read_only) as conn:
@@ -569,6 +633,7 @@ class JobIntelStore:
         score_v2: int | None = None,
         active_score: int | None = None,
         recommendation: str | None = None,
+        canonical_url: str | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -576,9 +641,9 @@ class JobIntelStore:
                 INSERT INTO vacancy_observability (
                     run_id, vacancy_key, source, role_bucket, geo_bucket, industry_bucket,
                     executive_detected, accepted, notified, score, score_band, confidence, is_duplicate, created_at,
-                    company, title, location, url, score_v1, score_v2, active_score, recommendation
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(run_id, vacancy_key) DO UPDATE SET
+                    company, title, location, url, score_v1, score_v2, active_score, recommendation, canonical_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, vacancy_key, url) DO UPDATE SET
                     source=excluded.source,
                     role_bucket=excluded.role_bucket,
                     geo_bucket=excluded.geo_bucket,
@@ -598,7 +663,8 @@ class JobIntelStore:
                     score_v1=excluded.score_v1,
                     score_v2=excluded.score_v2,
                     active_score=excluded.active_score,
-                    recommendation=excluded.recommendation
+                    recommendation=excluded.recommendation,
+                    canonical_url=excluded.canonical_url
                 """,
                 (
                     run_id,
@@ -618,11 +684,12 @@ class JobIntelStore:
                     company,
                     title,
                     location,
-                    url,
+                    url or '',
                     score_v1,
                     score_v2,
                     active_score if active_score is not None else score,
                     recommendation,
+                    canonical_url,
                 ),
             )
 
