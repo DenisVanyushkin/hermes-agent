@@ -855,6 +855,7 @@ def record_daily_observability(
         # collides on (vacancy_key, url) with the already-recorded canonical entry,
         # use a sentinel URL so the row is preserved with is_duplicate=1.
         obs_url = str(getattr(vacancy, "url", None) or "") or None
+        canonical_url = obs_url  # always the real URL, before any dedup suffix
         obs_url_key = (vacancy_key, obs_url or "")
         if duplicate and obs_url_key in seen_obs_keys:
             obs_url = (obs_url or "") + f"#dup:{vacancy_id}"
@@ -882,6 +883,7 @@ def record_daily_observability(
             score_v2=score_v2,
             active_score=score,
             recommendation=recommendation,
+            canonical_url=canonical_url,
         )
         reasons = rejection_reasons_for(vacancy, evaluation, classification, duplicate=duplicate)
         top_reason = reasons[0] if reasons else None
