@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Re-exec as root so ownership repairs work before any git operation.
-# The root-branch of this script (below) detects non-root-owned repos,
-# fixes all root-owned files, then re-execs as the repo owner.
-if [ "$(id -u)" -ne 0 ]; then
+# If there are root-owned files in .git, elevate to root so the ownership-repair
+# logic below can fix them and re-exec as the repo owner.  Check FIRST to avoid
+# an infinite loop: after root repairs ownership and re-execs as hermes, the
+# find will return nothing and we skip the sudo.
+_default_repo="${HOME:-/home/hermes}/.hermes/hermes-agent"
+if [ "$(id -u)" -ne 0 ] && \
+   [ -n "$(find "$_default_repo/.git" -user root -print -quit 2>/dev/null)" ]; then
   exec sudo -n "$0" "$@"
 fi
+unset _default_repo
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 if [ -d "${PWD:-.}/.git" ] && [ -d "${PWD:-.}/agent" ] && [ -d "${PWD:-.}/gateway" ]; then
