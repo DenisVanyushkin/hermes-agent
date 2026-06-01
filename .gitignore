@@ -158,3 +158,6 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# Runtime lock files and ephemeral artifacts created by hermes sandboxes
+.artifacts/
