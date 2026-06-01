@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Re-exec as root so ownership repairs work before any git operation.
+# The root-branch of this script (below) detects non-root-owned repos,
+# fixes all root-owned files, then re-execs as the repo owner.
+if [ "$(id -u)" -ne 0 ]; then
+  exec sudo -n "$0" "$@"
+fi
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 if [ -d "${PWD:-.}/.git" ] && [ -d "${PWD:-.}/agent" ] && [ -d "${PWD:-.}/gateway" ]; then
   REPO="${PWD}"
@@ -14,7 +21,7 @@ BRANCH="${HERMES_LOCAL_BRANCH:-local/customizations}"
 UPSTREAM_REMOTE="${HERMES_UPSTREAM_REMOTE:-origin}"
 UPSTREAM_BRANCH="${HERMES_UPSTREAM_BRANCH:-main}"
 UPSTREAM_REF="$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
-PERSONAL_REMOTE="${HERMES_PERSONAL_REMOTE:-personal}"
+PERSONAL_REMOTE="${HERMES_PERSONAL_REMOTE:-origin}"
 PERSONAL_REMOTE_URL="${HERMES_PERSONAL_REMOTE_URL:-https://github.com/DenisVanyushkin/hermes-agent.git}"
 UPSTREAM_FETCH_URL="${HERMES_UPSTREAM_FETCH_URL:-https://github.com/NousResearch/hermes-agent.git}"
 HERMES_ENV_FILE="${HERMES_ENV_FILE:-$HOME/.hermes/.env}"
@@ -51,10 +58,14 @@ ensure_personal_remote_https() {
 push_personal_branch() {
   ensure_personal_remote_https
   github_token="$(load_github_token || true)"
-  if [ -n "$github_token" ]; then
-    askpass_dir="$(mktemp -d)"
-    askpass_script="$askpass_dir/askpass.sh"
-    cat >"$askpass_script" <<'EOF'
+  if [ -z "$github_token" ]; then
+    echo "Skipping push to $PERSONAL_REMOTE: no GitHub token available." >&2
+    return 0
+  fi
+
+  askpass_dir="$(mktemp -d)"
+  askpass_script="$askpass_dir/askpass.sh"
+  cat >"$askpass_script" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   *Username*) printf '%s\n' "x-access-token" ;;
@@ -62,13 +73,12 @@ case "$1" in
   *) printf '\n' ;;
 esac
 EOF
-    chmod 700 "$askpass_script"
-    GIT_ASKPASS="$askpass_script" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$github_token" git -C "$REPO" push --force-with-lease "$PERSONAL_REMOTE" "$BRANCH" >/dev/null
-    rm -rf "$askpass_dir"
-    return 0
+  chmod 700 "$askpass_script"
+  if ! GIT_ASKPASS="$askpass_script" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$github_token" git -C "$REPO" push --force-with-lease "$PERSONAL_REMOTE" "$BRANCH" >/dev/null; then
+    echo "Warning: push to $PERSONAL_REMOTE failed; continuing without remote sync." >&2
   fi
-
-  GIT_TERMINAL_PROMPT=0 git -C "$REPO" push --force-with-lease "$PERSONAL_REMOTE" "$BRANCH" >/dev/null
+  rm -rf "$askpass_dir"
+  return 0
 }
 
 resolve_hermes_bin() {
