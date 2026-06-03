@@ -5,6 +5,7 @@ import os
 import random
 import re
 import subprocess
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -383,18 +384,102 @@ def _browser_worker_env() -> dict[str, str]:
     return env
 
 
+_BROWSER_TIMEOUT_TARGETS = {
+    "linkedin": {
+        "source": "linkedin",
+        "cdp_url": "http://127.0.0.1:9222/json/list",
+        "display": ":99",
+        "profile": "linkedin",
+    },
+    "headhunter": {
+        "source": "headhunter",
+        "cdp_url": "http://127.0.0.1:9223/json/list",
+        "display": ":100",
+        "profile": "hh",
+    },
+}
+
+
+def _browser_diagnostics_dir() -> Path | None:
+    configured = os.getenv("JOB_INTEL_BROWSER_DIAGNOSTICS_DIR", "").strip()
+    if not configured:
+        return None
+    path = Path(configured).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _capture_browser_worker_timeout(command: str, browser_python: Path, *, timeout: int, args: tuple[str, ...]) -> None:
+    target = _BROWSER_TIMEOUT_TARGETS.get(command)
+    diagnostics_dir = _browser_diagnostics_dir()
+    if not target or diagnostics_dir is None:
+        return
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    base = diagnostics_dir / f"{timestamp}-{target['source']}-worker-timeout"
+    payload: dict[str, Any] = {
+        "label": f"{target['source']}-worker-timeout",
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "command": command,
+        "args": list(args),
+        "timeout_seconds": timeout,
+        "browser_python": str(browser_python),
+        "cdp_url": target["cdp_url"],
+        "display": target["display"],
+        "profile": target["profile"],
+    }
+    with suppress(Exception):
+        response = requests.get(target["cdp_url"], timeout=5)
+        payload["cdp_status"] = response.status_code
+        payload["cdp_targets"] = response.json()[:25]
+    pattern_port = target["cdp_url"].split(":")[-1].split("/")[0]
+    ps_cmd = (
+        "ps -eo pid=,ppid=,etimes=,%cpu=,%mem=,args= "
+        f"| grep 'remote-debugging-port={pattern_port}' "
+        f"| grep 'profiles/{target['profile']}' | grep -v grep"
+    )
+    with suppress(Exception):
+        ps_proc = subprocess.run(["bash", "-lc", ps_cmd], capture_output=True, text=True, timeout=10, check=False)
+        payload["browser_processes"] = [line for line in (ps_proc.stdout or "").splitlines() if line.strip()]
+    screenshot_path = base.with_suffix('.xwd')
+    temp_screenshot = Path(f"/tmp/{timestamp}-{target['source']}-worker-timeout.xwd")
+    with suppress(Exception):
+        shot_proc = subprocess.run(
+            [
+                "sudo", "-n", "runuser", "-u", "browser", "--", "env",
+                f"DISPLAY={target['display']}",
+                "xwd", "-root", "-silent", "-out", str(temp_screenshot),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        payload["xwd_returncode"] = shot_proc.returncode
+        payload["xwd_stderr"] = (shot_proc.stderr or "").strip()[:1000]
+        if temp_screenshot.exists():
+            temp_screenshot.replace(screenshot_path)
+            payload["screenshot_path"] = str(screenshot_path)
+            payload["screenshot_size"] = screenshot_path.stat().st_size
+    with suppress(Exception):
+        base.with_suffix('.json').write_text(json.dumps(payload, ensure_ascii=True, indent=2))
+
+
 def _browser_worker_payload(command: str, *args: str, timeout: int = 240) -> dict[str, Any]:
     browser_python = Path(os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip() or "/var/lib/browser-desktop/playwright-venv/bin/python").expanduser()
     if not browser_python.exists():
         raise SourceFetchError(f"browser worker python missing: {browser_python}")
-    proc = subprocess.run(
-        [str(browser_python), "-m", "job_intel.browser_worker", command, *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-        env=_browser_worker_env(),
-    )
+    try:
+        proc = subprocess.run(
+            [str(browser_python), "-m", "job_intel.browser_worker", command, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=_browser_worker_env(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        _capture_browser_worker_timeout(command, browser_python, timeout=timeout, args=args)
+        raise SourceFetchError(f"browser worker timed out after {timeout} seconds") from exc
     payload = None
     stdout = (proc.stdout or "").strip()
     for line in reversed(stdout.splitlines()):

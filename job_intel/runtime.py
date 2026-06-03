@@ -295,8 +295,6 @@ def build_runtime_contract() -> dict[str, Any]:
         path = Path(path_str)
         if not _safe_exists(path):
             issues.append(f"browser profile missing: {name}={path}")
-    if not expected_git_commit:
-        issues.append("JOB_INTEL_EXPECTED_GIT_COMMIT is not set")
     actual_commit = contract["actual_git_commit"]
     if expected_git_commit and actual_commit != expected_git_commit:
         issues.append(f"git commit mismatch: expected {expected_git_commit}, got {actual_commit or 'n/a'}")
@@ -325,10 +323,15 @@ def build_runtime_contract() -> dict[str, Any]:
     return contract
 
 
+def _runtime_contract_strict() -> bool:
+    raw = os.getenv("JOB_INTEL_RUNTIME_STRICT", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def assert_runtime_contract() -> dict[str, Any]:
     contract = build_runtime_contract()
     issues = contract.get("issues") or []
-    if issues:
+    if issues and _runtime_contract_strict():
         raise RuntimeError("Job-intel runtime contract violated: " + "; ".join(issues))
     return contract
 

@@ -31,6 +31,8 @@ class JournalCorruptionError(JournalError):
 class EventType(StrEnum):
     MARKET_TICK = "market.tick"
     MARKET_SNAPSHOT = "market.snapshot"
+    MARKET_STATE_BRIEF = "market.state_brief"
+    CRITICAL_ALERT = "market.critical_alert"
     STRATEGY_PROPOSAL = "strategy.proposal"
     RISK_DECISION = "risk.decision"
     EXECUTION_INTENT = "execution.intent"
@@ -43,6 +45,22 @@ class EventType(StrEnum):
     OBSERVER_FILL = "observer.fill"
     SHADOW_PORTFOLIO_SNAPSHOT = "shadow.portfolio_snapshot"
     OBSERVER_SESSION_END = "observer.session_end"
+    LIVE_READ_SESSION_START = "live.read.session_start"
+    LIVE_READ_ACCOUNT_SNAPSHOT = "live.read.account_snapshot"
+    LIVE_READ_SYMBOL_METADATA = "live.read.symbol_metadata"
+    LIVE_READ_MARKET_SNAPSHOT = "live.read.market_snapshot"
+    LIVE_READ_SESSION_END = "live.read.session_end"
+    PAPER_TRADING_SESSION_START = "paper.trading.session_start"
+    PAPER_TRADING_MARKET_SNAPSHOT = "paper.trading.market_snapshot"
+    PAPER_ORDER_CREATED = "paper.order.created"
+    PAPER_ORDER_STATE_CHANGED = "paper.order.state_changed"
+    PAPER_ORDER_SNAPSHOT = "paper.order.snapshot"
+    PAPER_ORDER_FILL = "paper.order.fill"
+    PAPER_ORDER_REJECTED = "paper.order.rejected"
+    PAPER_PORTFOLIO_SNAPSHOT = "paper.portfolio_snapshot"
+    PAPER_PNL_SNAPSHOT = "paper.pnl_snapshot"
+    PAPER_TRADING_SLACK_REPORT = "paper.trading.slack_report"
+    PAPER_TRADING_SESSION_END = "paper.trading.session_end"
 
 
 @dataclass(frozen=True, slots=True)

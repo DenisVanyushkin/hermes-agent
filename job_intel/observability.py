@@ -823,16 +823,13 @@ def record_daily_observability(
     accepted_vacancy_ids: set[int] | None = None,
     notified_vacancy_ids: set[int] | None = None,
     dual_scores_by_url: dict[str, dict[str, Any]] | None = None,
+    active_scoring_version: str | None = None,
+    active_recommendation_version: str | None = None,
 ) -> None:
     accepted_vacancy_ids = accepted_vacancy_ids or set()
     notified_vacancy_ids = notified_vacancy_ids or set()
     dual_scores_by_url = dual_scores_by_url or {}
     rejection_events: list[dict[str, Any]] = []
-    # Track (vacancy_key, url) pairs already inserted for this run to avoid
-    # the UNIQUE(run_id, vacancy_key, url) constraint silently collapsing
-    # URL-duplicate rows into the canonical row. Duplicates that collide get
-    # a sentinel URL so every scraped vacancy produces its own obs row.
-    seen_obs_keys: set[tuple[str, str]] = set()
     for vacancy, evaluation, classification, vacancy_id, duplicate in scored_rows:
         score = int(getattr(evaluation, "score", 0) or 0)
         score_band = score_band_for(score)
@@ -851,15 +848,9 @@ def record_daily_observability(
         dual = dual_scores_by_url.get(getattr(vacancy, "url", None) or "")
         score_v1: int | None = int(dual["score_v1"]) if dual and dual.get("score_v1") is not None else None
         score_v2: int | None = int(dual["score_v2"]) if dual and dual.get("score_v2") is not None else None
-        # Ensure each scraped vacancy gets its own row: if a duplicate vacancy
-        # collides on (vacancy_key, url) with the already-recorded canonical entry,
-        # use a sentinel URL so the row is preserved with is_duplicate=1.
+        # Canonical observability URL: duplicate copies are merged at (run_id, vacancy_key, url).
         obs_url = str(getattr(vacancy, "url", None) or "") or None
-        canonical_url = obs_url  # always the real URL, before any dedup suffix
-        obs_url_key = (vacancy_key, obs_url or "")
-        if duplicate and obs_url_key in seen_obs_keys:
-            obs_url = (obs_url or "") + f"#dup:{vacancy_id}"
-        seen_obs_keys.add((vacancy_key, obs_url or ""))
+        canonical_url = obs_url
         store.upsert_vacancy_observability(
             run_id=run_id,
             vacancy_key=vacancy_key,
@@ -884,6 +875,8 @@ def record_daily_observability(
             active_score=score,
             recommendation=recommendation,
             canonical_url=canonical_url,
+            active_scoring_version=active_scoring_version,
+            active_recommendation_version=active_recommendation_version,
         )
         reasons = rejection_reasons_for(vacancy, evaluation, classification, duplicate=duplicate)
         top_reason = reasons[0] if reasons else None

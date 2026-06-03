@@ -10,7 +10,7 @@ import subprocess
 import shutil
 from pathlib import Path
 
-from hermes_cli.config import get_project_root, get_hermes_home, get_env_path
+from hermes_cli.config import get_project_root, get_hermes_home, get_env_path, load_config
 from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_constants import display_hermes_home
 from hermes_constants import agent_browser_runnable
@@ -135,9 +135,21 @@ def _doctor_tool_availability_detail(toolset: str) -> str:
 
 
 def _apply_doctor_tool_availability_overrides(available: list[str], unavailable: list[dict]) -> tuple[list[str], list[dict]]:
-    """Adjust runtime-gated tool availability for doctor diagnostics."""
+    """Adjust runtime-gated tool availability for doctor diagnostics.
+
+    Toolsets that are not enabled for the current CLI platform are treated as
+    intentionally out of scope so doctor stays focused on the user's active
+    surface area instead of listing every optional integration Hermes ships.
+    """
     updated_available = list(available)
     updated_unavailable = []
+
+    try:
+        cfg = load_config()
+        active_toolsets = set((cfg.get("platform_toolsets") or {}).get("cli") or [])
+    except Exception:
+        active_toolsets = set()
+
     for item in unavailable:
         name = item.get("name")
         if _is_kanban_worker_env_gate(item):
@@ -147,6 +159,8 @@ def _apply_doctor_tool_availability_overrides(available: list[str], unavailable:
         if name == "honcho" and _honcho_is_configured_for_doctor():
             if "honcho" not in updated_available:
                 updated_available.append("honcho")
+            continue
+        if active_toolsets and name not in active_toolsets:
             continue
         updated_unavailable.append(item)
     return updated_available, updated_unavailable

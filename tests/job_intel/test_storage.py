@@ -40,4 +40,4 @@ def test_store_start_run_persists_runtime_provenance(monkeypatch, tmp_path) -> N
 
     assert run_id == row["id"]
     assert json.loads(row["provenance_json"]) == provenance
-    assert json.loads(row["metadata_json"]) == {"source_statuses": {"linkedin": {"status": "ok"}}}
+    assert json.loads(row["metadata_json"]) == {"source_statuses": {"linkedin": {"status": "ok"}}, "scoring_model_version": "v1"}
