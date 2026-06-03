@@ -6,9 +6,11 @@ import json
 import os
 import re
 import subprocess
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +43,7 @@ from .digest import (
     format_weekly_source_quality,
     reject_reason_bucket,
 )
-from .evaluator import classify_vacancy, score_vacancy, score_vacancy_with_version
+from .evaluator import classify_vacancy, score_vacancy, score_vacancy_with_version, score_vacancy_v3_shadow
 from .enrichment import detect_high_value_questions
 from .observability import JobIntelObservabilityExporter, record_daily_observability
 from .models import Evaluation, Vacancy
@@ -84,6 +86,7 @@ class SlackDeliveryResult:
     attempts: int
     error: str | None = None
     status: str = "sent"
+    message_ts: str | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +140,58 @@ _SOURCE_FILTER_ALIASES = {
     "remotive": "remotive",
 }
 
+_REGISTRY_ATS_SOURCES = {
+    "greenhouse",
+    "lever",
+    "ashby",
+    "teamtailor",
+    "smartrecruiters",
+    "personio",
+    "recruitee",
+}
+
+
+def _registry_seed_path() -> Path:
+    raw = (os.getenv("JOB_INTEL_COMPANY_REGISTRY_PATH", "") or "").strip()
+    if raw:
+        return Path(raw)
+    return resolve_workdir() / "docs" / "company-registry-seed.yaml"
+
+
+def _load_company_registry() -> list[dict[str, Any]]:
+    """Load machine-readable registry seed.
+
+    Format is JSON content (valid YAML superset) with a list of company records.
+    """
+    path = _registry_seed_path()
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    records: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        records.append(dict(item))
+    return records
+
+
+def _registry_entries_for_source(source: str) -> list[dict[str, Any]]:
+    source_key = (source or "").strip().lower()
+    out: list[dict[str, Any]] = []
+    for row in _load_company_registry():
+        vendor = str(row.get("ats_vendor") or "").strip().lower()
+        enabled = bool(row.get("acquisition_enabled", True))
+        slug = str(row.get("ats_slug") or "").strip()
+        if vendor != source_key or not enabled or not slug:
+            continue
+        out.append(row)
+    return out
+
 
 def _enabled_sources() -> set[str] | None:
     raw = os.getenv("JOB_INTEL_ENABLED_SOURCES", "").strip()
@@ -168,7 +223,14 @@ def _source_enabled(enabled: set[str] | None, source: str) -> bool:
 
 
 def _skipped_source_status(source: str, *, acquisition: str | None = None) -> dict[str, Any]:
-    payload = _source_status_template(source, status="skipped", hits=0, errors=[], acquisition=acquisition or source)
+    payload = _source_status_template(
+        source,
+        status="skipped",
+        hits=0,
+        errors=[],
+        acquisition=acquisition or source,
+        runtime_seconds=0.0,
+    )
     payload["reason"] = "disabled by JOB_INTEL_ENABLED_SOURCES"
     return payload
 
@@ -185,7 +247,9 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
     ats_seeds: dict[str, list[str]] = {}
 
     if _source_enabled(enabled_sources, "target_companies"):
+        target_started = perf_counter()
         target_result = monitor_target_companies(store)
+        target_runtime_seconds = perf_counter() - target_started
         vacancies.extend(target_result.vacancies)
         company_ok = any(status.get("status") == "ok" for status in target_result.company_statuses.values())
         statuses["target_companies"] = _source_status_template(
@@ -194,6 +258,7 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             hits=len(target_result.vacancies),
             companies=len(target_result.company_statuses),
             company_statuses=target_result.company_statuses,
+            runtime_seconds=target_runtime_seconds,
         )
         # ATS seeds: reuse links already discovered via target company monitoring.
         try:
@@ -218,6 +283,7 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
         linkedin_queries = rotating_source_queries("linkedin", limit=6)
         linkedin_hits = 0
         linkedin_errors: list[str] = []
+        linkedin_started = perf_counter()
         for query in linkedin_queries:
             try:
                 results = fetch_linkedin_vacancies(query, max_pages=2)
@@ -233,7 +299,14 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             linkedin_status = "error"
         else:
             linkedin_status = "empty"
-        linkedin_source_status = _source_status_template("linkedin", status=linkedin_status, hits=linkedin_hits, errors=linkedin_errors, acquisition="browser-native")
+        linkedin_source_status = _source_status_template(
+            "linkedin",
+            status=linkedin_status,
+            hits=linkedin_hits,
+            errors=linkedin_errors,
+            acquisition="browser-native",
+            runtime_seconds=perf_counter() - linkedin_started,
+        )
         linkedin_health = getattr(fetch_linkedin_vacancies, "last_health", None)
         if linkedin_health:
             linkedin_source_status["session_health"] = linkedin_health
@@ -247,6 +320,7 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
         hh_queries = rotating_source_queries("headhunter", limit=hh_query_limit)
         hh_hits = 0
         hh_errors: list[str] = []
+        hh_started = perf_counter()
         for query in hh_queries:
             try:
                 results = fetch_headhunter_vacancies(query, per_page=hh_per_page)
@@ -262,7 +336,14 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             hh_status = "error"
         else:
             hh_status = "empty"
-        hh_source_status = _source_status_template("headhunter", status=hh_status, hits=hh_hits, errors=hh_errors, acquisition="browser-native-first")
+        hh_source_status = _source_status_template(
+            "headhunter",
+            status=hh_status,
+            hits=hh_hits,
+            errors=hh_errors,
+            acquisition="browser-native-first",
+            runtime_seconds=perf_counter() - hh_started,
+        )
         hh_health = getattr(fetch_headhunter_vacancies, "last_health", None)
         if hh_health:
             hh_source_status["session_health"] = hh_health
@@ -274,19 +355,105 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             statuses[source] = _skipped_source_status(source, acquisition=acquisition)
             return
         queries = rotating_source_queries(source, limit=6)
+        started = perf_counter()
         try:
-            companies = (ats_seeds.get(source) or None) if isinstance(ats_seeds, dict) else None
-            result = fetcher(queries, companies=companies)
-            vacancies.extend(result.vacancies)
-            hits = len(result.vacancies)
-            errors = list(result.errors or [])
+            registry_entries = _registry_entries_for_source(source) if source in _REGISTRY_ATS_SOURCES else []
+            registry_statuses: list[dict[str, Any]] = []
+
+            all_vacancies: list[Vacancy] = []
+            all_errors: list[str] = []
+            pages_fetched = 0
+            discovered_companies = 0
+
+            seen_slugs: set[str] = set()
+            for entry in registry_entries:
+                slug = str(entry.get("ats_slug") or "").strip()
+                if not slug:
+                    continue
+                seen_slugs.add(slug.lower())
+                company_name = str(entry.get("company_name") or slug).strip() or slug
+                attempt_payload = {
+                    "company_name": company_name,
+                    "tier": entry.get("tier"),
+                    "ats_vendor": source,
+                    "ats_slug": slug,
+                    "collection_url": entry.get("collection_url"),
+                    "validation_url": entry.get("validation_url"),
+                    "acquisition_enabled": bool(entry.get("acquisition_enabled", True)),
+                    "attempted": True,
+                    "collected": False,
+                    "vacancies_found": 0,
+                    "source_status": "error",
+                    "reason": "collection_failure",
+                    "errors": [],
+                }
+                try:
+                    per = fetcher(queries, companies=[slug])
+                    per_errors = list(per.errors or [])
+                    per_hits = len(per.vacancies or [])
+                    attempt_payload["errors"] = per_errors
+                    attempt_payload["vacancies_found"] = per_hits
+                    attempt_payload["collected"] = bool((per.pages_fetched or 0) > 0)
+                    if per_hits > 0:
+                        attempt_payload["source_status"] = "ok"
+                        attempt_payload["reason"] = "vacancies_found"
+                    elif per_errors:
+                        attempt_payload["source_status"] = "error"
+                        attempt_payload["reason"] = "collection_error"
+                    else:
+                        attempt_payload["source_status"] = "empty"
+                        attempt_payload["reason"] = "no_open_roles_or_query_empty"
+
+                    for vacancy in per.vacancies or []:
+                        md = dict(vacancy.metadata or {})
+                        md["acquisition_path"] = "registry"
+                        md["registry_company_name"] = company_name
+                        md["registry_ats_vendor"] = source
+                        md["registry_ats_slug"] = slug
+                        vacancy.metadata = md
+                        all_vacancies.append(vacancy)
+                    all_errors.extend(per_errors)
+                    pages_fetched += int(per.pages_fetched or 0)
+                    discovered_companies += int(per.discovered_companies or 0)
+                except Exception as exc:
+                    attempt_payload["errors"] = [str(exc)]
+                    attempt_payload["source_status"] = "error"
+                    attempt_payload["reason"] = "collection_exception"
+                    all_errors.append(f"{source} registry slug={slug}: {exc}")
+                registry_statuses.append(attempt_payload)
+
+            # Keep discovery path in hybrid mode; avoid double-fetching registry slugs.
+            seed_companies = (ats_seeds.get(source) or []) if isinstance(ats_seeds, dict) else []
+            discovery_companies = [c for c in seed_companies if str(c).strip().lower() not in seen_slugs]
+            if discovery_companies:
+                result = fetcher(queries, companies=discovery_companies)
+                all_vacancies.extend(result.vacancies or [])
+                all_errors.extend(list(result.errors or []))
+                pages_fetched += int(result.pages_fetched or 0)
+                discovered_companies += int(result.discovered_companies or 0)
+
+            vacancies.extend(all_vacancies)
+            hits = len(all_vacancies)
+            errors = list(all_errors)
             status = status_from_hits_errors(hits, errors)
             payload = _source_status_template(source, status=status, hits=hits, errors=errors, acquisition=acquisition)
-            payload["discovered_companies"] = int(result.discovered_companies or 0)
-            payload["pages_fetched"] = int(result.pages_fetched or 0)
+            payload["discovered_companies"] = int(discovered_companies or 0)
+            payload["pages_fetched"] = int(pages_fetched or 0)
+            payload["runtime_seconds"] = perf_counter() - started
+            if registry_statuses:
+                payload["registry_companies"] = registry_statuses
+                payload["registry_companies_attempted"] = len(registry_statuses)
+                payload["registry_companies_with_hits"] = sum(1 for item in registry_statuses if int(item.get("vacancies_found") or 0) > 0)
             statuses[source] = payload
         except Exception as exc:
-            statuses[source] = _source_status_template(source, status="error", hits=0, errors=[str(exc)], acquisition=acquisition)
+            statuses[source] = _source_status_template(
+                source,
+                status="error",
+                hits=0,
+                errors=[str(exc)],
+                acquisition=acquisition,
+                runtime_seconds=perf_counter() - started,
+            )
 
     _collect_ats("greenhouse", fetcher=fetch_greenhouse, acquisition="ats-api")
     _collect_ats("lever", fetcher=fetch_lever, acquisition="ats-api")
@@ -359,12 +526,18 @@ def _slack_webhook_enabled() -> bool:
 
 
 
-def _deliver_to_slack(message: str, channel: str | None = None, *, retries: int = 3) -> SlackDeliveryResult:
+def _deliver_to_slack(
+    message: str,
+    channel: str | None = None,
+    *,
+    retries: int = 3,
+    prefer_gateway: bool = False,
+) -> SlackDeliveryResult:
     webhook = os.getenv("JOB_INTEL_SLACK_WEBHOOK_URL", "").strip()
     if message == "[SILENT]":
         return SlackDeliveryResult(success=True, attempts=0, error=None, status="sent")
 
-    if not webhook:
+    if prefer_gateway or not webhook:
         target = (f"slack:{channel}" if (channel and channel.startswith("C")) else ("slack:C0B4MM6D52A" if channel == "executive_search_report" else (f"slack:{channel}" if channel else "slack")))
         try:
             raw = send_message_tool({"target": target, "message": message})
@@ -374,7 +547,8 @@ def _deliver_to_slack(message: str, channel: str | None = None, *, retries: int 
         if payload.get("error"):
             return SlackDeliveryResult(success=False, attempts=1, error=str(payload.get("error")), status="failed")
         if payload.get("success"):
-            return SlackDeliveryResult(success=True, attempts=1, error=None, status="sent")
+            ts = payload.get("ts") or payload.get("message_ts") or payload.get("id")
+            return SlackDeliveryResult(success=True, attempts=1, error=None, status="sent", message_ts=str(ts) if ts else None)
         return SlackDeliveryResult(success=False, attempts=1, error=f"unexpected live adapter response: {payload}", status="failed")
 
     payload: dict[str, str] = {"text": message}
@@ -455,6 +629,67 @@ def _search_technical_report(source_statuses: dict[str, dict[str, Any]], *, chan
 def _search_report_payload(source_statuses: dict[str, dict[str, Any]]) -> str:
     return _search_technical_report(source_statuses)
 
+
+
+def _feedback_hint_block() -> str:
+    return "👍 Interesting\n👎 Not Interesting\n🔥 Exceptional\n🚀 Applied"
+
+
+def _format_vacancy_feedback_message(vacancy: Vacancy, evaluation: Any) -> str:
+    base = format_vacancy_summary(vacancy, evaluation)
+    parts = [base, "", "*Feedback*", _feedback_hint_block()]
+    return "\n".join(parts).strip()
+
+
+def _deliver_vacancy_messages(
+    store: JobIntelStore,
+    run_id: int,
+    channel: str,
+    items: list[tuple[Vacancy, Any, int]],
+) -> list[dict[str, Any]]:
+    deliveries: list[dict[str, Any]] = []
+    for vacancy, evaluation, vacancy_id in items:
+        body = _format_vacancy_feedback_message(vacancy, evaluation)
+        payload = _notification_payload(vacancy, evaluation, vacancy_id)
+        notification_id = store.create_notification(
+            run_id,
+            channel,
+            "vacancy_message",
+            body,
+            vacancy_id=vacancy_id,
+            payload=payload,
+            delivery_status="pending",
+            delivery_attempts=0,
+        )
+        delivery = _deliver_to_slack(body, channel)
+        store.mark_notification_delivery(
+            notification_id,
+            _delivery_db_status(delivery),
+            attempts=delivery.attempts,
+            delivery_error=delivery.error,
+        )
+        if delivery.success:
+            message_ts = str(delivery.message_ts or f"{datetime.now(timezone.utc).timestamp():.6f}")
+            store.insert_vacancy_slack_message(
+                vacancy_id=vacancy_id,
+                run_id=run_id,
+                slack_channel=channel,
+                slack_message_ts=message_ts,
+                company=vacancy.company,
+                title=vacancy.title,
+                score=int(getattr(evaluation, "score", 0) or 0),
+                recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
+                url=vacancy.url,
+            )
+            store.set_vacancy_status(vacancy_id, "notified")
+        else:
+            store.set_vacancy_status(vacancy_id, "active")
+        deliveries.append({
+            "vacancy_id": vacancy_id,
+            "notification_id": notification_id,
+            "delivery": delivery.__dict__,
+        })
+    return deliveries
 
 
 def _notification_payload(vacancy: Vacancy, evaluation: Any, vacancy_id: int) -> dict[str, Any]:
@@ -578,6 +813,43 @@ def _finalize_notifications(store: JobIntelStore, notification_ids: list[int], d
     for notification_id in notification_ids:
         store.mark_notification_delivery(notification_id, status, attempts=delivery.attempts, delivery_error=error)
 
+
+def _deliver_vacancy_notifications(
+    store: JobIntelStore,
+    run_id: int,
+    channel: str,
+    items: list[tuple[Vacancy, Any, int]],
+) -> list[SlackDeliveryResult]:
+    deliveries: list[SlackDeliveryResult] = []
+    for vacancy, evaluation, vacancy_id in items:
+        body = format_vacancy_summary(vacancy, evaluation)
+        payload = _notification_payload(vacancy, evaluation, vacancy_id)
+        notification_id = store.create_notification(
+            run_id,
+            channel,
+            "vacancy_opportunity",
+            body,
+            vacancy_id=vacancy_id,
+            payload=payload,
+            delivery_status="pending",
+            delivery_attempts=0,
+        )
+        delivery = _deliver_to_slack(body, channel, prefer_gateway=True)
+        _finalize_notifications(store, [notification_id], delivery)
+        if delivery.success and delivery.message_ts:
+            store.record_vacancy_slack_message(
+                vacancy_id=vacancy_id,
+                run_id=run_id,
+                slack_channel=channel,
+                slack_message_ts=delivery.message_ts,
+                company=vacancy.company,
+                title=vacancy.title,
+                score=int(getattr(evaluation, "score", 0) or 0),
+                recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
+                url=vacancy.url,
+            )
+        deliveries.append(delivery)
+    return deliveries
 
 
 def _normalize_source_notification_key(source: str) -> str:
@@ -818,6 +1090,17 @@ def run_daily() -> str:
             stats['rejected_count'] += 1
             stats['rejected'] += 1
 
+    def _is_linkedin_discovery_url(url: str) -> bool:
+        lowered = (url or "").strip().lower()
+        if "linkedin.com" not in lowered:
+            return False
+        return any(token in lowered for token in (
+            "/jobs/collections/",
+            "/jobs/search",
+            "/jobs/recommended",
+            "recommended_jobs",
+        ))
+
     def _normalize_job_url(url: str) -> str:
         """Normalize URLs for within-run dedup.
 
@@ -839,8 +1122,15 @@ def run_daily() -> str:
     dual_score_enabled = _dual_score_rollout_enabled(store, run_id)
     dual_scores_by_url: dict[str, dict[str, object]] = {} if dual_score_enabled else {}
     scoring_model_version = (os.getenv("SCORING_MODEL_VERSION", "v1") or "v1").strip().lower()
+    effective_scoring_version = scoring_model_version if scoring_model_version in {"v1", "v2", "v3"} else "v1"
+    v3_shadow_enabled = (os.getenv("SCORING_V3_SHADOW_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no"}
+    v3_shadow_counts: Counter[str] = Counter()
+    v3_nr_shadow_counts: Counter[str] = Counter()
 
     for vacancy in vacancies:
+        raw_url = str(getattr(vacancy, "url", "") or "")
+        if (getattr(vacancy, "source", "") or "").strip().lower() == "linkedin" and _is_linkedin_discovery_url(raw_url):
+            continue
         vacancy.url = _normalize_job_url(vacancy.url)
         vacancy_key = canonical_vacancy_key(vacancy)
         vacancy_id = store.upsert_vacancy(vacancy, vacancy_key)
@@ -848,7 +1138,7 @@ def run_daily() -> str:
         if dual_score_enabled:
             ev1 = score_vacancy_with_version(vacancy, "v1")
             ev2 = score_vacancy_with_version(vacancy, "v2")
-            evaluation = ev2 if scoring_model_version == "v2" else ev1
+            evaluation = score_vacancy_with_version(vacancy, effective_scoring_version)
             dual_scores_by_url[vacancy.url] = {
                 "score_v1": int(getattr(ev1, "score", 0) or 0),
                 "rec_v1": str(getattr(ev1, "recommendation", "reject") or "reject"),
@@ -857,6 +1147,31 @@ def run_daily() -> str:
             }
         else:
             evaluation = score_vacancy(vacancy)
+
+        if v3_shadow_enabled:
+            ev2_shadow = score_vacancy_with_version(vacancy, "v2")
+            ev3_shadow = score_vacancy_v3_shadow(vacancy)
+            rec_v3 = str(ev3_shadow.get("recommendation") or "reject")
+            # V3+NeedsReview variant:
+            # - explicit `needs_review` bucket retained
+            # - near_miss remains separate for non-product-adjacent ambiguous cases
+            rec_v3_nr = rec_v3
+            store.upsert_vacancy_scoring_shadow(
+                run_id=run_id,
+                vacancy_key=vacancy_key,
+                source=vacancy.source,
+                score_v2=int(getattr(ev2_shadow, "score", 0) or 0),
+                recommendation_v2=str(getattr(ev2_shadow, "recommendation", "reject") or "reject"),
+                score_v3=int(ev3_shadow.get("score") or 0),
+                recommendation_v3=rec_v3,
+                score_v3_nr=int(ev3_shadow.get("score") or 0),
+                recommendation_v3_nr=rec_v3_nr,
+                gates_v3=ev3_shadow.get("gates") or {},
+                function_class_v3=str(ev3_shadow.get("function_class") or ""),
+            )
+            v3_shadow_counts[rec_v3] += 1
+            v3_nr_shadow_counts[rec_v3_nr] += 1
+
         store.save_evaluation(vacancy_key, evaluation, run_id=run_id)
         _count_source(vacancy, classification, evaluation)
 
@@ -947,22 +1262,28 @@ def run_daily() -> str:
             source_counts,
             accepted_by_source,
         )
+    # Top scored opportunities (include rejected; exclude duplicates).
+    nondup_scored = [(v, e, c, vid, dup) for (v, e, c, vid, dup) in scored_rows if not dup]
+    nondup_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
+    surfaced_rows = [
+        (vacancy, evaluation, vacancy_id)
+        for vacancy, evaluation, _classification, vacancy_id, _duplicate in nondup_scored
+        if str(getattr(evaluation, 'recommendation', '') or '') in {"strong_fit", "exceptional_fit", "potential_fit", "possible_fit", "near_miss"}
+    ]
+    top_scored = [(v, e) for (v, e, _, _, _) in nondup_scored[:20]]
+
     # Compute "planned notified" counts (actual becomes 0 if delivery fails).
     planned_notified_by_source: dict[str, int] = {}
-    for vacancy, _, _ in digest_items:
+    for vacancy, _, _ in surfaced_rows:
         key = _normalize_source_notification_key(vacancy.source)
         planned_notified_by_source[key] = planned_notified_by_source.get(key, 0) + 1
 
     # Executive Opportunity Report (user-facing).
     per_source_funnel: list[dict[str, object]] = []
-    # Populate notified_count with planned values for reporting pre-delivery.
-    for source, cnt in planned_notified_by_source.items():
-        stats = source_counts.setdefault(source, {})
-        stats["notified_count"] = int(cnt or 0)
-        stats["notified"] = int(cnt or 0)
-
     for source in sorted(source_counts.keys()):
         stats = source_counts.get(source) or {}
+        stats["notified_count"] = int(planned_notified_by_source.get(source, 0) or 0)
+        stats["notified"] = int(planned_notified_by_source.get(source, 0) or 0)
         per_source_funnel.append(
             {
                 "source": source,
@@ -973,11 +1294,6 @@ def run_daily() -> str:
                 "notified": int(stats.get("notified_count") or 0),
             }
         )
-
-    # Top scored opportunities (include rejected; exclude duplicates).
-    nondup_scored = [(v, e, c, vid, dup) for (v, e, c, vid, dup) in scored_rows if not dup]
-    nondup_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
-    top_scored = [(v, e) for (v, e, _, _, _) in nondup_scored[:20]]
 
     # Decision buckets (non-duplicate only).
     decision_counts = Counter()
@@ -1048,6 +1364,15 @@ def run_daily() -> str:
         operator_footer=operator_footer if digest_items else None,
         dual_scores=dual_scores_by_url if dual_score_enabled else None,
     )
+    if v3_shadow_enabled:
+        v3_block = (
+            "*V3 Shadow Buckets*\\n"
+            f"- strong_fit: {int(v3_nr_shadow_counts.get('strong_fit', 0))}\\n"
+            f"- needs_review: {int(v3_nr_shadow_counts.get('needs_review', 0))}\\n"
+            f"- near_miss: {int(v3_nr_shadow_counts.get('near_miss', 0))}\\n"
+            f"- reject: {int(v3_nr_shadow_counts.get('reject', 0))}"
+        )
+        digest = (digest + "\\n\\n" + v3_block).rstrip()
     if technical_footer:
         digest = (digest + "\n\n" + technical_footer).rstrip()
 
@@ -1056,9 +1381,11 @@ def run_daily() -> str:
     notification_ids = _prepare_notifications(store, run_id, search_channel, "daily_digest", digest_items)
     _finalize_notifications(store, notification_ids, delivery_report)
 
+    vacancy_deliveries = _deliver_vacancy_notifications(store, run_id, search_channel, surfaced_rows)
+
     # Always write one run-level daily_digest summary row, regardless of accepted count.
     # This ensures delivery tracking is never missing from the DB for zero-accepted runs.
-    if not digest_items:
+    if not digest_items and not delivery_report.success:
         _dd_found = len(vacancies)
         _dd_accepted = len(accepted)
         _dd_strong = int(decision_counts.get("strong_fit", 0))
@@ -1095,12 +1422,6 @@ def run_daily() -> str:
             delivery_error=None if delivery_report.success else delivery_report.error,
         )
 
-    for vacancy, evaluation, vacancy_id in digest_items:
-        if delivery_report.success:
-            store.set_vacancy_status(vacancy_id, "notified")
-        else:
-            store.set_vacancy_status(vacancy_id, "active")
-
     # Update per-source notified_count based on actual delivery outcome.
     if delivery_report.success:
         for source, cnt in planned_notified_by_source.items():
@@ -1115,6 +1436,14 @@ def run_daily() -> str:
 
     notified_vacancy_ids = {vacancy_id for _, _, vacancy_id in digest_items} if delivery_report.success else set()
     accepted_vacancy_ids = {vacancy_id for _, _, vacancy_id in accepted}
+
+    # Seed user feedback dataset for surfaced opportunities (no scoring side effects).
+    for vacancy, evaluation, _classification, _vacancy_id, duplicate in scored_rows:
+        if duplicate:
+            continue
+        rec = str(getattr(evaluation, "recommendation", "reject") or "reject")
+        if rec in {"strong_fit", "potential_fit", "needs_review", "near_miss"}:
+            store.upsert_user_feedback_unseen(canonical_vacancy_key(vacancy), run_id=run_id)
     record_daily_observability(
         store,
         run_id,
@@ -1122,7 +1451,38 @@ def run_daily() -> str:
         accepted_vacancy_ids=accepted_vacancy_ids,
         notified_vacancy_ids=notified_vacancy_ids,
         dual_scores_by_url=dual_scores_by_url if dual_score_enabled else None,
+        active_scoring_version=effective_scoring_version,
+        active_recommendation_version=effective_scoring_version,
     )
+
+    # Registry-company observability: attempted -> collected -> found -> stored/scored.
+    scored_registry_counts: dict[tuple[str, str, str], int] = {}
+    for vacancy, _, _, _, _ in scored_rows:
+        md = dict(getattr(vacancy, "metadata", {}) or {})
+        if md.get("acquisition_path") != "registry":
+            continue
+        key = (
+            str(md.get("registry_company_name") or "").strip(),
+            str(md.get("registry_ats_vendor") or "").strip(),
+            str(md.get("registry_ats_slug") or "").strip(),
+        )
+        if not key[0]:
+            continue
+        scored_registry_counts[key] = scored_registry_counts.get(key, 0) + 1
+
+    for source, src_status in source_statuses.items():
+        rows = list(src_status.get("registry_companies") or [])
+        for item in rows:
+            company_name = str(item.get("company_name") or "").strip()
+            vendor = str(item.get("ats_vendor") or source).strip()
+            slug = str(item.get("ats_slug") or "").strip()
+            if not company_name:
+                continue
+            key = (company_name, vendor, slug)
+            scored_count = int(scored_registry_counts.get(key, 0))
+            item["vacancies_scored"] = scored_count
+            item["vacancies_stored"] = scored_count
+            store.upsert_registry_company_run(run_id, source, item)
 
     # Return user-facing report for CLI output.
     def _pctl(values: list[int], p: float) -> int | None:
@@ -1161,7 +1521,7 @@ def run_daily() -> str:
             {
                 "source_status": src_status.get("status"),
                 "acquisition_mode": src_status.get("acquisition"),
-                "runtime_seconds": None,
+                "runtime_seconds": float(src_status.get("runtime_seconds") or 0.0),
                 "attempts": None,
                 "pages_fetched": pages_fetched,
                 "login_walls": login_walls,
@@ -1195,11 +1555,76 @@ def run_daily() -> str:
             },
         )
 
+    # Observation-phase daily snapshot for 14-day production tracking.
+    total_collected = sum(int((source_counts.get(s) or {}).get("found_count") or 0) for s in source_statuses.keys())
+    total_unique = sum(int((source_counts.get(s) or {}).get("vacancies_deduped") or 0) for s in source_statuses.keys())
+    duplicate_rate = (1.0 - (float(total_unique) / float(total_collected))) if total_collected else 0.0
+    company_known = sum(int((source_counts.get(s) or {}).get("company_known") or 0) for s in source_statuses.keys())
+    unknown_company_rate = (1.0 - (float(company_known) / float(total_collected))) if total_collected else 0.0
+    login_walls_total = sum(int(((source_statuses.get(s) or {}).get("session_health") or {}).get("login_walls") or 0) for s in source_statuses.keys())
+    anti_bot_total = sum(int(((source_statuses.get(s) or {}).get("session_health") or {}).get("anti_bot_events") or 0) for s in source_statuses.keys())
+    auth_redirects_total = sum(int(((source_statuses.get(s) or {}).get("session_health") or {}).get("auth_redirects") or 0) for s in source_statuses.keys())
+    source_failures = {s: (source_statuses.get(s) or {}).get("status") for s in source_statuses.keys() if (source_statuses.get(s) or {}).get("status") not in {"ok", "empty", "skipped"}}
+    source_runtimes = {
+        str(s): float((source_statuses.get(s) or {}).get("runtime_seconds") or 0.0)
+        for s in source_statuses.keys()
+        if (source_statuses.get(s) or {}).get("runtime_seconds") is not None
+    }
+    slowest_source = max(source_runtimes, key=source_runtimes.get) if source_runtimes else None
+
+    run_row = store.get_run(run_id) or {}
+    started_at = run_row.get("started_at")
+    started_dt = parse_iso_datetime(started_at) if started_at else None
+    finished_dt = datetime.now(timezone.utc)
+    runtime_seconds = (finished_dt - started_dt).total_seconds() if started_dt else None
+
+    feedback_metrics = store.feedback_metrics_for_run(run_id)
+    store.upsert_production_observation_daily(
+        run_id,
+        {
+            "run_started_at": started_at,
+            "run_finished_at": finished_dt.isoformat(),
+            "runtime_seconds": runtime_seconds,
+            "total_collected": total_collected,
+            "total_unique": total_unique,
+            "duplicate_rate": duplicate_rate,
+            "unknown_company_rate": unknown_company_rate,
+            "strong_fit_count": int(decision_counts.get("strong_fit", 0)),
+            "needs_review_count": int(decision_counts.get("needs_review", 0)),
+            "near_miss_count": int(decision_counts.get("near_miss", 0)),
+            "login_walls": login_walls_total,
+            "anti_bot_events": anti_bot_total,
+            "auth_redirects": auth_redirects_total,
+            "source_failures": source_failures,
+            "source_runtimes": source_runtimes,
+            "slowest_source": slowest_source,
+            "vacancies_sent": int(feedback_metrics.get("vacancies_sent") or 0),
+            "vacancies_reacted": int(feedback_metrics.get("vacancies_reacted") or 0),
+            "reaction_rate": feedback_metrics.get("reaction_rate"),
+            "positive_rate": feedback_metrics.get("positive_rate"),
+            "applied_rate": feedback_metrics.get("applied_rate"),
+        },
+    )
+
     strategic = update_strategic_layer(store, persist=True)
     strategy_count = len(strategic.predictions)
 
     run_notes = f"found={len(vacancies)} accepted={len(accepted)} source_failures={sum(1 for s in source_statuses.values() if s.get('status') not in {'ok', 'empty', 'skipped'})} strategic_predictions={strategy_count}"
-    store.finish_run(run_id, status="ok", notes=run_notes, metadata={"source_statuses": source_statuses, "delivery": delivery_report.__dict__, "strategic_predictions": strategy_count, "source_notifications": source_notifications})
+    run_metadata = {
+        "source_statuses": source_statuses,
+        "delivery": delivery_report.__dict__,
+        "strategic_predictions": strategy_count,
+        "source_notifications": source_notifications,
+        "vacancy_message_deliveries": vacancy_message_deliveries if "vacancy_message_deliveries" in locals() else [],
+    }
+    if v3_shadow_enabled:
+        run_metadata["v3_shadow"] = {
+            "enabled": True,
+            "counts": dict(v3_shadow_counts),
+            "counts_v3_plus_needs_review": dict(v3_nr_shadow_counts),
+            "active_pipeline_model": scoring_model_version,
+        }
+    store.finish_run(run_id, status="ok", notes=run_notes, metadata=run_metadata)
     return digest
 
 
@@ -1360,7 +1785,7 @@ def run_alert_scan() -> str:
 
     exceptional.sort(key=lambda item: item[1].score, reverse=True)
     digest_items = exceptional[:3]
-    if not digest_items:
+    if not digest_items and not delivery_report.success:
         store.finish_run(run_id, status="ok", notes="exceptional=0", metadata={"alert_mode": "persisted_inventory", "delivery": {"success": True, "attempts": 0}})
         return "[SILENT]"
 
@@ -2415,6 +2840,68 @@ def send_test_message(channel: str) -> str:
 
 
 
+
+def _map_feedback_reaction(raw_reaction: str) -> str | None:
+    reaction = (raw_reaction or "").strip().lower()
+    mapping = {
+        "+1": "interesting",
+        "thumbsup": "interesting",
+        "thumbs_up": "interesting",
+        "-1": "not_interesting",
+        "thumbsdown": "not_interesting",
+        "thumbs_down": "not_interesting",
+        "star": "exceptional",
+        "fire": "exceptional",
+        "rocket": "applied",
+    }
+    return mapping.get(reaction)
+
+
+def run_feedback_event(payload: dict[str, Any]) -> str:
+    event_type = str(payload.get("type") or "").strip()
+    if event_type not in {"reaction_added", "reaction_removed"}:
+        return json.dumps({"status": "ignored", "reason": "unsupported_event_type", "event_type": event_type})
+
+    item = payload.get("item") or {}
+    channel = str(item.get("channel") or payload.get("item_channel") or "").strip()
+    message_ts = str(item.get("ts") or payload.get("item_ts") or "").strip()
+    user_id = str(payload.get("user") or payload.get("user_id") or "unknown").strip() or "unknown"
+    reaction = str(payload.get("reaction") or "").strip()
+    feedback_type = _map_feedback_reaction(reaction)
+    if not feedback_type:
+        return json.dumps({"status": "ignored", "reason": "unsupported_reaction", "reaction": reaction, "event_type": event_type})
+    if not channel or not message_ts:
+        return json.dumps({"status": "ignored", "reason": "missing_message_reference", "event_type": event_type})
+
+    event_timestamp = str(payload.get("event_ts") or payload.get("event_timestamp") or datetime.now(timezone.utc).isoformat())
+    store = _store()
+    message = store.find_vacancy_message(slack_channel=channel, slack_message_ts=message_ts)
+    if not message:
+        return json.dumps({"status": "ignored", "reason": "message_not_tracked", "channel": channel, "slack_message_ts": message_ts})
+
+    vacancy_id = int(message.get("vacancy_id"))
+    store.record_vacancy_feedback_event(
+        vacancy_id=vacancy_id,
+        slack_message_ts=message_ts,
+        feedback_type=feedback_type,
+        event_type=event_type,
+        event_timestamp=event_timestamp,
+        user_id=user_id,
+        raw_event_json=payload,
+    )
+    return json.dumps(
+        {
+            "status": "ok",
+            "vacancy_id": vacancy_id,
+            "feedback_type": feedback_type,
+            "event_type": event_type,
+            "channel": channel,
+            "slack_message_ts": message_ts,
+            "user_id": user_id,
+        },
+        ensure_ascii=False,
+    )
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="job-intel")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -2440,11 +2927,14 @@ def build_parser() -> argparse.ArgumentParser:
     send_test.add_argument("--channel", required=True)
     send_test.set_defaults(cmd="send-test")
 
+    feedback_event = sub.add_parser("feedback-event")
+    feedback_event.add_argument("--payload-file", default="-", help="JSON payload file, or - for stdin")
+    feedback_event.set_defaults(cmd="feedback-event")
+
     retire = sub.add_parser("retire-stale")
     retire.add_argument("--days", type=int, default=None)
     retire.set_defaults(cmd="retire-stale")
     return parser
-
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2491,6 +2981,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if health["status"] == "healthy" else 1
     if args.cmd == "send-test":
         print(send_test_message(args.channel))
+        return 0
+    if args.cmd == "feedback-event":
+        if args.payload_file == "-":
+            raw = sys.stdin.read()
+        else:
+            raw = Path(args.payload_file).read_text(encoding="utf-8")
+        payload = json.loads(raw or "{}")
+        print(run_feedback_event(payload))
         return 0
     if args.cmd == "retire-stale":
         result = retire_stale_vacancies(args.days)

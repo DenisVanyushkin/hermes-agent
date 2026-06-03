@@ -95,12 +95,22 @@ ensure_base_dir() {
     fi
     install -d -o "${USER_NAME}" -g "${USER_NAME}" -m 0750 "${BASE_DIR}" "${BASE_DIR}/profiles" "${BASE_DIR}/logs"
     install -d -o "${USER_NAME}" -g "${USER_NAME}" -m 0700 "${CACHE_DIR}" "${BASE_DIR}/profiles/linkedin" "${BASE_DIR}/profiles/hh"
+    if id -u hermes >/dev/null 2>&1; then
+      setfacl -m u:hermes:r-x,m:r-x "${BASE_DIR}" "${BASE_DIR}/profiles"
+      setfacl -m u:hermes:rwx,m:rwx "${BASE_DIR}/profiles/linkedin" "${BASE_DIR}/profiles/hh"
+      setfacl -d -m u:hermes:rwx,m:rwx "${BASE_DIR}/profiles/linkedin" "${BASE_DIR}/profiles/hh"
+    fi
     : > "${MANAGED_MARKER}"
     chown "${USER_NAME}:${USER_NAME}" "${MANAGED_MARKER}"
     chmod 0640 "${MANAGED_MARKER}"
   else
     install -d -m 0750 "${BASE_DIR}" "${BASE_DIR}/profiles" "${BASE_DIR}/logs"
     install -d -m 0700 "${CACHE_DIR}" "${BASE_DIR}/profiles/linkedin" "${BASE_DIR}/profiles/hh"
+    if command -v setfacl >/dev/null 2>&1 && id -u hermes >/dev/null 2>&1; then
+      setfacl -m u:hermes:r-x,m:r-x "${BASE_DIR}" "${BASE_DIR}/profiles" || true
+      setfacl -m u:hermes:rwx,m:rwx "${BASE_DIR}/profiles/linkedin" "${BASE_DIR}/profiles/hh" || true
+      setfacl -d -m u:hermes:rwx,m:rwx "${BASE_DIR}/profiles/linkedin" "${BASE_DIR}/profiles/hh" || true
+    fi
     : > "${MANAGED_MARKER}"
     chmod 0640 "${MANAGED_MARKER}"
   fi

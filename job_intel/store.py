@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,22 @@ from .models import Evaluation, Vacancy
 from .runtime import capture_runtime_provenance, parse_iso_datetime
 
 logger = logging.getLogger(__name__)
+
+
+def canonical_source_key(value: str | None) -> str:
+    raw = (value or "").strip().lower()
+    return "".join(ch for ch in raw if ch.isalnum() or ch == "_")
+
+
+def canonical_company_key(value: str | None) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    collapsed = re.sub(r"\s+", " ", raw.casefold())
+    if collapsed == "unknown":
+        return "unknown"
+    return "".join(ch for ch in collapsed if ch.isalnum()) or None
+
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -79,6 +96,7 @@ CREATE TABLE IF NOT EXISTS vacancy_observability (
     run_id INTEGER NOT NULL,
     vacancy_key TEXT NOT NULL,
     source TEXT NOT NULL,
+    source_key TEXT NOT NULL DEFAULT '',
     role_bucket TEXT NOT NULL,
     geo_bucket TEXT NOT NULL,
     industry_bucket TEXT NOT NULL,
@@ -91,6 +109,17 @@ CREATE TABLE IF NOT EXISTS vacancy_observability (
     is_duplicate INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     url TEXT NOT NULL DEFAULT '',
+    company TEXT,
+    canonical_company_key TEXT,
+    title TEXT,
+    location TEXT,
+    score_v1 INTEGER,
+    score_v2 INTEGER,
+    active_score INTEGER,
+    active_scoring_version TEXT,
+    recommendation TEXT,
+    active_recommendation_version TEXT,
+    canonical_url TEXT,
     UNIQUE(run_id, vacancy_key, url),
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
@@ -209,6 +238,134 @@ CREATE TABLE IF NOT EXISTS source_kpi_run (
     error_message_truncated TEXT,
 
     UNIQUE(run_id, source),
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS registry_company_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    source_key TEXT NOT NULL DEFAULT '',
+    company_name TEXT NOT NULL,
+    canonical_company_key TEXT,
+    tier TEXT,
+    ats_vendor TEXT,
+    ats_slug TEXT,
+    collection_url TEXT,
+    validation_url TEXT,
+    acquisition_enabled INTEGER NOT NULL DEFAULT 1,
+    attempted INTEGER NOT NULL DEFAULT 0,
+    collected INTEGER NOT NULL DEFAULT 0,
+    vacancies_found INTEGER NOT NULL DEFAULT 0,
+    vacancies_stored INTEGER NOT NULL DEFAULT 0,
+    vacancies_scored INTEGER NOT NULL DEFAULT 0,
+    source_status TEXT,
+    reason TEXT,
+    errors_json TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, source, company_name),
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+
+
+
+CREATE TABLE IF NOT EXISTS vacancy_slack_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vacancy_id INTEGER NOT NULL,
+    run_id INTEGER,
+    slack_channel TEXT NOT NULL,
+    slack_message_ts TEXT NOT NULL,
+    company TEXT NOT NULL,
+    title TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    recommendation TEXT NOT NULL,
+    url TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(slack_channel, slack_message_ts),
+    FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE CASCADE,
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS vacancy_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vacancy_id INTEGER NOT NULL,
+    slack_message_ts TEXT NOT NULL,
+    feedback_type TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_timestamp TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    raw_event_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS vacancy_feedback_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vacancy_id INTEGER NOT NULL,
+    slack_message_ts TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    feedback_type TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    UNIQUE(vacancy_id, user_id, feedback_type),
+    FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS production_observation_daily (
+    run_id INTEGER PRIMARY KEY,
+    run_started_at TEXT,
+    run_finished_at TEXT,
+    runtime_seconds REAL,
+    total_collected INTEGER NOT NULL DEFAULT 0,
+    total_unique INTEGER NOT NULL DEFAULT 0,
+    duplicate_rate REAL,
+    unknown_company_rate REAL,
+    strong_fit_count INTEGER NOT NULL DEFAULT 0,
+    needs_review_count INTEGER NOT NULL DEFAULT 0,
+    near_miss_count INTEGER NOT NULL DEFAULT 0,
+    login_walls INTEGER NOT NULL DEFAULT 0,
+    anti_bot_events INTEGER NOT NULL DEFAULT 0,
+    auth_redirects INTEGER NOT NULL DEFAULT 0,
+    source_failures_json TEXT,
+    source_runtimes_json TEXT,
+    slowest_source TEXT,
+    vacancies_sent INTEGER NOT NULL DEFAULT 0,
+    vacancies_reacted INTEGER NOT NULL DEFAULT 0,
+    reaction_rate REAL,
+    positive_rate REAL,
+    applied_rate REAL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_feedback_opportunities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vacancy_key TEXT NOT NULL,
+    run_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'unseen',
+    updated_at TEXT NOT NULL,
+    notes TEXT,
+    UNIQUE(vacancy_key),
+    FOREIGN KEY(vacancy_key) REFERENCES vacancies(vacancy_key) ON DELETE CASCADE,
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS vacancy_scoring_shadow (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    vacancy_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_key TEXT NOT NULL DEFAULT '',
+    score_v2 INTEGER,
+    recommendation_v2 TEXT,
+    score_v3 INTEGER,
+    recommendation_v3 TEXT,
+    score_v3_nr INTEGER,
+    recommendation_v3_nr TEXT,
+    gates_v3_json TEXT,
+    function_class_v3 TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, vacancy_key),
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
 
@@ -344,6 +501,10 @@ class JobIntelStore:
             self._ensure_column(conn, "vacancy_observability", "active_score", "INTEGER")
             self._ensure_column(conn, "vacancy_observability", "recommendation", "TEXT")
             self._ensure_column(conn, "vacancy_observability", "canonical_url", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "source_key", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "vacancy_observability", "canonical_company_key", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "active_scoring_version", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "active_recommendation_version", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_events", "reason_type", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_events", "severity", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_summary", "recommendation", "TEXT")
@@ -355,8 +516,19 @@ class JobIntelStore:
             self._ensure_column(conn, "vacancy_rejection_summary", "top_warning", "TEXT")
             self._ensure_column(conn, "source_kpi_run", "enabled", "INTEGER DEFAULT 1")
             self._ensure_column(conn, "source_kpi_run", "skip_reason", "TEXT")
+            self._ensure_column(conn, "registry_company_runs", "source_key", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "registry_company_runs", "canonical_company_key", "TEXT")
+            self._ensure_column(conn, "production_observation_daily", "vacancies_sent", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "production_observation_daily", "vacancies_reacted", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "production_observation_daily", "reaction_rate", "REAL")
+            self._ensure_column(conn, "production_observation_daily", "positive_rate", "REAL")
+            self._ensure_column(conn, "production_observation_daily", "applied_rate", "REAL")
+            self._ensure_column(conn, "vacancy_scoring_shadow", "score_v3_nr", "INTEGER")
+            self._ensure_column(conn, "vacancy_scoring_shadow", "recommendation_v3_nr", "TEXT")
+            self._ensure_column(conn, "vacancy_scoring_shadow", "source_key", "TEXT NOT NULL DEFAULT ''")
             # Phase 3.8: fix URL-dedup gap — widen unique key to (run_id, vacancy_key, url)
             self._migrate_vacancy_observability_unique_key(conn)
+            self._backfill_observability_readiness_columns(conn)
 
     def _migrate_vacancy_observability_unique_key(self, conn: "sqlite3.Connection") -> None:
         """Idempotent migration: widen UNIQUE(run_id, vacancy_key) to
@@ -417,6 +589,42 @@ COMMIT;
 PRAGMA foreign_keys=ON;
 """)
         logger.info("vacancy_observability migration complete")
+
+    def _backfill_observability_readiness_columns(self, conn: "sqlite3.Connection") -> None:
+        rows = conn.execute(
+            """
+            SELECT rowid, source, company
+            FROM vacancy_observability
+            WHERE source_key IS NULL OR source_key = '' OR canonical_company_key IS NULL
+            """
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE vacancy_observability SET source_key = ?, canonical_company_key = ? WHERE rowid = ?",
+                (canonical_source_key(row[1]), canonical_company_key(row[2]), row[0]),
+            )
+
+        rows = conn.execute(
+            """
+            SELECT rowid, source, company_name
+            FROM registry_company_runs
+            WHERE source_key IS NULL OR source_key = '' OR canonical_company_key IS NULL
+            """
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE registry_company_runs SET source_key = ?, canonical_company_key = ? WHERE rowid = ?",
+                (canonical_source_key(row[1]), canonical_company_key(row[2]), row[0]),
+            )
+
+        rows = conn.execute(
+            "SELECT rowid, source FROM vacancy_scoring_shadow WHERE source_key IS NULL OR source_key = ''"
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE vacancy_scoring_shadow SET source_key = ? WHERE rowid = ?",
+                (canonical_source_key(row[1]), row[0]),
+            )
 
     def list_tables(self, *, read_only: bool = False) -> list[str]:
         with self.connect(read_only=read_only) as conn:
@@ -492,6 +700,11 @@ PRAGMA foreign_keys=ON;
     def latest_run(self) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def get_run(self, run_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE id = ? LIMIT 1", (run_id,)).fetchone()
         return dict(row) if row else None
 
     def fetch_runs(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -634,17 +847,23 @@ PRAGMA foreign_keys=ON;
         active_score: int | None = None,
         recommendation: str | None = None,
         canonical_url: str | None = None,
+        active_scoring_version: str | None = None,
+        active_recommendation_version: str | None = None,
     ) -> None:
+        source_key = canonical_source_key(source)
+        company_key = canonical_company_key(company)
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO vacancy_observability (
-                    run_id, vacancy_key, source, role_bucket, geo_bucket, industry_bucket,
+                    run_id, vacancy_key, source, source_key, role_bucket, geo_bucket, industry_bucket,
                     executive_detected, accepted, notified, score, score_band, confidence, is_duplicate, created_at,
-                    company, title, location, url, score_v1, score_v2, active_score, recommendation, canonical_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    company, canonical_company_key, title, location, url,
+                    score_v1, score_v2, active_score, active_scoring_version, recommendation, active_recommendation_version, canonical_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id, vacancy_key, url) DO UPDATE SET
                     source=excluded.source,
+                    source_key=excluded.source_key,
                     role_bucket=excluded.role_bucket,
                     geo_bucket=excluded.geo_bucket,
                     industry_bucket=excluded.industry_bucket,
@@ -657,19 +876,23 @@ PRAGMA foreign_keys=ON;
                     is_duplicate=excluded.is_duplicate,
                     created_at=excluded.created_at,
                     company=excluded.company,
+                    canonical_company_key=excluded.canonical_company_key,
                     title=excluded.title,
                     location=excluded.location,
                     url=excluded.url,
                     score_v1=excluded.score_v1,
                     score_v2=excluded.score_v2,
                     active_score=excluded.active_score,
+                    active_scoring_version=excluded.active_scoring_version,
                     recommendation=excluded.recommendation,
+                    active_recommendation_version=excluded.active_recommendation_version,
                     canonical_url=excluded.canonical_url
                 """,
                 (
                     run_id,
                     vacancy_key,
                     source,
+                    source_key,
                     role_bucket,
                     geo_bucket,
                     industry_bucket,
@@ -682,13 +905,16 @@ PRAGMA foreign_keys=ON;
                     int(is_duplicate),
                     created_at or datetime.now(timezone.utc).isoformat(),
                     company,
+                    company_key,
                     title,
                     location,
                     url or '',
                     score_v1,
                     score_v2,
                     active_score if active_score is not None else score,
+                    active_scoring_version,
                     recommendation,
+                    active_recommendation_version,
                     canonical_url,
                 ),
             )
@@ -903,6 +1129,391 @@ PRAGMA foreign_keys=ON;
         sql = f"INSERT INTO source_kpi_run ({col_sql}) VALUES ({placeholders}) ON CONFLICT(run_id,source) DO UPDATE SET {update_sql}"
         with self.connect() as conn:
             conn.execute(sql, values)
+
+    def upsert_registry_company_run(self, run_id: int, source: str, item: dict[str, Any]) -> None:
+        self.bootstrap()
+        now = datetime.now(timezone.utc).isoformat()
+        payload = dict(item or {})
+        source_key = canonical_source_key(source)
+        company_key = canonical_company_key(str(payload.get("company_name") or ""))
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO registry_company_runs (
+                    run_id, source, source_key, company_name, canonical_company_key, tier, ats_vendor, ats_slug, collection_url, validation_url,
+                    acquisition_enabled, attempted, collected, vacancies_found, vacancies_stored, vacancies_scored,
+                    source_status, reason, errors_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, source, company_name) DO UPDATE SET
+                    source_key=excluded.source_key,
+                    canonical_company_key=excluded.canonical_company_key,
+                    tier=excluded.tier,
+                    ats_vendor=excluded.ats_vendor,
+                    ats_slug=excluded.ats_slug,
+                    collection_url=excluded.collection_url,
+                    validation_url=excluded.validation_url,
+                    acquisition_enabled=excluded.acquisition_enabled,
+                    attempted=excluded.attempted,
+                    collected=excluded.collected,
+                    vacancies_found=excluded.vacancies_found,
+                    vacancies_stored=excluded.vacancies_stored,
+                    vacancies_scored=excluded.vacancies_scored,
+                    source_status=excluded.source_status,
+                    reason=excluded.reason,
+                    errors_json=excluded.errors_json,
+                    created_at=excluded.created_at
+                """,
+                (
+                    run_id,
+                    source,
+                    source_key,
+                    str(payload.get("company_name") or ""),
+                    company_key,
+                    payload.get("tier"),
+                    payload.get("ats_vendor"),
+                    payload.get("ats_slug"),
+                    payload.get("collection_url"),
+                    payload.get("validation_url"),
+                    int(bool(payload.get("acquisition_enabled", True))),
+                    int(bool(payload.get("attempted", False))),
+                    int(bool(payload.get("collected", False))),
+                    int(payload.get("vacancies_found") or 0),
+                    int(payload.get("vacancies_stored") or 0),
+                    int(payload.get("vacancies_scored") or 0),
+                    payload.get("source_status"),
+                    payload.get("reason"),
+                    json.dumps(payload.get("errors") or [], ensure_ascii=False),
+                    now,
+                ),
+            )
+
+    def upsert_user_feedback_unseen(self, vacancy_key: str, run_id: int | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_feedback_opportunities (vacancy_key, run_id, status, updated_at)
+                VALUES (?, ?, 'unseen', ?)
+                ON CONFLICT(vacancy_key) DO UPDATE SET
+                    run_id=COALESCE(excluded.run_id, user_feedback_opportunities.run_id),
+                    updated_at=CASE WHEN user_feedback_opportunities.status='unseen' THEN excluded.updated_at ELSE user_feedback_opportunities.updated_at END
+                """,
+                (vacancy_key, run_id, now),
+            )
+
+    def insert_vacancy_slack_message(
+        self,
+        *,
+        vacancy_id: int,
+        run_id: int | None,
+        slack_channel: str,
+        slack_message_ts: str,
+        company: str,
+        title: str,
+        score: int,
+        recommendation: str,
+        url: str,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO vacancy_slack_messages (
+                    vacancy_id, run_id, slack_channel, slack_message_ts,
+                    company, title, score, recommendation, url, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    vacancy_id,
+                    run_id,
+                    slack_channel,
+                    slack_message_ts,
+                    company,
+                    title,
+                    int(score or 0),
+                    recommendation,
+                    url,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def find_vacancy_message(self, *, slack_channel: str, slack_message_ts: str) -> dict[str, Any] | None:
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                "SELECT * FROM vacancy_slack_messages WHERE slack_channel=? AND slack_message_ts=? LIMIT 1",
+                (slack_channel, slack_message_ts),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_vacancy_slack_message(
+        self,
+        *,
+        vacancy_id: int,
+        run_id: int | None,
+        slack_channel: str,
+        slack_message_ts: str,
+        company: str,
+        title: str,
+        score: int,
+        recommendation: str,
+        url: str,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO vacancy_slack_messages (
+                    vacancy_id, run_id, slack_channel, slack_message_ts, company, title,
+                    score, recommendation, url, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(slack_channel, slack_message_ts) DO UPDATE SET
+                    vacancy_id=excluded.vacancy_id,
+                    run_id=excluded.run_id,
+                    company=excluded.company,
+                    title=excluded.title,
+                    score=excluded.score,
+                    recommendation=excluded.recommendation,
+                    url=excluded.url
+                """,
+                (
+                    vacancy_id,
+                    run_id,
+                    slack_channel,
+                    slack_message_ts,
+                    company,
+                    title,
+                    score,
+                    recommendation,
+                    url,
+                    now,
+                ),
+            )
+
+    def record_vacancy_feedback_event(
+        self,
+        *,
+        vacancy_id: int,
+        slack_message_ts: str,
+        feedback_type: str,
+        event_type: str,
+        event_timestamp: str,
+        user_id: str,
+        raw_event_json: dict[str, Any] | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        active = 1 if event_type == "reaction_added" else 0
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO vacancy_feedback (
+                    vacancy_id, slack_message_ts, feedback_type, event_type,
+                    event_timestamp, user_id, raw_event_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    vacancy_id,
+                    slack_message_ts,
+                    feedback_type,
+                    event_type,
+                    event_timestamp,
+                    user_id,
+                    json.dumps(raw_event_json or {}, ensure_ascii=False),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO vacancy_feedback_state (
+                    vacancy_id, slack_message_ts, user_id, feedback_type, active, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(vacancy_id, user_id, feedback_type) DO UPDATE SET
+                    slack_message_ts=excluded.slack_message_ts,
+                    active=excluded.active,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    vacancy_id,
+                    slack_message_ts,
+                    user_id,
+                    feedback_type,
+                    active,
+                    now,
+                ),
+            )
+
+    def feedback_metrics_for_run(self, run_id: int) -> dict[str, Any]:
+        with self.connect(read_only=True) as conn:
+            sent_row = conn.execute(
+                "SELECT COUNT(*) FROM vacancy_slack_messages WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            reacted_row = conn.execute(
+                """
+                SELECT COUNT(DISTINCT vsm.vacancy_id)
+                FROM vacancy_slack_messages vsm
+                JOIN vacancy_feedback_state vfs ON vfs.vacancy_id = vsm.vacancy_id
+                WHERE vsm.run_id=? AND vfs.active=1
+                """,
+                (run_id,),
+            ).fetchone()
+            pos_row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM vacancy_feedback_state vfs
+                JOIN vacancy_slack_messages vsm ON vsm.vacancy_id=vfs.vacancy_id
+                WHERE vsm.run_id=? AND vfs.active=1 AND vfs.feedback_type IN ('interesting','exceptional')
+                """,
+                (run_id,),
+            ).fetchone()
+            all_active_row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM vacancy_feedback_state vfs
+                JOIN vacancy_slack_messages vsm ON vsm.vacancy_id=vfs.vacancy_id
+                WHERE vsm.run_id=? AND vfs.active=1
+                """,
+                (run_id,),
+            ).fetchone()
+            applied_row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM vacancy_feedback_state vfs
+                JOIN vacancy_slack_messages vsm ON vsm.vacancy_id=vfs.vacancy_id
+                WHERE vsm.run_id=? AND vfs.active=1 AND vfs.feedback_type='applied'
+                """,
+                (run_id,),
+            ).fetchone()
+        sent = int(sent_row[0] or 0)
+        reacted = int(reacted_row[0] or 0)
+        all_active = int(all_active_row[0] or 0)
+        positive = int(pos_row[0] or 0)
+        applied = int(applied_row[0] or 0)
+        return {
+            "vacancies_sent": sent,
+            "vacancies_reacted": reacted,
+            "reaction_rate": (float(reacted) / float(sent)) if sent else 0.0,
+            "positive_rate": (float(positive) / float(all_active)) if all_active else 0.0,
+            "applied_rate": (float(applied) / float(all_active)) if all_active else 0.0,
+        }
+
+    def upsert_production_observation_daily(self, run_id: int, payload: dict[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO production_observation_daily (
+                    run_id, run_started_at, run_finished_at, runtime_seconds,
+                    total_collected, total_unique, duplicate_rate, unknown_company_rate,
+                    strong_fit_count, needs_review_count, near_miss_count,
+                    login_walls, anti_bot_events, auth_redirects,
+                    source_failures_json, source_runtimes_json, slowest_source,
+                    vacancies_sent, vacancies_reacted, reaction_rate, positive_rate, applied_rate,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    run_started_at=excluded.run_started_at,
+                    run_finished_at=excluded.run_finished_at,
+                    runtime_seconds=excluded.runtime_seconds,
+                    total_collected=excluded.total_collected,
+                    total_unique=excluded.total_unique,
+                    duplicate_rate=excluded.duplicate_rate,
+                    unknown_company_rate=excluded.unknown_company_rate,
+                    strong_fit_count=excluded.strong_fit_count,
+                    needs_review_count=excluded.needs_review_count,
+                    near_miss_count=excluded.near_miss_count,
+                    login_walls=excluded.login_walls,
+                    anti_bot_events=excluded.anti_bot_events,
+                    auth_redirects=excluded.auth_redirects,
+                    source_failures_json=excluded.source_failures_json,
+                    source_runtimes_json=excluded.source_runtimes_json,
+                    slowest_source=excluded.slowest_source,
+                    vacancies_sent=excluded.vacancies_sent,
+                    vacancies_reacted=excluded.vacancies_reacted,
+                    reaction_rate=excluded.reaction_rate,
+                    positive_rate=excluded.positive_rate,
+                    applied_rate=excluded.applied_rate,
+                    created_at=excluded.created_at
+                """,
+                (
+                    run_id,
+                    payload.get("run_started_at"),
+                    payload.get("run_finished_at"),
+                    payload.get("runtime_seconds"),
+                    int(payload.get("total_collected") or 0),
+                    int(payload.get("total_unique") or 0),
+                    payload.get("duplicate_rate"),
+                    payload.get("unknown_company_rate"),
+                    int(payload.get("strong_fit_count") or 0),
+                    int(payload.get("needs_review_count") or 0),
+                    int(payload.get("near_miss_count") or 0),
+                    int(payload.get("login_walls") or 0),
+                    int(payload.get("anti_bot_events") or 0),
+                    int(payload.get("auth_redirects") or 0),
+                    json.dumps(payload.get("source_failures") or {}, ensure_ascii=False),
+                    json.dumps(payload.get("source_runtimes") or {}, ensure_ascii=False),
+                    payload.get("slowest_source"),
+                    int(payload.get("vacancies_sent") or 0),
+                    int(payload.get("vacancies_reacted") or 0),
+                    payload.get("reaction_rate"),
+                    payload.get("positive_rate"),
+                    payload.get("applied_rate"),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def upsert_vacancy_scoring_shadow(
+        self,
+        *,
+        run_id: int,
+        vacancy_key: str,
+        source: str,
+        score_v2: int | None,
+        recommendation_v2: str | None,
+        score_v3: int | None,
+        recommendation_v3: str | None,
+        score_v3_nr: int | None,
+        recommendation_v3_nr: str | None,
+        gates_v3: dict[str, Any] | None,
+        function_class_v3: str | None,
+    ) -> None:
+        self.bootstrap()
+        now = datetime.now(timezone.utc).isoformat()
+        source_key = canonical_source_key(source)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO vacancy_scoring_shadow (
+                    run_id, vacancy_key, source, source_key, score_v2, recommendation_v2,
+                    score_v3, recommendation_v3, score_v3_nr, recommendation_v3_nr,
+                    gates_v3_json, function_class_v3, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, vacancy_key) DO UPDATE SET
+                    source=excluded.source,
+                    source_key=excluded.source_key,
+                    score_v2=excluded.score_v2,
+                    recommendation_v2=excluded.recommendation_v2,
+                    score_v3=excluded.score_v3,
+                    recommendation_v3=excluded.recommendation_v3,
+                    score_v3_nr=excluded.score_v3_nr,
+                    recommendation_v3_nr=excluded.recommendation_v3_nr,
+                    gates_v3_json=excluded.gates_v3_json,
+                    function_class_v3=excluded.function_class_v3,
+                    created_at=excluded.created_at
+                """,
+                (
+                    run_id,
+                    vacancy_key,
+                    source,
+                    source_key,
+                    score_v2,
+                    recommendation_v2,
+                    score_v3,
+                    recommendation_v3,
+                    score_v3_nr,
+                    recommendation_v3_nr,
+                    json.dumps(gates_v3 or {}, ensure_ascii=False),
+                    function_class_v3,
+                    now,
+                ),
+            )
 
     def count_notified_vacancies_by_source(self, run_id: int, *, delivery_status: str = "sent") -> dict[str, int]:
         """Return count of distinct notified vacancy_ids by vacancy.source for a run."""

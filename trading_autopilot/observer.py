@@ -6,6 +6,7 @@ from pathlib import Path
 import argparse
 import json
 import tempfile
+import os
 from typing import Iterable
 
 from .journal import AppendOnlyJournal, EventType, JournalEvent
@@ -716,6 +717,15 @@ def main(argv: list[str] | None = None) -> None:
     monitor_parser.add_argument("--compare-candidate-journal-path", type=Path, default=None, help="Optional candidate journal for comparison")
     monitor_parser.add_argument("--compare-candidate-session-id", default=None, help="Candidate session id for comparison")
 
+    live_read_parser = subparsers.add_parser("live-read", help="Read live exchange state in strict read-only mode")
+    live_read_parser.add_argument("--journal-path", type=Path, required=True, help="Path to the live-read journal")
+    live_read_parser.add_argument("--session-id", required=True, help="Session correlation id to record")
+    live_read_parser.add_argument("--symbol", required=True, help="Symbol to observe, e.g. BTCUSDT")
+    live_read_parser.add_argument("--base-url", default="https://api.binance.com", help="Binance REST base URL")
+    live_read_parser.add_argument("--api-key", default=None, help="Binance API key (read-only if possible)")
+    live_read_parser.add_argument("--api-secret", default=None, help="Binance API secret")
+    live_read_parser.add_argument("--format", choices=("json", "markdown"), default="json", help="Render format for the report")
+
     args = parser.parse_args(argv)
 
     if args.command in {"audit", "replay"}:
@@ -780,6 +790,35 @@ def main(argv: list[str] | None = None) -> None:
             print(render_observer_monitoring_dashboard(report))
         else:
             print(format_observer_monitoring_report(report))
+        return
+
+    if args.command == "live-read":
+        from .live_read import (
+            BinanceLiveReadOnlyClient,
+            LiveReadOnlySessionRequest,
+            build_live_read_only_report,
+            format_live_read_only_report,
+            format_live_read_only_report_markdown,
+        )
+
+        api_key = args.api_key or os.environ.get("BINANCE_API_KEY")
+        api_secret = args.api_secret or os.environ.get("BINANCE_API_SECRET")
+        if not api_key or not api_secret:
+            raise SystemExit("live-read requires --api-key/--api-secret or BINANCE_API_KEY/BINANCE_API_SECRET")
+        journal = AppendOnlyJournal(args.journal_path)
+        client = BinanceLiveReadOnlyClient(api_key=api_key, api_secret=api_secret, base_url=args.base_url)
+        report = build_live_read_only_report(
+            LiveReadOnlySessionRequest(
+                session_id=args.session_id,
+                symbol=args.symbol,
+                journal=journal,
+                client=client,
+            )
+        )
+        if args.format == "markdown":
+            print(format_live_read_only_report_markdown(report, redact_sensitive=True))
+        else:
+            print(format_live_read_only_report(report))
         return
 
     policy = _demo_policy()

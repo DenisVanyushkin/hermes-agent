@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import os
 import re
 from typing import Any
 
@@ -42,6 +43,61 @@ NEGATIVE_KEYWORDS = {
 REJECT_GEOS = {"russia", "belarus", "iran", "north korea", "syria", "crimea", "donetsk", "luhansk"}
 REJECT_TITLES = {"scrum master", "project manager", "delivery manager", "product owner", "implementation manager"}
 
+# V2: growth signal must be product-growth ownership, not generic growth/perf/BD.
+GROWTH_PRODUCT_OWNERSHIP_TOKENS = (
+    "growth product",
+    "lifecycle",
+    "activation",
+    "retention",
+    "engagement",
+    "product-led growth",
+    "plg",
+    "monetization",
+    "pricing",
+    "subscription",
+    "subscriptions",
+    "marketplace",
+    "cvm",
+)
+GROWTH_DISQUALIFIERS = (
+    "performance",
+    "analytics",
+    "performance marketing",
+    "marketing",
+    "sales",
+    "business development",
+    "bd",
+)
+
+# V2: penalize non-product functions only when product-domain is absent.
+NON_PRODUCT_FUNCTION_TOKENS = (
+    "head of sales",
+    "sales",
+    "marketing",
+    "cmo",
+    "finance",
+    "head of finance",
+    "finance director",
+    "business development",
+    "bd",
+    "partnerships",
+    "account manager",
+    "key account",
+)
+
+PRODUCT_DOMAIN_TOKENS = (
+    "product",
+    "platform",
+    "ecosystem",
+    "monetization",
+    "growth product",
+    "digital product",
+    "digital products",
+    "product strategy",
+    "product management",
+    "product manager",
+)
+
 
 def _target_company_names() -> set[str]:
     cfg = _cfg().get("target_companies") or {}
@@ -77,6 +133,13 @@ def _text(vacancy: Vacancy) -> str:
 
 def _has_any(text: str, terms: list[str] | set[str]) -> bool:
     return any(term in text for term in terms)
+
+def _product_domain(text: str) -> bool:
+    return any(tok in text for tok in PRODUCT_DOMAIN_TOKENS)
+
+def _executive_seniority_in_title(title: str) -> bool:
+    t = (title or "").lower()
+    return any(tok in t for tok in ("chief", "cpo", "vp", "vice president", "director", "head of", "gm", "general manager", "lead"))
 
 
 _ROLE_CLASSIFICATION_PATTERNS: list[tuple[str, tuple[str, ...], bool]] = [
@@ -201,7 +264,7 @@ def salary_tier_for(vacancy: Vacancy, score: int) -> str:
     return "market"
 
 
-def score_vacancy(vacancy: Vacancy) -> Evaluation:
+def score_vacancy_v1(vacancy: Vacancy) -> Evaluation:
     cfg = _cfg()["scoring"]
     text = _text(vacancy)
     classification = classify_vacancy(vacancy)
@@ -349,3 +412,400 @@ def score_vacancy(vacancy: Vacancy) -> Evaluation:
         reasons=reasons,
         raw_breakdown=dict(breakdown),
     )
+
+
+def score_vacancy_v2(vacancy: Vacancy) -> Evaluation:
+    """Scoring V2 (experimental).
+
+    Core assumptions:
+    - Unknown fields do not subtract.
+    - Company intelligence is neutral until implemented (company_score/hiring_likelihood not used).
+    - P&L is a bonus only (not mandatory).
+    - executive_visibility is gated by product-domain.
+    - growth_signal is high only for product-growth ownership (not perf/analytics/marketing/sales/BD).
+    """
+
+    cfg = _cfg()["scoring"]
+    text = _text(vacancy)
+    classification = classify_vacancy(vacancy)
+
+    score = 0
+    matched: list[str] = []
+    concerns: list[str] = []
+    reasons: list[str] = []
+    breakdown: Counter[str] = Counter()
+
+    title_lower = (vacancy.title or "").lower()
+    product_domain = _product_domain(text)
+    executive_seniority = _executive_seniority_in_title(vacancy.title)
+
+    # V2 weights (from scoring-v2-simulation.md; keep here for explicit versioning).
+    W_EXEC_VIS = 15
+    W_HEAD_PRODUCT_TITLE = 10
+    W_PRODUCT_LEAD_TITLE = 10
+    W_FINTECH = 18
+    W_B2C_PLATFORM = 10
+    W_AI = 12
+    W_REMOTE = 5
+    W_GROWTH = 20
+    W_PRODUCT_OWNERSHIP = 25
+    W_MONETIZATION = 30
+    W_PNL_BONUS = 10
+    W_NON_PRODUCT_PENALTY = -35
+
+    # Executive visibility: only if both seniority and product-domain.
+    if executive_seniority and product_domain:
+        score += W_EXEC_VIS
+        breakdown["executive_visibility"] += W_EXEC_VIS
+        matched.append("executive visibility (product-domain)")
+
+    # Title boosts: help thesis roles reach review buckets without relying on unknown fields.
+    if "head of product" in title_lower or ("head" in title_lower and "product" in title_lower):
+        score += W_HEAD_PRODUCT_TITLE
+        breakdown["head_of_product_title_bonus"] += W_HEAD_PRODUCT_TITLE
+        matched.append("head of product (title)")
+    if "product lead" in title_lower or ("lead" in title_lower and "product" in title_lower):
+        score += W_PRODUCT_LEAD_TITLE
+        breakdown["product_lead_title_bonus"] += W_PRODUCT_LEAD_TITLE
+        matched.append("product lead (title)")
+
+    # Industry adjacency.
+    if _has_any(text, ["fintech", "telecom"]):
+        score += W_FINTECH
+        breakdown["fintech_or_telecom"] += W_FINTECH
+        matched.append("telecom/fintech adjacency")
+
+    # Environment: keep but reduce.
+    if _has_any(text, ["b2c", "consumer", "subscription", "subscriptions", "ecosystem", "platform", "marketplace"]):
+        score += W_B2C_PLATFORM
+        breakdown["B2C_platform"] += W_B2C_PLATFORM
+        matched.append("B2C/platform environment")
+
+    if "remote" in text:
+        score += W_REMOTE
+        breakdown["remote_friendly"] += W_REMOTE
+        matched.append("remote friendly")
+
+    if "ai" in text or "machine learning" in text:
+        score += W_AI
+        breakdown["AI_or_modern_tech"] += W_AI
+        matched.append("AI / modern tech")
+
+    # Ownership / monetization.
+    if _has_any(text, ["product strategy", "product ownership", "roadmap", "product vision"]):
+        score += W_PRODUCT_OWNERSHIP
+        breakdown["product_ownership"] += W_PRODUCT_OWNERSHIP
+        matched.append("product ownership / strategy")
+
+    # Monetization is high-weight but should still be in product context; require product-domain.
+    if product_domain and _has_any(text, ["monetization", "pricing"]):
+        score += W_MONETIZATION
+        breakdown["monetization_responsibility"] += W_MONETIZATION
+        matched.append("monetization responsibility")
+
+    # P&L is bonus only.
+    if "p&l" in text or "profit and loss" in text:
+        score += W_PNL_BONUS
+        breakdown["PnL_ownership"] += W_PNL_BONUS
+        matched.append("P&L (bonus)")
+
+    # Growth signal: only product-growth ownership; exclude perf/analytics/marketing/sales/BD.
+    growth_ownership = any(tok in text for tok in GROWTH_PRODUCT_OWNERSHIP_TOKENS) or ("growth" in text and "product" in text)
+    growth_disq = any(tok in text for tok in GROWTH_DISQUALIFIERS)
+    if growth_ownership and not growth_disq:
+        score += W_GROWTH
+        breakdown["growth_signal"] += W_GROWTH
+        matched.append("product-growth ownership")
+
+    # Target company / company signals remain as-is (explicit evidence only).
+    raw_metadata = vacancy.metadata if isinstance(vacancy.metadata, dict) else {}
+    company_signals = _company_signals(vacancy)
+    target_company_names = _target_company_names()
+    if raw_metadata.get("target_company") or vacancy.company.lower() in target_company_names:
+        score += 18
+        breakdown["target_company"] += 18
+        matched.append("target company")
+    if company_signals.get("signals"):
+        signal_count = len(company_signals.get("signals") or [])
+        bonus = min(10, signal_count * 3)
+        score += bonus
+        breakdown["career_page_signal"] += bonus
+        if bonus:
+            matched.append("career page activity")
+    if company_signals.get("opening_count"):
+        openings = int(company_signals.get("opening_count") or 0)
+        if openings:
+            bonus = min(8, openings)
+            score += bonus
+            breakdown["career_page_signal"] += bonus
+            matched.append("open leadership openings")
+
+    # Explicit negatives (keep): these are real negative evidence, not unknown.
+    for keyword, signal in NEGATIVE_KEYWORDS.items():
+        if keyword in text:
+            penalty = abs(cfg["negative_signals"][signal])
+            score -= penalty
+            breakdown[signal] -= penalty
+            concerns.append(keyword)
+            reasons.append(f"negative signal: {keyword}")
+
+    if _has_any(text, REJECT_TITLES):
+        score -= 30
+        concerns.append("delivery/PM title")
+        reasons.append("role title is outside executive product path")
+
+    # Non-product function penalty (only when product-domain is absent).
+    if (not product_domain) and any(tok in text for tok in NON_PRODUCT_FUNCTION_TOKENS):
+        score += W_NON_PRODUCT_PENALTY
+        breakdown["non_product_function_penalty"] += W_NON_PRODUCT_PENALTY
+        concerns.append("non-product function")
+        reasons.append("non-product function without product-domain evidence")
+
+    if vacancy.source in {"remoteok", "remotive"} and not any(term in title_lower for term in ["vp", "vice president", "director", "head of", "chief", "cpo", "gm", "general manager"]):
+        score -= 25
+        breakdown["generic_remote_noise"] -= 25
+        concerns.append("generic remote noise")
+        reasons.append("remote board result without executive title signal")
+
+    if _has_any(text, REJECT_GEOS):
+        score -= 60
+        concerns.append("restricted geography")
+        reasons.append("restricted geography or sanctions risk")
+
+    if "russia" in text or "belarus" in text:
+        score -= 60
+        concerns.append("sanctions risk")
+
+    tier = tier_for_score(score)
+
+    # Recommendation buckets: unchanged thresholds.
+    if score >= 75:
+        recommendation = "strong_fit"
+    elif score >= 60:
+        recommendation = "potential_fit"
+    elif score >= 40:
+        recommendation = "near_miss"
+    else:
+        recommendation = "reject"
+
+    if tier == "exceptional_fit":
+        reasons.append("high-signal executive match")
+    elif tier == "strong_fit":
+        reasons.append("good strategic fit")
+    elif tier == "possible_fit":
+        reasons.append("some fit, manual review recommended")
+    else:
+        reasons.append("insufficient fit")
+
+    return Evaluation(
+        score=max(-100, min(100, score)),
+        tier=tier,
+        recommendation=recommendation,
+        salary_tier=salary_tier_for(vacancy, score),
+        matched_signals=matched,
+        concerns=concerns,
+        reasons=reasons,
+        raw_breakdown=dict(breakdown),
+    )
+
+
+def _evaluation_from_v3_shadow(vacancy: Vacancy, payload: dict[str, Any]) -> Evaluation:
+    recommendation = str(payload.get("recommendation") or "reject")
+    score = int(payload.get("score") or 0)
+    if recommendation == "strong_fit":
+        tier = "strong_fit"
+    elif recommendation in {"needs_review", "near_miss"}:
+        tier = "possible_fit"
+    else:
+        tier = "reject"
+
+    gates = payload.get("gates") or {}
+    concerns = [
+        f"{gate}:{details.get('reason')}"
+        for gate, details in gates.items()
+        if str(details.get("status") or "") == "FAIL"
+    ]
+    matched = [
+        f"{gate}:{details.get('reason')}"
+        for gate, details in gates.items()
+        if str(details.get("status") or "") == "PASS"
+    ]
+    reasons = list(payload.get("reasons") or [])
+    breakdown = dict(payload.get("raw_breakdown") or {})
+
+    return Evaluation(
+        score=max(-100, min(100, score)),
+        tier=tier,
+        recommendation=recommendation,
+        salary_tier=salary_tier_for(vacancy, score),
+        matched_signals=matched,
+        concerns=concerns,
+        reasons=reasons,
+        raw_breakdown=breakdown,
+    )
+
+
+def score_vacancy(vacancy: Vacancy) -> Evaluation:
+    """Versioned scorer wrapper.
+
+    Environment:
+    - SCORING_MODEL_VERSION=v1|v2|v3 (default v1)
+    """
+    version = (os.getenv("SCORING_MODEL_VERSION", "v1") or "v1").strip().lower()
+    return score_vacancy_with_version(vacancy, version)
+
+
+def score_vacancy_with_version(vacancy: Vacancy, version: str) -> Evaluation:
+    v = (version or "v1").strip().lower()
+    if v == "v3":
+        return _evaluation_from_v3_shadow(vacancy, score_vacancy_v3_shadow(vacancy))
+    if v == "v2":
+        return score_vacancy_v2(vacancy)
+    return score_vacancy_v1(vacancy)
+
+
+def score_vacancy_v3_shadow(vacancy: Vacancy) -> dict[str, Any]:
+    """Shadow-only Scoring V3.
+
+    Important:
+    - This function does not drive production recommendation decisions yet.
+    - It returns an explicit gate trace with PASS/FAIL/UNKNOWN states.
+    """
+    text = _text(vacancy)
+    title = (vacancy.title or "").strip()
+    title_l = title.lower()
+
+    non_product_patterns = (
+        r"\bvp\b.*\b(data|revenue|sales|operations)\b",
+        r"\bvice president\b.*\b(data|revenue|sales|operations)\b",
+        r"\brevenue strategy\b",
+        r"\baccount management\b",
+        r"\bcustomer success\b",
+        r"\bsite reliability engineer\b",
+        r"\bsoftware engineer\b",
+        r"\bdata scientist\b",
+        r"\bproduct designer\b",
+    )
+    core_product_patterns = (
+        r"\bchief product officer\b",
+        r"\bcpo\b",
+        r"\bvp\b.*\bproduct\b",
+        r"\bvice president\b.*\bproduct\b",
+        r"\bhead of\b.*\bproduct\b",
+        r"\bdirector\b.*\bproduct\b",
+        r"\bproduct director\b",
+        r"\bgm\b.*\bproduct\b",
+        r"\bgeneral manager\b.*\bproduct\b",
+    )
+    adjacent_patterns = (
+        r"\bproduct design\b",
+        r"\bproduct marketing\b",
+        r"\bgrowth\b",
+        r"\bstrategy\b",
+    )
+
+    def _match_any(patterns: tuple[str, ...], hay: str) -> bool:
+        return any(re.search(p, hay, re.I) for p in patterns)
+
+    gates: dict[str, dict[str, str]] = {}
+
+    # G0: Core Product Function Required
+    if _match_any(non_product_patterns, title_l):
+        g0 = ("FAIL", "non-product function")
+        function_class = "non_product"
+    elif _match_any(core_product_patterns, title_l):
+        g0 = ("PASS", "core product title")
+        function_class = "core_product"
+    elif _match_any(adjacent_patterns, title_l):
+        g0 = ("UNKNOWN", "product-adjacent title")
+        function_class = "product_adjacent"
+    else:
+        g0 = ("UNKNOWN", "function ambiguous")
+        function_class = "unknown"
+    gates["G0"] = {"status": g0[0], "reason": g0[1]}
+
+    # G1: Product Leadership Required
+    if re.search(r"\b(chief|cpo|vp|vice president|head of|director|gm|general manager)\b", title_l) and "product" in title_l:
+        g1 = ("PASS", "explicit product leadership title")
+    elif re.search(r"\b(chief|vp|vice president|head of|director|gm|general manager)\b", title_l) and "product" not in title_l:
+        g1 = ("FAIL", "leadership without product function")
+    elif re.search(r"\b(product lead|group product manager)\b", title_l):
+        g1 = ("UNKNOWN", "leadership track possible, scope unclear")
+    else:
+        g1 = ("FAIL", "no product leadership signal")
+    gates["G1"] = {"status": g1[0], "reason": g1[1]}
+
+    # G2: Senior Leadership Scope Required
+    if re.search(r"\b(chief|cpo|vp|vice president|head of|director|gm|general manager)\b", title_l):
+        g2 = ("PASS", "seniority present")
+    elif re.search(r"\b(product lead|group product manager)\b", title_l):
+        g2 = ("UNKNOWN", "seniority may depend on company leveling")
+    elif re.search(r"\b(staff|senior|principal)\b", title_l):
+        g2 = ("FAIL", "individual contributor seniority")
+    else:
+        g2 = ("FAIL", "seniority not evident")
+    gates["G2"] = {"status": g2[0], "reason": g2[1]}
+
+    # G3: Executive Product Ownership Required
+    ownership_terms = ("product ownership", "roadmap", "product strategy", "monetization", "p&l", "profit and loss")
+    if "product" in text and any(t in text for t in ownership_terms):
+        g3 = ("PASS", "product ownership/strategy evidence")
+    elif "product" in text and re.search(r"\b(director|head|vp|chief|gm)\b", title_l):
+        g3 = ("UNKNOWN", "product role present, ownership explicitness unclear")
+    elif "product" not in text:
+        g3 = ("FAIL", "no product ownership domain")
+    else:
+        g3 = ("FAIL", "ownership not executive-product")
+    gates["G3"] = {"status": g3[0], "reason": g3[1]}
+
+    gate_states = [gates[k]["status"] for k in ("G0", "G1", "G2", "G3")]
+
+    title_l = title.lower()
+    needs_review_title = bool(
+        re.search(
+            r"\b(product lead|group product manager|principal product manager|senior product manager|staff product manager)\b",
+            title_l,
+            re.I,
+        )
+    )
+
+    # Company context: ranking-only signal for borderline product-management roles.
+    # Never bypasses hard gate failure.
+    company_context = 0
+    target_company_names = _target_company_names()
+    company_lower = (vacancy.company or "").strip().lower()
+    md = vacancy.metadata if isinstance(vacancy.metadata, dict) else {}
+    if company_lower and company_lower in target_company_names:
+        company_context += 10
+    if md.get("target_company"):
+        company_context += 10
+    opening_raw = md.get("opening_count")
+    opening_count = int(opening_raw or 0) if isinstance(opening_raw, (int, float)) else 0
+    if opening_count > 0:
+        company_context += min(10, opening_count)
+
+    if "FAIL" in gate_states:
+        recommendation = "reject"
+        score = 10
+    elif "UNKNOWN" in gate_states:
+        if needs_review_title:
+            recommendation = "needs_review"
+            score = 60 + min(15, company_context)
+        else:
+            recommendation = "near_miss"
+            score = 55 + min(10, company_context)
+    else:
+        recommendation = "strong_fit"
+        score = 85 + min(10, company_context)
+
+    breakdown = {"hard_gate_model_v3": score, "company_context": company_context}
+    reasons = [f"{k}:{v['status']}:{v['reason']}" for k, v in gates.items()]
+
+    return {
+        "score": score,
+        "recommendation": recommendation,
+        "gates": gates,
+        "function_class": function_class,
+        "raw_breakdown": breakdown,
+        "reasons": reasons,
+    }
