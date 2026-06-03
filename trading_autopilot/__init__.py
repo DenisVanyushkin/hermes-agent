@@ -68,24 +68,6 @@ from .secrets import (
     load_credentials,
     redact_secrets,
 )
-from .live_read import (
-    BinanceApiError,
-    BinanceLiveReadOnlyClient,
-    LIVE_READ_OPERATIONAL_MODE,
-    LIVE_READ_SCHEMA_VERSION,
-    LIVE_READ_SOURCE_KIND,
-    LiveAccountBalance,
-    LiveAccountSnapshot,
-    LiveExecutionProof,
-    LiveMarketObservation,
-    LiveReadOnlyError,
-    LiveReadOnlyReport,
-    LiveReadOnlySessionRequest,
-    LiveReadOnlySessionError,
-    LiveSymbolMetadata,
-    build_live_read_only_report,
-    format_live_read_only_report,
-)
 
 BOOT_REPORT_VERSION = "1.0.0"
 
@@ -102,6 +84,133 @@ _OBSERVER_EXPORTS = {
     "SimulatedFillModel",
 }
 
+_PROMETHEUS_EXPORTS = {
+    "AllocationValue",
+    "CountDatum",
+    "PAPER_TRADING_PROMETHEUS_SCHEMA_VERSION",
+    "PaperTradingPrometheusSnapshot",
+    "build_paper_trading_prometheus_snapshot",
+    "render_paper_trading_prometheus_text",
+    "serve_paper_trading_prometheus",
+    "write_paper_trading_prometheus_text",
+}
+
+_PAPER_EXPORTS = {
+    "PAPER_TRADING_DEFAULT_ALLOWED_ASSETS",
+    "PAPER_TRADING_DEFAULT_INITIAL_CASH_QUOTE",
+    "PAPER_TRADING_DEFAULT_QUOTE_ASSET",
+    "PAPER_TRADING_DEFAULT_SLACK_TARGET",
+    "PAPER_TRADING_SCHEMA_VERSION",
+    "PAPER_TRADING_DEFAULT_FEE_RATE",
+    "PAPER_TRADING_DEFAULT_MAX_ORDER_NOTIONAL_QUOTE",
+    "PAPER_TRADING_DEFAULT_MAX_POSITION_NOTIONAL_QUOTE",
+    "PAPER_TRADING_DEFAULT_SLIPPAGE_BPS",
+    "PaperOrder",
+    "PaperOrderState",
+    "PaperTradingPnLSnapshot",
+    "PaperTradingReplayReport",
+    "PaperTradingRunReport",
+    "PaperTradingRunRequest",
+    "PaperTradingRiskPolicy",
+    "PaperTradingStepReport",
+    "default_paper_risk_policy",
+    "format_paper_trading_report",
+    "replay_paper_trading_run",
+    "run_paper_trading_mvp",
+}
+
+_LIVE_READ_EXPORTS = {
+    "BinanceApiError",
+    "BinanceLiveReadOnlyClient",
+    "LIVE_READ_OPERATIONAL_MODE",
+    "LIVE_READ_SCHEMA_VERSION",
+    "LIVE_READ_SOURCE_KIND",
+    "LiveAccountBalance",
+    "LiveAccountSnapshot",
+    "LiveExecutionProof",
+    "LiveMarketObservation",
+    "LiveReadOnlyError",
+    "LiveReadOnlyReport",
+    "LiveReadOnlySessionRequest",
+    "LiveReadOnlySessionError",
+    "LiveSymbolMetadata",
+    "build_live_read_only_report",
+    "format_live_read_only_report",
+}
+
+_CANONICAL_JOURNAL_EXPORTS = {
+    "CANONICAL_JOURNAL_SCHEMA_VERSION",
+    "CANONICAL_JOURNAL_SOURCE_MODULE",
+    "CanonicalJournal",
+    "CanonicalJournalRecord",
+}
+
+_MARKET_INGESTION_EXPORTS = {
+    "MARKET_OBSERVATION_SCHEMA_VERSION",
+    "DEFAULT_MARKET_LOOKBACK_HOURS",
+    "DEFAULT_MARKET_STALE_AFTER_MINUTES",
+    "DEFAULT_MARKET_SYMBOLS",
+    "DuplicateObservationError",
+    "MalformedObservationPayloadError",
+    "MarketCollectionReport",
+    "MarketIngestionRunner",
+    "MarketIngestionStatusReport",
+    "MarketObservationError",
+    "MarketSourceFetchResult",
+    "MissingObservationFieldError",
+    "NormalizedMarketObservation",
+    "StaleObservationError",
+    "EXPECTED_MARKET_SOURCES",
+    "build_market_ingestion_status",
+    "dedupe_observations",
+    "format_market_ingestion_status",
+    "normalize_binance_futures_payload",
+    "normalize_binance_spot_payload",
+    "normalize_coinbase_spot_payload",
+    "observation_event_id",
+    "observation_to_canonical_record",
+}
+
+_DAILY_MARKET_STATE_BRIEF_EXPORTS = {
+    "DAILY_MARKET_STATE_BRIEF_SCHEMA_VERSION",
+    "DAILY_MARKET_STATE_BRIEF_TEMPLATE",
+    "DailyMarketStateBriefReport",
+    "DailyMarketStateAssetBrief",
+    "build_daily_market_state_brief",
+    "format_daily_market_state_brief",
+}
+
+_CRITICAL_ALERT_EXPORTS = {
+    "CRITICAL_ALERTS_SCHEMA_VERSION",
+    "CRITICAL_ALERT_TAXONOMY",
+    "CriticalAlert",
+    "CriticalAlertDefinition",
+    "CriticalAlertReport",
+    "build_critical_alert_report",
+    "build_critical_alerts",
+    "format_critical_alert_report",
+}
+
+_REPLAY_VALIDATION_EXPORTS = {
+    "REPLAY_VALIDATION_SCHEMA_VERSION",
+    "ReplayMismatch",
+    "ReplayValidationReport",
+    "build_replay_validation_report",
+    "format_replay_validation_report",
+}
+
+_PILOT_OPERATION_EXPORTS = {
+    "PILOT_OPERATION_SCHEMA_VERSION",
+    "PilotAlertRecord",
+    "PilotCycleResult",
+    "PilotMetric",
+    "PilotOperationReport",
+    "PilotRunner",
+    "build_pilot_operation_report",
+    "format_pilot_operation_report",
+}
+
+
 __all__ = [
     "AppendOnlyJournal",
     "BOOT_REPORT_VERSION",
@@ -111,6 +220,60 @@ __all__ = [
     "JournalDuplicateEventError",
     "JournalEvent",
     "JournalError",
+    "CANONICAL_JOURNAL_SCHEMA_VERSION",
+    "CANONICAL_JOURNAL_SOURCE_MODULE",
+    "CanonicalJournal",
+    "CanonicalJournalRecord",
+    "MARKET_OBSERVATION_SCHEMA_VERSION",
+    "DEFAULT_MARKET_LOOKBACK_HOURS",
+    "DEFAULT_MARKET_STALE_AFTER_MINUTES",
+    "DEFAULT_MARKET_SYMBOLS",
+    "DuplicateObservationError",
+    "MalformedObservationPayloadError",
+    "MarketCollectionReport",
+    "MarketIngestionRunner",
+    "MarketIngestionStatusReport",
+    "MarketObservationError",
+    "MarketSourceFetchResult",
+    "MissingObservationFieldError",
+    "NormalizedMarketObservation",
+    "StaleObservationError",
+    "EXPECTED_MARKET_SOURCES",
+    "build_market_ingestion_status",
+    "dedupe_observations",
+    "format_market_ingestion_status",
+    "normalize_binance_futures_payload",
+    "normalize_binance_spot_payload",
+    "normalize_coinbase_spot_payload",
+    "observation_event_id",
+    "observation_to_canonical_record",
+    "DAILY_MARKET_STATE_BRIEF_SCHEMA_VERSION",
+    "DAILY_MARKET_STATE_BRIEF_TEMPLATE",
+    "DailyMarketStateBriefReport",
+    "DailyMarketStateAssetBrief",
+    "build_daily_market_state_brief",
+    "format_daily_market_state_brief",
+    "CRITICAL_ALERTS_SCHEMA_VERSION",
+    "CRITICAL_ALERT_TAXONOMY",
+    "CriticalAlert",
+    "CriticalAlertDefinition",
+    "CriticalAlertReport",
+    "build_critical_alert_report",
+    "build_critical_alerts",
+    "format_critical_alert_report",
+    "REPLAY_VALIDATION_SCHEMA_VERSION",
+    "ReplayMismatch",
+    "ReplayValidationReport",
+    "build_replay_validation_report",
+    "format_replay_validation_report",
+    "PILOT_OPERATION_SCHEMA_VERSION",
+    "PilotAlertRecord",
+    "PilotCycleResult",
+    "PilotMetric",
+    "PilotOperationReport",
+    "PilotRunner",
+    "build_pilot_operation_report",
+    "format_pilot_operation_report",
     "LIVE_ORDER_PATH_ENABLED",
     "MANIFEST_SCHEMA_VERSION",
     "MarketAnomaly",
@@ -186,7 +349,36 @@ __all__ = [
     "LiveSymbolMetadata",
     "build_live_read_only_report",
     "format_live_read_only_report",
+    "PAPER_TRADING_DEFAULT_ALLOWED_ASSETS",
+    "PAPER_TRADING_DEFAULT_INITIAL_CASH_QUOTE",
+    "PAPER_TRADING_DEFAULT_QUOTE_ASSET",
+    "PAPER_TRADING_DEFAULT_SLACK_TARGET",
+    "PAPER_TRADING_SCHEMA_VERSION",
+    "PAPER_TRADING_DEFAULT_FEE_RATE",
+    "PAPER_TRADING_DEFAULT_MAX_ORDER_NOTIONAL_QUOTE",
+    "PAPER_TRADING_DEFAULT_MAX_POSITION_NOTIONAL_QUOTE",
+    "PAPER_TRADING_DEFAULT_SLIPPAGE_BPS",
+    "PaperOrder",
+    "PaperOrderState",
+    "PaperTradingPnLSnapshot",
+    "PaperTradingReplayReport",
+    "PaperTradingRunReport",
+    "PaperTradingRunRequest",
+    "PaperTradingRiskPolicy",
+    "PaperTradingStepReport",
+    "default_paper_risk_policy",
+    "format_paper_trading_report",
+    "replay_paper_trading_run",
+    "run_paper_trading_mvp",
     "normalize_market_snapshot",
+    "AllocationValue",
+    "CountDatum",
+    "PAPER_TRADING_PROMETHEUS_SCHEMA_VERSION",
+    "PaperTradingPrometheusSnapshot",
+    "build_paper_trading_prometheus_snapshot",
+    "render_paper_trading_prometheus_text",
+    "serve_paper_trading_prometheus",
+    "write_paper_trading_prometheus_text",
 ]
 
 
@@ -216,6 +408,266 @@ def __getattr__(name: str):
             "ShadowPosition": ShadowPosition,
             "SimulatedFillExecution": SimulatedFillExecution,
             "SimulatedFillModel": SimulatedFillModel,
+        }
+        return mapping[name]
+    if name in _PROMETHEUS_EXPORTS:
+        from .prometheus import (
+            AllocationValue,
+            CountDatum,
+            PAPER_TRADING_PROMETHEUS_SCHEMA_VERSION,
+            PaperTradingPrometheusSnapshot,
+            build_paper_trading_prometheus_snapshot,
+            render_paper_trading_prometheus_text,
+            serve_paper_trading_prometheus,
+            write_paper_trading_prometheus_text,
+        )
+
+        mapping = {
+            "AllocationValue": AllocationValue,
+            "CountDatum": CountDatum,
+            "PAPER_TRADING_PROMETHEUS_SCHEMA_VERSION": PAPER_TRADING_PROMETHEUS_SCHEMA_VERSION,
+            "PaperTradingPrometheusSnapshot": PaperTradingPrometheusSnapshot,
+            "build_paper_trading_prometheus_snapshot": build_paper_trading_prometheus_snapshot,
+            "render_paper_trading_prometheus_text": render_paper_trading_prometheus_text,
+            "serve_paper_trading_prometheus": serve_paper_trading_prometheus,
+            "write_paper_trading_prometheus_text": write_paper_trading_prometheus_text,
+        }
+        return mapping[name]
+    if name in _MARKET_INGESTION_EXPORTS:
+        from .market_ingestion import (
+            MARKET_OBSERVATION_SCHEMA_VERSION,
+            DEFAULT_MARKET_LOOKBACK_HOURS,
+            DEFAULT_MARKET_SYMBOLS,
+            EXPECTED_MARKET_SOURCES,
+            DuplicateObservationError,
+            MalformedObservationPayloadError,
+            MarketCollectionReport,
+            MarketIngestionRunner,
+            MarketIngestionStatusReport,
+            MarketObservationError,
+            MarketSourceFetchResult,
+            MissingObservationFieldError,
+            NormalizedMarketObservation,
+            StaleObservationError,
+            build_market_ingestion_status,
+            dedupe_observations,
+            format_market_ingestion_status,
+            normalize_binance_futures_payload,
+            normalize_binance_spot_payload,
+            normalize_coinbase_spot_payload,
+            observation_event_id,
+            observation_to_canonical_record,
+        )
+
+        mapping = {
+            "MARKET_OBSERVATION_SCHEMA_VERSION": MARKET_OBSERVATION_SCHEMA_VERSION,
+            "DEFAULT_MARKET_LOOKBACK_HOURS": DEFAULT_MARKET_LOOKBACK_HOURS,
+            "DEFAULT_MARKET_STALE_AFTER_MINUTES": DEFAULT_MARKET_STALE_AFTER_MINUTES,
+            "DEFAULT_MARKET_SYMBOLS": DEFAULT_MARKET_SYMBOLS,
+            "DuplicateObservationError": DuplicateObservationError,
+            "MalformedObservationPayloadError": MalformedObservationPayloadError,
+            "MarketCollectionReport": MarketCollectionReport,
+            "MarketIngestionRunner": MarketIngestionRunner,
+            "MarketIngestionStatusReport": MarketIngestionStatusReport,
+            "MarketObservationError": MarketObservationError,
+            "MarketSourceFetchResult": MarketSourceFetchResult,
+            "MissingObservationFieldError": MissingObservationFieldError,
+            "NormalizedMarketObservation": NormalizedMarketObservation,
+            "StaleObservationError": StaleObservationError,
+            "EXPECTED_MARKET_SOURCES": EXPECTED_MARKET_SOURCES,
+            "build_market_ingestion_status": build_market_ingestion_status,
+            "dedupe_observations": dedupe_observations,
+            "format_market_ingestion_status": format_market_ingestion_status,
+            "normalize_binance_futures_payload": normalize_binance_futures_payload,
+            "normalize_binance_spot_payload": normalize_binance_spot_payload,
+            "normalize_coinbase_spot_payload": normalize_coinbase_spot_payload,
+            "observation_event_id": observation_event_id,
+            "observation_to_canonical_record": observation_to_canonical_record,
+        }
+        return mapping[name]
+    if name in _DAILY_MARKET_STATE_BRIEF_EXPORTS:
+        from .daily_market_state_brief import (
+            DAILY_MARKET_STATE_BRIEF_SCHEMA_VERSION,
+            DAILY_MARKET_STATE_BRIEF_TEMPLATE,
+            DailyMarketStateAssetBrief,
+            DailyMarketStateBriefReport,
+            build_daily_market_state_brief,
+            format_daily_market_state_brief,
+        )
+
+        mapping = {
+            "DAILY_MARKET_STATE_BRIEF_SCHEMA_VERSION": DAILY_MARKET_STATE_BRIEF_SCHEMA_VERSION,
+            "DAILY_MARKET_STATE_BRIEF_TEMPLATE": DAILY_MARKET_STATE_BRIEF_TEMPLATE,
+            "DailyMarketStateAssetBrief": DailyMarketStateAssetBrief,
+            "DailyMarketStateBriefReport": DailyMarketStateBriefReport,
+            "build_daily_market_state_brief": build_daily_market_state_brief,
+            "format_daily_market_state_brief": format_daily_market_state_brief,
+        }
+        return mapping[name]
+    if name in _CRITICAL_ALERT_EXPORTS:
+        from .critical_alerts import (
+            CRITICAL_ALERTS_SCHEMA_VERSION,
+            CRITICAL_ALERT_TAXONOMY,
+            CriticalAlert,
+            CriticalAlertDefinition,
+            CriticalAlertReport,
+            build_critical_alert_report,
+            build_critical_alerts,
+            format_critical_alert_report,
+        )
+
+        mapping = {
+            "CRITICAL_ALERTS_SCHEMA_VERSION": CRITICAL_ALERTS_SCHEMA_VERSION,
+            "CRITICAL_ALERT_TAXONOMY": CRITICAL_ALERT_TAXONOMY,
+            "CriticalAlert": CriticalAlert,
+            "CriticalAlertDefinition": CriticalAlertDefinition,
+            "CriticalAlertReport": CriticalAlertReport,
+            "build_critical_alert_report": build_critical_alert_report,
+            "build_critical_alerts": build_critical_alerts,
+            "format_critical_alert_report": format_critical_alert_report,
+        }
+        return mapping[name]
+    if name in _REPLAY_VALIDATION_EXPORTS:
+        from .replay_validation import (
+            REPLAY_VALIDATION_SCHEMA_VERSION,
+            ReplayMismatch,
+            ReplayValidationReport,
+            build_replay_validation_report,
+            format_replay_validation_report,
+        )
+
+        mapping = {
+            "REPLAY_VALIDATION_SCHEMA_VERSION": REPLAY_VALIDATION_SCHEMA_VERSION,
+            "ReplayMismatch": ReplayMismatch,
+            "ReplayValidationReport": ReplayValidationReport,
+            "build_replay_validation_report": build_replay_validation_report,
+            "format_replay_validation_report": format_replay_validation_report,
+        }
+        return mapping[name]
+    if name in _PILOT_OPERATION_EXPORTS:
+        from .pilot_operation import (
+            PILOT_OPERATION_SCHEMA_VERSION,
+            PilotAlertRecord,
+            PilotCycleResult,
+            PilotMetric,
+            PilotOperationReport,
+            PilotRunner,
+            build_pilot_operation_report,
+            format_pilot_operation_report,
+        )
+
+        mapping = {
+            "PILOT_OPERATION_SCHEMA_VERSION": PILOT_OPERATION_SCHEMA_VERSION,
+            "PilotAlertRecord": PilotAlertRecord,
+            "PilotCycleResult": PilotCycleResult,
+            "PilotMetric": PilotMetric,
+            "PilotOperationReport": PilotOperationReport,
+            "PilotRunner": PilotRunner,
+            "build_pilot_operation_report": build_pilot_operation_report,
+            "format_pilot_operation_report": format_pilot_operation_report,
+        }
+        return mapping[name]
+    if name in _PAPER_EXPORTS:
+        from .paper import (
+            PAPER_TRADING_DEFAULT_ALLOWED_ASSETS,
+            PAPER_TRADING_DEFAULT_INITIAL_CASH_QUOTE,
+            PAPER_TRADING_DEFAULT_QUOTE_ASSET,
+            PAPER_TRADING_DEFAULT_SLACK_TARGET,
+            PAPER_TRADING_SCHEMA_VERSION,
+            PAPER_TRADING_DEFAULT_FEE_RATE,
+            PAPER_TRADING_DEFAULT_MAX_ORDER_NOTIONAL_QUOTE,
+            PAPER_TRADING_DEFAULT_MAX_POSITION_NOTIONAL_QUOTE,
+            PAPER_TRADING_DEFAULT_SLIPPAGE_BPS,
+            PaperOrder,
+            PaperOrderState,
+            PaperTradingPnLSnapshot,
+            PaperTradingReplayReport,
+            PaperTradingRunReport,
+            PaperTradingRunRequest,
+            PaperTradingRiskPolicy,
+            PaperTradingStepReport,
+            default_paper_risk_policy,
+            format_paper_trading_report,
+            replay_paper_trading_run,
+            run_paper_trading_mvp,
+        )
+
+        mapping = {
+            "PAPER_TRADING_DEFAULT_ALLOWED_ASSETS": PAPER_TRADING_DEFAULT_ALLOWED_ASSETS,
+            "PAPER_TRADING_DEFAULT_INITIAL_CASH_QUOTE": PAPER_TRADING_DEFAULT_INITIAL_CASH_QUOTE,
+            "PAPER_TRADING_DEFAULT_QUOTE_ASSET": PAPER_TRADING_DEFAULT_QUOTE_ASSET,
+            "PAPER_TRADING_DEFAULT_SLACK_TARGET": PAPER_TRADING_DEFAULT_SLACK_TARGET,
+            "PAPER_TRADING_SCHEMA_VERSION": PAPER_TRADING_SCHEMA_VERSION,
+            "PAPER_TRADING_DEFAULT_FEE_RATE": PAPER_TRADING_DEFAULT_FEE_RATE,
+            "PAPER_TRADING_DEFAULT_MAX_ORDER_NOTIONAL_QUOTE": PAPER_TRADING_DEFAULT_MAX_ORDER_NOTIONAL_QUOTE,
+            "PAPER_TRADING_DEFAULT_MAX_POSITION_NOTIONAL_QUOTE": PAPER_TRADING_DEFAULT_MAX_POSITION_NOTIONAL_QUOTE,
+            "PAPER_TRADING_DEFAULT_SLIPPAGE_BPS": PAPER_TRADING_DEFAULT_SLIPPAGE_BPS,
+            "PaperOrder": PaperOrder,
+            "PaperOrderState": PaperOrderState,
+            "PaperTradingPnLSnapshot": PaperTradingPnLSnapshot,
+            "PaperTradingReplayReport": PaperTradingReplayReport,
+            "PaperTradingRunReport": PaperTradingRunReport,
+            "PaperTradingRunRequest": PaperTradingRunRequest,
+            "PaperTradingRiskPolicy": PaperTradingRiskPolicy,
+            "PaperTradingStepReport": PaperTradingStepReport,
+            "default_paper_risk_policy": default_paper_risk_policy,
+            "format_paper_trading_report": format_paper_trading_report,
+            "replay_paper_trading_run": replay_paper_trading_run,
+            "run_paper_trading_mvp": run_paper_trading_mvp,
+        }
+        return mapping[name]
+    if name in _LIVE_READ_EXPORTS:
+        from .live_read import (
+            BinanceApiError,
+            BinanceLiveReadOnlyClient,
+            LIVE_READ_OPERATIONAL_MODE,
+            LIVE_READ_SCHEMA_VERSION,
+            LIVE_READ_SOURCE_KIND,
+            LiveAccountBalance,
+            LiveAccountSnapshot,
+            LiveExecutionProof,
+            LiveMarketObservation,
+            LiveReadOnlyError,
+            LiveReadOnlyReport,
+            LiveReadOnlySessionRequest,
+            LiveReadOnlySessionError,
+            LiveSymbolMetadata,
+            build_live_read_only_report,
+            format_live_read_only_report,
+        )
+
+        mapping = {
+            "BinanceApiError": BinanceApiError,
+            "BinanceLiveReadOnlyClient": BinanceLiveReadOnlyClient,
+            "LIVE_READ_OPERATIONAL_MODE": LIVE_READ_OPERATIONAL_MODE,
+            "LIVE_READ_SCHEMA_VERSION": LIVE_READ_SCHEMA_VERSION,
+            "LIVE_READ_SOURCE_KIND": LIVE_READ_SOURCE_KIND,
+            "LiveAccountBalance": LiveAccountBalance,
+            "LiveAccountSnapshot": LiveAccountSnapshot,
+            "LiveExecutionProof": LiveExecutionProof,
+            "LiveMarketObservation": LiveMarketObservation,
+            "LiveReadOnlyError": LiveReadOnlyError,
+            "LiveReadOnlyReport": LiveReadOnlyReport,
+            "LiveReadOnlySessionRequest": LiveReadOnlySessionRequest,
+            "LiveReadOnlySessionError": LiveReadOnlySessionError,
+            "LiveSymbolMetadata": LiveSymbolMetadata,
+            "build_live_read_only_report": build_live_read_only_report,
+            "format_live_read_only_report": format_live_read_only_report,
+        }
+        return mapping[name]
+    if name in _CANONICAL_JOURNAL_EXPORTS:
+        from .canonical_journal import (
+            CANONICAL_JOURNAL_SCHEMA_VERSION,
+            CANONICAL_JOURNAL_SOURCE_MODULE,
+            CanonicalJournal,
+            CanonicalJournalRecord,
+        )
+
+        mapping = {
+            "CANONICAL_JOURNAL_SCHEMA_VERSION": CANONICAL_JOURNAL_SCHEMA_VERSION,
+            "CANONICAL_JOURNAL_SOURCE_MODULE": CANONICAL_JOURNAL_SOURCE_MODULE,
+            "CanonicalJournal": CanonicalJournal,
+            "CanonicalJournalRecord": CanonicalJournalRecord,
         }
         return mapping[name]
     raise AttributeError(name)

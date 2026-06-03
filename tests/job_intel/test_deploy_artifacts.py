@@ -26,6 +26,7 @@ def test_deploy_bundle_contains_required_artifacts() -> None:
         DEPLOY / "systemd" / "job-intel-market.timer",
         DEPLOY / "systemd" / "job-intel-strategic.service",
         DEPLOY / "systemd" / "job-intel-strategic.timer",
+        DEPLOY / "systemd" / "job-intel-metrics-exporter.service",
     ]
 
     for path in expected:
@@ -43,6 +44,7 @@ def test_install_script_enforces_secure_env_and_fail_closed_cleanup() -> None:
     assert "job-intel-daily.timer" in script
     assert "job-intel-strategic.timer" in script
     assert "company-career" in script
+    assert "job-intel-metrics-exporter.service" in script
     assert "would ensure directories:" in script
     assert "require_safe_path" in script
     assert "require_safe_name" in script
@@ -63,6 +65,7 @@ def test_verifier_checks_env_mode_and_required_contract_fields() -> None:
     assert "ExecStart=/usr/bin/env bash $repo_root/scripts/job_intel_host_wrapper.sh $command_name" in script
     assert "job-intel-alert:alert" in script
     assert "job-intel-strategic:strategic" in script
+    assert "job-intel-metrics-exporter:metrics-exporter" in script
     assert "fail()" in script and "cleanup_on_failure" in script
     assert 'source "$env_file"' not in script
     assert "systemctl start --wait job-intel-health.service" in script

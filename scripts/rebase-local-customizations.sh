@@ -178,8 +178,22 @@ cleanup_autostash() {
     if git -C "$REPO" stash pop --index >/dev/null 2>&1; then
       AUTOSTASH_CREATED=0
     else
-      AUTOSTASH_RESTORE_FAILED=1
-      echo "Warning: autostash could not be restored cleanly; it remains in git stash." >&2
+      # stash pop failed — check if it's just merge conflicts in auto-generated
+      # files (e.g. package-lock.json updated by both upstream and the stash).
+      # Resolve by taking HEAD for every conflicting file, then drop the stash.
+      local conflicts
+      conflicts="$(git -C "$REPO" diff --name-only --diff-filter=U 2>/dev/null || true)"
+      if [ -n "$conflicts" ]; then
+        echo "Warning: autostash conflicts in the following files — taking rebased (HEAD) versions:" >&2
+        printf '  %s\n' $conflicts >&2
+        # shellcheck disable=SC2086
+        git -C "$REPO" checkout HEAD -- $conflicts 2>/dev/null || true
+        git -C "$REPO" stash drop >/dev/null 2>&1 || true
+        AUTOSTASH_CREATED=0
+      else
+        AUTOSTASH_RESTORE_FAILED=1
+        echo "Warning: autostash could not be restored cleanly; it remains in git stash." >&2
+      fi
     fi
   fi
   if [ "$status" -eq 0 ] && [ "$AUTOSTASH_RESTORE_FAILED" -eq 1 ]; then

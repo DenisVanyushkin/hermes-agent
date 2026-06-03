@@ -195,6 +195,7 @@ cleanup_on_failure() {
     job-intel-enrichment.service
     job-intel-market.service
     job-intel-strategic.service
+    job-intel-metrics-exporter.service
   )
   if command -v systemctl >/dev/null 2>&1; then
     local unit
@@ -322,6 +323,7 @@ required_files=(
   job-intel-market.timer
   job-intel-strategic.service
   job-intel-strategic.timer
+  job-intel-metrics-exporter.service
 )
 for file in "${required_files[@]}"; do
   [[ -f "$script_dir/systemd/$file" ]] || add_issue "missing deploy template: $script_dir/systemd/$file"
@@ -364,6 +366,7 @@ service_specs=(
   job-intel-enrichment:enrichment
   job-intel-market:market
   job-intel-strategic:strategic
+  job-intel-metrics-exporter:metrics-exporter
 )
 for spec in "${service_specs[@]}"; do
   service_name="${spec%%:*}"

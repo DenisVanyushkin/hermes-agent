@@ -5,8 +5,48 @@ import json
 import os
 import random
 import re
+import signal
 import time
 from contextlib import suppress
+
+
+class _WallTimeout:
+    """Best-effort wall-clock timeout for sync Playwright operations.
+
+    Uses SIGALRM (main thread only). On timeout raises TimeoutError.
+    """
+
+    def __init__(self, seconds: float, message: str):
+        self.seconds = max(0.0, float(seconds))
+        self.message = message
+        self._old = None
+
+    def __enter__(self):
+        if self.seconds <= 0:
+            return self
+
+        def _handler(signum, frame):
+            raise TimeoutError(self.message)
+
+        self._old = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _handler)
+        signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.seconds > 0:
+            try:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            except Exception:
+                pass
+            if self._old is not None:
+                try:
+                    signal.signal(signal.SIGALRM, self._old)
+                except Exception:
+                    pass
+        return False
+
+
 from email import message_from_bytes
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -16,6 +56,7 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.request import urlopen
 
 from .models import Vacancy
 from .runtime import resolve_browser_profile_base, sha256_text
@@ -374,10 +415,6 @@ def _normalize_location_text(value: str) -> str:
     lowered = normalized.lower()
     if "remote" in lowered:
         return "Remote"
-    if "," in normalized:
-        primary = normalized.split(",", 1)[0].strip()
-        if primary:
-            return primary
     return normalized
 
 
@@ -619,8 +656,11 @@ def _link_vacancies_from_html(html: str, *, source: str, page_url: str, company_
         parsed = urlparse(absolute)
         normalized = absolute.lower()
         path_tokens = {token for token in parsed.path.lower().split("/") if token}
-        if not (
-            any(domain in normalized for domain in ("linkedin.com/jobs/view", "hh.ru/vacancy", "greenhouse.io", "lever.co", "ashbyhq.com"))
+        if source == "linkedin":
+            if "linkedin.com/jobs/view/" not in normalized:
+                continue
+        elif not (
+            any(domain in normalized for domain in ("hh.ru/vacancy", "greenhouse.io", "lever.co", "ashbyhq.com", "smartrecruiters.com", "teamtailor.com", "personio", "recruitee"))
             or any(token in path_tokens for token in {"careers", "jobs", "vacancy", "vacancies", "positions", "openings", "roles", "job"})
             or any(token in page_host for token in ("careers", "jobs", "vacancies", "openings"))
         ):
@@ -649,11 +689,37 @@ def _link_vacancies_from_html(html: str, *, source: str, page_url: str, company_
     return _dedupe_vacancies(vacancies)
 
 
+
+
+def _extract_linkedin_company_hint(html: str) -> str | None:
+    patterns = (
+        r'jobs-unified-top-card__company-name[^>]*>\s*<a[^>]*>(?P<company>.*?)</a>',
+        r'jobs-unified-top-card__company-name[^>]*>\s*<span[^>]*>(?P<company>.*?)</span>',
+        r'topcard__org-name-link[^>]*>\s*(?P<company>.*?)\s*</a>',
+        r'\"companyName\"\s*:\s*\"(?P<company>[^\"]+)\"',
+        r'\"hiringOrganization\"\s*:\s*\{[^}]*\"name\"\s*:\s*\"(?P<company>[^\"]+)\"',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, flags=re.S | re.I)
+        if not match:
+            continue
+        company = _clean_html_text(match.group("company"))
+        if company and company.lower() != "unknown":
+            return company
+    return None
+
 def extract_linkedin_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
     card_vacancies = _linkedin_card_vacancies_from_html(html, page_url=page_url)
     structured = [_vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url) for jobposting in _jobposting_objects(html)]
-    fallback = _link_vacancies_from_html(html, source="linkedin", page_url=page_url) if not card_vacancies and not structured else []
-    return _merge_vacancy_lists(card_vacancies or structured, structured + fallback)
+    # Do not ingest generic link-based LinkedIn rows here: they are a major source of
+    # collection/search artifacts and Unknown-company duplicates.
+    merged = _merge_vacancy_lists(card_vacancies or structured, structured)
+    company_hint = _extract_linkedin_company_hint(html)
+    if company_hint:
+        for vacancy in merged:
+            if (vacancy.company or "").strip().lower() in {"", "unknown"}:
+                vacancy.company = company_hint
+    return merged
 
 
 def extract_headhunter_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
@@ -669,6 +735,15 @@ def extract_company_career_vacancies_from_html(html: str, *, page_url: str) -> l
     return _dedupe_vacancies(structured + link_vacancies)
 
 
+
+def extract_jobposting_vacancies_from_html(html: str, *, source: str, page_url: str) -> list[Vacancy]:
+    """Extract JSON-LD JobPosting objects into Vacancy rows with a caller-provided source name.
+
+    Used for ATS boards where the page is public but does not warrant a full browser-native flow.
+    """
+    structured = [_vacancy_from_jobposting(jobposting, source=source, page_url=page_url) for jobposting in _jobposting_objects(html)]
+    return _dedupe_vacancies(structured)
+
 class BrowserSourceClient:
     def __init__(self, config: BrowserAcquisitionConfig | None = None):
         self.config = config or BrowserAcquisitionConfig()
@@ -676,6 +751,7 @@ class BrowserSourceClient:
         self._browser = None
         self._context = None
         self._cdp_attached = False
+        self._cdp_url = ""
         self._health = BrowserSessionHealth(source="browser")
         self._health.browser_profile = str(self.config.user_data_dir)
         diagnostics_root = os.getenv("JOB_INTEL_BROWSER_DIAGNOSTICS_DIR", "").strip()
@@ -691,14 +767,19 @@ class BrowserSourceClient:
             _ensure_required_browser_profile(profile_name, self.config)
 
         cdp_url = os.getenv("JOB_INTEL_BROWSER_CDP_URL", "").strip()
+        self._cdp_url = cdp_url
         try:
             self._playwright = sync_playwright().start()
             if cdp_url:
+                self._write_attach_diagnostics(label="cdp-before-connect", extra={"cdp_url": cdp_url})
                 self._browser = self._playwright.chromium.connect_over_cdp(cdp_url)
+                self._write_attach_diagnostics(label="cdp-after-connect", extra={"cdp_url": cdp_url})
                 contexts = list(getattr(self._browser, "contexts", []) or [])
+                self._write_attach_diagnostics(label="cdp-after-contexts", extra={"context_count": len(contexts)})
                 if not contexts:
                     raise BrowserNativeUnavailable(f"Playwright CDP attach at {cdp_url} did not expose a persistent browser context.")
                 self._context = contexts[0]
+                self._write_attach_diagnostics(label="cdp-after-context-selected", extra={"cdp_url": cdp_url})
                 self._cdp_attached = True
                 return self
 
@@ -747,6 +828,28 @@ class BrowserSourceClient:
     def _diagnostic_slug(self, label: str) -> str:
         slug = re.sub(r"[^a-z0-9._-]+", "-", (label or "page").lower()).strip("-")
         return slug or "page"
+
+    def _write_attach_diagnostics(self, *, label: str, extra: dict[str, Any] | None = None) -> None:
+        if self._diagnostics_dir is None:
+            return
+        try:
+            self._diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        slug = self._diagnostic_slug(label)
+        meta_path = self._diagnostics_dir / f"{timestamp}-{slug}.json"
+        payload: dict[str, Any] = {
+            "label": label,
+            "source": self.config.source_name or self._health.source,
+            "requested_profile": str(self.config.user_data_dir),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "diagnostics_dir": str(self._diagnostics_dir),
+        }
+        if extra:
+            payload["extra"] = extra
+        with suppress(Exception):
+            meta_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2))
 
     def _capture_page_diagnostics(self, *, page: Any, label: str, html: str | None = None, extra: dict[str, Any] | None = None) -> None:
         if self._diagnostics_dir is None:
@@ -801,6 +904,66 @@ class BrowserSourceClient:
             payload["extra"] = extra
         with suppress(Exception):
             meta_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2))
+
+    def _browser_state_snapshot(self) -> dict[str, Any]:
+        snapshot: dict[str, Any] = {
+            "cdp_url": self._cdp_url or "",
+            "cdp_attached": self._cdp_attached,
+            "browser_present": self._browser is not None,
+            "context_present": self._context is not None,
+            "context_page_count": 0,
+            "context_page_urls": [],
+            "browser_context_count": 0,
+            "browser_page_urls": [],
+            "cdp_targets": [],
+        }
+        with suppress(Exception):
+            if self._context is not None:
+                pages = list(getattr(self._context, "pages", []) or [])
+                snapshot["context_page_count"] = len(pages)
+                snapshot["context_page_urls"] = [getattr(page, "url", "") for page in pages[:10]]
+        with suppress(Exception):
+            if self._browser is not None:
+                contexts = list(getattr(self._browser, "contexts", []) or [])
+                snapshot["browser_context_count"] = len(contexts)
+                browser_urls: list[str] = []
+                for ctx in contexts[:3]:
+                    for page in list(getattr(ctx, "pages", []) or [])[:5]:
+                        browser_urls.append(getattr(page, "url", ""))
+                snapshot["browser_page_urls"] = browser_urls[:15]
+        if self._cdp_url:
+            with suppress(Exception):
+                with urlopen(self._cdp_url.rstrip("/") + "/json/list", timeout=5) as resp:
+                    targets = json.loads(resp.read().decode("utf-8", errors="replace"))
+                snapshot["cdp_targets"] = [
+                    {
+                        "id": item.get("id", ""),
+                        "type": item.get("type", ""),
+                        "title": item.get("title", ""),
+                        "url": item.get("url", ""),
+                    }
+                    for item in targets[:25]
+                ]
+        return snapshot
+
+    def _write_browser_failure_diagnostics(
+        self,
+        *,
+        label: str,
+        requested_url: str,
+        error: str,
+        page: Any | None = None,
+        html: str | None = None,
+    ) -> None:
+        extra = {
+            "requested_url": requested_url,
+            "error": error,
+            "browser_state": self._browser_state_snapshot(),
+        }
+        self._write_attach_diagnostics(label=label, extra=extra)
+        if page is not None:
+            with suppress(Exception):
+                self._capture_page_diagnostics(page=page, label=label, html=html, extra=extra)
 
     def _validate_authenticated_html(
         self,
@@ -946,7 +1109,7 @@ class BrowserSourceClient:
     def _validate_linkedin_auth(self) -> None:
         url = "https://www.linkedin.com/feed/"
         self._health.auth_attempted = True
-        html = self.fetch_html(url, scrolls=0, capture_label="linkedin-auth")
+        html = self.fetch_html(url, scrolls=0)
         self._validate_authenticated_html(
             source="linkedin",
             url=url,
@@ -965,53 +1128,234 @@ class BrowserSourceClient:
     def _validate_headhunter_auth(self) -> None:
         search_url = "https://hh.ru/search/vacancy?text=Head+of+Product"
         self._health.auth_attempted = True
-        search_html = self.fetch_html(search_url, scrolls=0, capture_label="headhunter-auth-search")
-        if _looks_like_login_wall(search_url, search_html) or _looks_like_auth_redirect(search_url, search_html):
+        required_markers = (
+            "hh.ru/search/vacancy",
+            "vacancy_search",
+            "vacancy search",
+            "поиск вакансий",
+            "найдено",
+            "resume",
+            "резюме",
+        )
+        search_html = self.fetch_html(search_url, scrolls=0)
+        has_results_markers = self._page_contains_any(search_html, required_markers) or _looks_like_headhunter_results_page(search_url, search_html)
+        if not has_results_markers and (_looks_like_login_wall(search_url, search_html) or _looks_like_auth_redirect(search_url, search_html)):
+            self._write_attach_diagnostics(label="headhunter-auth-search-otp-recovery-attempt", extra={"requested_url": search_url})
             if self._attempt_headhunter_otp_recovery("https://hh.ru/account/login?backurl=https%3A%2F%2Fhh.ru%2Fsearch%2Fvacancy"):
-                search_html = self.fetch_html(search_url, scrolls=0, capture_label="headhunter-auth-search-after-otp")
+                search_html = self.fetch_html(search_url, scrolls=0)
+        elif has_results_markers:
+            self._write_attach_diagnostics(label="headhunter-auth-search-results-detected", extra={"requested_url": search_url})
         self._validate_authenticated_html(
             source="headhunter",
             url=search_url,
             html=search_html,
-            required_markers=(
-                "hh.ru/search/vacancy",
-                "vacancy_search",
-                "vacancy search",
-                "поиск вакансий",
-                "найдено",
-                "resume",
-                "резюме",
-            ),
+            required_markers=required_markers,
             login_markers=("sign in", "log in", "authorize", "verification code"),
         )
 
     def session_health_snapshot(self) -> dict[str, Any]:
         return self._health.snapshot()
 
+    def capture_existing_pages(self, *, label: str) -> None:
+        snapshot = self._browser_state_snapshot()
+        self._write_attach_diagnostics(label=label, extra={"browser_state": snapshot})
+        if self._context is None:
+            return
+        with suppress(Exception):
+            pages = list(getattr(self._context, "pages", []) or [])
+            for idx, page in enumerate(pages[:5]):
+                self._capture_page_diagnostics(
+                    page=page,
+                    label=f"{label}-page-{idx}",
+                    extra={"browser_state": snapshot, "page_index": idx},
+                )
+
+    def _reuse_or_prepare_headhunter_page(self, *, requested_url: str, label: str) -> Any | None:
+        if self._context is None:
+            return None
+        pages = list(getattr(self._context, "pages", []) or [])
+        if not pages:
+            return None
+        keep = None
+        closed = 0
+        page_urls: list[str] = []
+        for page in pages:
+            url = ""
+            with suppress(Exception):
+                url = getattr(page, "url", "") or ""
+            page_urls.append(url)
+            normalized = url.lower()
+            should_keep = (
+                normalized.startswith("https://hh.ru/search/vacancy")
+                or normalized == "https://hh.ru/"
+                or normalized == "about:blank"
+            )
+            if keep is None and should_keep:
+                keep = page
+                continue
+            with suppress(Exception):
+                page.close()
+                closed += 1
+        if keep is None:
+            return None
+        with suppress(Exception):
+            keep.bring_to_front()
+        self._write_attach_diagnostics(
+            label=f"{label}-reuse-page",
+            extra={
+                "requested_url": requested_url,
+                "closed_pages": closed,
+                "remaining_url": getattr(keep, "url", ""),
+                "seen_urls": page_urls[:15],
+            },
+        )
+        return keep
+
+
+    def _reuse_or_prepare_linkedin_page(self, *, requested_url: str, label: str) -> Any | None:
+        if self._context is None:
+            return None
+        pages = list(getattr(self._context, "pages", []) or [])
+        if not pages:
+            return None
+        keep = None
+        closed = 0
+        page_urls: list[str] = []
+        for page in pages:
+            url = ""
+            with suppress(Exception):
+                url = getattr(page, "url", "") or ""
+            page_urls.append(url)
+            normalized = url.lower()
+            should_keep = (
+                normalized.startswith("https://www.linkedin.com/")
+                or normalized == "https://www.linkedin.com"
+                or normalized == "about:blank"
+            )
+            if keep is None and should_keep:
+                keep = page
+                continue
+            with suppress(Exception):
+                page.close()
+                closed += 1
+        if keep is None:
+            return None
+        with suppress(Exception):
+            keep.bring_to_front()
+        self._write_attach_diagnostics(
+            label=f"{label}-reuse-page",
+            extra={
+                "requested_url": requested_url,
+                "closed_pages": closed,
+                "remaining_url": getattr(keep, "url", ""),
+                "seen_urls": page_urls[:15],
+            },
+        )
+        return keep
+
     def fetch_html(self, url: str, *, scrolls: int | None = None, capture_label: str | None = None) -> str:
         if self._context is None:
             raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
         scroll_count = self.config.max_scrolls if scrolls is None else max(0, scrolls)
         start = time.perf_counter()
-        try:
-            page = self._context.new_page()
+        source_key = (self.config.source_name or "").strip().lower()
+        fetch_label = capture_label or "fetch"
+
+        def _attempt_fetch() -> str:
+            page = None
+            reuse_existing = False
             try:
+                if source_key in {"headhunter", "hh"}:
+                    page = self._reuse_or_prepare_headhunter_page(requested_url=url, label=fetch_label)
+                    reuse_existing = page is not None
+                elif source_key == "linkedin":
+                    # For LinkedIn search pages we prefer a fresh tab. Reusing the feed tab sometimes
+                    # yields Page.goto net::ERR_ABORTED / frame-detached.
+                    if fetch_label.startswith("linkedin-search"):
+                        page = None
+                        reuse_existing = False
+                    else:
+                        page = self._reuse_or_prepare_linkedin_page(requested_url=url, label=fetch_label)
+                        reuse_existing = page is not None
+                if page is None:
+                    self._write_attach_diagnostics(label=f"{fetch_label}-new-page-start", extra={"requested_url": url})
+                    page = self._context.new_page()
+                    self._write_attach_diagnostics(label=f"{fetch_label}-new-page-opened", extra={"requested_url": url})
+                else:
+                    self._write_attach_diagnostics(label=f"{fetch_label}-reuse-page-opened", extra={"requested_url": url, "current_url": getattr(page, "url", "")})
                 self._sleep(source=self.config.source_name)
-                page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                self._write_attach_diagnostics(label=f"{fetch_label}-goto-start", extra={"requested_url": url, "timeout_ms": self.config.navigation_timeout_ms, "reused_page": reuse_existing})
+                def _do_goto() -> None:
+                    if source_key == "linkedin" and fetch_label.startswith("linkedin-search"):
+                        wall = float(os.getenv("JOB_INTEL_BROWSER_GOTO_WALL_TIMEOUT_SECONDS", "70"))
+                        with _WallTimeout(wall, f"Page.goto wall-timeout after {wall}s"):
+                            page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                    else:
+                        page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                try:
+                    _do_goto()
+                except Exception as exc:
+                    msg = str(exc)
+                    transient = source_key == "linkedin" and ("ERR_NETWORK_CHANGED" in msg or "ERR_ABORTED" in msg or "frame was detached" in msg)
+                    if not transient:
+                        raise
+                    self._write_attach_diagnostics(label=f"{fetch_label}-goto-retry", extra={"requested_url": url, "error": msg[:300]})
+                    page.wait_for_timeout(1200)
+                    _do_goto()
+                self._write_attach_diagnostics(label=f"{fetch_label}-goto-done", extra={"requested_url": url, "reused_page": reuse_existing})
                 page.wait_for_timeout(self.config.scroll_pause_ms)
                 self._humanize_page(page, url=url)
                 for _ in range(scroll_count):
                     page.mouse.wheel(0, 1800)
                     page.wait_for_timeout(self.config.scroll_pause_ms)
                 html = page.content()
+                self._write_attach_diagnostics(label=f"{fetch_label}-content-read", extra={"requested_url": url, "html_length": len(html), "reused_page": reuse_existing})
                 if capture_label:
-                    self._capture_page_diagnostics(page=page, label=capture_label, html=html, extra={"requested_url": url, "scroll_count": scroll_count})
+                    self._capture_page_diagnostics(page=page, label=capture_label, html=html, extra={"requested_url": url, "scroll_count": scroll_count, "reused_page": reuse_existing})
                 return html
             finally:
-                page.close()
+                if page is not None and not reuse_existing:
+                    with suppress(Exception):
+                        page.close()
+
+        try:
+            return _attempt_fetch()
         except Exception as exc:
-            with suppress(Exception):
-                self._capture_page_diagnostics(page=page, label=capture_label or "fetch-exception", extra={"requested_url": url, "error": str(exc)})
+            page_obj = locals().get("page")
+            html_obj = locals().get("html")
+            self._write_browser_failure_diagnostics(
+                label=f"{fetch_label}-failure-state",
+                requested_url=url,
+                error=str(exc),
+                page=page_obj,
+                html=html_obj,
+            )
+            should_retry = (
+                source_key in {"headhunter", "hh"}
+                and ("Target page, context or browser has been closed" in str(exc) or "BrowserContext.new_page" in str(exc))
+            )
+            if should_retry:
+                self._write_browser_failure_diagnostics(
+                    label=f"{fetch_label}-retry-context-close",
+                    requested_url=url,
+                    error=str(exc),
+                    page=page_obj,
+                    html=html_obj,
+                )
+                try:
+                    if self._browser is not None and self._cdp_attached:
+                        with suppress(Exception):
+                            self._browser.close()
+                    if self._playwright is not None:
+                        with suppress(Exception):
+                            self._playwright.stop()
+                finally:
+                    self._browser = None
+                    self._context = None
+                    self._playwright = None
+                    self._cdp_attached = False
+                    self._cdp_url = ""
+                raise BrowserNativeUnavailable(f"Playwright browser fetch failed: {exc}") from exc
             raise BrowserNativeUnavailable(f"Playwright browser fetch failed: {exc}") from exc
         finally:
             self._last_fetch_seconds = max(0.0, time.perf_counter() - start)
@@ -1089,7 +1433,7 @@ class BrowserSourceClient:
         return list(dict.fromkeys(candidates))
 
     def _maybe_open_noise_page(self, *, page_url: str, html: str, source: str) -> list[Vacancy]:
-        if source in {"linkedin", "headhunter"}:
+        if source == "headhunter":
             return []
         if random.random() > self.config.noise_probability:
             return []
@@ -1107,13 +1451,14 @@ class BrowserSourceClient:
         return detail_vacancies
 
     def _maybe_open_detail_vacancy(self, *, source: str, vacancies: list[Vacancy]) -> list[Vacancy]:
-        if source in {"linkedin", "headhunter"}:
+        if source == "headhunter":
             return []
         if not vacancies or random.random() > max(0.25, self.config.noise_probability):
             return []
-        candidate = next((vacancy for vacancy in vacancies if vacancy.url), None)
-        if candidate is None:
+        candidates = [vacancy for vacancy in vacancies if vacancy.url]
+        if not candidates:
             return []
+        candidate = random.choice(candidates)
         detail_url = candidate.url
         detail_html = self.fetch_html(detail_url, scrolls=0)
         detail_vacancies = {
@@ -1149,7 +1494,7 @@ class BrowserSourceClient:
         for page_index in self._linkedin_page_plan(max_pages):
             self._sleep(source="linkedin", extra_bias_ms=(250, 1300))
             page_url = f"{url}&start={page_index * 25}" if page_index else url
-            html = self.fetch_html(page_url, capture_label=f"linkedin-search-page-{page_index}")
+            html = self.fetch_html(page_url)
             page_vacancies = extract_linkedin_vacancies_from_html(html, page_url=page_url)
             self._observe_page(page_url, html, len(page_vacancies))
             vacancies.extend(page_vacancies)
@@ -1167,7 +1512,7 @@ class BrowserSourceClient:
         for page_index in self._headhunter_page_plan(max_pages):
             self._sleep(source="headhunter", extra_bias_ms=(300, 1600))
             page_url = f"{url}&page={page_index}" if page_index else url
-            html = self.fetch_html(page_url, capture_label=f"headhunter-search-page-{page_index}")
+            html = self.fetch_html(page_url)
             page_vacancies = extract_headhunter_vacancies_from_html(html, page_url=page_url)
             self._observe_page(page_url, html, len(page_vacancies))
             vacancies.extend(page_vacancies)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -27,6 +28,58 @@ _UA = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.8",
 }
+
+def _int_env(name: str, default: int, *, min_value: int = 1, max_value: int = 10_000) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(min_value, min(max_value, value))
+
+
+def _source_cap(source: str, key: str, default: int) -> int:
+    src = (source or "").strip().upper().replace("-", "_")
+    return _int_env(f"JOB_INTEL_ATS_{src}_{key}", _int_env(f"JOB_INTEL_ATS_{key}", default))
+
+_ATS_ENV_SEEDS = {
+    "greenhouse": "JOB_INTEL_ATS_SEEDS_GREENHOUSE",
+    "lever": "JOB_INTEL_ATS_SEEDS_LEVER",
+    "ashby": "JOB_INTEL_ATS_SEEDS_ASHBY",
+    "teamtailor": "JOB_INTEL_ATS_SEEDS_TEAMTAILOR",
+    "smartrecruiters": "JOB_INTEL_ATS_SEEDS_SMARTRECRUITERS",
+    "personio": "JOB_INTEL_ATS_SEEDS_PERSONIO",
+    "recruitee": "JOB_INTEL_ATS_SEEDS_RECRUITEE",
+}
+
+
+def env_ats_seeds(source: str) -> list[str]:
+    """Temporary validation mechanism: operator-provided ATS tenant seeds.
+
+    These are not a permanent discovery strategy.
+    """
+    var = _ATS_ENV_SEEDS.get((source or "").strip().lower())
+    if not var:
+        return []
+    raw = os.getenv(var, "").strip()
+    if not raw:
+        return []
+    # Allow comma / newline / space separation.
+    parts = re.split(r"[,\n\r\t ]+", raw)
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        token = (part or "").strip()
+        if not token:
+            continue
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(token)
+    return out
 
 
 def _http_get(url: str, *, timeout: int = 25, headers: dict[str, str] | None = None) -> requests.Response:
@@ -145,6 +198,73 @@ def discover_companies(
             if len(companies) >= max_companies:
                 return companies
     return companies
+
+
+def discover_ats_seeds_from_career_urls(career_urls: list[str], *, max_pages: int = 40) -> dict[str, list[str]]:
+    """Best-effort extraction of ATS tenant slugs from a set of career pages.
+
+    This avoids reliance on public web search (DDG HTML results are unstable / often blocked from servers).
+    """
+    seeds: dict[str, set[str]] = {
+        "greenhouse": set(),
+        "lever": set(),
+        "ashby": set(),
+        "teamtailor": set(),
+        "smartrecruiters": set(),
+        "personio": set(),
+        "recruitee": set(),
+    }
+    urls = [u for u in (career_urls or []) if isinstance(u, str) and u.strip()]
+    seen: set[str] = set()
+    pages = 0
+
+    for url in urls:
+        if pages >= max_pages:
+            break
+        url = url.strip()
+        if url in seen:
+            continue
+        seen.add(url)
+        try:
+            resp = _http_get(url, timeout=20)
+            pages += 1
+            if resp.status_code != 200:
+                continue
+            html = resp.text or ""
+        except Exception:
+            continue
+
+        # Greenhouse boards
+        for m in re.finditer(r"https?://boards\\.greenhouse\\.io/([^/\\s\"'#?]+)", html, flags=re.I):
+            seeds["greenhouse"].add(m.group(1))
+        for m in re.finditer(r"https?://(?:www\\.)?greenhouse\\.io/([^/\\s\"'#?]+)", html, flags=re.I):
+            seeds["greenhouse"].add(m.group(1))
+
+        # Lever
+        for m in re.finditer(r"https?://jobs\\.lever\\.co/([^/\\s\"'#?]+)", html, flags=re.I):
+            seeds["lever"].add(m.group(1))
+
+        # Ashby
+        for m in re.finditer(r"https?://jobs\\.ashbyhq\\.com/([^/\\s\"'#?]+)", html, flags=re.I):
+            seeds["ashby"].add(m.group(1))
+
+        # Teamtailor
+        for m in re.finditer(r"https?://([^./\\s\"'#?]+)\\.teamtailor\\.com/jobs", html, flags=re.I):
+            seeds["teamtailor"].add(m.group(1))
+
+        # SmartRecruiters
+        for m in re.finditer(r"https?://jobs\\.smartrecruiters\\.com/([^/\\s\"'#?]+)", html, flags=re.I):
+            seeds["smartrecruiters"].add(m.group(1))
+
+        # Personio
+        for m in re.finditer(r"https?://([^./\\s\"'#?]+)\\.jobs\\.personio\\.com", html, flags=re.I):
+            seeds["personio"].add(m.group(1))
+
+        # Recruitee
+        for m in re.finditer(r"https?://([^./\\s\"'#?]+)\\.recruitee\\.com", html, flags=re.I):
+            seeds["recruitee"].add(m.group(1))
+
+    return {k: sorted(v) for k, v in seeds.items() if v}
 
 
 def _vacancy(
@@ -288,13 +408,16 @@ def _company_from_path_segment(url: str, *, hosts: tuple[str, ...]) -> str | Non
 def fetch_greenhouse(
     queries: list[str],
     *,
-    max_companies: int = 30,
-    max_jobs_per_company: int = 200,
+    max_companies: int = 0,
+    max_jobs_per_company: int = 0,
+    companies: list[str] | None = None,
 ) -> AtsSourceResult:
+    max_companies = max_companies or _source_cap("greenhouse", "MAX_COMPANIES", 8)
+    max_jobs_per_company = max_jobs_per_company or _source_cap("greenhouse", "MAX_JOBS_PER_COMPANY", 200)
     def _company(url: str) -> str | None:
         return _company_from_path_segment(url, hosts=("boards.greenhouse.io", "greenhouse.io"))
 
-    tokens = discover_companies(queries, site_filter="boards.greenhouse.io", company_from_url=_company, max_companies=max_companies)
+    tokens = list(companies or []) or env_ats_seeds("greenhouse") or discover_companies(queries, site_filter="boards.greenhouse.io", company_from_url=_company, max_companies=max_companies)
     vacancies: list[Vacancy] = []
     errors: list[str] = []
     pages = 0
@@ -352,13 +475,16 @@ def fetch_greenhouse(
 def fetch_lever(
     queries: list[str],
     *,
-    max_companies: int = 40,
-    max_jobs_per_company: int = 200,
+    max_companies: int = 0,
+    max_jobs_per_company: int = 0,
+    companies: list[str] | None = None,
 ) -> AtsSourceResult:
+    max_companies = max_companies or _source_cap("lever", "MAX_COMPANIES", 10)
+    max_jobs_per_company = max_jobs_per_company or _source_cap("lever", "MAX_JOBS_PER_COMPANY", 200)
     def _company(url: str) -> str | None:
         return _company_from_path_segment(url, hosts=("jobs.lever.co",))
 
-    slugs = discover_companies(queries, site_filter="jobs.lever.co", company_from_url=_company, max_companies=max_companies)
+    slugs = list(companies or []) or env_ats_seeds("lever") or discover_companies(queries, site_filter="jobs.lever.co", company_from_url=_company, max_companies=max_companies)
     vacancies: list[Vacancy] = []
     errors: list[str] = []
     pages = 0
@@ -420,13 +546,16 @@ def fetch_lever(
 def fetch_ashby(
     queries: list[str],
     *,
-    max_companies: int = 40,
-    max_jobs_per_company: int = 300,
+    max_companies: int = 0,
+    max_jobs_per_company: int = 0,
+    companies: list[str] | None = None,
 ) -> AtsSourceResult:
+    max_companies = max_companies or _source_cap("ashby", "MAX_COMPANIES", 10)
+    max_jobs_per_company = max_jobs_per_company or _source_cap("ashby", "MAX_JOBS_PER_COMPANY", 300)
     def _company(url: str) -> str | None:
         return _company_from_path_segment(url, hosts=("jobs.ashbyhq.com", "ashbyhq.com"))
 
-    boards = discover_companies(queries, site_filter="jobs.ashbyhq.com", company_from_url=_company, max_companies=max_companies)
+    boards = list(companies or []) or env_ats_seeds("ashby") or discover_companies(queries, site_filter="jobs.ashbyhq.com", company_from_url=_company, max_companies=max_companies)
     vacancies: list[Vacancy] = []
     errors: list[str] = []
     pages = 0
@@ -483,13 +612,16 @@ def fetch_ashby(
 def fetch_smartrecruiters(
     queries: list[str],
     *,
-    max_companies: int = 40,
-    max_jobs_per_company: int = 250,
+    max_companies: int = 0,
+    max_jobs_per_company: int = 0,
+    companies: list[str] | None = None,
 ) -> AtsSourceResult:
+    max_companies = max_companies or _source_cap("smartrecruiters", "MAX_COMPANIES", 8)
+    max_jobs_per_company = max_jobs_per_company or _source_cap("smartrecruiters", "MAX_JOBS_PER_COMPANY", 250)
     def _company(url: str) -> str | None:
         return _company_from_path_segment(url, hosts=("jobs.smartrecruiters.com",))
 
-    companies = discover_companies(queries, site_filter="jobs.smartrecruiters.com", company_from_url=_company, max_companies=max_companies)
+    companies = list(companies or []) or env_ats_seeds("smartrecruiters") or discover_companies(queries, site_filter="jobs.smartrecruiters.com", company_from_url=_company, max_companies=max_companies)
     vacancies: list[Vacancy] = []
     errors: list[str] = []
     pages = 0
@@ -595,14 +727,18 @@ def fetch_smartrecruiters(
 def fetch_teamtailor(
     queries: list[str],
     *,
-    max_companies: int = 35,
-    max_pages_per_company: int = 3,
-    max_jobs_per_company: int = 120,
+    max_companies: int = 0,
+    max_pages_per_company: int = 0,
+    max_jobs_per_company: int = 0,
+    companies: list[str] | None = None,
 ) -> AtsSourceResult:
+    max_companies = max_companies or _source_cap("teamtailor", "MAX_COMPANIES", 6)
+    max_pages_per_company = max_pages_per_company or _source_cap("teamtailor", "MAX_PAGES_PER_COMPANY", 2)
+    max_jobs_per_company = max_jobs_per_company or _source_cap("teamtailor", "MAX_JOBS_PER_COMPANY", 80)
     def _company(url: str) -> str | None:
         return _company_from_subdomain(url, suffix=".teamtailor.com")
 
-    companies = discover_companies(queries, site_filter="teamtailor.com/jobs", company_from_url=_company, max_companies=max_companies)
+    companies = list(companies or []) or env_ats_seeds("teamtailor") or discover_companies(queries, site_filter="teamtailor.com/jobs", company_from_url=_company, max_companies=max_companies)
     vacancies: list[Vacancy] = []
     errors: list[str] = []
     pages = 0
@@ -695,13 +831,16 @@ def _parse_personio_xml(xml_text: str, *, company: str) -> list[Vacancy]:
 def fetch_personio(
     queries: list[str],
     *,
-    max_companies: int = 40,
-    max_jobs_per_company: int = 300,
+    max_companies: int = 0,
+    max_jobs_per_company: int = 0,
+    companies: list[str] | None = None,
 ) -> AtsSourceResult:
+    max_companies = max_companies or _source_cap("personio", "MAX_COMPANIES", 10)
+    max_jobs_per_company = max_jobs_per_company or _source_cap("personio", "MAX_JOBS_PER_COMPANY", 300)
     def _company(url: str) -> str | None:
         return _company_from_subdomain(url, suffix=".jobs.personio.com")
 
-    accounts = discover_companies(queries, site_filter="jobs.personio.com", company_from_url=_company, max_companies=max_companies)
+    accounts = list(companies or []) or env_ats_seeds("personio") or discover_companies(queries, site_filter="jobs.personio.com", company_from_url=_company, max_companies=max_companies)
     vacancies: list[Vacancy] = []
     errors: list[str] = []
     pages = 0
@@ -758,13 +897,16 @@ def _parse_recruitee_offers_xml(xml_text: str, *, company: str) -> list[Vacancy]
 def fetch_recruitee(
     queries: list[str],
     *,
-    max_companies: int = 40,
-    max_jobs_per_company: int = 300,
+    max_companies: int = 0,
+    max_jobs_per_company: int = 0,
+    companies: list[str] | None = None,
 ) -> AtsSourceResult:
+    max_companies = max_companies or _source_cap("recruitee", "MAX_COMPANIES", 10)
+    max_jobs_per_company = max_jobs_per_company or _source_cap("recruitee", "MAX_JOBS_PER_COMPANY", 300)
     def _company(url: str) -> str | None:
         return _company_from_subdomain(url, suffix=".recruitee.com")
 
-    accounts = discover_companies(queries, site_filter="recruitee.com", company_from_url=_company, max_companies=max_companies)
+    accounts = list(companies or []) or env_ats_seeds("recruitee") or discover_companies(queries, site_filter="recruitee.com", company_from_url=_company, max_companies=max_companies)
     vacancies: list[Vacancy] = []
     errors: list[str] = []
     pages = 0

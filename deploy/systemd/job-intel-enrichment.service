@@ -10,6 +10,7 @@ Group=__JOB_INTEL_SERVICE_GROUP__
 EnvironmentFile=__JOB_INTEL_ENV_FILE__
 Environment=JOB_INTEL_SERVICE_USER=__JOB_INTEL_SERVICE_USER__
 Environment=JOB_INTEL_SERVICE_GROUP=__JOB_INTEL_SERVICE_GROUP__
+Environment=JOB_INTEL_RUNTIME_STRICT=1
 Environment=JOB_INTEL_WORKDIR=__JOB_INTEL_REPO_ROOT__
 WorkingDirectory=__JOB_INTEL_REPO_ROOT__
 ExecStart=/usr/bin/env bash __JOB_INTEL_REPO_ROOT__/scripts/job_intel_host_wrapper.sh enrichment

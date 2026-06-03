@@ -79,6 +79,7 @@ disable_timers_on_failure() {
     job-intel-enrichment.service
     job-intel-market.service
     job-intel-strategic.service
+    job-intel-metrics-exporter.service
   )
   local unit
   for unit in "${units[@]}"; do
@@ -162,7 +163,7 @@ if (( dry_run )); then
   printf 'would install env file: %s\n' "$env_file"
   printf 'would render systemd units into: %s\n' "$systemd_dir"
   if (( enable_now )); then
-    printf 'would enable timers after verification: job-intel-daily.timer job-intel-alert.timer job-intel-health.timer job-intel-enrichment.timer job-intel-market.timer job-intel-strategic.timer\n'
+    printf 'would enable timers after verification: job-intel-daily.timer job-intel-alert.timer job-intel-health.timer job-intel-enrichment.timer job-intel-market.timer job-intel-strategic.timer and service: job-intel-metrics-exporter.service\n'
   fi
   exit 0
 fi
@@ -213,6 +214,7 @@ service_templates=(
   job-intel-enrichment.service
   job-intel-market.service
   job-intel-strategic.service
+  job-intel-metrics-exporter.service
 )
 timer_templates=(
   job-intel-daily.timer
@@ -240,6 +242,7 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     "$systemd_dir/job-intel-market.timer"
     "$systemd_dir/job-intel-strategic.service"
     "$systemd_dir/job-intel-strategic.timer"
+    "$systemd_dir/job-intel-metrics-exporter.service"
   )
   systemd-analyze verify "${systemd_units[@]}"
 else
@@ -261,7 +264,7 @@ if ! verify_installed_contract; then
 fi
 
 if (( enable_now )); then
-  if ! systemctl enable --now "${timers[@]}"; then
+  if ! systemctl enable --now "${timers[@]}" job-intel-metrics-exporter.service; then
     fail "failed to enable timers"
   fi
 fi

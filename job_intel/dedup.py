@@ -5,6 +5,7 @@ from difflib import SequenceMatcher
 from hashlib import sha256
 import re
 from typing import Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 from .models import Vacancy
 
@@ -25,8 +26,44 @@ def _norm(text: str) -> str:
     return text
 
 
+
+
+def canonical_job_url(url: str | None, source: str | None = None) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+    except Exception:
+        return raw
+    scheme = (parsed.scheme or "https").lower()
+    host = parsed.netloc.lower()
+    path = parsed.path or ""
+
+    if "linkedin.com" in host:
+        m = re.search(r"/jobs/view/([0-9]+)", path)
+        if not m:
+            return ""
+        path = f"/jobs/view/{m.group(1)}"
+        return urlunsplit((scheme, host, path, "", ""))
+
+    if "hh.ru" in host:
+        m = re.search(r"/vacancy/([0-9]+)", path)
+        if m:
+            path = f"/vacancy/{m.group(1)}"
+            return urlunsplit((scheme, host, path, "", ""))
+
+    path = path.rstrip("/")
+    return urlunsplit((scheme, host, path, "", ""))
+
+
 def canonical_vacancy_key(vacancy: Vacancy) -> str:
-    payload = "|".join((_norm(vacancy.company), _norm(vacancy.title), _norm(vacancy.location)))
+    source = _norm(getattr(vacancy, "source", "") or "unknown")
+    canonical_url = canonical_job_url(getattr(vacancy, "url", ""), getattr(vacancy, "source", None))
+    if canonical_url:
+        payload = "|".join((source, canonical_url.lower()))
+    else:
+        payload = "|".join((source, _norm(vacancy.company), _norm(vacancy.title), _norm(vacancy.location)))
     return sha256(payload.encode("utf-8")).hexdigest()
 
 

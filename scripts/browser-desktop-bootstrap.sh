@@ -457,10 +457,20 @@ ensure_port_free_or_owned() {
   local port="$1"
   local pattern="$2"
   local label="$3"
-  if port_listening "${port}" && ! process_matches "${pattern}"; then
-    echo "${label} port ${port} is already in use by another process." >&2
-    exit 1
+  if ! port_listening "${port}"; then
+    return 0
   fi
+  if process_matches "${pattern}"; then
+    return 0
+  fi
+  if [[ "${label}" == "VNC" ]] && process_matches "x11vnc -display :${DISPLAY_NUM}"; then
+    return 0
+  fi
+  if [[ "${label}" == "noVNC" ]] && process_matches "websockify.*127.0.0.1:${NOVNC_PORT} 127.0.0.1:${VNC_PORT}"; then
+    return 0
+  fi
+  echo "${label} port ${port} is already in use by another process." >&2
+  exit 1
 }
 
 wait_for_display() {
@@ -497,8 +507,8 @@ if ! process_matches "dbus-run-session -- startxfce4"; then
   start_as_browser "${LOG_DIR}/xfce.log" dbus-run-session -- startxfce4
 fi
 
-ensure_port_free_or_owned "${VNC_PORT}" "x11vnc .* -display :${DISPLAY_NUM} .* -rfbport ${VNC_PORT}" "VNC"
-if ! process_matches "x11vnc .* -display :${DISPLAY_NUM}"; then
+ensure_port_free_or_owned "${VNC_PORT}" "x11vnc -display :${DISPLAY_NUM}.*-rfbport ${VNC_PORT}" "VNC"
+if ! process_matches "x11vnc -display :${DISPLAY_NUM}"; then
   start_as_browser "${LOG_DIR}/x11vnc.log" x11vnc \
     -display ":${DISPLAY_NUM}" \
     -localhost \
@@ -510,8 +520,8 @@ if ! process_matches "x11vnc .* -display :${DISPLAY_NUM}"; then
     -o "${LOG_DIR}/x11vnc.log"
 fi
 
-ensure_port_free_or_owned "${NOVNC_PORT}" "websockify .*127.0.0.1:${NOVNC_PORT} .*127.0.0.1:${VNC_PORT}" "noVNC"
-if ! process_matches "websockify .*127.0.0.1:${NOVNC_PORT} .*127.0.0.1:${VNC_PORT}"; then
+ensure_port_free_or_owned "${NOVNC_PORT}" "websockify.*127.0.0.1:${NOVNC_PORT} 127.0.0.1:${VNC_PORT}" "noVNC"
+if ! process_matches "websockify.*127.0.0.1:${NOVNC_PORT} 127.0.0.1:${VNC_PORT}"; then
   start_as_browser "${LOG_DIR}/websockify.log" websockify --web=/usr/share/novnc "127.0.0.1:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}"
 fi
 

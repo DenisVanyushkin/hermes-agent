@@ -8,6 +8,7 @@ import pytest
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 from gateway.session import SessionSource
+from gateway.telegram_reactions import strip_telegram_reaction_only_response
 
 
 def _make_adapter(**extra_env):
@@ -36,7 +37,13 @@ def _make_event(chat_id: str = "123", message_id: str = "456") -> MessageEvent:
     )
 
 
-# ── _reactions_enabled ───────────────────────────────────────────────
+
+def test_strip_telegram_reaction_only_response():
+    """Bare Telegram emoji replies should be suppressed into reactions."""
+    assert strip_telegram_reaction_only_response("👍") == ""
+    assert strip_telegram_reaction_only_response("  **👍**  ") == ""
+    assert strip_telegram_reaction_only_response("Thanks 👍") == "Thanks 👍"
+    assert strip_telegram_reaction_only_response("done") == "done"
 
 
 def test_reactions_disabled_by_default(monkeypatch):
