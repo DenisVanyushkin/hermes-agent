@@ -22,38 +22,19 @@ def resolve_workdir() -> Path:
         if not candidate:
             continue
         path = Path(candidate)
-        if (path / "job_intel").is_dir() or (path / "gateway").is_dir() or (path / "scripts").is_dir():
+        if (path / "job_intel").is_dir() or (path / "scripts").is_dir():
             return path
     return Path(os.getcwd())
 
 
-def resolve_hermes_home() -> Path:
-    env_home = os.environ.get("HERMES_HOME", "").strip()
-    if env_home:
-        return Path(env_home)
-
+def resolve_python(workdir: Path) -> str:
     candidates = [
-        "/home/hermes/.hermes",
-        "/root/.hermes",
-        str(Path.home() / ".hermes"),
-    ]
-    for candidate in candidates:
-        path = Path(candidate)
-        if path.exists():
-            return path
-    return Path.home() / ".hermes"
-
-
-def resolve_hermes(workdir: Path, hermes_home: Path) -> str:
-    candidates = [
-        os.environ.get("HERMES_BIN", ""),
-        str(hermes_home / "hermes-agent" / ".venv" / "bin" / "hermes"),
-        str(hermes_home / "hermes-agent" / "venv" / "bin" / "hermes"),
-        str(workdir / ".venv" / "bin" / "hermes"),
-        "/workspace/live-hermes/.venv/bin/hermes",
-        str(workdir / "venv" / "bin" / "hermes"),
-        str(hermes_home / ".local" / "bin" / "hermes"),
-        "hermes",
+        os.environ.get("JOB_INTEL_PYTHON", ""),
+        str(workdir / "venv" / "bin" / "python"),
+        str(workdir / ".venv" / "bin" / "python"),
+        "/usr/bin/python3",
+        "python3",
+        "python",
     ]
     for candidate in candidates:
         if not candidate:
@@ -91,7 +72,6 @@ def run_command(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) ->
         proc = subprocess.run(
             cmd,
             cwd=str(cwd),
-            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -122,23 +102,23 @@ def maybe_issue(label: str, code: int, output: str) -> list[str]:
 
 def main() -> int:
     workdir = resolve_workdir()
-    hermes_home = resolve_hermes_home()
-    hermes_bin = resolve_hermes(workdir, hermes_home)
-    if not hermes_bin:
-        print("nightly-diagnostics-hermes: hermes binary not found")
+    python_bin = resolve_python(workdir)
+    if not python_bin:
+        print("nightly-diagnostics-job-intel: python binary not found")
         return 1
 
     env = os.environ.copy()
-    env["HERMES_HOME"] = str(hermes_home)
+    env.setdefault("JOB_INTEL_WORKDIR", str(workdir))
+    env.setdefault("JOB_INTEL_DB_PATH", str(Path.home() / ".hermes" / "job_intel" / "job_intel.sqlite3"))
+    env.setdefault("JOB_INTEL_ENVIRONMENT", "production")
+    env["JOB_INTEL_SCRIPTS_DIR"] = str(Path(__file__).resolve().parent)
 
-    code, output = run_command([hermes_bin, "doctor"], workdir, env=env)
-    issues = maybe_issue("hermes doctor", code, output)
+    code, output = run_command([python_bin, "-m", "job_intel", "doctor"], workdir, env=env)
+    issues = maybe_issue("job_intel doctor", code, output)
     if not issues:
         return 0
 
-    print(f"Nightly diagnostics — hermes — {workdir}")
-    print(f"- Hermes home: {hermes_home}")
-    print(f"- Hermes binary: {hermes_bin}")
+    print(f"Nightly diagnostics — job-intel — {workdir}")
     for line in issues:
         print(f"- {line}")
     return 0
