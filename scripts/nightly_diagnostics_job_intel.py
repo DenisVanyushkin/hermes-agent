@@ -108,9 +108,13 @@ def main() -> int:
         return 1
 
     env = os.environ.copy()
-    env.setdefault("JOB_INTEL_WORKDIR", str(workdir))
-    env.setdefault("JOB_INTEL_DB_PATH", str(Path.home() / ".hermes" / "job_intel" / "job_intel.sqlite3"))
-    env.setdefault("JOB_INTEL_ENVIRONMENT", "production")
+    env["JOB_INTEL_WORKDIR"] = str(workdir)
+    runtime_base = Path.home() / ".hermes" / "job_intel"
+    state_dir = runtime_base / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    env["JOB_INTEL_STATE_DIR"] = str(state_dir)
+    env["JOB_INTEL_DB_PATH"] = str(state_dir / "job_intel.sqlite3")
+    env["JOB_INTEL_ENVIRONMENT"] = "production"
     env["JOB_INTEL_SCRIPTS_DIR"] = str(Path(__file__).resolve().parent)
 
     code, output = run_command([python_bin, "-m", "job_intel", "doctor"], workdir, env=env)
