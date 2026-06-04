@@ -13,8 +13,8 @@ MEM_WARN_GB = 2.0
 def resolve_workdir() -> Path:
     candidates = [
         os.environ.get("JOB_INTEL_WORKDIR", ""),
-        "/home/hermes/.hermes/hermes-agent",
         "/workspace/live-hermes",
+        "/home/hermes/.hermes/hermes-agent",
         os.getcwd(),
     ]
     for candidate in candidates:
@@ -24,6 +24,13 @@ def resolve_workdir() -> Path:
         if (path / "job_intel").is_dir():
             return path
     return Path(os.getcwd())
+
+
+def resolve_hermes_home() -> Path:
+    env_home = os.environ.get("HERMES_HOME", "").strip()
+    if env_home:
+        return Path(env_home)
+    return Path("/home/hermes/.hermes")
 
 
 def clean_lines(text: str) -> list[str]:
@@ -106,10 +113,12 @@ def system_report(paths: list[str]) -> tuple[str, bool]:
 
 def main() -> int:
     workdir = resolve_workdir()
-    system_line, alarming = system_report([str(Path.home()), str(workdir), "/var/lib/browser-desktop"])
+    hermes_home = resolve_hermes_home()
+    system_line, alarming = system_report([str(hermes_home), str(workdir), "/var/lib/browser-desktop"])
     if not alarming:
         return 0
     print(f"Nightly diagnostics — system — {workdir}")
+    print(f"- Hermes home: {hermes_home}")
     print(f"- {system_line}")
     return 0
 
