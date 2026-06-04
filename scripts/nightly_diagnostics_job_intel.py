@@ -27,6 +27,13 @@ def resolve_workdir() -> Path:
     return Path(os.getcwd())
 
 
+def resolve_hermes_home() -> Path:
+    env_home = os.environ.get("HERMES_HOME", "").strip()
+    if env_home:
+        return Path(env_home)
+    return Path("/home/hermes/.hermes")
+
+
 def resolve_python(workdir: Path) -> str:
     candidates = [
         os.environ.get("JOB_INTEL_PYTHON", ""),
@@ -72,6 +79,7 @@ def run_command(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) ->
         proc = subprocess.run(
             cmd,
             cwd=str(cwd),
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -109,7 +117,7 @@ def main() -> int:
 
     env = os.environ.copy()
     env["JOB_INTEL_WORKDIR"] = str(workdir)
-    runtime_base = Path.home() / ".hermes" / "job_intel"
+    runtime_base = resolve_hermes_home() / "job_intel"
     state_dir = runtime_base / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     env["JOB_INTEL_STATE_DIR"] = str(state_dir)
