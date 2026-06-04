@@ -2702,7 +2702,10 @@ def _format_browser_desktop_health(health: dict[str, Any]) -> str:
 
 
 def _source_statuses_for_doctor(store: JobIntelStore) -> dict[str, dict[str, Any]]:
-    latest = store.source_adapter_status_from_latest_run()
+    try:
+        latest = store.source_adapter_status_from_latest_run()
+    except Exception as exc:
+        return {"database": {"source": "database", "status": "error", "errors": [str(exc)]}}
     if latest:
         return latest
     try:
@@ -2742,7 +2745,11 @@ def doctor_report() -> str:
     db_flags = file_access_flags(resolve_db_path())
     workdir_flags = file_access_flags(resolve_workdir())
     source_statuses = _collect_source_statuses(store)
-    latest = store.latest_run() or {}
+    try:
+        latest = store.latest_run() or {}
+    except Exception as exc:
+        latest = {}
+        bootstrap_error = (bootstrap_error + "; " if bootstrap_error else "") + f"latest_run_failed: {exc}"
     latest_statuses: dict[str, dict[str, Any]] = {}
     metadata_json = latest.get("metadata_json") if isinstance(latest, dict) else None
     if metadata_json:
