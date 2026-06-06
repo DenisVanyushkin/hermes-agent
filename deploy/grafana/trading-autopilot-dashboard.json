@@ -1,0 +1,379 @@
+{
+  "uid": "trading-autopilot",
+  "title": "Trading Autopilot",
+  "tags": ["trading", "autopilot", "paper-trading", "prometheus"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "session_id",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(trading_autopilot_session_info, session_id)",
+        "refresh": 1,
+        "sort": 1,
+        "multi": false,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Current Equity",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 0}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "trading_autopilot_balance_quote{session_id=~\"$session_id\",kind=\"equity\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"})",
+          "legendFormat": "equity",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Total P&L",
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 0}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "trading_autopilot_pnl_quote{session_id=~\"$session_id\",kind=\"total\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"})",
+          "legendFormat": "total pnl",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Operations",
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum(trading_autopilot_operation_count{session_id=~\"$session_id\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"}))",
+          "legendFormat": "operations",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Balance",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 5},
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["lastNotNull", "min", "max"]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum by (kind) (trading_autopilot_balance_quote{session_id=~\"$session_id\",kind=~\"cash|equity\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"}))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "P&L",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 5},
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["lastNotNull", "min", "max"]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum by (kind) (trading_autopilot_pnl_quote{session_id=~\"$session_id\",kind=~\"realized|unrealized|total|drawdown\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"}))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "piechart",
+      "title": "Portfolio allocation (absolute value)",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 14},
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "pieType": "pie",
+        "displayLabels": ["name", "percent"],
+        "legend": {
+          "displayMode": "list",
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum by (asset) (trading_autopilot_allocation_value_quote{session_id=~\"$session_id\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"}))",
+          "legendFormat": "{{asset}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "bargauge",
+      "title": "Operation counts",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 14},
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "displayName": "${__field.labels.operation}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "sum by (operation) (trading_autopilot_operation_count{session_id=~\"$session_id\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"}))",
+          "legendFormat": "{{operation}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Latest transactions",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 23},
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 3
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Time"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Time",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Metric": true,
+              "Value": true,
+              "__name__": true,
+              "session_id": true,
+              "occurred_at": true,
+              "execution_price_quote": true,
+              "trade_id": true,
+              "order_id": true,
+              "decision_id": true
+            },
+            "indexByName": {
+              "Time": 0,
+              "asset": 1,
+              "side": 2,
+              "symbol": 3,
+              "quantity": 4,
+              "notional_quote": 5,
+              "fee_quote": 6,
+              "fill_status": 7
+            },
+            "renameByName": {
+              "asset": "Asset",
+              "side": "Side",
+              "symbol": "Symbol",
+              "quantity": "Qty",
+              "notional_quote": "Notional",
+              "fee_quote": "Fee",
+              "fill_status": "Status"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Prometheus",
+          "expr": "topk(10, trading_autopilot_transaction_timestamp_milliseconds{session_id=~\"$session_id\"})",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    }
+  ]
+}

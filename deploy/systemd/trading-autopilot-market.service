@@ -1,0 +1,20 @@
+[Unit]
+Description=Trading Autopilot market ingestion worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__TRADING_AUTOPILOT_SERVICE_USER__
+Group=__TRADING_AUTOPILOT_SERVICE_GROUP__
+WorkingDirectory=__TRADING_AUTOPILOT_REPO_ROOT__
+ExecStart=/usr/bin/env python -m trading_autopilot.market_ingestion market-collect --journal-path /var/lib/trading-autopilot/market.sqlite3 --symbols BTC ETH
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/trading-autopilot /var/log/trading-autopilot
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

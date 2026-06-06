@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import logging
 import os
 import re
 import subprocess
@@ -11,7 +10,6 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from time import perf_counter
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +32,7 @@ from .ats_sources import (
 from .company_intel import build_market_report, monitor_target_companies
 from .config import DEFAULT_CONFIG, load_config_bundle
 from .strategic import build_strategic_report, update_strategic_layer
-from .dedup import canonical_job_url, canonical_vacancy_key, description_similarity, is_duplicate
+from .dedup import canonical_vacancy_key, description_similarity, is_duplicate
 from .digest import (
     format_daily_digest,
     format_enrichment_questions,
@@ -77,19 +75,8 @@ from .sources import (
 )
 from .store import JobIntelStore
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_DB = resolve_db_path()
 TIER_ORDER = {"reject": 0, "weak_fit": 1, "possible_fit": 2, "strong_fit": 3, "exceptional_fit": 4}
-RECOMMENDATION_ORDER = {
-    "reject": 0,
-    "near_miss": 1,
-    "possible_fit": 2,
-    "needs_review": 2,
-    "potential_fit": 2,
-    "strong_fit": 3,
-    "exceptional_fit": 4,
-}
 
 
 @dataclass(frozen=True)
@@ -99,10 +86,6 @@ class SlackDeliveryResult:
     error: str | None = None
     status: str = "sent"
     message_ts: str | None = None
-    channel_id: str | None = None
-    channel_alias: str | None = None
-    channel_name: str | None = None
-    platform_message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -239,14 +222,7 @@ def _source_enabled(enabled: set[str] | None, source: str) -> bool:
 
 
 def _skipped_source_status(source: str, *, acquisition: str | None = None) -> dict[str, Any]:
-    payload = _source_status_template(
-        source,
-        status="skipped",
-        hits=0,
-        errors=[],
-        acquisition=acquisition or source,
-        runtime_seconds=0.0,
-    )
+    payload = _source_status_template(source, status="skipped", hits=0, errors=[], acquisition=acquisition or source)
     payload["reason"] = "disabled by JOB_INTEL_ENABLED_SOURCES"
     return payload
 
@@ -263,9 +239,7 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
     ats_seeds: dict[str, list[str]] = {}
 
     if _source_enabled(enabled_sources, "target_companies"):
-        target_started = perf_counter()
         target_result = monitor_target_companies(store)
-        target_runtime_seconds = perf_counter() - target_started
         vacancies.extend(target_result.vacancies)
         company_ok = any(status.get("status") == "ok" for status in target_result.company_statuses.values())
         statuses["target_companies"] = _source_status_template(
@@ -274,7 +248,6 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             hits=len(target_result.vacancies),
             companies=len(target_result.company_statuses),
             company_statuses=target_result.company_statuses,
-            runtime_seconds=target_runtime_seconds,
         )
         # ATS seeds: reuse links already discovered via target company monitoring.
         try:
@@ -299,7 +272,6 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
         linkedin_queries = rotating_source_queries("linkedin", limit=6)
         linkedin_hits = 0
         linkedin_errors: list[str] = []
-        linkedin_started = perf_counter()
         for query in linkedin_queries:
             try:
                 results = fetch_linkedin_vacancies(query, max_pages=2)
@@ -315,14 +287,7 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             linkedin_status = "error"
         else:
             linkedin_status = "empty"
-        linkedin_source_status = _source_status_template(
-            "linkedin",
-            status=linkedin_status,
-            hits=linkedin_hits,
-            errors=linkedin_errors,
-            acquisition="browser-native",
-            runtime_seconds=perf_counter() - linkedin_started,
-        )
+        linkedin_source_status = _source_status_template("linkedin", status=linkedin_status, hits=linkedin_hits, errors=linkedin_errors, acquisition="browser-native")
         linkedin_health = getattr(fetch_linkedin_vacancies, "last_health", None)
         if linkedin_health:
             linkedin_source_status["session_health"] = linkedin_health
@@ -336,7 +301,6 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
         hh_queries = rotating_source_queries("headhunter", limit=hh_query_limit)
         hh_hits = 0
         hh_errors: list[str] = []
-        hh_started = perf_counter()
         for query in hh_queries:
             try:
                 results = fetch_headhunter_vacancies(query, per_page=hh_per_page)
@@ -352,14 +316,7 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             hh_status = "error"
         else:
             hh_status = "empty"
-        hh_source_status = _source_status_template(
-            "headhunter",
-            status=hh_status,
-            hits=hh_hits,
-            errors=hh_errors,
-            acquisition="browser-native-first",
-            runtime_seconds=perf_counter() - hh_started,
-        )
+        hh_source_status = _source_status_template("headhunter", status=hh_status, hits=hh_hits, errors=hh_errors, acquisition="browser-native-first")
         hh_health = getattr(fetch_headhunter_vacancies, "last_health", None)
         if hh_health:
             hh_source_status["session_health"] = hh_health
@@ -371,7 +328,6 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             statuses[source] = _skipped_source_status(source, acquisition=acquisition)
             return
         queries = rotating_source_queries(source, limit=6)
-        started = perf_counter()
         try:
             registry_entries = _registry_entries_for_source(source) if source in _REGISTRY_ATS_SOURCES else []
             registry_statuses: list[dict[str, Any]] = []
@@ -455,21 +411,13 @@ def _collect_vacancies(store: JobIntelStore | None = None) -> CollectedVacancies
             payload = _source_status_template(source, status=status, hits=hits, errors=errors, acquisition=acquisition)
             payload["discovered_companies"] = int(discovered_companies or 0)
             payload["pages_fetched"] = int(pages_fetched or 0)
-            payload["runtime_seconds"] = perf_counter() - started
             if registry_statuses:
                 payload["registry_companies"] = registry_statuses
                 payload["registry_companies_attempted"] = len(registry_statuses)
                 payload["registry_companies_with_hits"] = sum(1 for item in registry_statuses if int(item.get("vacancies_found") or 0) > 0)
             statuses[source] = payload
         except Exception as exc:
-            statuses[source] = _source_status_template(
-                source,
-                status="error",
-                hits=0,
-                errors=[str(exc)],
-                acquisition=acquisition,
-                runtime_seconds=perf_counter() - started,
-            )
+            statuses[source] = _source_status_template(source, status="error", hits=0, errors=[str(exc)], acquisition=acquisition)
 
     _collect_ats("greenhouse", fetcher=fetch_greenhouse, acquisition="ats-api")
     _collect_ats("lever", fetcher=fetch_lever, acquisition="ats-api")
@@ -542,54 +490,13 @@ def _slack_webhook_enabled() -> bool:
 
 
 
-def _ensure_hermes_env_loaded_for_outbound_delivery() -> None:
-    try:
-        from hermes_cli.send_cmd import _load_hermes_env
-    except Exception:
-        _load_hermes_env = None
-
-    if _load_hermes_env is not None:
-        try:
-            _load_hermes_env()
-            return
-        except Exception:
-            pass
-
-    if os.getenv("SLACK_BOT_TOKEN"):
-        return
-
-    env_path = runtime_home() / ".env"
-    if not env_path.exists() or load_dotenv is None:
-        return
-
-    try:
-        load_dotenv(str(env_path), override=True, encoding="utf-8")
-    except UnicodeDecodeError:
-        try:
-            load_dotenv(str(env_path), override=True, encoding="latin-1")
-        except Exception:
-            return
-    except Exception:
-        return
-
-
-
-def _deliver_to_slack(
-    message: str,
-    channel: str | None = None,
-    *,
-    retries: int = 3,
-    prefer_gateway: bool = False,
-) -> SlackDeliveryResult:
+def _deliver_to_slack(message: str, channel: str | None = None, *, retries: int = 3) -> SlackDeliveryResult:
     webhook = os.getenv("JOB_INTEL_SLACK_WEBHOOK_URL", "").strip()
     if message == "[SILENT]":
         return SlackDeliveryResult(success=True, attempts=0, error=None, status="sent")
 
-    if prefer_gateway or not webhook:
-        channel_alias = channel
-        target_channel = (channel if (channel and channel.startswith("C")) else ("C0B4MM6D52A" if channel == "executive_search_report" else channel))
-        target = f"slack:{target_channel}" if target_channel else "slack"
-        _ensure_hermes_env_loaded_for_outbound_delivery()
+    if not webhook:
+        target = (f"slack:{channel}" if (channel and channel.startswith("C")) else ("slack:C0B4MM6D52A" if channel == "executive_search_report" else (f"slack:{channel}" if channel else "slack")))
         try:
             raw = send_message_tool({"target": target, "message": message})
             payload = json.loads(raw) if raw else {}
@@ -598,19 +505,8 @@ def _deliver_to_slack(
         if payload.get("error"):
             return SlackDeliveryResult(success=False, attempts=1, error=str(payload.get("error")), status="failed")
         if payload.get("success"):
-            platform_message_id = payload.get("message_id") or payload.get("ts") or payload.get("message_ts") or payload.get("id")
-            channel_id = payload.get("chat_id") or payload.get("channel") or target_channel
-            return SlackDeliveryResult(
-                success=True,
-                attempts=1,
-                error=None,
-                status="sent",
-                message_ts=str(platform_message_id) if platform_message_id else None,
-                channel_id=str(channel_id) if channel_id else None,
-                channel_alias=channel_alias,
-                channel_name=payload.get("channel_name"),
-                platform_message_id=str(platform_message_id) if platform_message_id else None,
-            )
+            ts = payload.get("ts") or payload.get("message_ts") or payload.get("id")
+            return SlackDeliveryResult(success=True, attempts=1, error=None, status="sent", message_ts=str(ts) if ts else None)
         return SlackDeliveryResult(success=False, attempts=1, error=f"unexpected live adapter response: {payload}", status="failed")
 
     payload: dict[str, str] = {"text": message}
@@ -633,6 +529,7 @@ def _deliver_to_slack(
             if attempt < retries:
                 continue
     return SlackDeliveryResult(success=False, attempts=attempts, error=str(last_error) if last_error else None, status="failed")
+
 
 def _source_footer(source_statuses: dict[str, dict[str, Any]]) -> str | None:
     issues: list[str] = []
@@ -693,7 +590,7 @@ def _search_report_payload(source_statuses: dict[str, dict[str, Any]]) -> str:
 
 
 def _feedback_hint_block() -> str:
-    return "👍 Interesting\n👎 Not Interesting\n🔥 Exceptional\n🚀 Applied\n👀 Save for later"
+    return "👍 Interesting\n👎 Not Interesting\n🔥 Exceptional\n🚀 Applied"
 
 
 def _format_vacancy_feedback_message(vacancy: Vacancy, evaluation: Any) -> str:
@@ -715,11 +612,9 @@ def _deliver_vacancy_messages(
         notification_id = store.create_notification(
             run_id,
             channel,
-            "vacancy_card",
+            "vacancy_message",
             body,
             vacancy_id=vacancy_id,
-            card_key=payload.get("card_key"),
-            notification_kind="vacancy_card",
             payload=payload,
             delivery_status="pending",
             delivery_attempts=0,
@@ -736,19 +631,13 @@ def _deliver_vacancy_messages(
             store.insert_vacancy_slack_message(
                 vacancy_id=vacancy_id,
                 run_id=run_id,
-                vacancy_key=payload.get("vacancy_key"),
-                canonical_url=payload.get("canonical_url"),
-                card_key=payload.get("card_key"),
-                notification_id=notification_id,
                 slack_channel=channel,
                 slack_message_ts=message_ts,
-                message_type="vacancy_card",
                 company=vacancy.company,
                 title=vacancy.title,
                 score=int(getattr(evaluation, "score", 0) or 0),
                 recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
                 url=vacancy.url,
-                sent_at=datetime.now(timezone.utc).isoformat(),
             )
             store.set_vacancy_status(vacancy_id, "notified")
         else:
@@ -762,16 +651,9 @@ def _deliver_vacancy_messages(
 
 
 def _notification_payload(vacancy: Vacancy, evaluation: Any, vacancy_id: int) -> dict[str, Any]:
-    canonical_url = canonical_job_url(vacancy.url, vacancy.source)
-    vacancy_key = canonical_vacancy_key(vacancy)
-    card_key = canonical_url or vacancy_key
-    summary_body = format_vacancy_summary(vacancy, evaluation)
     return {
         "vacancy_id": vacancy_id,
-        "vacancy_key": vacancy_key,
-        "canonical_url": canonical_url,
-        "card_key": card_key,
-        "summary_hash": sha256_text(summary_body),
+        "vacancy_key": canonical_vacancy_key(vacancy),
         "score": evaluation.score,
         "tier": evaluation.tier,
         "recommendation": evaluation.recommendation,
@@ -784,21 +666,9 @@ def _notification_payload(vacancy: Vacancy, evaluation: Any, vacancy_id: int) ->
     }
 
 
-def _card_key_for_vacancy(vacancy: Vacancy) -> str:
-    return canonical_job_url(vacancy.url, vacancy.source) or canonical_vacancy_key(vacancy)
 
-
-def _recommendation_rank(value: str | None) -> int:
-    return RECOMMENDATION_ORDER.get(str(value or "reject"), 0)
-
-
-def _material_card_change(
-    latest: dict[str, Any] | None,
-    vacancy: Vacancy,
-    evaluation: Any,
-    *,
-    score_delta: int,
-) -> bool:
+def _should_notify_vacancy(store: JobIntelStore, vacancy_id: int, vacancy: Vacancy, evaluation: Any, repost_window_days: int) -> bool:
+    latest = store.latest_notification_for_vacancy(vacancy_id, delivery_status="sent")
     if not latest:
         return True
     try:
@@ -806,56 +676,23 @@ def _material_card_change(
     except json.JSONDecodeError:
         payload = {}
     current_body = format_vacancy_summary(vacancy, evaluation)
-    current_summary_hash = sha256_text(current_body)
     current_description_hash = sha256_text(vacancy.description)
-    previous_recommendation = payload.get("recommendation") or payload.get("tier") or "reject"
-    if _recommendation_rank(getattr(evaluation, "recommendation", "reject")) > _recommendation_rank(previous_recommendation):
-        return True
-    previous_score = int(payload.get("score") or 0)
-    current_score = int(getattr(evaluation, "score", 0) or 0)
-    if current_score >= previous_score + score_delta:
-        return True
     if payload.get("description_hash") and payload.get("description_hash") != current_description_hash:
+        return True
+    if latest.get("content_hash") == sha256_text(current_body):
+        return False
+    previous_tier = payload.get("tier", "reject")
+    if TIER_ORDER.get(evaluation.tier, 0) > TIER_ORDER.get(previous_tier, 0):
+        return True
+    if vacancy.salary and vacancy.salary != payload.get("salary"):
         return True
     previous_description = payload.get("description", "")
     if previous_description and description_similarity(vacancy.description, previous_description) < 0.9:
         return True
-    if vacancy.salary and vacancy.salary != payload.get("salary"):
-        return True
-    previous_summary_hash = payload.get("summary_hash")
-    if previous_summary_hash and previous_summary_hash != current_summary_hash:
+    notified_at = parse_iso_datetime(latest.get("sent_at"))
+    if notified_at and datetime.now(timezone.utc) - notified_at >= timedelta(days=repost_window_days):
         return True
     return False
-
-
-
-def _should_notify_vacancy(store: JobIntelStore, vacancy_id: int, vacancy: Vacancy, evaluation: Any, repost_window_days: int) -> bool:
-    score_delta = int(os.getenv("JOB_INTEL_CARD_RESEND_SCORE_DELTA", "10") or "10")
-    card_key = _card_key_for_vacancy(vacancy)
-    latest = store.latest_notification_for_card(
-        card_key,
-        delivery_status="sent",
-        message_types=("vacancy_card", "vacancy_opportunity", "daily_digest"),
-    )
-    if not latest:
-        return True
-
-    feedback_types = set(store.active_feedback_for_card(card_key))
-    material_change = _material_card_change(latest, vacancy, evaluation, score_delta=score_delta)
-    notified_at = parse_iso_datetime(latest.get("sent_at"))
-    cooldown_elapsed = bool(
-        notified_at and datetime.now(timezone.utc) - notified_at >= timedelta(days=repost_window_days)
-    )
-
-    if "applied" in feedback_types:
-        return False
-    if "exceptional" in feedback_types:
-        return False
-    if "not_interesting" in feedback_types:
-        return material_change
-    if "interesting" in feedback_types or "save_for_later" in feedback_types:
-        return material_change or cooldown_elapsed
-    return material_change or cooldown_elapsed
 
 
 def _dual_score_rollout_enabled(store: JobIntelStore, run_id: int) -> bool:
@@ -919,8 +756,6 @@ def _prepare_notifications(
                 message_type,
                 body,
                 vacancy_id=vacancy_id,
-                card_key=payload.get("card_key"),
-                notification_kind=message_type,
                 payload=payload,
                 delivery_status="pending",
                 delivery_attempts=0,
@@ -936,76 +771,6 @@ def _finalize_notifications(store: JobIntelStore, notification_ids: list[int], d
     for notification_id in notification_ids:
         store.mark_notification_delivery(notification_id, status, attempts=delivery.attempts, delivery_error=error)
 
-
-def _deliver_vacancy_notifications(
-    store: JobIntelStore,
-    run_id: int,
-    channel: str,
-    items: list[tuple[Vacancy, Any, int]],
-) -> list[dict[str, Any]]:
-    deliveries: list[dict[str, Any]] = []
-    for vacancy, evaluation, vacancy_id in items:
-        body = _format_vacancy_feedback_message(vacancy, evaluation)
-        payload = _notification_payload(vacancy, evaluation, vacancy_id)
-        notification_id = store.create_notification(
-            run_id,
-            channel,
-            "vacancy_card",
-            body,
-            vacancy_id=vacancy_id,
-            card_key=payload.get("card_key"),
-            notification_kind="vacancy_card",
-            payload=payload,
-            delivery_status="pending",
-            delivery_attempts=0,
-        )
-        delivery = _deliver_to_slack(body, channel, prefer_gateway=True)
-        _finalize_notifications(store, [notification_id], delivery)
-        message_ts = delivery.message_ts
-        if delivery.success:
-            if not message_ts:
-                raise RuntimeError("Slack delivery succeeded without a platform message id; refusing to store fallback slack_message_ts")
-            store.record_vacancy_slack_message(
-                vacancy_id=vacancy_id,
-                run_id=run_id,
-                vacancy_key=payload.get("vacancy_key"),
-                canonical_url=payload.get("canonical_url"),
-                card_key=payload.get("card_key"),
-                notification_id=notification_id,
-                slack_channel=delivery.channel_id or channel,
-                slack_channel_id=delivery.channel_id,
-                slack_channel_name=delivery.channel_name,
-                channel_alias=delivery.channel_alias,
-                platform_message_id=delivery.platform_message_id,
-                slack_message_ts=str(message_ts),
-                message_type="vacancy_card",
-                company=vacancy.company,
-                title=vacancy.title,
-                score=int(getattr(evaluation, "score", 0) or 0),
-                recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
-                url=vacancy.url,
-                sent_at=datetime.now(timezone.utc).isoformat(),
-            )
-            _crm_record_delivery(
-                store,
-                vacancy=vacancy,
-                vacancy_id=vacancy_id,
-                slack_channel_id=str(delivery.channel_id or channel),
-                slack_message_ts=str(message_ts),
-            )
-            store.set_vacancy_status(vacancy_id, "notified")
-        else:
-            store.set_vacancy_status(vacancy_id, "active")
-        deliveries.append(
-            {
-                "vacancy_id": vacancy_id,
-                "notification_id": notification_id,
-                "card_key": payload.get("card_key"),
-                "delivery": delivery,
-                "message_ts": message_ts if delivery.success else None,
-            }
-        )
-    return deliveries
 
 
 def _normalize_source_notification_key(source: str) -> str:
@@ -1115,9 +880,8 @@ def _deliver_source_notifications(
         notification_id = store.create_notification(
             run_id,
             channel,
-            "source_status",
+            "source_search",
             body,
-            notification_kind="source_status",
             payload=_source_search_notification_payload(source, source_status, stats=stats, accepted_rows=accepted_rows),
             delivery_status="pending",
         )
@@ -1279,7 +1043,6 @@ def run_daily() -> str:
     dual_score_enabled = _dual_score_rollout_enabled(store, run_id)
     dual_scores_by_url: dict[str, dict[str, object]] = {} if dual_score_enabled else {}
     scoring_model_version = (os.getenv("SCORING_MODEL_VERSION", "v1") or "v1").strip().lower()
-    effective_scoring_version = scoring_model_version if scoring_model_version in {"v1", "v2", "v3"} else "v1"
     v3_shadow_enabled = (os.getenv("SCORING_V3_SHADOW_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no"}
     v3_shadow_counts: Counter[str] = Counter()
     v3_nr_shadow_counts: Counter[str] = Counter()
@@ -1295,7 +1058,7 @@ def run_daily() -> str:
         if dual_score_enabled:
             ev1 = score_vacancy_with_version(vacancy, "v1")
             ev2 = score_vacancy_with_version(vacancy, "v2")
-            evaluation = score_vacancy_with_version(vacancy, effective_scoring_version)
+            evaluation = ev2 if scoring_model_version == "v2" else ev1
             dual_scores_by_url[vacancy.url] = {
                 "score_v1": int(getattr(ev1, "score", 0) or 0),
                 "rec_v1": str(getattr(ev1, "recommendation", "reject") or "reject"),
@@ -1383,6 +1146,7 @@ def run_daily() -> str:
     digest_items = accepted[:batch_size]
     operator_footer = _source_footer(source_statuses)
     search_channel = _search_report_channel(cfg)
+    technical_footer = _search_technical_report(source_statuses, channel=search_channel)
     digest = ""
 
     target_company_hits = int((source_statuses.get("target_companies") or {}).get("hits") or 0)
@@ -1418,47 +1182,22 @@ def run_daily() -> str:
             source_counts,
             accepted_by_source,
         )
-    max_cards_per_run = int(os.getenv("JOB_INTEL_MAX_VACANCY_CARDS_PER_RUN", "10") or "10")
-
-    # Top scored opportunities (include rejected; exclude duplicates).
-    nondup_scored = [(v, e, c, vid, dup) for (v, e, c, vid, dup) in scored_rows if not dup]
-    nondup_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
-    actionable_candidates: list[tuple[int, int, Vacancy, Any, int]] = []
-    for vacancy, evaluation, _classification, vacancy_id, _duplicate in nondup_scored:
-        recommendation = str(getattr(evaluation, "recommendation", "") or "")
-        if recommendation in {"strong_fit", "exceptional_fit"}:
-            priority = 0
-        elif recommendation in {"potential_fit", "possible_fit", "needs_review"}:
-            priority = 1
-        elif recommendation == "near_miss":
-            priority = 2
-        else:
-            continue
-        actionable_candidates.append((priority, -int(getattr(evaluation, "score", 0) or 0), vacancy, evaluation, vacancy_id))
-    surfaced_rows: list[tuple[Vacancy, Any, int]] = []
-    suppressed_card_count = 0
-    for _priority, _neg_score, vacancy, evaluation, vacancy_id in actionable_candidates:
-        if len(surfaced_rows) >= max_cards_per_run:
-            break
-        if _should_notify_vacancy(store, vacancy_id, vacancy, evaluation, repost_window_days):
-            surfaced_rows.append((vacancy, evaluation, vacancy_id))
-        else:
-            suppressed_card_count += 1
-            store.set_vacancy_status(vacancy_id, "notified")
-    top_scored = [(v, e) for (v, e, _, _, _) in nondup_scored[:20]]
-
     # Compute "planned notified" counts (actual becomes 0 if delivery fails).
     planned_notified_by_source: dict[str, int] = {}
-    for vacancy, _, _ in surfaced_rows:
+    for vacancy, _, _ in digest_items:
         key = _normalize_source_notification_key(vacancy.source)
         planned_notified_by_source[key] = planned_notified_by_source.get(key, 0) + 1
 
     # Executive Opportunity Report (user-facing).
     per_source_funnel: list[dict[str, object]] = []
+    # Populate notified_count with planned values for reporting pre-delivery.
+    for source, cnt in planned_notified_by_source.items():
+        stats = source_counts.setdefault(source, {})
+        stats["notified_count"] = int(cnt or 0)
+        stats["notified"] = int(cnt or 0)
+
     for source in sorted(source_counts.keys()):
         stats = source_counts.get(source) or {}
-        stats["notified_count"] = int(planned_notified_by_source.get(source, 0) or 0)
-        stats["notified"] = int(planned_notified_by_source.get(source, 0) or 0)
         per_source_funnel.append(
             {
                 "source": source,
@@ -1469,6 +1208,11 @@ def run_daily() -> str:
                 "notified": int(stats.get("notified_count") or 0),
             }
         )
+
+    # Top scored opportunities (include rejected; exclude duplicates).
+    nondup_scored = [(v, e, c, vid, dup) for (v, e, c, vid, dup) in scored_rows if not dup]
+    nondup_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
+    top_scored = [(v, e) for (v, e, _, _, _) in nondup_scored[:20]]
 
     # Decision buckets (non-duplicate only).
     decision_counts = Counter()
@@ -1536,11 +1280,7 @@ def run_daily() -> str:
         market_companies=market_companies,
         decision_counts=dict(decision_counts),
         top_near_miss=near_miss_scored,
-        scoring_model_version=effective_scoring_version,
-        vacancy_card_candidates=len(actionable_candidates),
-        vacancy_card_sent=len(surfaced_rows),
-        vacancy_card_suppressed=suppressed_card_count,
-        operator_footer=operator_footer,
+        operator_footer=operator_footer if digest_items else None,
         dual_scores=dual_scores_by_url if dual_score_enabled else None,
     )
     if v3_shadow_enabled:
@@ -1552,38 +1292,52 @@ def run_daily() -> str:
             f"- reject: {int(v3_nr_shadow_counts.get('reject', 0))}"
         )
         digest = (digest + "\\n\\n" + v3_block).rstrip()
+    if technical_footer:
+        digest = (digest + "\n\n" + technical_footer).rstrip()
 
     delivery_report = _deliver_to_slack(digest, search_channel)
-    summary_payload = {
-        "run_id": run_id,
-        "found": len(vacancies),
-        "accepted": len(accepted),
-        "strong_fit": int(decision_counts.get("strong_fit", 0)),
-        "potential_fit": int(decision_counts.get("potential_fit", 0)),
-        "needs_review": int(decision_counts.get("needs_review", 0)),
-        "near_miss": int(decision_counts.get("near_miss", 0)),
-        "rejected": int(decision_counts.get("reject", 0)),
-        "vacancy_card_candidates": len(actionable_candidates),
-        "vacancy_card_suppressed": suppressed_card_count,
-    }
-    summary_notification_id = store.create_notification(
-        run_id,
-        search_channel,
-        "daily_summary",
-        digest,
-        notification_kind="daily_summary",
-        payload=summary_payload,
-        delivery_status="pending",
-        delivery_attempts=0,
-    )
-    store.mark_notification_delivery(
-        summary_notification_id,
-        _delivery_db_status(delivery_report),
-        attempts=delivery_report.attempts,
-        delivery_error=None if delivery_report.success else delivery_report.error,
-    )
 
-    vacancy_deliveries = _deliver_vacancy_notifications(store, run_id, search_channel, surfaced_rows)
+    notification_ids = _prepare_notifications(store, run_id, search_channel, "daily_digest", digest_items)
+    _finalize_notifications(store, notification_ids, delivery_report)
+
+    # Always write one run-level daily_digest summary row, regardless of accepted count.
+    # This ensures delivery tracking is never missing from the DB for zero-accepted runs.
+    if not digest_items and not delivery_report.success:
+        _dd_found = len(vacancies)
+        _dd_accepted = len(accepted)
+        _dd_strong = int(decision_counts.get("strong_fit", 0))
+        _dd_potential = int(decision_counts.get("potential_fit", 0))
+        _dd_near_miss = int(decision_counts.get("near_miss", 0))
+        _dd_rejected = int(decision_counts.get("reject", 0))
+        _dd_body = (
+            f"daily_digest run_id={run_id} found={_dd_found} "
+            f"accepted={_dd_accepted} strong_fit={_dd_strong} "
+            f"potential_fit={_dd_potential} near_miss={_dd_near_miss} rejected={_dd_rejected}"
+        )
+        _dd_payload = {
+            "found": _dd_found,
+            "accepted": _dd_accepted,
+            "strong_fit": _dd_strong,
+            "potential_fit": _dd_potential,
+            "near_miss": _dd_near_miss,
+            "rejected": _dd_rejected,
+        }
+        _dd_id = store.create_notification(
+            run_id,
+            search_channel,
+            "daily_digest",
+            _dd_body,
+            vacancy_id=None,
+            payload=_dd_payload,
+            delivery_status="pending",
+            delivery_attempts=0,
+        )
+        store.mark_notification_delivery(
+            _dd_id,
+            _delivery_db_status(delivery_report),
+            attempts=delivery_report.attempts,
+            delivery_error=None if delivery_report.success else delivery_report.error,
+        )
 
     # Update per-source notified_count based on actual delivery outcome.
     if delivery_report.success:
@@ -1597,11 +1351,7 @@ def run_daily() -> str:
             stats["notified_count"] = 0
             stats["notified"] = 0
 
-    notified_vacancy_ids = {
-        int(item["vacancy_id"])
-        for item in vacancy_deliveries
-        if item["delivery"].success
-    }
+    notified_vacancy_ids = {vacancy_id for _, _, vacancy_id in digest_items} if delivery_report.success else set()
     accepted_vacancy_ids = {vacancy_id for _, _, vacancy_id in accepted}
 
     # Seed user feedback dataset for surfaced opportunities (no scoring side effects).
@@ -1618,8 +1368,6 @@ def run_daily() -> str:
         accepted_vacancy_ids=accepted_vacancy_ids,
         notified_vacancy_ids=notified_vacancy_ids,
         dual_scores_by_url=dual_scores_by_url if dual_score_enabled else None,
-        active_scoring_version=effective_scoring_version,
-        active_recommendation_version=effective_scoring_version,
     )
 
     # Registry-company observability: attempted -> collected -> found -> stored/scored.
@@ -1688,7 +1436,7 @@ def run_daily() -> str:
             {
                 "source_status": src_status.get("status"),
                 "acquisition_mode": src_status.get("acquisition"),
-                "runtime_seconds": float(src_status.get("runtime_seconds") or 0.0),
+                "runtime_seconds": None,
                 "attempts": None,
                 "pages_fetched": pages_fetched,
                 "login_walls": login_walls,
@@ -1732,12 +1480,6 @@ def run_daily() -> str:
     anti_bot_total = sum(int(((source_statuses.get(s) or {}).get("session_health") or {}).get("anti_bot_events") or 0) for s in source_statuses.keys())
     auth_redirects_total = sum(int(((source_statuses.get(s) or {}).get("session_health") or {}).get("auth_redirects") or 0) for s in source_statuses.keys())
     source_failures = {s: (source_statuses.get(s) or {}).get("status") for s in source_statuses.keys() if (source_statuses.get(s) or {}).get("status") not in {"ok", "empty", "skipped"}}
-    source_runtimes = {
-        str(s): float((source_statuses.get(s) or {}).get("runtime_seconds") or 0.0)
-        for s in source_statuses.keys()
-        if (source_statuses.get(s) or {}).get("runtime_seconds") is not None
-    }
-    slowest_source = max(source_runtimes, key=source_runtimes.get) if source_runtimes else None
 
     run_row = store.get_run(run_id) or {}
     started_at = run_row.get("started_at")
@@ -1763,8 +1505,8 @@ def run_daily() -> str:
             "anti_bot_events": anti_bot_total,
             "auth_redirects": auth_redirects_total,
             "source_failures": source_failures,
-            "source_runtimes": source_runtimes,
-            "slowest_source": slowest_source,
+            "source_runtimes": {},
+            "slowest_source": None,
             "vacancies_sent": int(feedback_metrics.get("vacancies_sent") or 0),
             "vacancies_reacted": int(feedback_metrics.get("vacancies_reacted") or 0),
             "reaction_rate": feedback_metrics.get("reaction_rate"),
@@ -1840,7 +1582,7 @@ def run_weekly_kpi_report() -> str:
     message = format_weekly_source_quality(data)
 
     # Delivery is best-effort. A delivery failure must not flip run.status to error.
-    notification_id = store.create_notification(run_id, channel, "weekly_source_quality", message, notification_kind="weekly_source_quality", delivery_status="pending")
+    notification_id = store.create_notification(run_id, channel, "weekly_kpi", message, delivery_status="pending")
     delivery = _deliver_to_slack(message, channel)
     store.mark_notification_delivery(
         notification_id,
@@ -2344,7 +2086,7 @@ def _health_summary_for_run(store: JobIntelStore, run: dict[str, Any]) -> dict[s
             (delivery_window_start,),
         ).fetchall()
         digest_rows = conn.execute(
-            "SELECT COUNT(*) FROM notifications WHERE sent_at >= ? AND message_type IN ('daily_summary','daily_digest') AND delivery_status = 'sent'",
+            "SELECT COUNT(*) FROM notifications WHERE sent_at >= ? AND message_type = 'daily_digest' AND delivery_status = 'sent'",
             (delivery_window_start,),
         ).fetchone()
         alert_rows = conn.execute(
@@ -2646,7 +2388,7 @@ def _check_health_conditions(store: "JobIntelStore") -> list[str]:
             # 5. Daily digest delivery failure
             fail = conn.execute(
                 "SELECT delivery_error FROM notifications "
-                "WHERE run_id=? AND message_type IN ('daily_summary','daily_digest') AND delivery_status='failed' LIMIT 1",
+                "WHERE run_id=? AND message_type='daily_digest' AND delivery_status='failed' LIMIT 1",
                 (last_run_id,)
             ).fetchone()
             if fail:
@@ -2693,7 +2435,7 @@ def run_health_report() -> str:
         digest = _format_health_report(current, previous)
     cfg = load_config_bundle() or DEFAULT_CONFIG
     channel = _search_report_channel(cfg)
-    notification_id = store.create_notification(run_id, channel, "health_warning", digest, notification_kind="health_warning", delivery_status="pending")
+    notification_id = store.create_notification(run_id, channel, "health_report", digest, delivery_status="pending")
     delivery = _deliver_to_slack(digest, channel)
     store.mark_notification_delivery(notification_id, _delivery_db_status(delivery), attempts=delivery.attempts, delivery_error=delivery.error)
     store.finish_run(run_id, status="ok", notes=f"report_length={len(digest)}", metadata={"report_type": "health", "latest_daily_run_id": daily_runs[0].get('id'), "previous_daily_run_id": daily_runs[1].get('id') if len(daily_runs) > 1 else None, "delivery": delivery.__dict__, "problems_found": len(problems)})
@@ -2869,10 +2611,7 @@ def _format_browser_desktop_health(health: dict[str, Any]) -> str:
 
 
 def _source_statuses_for_doctor(store: JobIntelStore) -> dict[str, dict[str, Any]]:
-    try:
-        latest = store.source_adapter_status_from_latest_run()
-    except Exception as exc:
-        return {"database": {"source": "database", "status": "error", "errors": [str(exc)]}}
+    latest = store.source_adapter_status_from_latest_run()
     if latest:
         return latest
     try:
@@ -2912,11 +2651,7 @@ def doctor_report() -> str:
     db_flags = file_access_flags(resolve_db_path())
     workdir_flags = file_access_flags(resolve_workdir())
     source_statuses = _collect_source_statuses(store)
-    try:
-        latest = store.latest_run() or {}
-    except Exception as exc:
-        latest = {}
-        bootstrap_error = (bootstrap_error + "; " if bootstrap_error else "") + f"latest_run_failed: {exc}"
+    latest = store.latest_run() or {}
     latest_statuses: dict[str, dict[str, Any]] = {}
     metadata_json = latest.get("metadata_json") if isinstance(latest, dict) else None
     if metadata_json:
@@ -3014,312 +2749,6 @@ def send_test_message(channel: str) -> str:
 
 
 
-
-def _map_feedback_reaction(raw_reaction: str) -> str | None:
-    reaction = (raw_reaction or "").strip().lower()
-    mapping = {
-        "+1": "interesting",
-        "thumbsup": "interesting",
-        "thumbs_up": "interesting",
-        "-1": "not_interesting",
-        "thumbsdown": "not_interesting",
-        "thumbs_down": "not_interesting",
-        "star": "exceptional",
-        "fire": "exceptional",
-        "rocket": "applied",
-        "eyes": "save_for_later",
-        "bookmark": "save_for_later",
-    }
-    return mapping.get(reaction)
-
-
-def _crm_service(store: JobIntelStore):
-    from .crm_service import CRMService
-
-    return CRMService.from_store(store)
-
-
-
-def _crm_record_delivery(
-    store: JobIntelStore,
-    *,
-    vacancy: Vacancy,
-    vacancy_id: int,
-    slack_channel_id: str,
-    slack_message_ts: str,
-) -> None:
-    try:
-        crm = _crm_service(store)
-        opportunity = crm.ensure_opportunity_for_vacancy(vacancy=vacancy, vacancy_id=vacancy_id)
-        crm.link_slack_message_to_opportunity(
-            opportunity_id=int(opportunity["id"]),
-            slack_channel_id=slack_channel_id,
-            slack_message_ts=slack_message_ts,
-            slack_thread_ts=slack_message_ts,
-        )
-        crm.transition_for_delivery(int(opportunity["id"]))
-    except Exception as exc:
-        logger.exception(
-            "crm_delivery_record_failed vacancy_id=%s channel=%s slack_message_ts=%s: %s",
-            vacancy_id,
-            slack_channel_id,
-            slack_message_ts,
-            exc,
-        )
-
-
-def _crm_handle_feedback_event(
-    store: JobIntelStore,
-    *,
-    channel: str,
-    message_ts: str,
-    reaction: str,
-    event_type: str,
-    user_id: str,
-    vacancy_id: int,
-    payload: dict[str, Any],
-) -> str:
-    crm = _crm_service(store)
-    return crm.handle_slack_reaction_event(
-        slack_channel_id=channel,
-        slack_message_ts=message_ts,
-        reaction=reaction,
-        event_type=event_type,
-        actor=user_id,
-        payload={"vacancy_id": vacancy_id, **payload},
-    )
-
-
-def run_feedback_event(payload: dict[str, Any]) -> str:
-    event_type = str(payload.get("type") or "").strip()
-    if event_type not in {"reaction_added", "reaction_removed"}:
-        return json.dumps({"status": "ignored", "reason": "unsupported_event_type", "event_type": event_type})
-
-    item = payload.get("item") or {}
-    channel = str(item.get("channel") or payload.get("item_channel") or "").strip()
-    message_ts = str(item.get("ts") or payload.get("item_ts") or "").strip()
-    user_id = str(payload.get("user") or payload.get("user_id") or "unknown").strip() or "unknown"
-    reaction = str(payload.get("reaction") or "").strip()
-    feedback_type = _map_feedback_reaction(reaction)
-    if not feedback_type:
-        return json.dumps({"status": "ignored", "reason": "unsupported_reaction", "reaction": reaction, "event_type": event_type})
-    if not channel or not message_ts:
-        return json.dumps({"status": "ignored", "reason": "missing_message_reference", "event_type": event_type})
-
-    event_timestamp = str(payload.get("event_ts") or payload.get("event_timestamp") or datetime.now(timezone.utc).isoformat())
-    store = _store()
-    message = store.find_vacancy_message(slack_channel=channel, slack_message_ts=message_ts)
-    if not message:
-        logger.warning(
-            "message_not_tracked channel=%s slack_message_ts=%s reaction=%s user=%s",
-            channel,
-            message_ts,
-            reaction,
-            user_id,
-        )
-        return json.dumps({"status": "ignored", "reason": "message_not_tracked", "channel": channel, "slack_message_ts": message_ts, "reaction": reaction, "user_id": user_id})
-
-    vacancy_id = int(message.get("vacancy_id"))
-    store.record_vacancy_feedback_event(
-        vacancy_id=vacancy_id,
-        run_id=int(message.get("run_id")) if message.get("run_id") is not None else None,
-        notification_id=int(message.get("notification_id")) if message.get("notification_id") is not None else None,
-        vacancy_key=message.get("vacancy_key"),
-        canonical_url=message.get("canonical_url"),
-        card_key=message.get("card_key"),
-        slack_channel=channel,
-        slack_message_ts=message_ts,
-        feedback_type=feedback_type,
-        event_type=event_type,
-        event_timestamp=event_timestamp,
-        user_id=user_id,
-        raw_event_json=payload,
-    )
-    logger.info(
-        "vacancy_feedback_recorded vacancy_id=%s notification_id=%s feedback_type=%s event_type=%s channel=%s slack_message_ts=%s",
-        vacancy_id,
-        message.get("notification_id"),
-        feedback_type,
-        event_type,
-        channel,
-        message_ts,
-    )
-    crm_status = "ok"
-    try:
-        crm_status = _crm_handle_feedback_event(
-            store,
-            channel=channel,
-            message_ts=message_ts,
-            reaction=reaction,
-            event_type=event_type,
-            user_id=user_id,
-            vacancy_id=vacancy_id,
-            payload=payload,
-        )
-    except Exception as exc:
-        crm_status = "error"
-        logger.exception(
-            "crm_reaction_branch_failed vacancy_id=%s channel=%s slack_message_ts=%s reaction=%s user=%s: %s",
-            vacancy_id,
-            channel,
-            message_ts,
-            reaction,
-            user_id,
-            exc,
-        )
-    return json.dumps(
-        {
-            "status": "ok",
-            "vacancy_id": vacancy_id,
-            "feedback_type": feedback_type,
-            "event_type": event_type,
-            "channel": channel,
-            "slack_message_ts": message_ts,
-            "user_id": user_id,
-            "crm_status": crm_status,
-        },
-        ensure_ascii=False,
-    )
-def run_manual_crm_command(
-    command_text: str,
-    *,
-    slack_channel_id: str | None = None,
-    slack_message_ts: str | None = None,
-    actor: str = "Denis",
-) -> dict[str, Any]:
-    import shlex
-
-    from .crm_constants import VALID_OPPORTUNITY_STATUSES
-    from .crm_service import CRMService
-
-    tokens = shlex.split(command_text or "")
-    if not tokens or tokens[0] != "/hermes-job":
-        return {"status": "invalid_command"}
-    if len(tokens) < 2:
-        return {"status": "invalid_command"}
-
-    action = tokens[1]
-    args = tokens[2:]
-    store = _store()
-    crm = CRMService.from_store(store)
-
-    if action == "due":
-        return {"status": "ok", "items": crm.list_due()}
-    if action == "active":
-        return {"status": "ok", "items": crm.list_active()}
-    if action == "pipeline":
-        return {"status": "ok", "items": crm.pipeline_summary()}
-
-    def _resolve(search_text: str | None):
-        return crm.resolve_command_opportunity(
-            slack_channel_id=slack_channel_id,
-            slack_message_ts=slack_message_ts,
-            search_text=search_text,
-        )
-
-    if action == "eval":
-        if not args:
-            return {"status": "invalid_command"}
-        return crm.ingest_manual_job_url(
-            url=args[0],
-            actor=actor,
-            source="manual_command",
-            force_re_evaluate=False,
-        )
-
-    if action == "status":
-        if not args:
-            return {"status": "invalid_command"}
-        new_status = args[0]
-        if new_status not in VALID_OPPORTUNITY_STATUSES:
-            return {"status": "invalid_status", "requested_status": new_status}
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status=new_status,
-            source="manual_command",
-            actor=actor,
-            reason="manual_status",
-            payload={"command": "status"},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "applied":
-        resolved = _resolve(" ".join(args) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status="applied",
-            source="manual_command",
-            actor=actor,
-            reason="applied_shortcut",
-            payload={"command": "applied"},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "decline":
-        if not args:
-            return {"status": "invalid_command"}
-        reason = args[0]
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status="declined_by_me",
-            source="manual_command",
-            actor=actor,
-            reason=reason,
-            payload={"command": "decline", "reason": reason},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "note":
-        if not args:
-            return {"status": "invalid_command"}
-        note_text = args[0]
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.add_note(opportunity_id=opportunity_id, actor=actor, text=note_text)
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "followup":
-        if not args:
-            return {"status": "invalid_command"}
-        spec = args[0]
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.create_followup_task(opportunity_id=opportunity_id, spec=spec)
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "reopen":
-        resolved = _resolve(" ".join(args) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status="evaluation_requested",
-            source="manual_command",
-            actor=actor,
-            reason="reopen",
-            payload={"command": "reopen"},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    return {"status": "invalid_command", "action": action}
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="job-intel")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -3352,12 +2781,6 @@ def build_parser() -> argparse.ArgumentParser:
     retire = sub.add_parser("retire-stale")
     retire.add_argument("--days", type=int, default=None)
     retire.set_defaults(cmd="retire-stale")
-
-    hermes_job = sub.add_parser("hermes-job")
-    hermes_job.add_argument("command_text")
-    hermes_job.add_argument("--slack-channel-id", default=None)
-    hermes_job.add_argument("--slack-message-ts", default=None)
-    hermes_job.set_defaults(cmd="hermes-job")
     return parser
 
 
@@ -3414,20 +2837,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(raw or "{}")
         print(run_feedback_event(payload))
         return 0
-    if args.cmd == "hermes-job":
-        result = run_manual_crm_command(
-            command_text=args.command_text,
-            slack_channel_id=getattr(args, "slack_channel_id", None),
-            slack_message_ts=getattr(args, "slack_message_ts", None),
-        )
-        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0 if result.get("status") in {"ok", "needs_disambiguation", "not_found", "invalid_url"} else 1
     if args.cmd == "retire-stale":
         result = retire_stale_vacancies(args.days)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

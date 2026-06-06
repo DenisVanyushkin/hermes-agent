@@ -161,6 +161,7 @@ def format_executive_opportunity_report(
     *,
     run_id: int,
     title: str,
+    scoring_model_version: str | None = None,
     per_source_funnel: list[dict[str, object]],
     top_scored: list[tuple[Vacancy, Evaluation]],
     top_rejected: list[tuple[Vacancy, Evaluation]],
@@ -170,6 +171,9 @@ def format_executive_opportunity_report(
     market_companies: list[tuple[str, int]],
     decision_counts: dict[str, int],
     top_near_miss: list[tuple[Vacancy, Evaluation]],
+    vacancy_card_candidates: int = 0,
+    vacancy_card_sent: int = 0,
+    vacancy_card_suppressed: int = 0,
     operator_footer: str | None = None,
     dual_scores: dict[str, dict[str, object]] | None = None,
 ) -> str:
@@ -177,6 +181,7 @@ def format_executive_opportunity_report(
         return _format_executive_opportunity_report_inner(
             run_id=run_id,
             title=title,
+            scoring_model_version=scoring_model_version,
             per_source_funnel=per_source_funnel,
             top_scored=top_scored,
             top_rejected=top_rejected,
@@ -186,6 +191,9 @@ def format_executive_opportunity_report(
             market_companies=market_companies,
             decision_counts=decision_counts,
             top_near_miss=top_near_miss,
+            vacancy_card_candidates=vacancy_card_candidates,
+            vacancy_card_sent=vacancy_card_sent,
+            vacancy_card_suppressed=vacancy_card_suppressed,
             operator_footer=operator_footer,
             dual_scores=dual_scores,
         )
@@ -197,6 +205,7 @@ def _format_executive_opportunity_report_inner(
     *,
     run_id: int,
     title: str,
+    scoring_model_version: str | None = None,
     per_source_funnel: list[dict[str, object]],
     top_scored: list[tuple[Vacancy, Evaluation]],
     top_rejected: list[tuple[Vacancy, Evaluation]],
@@ -206,13 +215,16 @@ def _format_executive_opportunity_report_inner(
     market_companies: list[tuple[str, int]],
     decision_counts: dict[str, int],
     top_near_miss: list[tuple[Vacancy, Evaluation]],
+    vacancy_card_candidates: int = 0,
+    vacancy_card_sent: int = 0,
+    vacancy_card_suppressed: int = 0,
     operator_footer: str | None = None,
     dual_scores: dict[str, dict[str, object]] | None = None,
 ) -> str:
     import datetime as _dt
 
     today = _dt.date.today().strftime("%d %b %Y")
-    lines: list[str] = [f"📊 *Daily Executive Review* — {today}", ""]
+    lines: list[str] = [f"📊 *Daily Executive Review* — {today}", f"`run_id={run_id}` | `scoring_model_version={scoring_model_version or 'unknown'}`", ""]
 
     # --- Summary ---
     strong = int(decision_counts.get("strong_fit") or 0) + int(decision_counts.get("exceptional_fit") or 0)
@@ -227,6 +239,9 @@ def _format_executive_opportunity_report_inner(
     lines.append(f"• Potential fit: {potential}")
     lines.append(f"• Near miss: {near} (review queue)")
     lines.append(f"• Rejected: {rej}")
+    lines.append(f"• Vacancy card candidates: {int(vacancy_card_candidates or 0)}")
+    lines.append(f"• Vacancy card sent: {int(vacancy_card_sent or 0)}")
+    lines.append(f"• Vacancy card suppressed: {int(vacancy_card_suppressed or 0)}")
     lines.append("")
 
     # --- Top Opportunities ---
@@ -239,37 +254,20 @@ def _format_executive_opportunity_report_inner(
         if len(good_rows) >= 10:
             break
 
-    lines.append("*Top Opportunities*")
-    if not good_rows:
-        lines.append("none")
-    else:
-        for vacancy, evaluation in good_rows:
-            rec = str(getattr(evaluation, "recommendation", "") or "")
-            indicator = "🟢" if rec in _STRONG_RECS else "🔵"
+    lines.append(f"*Top Opportunities* ({len(good_rows)} surfaced as cards)")
+    if good_rows:
+        preview = []
+        for vacancy, _evaluation in good_rows[:3]:
             company = (getattr(vacancy, "company", None) or "Unknown").strip()
             job_title = (getattr(vacancy, "title", None) or "Unknown").strip()
-            location = (getattr(vacancy, "location", None) or "Unknown").strip()
-            source = (getattr(vacancy, "source", None) or "").strip()
-            score = int(getattr(evaluation, "score", 0) or 0)
-            url = getattr(vacancy, "url", None) or ""
-
-            lines.append(f"{indicator} *{company}* — {job_title}")
-            lines.append(f"   {location} | score {score} | {source}")
-
-            signals = list(getattr(evaluation, "matched_signals", None) or [])
-            if signals:
-                lines.append(f"   ✓ {', '.join(signals[:3])}")
-
-            concerns = list(getattr(evaluation, "concerns", None) or [])
-            if concerns:
-                lines.append(f"   ⚠ {concerns[0]}")
-
-            if url:
-                lines.append(f"   {url}")
-            lines.append("")
+            preview.append(f"{company} — {job_title}")
+        lines.append("• " + "\n• ".join(preview))
+    else:
+        lines.append("none")
+    lines.append("")
 
     # --- Near Miss Queue ---
-    near_miss_limit = 5 if good_rows else 10
+    near_miss_limit = 3
     lines.append(f"*Near Miss Queue* ({near} total)")
     if not top_near_miss:
         lines.append("none")
@@ -308,25 +306,19 @@ def _format_executive_opportunity_report_inner(
 
     # --- Sources ---
     if per_source_funnel:
-        ok_sources = [
-            str(row.get("source") or "")
-            for row in per_source_funnel
-            if int(row.get("found") or 0) > 0
-        ]
         empty_sources = [
             str(row.get("source") or "")
             for row in per_source_funnel
             if int(row.get("found") or 0) == 0
         ]
         lines.append("*Sources*")
-        if ok_sources:
-            lines.append(f"  ok: {', '.join(ok_sources)}")
         if empty_sources:
             for s in empty_sources:
                 lines.append(f"  ⚠️ {s}: empty")
-        # Surface any operator-level issues (source errors/auth failures) from the footer.
         if operator_footer:
             lines.append(f"  ⚠️ {operator_footer}")
+        if not empty_sources and not operator_footer:
+            lines.append("  no problems detected")
         lines.append("")
 
     return "\n".join(lines).rstrip()

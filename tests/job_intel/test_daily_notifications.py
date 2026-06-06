@@ -103,15 +103,27 @@ def test_run_daily_emits_per_source_notifications(monkeypatch, tmp_path) -> None
 
     store = cli.JobIntelStore(db_path)
     notifications = store.fetch_notifications(limit=20)
-    assert sum(1 for row in notifications if row["message_type"] == "source_search") == 0
-    assert sum(1 for row in notifications if row["message_type"] == "vacancy_opportunity") == 3
+    assert sum(1 for row in notifications if row["message_type"] == "source_status") == 0
+    assert sum(1 for row in notifications if row["message_type"] == "daily_summary") == 1
+    assert sum(1 for row in notifications if row["message_type"] == "vacancy_card") == 3
 
     with store.connect() as conn:
         rows = conn.execute(
-            "SELECT company, title, score, recommendation, slack_channel, slack_message_ts, url FROM vacancy_slack_messages ORDER BY id"
+            """
+            SELECT company, title, score, recommendation, slack_channel, slack_message_ts, url,
+                   run_id, vacancy_key, canonical_url, card_key, notification_id, message_type,
+                   score_at_send, recommendation_at_send
+            FROM vacancy_slack_messages
+            ORDER BY id
+            """
         ).fetchall()
 
     assert len(rows) == 3
     assert {row["company"] for row in rows} == {"Acme", "Globex", "Initech"}
     assert all(row["slack_channel"] == "C-search" for row in rows)
     assert all(row["slack_message_ts"] for row in rows)
+    assert all(row["message_type"] == "vacancy_card" for row in rows)
+    assert all(row["notification_id"] is not None for row in rows)
+    assert all(row["card_key"] for row in rows)
+    assert all(row["score_at_send"] == row["score"] for row in rows)
+    assert all(row["recommendation_at_send"] == row["recommendation"] for row in rows)
