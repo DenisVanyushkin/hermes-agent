@@ -118,16 +118,49 @@ Gateway restarted: no
 EOF
 }
 
-report_success() {
-  local restarted="${3:-yes}"
+report_post_update() {
+  local before="$1"
+  local after="$2"
+  local restart_status="${3:-yes}"
+  local changed_commits changed_files clean_status
+
+  changed_commits="$(git -C "$REPO" log --no-merges --format='%h %s' "$before..$after" 2>/dev/null || true)"
+  changed_files="$(git -C "$REPO" diff --name-only "$before..$after" 2>/dev/null || true)"
+  clean_status="$(git -C "$REPO" status --porcelain --untracked-files=all 2>/dev/null || true)"
+
   cat <<EOF
-Hermes local-branch update succeeded.
+Hermes local-branch update completed.
 Repo: $REPO
 Branch: $BRANCH
 Base: $UPSTREAM_REF
-Before: $1
-After: $2
-Gateway restarted: $restarted
+Before: $before
+After: $after
+
+### Updated commits
+EOF
+  if [ -n "$changed_commits" ]; then
+    printf '%s\n' "$changed_commits" | sed 's/^/- /'
+  else
+    echo "- (no new commits; update was a no-op)"
+  fi
+
+  cat <<EOF
+
+### Updated files
+EOF
+  if [ -n "$changed_files" ]; then
+    printf '%s\n' "$changed_files" | sed 's/^/- /'
+  else
+    echo "- (no file-path changes detected)"
+  fi
+
+  cat <<EOF
+
+### Verification
+- repo branch: $(git -C "$REPO" branch --show-current)
+- git status clean: $( [ -z "$clean_status" ] && echo yes || echo no )
+- runtime scripts synced: yes
+- gateway restarted: $restart_status
 EOF
 }
 
@@ -278,7 +311,7 @@ if [ -z "$HERMES_BIN" ]; then
   echo "Branch: $BRANCH" >&2
   echo "Before: $BEFORE_HEAD" >&2
   echo "After: $AFTER_HEAD" >&2
-  report_success "$BEFORE_HEAD" "$AFTER_HEAD" "no"
+  report_post_update "$BEFORE_HEAD" "$AFTER_HEAD" "no"
   exit 0
 fi
 
@@ -290,8 +323,8 @@ RESTART_OUTPUT="$($HERMES_BIN gateway restart 2>&1)" || {
   echo "After: $AFTER_HEAD" >&2
   echo "Restart output:" >&2
   printf '%s\n' "$RESTART_OUTPUT" >&2
-  report_success "$BEFORE_HEAD" "$AFTER_HEAD" "no"
+  report_post_update "$BEFORE_HEAD" "$AFTER_HEAD" "no"
   exit 0
 }
 
-report_success "$BEFORE_HEAD" "$AFTER_HEAD"
+report_post_update "$BEFORE_HEAD" "$AFTER_HEAD"
