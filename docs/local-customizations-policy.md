@@ -78,15 +78,39 @@ Prefer small, focused commits such as:
 
 ## Update workflow
 
-The preferred update path is:
+The preferred update path is a two-step human-approved gate:
 
-1. Ensure repo is clean.
+### 1) Preflight report
+
+Before any update, run the preflight helper:
+
+```bash
+scripts/preflight-local-customizations-update.sh
+```
+
+The report must show:
+- the upstream delta relative to the current local merge-base
+- local uncommitted changes, if any
+- likely conflict points
+- likely breaking-change surfaces
+- a clear recommendation whether the update should be treated as low, medium, or high risk
+
+Do **not** update before the report is reviewed.
+
+### 2) Explicit approval
+
+Wait for an explicit human approval before applying any upstream changes.
+
+Only after approval:
+
+1. Ensure repo is clean enough to proceed.
 2. `git fetch origin --prune`
 3. `git rebase origin/main` while on `local/customizations`
 4. Restart the gateway only if HEAD changed.
 5. If rebase conflicts, stop and report clearly.
+6. After the update completes, provide a post-update report summarizing what changed, what was verified, and whether any restart failed.
 
-Avoid `hermes update` for this customized install, because its autostash behavior is a poor fit for a locally modified checkout.
+Avoid `hermes update` for this customized install, because its autostash behavior is a poor fit for a locally modified checkout and it does not give the approval-gated report the operator wants.
 
 ## Failure handling
 
