@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import logging
 import os
 import re
 import subprocess
@@ -77,8 +76,6 @@ from .sources import (
 )
 from .store import JobIntelStore
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_DB = resolve_db_path()
 TIER_ORDER = {"reject": 0, "weak_fit": 1, "possible_fit": 2, "strong_fit": 3, "exceptional_fit": 4}
 RECOMMENDATION_ORDER = {
@@ -99,10 +96,6 @@ class SlackDeliveryResult:
     error: str | None = None
     status: str = "sent"
     message_ts: str | None = None
-    channel_id: str | None = None
-    channel_alias: str | None = None
-    channel_name: str | None = None
-    platform_message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -542,38 +535,6 @@ def _slack_webhook_enabled() -> bool:
 
 
 
-def _ensure_hermes_env_loaded_for_outbound_delivery() -> None:
-    try:
-        from hermes_cli.send_cmd import _load_hermes_env
-    except Exception:
-        _load_hermes_env = None
-
-    if _load_hermes_env is not None:
-        try:
-            _load_hermes_env()
-            return
-        except Exception:
-            pass
-
-    if os.getenv("SLACK_BOT_TOKEN"):
-        return
-
-    env_path = runtime_home() / ".env"
-    if not env_path.exists() or load_dotenv is None:
-        return
-
-    try:
-        load_dotenv(str(env_path), override=True, encoding="utf-8")
-    except UnicodeDecodeError:
-        try:
-            load_dotenv(str(env_path), override=True, encoding="latin-1")
-        except Exception:
-            return
-    except Exception:
-        return
-
-
-
 def _deliver_to_slack(
     message: str,
     channel: str | None = None,
@@ -586,10 +547,7 @@ def _deliver_to_slack(
         return SlackDeliveryResult(success=True, attempts=0, error=None, status="sent")
 
     if prefer_gateway or not webhook:
-        channel_alias = channel
-        target_channel = (channel if (channel and channel.startswith("C")) else ("C0B4MM6D52A" if channel == "executive_search_report" else channel))
-        target = f"slack:{target_channel}" if target_channel else "slack"
-        _ensure_hermes_env_loaded_for_outbound_delivery()
+        target = (f"slack:{channel}" if (channel and channel.startswith("C")) else ("slack:C0B4MM6D52A" if channel == "executive_search_report" else (f"slack:{channel}" if channel else "slack")))
         try:
             raw = send_message_tool({"target": target, "message": message})
             payload = json.loads(raw) if raw else {}
@@ -598,19 +556,8 @@ def _deliver_to_slack(
         if payload.get("error"):
             return SlackDeliveryResult(success=False, attempts=1, error=str(payload.get("error")), status="failed")
         if payload.get("success"):
-            platform_message_id = payload.get("message_id") or payload.get("ts") or payload.get("message_ts") or payload.get("id")
-            channel_id = payload.get("chat_id") or payload.get("channel") or target_channel
-            return SlackDeliveryResult(
-                success=True,
-                attempts=1,
-                error=None,
-                status="sent",
-                message_ts=str(platform_message_id) if platform_message_id else None,
-                channel_id=str(channel_id) if channel_id else None,
-                channel_alias=channel_alias,
-                channel_name=payload.get("channel_name"),
-                platform_message_id=str(platform_message_id) if platform_message_id else None,
-            )
+            ts = payload.get("ts") or payload.get("message_ts") or payload.get("id")
+            return SlackDeliveryResult(success=True, attempts=1, error=None, status="sent", message_ts=str(ts) if ts else None)
         return SlackDeliveryResult(success=False, attempts=1, error=f"unexpected live adapter response: {payload}", status="failed")
 
     payload: dict[str, str] = {"text": message}
@@ -633,6 +580,7 @@ def _deliver_to_slack(
             if attempt < retries:
                 continue
     return SlackDeliveryResult(success=False, attempts=attempts, error=str(last_error) if last_error else None, status="failed")
+
 
 def _source_footer(source_statuses: dict[str, dict[str, Any]]) -> str | None:
     issues: list[str] = []
@@ -961,10 +909,8 @@ def _deliver_vacancy_notifications(
         )
         delivery = _deliver_to_slack(body, channel, prefer_gateway=True)
         _finalize_notifications(store, [notification_id], delivery)
-        message_ts = delivery.message_ts
+        message_ts = str(delivery.message_ts or f"{datetime.now(timezone.utc).timestamp():.6f}")
         if delivery.success:
-            if not message_ts:
-                raise RuntimeError("Slack delivery succeeded without a platform message id; refusing to store fallback slack_message_ts")
             store.record_vacancy_slack_message(
                 vacancy_id=vacancy_id,
                 run_id=run_id,
@@ -972,12 +918,8 @@ def _deliver_vacancy_notifications(
                 canonical_url=payload.get("canonical_url"),
                 card_key=payload.get("card_key"),
                 notification_id=notification_id,
-                slack_channel=delivery.channel_id or channel,
-                slack_channel_id=delivery.channel_id,
-                slack_channel_name=delivery.channel_name,
-                channel_alias=delivery.channel_alias,
-                platform_message_id=delivery.platform_message_id,
-                slack_message_ts=str(message_ts),
+                slack_channel=channel,
+                slack_message_ts=message_ts,
                 message_type="vacancy_card",
                 company=vacancy.company,
                 title=vacancy.title,
@@ -985,13 +927,6 @@ def _deliver_vacancy_notifications(
                 recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
                 url=vacancy.url,
                 sent_at=datetime.now(timezone.utc).isoformat(),
-            )
-            _crm_record_delivery(
-                store,
-                vacancy=vacancy,
-                vacancy_id=vacancy_id,
-                slack_channel_id=str(delivery.channel_id or channel),
-                slack_message_ts=str(message_ts),
             )
             store.set_vacancy_status(vacancy_id, "notified")
         else:
@@ -3033,63 +2968,6 @@ def _map_feedback_reaction(raw_reaction: str) -> str | None:
     return mapping.get(reaction)
 
 
-def _crm_service(store: JobIntelStore):
-    from .crm_service import CRMService
-
-    return CRMService.from_store(store)
-
-
-
-def _crm_record_delivery(
-    store: JobIntelStore,
-    *,
-    vacancy: Vacancy,
-    vacancy_id: int,
-    slack_channel_id: str,
-    slack_message_ts: str,
-) -> None:
-    try:
-        crm = _crm_service(store)
-        opportunity = crm.ensure_opportunity_for_vacancy(vacancy=vacancy, vacancy_id=vacancy_id)
-        crm.link_slack_message_to_opportunity(
-            opportunity_id=int(opportunity["id"]),
-            slack_channel_id=slack_channel_id,
-            slack_message_ts=slack_message_ts,
-            slack_thread_ts=slack_message_ts,
-        )
-        crm.transition_for_delivery(int(opportunity["id"]))
-    except Exception as exc:
-        logger.exception(
-            "crm_delivery_record_failed vacancy_id=%s channel=%s slack_message_ts=%s: %s",
-            vacancy_id,
-            slack_channel_id,
-            slack_message_ts,
-            exc,
-        )
-
-
-def _crm_handle_feedback_event(
-    store: JobIntelStore,
-    *,
-    channel: str,
-    message_ts: str,
-    reaction: str,
-    event_type: str,
-    user_id: str,
-    vacancy_id: int,
-    payload: dict[str, Any],
-) -> str:
-    crm = _crm_service(store)
-    return crm.handle_slack_reaction_event(
-        slack_channel_id=channel,
-        slack_message_ts=message_ts,
-        reaction=reaction,
-        event_type=event_type,
-        actor=user_id,
-        payload={"vacancy_id": vacancy_id, **payload},
-    )
-
-
 def run_feedback_event(payload: dict[str, Any]) -> str:
     event_type = str(payload.get("type") or "").strip()
     if event_type not in {"reaction_added", "reaction_removed"}:
@@ -3110,14 +2988,7 @@ def run_feedback_event(payload: dict[str, Any]) -> str:
     store = _store()
     message = store.find_vacancy_message(slack_channel=channel, slack_message_ts=message_ts)
     if not message:
-        logger.warning(
-            "message_not_tracked channel=%s slack_message_ts=%s reaction=%s user=%s",
-            channel,
-            message_ts,
-            reaction,
-            user_id,
-        )
-        return json.dumps({"status": "ignored", "reason": "message_not_tracked", "channel": channel, "slack_message_ts": message_ts, "reaction": reaction, "user_id": user_id})
+        return json.dumps({"status": "ignored", "reason": "message_not_tracked", "channel": channel, "slack_message_ts": message_ts})
 
     vacancy_id = int(message.get("vacancy_id"))
     store.record_vacancy_feedback_event(
@@ -3135,38 +3006,6 @@ def run_feedback_event(payload: dict[str, Any]) -> str:
         user_id=user_id,
         raw_event_json=payload,
     )
-    logger.info(
-        "vacancy_feedback_recorded vacancy_id=%s notification_id=%s feedback_type=%s event_type=%s channel=%s slack_message_ts=%s",
-        vacancy_id,
-        message.get("notification_id"),
-        feedback_type,
-        event_type,
-        channel,
-        message_ts,
-    )
-    crm_status = "ok"
-    try:
-        crm_status = _crm_handle_feedback_event(
-            store,
-            channel=channel,
-            message_ts=message_ts,
-            reaction=reaction,
-            event_type=event_type,
-            user_id=user_id,
-            vacancy_id=vacancy_id,
-            payload=payload,
-        )
-    except Exception as exc:
-        crm_status = "error"
-        logger.exception(
-            "crm_reaction_branch_failed vacancy_id=%s channel=%s slack_message_ts=%s reaction=%s user=%s: %s",
-            vacancy_id,
-            channel,
-            message_ts,
-            reaction,
-            user_id,
-            exc,
-        )
     return json.dumps(
         {
             "status": "ok",
@@ -3176,149 +3015,9 @@ def run_feedback_event(payload: dict[str, Any]) -> str:
             "channel": channel,
             "slack_message_ts": message_ts,
             "user_id": user_id,
-            "crm_status": crm_status,
         },
         ensure_ascii=False,
     )
-def run_manual_crm_command(
-    command_text: str,
-    *,
-    slack_channel_id: str | None = None,
-    slack_message_ts: str | None = None,
-    actor: str = "Denis",
-) -> dict[str, Any]:
-    import shlex
-
-    from .crm_constants import VALID_OPPORTUNITY_STATUSES
-    from .crm_service import CRMService
-
-    tokens = shlex.split(command_text or "")
-    if not tokens or tokens[0] != "/hermes-job":
-        return {"status": "invalid_command"}
-    if len(tokens) < 2:
-        return {"status": "invalid_command"}
-
-    action = tokens[1]
-    args = tokens[2:]
-    store = _store()
-    crm = CRMService.from_store(store)
-
-    if action == "due":
-        return {"status": "ok", "items": crm.list_due()}
-    if action == "active":
-        return {"status": "ok", "items": crm.list_active()}
-    if action == "pipeline":
-        return {"status": "ok", "items": crm.pipeline_summary()}
-
-    def _resolve(search_text: str | None):
-        return crm.resolve_command_opportunity(
-            slack_channel_id=slack_channel_id,
-            slack_message_ts=slack_message_ts,
-            search_text=search_text,
-        )
-
-    if action == "eval":
-        if not args:
-            return {"status": "invalid_command"}
-        return crm.ingest_manual_job_url(
-            url=args[0],
-            actor=actor,
-            source="manual_command",
-            force_re_evaluate=False,
-        )
-
-    if action == "status":
-        if not args:
-            return {"status": "invalid_command"}
-        new_status = args[0]
-        if new_status not in VALID_OPPORTUNITY_STATUSES:
-            return {"status": "invalid_status", "requested_status": new_status}
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status=new_status,
-            source="manual_command",
-            actor=actor,
-            reason="manual_status",
-            payload={"command": "status"},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "applied":
-        resolved = _resolve(" ".join(args) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status="applied",
-            source="manual_command",
-            actor=actor,
-            reason="applied_shortcut",
-            payload={"command": "applied"},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "decline":
-        if not args:
-            return {"status": "invalid_command"}
-        reason = args[0]
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status="declined_by_me",
-            source="manual_command",
-            actor=actor,
-            reason=reason,
-            payload={"command": "decline", "reason": reason},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "note":
-        if not args:
-            return {"status": "invalid_command"}
-        note_text = args[0]
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.add_note(opportunity_id=opportunity_id, actor=actor, text=note_text)
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "followup":
-        if not args:
-            return {"status": "invalid_command"}
-        spec = args[0]
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.create_followup_task(opportunity_id=opportunity_id, spec=spec)
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "reopen":
-        resolved = _resolve(" ".join(args) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status="evaluation_requested",
-            source="manual_command",
-            actor=actor,
-            reason="reopen",
-            payload={"command": "reopen"},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    return {"status": "invalid_command", "action": action}
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="job-intel")
@@ -3352,12 +3051,6 @@ def build_parser() -> argparse.ArgumentParser:
     retire = sub.add_parser("retire-stale")
     retire.add_argument("--days", type=int, default=None)
     retire.set_defaults(cmd="retire-stale")
-
-    hermes_job = sub.add_parser("hermes-job")
-    hermes_job.add_argument("command_text")
-    hermes_job.add_argument("--slack-channel-id", default=None)
-    hermes_job.add_argument("--slack-message-ts", default=None)
-    hermes_job.set_defaults(cmd="hermes-job")
     return parser
 
 
@@ -3414,20 +3107,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(raw or "{}")
         print(run_feedback_event(payload))
         return 0
-    if args.cmd == "hermes-job":
-        result = run_manual_crm_command(
-            command_text=args.command_text,
-            slack_channel_id=getattr(args, "slack_channel_id", None),
-            slack_message_ts=getattr(args, "slack_message_ts", None),
-        )
-        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0 if result.get("status") in {"ok", "needs_disambiguation", "not_found", "invalid_url"} else 1
     if args.cmd == "retire-stale":
         result = retire_stale_vacancies(args.days)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

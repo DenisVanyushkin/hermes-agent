@@ -1,0 +1,114 @@
+[
+  {
+    "company_name": "Adyen",
+    "tier": "tier1",
+    "ats_vendor": "greenhouse",
+    "ats_slug": "adyen",
+    "collection_url": "https://job-boards.greenhouse.io/adyen",
+    "validation_url": "https://job-boards.greenhouse.io/adyen/jobs/7522608",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://job-boards.greenhouse.io/adyen",
+      "https://job-boards.greenhouse.io/adyen/jobs/7522608",
+      "https://boards-api.greenhouse.io/v1/boards/adyen/jobs"
+    ]
+  },
+  {
+    "company_name": "Wolt",
+    "tier": "tier1",
+    "ats_vendor": "greenhouse",
+    "ats_slug": "wolt",
+    "collection_url": "https://job-boards.greenhouse.io/wolt",
+    "validation_url": "https://job-boards.greenhouse.io/wolt/jobs/7697415",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://job-boards.greenhouse.io/wolt",
+      "https://job-boards.greenhouse.io/wolt/jobs/7697415",
+      "https://boards-api.greenhouse.io/v1/boards/wolt/jobs"
+    ]
+  },
+  {
+    "company_name": "GitLab",
+    "tier": "tier1",
+    "ats_vendor": "greenhouse",
+    "ats_slug": "gitlab",
+    "collection_url": "https://job-boards.greenhouse.io/gitlab",
+    "validation_url": "https://job-boards.greenhouse.io/gitlab/jobs/8539288002",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://job-boards.greenhouse.io/gitlab",
+      "https://job-boards.greenhouse.io/gitlab/jobs/8539288002",
+      "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs"
+    ]
+  },
+  {
+    "company_name": "Wise",
+    "tier": "tier1",
+    "ats_vendor": "smartrecruiters",
+    "ats_slug": "wise",
+    "collection_url": "https://jobs.smartrecruiters.com/Wise",
+    "validation_url": "https://jobs.smartrecruiters.com/Wise/744000104859432-product-lead-finance",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://jobs.smartrecruiters.com/Wise",
+      "https://jobs.smartrecruiters.com/Wise/744000104859432-product-lead-finance",
+      "https://api.smartrecruiters.com/v1/companies/wise/postings"
+    ]
+  },
+  {
+    "company_name": "Canva",
+    "tier": "tier1",
+    "ats_vendor": "smartrecruiters",
+    "ats_slug": "canva",
+    "collection_url": "https://jobs.smartrecruiters.com/Canva",
+    "validation_url": "https://jobs.smartrecruiters.com/Canva/6000000001086584-head-of-product-print",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://jobs.smartrecruiters.com/Canva",
+      "https://jobs.smartrecruiters.com/Canva/6000000001086584-head-of-product-print",
+      "https://api.smartrecruiters.com/v1/companies/canva/postings"
+    ]
+  },
+  {
+    "company_name": "Delivery Hero",
+    "tier": "tier1",
+    "ats_vendor": "smartrecruiters",
+    "ats_slug": "deliveryhero",
+    "collection_url": "https://careers.smartrecruiters.com/DeliveryHero",
+    "validation_url": "https://jobs.smartrecruiters.com/DeliveryHero/744000116880292-director-product-management-global-product-strategy",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://careers.smartrecruiters.com/DeliveryHero",
+      "https://jobs.smartrecruiters.com/DeliveryHero/744000116880292-director-product-management-global-product-strategy",
+      "https://api.smartrecruiters.com/v1/companies/deliveryhero/postings"
+    ]
+  },
+  {
+    "company_name": "Talabat",
+    "tier": "tier1",
+    "ats_vendor": "smartrecruiters",
+    "ats_slug": "deliveryhero",
+    "collection_url": "https://careers.smartrecruiters.com/DeliveryHero",
+    "validation_url": "https://jobs.smartrecruiters.com/DeliveryHero/744000110766448-cpto-chief-product-technology-officer",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://careers.smartrecruiters.com/DeliveryHero",
+      "https://jobs.smartrecruiters.com/DeliveryHero/744000110766448-cpto-chief-product-technology-officer",
+      "https://api.smartrecruiters.com/v1/companies/deliveryhero/postings"
+    ]
+  },
+  {
+    "company_name": "Airwallex",
+    "tier": "tier1",
+    "ats_vendor": "ashby",
+    "ats_slug": "airwallex",
+    "collection_url": "https://jobs.ashbyhq.com/airwallex",
+    "validation_url": "https://jobs.ashbyhq.com/airwallex/bab7f388-1bfc-41f7-b5d5-6b201a221fed",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://jobs.ashbyhq.com/airwallex",
+      "https://jobs.ashbyhq.com/airwallex/bab7f388-1bfc-41f7-b5d5-6b201a221fed",
+      "https://api.ashbyhq.com/posting-api/job-board/airwallex"
+    ]
+  }
+]
