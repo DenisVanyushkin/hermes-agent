@@ -254,7 +254,14 @@ def _format_executive_opportunity_report_inner(
         if len(good_rows) >= 10:
             break
 
-    lines.append(f"*Top Opportunities* ({len(good_rows)} surfaced as cards)")
+    if int(vacancy_card_sent or 0) > 0:
+        lines.append(f"*New Vacancy Cards Sent* ({int(vacancy_card_sent or 0)} sent)")
+    elif int(vacancy_card_candidates or 0) > 0:
+        lines.append(
+            f"*Top Opportunities Considered* ({int(vacancy_card_suppressed or 0)} suppressed / already seen)"
+        )
+    else:
+        lines.append("*Top Opportunities*")
     if good_rows:
         preview = []
         for vacancy, _evaluation in good_rows[:3]:
