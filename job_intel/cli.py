@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import logging
 import os
 import re
 import subprocess
@@ -77,8 +76,6 @@ from .sources import (
 )
 from .store import JobIntelStore
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_DB = resolve_db_path()
 TIER_ORDER = {"reject": 0, "weak_fit": 1, "possible_fit": 2, "strong_fit": 3, "exceptional_fit": 4}
 RECOMMENDATION_ORDER = {
@@ -99,16 +96,28 @@ class SlackDeliveryResult:
     error: str | None = None
     status: str = "sent"
     message_ts: str | None = None
-    channel_id: str | None = None
-    channel_alias: str | None = None
-    channel_name: str | None = None
-    platform_message_id: str | None = None
 
 
 @dataclass(frozen=True)
 class CollectedVacancies:
     vacancies: list[Vacancy]
     source_statuses: dict[str, dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class CardDecisionPlan:
+    should_notify: bool
+    decision: str
+    suppression_reason: str | None
+    previous_sent_run_id: int | None
+    previous_sent_at: str | None
+    previous_feedback_label: str | None
+    feedback_state_active: bool
+    next_allowed_send_at: str | None
+    score_delta_since_last_sent: int | None
+    recommendation_changed_since_last_sent: bool
+    content_hash_changed: bool
+    description_hash_changed: bool
 
 
 
@@ -542,38 +551,6 @@ def _slack_webhook_enabled() -> bool:
 
 
 
-def _ensure_hermes_env_loaded_for_outbound_delivery() -> None:
-    try:
-        from hermes_cli.send_cmd import _load_hermes_env
-    except Exception:
-        _load_hermes_env = None
-
-    if _load_hermes_env is not None:
-        try:
-            _load_hermes_env()
-            return
-        except Exception:
-            pass
-
-    if os.getenv("SLACK_BOT_TOKEN"):
-        return
-
-    env_path = runtime_home() / ".env"
-    if not env_path.exists() or load_dotenv is None:
-        return
-
-    try:
-        load_dotenv(str(env_path), override=True, encoding="utf-8")
-    except UnicodeDecodeError:
-        try:
-            load_dotenv(str(env_path), override=True, encoding="latin-1")
-        except Exception:
-            return
-    except Exception:
-        return
-
-
-
 def _deliver_to_slack(
     message: str,
     channel: str | None = None,
@@ -586,10 +563,7 @@ def _deliver_to_slack(
         return SlackDeliveryResult(success=True, attempts=0, error=None, status="sent")
 
     if prefer_gateway or not webhook:
-        channel_alias = channel
-        target_channel = (channel if (channel and channel.startswith("C")) else ("C0B4MM6D52A" if channel == "executive_search_report" else channel))
-        target = f"slack:{target_channel}" if target_channel else "slack"
-        _ensure_hermes_env_loaded_for_outbound_delivery()
+        target = (f"slack:{channel}" if (channel and channel.startswith("C")) else ("slack:C0B4MM6D52A" if channel == "executive_search_report" else (f"slack:{channel}" if channel else "slack")))
         try:
             raw = send_message_tool({"target": target, "message": message})
             payload = json.loads(raw) if raw else {}
@@ -598,19 +572,8 @@ def _deliver_to_slack(
         if payload.get("error"):
             return SlackDeliveryResult(success=False, attempts=1, error=str(payload.get("error")), status="failed")
         if payload.get("success"):
-            platform_message_id = payload.get("message_id") or payload.get("ts") or payload.get("message_ts") or payload.get("id")
-            channel_id = payload.get("chat_id") or payload.get("channel") or target_channel
-            return SlackDeliveryResult(
-                success=True,
-                attempts=1,
-                error=None,
-                status="sent",
-                message_ts=str(platform_message_id) if platform_message_id else None,
-                channel_id=str(channel_id) if channel_id else None,
-                channel_alias=channel_alias,
-                channel_name=payload.get("channel_name"),
-                platform_message_id=str(platform_message_id) if platform_message_id else None,
-            )
+            ts = payload.get("ts") or payload.get("message_ts") or payload.get("id")
+            return SlackDeliveryResult(success=True, attempts=1, error=None, status="sent", message_ts=str(ts) if ts else None)
         return SlackDeliveryResult(success=False, attempts=1, error=f"unexpected live adapter response: {payload}", status="failed")
 
     payload: dict[str, str] = {"text": message}
@@ -633,6 +596,7 @@ def _deliver_to_slack(
             if attempt < retries:
                 continue
     return SlackDeliveryResult(success=False, attempts=attempts, error=str(last_error) if last_error else None, status="failed")
+
 
 def _source_footer(source_statuses: dict[str, dict[str, Any]]) -> str | None:
     issues: list[str] = []
@@ -792,6 +756,28 @@ def _recommendation_rank(value: str | None) -> int:
     return RECOMMENDATION_ORDER.get(str(value or "reject"), 0)
 
 
+def _candidate_priority_for_recommendation(value: str | None) -> int | None:
+    recommendation = str(value or "")
+    if recommendation in {"strong_fit", "exceptional_fit"}:
+        return 0
+    if recommendation in {"potential_fit", "possible_fit", "needs_review"}:
+        return 1
+    if recommendation == "near_miss":
+        return 2
+    return None
+
+
+def _candidate_freshness_timestamp(vacancy: Vacancy) -> float:
+    for raw in (
+        getattr(vacancy, "scraped_at", None),
+        getattr(vacancy, "posted_at", None),
+    ):
+        parsed = parse_iso_datetime(raw) if raw else None
+        if parsed:
+            return parsed.timestamp()
+    return 0.0
+
+
 def _material_card_change(
     latest: dict[str, Any] | None,
     vacancy: Vacancy,
@@ -826,10 +812,12 @@ def _material_card_change(
     if previous_summary_hash and previous_summary_hash != current_summary_hash:
         return True
     return False
-
-
-
-def _should_notify_vacancy(store: JobIntelStore, vacancy_id: int, vacancy: Vacancy, evaluation: Any, repost_window_days: int) -> bool:
+def _card_decision_plan(
+    store: JobIntelStore,
+    vacancy: Vacancy,
+    evaluation: Any,
+    repost_window_days: int,
+) -> CardDecisionPlan:
     score_delta = int(os.getenv("JOB_INTEL_CARD_RESEND_SCORE_DELTA", "10") or "10")
     card_key = _card_key_for_vacancy(vacancy)
     latest = store.latest_notification_for_card(
@@ -838,24 +826,106 @@ def _should_notify_vacancy(store: JobIntelStore, vacancy_id: int, vacancy: Vacan
         message_types=("vacancy_card", "vacancy_opportunity", "daily_digest"),
     )
     if not latest:
-        return True
+        return CardDecisionPlan(True, "sent", None, None, None, None, False, None, None, False, False, False)
 
     feedback_types = set(store.active_feedback_for_card(card_key))
+    try:
+        payload = json.loads(latest.get("payload_json") or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    previous_score = int(payload.get("score") or 0)
+    current_score = int(getattr(evaluation, "score", 0) or 0)
+    previous_recommendation = str(payload.get("recommendation") or payload.get("tier") or "reject")
+    current_recommendation = str(getattr(evaluation, "recommendation", "reject") or "reject")
+    recommendation_changed = current_recommendation != previous_recommendation
+    recommendation_improved = _recommendation_rank(current_recommendation) > _recommendation_rank(previous_recommendation)
+    current_body = format_vacancy_summary(vacancy, evaluation)
+    current_summary_hash = sha256_text(current_body)
+    current_description_hash = sha256_text(vacancy.description)
+    content_hash_changed = bool(payload.get("summary_hash")) and payload.get("summary_hash") != current_summary_hash
+    description_hash_changed = bool(payload.get("description_hash")) and payload.get("description_hash") != current_description_hash
     material_change = _material_card_change(latest, vacancy, evaluation, score_delta=score_delta)
     notified_at = parse_iso_datetime(latest.get("sent_at"))
-    cooldown_elapsed = bool(
-        notified_at and datetime.now(timezone.utc) - notified_at >= timedelta(days=repost_window_days)
-    )
+    next_allowed_at = None
+    cooldown_elapsed = False
+    if notified_at:
+        next_allowed = notified_at + timedelta(days=repost_window_days)
+        next_allowed_at = next_allowed.isoformat()
+        cooldown_elapsed = datetime.now(timezone.utc) >= next_allowed
+
+    previous_feedback_label = ",".join(sorted(feedback_types)) if feedback_types else None
+    score_delta_since_last_sent = current_score - previous_score
+    feedback_state_active = bool(feedback_types)
+    previous_sent_run_id = int(latest.get("run_id")) if latest.get("run_id") is not None else None
+    previous_sent_at = latest.get("sent_at")
 
     if "applied" in feedback_types:
-        return False
+        return CardDecisionPlan(False, "suppressed", "feedback_applied", previous_sent_run_id, previous_sent_at, previous_feedback_label, feedback_state_active, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
     if "exceptional" in feedback_types:
-        return False
-    if "not_interesting" in feedback_types:
-        return material_change
-    if "interesting" in feedback_types or "save_for_later" in feedback_types:
-        return material_change or cooldown_elapsed
-    return material_change or cooldown_elapsed
+        return CardDecisionPlan(False, "suppressed", "feedback_exceptional_follow_up", previous_sent_run_id, previous_sent_at, previous_feedback_label, feedback_state_active, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+    if "not_interesting" in feedback_types and not material_change:
+        return CardDecisionPlan(False, "suppressed", "feedback_not_interesting", previous_sent_run_id, previous_sent_at, previous_feedback_label, feedback_state_active, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+    if ("interesting" in feedback_types or "save_for_later" in feedback_types) and not (material_change or cooldown_elapsed):
+        return CardDecisionPlan(False, "suppressed", "feedback_cooldown_active", previous_sent_run_id, previous_sent_at, previous_feedback_label, feedback_state_active, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+    if not feedback_types and not (material_change or cooldown_elapsed):
+        return CardDecisionPlan(False, "suppressed", "already_sent_cooldown_active", previous_sent_run_id, previous_sent_at, None, False, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+
+    if recommendation_improved:
+        reason = "recommendation_improved"
+    elif score_delta_since_last_sent >= score_delta:
+        reason = "score_increased_materially"
+    elif description_hash_changed:
+        reason = "description_changed_materially"
+    elif content_hash_changed:
+        reason = "content_changed_materially"
+    elif cooldown_elapsed:
+        reason = "cooldown_elapsed"
+    else:
+        reason = "material_change"
+    return CardDecisionPlan(True, "sent", reason, previous_sent_run_id, previous_sent_at, previous_feedback_label, feedback_state_active, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+
+
+def _should_notify_vacancy(store: JobIntelStore, vacancy_id: int, vacancy: Vacancy, evaluation: Any, repost_window_days: int) -> bool:
+    return _card_decision_plan(store, vacancy, evaluation, repost_window_days).should_notify
+
+
+def _canonical_actionable_candidates(
+    scored_rows: list[tuple[Vacancy, Any, dict[str, Any], int, bool]],
+) -> list[tuple[int, int, float, int, Vacancy, Any, int]]:
+    grouped: dict[str, list[tuple[int, int, float, int, Vacancy, Any, int, bool]]] = {}
+    for vacancy, evaluation, _classification, vacancy_id, duplicate in scored_rows:
+        priority = _candidate_priority_for_recommendation(getattr(evaluation, "recommendation", None))
+        if priority is None:
+            continue
+        card_key = _card_key_for_vacancy(vacancy)
+        grouped.setdefault(card_key, []).append(
+            (
+                priority,
+                -int(getattr(evaluation, "score", 0) or 0),
+                -_candidate_freshness_timestamp(vacancy),
+                int(vacancy_id),
+                vacancy,
+                evaluation,
+                int(vacancy_id),
+                bool(duplicate),
+            )
+        )
+
+    canonical: list[tuple[int, int, float, int, Vacancy, Any, int]] = []
+    for rows in grouped.values():
+        # If the same card identity produced duplicate-linked rows in the run,
+        # keep it out of human-facing candidate accounting until lineage is unambiguous.
+        if any(bool(row[7]) for row in rows):
+            continue
+        canonical_rows = [row for row in rows if not bool(row[7])]
+        if not canonical_rows:
+            continue
+        canonical_rows.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+        best = canonical_rows[0]
+        canonical.append(best[:7])
+
+    canonical.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+    return canonical
 
 
 def _dual_score_rollout_enabled(store: JobIntelStore, run_id: int) -> bool:
@@ -961,10 +1031,8 @@ def _deliver_vacancy_notifications(
         )
         delivery = _deliver_to_slack(body, channel, prefer_gateway=True)
         _finalize_notifications(store, [notification_id], delivery)
-        message_ts = delivery.message_ts
+        message_ts = str(delivery.message_ts or f"{datetime.now(timezone.utc).timestamp():.6f}")
         if delivery.success:
-            if not message_ts:
-                raise RuntimeError("Slack delivery succeeded without a platform message id; refusing to store fallback slack_message_ts")
             store.record_vacancy_slack_message(
                 vacancy_id=vacancy_id,
                 run_id=run_id,
@@ -972,12 +1040,8 @@ def _deliver_vacancy_notifications(
                 canonical_url=payload.get("canonical_url"),
                 card_key=payload.get("card_key"),
                 notification_id=notification_id,
-                slack_channel=delivery.channel_id or channel,
-                slack_channel_id=delivery.channel_id,
-                slack_channel_name=delivery.channel_name,
-                channel_alias=delivery.channel_alias,
-                platform_message_id=delivery.platform_message_id,
-                slack_message_ts=str(message_ts),
+                slack_channel=channel,
+                slack_message_ts=message_ts,
                 message_type="vacancy_card",
                 company=vacancy.company,
                 title=vacancy.title,
@@ -985,13 +1049,6 @@ def _deliver_vacancy_notifications(
                 recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
                 url=vacancy.url,
                 sent_at=datetime.now(timezone.utc).isoformat(),
-            )
-            _crm_record_delivery(
-                store,
-                vacancy=vacancy,
-                vacancy_id=vacancy_id,
-                slack_channel_id=str(delivery.channel_id or channel),
-                slack_message_ts=str(message_ts),
             )
             store.set_vacancy_status(vacancy_id, "notified")
         else:
@@ -1420,32 +1477,101 @@ def run_daily() -> str:
         )
     max_cards_per_run = int(os.getenv("JOB_INTEL_MAX_VACANCY_CARDS_PER_RUN", "10") or "10")
 
-    # Top scored opportunities (include rejected; exclude duplicates).
+    # Card candidate accounting: one canonical non-duplicate row per card_key.
     nondup_scored = [(v, e, c, vid, dup) for (v, e, c, vid, dup) in scored_rows if not dup]
     nondup_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
-    actionable_candidates: list[tuple[int, int, Vacancy, Any, int]] = []
-    for vacancy, evaluation, _classification, vacancy_id, _duplicate in nondup_scored:
-        recommendation = str(getattr(evaluation, "recommendation", "") or "")
-        if recommendation in {"strong_fit", "exceptional_fit"}:
-            priority = 0
-        elif recommendation in {"potential_fit", "possible_fit", "needs_review"}:
-            priority = 1
-        elif recommendation == "near_miss":
-            priority = 2
-        else:
-            continue
-        actionable_candidates.append((priority, -int(getattr(evaluation, "score", 0) or 0), vacancy, evaluation, vacancy_id))
+    actionable_candidates = _canonical_actionable_candidates(scored_rows)
+
     surfaced_rows: list[tuple[Vacancy, Any, int]] = []
-    suppressed_card_count = 0
-    for _priority, _neg_score, vacancy, evaluation, vacancy_id in actionable_candidates:
+    top_scored = [(vacancy, evaluation) for _, _, _, _, vacancy, evaluation, _ in actionable_candidates[:20]]
+    near_miss_scored = [
+        (vacancy, evaluation)
+        for _, _, _, _, vacancy, evaluation, _ in actionable_candidates
+        if str(getattr(evaluation, "recommendation", None) or "") == "near_miss"
+    ]
+    for candidate_rank, (_priority, _neg_score, _neg_freshness, _vacancy_sort_id, vacancy, evaluation, vacancy_id) in enumerate(actionable_candidates, start=1):
+        decision_plan = _card_decision_plan(store, vacancy, evaluation, repost_window_days)
+        vacancy_key = canonical_vacancy_key(vacancy)
+        canonical_url = canonical_job_url(vacancy.url, vacancy.source)
+        card_key = canonical_url or vacancy_key
         if len(surfaced_rows) >= max_cards_per_run:
-            break
-        if _should_notify_vacancy(store, vacancy_id, vacancy, evaluation, repost_window_days):
+            store.record_vacancy_card_decision(
+                run_id=run_id,
+                vacancy_id=vacancy_id,
+                vacancy_key=vacancy_key,
+                canonical_url=canonical_url,
+                card_key=card_key,
+                source=vacancy.source,
+                company=vacancy.company,
+                title=vacancy.title,
+                score=int(getattr(evaluation, "score", 0) or 0),
+                recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
+                candidate_rank=candidate_rank,
+                decision="skipped_limit",
+                suppression_reason="max_cards_per_run",
+                previous_sent_run_id=decision_plan.previous_sent_run_id,
+                previous_sent_at=decision_plan.previous_sent_at,
+                previous_feedback_label=decision_plan.previous_feedback_label,
+                feedback_state_active=decision_plan.feedback_state_active,
+                next_allowed_send_at=decision_plan.next_allowed_send_at,
+                score_delta_since_last_sent=decision_plan.score_delta_since_last_sent,
+                recommendation_changed_since_last_sent=decision_plan.recommendation_changed_since_last_sent,
+                content_hash_changed=decision_plan.content_hash_changed,
+                description_hash_changed=decision_plan.description_hash_changed,
+            )
+            continue
+        if decision_plan.should_notify:
             surfaced_rows.append((vacancy, evaluation, vacancy_id))
+            store.record_vacancy_card_decision(
+                run_id=run_id,
+                vacancy_id=vacancy_id,
+                vacancy_key=vacancy_key,
+                canonical_url=canonical_url,
+                card_key=card_key,
+                source=vacancy.source,
+                company=vacancy.company,
+                title=vacancy.title,
+                score=int(getattr(evaluation, "score", 0) or 0),
+                recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
+                candidate_rank=candidate_rank,
+                decision="sent",
+                suppression_reason=decision_plan.suppression_reason,
+                previous_sent_run_id=decision_plan.previous_sent_run_id,
+                previous_sent_at=decision_plan.previous_sent_at,
+                previous_feedback_label=decision_plan.previous_feedback_label,
+                feedback_state_active=decision_plan.feedback_state_active,
+                next_allowed_send_at=decision_plan.next_allowed_send_at,
+                score_delta_since_last_sent=decision_plan.score_delta_since_last_sent,
+                recommendation_changed_since_last_sent=decision_plan.recommendation_changed_since_last_sent,
+                content_hash_changed=decision_plan.content_hash_changed,
+                description_hash_changed=decision_plan.description_hash_changed,
+            )
         else:
-            suppressed_card_count += 1
             store.set_vacancy_status(vacancy_id, "notified")
-    top_scored = [(v, e) for (v, e, _, _, _) in nondup_scored[:20]]
+            store.record_vacancy_card_decision(
+                run_id=run_id,
+                vacancy_id=vacancy_id,
+                vacancy_key=vacancy_key,
+                canonical_url=canonical_url,
+                card_key=card_key,
+                source=vacancy.source,
+                company=vacancy.company,
+                title=vacancy.title,
+                score=int(getattr(evaluation, "score", 0) or 0),
+                recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
+                candidate_rank=candidate_rank,
+                decision="suppressed",
+                suppression_reason=decision_plan.suppression_reason,
+                previous_sent_run_id=decision_plan.previous_sent_run_id,
+                previous_sent_at=decision_plan.previous_sent_at,
+                previous_feedback_label=decision_plan.previous_feedback_label,
+                feedback_state_active=decision_plan.feedback_state_active,
+                next_allowed_send_at=decision_plan.next_allowed_send_at,
+                score_delta_since_last_sent=decision_plan.score_delta_since_last_sent,
+                recommendation_changed_since_last_sent=decision_plan.recommendation_changed_since_last_sent,
+                content_hash_changed=decision_plan.content_hash_changed,
+                description_hash_changed=decision_plan.description_hash_changed,
+            )
 
     # Compute "planned notified" counts (actual becomes 0 if delivery fails).
     planned_notified_by_source: dict[str, int] = {}
@@ -1474,9 +1600,6 @@ def run_daily() -> str:
     decision_counts = Counter()
     for v, e, _, _, _ in nondup_scored:
         decision_counts[str(getattr(e, 'recommendation', 'reject') or 'reject')] += 1
-
-    near_miss_scored = [(v, e) for (v, e, _, _, _) in nondup_scored if str(getattr(e, 'recommendation', None) or '') == 'near_miss']
-    near_miss_scored.sort(key=lambda row: int(getattr(row[1], 'score', 0) or 0), reverse=True)
 
 
     # Rejection intelligence buckets.
@@ -1524,6 +1647,10 @@ def run_daily() -> str:
     rejected_scored.sort(key=lambda row: int(getattr(row[1], "score", 0) or 0), reverse=True)
 
     # User-facing opportunity report (review-mode buckets; near-miss visible but never alerts).
+    card_decision_counts = store.card_decision_counts(run_id)
+    summary_card_candidates = sum(card_decision_counts.values())
+    summary_card_sent = int(card_decision_counts.get("sent", 0))
+    summary_card_suppressed = int(card_decision_counts.get("suppressed", 0)) + int(card_decision_counts.get("skipped_limit", 0))
     digest = format_executive_opportunity_report(
         run_id=run_id,
         title='Daily executive opportunity report',
@@ -1537,9 +1664,9 @@ def run_daily() -> str:
         decision_counts=dict(decision_counts),
         top_near_miss=near_miss_scored,
         scoring_model_version=effective_scoring_version,
-        vacancy_card_candidates=len(actionable_candidates),
-        vacancy_card_sent=len(surfaced_rows),
-        vacancy_card_suppressed=suppressed_card_count,
+        vacancy_card_candidates=summary_card_candidates,
+        vacancy_card_sent=summary_card_sent,
+        vacancy_card_suppressed=summary_card_suppressed,
         operator_footer=operator_footer,
         dual_scores=dual_scores_by_url if dual_score_enabled else None,
     )
@@ -1563,8 +1690,9 @@ def run_daily() -> str:
         "needs_review": int(decision_counts.get("needs_review", 0)),
         "near_miss": int(decision_counts.get("near_miss", 0)),
         "rejected": int(decision_counts.get("reject", 0)),
-        "vacancy_card_candidates": len(actionable_candidates),
-        "vacancy_card_suppressed": suppressed_card_count,
+        "vacancy_card_candidates": summary_card_candidates,
+        "vacancy_card_sent": summary_card_sent,
+        "vacancy_card_suppressed": summary_card_suppressed,
     }
     summary_notification_id = store.create_notification(
         run_id,
@@ -3033,63 +3161,6 @@ def _map_feedback_reaction(raw_reaction: str) -> str | None:
     return mapping.get(reaction)
 
 
-def _crm_service(store: JobIntelStore):
-    from .crm_service import CRMService
-
-    return CRMService.from_store(store)
-
-
-
-def _crm_record_delivery(
-    store: JobIntelStore,
-    *,
-    vacancy: Vacancy,
-    vacancy_id: int,
-    slack_channel_id: str,
-    slack_message_ts: str,
-) -> None:
-    try:
-        crm = _crm_service(store)
-        opportunity = crm.ensure_opportunity_for_vacancy(vacancy=vacancy, vacancy_id=vacancy_id)
-        crm.link_slack_message_to_opportunity(
-            opportunity_id=int(opportunity["id"]),
-            slack_channel_id=slack_channel_id,
-            slack_message_ts=slack_message_ts,
-            slack_thread_ts=slack_message_ts,
-        )
-        crm.transition_for_delivery(int(opportunity["id"]))
-    except Exception as exc:
-        logger.exception(
-            "crm_delivery_record_failed vacancy_id=%s channel=%s slack_message_ts=%s: %s",
-            vacancy_id,
-            slack_channel_id,
-            slack_message_ts,
-            exc,
-        )
-
-
-def _crm_handle_feedback_event(
-    store: JobIntelStore,
-    *,
-    channel: str,
-    message_ts: str,
-    reaction: str,
-    event_type: str,
-    user_id: str,
-    vacancy_id: int,
-    payload: dict[str, Any],
-) -> str:
-    crm = _crm_service(store)
-    return crm.handle_slack_reaction_event(
-        slack_channel_id=channel,
-        slack_message_ts=message_ts,
-        reaction=reaction,
-        event_type=event_type,
-        actor=user_id,
-        payload={"vacancy_id": vacancy_id, **payload},
-    )
-
-
 def run_feedback_event(payload: dict[str, Any]) -> str:
     event_type = str(payload.get("type") or "").strip()
     if event_type not in {"reaction_added", "reaction_removed"}:
@@ -3110,14 +3181,7 @@ def run_feedback_event(payload: dict[str, Any]) -> str:
     store = _store()
     message = store.find_vacancy_message(slack_channel=channel, slack_message_ts=message_ts)
     if not message:
-        logger.warning(
-            "message_not_tracked channel=%s slack_message_ts=%s reaction=%s user=%s",
-            channel,
-            message_ts,
-            reaction,
-            user_id,
-        )
-        return json.dumps({"status": "ignored", "reason": "message_not_tracked", "channel": channel, "slack_message_ts": message_ts, "reaction": reaction, "user_id": user_id})
+        return json.dumps({"status": "ignored", "reason": "message_not_tracked", "channel": channel, "slack_message_ts": message_ts})
 
     vacancy_id = int(message.get("vacancy_id"))
     store.record_vacancy_feedback_event(
@@ -3135,38 +3199,6 @@ def run_feedback_event(payload: dict[str, Any]) -> str:
         user_id=user_id,
         raw_event_json=payload,
     )
-    logger.info(
-        "vacancy_feedback_recorded vacancy_id=%s notification_id=%s feedback_type=%s event_type=%s channel=%s slack_message_ts=%s",
-        vacancy_id,
-        message.get("notification_id"),
-        feedback_type,
-        event_type,
-        channel,
-        message_ts,
-    )
-    crm_status = "ok"
-    try:
-        crm_status = _crm_handle_feedback_event(
-            store,
-            channel=channel,
-            message_ts=message_ts,
-            reaction=reaction,
-            event_type=event_type,
-            user_id=user_id,
-            vacancy_id=vacancy_id,
-            payload=payload,
-        )
-    except Exception as exc:
-        crm_status = "error"
-        logger.exception(
-            "crm_reaction_branch_failed vacancy_id=%s channel=%s slack_message_ts=%s reaction=%s user=%s: %s",
-            vacancy_id,
-            channel,
-            message_ts,
-            reaction,
-            user_id,
-            exc,
-        )
     return json.dumps(
         {
             "status": "ok",
@@ -3176,149 +3208,9 @@ def run_feedback_event(payload: dict[str, Any]) -> str:
             "channel": channel,
             "slack_message_ts": message_ts,
             "user_id": user_id,
-            "crm_status": crm_status,
         },
         ensure_ascii=False,
     )
-def run_manual_crm_command(
-    command_text: str,
-    *,
-    slack_channel_id: str | None = None,
-    slack_message_ts: str | None = None,
-    actor: str = "Denis",
-) -> dict[str, Any]:
-    import shlex
-
-    from .crm_constants import VALID_OPPORTUNITY_STATUSES
-    from .crm_service import CRMService
-
-    tokens = shlex.split(command_text or "")
-    if not tokens or tokens[0] != "/hermes-job":
-        return {"status": "invalid_command"}
-    if len(tokens) < 2:
-        return {"status": "invalid_command"}
-
-    action = tokens[1]
-    args = tokens[2:]
-    store = _store()
-    crm = CRMService.from_store(store)
-
-    if action == "due":
-        return {"status": "ok", "items": crm.list_due()}
-    if action == "active":
-        return {"status": "ok", "items": crm.list_active()}
-    if action == "pipeline":
-        return {"status": "ok", "items": crm.pipeline_summary()}
-
-    def _resolve(search_text: str | None):
-        return crm.resolve_command_opportunity(
-            slack_channel_id=slack_channel_id,
-            slack_message_ts=slack_message_ts,
-            search_text=search_text,
-        )
-
-    if action == "eval":
-        if not args:
-            return {"status": "invalid_command"}
-        return crm.ingest_manual_job_url(
-            url=args[0],
-            actor=actor,
-            source="manual_command",
-            force_re_evaluate=False,
-        )
-
-    if action == "status":
-        if not args:
-            return {"status": "invalid_command"}
-        new_status = args[0]
-        if new_status not in VALID_OPPORTUNITY_STATUSES:
-            return {"status": "invalid_status", "requested_status": new_status}
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status=new_status,
-            source="manual_command",
-            actor=actor,
-            reason="manual_status",
-            payload={"command": "status"},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "applied":
-        resolved = _resolve(" ".join(args) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status="applied",
-            source="manual_command",
-            actor=actor,
-            reason="applied_shortcut",
-            payload={"command": "applied"},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "decline":
-        if not args:
-            return {"status": "invalid_command"}
-        reason = args[0]
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status="declined_by_me",
-            source="manual_command",
-            actor=actor,
-            reason=reason,
-            payload={"command": "decline", "reason": reason},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "note":
-        if not args:
-            return {"status": "invalid_command"}
-        note_text = args[0]
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.add_note(opportunity_id=opportunity_id, actor=actor, text=note_text)
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "followup":
-        if not args:
-            return {"status": "invalid_command"}
-        spec = args[0]
-        resolved = _resolve(" ".join(args[1:]) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.create_followup_task(opportunity_id=opportunity_id, spec=spec)
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    if action == "reopen":
-        resolved = _resolve(" ".join(args) or None)
-        if resolved["status"] != "ok":
-            return resolved
-        opportunity_id = int(resolved["opportunity"]["id"])
-        crm.transition_opportunity(
-            opportunity_id=opportunity_id,
-            new_status="evaluation_requested",
-            source="manual_command",
-            actor=actor,
-            reason="reopen",
-            payload={"command": "reopen"},
-        )
-        return {"status": "ok", "opportunity_id": opportunity_id}
-
-    return {"status": "invalid_command", "action": action}
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="job-intel")
@@ -3352,12 +3244,6 @@ def build_parser() -> argparse.ArgumentParser:
     retire = sub.add_parser("retire-stale")
     retire.add_argument("--days", type=int, default=None)
     retire.set_defaults(cmd="retire-stale")
-
-    hermes_job = sub.add_parser("hermes-job")
-    hermes_job.add_argument("command_text")
-    hermes_job.add_argument("--slack-channel-id", default=None)
-    hermes_job.add_argument("--slack-message-ts", default=None)
-    hermes_job.set_defaults(cmd="hermes-job")
     return parser
 
 
@@ -3414,20 +3300,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(raw or "{}")
         print(run_feedback_event(payload))
         return 0
-    if args.cmd == "hermes-job":
-        result = run_manual_crm_command(
-            command_text=args.command_text,
-            slack_channel_id=getattr(args, "slack_channel_id", None),
-            slack_message_ts=getattr(args, "slack_message_ts", None),
-        )
-        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0 if result.get("status") in {"ok", "needs_disambiguation", "not_found", "invalid_url"} else 1
     if args.cmd == "retire-stale":
         result = retire_stale_vacancies(args.days)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

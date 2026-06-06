@@ -191,6 +191,36 @@ CREATE TABLE IF NOT EXISTS notifications (
     FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS vacancy_card_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    vacancy_id INTEGER,
+    vacancy_key TEXT NOT NULL,
+    canonical_url TEXT,
+    card_key TEXT NOT NULL,
+    source TEXT,
+    company TEXT,
+    title TEXT,
+    score INTEGER,
+    recommendation TEXT,
+    candidate_rank INTEGER,
+    decision TEXT NOT NULL,
+    suppression_reason TEXT,
+    previous_sent_run_id INTEGER,
+    previous_sent_at TEXT,
+    previous_feedback_label TEXT,
+    feedback_state_active INTEGER NOT NULL DEFAULT 0,
+    next_allowed_send_at TEXT,
+    score_delta_since_last_sent INTEGER,
+    recommendation_changed_since_last_sent INTEGER NOT NULL DEFAULT 0,
+    content_hash_changed INTEGER NOT NULL DEFAULT 0,
+    description_hash_changed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, card_key),
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+    FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE SET NULL
+);
+
 
 CREATE TABLE IF NOT EXISTS source_kpi_run (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -280,11 +310,7 @@ CREATE TABLE IF NOT EXISTS vacancy_slack_messages (
     card_key TEXT,
     notification_id INTEGER,
     slack_channel TEXT NOT NULL,
-    slack_channel_id TEXT,
-    slack_channel_name TEXT,
-    channel_alias TEXT,
     slack_message_ts TEXT NOT NULL,
-    platform_message_id TEXT,
     message_type TEXT,
     company TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -341,127 +367,6 @@ CREATE TABLE IF NOT EXISTS vacancy_feedback_state (
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL,
     FOREIGN KEY(notification_id) REFERENCES notifications(id) ON DELETE SET NULL
 );
-
-CREATE TABLE IF NOT EXISTS opportunities (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    vacancy_id INTEGER,
-    company TEXT,
-    company_normalized TEXT,
-    title TEXT,
-    title_normalized TEXT,
-    location TEXT,
-    remote_policy TEXT,
-    source TEXT NOT NULL,
-    source_url TEXT,
-    canonical_url TEXT,
-    ats TEXT,
-    ats_job_id TEXT,
-    description TEXT,
-    description_hash TEXT,
-    status TEXT NOT NULL DEFAULT 'discovered',
-    score INTEGER,
-    confidence TEXT,
-    recommendation TEXT,
-    slack_channel_id TEXT,
-    slack_message_ts TEXT,
-    slack_thread_ts TEXT,
-    artifact_bundle_id INTEGER,
-    next_action_id INTEGER,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    last_seen_at TEXT,
-    FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE SET NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_opportunities_company_title
-ON opportunities(company_normalized, title_normalized);
-
-CREATE INDEX IF NOT EXISTS idx_opportunities_status
-ON opportunities(status);
-
-CREATE INDEX IF NOT EXISTS idx_opportunities_ats_job
-ON opportunities(ats, ats_job_id);
-
-CREATE INDEX IF NOT EXISTS idx_opportunities_canonical_url
-ON opportunities(canonical_url);
-
-CREATE INDEX IF NOT EXISTS idx_opportunities_slack
-ON opportunities(slack_channel_id, slack_message_ts);
-
-CREATE TABLE IF NOT EXISTS opportunity_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    opportunity_id INTEGER,
-    event_type TEXT NOT NULL,
-    event_source TEXT NOT NULL,
-    actor TEXT,
-    payload_json TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_events_opportunity
-ON opportunity_events(opportunity_id);
-
-CREATE INDEX IF NOT EXISTS idx_events_type
-ON opportunity_events(event_type);
-
-CREATE INDEX IF NOT EXISTS idx_events_created_at
-ON opportunity_events(created_at);
-
-CREATE TABLE IF NOT EXISTS opportunity_tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    opportunity_id INTEGER NOT NULL,
-    task_type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',
-    owner TEXT NOT NULL DEFAULT 'denis',
-    due_at TEXT,
-    note TEXT,
-    created_at TEXT NOT NULL,
-    completed_at TEXT,
-    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS opportunity_artifacts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    opportunity_id INTEGER NOT NULL,
-    artifact_type TEXT NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1,
-    content_path TEXT,
-    content_text TEXT,
-    summary TEXT,
-    model TEXT,
-    qa_status TEXT,
-    qa_notes TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS opportunity_contacts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    opportunity_id INTEGER NOT NULL,
-    name TEXT,
-    role TEXT,
-    company TEXT,
-    email TEXT,
-    linkedin_url TEXT,
-    source TEXT,
-    confidence TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS slack_message_map (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    opportunity_id INTEGER NOT NULL,
-    slack_channel_id TEXT NOT NULL,
-    slack_message_ts TEXT NOT NULL,
-    slack_thread_ts TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_slack_message_map_unique
-ON slack_message_map(slack_channel_id, slack_message_ts);
 
 CREATE TABLE IF NOT EXISTS production_observation_daily (
     run_id INTEGER PRIMARY KEY,
@@ -632,10 +537,6 @@ class JobIntelStore:
             self._ensure_column(conn, "vacancy_slack_messages", "canonical_url", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "card_key", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "notification_id", "INTEGER")
-            self._ensure_column(conn, "vacancy_slack_messages", "slack_channel_id", "TEXT")
-            self._ensure_column(conn, "vacancy_slack_messages", "slack_channel_name", "TEXT")
-            self._ensure_column(conn, "vacancy_slack_messages", "channel_alias", "TEXT")
-            self._ensure_column(conn, "vacancy_slack_messages", "platform_message_id", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "message_type", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "score_at_send", "INTEGER")
             self._ensure_column(conn, "vacancy_slack_messages", "recommendation_at_send", "TEXT")
@@ -1323,6 +1224,120 @@ PRAGMA foreign_keys=ON;
                 ),
             )
 
+    def record_vacancy_card_decision(
+        self,
+        *,
+        run_id: int,
+        vacancy_id: int | None,
+        vacancy_key: str,
+        canonical_url: str | None,
+        card_key: str,
+        source: str | None,
+        company: str | None,
+        title: str | None,
+        score: int | None,
+        recommendation: str | None,
+        candidate_rank: int | None,
+        decision: str,
+        suppression_reason: str | None = None,
+        previous_sent_run_id: int | None = None,
+        previous_sent_at: str | None = None,
+        previous_feedback_label: str | None = None,
+        feedback_state_active: bool = False,
+        next_allowed_send_at: str | None = None,
+        score_delta_since_last_sent: int | None = None,
+        recommendation_changed_since_last_sent: bool = False,
+        content_hash_changed: bool = False,
+        description_hash_changed: bool = False,
+        created_at: str | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO vacancy_card_decisions (
+                    run_id, vacancy_id, vacancy_key, canonical_url, card_key,
+                    source, company, title, score, recommendation, candidate_rank,
+                    decision, suppression_reason, previous_sent_run_id, previous_sent_at,
+                    previous_feedback_label, feedback_state_active, next_allowed_send_at,
+                    score_delta_since_last_sent, recommendation_changed_since_last_sent,
+                    content_hash_changed, description_hash_changed, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, card_key) DO UPDATE SET
+                    vacancy_id=excluded.vacancy_id,
+                    vacancy_key=excluded.vacancy_key,
+                    canonical_url=excluded.canonical_url,
+                    source=excluded.source,
+                    company=excluded.company,
+                    title=excluded.title,
+                    score=excluded.score,
+                    recommendation=excluded.recommendation,
+                    candidate_rank=excluded.candidate_rank,
+                    decision=excluded.decision,
+                    suppression_reason=excluded.suppression_reason,
+                    previous_sent_run_id=excluded.previous_sent_run_id,
+                    previous_sent_at=excluded.previous_sent_at,
+                    previous_feedback_label=excluded.previous_feedback_label,
+                    feedback_state_active=excluded.feedback_state_active,
+                    next_allowed_send_at=excluded.next_allowed_send_at,
+                    score_delta_since_last_sent=excluded.score_delta_since_last_sent,
+                    recommendation_changed_since_last_sent=excluded.recommendation_changed_since_last_sent,
+                    content_hash_changed=excluded.content_hash_changed,
+                    description_hash_changed=excluded.description_hash_changed,
+                    created_at=excluded.created_at
+                """,
+                (
+                    run_id,
+                    vacancy_id,
+                    vacancy_key,
+                    canonical_url,
+                    card_key,
+                    source,
+                    company,
+                    title,
+                    score,
+                    recommendation,
+                    candidate_rank,
+                    decision,
+                    suppression_reason,
+                    previous_sent_run_id,
+                    previous_sent_at,
+                    previous_feedback_label,
+                    int(feedback_state_active),
+                    next_allowed_send_at,
+                    score_delta_since_last_sent,
+                    int(recommendation_changed_since_last_sent),
+                    int(content_hash_changed),
+                    int(description_hash_changed),
+                    created_at or datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def card_decision_counts(self, run_id: int) -> dict[str, int]:
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT decision, COUNT(*) AS n
+                FROM vacancy_card_decisions
+                WHERE run_id = ?
+                GROUP BY decision
+                """,
+                (run_id,),
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows}
+
+    def fetch_card_decisions(self, run_id: int) -> list[dict[str, Any]]:
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM vacancy_card_decisions
+                WHERE run_id = ?
+                ORDER BY candidate_rank ASC, id ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
 
     def upsert_source_kpi_run(self, run_id: int, source: str, kpi: dict[str, Any]) -> None:
         """Persist per-run/per-source KPIs. Missing keys are stored as NULL."""
@@ -1439,19 +1454,15 @@ PRAGMA foreign_keys=ON;
         recommendation: str,
         url: str,
         sent_at: str | None = None,
-        slack_channel_id: str | None = None,
-        slack_channel_name: str | None = None,
-        channel_alias: str | None = None,
-        platform_message_id: str | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO vacancy_slack_messages (
                     vacancy_id, run_id, vacancy_key, canonical_url, card_key, notification_id,
-                    slack_channel, slack_channel_id, slack_channel_name, channel_alias, slack_message_ts, platform_message_id,
-                    message_type, company, title, score, recommendation, score_at_send, recommendation_at_send, url, sent_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    slack_channel, slack_message_ts, message_type, company, title,
+                    score, recommendation, score_at_send, recommendation_at_send, url, sent_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     vacancy_id,
@@ -1461,11 +1472,7 @@ PRAGMA foreign_keys=ON;
                     card_key,
                     notification_id,
                     slack_channel,
-                    slack_channel_id or slack_channel,
-                    slack_channel_name,
-                    channel_alias,
                     slack_message_ts,
-                    platform_message_id,
                     message_type,
                     company,
                     title,
@@ -1482,14 +1489,8 @@ PRAGMA foreign_keys=ON;
     def find_vacancy_message(self, *, slack_channel: str, slack_message_ts: str) -> dict[str, Any] | None:
         with self.connect(read_only=True) as conn:
             row = conn.execute(
-                """
-                SELECT *
-                FROM vacancy_slack_messages
-                WHERE slack_message_ts=?
-                  AND (slack_channel_id=? OR slack_channel=?)
-                LIMIT 1
-                """,
-                (slack_message_ts, slack_channel, slack_channel),
+                "SELECT * FROM vacancy_slack_messages WHERE slack_channel=? AND slack_message_ts=? LIMIT 1",
+                (slack_channel, slack_message_ts),
             ).fetchone()
         return dict(row) if row else None
 
@@ -1511,10 +1512,6 @@ PRAGMA foreign_keys=ON;
         recommendation: str,
         url: str,
         sent_at: str | None = None,
-        slack_channel_id: str | None = None,
-        slack_channel_name: str | None = None,
-        channel_alias: str | None = None,
-        platform_message_id: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:
@@ -1522,9 +1519,9 @@ PRAGMA foreign_keys=ON;
                 """
                 INSERT INTO vacancy_slack_messages (
                     vacancy_id, run_id, vacancy_key, canonical_url, card_key, notification_id,
-                    slack_channel, slack_channel_id, slack_channel_name, channel_alias, slack_message_ts, platform_message_id,
-                    message_type, company, title, score, recommendation, score_at_send, recommendation_at_send, url, sent_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    slack_channel, slack_message_ts, message_type, company, title,
+                    score, recommendation, score_at_send, recommendation_at_send, url, sent_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(slack_channel, slack_message_ts) DO UPDATE SET
                     vacancy_id=excluded.vacancy_id,
                     run_id=excluded.run_id,
@@ -1532,10 +1529,6 @@ PRAGMA foreign_keys=ON;
                     canonical_url=excluded.canonical_url,
                     card_key=excluded.card_key,
                     notification_id=excluded.notification_id,
-                    slack_channel_id=excluded.slack_channel_id,
-                    slack_channel_name=excluded.slack_channel_name,
-                    channel_alias=excluded.channel_alias,
-                    platform_message_id=excluded.platform_message_id,
                     message_type=excluded.message_type,
                     company=excluded.company,
                     title=excluded.title,
@@ -1554,11 +1547,7 @@ PRAGMA foreign_keys=ON;
                     card_key,
                     notification_id,
                     slack_channel,
-                    slack_channel_id or slack_channel,
-                    slack_channel_name,
-                    channel_alias,
                     slack_message_ts,
-                    platform_message_id,
                     message_type,
                     company,
                     title,
