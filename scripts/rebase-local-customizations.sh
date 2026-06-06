@@ -8,7 +8,9 @@ set -euo pipefail
 _default_repo="${HOME:-/home/hermes}/.hermes/hermes-agent"
 if [ "$(id -u)" -ne 0 ] && \
    [ -n "$(find "$_default_repo" -maxdepth 6 -user root -print -quit 2>/dev/null)" ]; then
-  exec sudo -n "$0" "$@"
+  # Pass HOME explicitly so root's REPO fallback resolves to the hermes home,
+  # not /root — sudo resets HOME to /root by default.
+  exec sudo -n env HOME="$HOME" "$0" "$@"
 fi
 unset _default_repo
 
