@@ -280,11 +280,7 @@ CREATE TABLE IF NOT EXISTS vacancy_slack_messages (
     card_key TEXT,
     notification_id INTEGER,
     slack_channel TEXT NOT NULL,
-    slack_channel_id TEXT,
-    slack_channel_name TEXT,
-    channel_alias TEXT,
     slack_message_ts TEXT NOT NULL,
-    platform_message_id TEXT,
     message_type TEXT,
     company TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -341,127 +337,6 @@ CREATE TABLE IF NOT EXISTS vacancy_feedback_state (
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL,
     FOREIGN KEY(notification_id) REFERENCES notifications(id) ON DELETE SET NULL
 );
-
-CREATE TABLE IF NOT EXISTS opportunities (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    vacancy_id INTEGER,
-    company TEXT,
-    company_normalized TEXT,
-    title TEXT,
-    title_normalized TEXT,
-    location TEXT,
-    remote_policy TEXT,
-    source TEXT NOT NULL,
-    source_url TEXT,
-    canonical_url TEXT,
-    ats TEXT,
-    ats_job_id TEXT,
-    description TEXT,
-    description_hash TEXT,
-    status TEXT NOT NULL DEFAULT 'discovered',
-    score INTEGER,
-    confidence TEXT,
-    recommendation TEXT,
-    slack_channel_id TEXT,
-    slack_message_ts TEXT,
-    slack_thread_ts TEXT,
-    artifact_bundle_id INTEGER,
-    next_action_id INTEGER,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    last_seen_at TEXT,
-    FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE SET NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_opportunities_company_title
-ON opportunities(company_normalized, title_normalized);
-
-CREATE INDEX IF NOT EXISTS idx_opportunities_status
-ON opportunities(status);
-
-CREATE INDEX IF NOT EXISTS idx_opportunities_ats_job
-ON opportunities(ats, ats_job_id);
-
-CREATE INDEX IF NOT EXISTS idx_opportunities_canonical_url
-ON opportunities(canonical_url);
-
-CREATE INDEX IF NOT EXISTS idx_opportunities_slack
-ON opportunities(slack_channel_id, slack_message_ts);
-
-CREATE TABLE IF NOT EXISTS opportunity_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    opportunity_id INTEGER,
-    event_type TEXT NOT NULL,
-    event_source TEXT NOT NULL,
-    actor TEXT,
-    payload_json TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_events_opportunity
-ON opportunity_events(opportunity_id);
-
-CREATE INDEX IF NOT EXISTS idx_events_type
-ON opportunity_events(event_type);
-
-CREATE INDEX IF NOT EXISTS idx_events_created_at
-ON opportunity_events(created_at);
-
-CREATE TABLE IF NOT EXISTS opportunity_tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    opportunity_id INTEGER NOT NULL,
-    task_type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',
-    owner TEXT NOT NULL DEFAULT 'denis',
-    due_at TEXT,
-    note TEXT,
-    created_at TEXT NOT NULL,
-    completed_at TEXT,
-    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS opportunity_artifacts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    opportunity_id INTEGER NOT NULL,
-    artifact_type TEXT NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1,
-    content_path TEXT,
-    content_text TEXT,
-    summary TEXT,
-    model TEXT,
-    qa_status TEXT,
-    qa_notes TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS opportunity_contacts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    opportunity_id INTEGER NOT NULL,
-    name TEXT,
-    role TEXT,
-    company TEXT,
-    email TEXT,
-    linkedin_url TEXT,
-    source TEXT,
-    confidence TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS slack_message_map (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    opportunity_id INTEGER NOT NULL,
-    slack_channel_id TEXT NOT NULL,
-    slack_message_ts TEXT NOT NULL,
-    slack_thread_ts TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_slack_message_map_unique
-ON slack_message_map(slack_channel_id, slack_message_ts);
 
 CREATE TABLE IF NOT EXISTS production_observation_daily (
     run_id INTEGER PRIMARY KEY,
@@ -632,10 +507,6 @@ class JobIntelStore:
             self._ensure_column(conn, "vacancy_slack_messages", "canonical_url", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "card_key", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "notification_id", "INTEGER")
-            self._ensure_column(conn, "vacancy_slack_messages", "slack_channel_id", "TEXT")
-            self._ensure_column(conn, "vacancy_slack_messages", "slack_channel_name", "TEXT")
-            self._ensure_column(conn, "vacancy_slack_messages", "channel_alias", "TEXT")
-            self._ensure_column(conn, "vacancy_slack_messages", "platform_message_id", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "message_type", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "score_at_send", "INTEGER")
             self._ensure_column(conn, "vacancy_slack_messages", "recommendation_at_send", "TEXT")
@@ -1439,19 +1310,15 @@ PRAGMA foreign_keys=ON;
         recommendation: str,
         url: str,
         sent_at: str | None = None,
-        slack_channel_id: str | None = None,
-        slack_channel_name: str | None = None,
-        channel_alias: str | None = None,
-        platform_message_id: str | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO vacancy_slack_messages (
                     vacancy_id, run_id, vacancy_key, canonical_url, card_key, notification_id,
-                    slack_channel, slack_channel_id, slack_channel_name, channel_alias, slack_message_ts, platform_message_id,
-                    message_type, company, title, score, recommendation, score_at_send, recommendation_at_send, url, sent_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    slack_channel, slack_message_ts, message_type, company, title,
+                    score, recommendation, score_at_send, recommendation_at_send, url, sent_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     vacancy_id,
@@ -1461,11 +1328,7 @@ PRAGMA foreign_keys=ON;
                     card_key,
                     notification_id,
                     slack_channel,
-                    slack_channel_id or slack_channel,
-                    slack_channel_name,
-                    channel_alias,
                     slack_message_ts,
-                    platform_message_id,
                     message_type,
                     company,
                     title,
@@ -1482,14 +1345,8 @@ PRAGMA foreign_keys=ON;
     def find_vacancy_message(self, *, slack_channel: str, slack_message_ts: str) -> dict[str, Any] | None:
         with self.connect(read_only=True) as conn:
             row = conn.execute(
-                """
-                SELECT *
-                FROM vacancy_slack_messages
-                WHERE slack_message_ts=?
-                  AND (slack_channel_id=? OR slack_channel=?)
-                LIMIT 1
-                """,
-                (slack_message_ts, slack_channel, slack_channel),
+                "SELECT * FROM vacancy_slack_messages WHERE slack_channel=? AND slack_message_ts=? LIMIT 1",
+                (slack_channel, slack_message_ts),
             ).fetchone()
         return dict(row) if row else None
 
@@ -1511,10 +1368,6 @@ PRAGMA foreign_keys=ON;
         recommendation: str,
         url: str,
         sent_at: str | None = None,
-        slack_channel_id: str | None = None,
-        slack_channel_name: str | None = None,
-        channel_alias: str | None = None,
-        platform_message_id: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:
@@ -1522,9 +1375,9 @@ PRAGMA foreign_keys=ON;
                 """
                 INSERT INTO vacancy_slack_messages (
                     vacancy_id, run_id, vacancy_key, canonical_url, card_key, notification_id,
-                    slack_channel, slack_channel_id, slack_channel_name, channel_alias, slack_message_ts, platform_message_id,
-                    message_type, company, title, score, recommendation, score_at_send, recommendation_at_send, url, sent_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    slack_channel, slack_message_ts, message_type, company, title,
+                    score, recommendation, score_at_send, recommendation_at_send, url, sent_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(slack_channel, slack_message_ts) DO UPDATE SET
                     vacancy_id=excluded.vacancy_id,
                     run_id=excluded.run_id,
@@ -1532,10 +1385,6 @@ PRAGMA foreign_keys=ON;
                     canonical_url=excluded.canonical_url,
                     card_key=excluded.card_key,
                     notification_id=excluded.notification_id,
-                    slack_channel_id=excluded.slack_channel_id,
-                    slack_channel_name=excluded.slack_channel_name,
-                    channel_alias=excluded.channel_alias,
-                    platform_message_id=excluded.platform_message_id,
                     message_type=excluded.message_type,
                     company=excluded.company,
                     title=excluded.title,
@@ -1554,11 +1403,7 @@ PRAGMA foreign_keys=ON;
                     card_key,
                     notification_id,
                     slack_channel,
-                    slack_channel_id or slack_channel,
-                    slack_channel_name,
-                    channel_alias,
                     slack_message_ts,
-                    platform_message_id,
                     message_type,
                     company,
                     title,

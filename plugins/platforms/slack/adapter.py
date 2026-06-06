@@ -1961,6 +1961,14 @@ class SlackAdapter(BasePlatformAdapter):
             async def handle_app_context_changed(event, say, body):
                 await self._handle_app_context_changed(event, body)
 
+            @self._app.event("reaction_added")
+            async def handle_reaction_added(event, say):
+                await self._handle_reaction_event(event)
+
+            @self._app.event("reaction_removed")
+            async def handle_reaction_removed(event, say):
+                await self._handle_reaction_event(event)
+
             # File lifecycle events can arrive around snippet uploads even when
             # the actual user message is what we care about. Ack them so Slack
             # doesn't log noisy 404 "unhandled request" warnings.
@@ -2217,6 +2225,48 @@ class SlackAdapter(BasePlatformAdapter):
         finally:
             if lock_acquired and not self._running:
                 self._release_platform_lock()
+
+
+    async def _handle_reaction_event(self, event: dict) -> None:
+        """Route Slack reaction events into job-intel vacancy feedback."""
+        event_type = str((event or {}).get("type") or "").strip()
+        item = (event or {}).get("item") or {}
+        channel = str(item.get("channel") or (event or {}).get("item_channel") or "").strip()
+        message_ts = str(item.get("ts") or (event or {}).get("item_ts") or "").strip()
+        reaction = str((event or {}).get("reaction") or "").strip()
+        user = str((event or {}).get("user") or (event or {}).get("user_id") or "unknown").strip() or "unknown"
+        logger.info(
+            "slack_reaction_event_received type=%s channel=%s ts=%s reaction=%s user=%s",
+            event_type,
+            channel,
+            message_ts,
+            reaction,
+            user,
+        )
+        if not channel or not message_ts:
+            logger.warning(
+                "slack_reaction_event_missing_message_reference type=%s reaction=%s user=%s",
+                event_type,
+                reaction,
+                user,
+            )
+            return
+        try:
+            from job_intel.cli import run_feedback_event
+
+            result = run_feedback_event(dict(event or {}))
+            logger.info("job_intel_feedback_event_result %s", result)
+        except Exception as exc:
+            logger.exception(
+                "job_intel_feedback_event_failed type=%s channel=%s ts=%s reaction=%s user=%s: %s",
+                event_type,
+                channel,
+                message_ts,
+                reaction,
+                user,
+                exc,
+            )
+
 
     async def create_handoff_thread(
         self,

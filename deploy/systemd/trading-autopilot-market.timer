@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule Trading Autopilot market ingestion every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+Unit=trading-autopilot-market.service
+
+[Install]
+WantedBy=timers.target
