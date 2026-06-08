@@ -22,4 +22,5 @@ profile_tiers:
   career_strategist: standard
   scribe: standard
   researcher: standard
+  general_operator: standard
   security_auditor: critical

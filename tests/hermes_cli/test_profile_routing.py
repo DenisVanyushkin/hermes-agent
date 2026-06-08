@@ -70,6 +70,22 @@ def test_route_scribe_for_docs_and_state_terms():
     assert decision.route_chain[0].model_tier == "standard"
 
 
+def test_route_general_operator_for_personal_admin_tasks():
+    decision = _route("Book me a haircut")
+
+    assert decision.primary_profile == "general_operator"
+    assert _hop_ids(decision) == ["general_operator"]
+    assert decision.route_chain[0].model_tier == "standard"
+
+
+def test_route_general_operator_for_safe_unclear_task():
+    decision = _route("Help me with a simple safe admin task")
+
+    assert decision.primary_profile == "general_operator"
+    assert _hop_ids(decision) == ["general_operator"]
+    assert decision.route_chain[0].model_tier == "standard"
+
+
 def test_route_researcher_for_current_info_terms():
     decision = _route("weather news company research current facts digest report")
 
@@ -161,11 +177,15 @@ def test_loaders_and_model_resolution_round_trip():
     policy = load_model_policy(POLICY_PATH)
 
     assert any(profile["id"] == "engineer" for profile in registry["profiles"])
+    assert any(profile["id"] == "general_operator" for profile in registry["profiles"])
     resolved = resolve_profile_model("security_auditor", policy)
+    general_resolved = resolve_profile_model("general_operator", policy)
     assert resolved.model_tier == "critical"
     assert resolved.model_resolution_status == "no_fallback_stop_and_escalate"
     assert resolved.model == "anthropic/claude-opus-4.6"
     assert resolved.provider == "openrouter"
+    assert general_resolved.model_tier == "standard"
+    assert general_resolved.model == "anthropic/claude-sonnet-4.6"
 
 
 def test_decision_to_dict_preserves_route_chain():

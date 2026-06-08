@@ -216,6 +216,40 @@ profiles:
       - source_quality_notes
       - citations
       - assumption_log
+  - id: general_operator
+    default_model: standard
+    allowed_tools:
+      - personal_assistance
+      - scheduling
+      - messaging
+      - checklist_management
+      - travel_booking
+      - general_admin
+    denied_tools:
+      - production_mutation
+      - direct_secret_exfiltration
+      - direct_trading_execution
+    requires_approval_for:
+      - external_commitment_confirmation
+      - money_payment_or_identity_escalation
+      - changing_profile_boundaries
+    may_read_paths:
+      - docs/state/
+      - docs/open-questions.md
+      - docs/runbooks/
+    may_write_paths:
+      - docs/profile-handoffs/
+      - docs/state/
+      - docs/reports/
+    scribe_hook: not_required
+    scribe_hook_condition: null
+    security_review_hook: conditional
+    security_review_hook_condition: public_exposure_auth_secret_permission_or_scheduler_risk
+    output_artifacts:
+      - personal_assistance_plan
+      - checklist
+      - appointment_confirmation
+      - reminder_result
   - id: security_auditor
     default_model: critical
     allowed_tools:

@@ -49,6 +49,18 @@ def test_output_contains_all_required_top_level_fields():
         "task",
         "validation_status",
         "validation_issues",
+        "execution_plan",
+        "selected_role",
+        "fallback_used",
+        "requires_reviewer",
+        "reviewer_profile",
+        "requires_scribe",
+        "requires_explicit_approval",
+        "ordinary_personal_admin",
+        "external_commitment",
+        "production_runtime_mutation",
+        "sensitive_diff_triggers",
+        "durable_outcome_expected",
         "route_decision",
         "model_selection",
         "approval_preview",
@@ -86,13 +98,13 @@ def test_route_decision_is_embedded():
     assert payload["route_decision"]["primary_profile"] == "engineer"
 
 
-def test_model_selection_is_recorded():
+def test_execution_plan_is_embedded():
     preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
     payload = preview_to_dict(preview)
 
-    assert payload["model_selection"] is not None
-    assert payload["model_selection"]["selected_model"]
-    assert payload["model_selection"]["route_hop"]["profile_id"] == payload["route_decision"]["route_chain"][0]["profile_id"]
+    assert payload["execution_plan"] is not None
+    assert payload["selected_role"] == payload["execution_plan"]["selected_role"]
+    assert payload["execution_plan"]["post_change_review_policy"]["summarize_diff"] is True
 
 
 def test_approval_preview_is_embedded():
@@ -189,7 +201,7 @@ def test_scribe_dry_run_hook_skipped_does_not_block_overall_status():
     preview = preview_profile("Check WebUI status and inspect logs")
     payload = preview_to_dict(preview)
 
-    assert payload["scribe_handoff_preview"]["write_performed"] is False
+    assert payload["scribe_handoff_preview"] is None
     assert payload["overall_status"] == "preview_ready"
 
 
