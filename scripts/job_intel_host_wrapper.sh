@@ -39,11 +39,11 @@ resolve_workdir() {
 resolve_python() {
   local workdir="$1"
   local candidates=(
-    "${JOB_INTEL_BROWSER_PYTHON:-}"
     "${JOB_INTEL_PYTHON:-}"
-    "/var/lib/browser-desktop/playwright-venv/bin/python"
     "$workdir/venv/bin/python"
     "$workdir/.venv/bin/python"
+    "${JOB_INTEL_BROWSER_PYTHON:-}"
+    "/var/lib/browser-desktop/playwright-venv/bin/python"
     "python3"
     "python"
   )
@@ -133,6 +133,7 @@ export JOB_INTEL_BROWSER_PROFILE_DIR="$browser_profile_dir"
 export JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN="${JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN:-$browser_profile_dir/linkedin}"
 export JOB_INTEL_BROWSER_PROFILE_DIR_HH="${JOB_INTEL_BROWSER_PROFILE_DIR_HH:-$browser_profile_dir/hh}"
 export JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER="${JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER:-$browser_profile_dir/company-career}"
+export JOB_INTEL_PYTHON="${JOB_INTEL_PYTHON:-$workdir/venv/bin/python}"
 export JOB_INTEL_BROWSER_PYTHON="${JOB_INTEL_BROWSER_PYTHON:-/var/lib/browser-desktop/playwright-venv/bin/python}"
 export JOB_INTEL_SCRIPTS_DIR="${JOB_INTEL_SCRIPTS_DIR:-$script_dir}"
 export JOB_INTEL_BROWSER_RUNTIME_DIR="${JOB_INTEL_BROWSER_RUNTIME_DIR:-/var/lib/browser-desktop}"

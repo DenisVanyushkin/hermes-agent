@@ -6,6 +6,7 @@ import os
 import random
 import re
 import signal
+import subprocess
 import time
 from contextlib import suppress
 
@@ -314,11 +315,41 @@ def _ensure_required_browser_profile(source: str, config: BrowserAcquisitionConf
         )
 
 
+def _browser_runtime_python() -> Path:
+    configured = os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    base_dir = os.getenv("JOB_INTEL_BROWSER_RUNTIME_DIR", "").strip() or os.getenv("BROWSER_DESKTOP_BASE_DIR", "").strip()
+    if base_dir:
+        return Path(base_dir).expanduser() / "playwright-venv" / "bin" / "python"
+    return Path("/var/lib/browser-desktop/playwright-venv/bin/python")
+
+
+def _browser_python_has_playwright() -> bool:
+    browser_python_path = _browser_runtime_python()
+    if not browser_python_path.exists():
+        return False
+    probe = [str(browser_python_path), "-c", "from importlib.util import find_spec; raise SystemExit(0 if find_spec('playwright.sync_api') else 1)"]
+    try:
+        result = subprocess.run(
+            probe,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
 def browser_native_available() -> bool:
     try:
-        return find_spec("playwright.sync_api") is not None
+        if find_spec("playwright.sync_api") is not None:
+            return True
     except ModuleNotFoundError:
-        return False
+        pass
+    return _browser_python_has_playwright()
 
 
 def _normalize_whitespace(text: str) -> str:
