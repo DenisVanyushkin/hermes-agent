@@ -14,7 +14,6 @@ tiers:
     allow_fallback: false
     unavailable_behavior: stop_and_escalate
     fallback_models: []
-    # legacy/derived compatibility field for older consumers
     fallback_behavior: stop_and_escalate
 profile_tiers:
   chief_hermes: reasoning
@@ -24,3 +23,266 @@ profile_tiers:
   researcher: standard
   general_operator: standard
   security_auditor: critical
+model_governance:
+  default_base_model: gpt-5.4-mini
+  base_model_owner: human_operator_maintainer
+  escalation_model_owner: human_operator_maintainer
+  free_fallback_owner: hermes_runtime_selector
+  runtime_selection_order:
+  - base_model
+  - escalation_model_if_policy_conditions_match
+  - free_fallback_if_allowed_and_needed
+  - stop_and_escalate_if_no_safe_model
+  critical_action_free_fallback_not_final_authority:
+  - production_runtime_mutation_approval
+  - security_pass_on_high_risk_changes
+  - secrets_auth_tool_permission_changes
+  - database_migration_or_repair
+  - production_data_deletion
+  - trading_execution
+  - financial_legal_medical_material_decision
+  observability_fields:
+  - role_id
+  - selected_model
+  - base_model
+  - escalation_model
+  - fallback_model
+  - model_tier
+  - fallback_used
+  - fallback_source
+  - fallback_selection_reason
+  - escalation_used
+  - escalation_reason
+  - critical_action_blocked_due_to_model_unavailable
+  - model_selection_timestamp
+fallback_selection_policy:
+  mode: capability_based
+  refresh:
+    source: https://shir-man.com/api/free-llm/top-models
+    cadence: daily_morning_best_effort
+    cache_path: ~/.hermes/state/free-model-fallbacks.json
+    update_source_config: false
+    do_not_dirty_git_worktree: true
+    on_failure:
+    - use_last_known_good_if_available
+    - use_provider_level_fallback_if_available
+    - mark_fallback_unavailable
+  provider_level_fallback: openrouter/free
+  candidate_attributes:
+  - healthStatus
+  - latencyMs
+  - contextLength
+  - maxCompletionTokens
+  - supportsTools
+  - supportsToolChoice
+  - supportsStructuredOutputs
+  - supportsResponseFormat
+  - supportsReasoning
+  - supportsIncludeReasoning
+  - liteEvalScore
+  - evalSummary
+  - instabilityPenalty
+  - rankingConfidence
+  global_filters:
+    hard:
+      reject_health_status:
+      - timeout_or_error
+      min_context_length: 32768
+      min_max_completion_tokens: 4096
+    prefer:
+      healthStatus: passed
+      supportsStructuredOutputs: true
+      supportsResponseFormat: true
+role_policies:
+  chief_coordinator:
+    base_model: gpt-5.4-mini
+    escalation:
+      model_family: strong_reasoning
+      example_model: gpt-5.5
+      conditions:
+      - routing_is_ambiguous
+      - risk_is_high
+      - cross_role_conflict_resolution_is_needed
+    free_fallback:
+      allowed_for:
+      - routing
+      - task_planning
+      - review_orchestration
+      not_final_authority_for:
+      - production_runtime_mutation_approval
+      - security_pass_on_high_risk_changes
+      - trading_execution
+      role_filters:
+        require:
+          supportsTools: true
+        prefer:
+          supportsStructuredOutputs: true
+          supportsResponseFormat: true
+          supportsReasoning: true
+  engineer:
+    base_model: gpt-5.4-mini
+    escalation:
+      model_family: specialized_coding
+      example_model: gpt-5.3-codex
+      conditions:
+      - complex_multi_file_changes
+      - difficult_bugfixes
+      - failing_test_diagnosis
+      - high_risk_engineering_changes
+      - runtime_deploy_gateway_auth_scheduler_related_changes
+      - base_model_uncertain_or_failed
+    free_fallback:
+      allowed_for:
+      - draft
+      - debug
+      - summarize
+      - suggest
+      not_final_authority_for:
+      - production_runtime_mutation
+      role_filters:
+        require:
+          supportsTools: true
+        prefer:
+          supportsStructuredOutputs: true
+          liteEvalScore: high
+          contextLength: large
+  security_auditor:
+    base_model: gpt-5.4-mini
+    escalation:
+      model_family: strong_reasoning
+      example_model: gpt-5.5
+      conditions:
+      - public_exposure
+      - auth_session_cookie_changes
+      - secrets_tool_permission_changes
+      - prompt_injection_risk
+      - complex_boundary_questions
+    free_fallback:
+      allowed_for:
+      - risk_summary
+      - conditional_pass_drafting
+      - mitigation_notes
+      not_final_authority_for:
+      - high_risk_security_pass
+      - production_runtime_mutation_approval
+      role_filters:
+        require:
+          supportsTools: true
+        prefer:
+          supportsStructuredOutputs: true
+          supportsReasoning: true
+          contextLength: large
+  scribe:
+    base_model: gpt-5.4-mini
+    escalation:
+      model_family: none
+      example_model: null
+      conditions: []
+    free_fallback:
+      allowed_for:
+      - document
+      - handoff
+      - state_capture
+      not_final_authority_for:
+      - mutate_runtime_systems
+      - deploy_or_rollback
+      role_filters:
+        require:
+          supportsTools: true
+        prefer:
+          supportsStructuredOutputs: true
+          supportsResponseFormat: true
+          latencyMs: low
+  researcher:
+    base_model: gpt-5.4-mini
+    escalation:
+      model_family: strong_reasoning
+      example_model: gpt-5.5
+      conditions:
+      - conflicting_sources
+      - high_impact_decisions
+      - complex_synthesis
+      - weak_source_quality
+    free_fallback:
+      allowed_for:
+      - source_gathering
+      - source_comparison
+      - synthesis
+      not_final_authority_for:
+      - present_unverified_claims_as_fact
+      - execute_trades
+      role_filters:
+        require:
+          supportsTools: true
+        prefer:
+          supportsStructuredOutputs: true
+          supportsReasoning: true
+          contextLength: large
+  career_strategist:
+    base_model: gpt-5.4-mini
+    escalation:
+      model_family: strong_reasoning
+      example_model: gpt-5.5
+      conditions:
+      - executive_decisions
+      - high_value_applications
+      - complex_positioning
+      - weak_evidence
+      - privacy_sensitive_cases
+    free_fallback:
+      allowed_for:
+      - fit_assessment
+      - draft_materials
+      - positioning
+      not_final_authority_for:
+      - submit_applications
+      - send_recruiter_messages
+      role_filters:
+        require:
+          supportsTools: true
+        prefer:
+          supportsStructuredOutputs: true
+          supportsReasoning: true
+          contextLength: large
+  general_operator:
+    base_model: gpt-5.4-mini
+    escalation:
+      model_family: none
+      example_model: null
+      conditions: []
+    free_fallback:
+      allowed_for:
+      - personal_admin
+      - draft_messages
+      - simple_coordination
+      - lookup
+      not_final_authority_for:
+      - external_commitments
+      - money_or_identity_risk
+      role_filters:
+        require:
+          supportsTools: true
+        prefer:
+          latencyMs: low
+          healthStatus: passed
+          supportsStructuredOutputs: true
+  trading_observer_trader_deferred:
+    status: deferred
+    base_model: deferred
+    escalation:
+      model_family: deferred
+      example_model: null
+      conditions:
+      - separate_trading_policy_not_implemented
+    free_fallback:
+      allowed_for:
+      - market_observation
+      - trading_research
+      not_final_authority_for:
+      - trading_execution
+      role_filters:
+        require:
+          supportsTools: true
+        prefer:
+          supportsStructuredOutputs: true
+          supportsReasoning: true
