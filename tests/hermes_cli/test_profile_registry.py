@@ -22,10 +22,36 @@ def test_valid_canonical_registry_passes():
     issues = validate_profile_architecture(CANONICAL_REGISTRY, CANONICAL_POLICY)
     errors = [issue for issue in issues if issue.severity == "error"]
     assert errors == []
+
     registry = yaml.safe_load(CANONICAL_REGISTRY.read_text(encoding="utf-8"))
-    assert any(profile["id"] == "general_operator" for profile in registry["profiles"])
+    chief = next(profile for profile in registry["profiles"] if profile["id"] == "chief_hermes")
+    engineer = next(profile for profile in registry["profiles"] if profile["id"] == "engineer")
+    trading = next(profile for profile in registry["deferred_profiles"] if profile["id"] == "trading_observer_trader")
+
+    assert chief["profile_contract"]["canonical_id"] == "chief_coordinator"
+    assert engineer["profile_contract"]["canonical_id"] == "engineer"
+    assert trading["profile_contract"]["canonical_id"] == "trading_observer_trader_deferred"
+    assert chief["profile_contract"]["spec_ref"].startswith("docs/profile-role-specification.md")
+    assert chief["profile_contract"]["personality_summary"]
+    assert isinstance(chief["profile_contract"]["personality_summary"], list)
+
     policy = yaml.safe_load(CANONICAL_POLICY.read_text(encoding="utf-8"))
     assert policy["profile_tiers"]["general_operator"] == "standard"
+    assert policy["model_governance"]["default_base_model"] == "gpt-5.4-mini"
+    assert policy["fallback_selection_policy"]["mode"] == "capability_based"
+    assert set(policy["role_policies"]) == {
+        "chief_coordinator",
+        "engineer",
+        "security_auditor",
+        "scribe",
+        "researcher",
+        "career_strategist",
+        "general_operator",
+        "trading_observer_trader_deferred",
+    }
+    assert policy["role_policies"]["engineer"]["escalation"]["example_model"] == "gpt-5.3-codex"
+    assert policy["role_policies"]["general_operator"]["free_fallback"]["role_filters"]["prefer"]["latencyMs"] == "low"
+    assert policy["role_policies"]["trading_observer_trader_deferred"]["status"] == "deferred"
 
 
 def test_missing_required_field_fails(tmp_path):
