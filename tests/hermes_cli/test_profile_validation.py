@@ -39,3 +39,87 @@ def test_validator_returns_issues_for_missing_tier(tmp_path):
 
     issues = validate_profile_architecture(registry_path, policy_path)
     assert any("reasoning" in issue.message.lower() for issue in issues)
+
+
+def test_validation_rejects_unknown_canonical_role(tmp_path):
+    registry = yaml.safe_load(CANONICAL_REGISTRY.read_text(encoding="utf-8"))
+    policy = yaml.safe_load(CANONICAL_POLICY.read_text(encoding="utf-8"))
+    registry["profiles"][0]["profile_contract"]["canonical_id"] = "ghost_coordinator"
+
+    registry_path = tmp_path / "hermes-profiles.yaml"
+    policy_path = tmp_path / "hermes-model-policy.yaml"
+    registry_path.write_text(yaml.safe_dump(registry, sort_keys=False), encoding="utf-8")
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+
+    issues = validate_profile_architecture(registry_path, policy_path)
+    assert any("ghost_coordinator" in issue.message or "canonical" in issue.message.lower() for issue in issues)
+
+
+def test_validation_rejects_unknown_tool_category(tmp_path):
+    registry = yaml.safe_load(CANONICAL_REGISTRY.read_text(encoding="utf-8"))
+    policy = yaml.safe_load(CANONICAL_POLICY.read_text(encoding="utf-8"))
+    registry["profiles"][1]["profile_contract"]["tool_contract"]["allowed_by_default"][0] = "alien_tool"
+
+    registry_path = tmp_path / "hermes-profiles.yaml"
+    policy_path = tmp_path / "hermes-model-policy.yaml"
+    registry_path.write_text(yaml.safe_dump(registry, sort_keys=False), encoding="utf-8")
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+
+    issues = validate_profile_architecture(registry_path, policy_path)
+    assert any("alien_tool" in issue.message for issue in issues)
+
+
+def test_validation_rejects_missing_role_policy(tmp_path):
+    registry = yaml.safe_load(CANONICAL_REGISTRY.read_text(encoding="utf-8"))
+    policy = yaml.safe_load(CANONICAL_POLICY.read_text(encoding="utf-8"))
+    policy["role_policies"].pop("general_operator")
+
+    registry_path = tmp_path / "hermes-profiles.yaml"
+    policy_path = tmp_path / "hermes-model-policy.yaml"
+    registry_path.write_text(yaml.safe_dump(registry, sort_keys=False), encoding="utf-8")
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+
+    issues = validate_profile_architecture(registry_path, policy_path)
+    assert any("missing required roles" in issue.message.lower() and "general_operator" in issue.message for issue in issues)
+
+
+def test_validation_rejects_missing_fallback_policy(tmp_path):
+    registry = yaml.safe_load(CANONICAL_REGISTRY.read_text(encoding="utf-8"))
+    policy = yaml.safe_load(CANONICAL_POLICY.read_text(encoding="utf-8"))
+    policy.pop("fallback_selection_policy")
+
+    registry_path = tmp_path / "hermes-profiles.yaml"
+    policy_path = tmp_path / "hermes-model-policy.yaml"
+    registry_path.write_text(yaml.safe_dump(registry, sort_keys=False), encoding="utf-8")
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+
+    issues = validate_profile_architecture(registry_path, policy_path)
+    assert any("fallback_selection_policy" in issue.message for issue in issues)
+
+
+def test_validation_rejects_malformed_refresh_policy(tmp_path):
+    registry = yaml.safe_load(CANONICAL_REGISTRY.read_text(encoding="utf-8"))
+    policy = yaml.safe_load(CANONICAL_POLICY.read_text(encoding="utf-8"))
+    policy["fallback_selection_policy"]["refresh"]["update_source_config"] = True
+
+    registry_path = tmp_path / "hermes-profiles.yaml"
+    policy_path = tmp_path / "hermes-model-policy.yaml"
+    registry_path.write_text(yaml.safe_dump(registry, sort_keys=False), encoding="utf-8")
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+
+    issues = validate_profile_architecture(registry_path, policy_path)
+    assert any("update_source_config" in issue.message or "fallback_selection_policy.refresh" in issue.message for issue in issues)
+
+
+def test_validation_rejects_missing_critical_guards(tmp_path):
+    registry = yaml.safe_load(CANONICAL_REGISTRY.read_text(encoding="utf-8"))
+    policy = yaml.safe_load(CANONICAL_POLICY.read_text(encoding="utf-8"))
+    policy["model_governance"]["critical_action_free_fallback_not_final_authority"] = []
+
+    registry_path = tmp_path / "hermes-profiles.yaml"
+    policy_path = tmp_path / "hermes-model-policy.yaml"
+    registry_path.write_text(yaml.safe_dump(registry, sort_keys=False), encoding="utf-8")
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+
+    issues = validate_profile_architecture(registry_path, policy_path)
+    assert any("critical_action_free_fallback_not_final_authority" in issue.message for issue in issues)
