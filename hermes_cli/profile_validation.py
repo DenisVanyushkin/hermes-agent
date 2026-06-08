@@ -25,6 +25,7 @@ ACTIVE_PROFILE_IDS = {
     "scribe",
     "researcher",
     "security_auditor",
+    "general_operator",
 }
 DEFERRED_PROFILE_IDS = {"trading_observer_trader"}
 MODEL_TIERS = {"standard", "reasoning", "critical"}

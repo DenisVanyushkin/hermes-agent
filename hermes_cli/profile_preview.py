@@ -35,6 +35,7 @@ from hermes_cli.profile_security_review import (
     preview_security_review,
     result_to_dict as security_result_to_dict,
 )
+from hermes_cli.profile_execution import RoleExecutionPlan, build_role_execution_plan, execution_plan_to_dict
 from hermes_cli.profile_validation import (
     DEFAULT_MODEL_POLICY_PATH,
     DEFAULT_PROFILE_REGISTRY_PATH,
@@ -53,6 +54,18 @@ class ProfilePreview:
     task: str
     validation_status: str
     validation_issues: list[dict[str, Any]] = field(default_factory=list)
+    execution_plan: dict[str, Any] | None = None
+    selected_role: str | None = None
+    fallback_used: bool = False
+    requires_reviewer: bool = False
+    reviewer_profile: str | None = None
+    requires_scribe: bool = False
+    requires_explicit_approval: bool = False
+    ordinary_personal_admin: bool = False
+    external_commitment: bool = False
+    production_runtime_mutation: bool = False
+    sensitive_diff_triggers: list[str] = field(default_factory=list)
+    durable_outcome_expected: bool = False
     route_decision: dict[str, Any] | None = None
     model_selection: dict[str, Any] | None = None
     approval_preview: dict[str, Any] | None = None
@@ -179,6 +192,8 @@ def _derive_required_operator_actions(
     route_error: str | None,
     security_status: str,
     approval_requires_approval: bool,
+    requires_scribe: bool,
+    external_commitment: bool,
     scribe_write_performed: bool,
 ) -> list[str]:
     actions: list[str] = []
@@ -192,8 +207,10 @@ def _derive_required_operator_actions(
         actions.append("provide_security_evidence_or_mitigations")
     elif security_status == "conditional_pass":
         actions.append("review_required_changes_and_residual_risks")
-    if not scribe_write_performed:
+    if requires_scribe and not scribe_write_performed:
         actions.append("run_scribe_write_if_durable_record_needed")
+    if external_commitment:
+        actions.append("confirm_external_commitment_before_final_action")
     return actions
 
 
@@ -225,6 +242,7 @@ def build_profile_preview(
     approval_preview: ApprovalPreview | dict[str, Any] | None = None,
     security_review_preview: SecurityReviewResult | dict[str, Any] | None = None,
     scribe_handoff_preview: ScribeHandoffResult | dict[str, Any] | None = None,
+    execution_plan: RoleExecutionPlan | dict[str, Any] | None = None,
     model_selection: dict[str, Any] | None = None,
     route_error: str | None = None,
 ) -> ProfilePreview:
@@ -255,6 +273,7 @@ def build_profile_preview(
     approval_dict: dict[str, Any] | None = None
     security_dict: dict[str, Any] | None = None
     scribe_dict: dict[str, Any] | None = None
+    execution_plan_dict: dict[str, Any] | None = None
     overall_chain: list[str] = []
     approval_requires_approval = False
     security_status = "not_applicable"
@@ -273,8 +292,27 @@ def build_profile_preview(
         if model_selection is None:
             model_selection = _normalize_model_selection(route_obj)
     elif not validation_failed and route_decision is None and route_error is None:
-        # The caller may be the pure reducer; leave route fields empty.
         pass
+
+    if execution_plan is not None:
+        execution_plan_dict = execution_plan_to_dict(execution_plan) if isinstance(execution_plan, RoleExecutionPlan) else _to_plain_object(execution_plan)
+    elif route_obj is not None:
+        execution_plan_dict = execution_plan_to_dict(build_role_execution_plan(task, route_decision=route_obj))
+
+    if execution_plan_dict is None and route_obj is not None:
+        execution_plan_dict = execution_plan_to_dict(build_role_execution_plan(task, route_decision=route_obj))
+
+    selected_role = str(execution_plan_dict.get("selected_role")) if execution_plan_dict else None
+    fallback_used = bool(execution_plan_dict.get("fallback_used", False)) if execution_plan_dict else False
+    requires_reviewer = bool(execution_plan_dict.get("requires_reviewer", False)) if execution_plan_dict else False
+    reviewer_profile = execution_plan_dict.get("reviewer_profile") if execution_plan_dict else None
+    requires_scribe = bool(execution_plan_dict.get("requires_scribe", False)) if execution_plan_dict else False
+    requires_explicit_approval = bool(execution_plan_dict.get("requires_explicit_approval", False)) if execution_plan_dict else False
+    ordinary_personal_admin = bool(execution_plan_dict.get("ordinary_personal_admin", False)) if execution_plan_dict else False
+    external_commitment = bool(execution_plan_dict.get("external_commitment", False)) if execution_plan_dict else False
+    production_runtime_mutation = bool(execution_plan_dict.get("production_runtime_mutation", False)) if execution_plan_dict else False
+    sensitive_diff_triggers = list(execution_plan_dict.get("sensitive_diff_triggers", []) or []) if execution_plan_dict else []
+    durable_outcome_expected = bool(execution_plan_dict.get("durable_outcome_expected", False)) if execution_plan_dict else False
 
     if approval_preview is not None:
         approval_dict = approval_decision_to_dict(approval_preview) if isinstance(approval_preview, ApprovalPreview) else _to_plain_object(approval_preview)
@@ -305,6 +343,8 @@ def build_profile_preview(
         route_error=route_error,
         security_status=security_status,
         approval_requires_approval=approval_requires_approval,
+        requires_scribe=requires_scribe,
+        external_commitment=external_commitment,
         scribe_write_performed=scribe_write_performed,
     )
 
@@ -312,6 +352,18 @@ def build_profile_preview(
         task=task.strip(),
         validation_status=validation_status,
         validation_issues=normalized_validation_issues,
+        execution_plan=execution_plan_dict,
+        selected_role=selected_role,
+        fallback_used=fallback_used,
+        requires_reviewer=requires_reviewer,
+        reviewer_profile=reviewer_profile,
+        requires_scribe=requires_scribe,
+        requires_explicit_approval=requires_explicit_approval,
+        ordinary_personal_admin=ordinary_personal_admin,
+        external_commitment=external_commitment,
+        production_runtime_mutation=production_runtime_mutation,
+        sensitive_diff_triggers=sensitive_diff_triggers,
+        durable_outcome_expected=durable_outcome_expected,
         route_decision=route_decision_dict,
         model_selection=model_selection,
         approval_preview=approval_dict,
@@ -377,22 +429,33 @@ def preview_profile(
     except RoutingError as exc:
         return build_profile_preview(task, route_error=str(exc))
 
-    approval_preview = classify_engineer_approval(task, route_decision=route_decision)
-    security_review_preview = preview_security_review(
-        task,
-        route_decision=route_decision,
-        approval_preview=approval_preview,
-        evidence=security_evidence,
-        required_changes=security_required_changes,
-        residual_risks=security_residual_risks,
-        write=False,
-    )
-    scribe_handoff_preview = preview_scribe_handoff(
-        task,
-        route_decision=route_decision,
-        approval_preview=approval_preview,
-        write=False,
-    )
+    execution_plan = build_role_execution_plan(task, route_decision=route_decision)
+
+    approval_preview = None
+    if execution_plan.selected_role == "engineer" or execution_plan.requires_explicit_approval or execution_plan.production_runtime_mutation:
+        approval_preview = classify_engineer_approval(task, route_decision=route_decision)
+
+    security_review_preview = None
+    if execution_plan.requires_reviewer or execution_plan.selected_role == "security_auditor":
+        security_review_preview = preview_security_review(
+            task,
+            route_decision=route_decision,
+            approval_preview=approval_preview,
+            evidence=security_evidence,
+            required_changes=security_required_changes,
+            residual_risks=security_residual_risks,
+            write=False,
+        )
+
+    scribe_handoff_preview = None
+    if execution_plan.requires_scribe or execution_plan.selected_role == "scribe":
+        scribe_handoff_preview = preview_scribe_handoff(
+            task,
+            route_decision=route_decision,
+            approval_preview=approval_preview,
+            write=False,
+        )
+
     model_selection = _normalize_model_selection(route_decision)
 
     return build_profile_preview(
@@ -402,6 +465,7 @@ def preview_profile(
         approval_preview=approval_preview,
         security_review_preview=security_review_preview,
         scribe_handoff_preview=scribe_handoff_preview,
+        execution_plan=execution_plan,
         model_selection=model_selection,
     )
 

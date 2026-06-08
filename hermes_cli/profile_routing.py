@@ -83,6 +83,10 @@ _SECURITY_TERMS = (
     "tool-boundary",
     "browser profile",
     "privileged",
+    "security review",
+    "security audit",
+    "audit",
+    "threat model",
 )
 
 _INFRA_TERMS = (
@@ -277,7 +281,7 @@ def _determine_primary_profile(normalized_text: str, matched: dict[str, list[str
         return "scribe"
     if has_research:
         return "researcher"
-    return "chief_hermes"
+    return "general_operator"
 
 
 def _build_overlays(primary_profile: str, matched: dict[str, list[str]], normalized_text: str) -> list[tuple[str, str]]:
@@ -326,7 +330,7 @@ def _confidence_from_route(primary_profile: str, matched: dict[str, list[str]], 
     ambiguity_reasons: list[str] = []
     domain_hits = [name for name, hits in matched.items() if hits]
     if not domain_hits:
-        return "low", ["no specific domain trigger matched; defaulting to chief_hermes metadata only"]
+        return "low", ["no specific domain trigger matched; defaulting to general_operator metadata only"]
 
     if len(domain_hits) > 1:
         ambiguity_reasons.append("multiple domain signals detected: " + ", ".join(domain_hits))

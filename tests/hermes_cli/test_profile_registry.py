@@ -22,6 +22,10 @@ def test_valid_canonical_registry_passes():
     issues = validate_profile_architecture(CANONICAL_REGISTRY, CANONICAL_POLICY)
     errors = [issue for issue in issues if issue.severity == "error"]
     assert errors == []
+    registry = yaml.safe_load(CANONICAL_REGISTRY.read_text(encoding="utf-8"))
+    assert any(profile["id"] == "general_operator" for profile in registry["profiles"])
+    policy = yaml.safe_load(CANONICAL_POLICY.read_text(encoding="utf-8"))
+    assert policy["profile_tiers"]["general_operator"] == "standard"
 
 
 def test_missing_required_field_fails(tmp_path):
