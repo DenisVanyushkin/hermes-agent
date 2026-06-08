@@ -1,0 +1,25 @@
+schema_version: 1
+tiers:
+  standard:
+    provider: openrouter
+    model: anthropic/claude-sonnet-4.6
+    fallback_behavior: fallback_allowed
+  reasoning:
+    provider: openrouter
+    model: anthropic/claude-opus-4.6
+    fallback_behavior: fallback_allowed
+  critical:
+    provider: openrouter
+    model: anthropic/claude-opus-4.6
+    allow_fallback: false
+    unavailable_behavior: stop_and_escalate
+    fallback_models: []
+    # legacy/derived compatibility field for older consumers
+    fallback_behavior: stop_and_escalate
+profile_tiers:
+  chief_hermes: reasoning
+  engineer: reasoning
+  career_strategist: standard
+  scribe: standard
+  researcher: standard
+  security_auditor: critical

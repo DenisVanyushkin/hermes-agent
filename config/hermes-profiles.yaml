@@ -1,0 +1,263 @@
+schema_version: 1
+documentation_policy:
+  runtime_required_paths:
+    - docs/hermes-profile-architecture.md
+    - docs/hermes-operator-runbook.md
+    - docs/hermes-webui-security-audit.md
+    - docs/job-intel-runtime.md
+    - docs/job-intel-architecture.md
+    - docs/state/
+    - docs/decisions/
+    - docs/profile-handoffs/
+  future_only_paths:
+    - docs/job-intel/
+    - docs/profiles/
+profiles:
+  - id: chief_hermes
+    default_model: reasoning
+    allowed_tools:
+      - profile_routing
+      - task_planning
+      - artifact_reading
+      - handoff_review
+      - user_communication
+    denied_tools:
+      - direct_production_mutation
+      - direct_secret_rotation
+      - direct_trading_execution
+    requires_approval_for:
+      - starting_multi_profile_workflows_that_mutate_production
+      - accepting_security_risk
+      - changing_profile_boundaries
+      - skipping_required_scribe_handoff
+    may_read_paths:
+      - docs/hermes-profile-architecture.md
+      - docs/state/
+      - docs/decisions/
+      - docs/runbooks/
+      - docs/reports/
+      - docs/profile-handoffs/
+      - docs/open-questions.md
+    may_write_paths:
+      - docs/profile-handoffs/
+      - docs/reports/
+    scribe_hook: required
+    scribe_hook_condition: meaningful_tasks
+    security_review_hook: conditional
+    security_review_hook_condition: exposure_auth_secret_scheduler_tool_or_permission_risk
+    output_artifacts:
+      - routing_decision
+      - task_brief
+      - final_user_summary
+  - id: engineer
+    default_model: reasoning
+    allowed_tools:
+      - read_only_host_inspection
+      - shell_after_approval
+      - git_diff
+      - code_editing
+      - test_execution
+      - build_execution_after_approval
+      - deploy_execution_after_approval
+      - smoke_testing
+      - rollback_after_approval
+      - log_reading
+      - db_reading
+      - monitoring_reading
+    denied_tools:
+      - direct_secret_exfiltration
+      - direct_trading_execution
+      - unapproved_production_mutation
+      - unapproved_public_exposure_change
+      - writing_final_docs_without_scribe
+    requires_approval_for:
+      - any_production_host_mutation
+      - service_start_stop_restart_reload_on_production
+      - production_config_change
+      - production_db_migration_or_repair
+      - production_build_or_deploy
+      - production_rollback
+      - firewall_cloudflare_reverse_proxy_change
+      - changing_scheduler_or_timer_behavior
+      - changing_tool_permissions
+      - changing_auth_or_secret_handling
+      - changing_profile_boundaries
+    may_read_paths:
+      - docs/hermes-operator-runbook.md
+      - docs/hermes-knowledge-base.md
+      - docs/hermes-webui-security-audit.md
+      - docs/job-intel-runtime.md
+      - docs/job-intel-architecture.md
+      - docs/runbooks/
+      - docs/reports/
+      - docs/state/
+    may_write_paths:
+      - docs/reports/
+      - docs/profile-handoffs/
+      - code_paths_after_approval
+    scribe_hook: required
+    scribe_hook_condition: meaningful_tasks
+    security_review_hook: conditional
+    security_review_hook_condition: auth_exposure_secret_scheduler_tool_permission_or_webui_changes
+    output_artifacts:
+      - engineering_report
+      - verification_evidence
+      - patch_diff
+      - test_result
+      - rollback_plan_or_result
+  - id: career_strategist
+    default_model: standard
+    allowed_tools:
+      - career_analysis
+      - report_reading
+      - cv_review
+      - draft_writing
+      - job_signal_review
+    denied_tools:
+      - production_mutation
+      - direct_secret_exfiltration
+      - direct_trading_execution
+    requires_approval_for:
+      - final_apply_decision_override
+      - editing_production_state
+      - changing_profile_boundaries
+    may_read_paths:
+      - docs/job-intel-runtime.md
+      - docs/job-intel-architecture.md
+      - docs/reports/
+      - docs/profile-handoffs/
+      - docs/state/
+    may_write_paths:
+      - docs/profile-handoffs/
+      - docs/reports/
+    scribe_hook: required
+    scribe_hook_condition: career_decision_or_application_plan
+    security_review_hook: conditional
+    security_review_hook_condition: external_data_or_personal_data_risk
+    output_artifacts:
+      - career_assessment
+      - application_strategy
+      - cv_or_cover_letter_draft
+      - recruiter_message_draft
+  - id: scribe
+    default_model: standard
+    allowed_tools:
+      - artifact_reading
+      - documentation_writing
+      - diff_review
+      - stale_doc_cleanup
+      - decision_log_writing
+      - runbook_editing
+      - session_handoff_writing
+    denied_tools:
+      - runtime_mutation
+      - production_deploy
+      - production_rollback
+      - secret_writing
+      - direct_trading_execution
+      - security_signoff_without_security_auditor
+    requires_approval_for:
+      - deleting_or_overwriting_canonical_docs
+      - changing_profile_boundaries
+      - recording_sensitive_personal_data
+      - marking_unverified_fact_as_verified
+    may_read_paths:
+      - docs/
+      - code_reports_when_available
+    may_write_paths:
+      - docs/state/
+      - docs/decisions/
+      - docs/runbooks/
+      - docs/reports/
+      - docs/profile-handoffs/
+      - docs/open-questions.md
+    scribe_hook: not_required
+    scribe_hook_condition: null
+    security_review_hook: conditional
+    security_review_hook_condition: security_docs_permission_changes_or_secret_handling
+    output_artifacts:
+      - updated_doc_diff
+      - decision_log
+      - current_state_update
+      - open_questions_update
+      - handoff_complete
+      - handoff_incomplete
+  - id: researcher
+    default_model: standard
+    allowed_tools:
+      - web_research
+      - source_evaluation
+      - report_synthesis
+      - citation_collection
+      - summary_writing
+    denied_tools:
+      - mutate_runtime
+      - production_deploy
+      - direct_secret_exfiltration
+      - direct_trading_execution
+    requires_approval_for:
+      - persisting_untrusted_external_content
+      - changing_profile_boundaries
+      - writing_to_production_state
+    may_read_paths:
+      - docs/
+      - docs/reports/
+      - docs/state/
+      - docs/open-questions.md
+    may_write_paths:
+      - docs/reports/
+      - docs/profile-handoffs/
+    scribe_hook: required
+    scribe_hook_condition: meaningful_research_or_report_updates
+    security_review_hook: conditional
+    security_review_hook_condition: external_content_exposure_or_source_trust_risk
+    output_artifacts:
+      - research_report
+      - source_quality_notes
+      - citations
+      - assumption_log
+  - id: security_auditor
+    default_model: critical
+    allowed_tools:
+      - artifact_reading
+      - threat_modeling
+      - config_review
+      - permission_review
+      - exposure_review
+      - prompt_injection_review
+      - security_report_writing
+    denied_tools:
+      - production_mutation_without_engineer
+      - direct_secret_exfiltration
+      - deploy_execution
+      - rollback_execution
+      - direct_trading_execution
+    requires_approval_for:
+      - accepting_residual_high_risk
+      - changing_security_policy
+      - exposing_services_publicly
+      - weakening_auth_or_permissions
+    may_read_paths:
+      - docs/hermes-profile-architecture.md
+      - docs/hermes-operator-runbook.md
+      - docs/hermes-webui-security-audit.md
+      - docs/reports/
+      - docs/runbooks/
+      - docs/state/
+      - docs/profile-handoffs/
+    may_write_paths:
+      - docs/reports/
+      - docs/profile-handoffs/
+    scribe_hook: required
+    scribe_hook_condition: security_findings_or_decisions
+    security_review_hook: not_required
+    security_review_hook_condition: null
+    output_artifacts:
+      - security_review
+      - threat_model
+      - risk_acceptance_request
+      - mitigation_plan
+deferred_profiles:
+  - id: trading_observer_trader
+    status: deferred
+    reason: observer_mode_and_deterministic_risk_controls_not_yet_proven
