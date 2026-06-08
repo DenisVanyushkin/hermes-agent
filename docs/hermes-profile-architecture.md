@@ -1013,3 +1013,17 @@ The profiles divide responsibility:
 - Security Auditor reviews risk.
 
 No profile may silently become the source of truth for facts that should live in evidence-backed artifacts.
+
+## 20. PR-1 validation contract
+
+PR-1 introduces a fail-closed validation layer before any runtime routing or execution work.
+
+Validation command:
+
+```bash
+python scripts/validate_profile_architecture.py --strict
+```
+
+Validation must fail closed on malformed YAML, missing required fields, invalid enum values, unknown model tiers, unknown active-profile references, critical-tier silent fallback, and any attempt to require `docs/job-intel/` or `docs/profiles/` at runtime.
+
+`docs/job-intel/` remains a future-only split-out path for now; it is documented as such in the registry and must not become a runtime dependency in PR-1.
