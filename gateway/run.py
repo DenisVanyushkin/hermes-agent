@@ -466,6 +466,28 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     return redacted
 
 
+def _looks_like_internal_clarify_summary(text: str) -> bool:
+    """Return True for internal clarify/action summaries that must stay hidden."""
+    body = str(text or "").strip().lower()
+    if not body:
+        return False
+    return body.startswith("clarify:")
+
+
+def _is_internal_clarify_activity_text(text: str) -> bool:
+    """Return True for clarify-internal activity/status labels."""
+    body = str(text or "").strip().lower()
+    if not body:
+        return False
+    return (
+        body == "clarify"
+        or body.startswith("clarify:")
+        or body.startswith("executing tool: clarify")
+        or body.startswith("tool completed: clarify")
+        or "waiting for user clarify response" in body
+    )
+
+
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
     """Filter/sanitize agent status callbacks before platform delivery.
 
@@ -474,6 +496,8 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     """
     text = str(message or "").strip()
     if not text:
+        return None
+    if _is_internal_clarify_activity_text(text):
         return None
     if _gateway_surface_passes_raw_text(platform):
         return text
@@ -20099,6 +20123,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if not _run_still_current():
                     return
                 display_text = text
+                if _looks_like_internal_clarify_summary(display_text):
+                    logger.debug("Suppressing internal clarify interim commentary: %s", str(display_text or "")[:160])
+                    return
                 if _stream_consumer is not None:
                     if already_streamed:
                         _stream_consumer.on_segment_break()
@@ -21421,6 +21448,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 f"iteration {_a['api_call_count']}/{_a['max_iterations']}"
                             )
                         _action = _a.get("current_tool") or _a.get("last_activity_desc")
+                        if _is_internal_clarify_activity_text(_action):
+                            logger.debug("Suppressing clarify long-running heartbeat for session %s", session_key or "?")
+                            continue
                         if _action:
                             _parts.append(str(_action))
                         if _parts:
@@ -21859,7 +21889,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         first_response,
                         previewed=_previewed,
                     )
-                    if first_response and not _already_streamed:
+                    if first_response and _looks_like_internal_clarify_summary(first_response):
+                        logger.info(
+                            "Queued follow-up for session %s: suppressing internal clarify summary before continuing.",
+                            session_key or "?",
+                        )
+                    elif first_response and not _already_streamed:
                         try:
                             logger.info(
                                 "Queued follow-up for session %s: final stream delivery not confirmed; sending first response before continuing.",

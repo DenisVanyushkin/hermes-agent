@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent.conversation_loop import _compose_turn_user_message_content
+from agent.conversation_loop import (
+    _assistant_turn_has_tool_call_named,
+    _compose_turn_user_message_content,
+)
 from hermes_cli.profile_context import (
     build_role_context_for_task,
     inject_role_execution_debug_header,
@@ -90,6 +93,15 @@ def test_debug_header_is_injected_into_response_path_not_cached_system_prompt(mo
     assert response.startswith("Hermes role: scribe")
     assert "assistant response" in response
     assert "SYSTEM PROMPT" not in response
+
+
+def test_detects_clarify_tool_call_on_assistant_turn():
+    clarify_tool_call = SimpleNamespace(function=SimpleNamespace(name="clarify"))
+    memory_tool_call = SimpleNamespace(function=SimpleNamespace(name="memory"))
+    assistant_message = SimpleNamespace(tool_calls=[clarify_tool_call, memory_tool_call])
+
+    assert _assistant_turn_has_tool_call_named(assistant_message, "clarify") is True
+    assert _assistant_turn_has_tool_call_named(assistant_message, "browser") is False
 
 
 def test_debug_header_soft_fails_and_preserves_response_when_metadata_missing(monkeypatch):
