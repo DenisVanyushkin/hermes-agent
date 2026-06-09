@@ -10,6 +10,7 @@ from agent.conversation_loop import (
 from hermes_cli.profile_context import (
     build_role_context_for_task,
     inject_role_execution_debug_header,
+    RoleContextResult,
 )
 
 
@@ -329,3 +330,48 @@ def test_debug_header_soft_fails_and_preserves_response_when_metadata_missing(mo
     response = inject_role_execution_debug_header("assistant response", None)
 
     assert response == "assistant response"
+
+
+def test_conversation_path_invokes_model_selector_without_mutating_runtime_model(monkeypatch):
+    selection_calls = []
+
+    fake_role_context = RoleContextResult(
+        task="Check WebUI status and inspect logs",
+        selected_role="engineer",
+        canonical_role="engineer",
+        context_text="You are acting as Hermes role: Engineer.",
+        profile_context_used=True,
+        critical_approval_required=False,
+    )
+
+    def _fake_build_role_context(task, **_kwargs):
+        assert task == "Check WebUI status and inspect logs"
+        return fake_role_context
+
+    def _fake_select_model_policy(**kwargs):
+        selection_calls.append(kwargs)
+        return {
+            "policy_name": "coding_high_reasoning",
+            "policy_class": "coding",
+            "effective_role": "engineer",
+            "preferred_provider": "openai-codex",
+            "preferred_model": "gpt-5.3-codex",
+            "fallback_chain_key": "configured_runtime_fallback_chain",
+            "allow_fallback": True,
+        }
+
+    monkeypatch.setattr("agent.conversation_loop.build_role_context_for_task", _fake_build_role_context)
+    monkeypatch.setattr("agent.conversation_loop.select_model_policy", _fake_select_model_policy)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(agent, "Check WebUI status and inspect logs", conversation_history=None)
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert selection_calls == [{
+        "selected_role": "engineer",
+        "canonical_role": "engineer",
+        "task_text": "Check WebUI status and inspect logs",
+        "critical_approval_required": False,
+    }]
+    assert getattr(agent, "_model_selection", None)["policy_name"] == "coding_high_reasoning"
+    assert agent.model == "gpt-5.4-mini"

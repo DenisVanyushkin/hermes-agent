@@ -55,6 +55,7 @@ from hermes_cli.profile_context import (
     inject_role_execution_debug_header,
     render_explicit_approval_request,
 )
+from hermes_cli.model_selection import model_selection_to_dict, select_model_policy
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
@@ -1087,6 +1088,7 @@ def run_conversation(
     # ephemeral (not persisted to session DB).
     _role_user_context = ""
     _role_context_result = None
+    _model_selection_result = None
     try:
         _role_context_result = build_role_context_for_task(original_user_message)
         if _role_context_result.profile_context_used:
@@ -1109,6 +1111,32 @@ def run_conversation(
     except Exception as exc:
         logger.warning("role context build failed: %s", exc)
 
+    try:
+        _model_selection_result = select_model_policy(
+            selected_role=getattr(_role_context_result, "selected_role", ""),
+            canonical_role=getattr(_role_context_result, "canonical_role", None),
+            task_text=original_user_message if isinstance(original_user_message, str) else "",
+            critical_approval_required=bool(getattr(_role_context_result, "critical_approval_required", False)),
+        )
+        agent._model_selection = model_selection_to_dict(_model_selection_result)
+        logger.info(
+            "model selection: session=%s policy=%s class=%s role=%s provider=%s model=%s fallback=%s allow_fallback=%s",
+            agent.session_id or "-",
+            agent._model_selection.get("policy_name", ""),
+            agent._model_selection.get("policy_class", ""),
+            agent._model_selection.get("effective_role", ""),
+            agent._model_selection.get("preferred_provider", ""),
+            agent._model_selection.get("preferred_model", ""),
+            agent._model_selection.get("fallback_chain_key", ""),
+            agent._model_selection.get("allow_fallback", True),
+        )
+    except Exception as exc:
+        logger.warning("model selection failed: %s", exc)
+        agent._model_selection = {
+            "policy_name": "unavailable",
+            "selection_error": str(exc),
+        }
+
     if _should_hard_stop_for_approval(_role_context_result):
         final_response = render_explicit_approval_request(
             _role_context_result,
@@ -1126,6 +1154,7 @@ def run_conversation(
                 "reviewer_profile": getattr(_role_context_result, "reviewer_profile", None),
                 "approval_reason": getattr(_role_context_result, "approval_reason", ""),
                 "task": original_user_message if isinstance(original_user_message, str) else "",
+                "model_selection": getattr(agent, "_model_selection", None),
             },
         }
         messages.append(approval_msg)
