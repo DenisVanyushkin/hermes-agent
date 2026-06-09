@@ -437,7 +437,7 @@ def build_role_execution_plan(
 
     route_obj = _coerce_route_decision(route_decision, task)
     selected_role, fallback_used, fallback_reason = _select_role(task, route_obj)
-    if route_obj is not None and route_obj.primary_profile == "general_operator":
+    if route_obj is not None and route_obj.primary_profile == "general_operator" and selected_role == "general_operator":
         selected_role = "general_operator"
         fallback_used = True
         fallback_reason = "routing defaulted to General Operator"
