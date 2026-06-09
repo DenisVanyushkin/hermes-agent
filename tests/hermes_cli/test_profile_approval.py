@@ -67,6 +67,8 @@ def test_mutation_classification_requires_approval(task: str, expected_action_ty
         ("systemctl status hermes-webui", "systemctl_status"),
         ("docker ps and docker logs for WebUI", "docker_inspect"),
         ("smoke check the WebUI and inspect logs", "smoke_check"),
+        ("Проверь статус WebUI и логи", "log_inspection"),
+        ("Show WebUI logs", "log_inspection"),
     ],
 )
 def test_read_only_classification_does_not_require_approval(task: str, expected_action_type: str):
@@ -77,6 +79,21 @@ def test_read_only_classification_does_not_require_approval(task: str, expected_
     assert preview.requires_approval is False
     assert preview.blocked_until_approved is False
     assert "read-only" in preview.classification_reason.lower() or "non-mutating" in preview.classification_reason.lower()
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Show WebUI logs",
+        "Check WebUI status and inspect logs",
+    ],
+)
+def test_show_webui_logs_does_not_require_approval(task: str):
+    preview = _preview(task)
+
+    assert preview.requires_approval is False
+    assert preview.blocked_until_approved is False
+    assert preview.action_type in {"log_inspection", "status", "health_check", "smoke_check"}
 
 
 def test_smoke_check_plain_is_read_only():

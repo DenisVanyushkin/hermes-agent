@@ -35,6 +35,8 @@ def _plan(task: str, **kwargs):
         ("Write a handoff note for the docs and current state", "scribe"),
         ("Research current sources and summarize findings", "researcher"),
         ("Review my CV and vacancy strategy", "career_strategist"),
+        ("Зафиксируй итог сегодняшней работы по ролям Hermes", "scribe"),
+        ("Оцени вакансию Head of Product для меня", "career_strategist"),
         ("Book me a haircut", "general_operator"),
         ("Create a calendar event for tomorrow", "general_operator"),
         ("Create a reminder for the dentist", "general_operator"),
@@ -143,6 +145,31 @@ def test_durable_outcome_triggers_scribe_recommendation():
     assert plan.requires_scribe is True
     assert plan.durable_outcome_expected is True
     assert "durable" in plan.scribe_reason.lower() or "handoff" in plan.scribe_reason.lower()
+
+
+def test_read_only_status_and_logs_do_not_require_scribe_or_approval():
+    plan = _plan("Проверь статус WebUI и логи")
+    assert plan.selected_role == "engineer"
+    assert plan.requires_reviewer is False
+    assert plan.requires_scribe is False
+    assert plan.requires_explicit_approval is False
+    assert plan.ordinary_personal_admin is False
+    assert plan.durable_outcome_expected is False
+    assert plan.post_change_review_policy["invoke_scribe"] is False
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Restart WebUI",
+        "Deploy WebUI",
+    ],
+)
+def test_mutation_tasks_require_explicit_approval(task: str):
+    plan = _plan(task)
+    assert plan.selected_role == "engineer"
+    assert plan.requires_explicit_approval is True
+    assert plan.production_runtime_mutation is True
 
 
 def test_ephemeral_task_does_not_trigger_scribe():

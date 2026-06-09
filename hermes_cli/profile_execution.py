@@ -75,13 +75,25 @@ _PERSONAL_ADMIN_TERMS = (
 
 _CAREER_TERMS = (
     "vacancy",
+    "оцени вакансию",
+    "стоит ли откликаться",
+    "зааплаиться",
+    "отклик",
+    "резюме",
     "cv",
     "cover letter",
+    "сопроводительное письмо",
     "recruiter",
+    "recruiter message",
+    "head of product",
+    "vp product",
+    "cpo",
+    "карьер",
+    "career",
     "job",
-    "interview",
-    "application",
+    "role fit",
     "apply",
+    "application",
 )
 
 _RESEARCH_TERMS = (
@@ -105,6 +117,28 @@ _DOCS_TERMS = (
     "open question",
     "memory",
     "note",
+    "record the decision",
+    "write handoff",
+    "update state",
+    "update docs",
+    "update documentation",
+    "capture durable memory",
+    "capture the outcome",
+    "summarize today's work",
+    "today's work",
+    "today's hermes role work",
+    "зафиксируй",
+    "зафиксируй итог",
+    "зафиксируй решение",
+    "зафиксируй сегодняшнюю работу",
+    "запиши итог",
+    "сохрани итог",
+    "сохрани в документацию",
+    "напиши handoff",
+    "сделай handoff",
+    "обнови state",
+    "обнови docs",
+    "обнови документацию",
 )
 
 _SECURITY_REVIEW_TERMS = (
@@ -127,6 +161,38 @@ _TRADING_TERMS = (
     "sell",
     "execution",
     "risk",
+)
+
+_READ_ONLY_DIAGNOSTIC_MARKERS = (
+    "status",
+    "inspect logs",
+    "show logs",
+    "show webui logs",
+    "show status",
+    "view logs",
+    "view status",
+    "read logs",
+    "read status",
+    "health",
+    "health check",
+    "check",
+    "monitor",
+    "monitoring",
+)
+
+_DURABLE_CAPTURE_TERMS = (
+    "document the handoff",
+    "document the result",
+    "document",
+    "handoff",
+    "docs",
+    "documentation",
+    "summary",
+    "summarize",
+    "record the decision",
+    "update docs",
+    "update documentation",
+    "update state",
 )
 
 _SENSITIVE_TRIGGER_MAP = {
@@ -237,6 +303,10 @@ def _normalize(text: str) -> str:
 
 def _contains(normalized_text: str, phrases: tuple[str, ...]) -> bool:
     return any(_normalize(phrase) in normalized_text for phrase in phrases)
+
+
+def _is_read_only_diagnostic_task(normalized_text: str) -> bool:
+    return any(marker in normalized_text for marker in _READ_ONLY_DIAGNOSTIC_MARKERS)
 
 
 def _dedupe_keep_order(values: list[str]) -> list[str]:
@@ -381,19 +451,11 @@ def _requires_explicit_approval(
 
 def _durable_outcome_expected(selected_role: str, external_commitment: bool, task: str) -> bool:
     normalized = _normalize(task)
-    readonly_markers = (
-        "status",
-        "inspect logs",
-        "inspect",
-        "read logs",
-        "health",
-        "check",
-        "monitor",
-        "monitoring",
-    )
-    if any(marker in normalized for marker in readonly_markers):
+    if _is_read_only_diagnostic_task(normalized):
         return False
-    if selected_role in {"scribe", "engineer", "security_auditor", "career_strategist", "researcher"}:
+    if selected_role == "scribe":
+        return True
+    if selected_role in {"engineer", "career_strategist", "researcher"} and _contains(normalized, _DURABLE_CAPTURE_TERMS):
         return True
     if external_commitment and any(term in normalized for term in ("book", "reserve", "calendar event", "reminder", "appointment")):
         return False
