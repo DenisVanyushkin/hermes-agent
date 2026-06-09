@@ -780,26 +780,47 @@ class QueuedCommentaryAgent:
         }
 
 
-class QueuedSilenceAgent:
-    """First turn is intentionally silent; queued follow-up still runs."""
-
-    calls = 0
-
+class ClarifyLeakCommentaryAgent:
     def __init__(self, **kwargs):
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
         self.tools = []
 
     def run_conversation(self, message, conversation_history=None, task_id=None):
-        type(self).calls += 1
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback(
+                "clarify: город/салон, когда удобно, какая стрижка",
+                already_streamed=False,
+            )
         return {
-            "final_response": "NO_REPLY" if type(self).calls == 1 else "follow-up processed",
+            "final_response": "done",
             "messages": [],
             "api_calls": 1,
         }
 
 
-class QueuedFailedEmptyAgent:
-    """First turn fails empty; its normalized error must send before follow-up."""
+class ClarifyHeartbeatAgent:
+    def __init__(self, **kwargs):
+        self.tools = []
 
+    def get_activity_summary(self):
+        return {
+            "api_call_count": 1,
+            "max_iterations": 120,
+            "current_tool": "clarify",
+            "last_activity_desc": "waiting for user clarify response",
+            "seconds_since_activity": 0.0,
+        }
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        time.sleep(0.2)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class ClarifyQueuedPreviewAgent:
     calls = 0
 
     def __init__(self, **kwargs):
@@ -809,14 +830,13 @@ class QueuedFailedEmptyAgent:
         type(self).calls += 1
         if type(self).calls == 1:
             return {
-                "final_response": "",
+                "final_response": "clarify: город/салон, когда удобно, какая стрижка",
+                "response_previewed": True,
                 "messages": [],
                 "api_calls": 1,
-                "failed": True,
-                "error": "provider exploded",
             }
         return {
-            "final_response": "follow-up processed",
+            "final_response": f"follow-up response {type(self).calls}",
             "messages": [],
             "api_calls": 1,
         }
@@ -1326,49 +1346,62 @@ async def test_run_agent_queued_message_does_not_treat_commentary_as_final(monke
 
 
 @pytest.mark.asyncio
-async def test_run_agent_suppresses_silent_first_turn_and_processes_queued_followup(
-    monkeypatch, tmp_path,
-):
-    """Regression: queued direct-send must not leak NO_REPLY to the channel."""
-    QueuedSilenceAgent.calls = 0
+async def test_run_agent_suppresses_internal_clarify_commentary_prefix(monkeypatch, tmp_path):
     adapter, result = await _run_with_agent(
         monkeypatch,
         tmp_path,
-        QueuedSilenceAgent,
-        session_id="sess-queued-silence",
-        pending_text="queued follow-up",
-        platform=Platform.SLACK,
-        chat_id="C123",
-        thread_id="1712345678.000100",
+        ClarifyLeakCommentaryAgent,
+        session_id="sess-clarify-commentary",
+        config_data={"display": {"tool_progress": "off", "interim_assistant_messages": True}},
     )
 
     sent_texts = [call["content"] for call in adapter.sent]
-    assert QueuedSilenceAgent.calls == 2
-    assert result["final_response"] == "follow-up processed"
-    assert "NO_REPLY" not in sent_texts
+    assert result["final_response"] == "done"
+    assert not any(text.lower().startswith("clarify:") for text in sent_texts)
 
 
 @pytest.mark.asyncio
-async def test_run_agent_sends_normalized_failure_before_queued_followup(
-    monkeypatch, tmp_path,
-):
-    """Queued delivery uses finalized output, not the raw empty agent result."""
-    QueuedFailedEmptyAgent.calls = 0
+async def test_run_agent_suppresses_telegram_clarify_long_running_heartbeat(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "0.05")
     adapter, result = await _run_with_agent(
         monkeypatch,
         tmp_path,
-        QueuedFailedEmptyAgent,
-        session_id="sess-queued-failed-empty",
-        pending_text="queued follow-up",
-        platform=Platform.SLACK,
-        chat_id="C123",
-        thread_id="1712345678.000100",
+        ClarifyHeartbeatAgent,
+        session_id="sess-clarify-heartbeat",
+        config_data={
+            "display": {
+                "tool_progress": "off",
+                "interim_assistant_messages": False,
+                "long_running_notifications": True,
+            }
+        },
+        platform=Platform.TELEGRAM,
+        chat_id="12345",
+        chat_type="dm",
+        thread_id=None,
     )
 
     sent_texts = [call["content"] for call in adapter.sent]
-    assert QueuedFailedEmptyAgent.calls == 2
-    assert result["final_response"] == "follow-up processed"
-    assert any("The request failed: provider exploded" in text for text in sent_texts)
+    assert result["final_response"] == "done"
+    assert not any("clarify" in text.lower() for text in sent_texts)
+    assert not any("waiting for user clarify response" in text.lower() for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_queued_followup_does_not_resend_internal_clarify_summary(monkeypatch, tmp_path):
+    ClarifyQueuedPreviewAgent.calls = 0
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ClarifyQueuedPreviewAgent,
+        session_id="sess-clarify-queued-preview",
+        pending_text="queued follow-up",
+        config_data={"display": {"tool_progress": "off", "interim_assistant_messages": False}},
+    )
+
+    sent_texts = [call["content"] for call in adapter.sent]
+    assert result["final_response"] == "follow-up response 2"
+    assert not any(text.lower().startswith("clarify:") for text in sent_texts)
 
 
 @pytest.mark.asyncio

@@ -414,6 +414,22 @@ def _compose_turn_user_message_content(
     return base_content + "\n\n" + "\n\n".join(injections)
 
 
+def _assistant_turn_has_tool_call_named(assistant_message: Any, tool_name: str) -> bool:
+    """Return True when the assistant turn includes the named tool call."""
+    target = str(tool_name or "").strip()
+    if not target:
+        return False
+
+    for tool_call in getattr(assistant_message, "tool_calls", None) or []:
+        try:
+            current_name = getattr(getattr(tool_call, "function", None), "name", None)
+        except Exception:
+            current_name = None
+        if str(current_name or "").strip() == target:
+            return True
+    return False
+
+
 def _restore_or_build_system_prompt(agent, system_message, conversation_history):
     """Restore the cached system prompt from the session DB or build it fresh.
 
@@ -5810,7 +5826,10 @@ def run_conversation(
                     and previous_interim_visible == current_interim_visible
                 )
                 messages.append(assistant_msg)
-                if not duplicate_previous_interim:
+                if (
+                    not duplicate_previous_interim
+                    and not _assistant_turn_has_tool_call_named(assistant_msg, "clarify")
+                ):
                     agent._emit_interim_assistant_message(assistant_msg)
 
                 # Mixed batch: error-result the invalid calls and strip them
