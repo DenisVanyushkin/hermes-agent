@@ -698,6 +698,68 @@ class QueuedCommentaryAgent:
         }
 
 
+class ClarifyLeakCommentaryAgent:
+    def __init__(self, **kwargs):
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback(
+                "clarify: город/салон, когда удобно, какая стрижка",
+                already_streamed=False,
+            )
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class ClarifyHeartbeatAgent:
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def get_activity_summary(self):
+        return {
+            "api_call_count": 1,
+            "max_iterations": 120,
+            "current_tool": "clarify",
+            "last_activity_desc": "waiting for user clarify response",
+            "seconds_since_activity": 0.0,
+        }
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        time.sleep(0.2)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class ClarifyQueuedPreviewAgent:
+    calls = 0
+
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        type(self).calls += 1
+        if type(self).calls == 1:
+            return {
+                "final_response": "clarify: город/салон, когда удобно, какая стрижка",
+                "response_previewed": True,
+                "messages": [],
+                "api_calls": 1,
+            }
+        return {
+            "final_response": f"follow-up response {type(self).calls}",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class BackgroundReviewAgent:
     def __init__(self, **kwargs):
         self.background_review_callback = kwargs.get("background_review_callback")
@@ -1138,6 +1200,65 @@ async def test_run_agent_queued_message_does_not_treat_commentary_as_final(monke
     assert result["final_response"] == "final response 2"
     assert "I'll inspect the repo first." in sent_texts
     assert "final response 1" in sent_texts
+
+
+@pytest.mark.asyncio
+async def test_run_agent_suppresses_internal_clarify_commentary_prefix(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ClarifyLeakCommentaryAgent,
+        session_id="sess-clarify-commentary",
+        config_data={"display": {"tool_progress": "off", "interim_assistant_messages": True}},
+    )
+
+    sent_texts = [call["content"] for call in adapter.sent]
+    assert result["final_response"] == "done"
+    assert not any(text.lower().startswith("clarify:") for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_suppresses_telegram_clarify_long_running_heartbeat(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "0.05")
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ClarifyHeartbeatAgent,
+        session_id="sess-clarify-heartbeat",
+        config_data={
+            "display": {
+                "tool_progress": "off",
+                "interim_assistant_messages": False,
+                "long_running_notifications": True,
+            }
+        },
+        platform=Platform.TELEGRAM,
+        chat_id="12345",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    sent_texts = [call["content"] for call in adapter.sent]
+    assert result["final_response"] == "done"
+    assert not any("clarify" in text.lower() for text in sent_texts)
+    assert not any("waiting for user clarify response" in text.lower() for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_queued_followup_does_not_resend_internal_clarify_summary(monkeypatch, tmp_path):
+    ClarifyQueuedPreviewAgent.calls = 0
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ClarifyQueuedPreviewAgent,
+        session_id="sess-clarify-queued-preview",
+        pending_text="queued follow-up",
+        config_data={"display": {"tool_progress": "off", "interim_assistant_messages": False}},
+    )
+
+    sent_texts = [call["content"] for call in adapter.sent]
+    assert result["final_response"] == "follow-up response 2"
+    assert not any(text.lower().startswith("clarify:") for text in sent_texts)
 
 
 @pytest.mark.asyncio
