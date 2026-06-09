@@ -189,6 +189,29 @@ def test_external_commitment_does_not_set_critical_hard_stop_metadata():
     assert "external commitment" in result.context_text.lower()
 
 
+def test_scribe_prompt_with_do_not_touch_trading_stays_scribe():
+    result = build_role_context_for_task("Зафиксируй финальный статус Hermes roles runtime MVP. Do not touch Trading.")
+
+    assert result.selected_role == "scribe"
+    assert result.reviewer_profile is None
+    assert result.selected_role != "trading_observer_trader"
+
+
+def test_investigation_prompt_with_do_not_activate_trading_stays_engineer():
+    result = build_role_context_for_task("Investigate approval-gate regression. Do not activate Trading.")
+
+    assert result.selected_role == "engineer"
+    assert result.selected_role != "trading_observer_trader"
+
+
+def test_crypto_research_prompt_stays_useful_without_trading_role():
+    result = build_role_context_for_task("Compare Binance Kazakhstan vs Coinbase fees for BTC")
+
+    assert result.selected_role in {"researcher", "general_operator"}
+    assert result.selected_role != "trading_observer_trader"
+    assert "trading remains deferred" not in result.context_text.lower()
+
+
 def test_render_explicit_approval_request_for_critical_mutation():
     result = build_role_context_for_task(
         "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения"
@@ -205,13 +228,19 @@ def test_render_explicit_approval_request_for_critical_mutation():
     assert "before any mutation" in rendered.lower() or "before making changes" in rendered.lower()
 
 
-def test_trading_role_renders_deferred_and_inactive():
-    result = build_role_context_for_task("Make a BTC trade")
-    assert result.selected_role == "trading_observer_trader"
-    assert result.canonical_role == "trading_observer_trader_deferred"
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Make a BTC trade",
+        "Buy BTC",
+        "Activate trading",
+    ],
+)
+def test_trade_prompts_do_not_render_trading_role_context(task: str):
+    result = build_role_context_for_task(task)
+    assert result.selected_role != "trading_observer_trader"
+    assert result.canonical_role != "trading_observer_trader_deferred"
     assert result.profile_context_used is True
-    assert "deferred" in result.context_text.lower()
-    assert "inactive" in result.context_text.lower() or "do not activate trading" in result.context_text.lower()
 
 
 def test_profile_context_module_does_not_import_gateway_cron_or_trading():

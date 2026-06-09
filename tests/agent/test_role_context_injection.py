@@ -284,8 +284,8 @@ def test_role_context_distinguishes_critical_hard_stop_from_other_approval_signa
     assert haircut.requires_explicit_approval is True
     assert haircut.critical_approval_required is False
     assert investigation.critical_approval_required is False
-    assert trading.selected_role == "trading_observer_trader"
-    assert "deferred" in trading.context_text.lower()
+    assert trading.selected_role != "trading_observer_trader"
+    assert trading.canonical_role != "trading_observer_trader_deferred"
 
 
 def test_detects_clarify_tool_call_on_assistant_turn():

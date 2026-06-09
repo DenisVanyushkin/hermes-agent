@@ -22,7 +22,6 @@ _ROLE_INTENTS = {
     "researcher": "external research",
     "career_strategist": "career/job",
     "general_operator": "personal/admin",
-    "trading_observer_trader": "trading deferred",
 }
 
 _ENGINEER_TERMS = (
@@ -51,6 +50,10 @@ _ENGINEER_TERMS = (
     "production",
     "logs",
     "log",
+    "investigate",
+    "regression",
+    "approval gate",
+    "approval-gate",
 )
 
 _PERSONAL_ADMIN_TERMS = (
@@ -106,6 +109,15 @@ _RESEARCH_TERMS = (
     "weather",
     "report",
     "digest",
+    "btc",
+    "bitcoin",
+    "crypto",
+    "binance",
+    "coinbase",
+    "fees",
+    "commissions",
+    "комиссии",
+    "купить btc",
 )
 
 _DOCS_TERMS = (
@@ -127,6 +139,9 @@ _DOCS_TERMS = (
     "summarize today's work",
     "today's work",
     "today's hermes role work",
+    "final status",
+    "status update",
+    "финальный статус",
     "зафиксируй",
     "зафиксируй итог",
     "зафиксируй решение",
@@ -218,7 +233,6 @@ _SENSITIVE_TRIGGER_MAP = {
     "WebUI access model": ("webui access", "access model", "auth model", "session model", "local access"),
     "production deploy scripts": ("deploy script", "deploy scripts", "production deploy", "release script"),
     "database migrations": ("database migration", "db migration", "migration", "schema migration", "repair database", "repair db"),
-    "trading/risk/execution paths": ("trading", "risk", "execution path", "execution paths", "order execution"),
     "persistent storage of untrusted external content": (
         "untrusted external content",
         "external content",
@@ -246,7 +260,6 @@ _RUNTIME_MUTATION_TERMS = (
     "database repair",
     "production data deletion",
     "delete production data",
-    "trading",
 )
 
 _EXTERNAL_COMMITMENT_TERMS = (
@@ -378,8 +391,17 @@ def _contains_any(normalized_text: str, phrases: tuple[str, ...]) -> bool:
 
 def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, bool, str]:
     normalized = _normalize(task)
-    if _contains_any(normalized, _TRADING_TERMS):
-        return "trading_observer_trader", True, "trading remains deferred"
+    docs_first_markers = (
+        "зафиксируй",
+        "handoff",
+        "final status",
+        "финальный статус",
+        "update docs",
+        "update state",
+        "status update",
+    )
+    if _contains_any(normalized, _DOCS_TERMS) and any(marker in normalized for marker in docs_first_markers):
+        return "scribe", False, "documentation/status capture intent detected"
 
     if _contains_any(normalized, _ENGINEER_TERMS):
         if _contains_any(normalized, _SECURITY_REVIEW_TERMS):
@@ -523,7 +545,7 @@ def build_role_execution_plan(
     if selected_role == "general_operator" and not external_commitment and not sensitive_triggers:
         ordinary_personal_admin = True
 
-    trading_deferred = selected_role == "trading_observer_trader"
+    trading_deferred = False
 
     post_change_review_policy = _post_change_review_policy(
         selected_role=selected_role,

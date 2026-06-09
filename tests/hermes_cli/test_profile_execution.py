@@ -97,7 +97,7 @@ def test_confirmation_and_escalation_metadata(task: str, expect_explicit: bool, 
         ("Restart the production service", True),
         ("Change Cloudflare firewall rules", True),
         ("Run a database migration in production", True),
-        ("Execute trading orders", True),
+        ("Execute trading orders", False),
     ],
 )
 def test_classify_production_runtime_mutation(task: str, expected_mutation: bool):
@@ -112,7 +112,7 @@ def test_classify_production_runtime_mutation(task: str, expected_mutation: bool
         ("Adjust gateway cron scheduler tool permissions", {"gateway", "cron/scheduler", "tool permissions"}),
         ("Review SSH browser profile upload permissions", {"SSH", "browser profiles", "file manager / shell / terminal / git / upload permissions"}),
         ("Update production deploy scripts and database migration paths", {"production deploy scripts", "database migrations"}),
-        ("Modify trading risk execution paths", {"trading/risk/execution paths"}),
+        ("Modify trading risk execution paths", set()),
         ("Store untrusted external content persistently", {"persistent storage of untrusted external content"}),
     ],
 )
@@ -188,12 +188,19 @@ def test_repo_code_mutation_allowed_for_engineer():
     assert plan.post_change_review_policy["summarize_diff"] is True
 
 
-def test_trading_task_remains_deferred():
-    plan = _plan("Execute trading orders for the portfolio")
-    assert plan.trading_deferred is True
-    assert plan.selected_role == "trading_observer_trader"
-    assert plan.fallback_used is True
-    assert plan.critical_approval_required is True
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Make a BTC trade",
+        "Buy BTC",
+        "Activate trading",
+    ],
+)
+def test_trade_prompts_do_not_select_trading_role(task: str):
+    plan = _plan(task)
+    assert plan.selected_role != "trading_observer_trader"
+    assert plan.selected_role != "trading_observer_trader_deferred"
+    assert plan.trading_deferred is False
 
 
 def test_cloudflare_public_exposure_requires_narrow_critical_hard_stop():
@@ -217,6 +224,19 @@ def test_investigation_prompt_does_not_require_critical_hard_stop():
     plan = _plan("Investigate approval-gate regression")
     assert plan.requires_explicit_approval is False
     assert plan.critical_approval_required is False
+
+
+def test_investigation_prompt_with_negative_trading_guardrail_routes_to_engineer():
+    plan = _plan("Investigate approval-gate regression. Do not activate Trading.")
+    assert plan.selected_role == "engineer"
+    assert plan.trading_deferred is False
+
+
+def test_crypto_research_prompt_routes_without_trading_role():
+    plan = _plan("Где я могу наиболее выгодно купить BTC?")
+    assert plan.selected_role in {"researcher", "general_operator"}
+    assert plan.selected_role != "trading_observer_trader"
+    assert plan.trading_deferred is False
 
 
 def test_execution_plan_serialization_round_trip():

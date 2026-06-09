@@ -85,6 +85,14 @@ def test_route_scribe_for_durable_memory_and_handoff_terms(task: str):
     assert _hop_ids(decision) == ["scribe"]
 
 
+def test_route_scribe_for_final_status_with_trading_guardrail():
+    decision = _route("Зафиксируй финальный статус Hermes roles runtime MVP. Do not touch Trading.")
+
+    assert decision.primary_profile == "scribe"
+    assert "trading_observer_trader" not in decision.selected_profiles
+    assert "trading_observer_trader_deferred" not in decision.selected_profiles
+
+
 @pytest.mark.parametrize(
     "task",
     [
@@ -116,12 +124,52 @@ def test_route_general_operator_for_safe_unclear_task():
     assert decision.route_chain[0].model_tier == "standard"
 
 
+def test_route_engineer_for_investigation_with_negative_trading_guardrail():
+    decision = _route("Investigate approval-gate regression. Do not activate Trading.")
+
+    assert decision.primary_profile == "engineer"
+    assert "trading_observer_trader" not in decision.selected_profiles
+    assert "trading_observer_trader_deferred" not in decision.selected_profiles
+
+
 def test_route_researcher_for_current_info_terms():
     decision = _route("weather news company research current facts digest report")
 
     assert decision.primary_profile == "researcher"
     assert _hop_ids(decision) == ["researcher"]
     assert decision.route_chain[0].model_tier == "standard"
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Где я могу наиболее выгодно купить BTC?",
+        "Compare Binance Kazakhstan vs Coinbase fees for BTC",
+    ],
+)
+def test_route_crypto_research_prompts_without_trading_role(task: str):
+    decision = _route(task)
+
+    assert decision.primary_profile in {"researcher", "general_operator"}
+    assert "trading_observer_trader" not in decision.selected_profiles
+    assert "trading_observer_trader_deferred" not in decision.selected_profiles
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Make a BTC trade",
+        "Buy BTC",
+        "Activate trading",
+    ],
+)
+def test_route_trade_execution_prompts_do_not_select_trading_role(task: str):
+    decision = _route(task)
+
+    assert decision.primary_profile != "trading_observer_trader"
+    assert decision.primary_profile != "trading_observer_trader_deferred"
+    assert "trading_observer_trader" not in decision.selected_profiles
+    assert "trading_observer_trader_deferred" not in decision.selected_profiles
 
 
 def test_route_mixed_webui_exposure_change_adds_security_and_scribe():
