@@ -307,12 +307,40 @@ def test_role_context_distinguishes_critical_hard_stop_from_other_approval_signa
 
     assert cloudflare.requires_explicit_approval is True
     assert cloudflare.critical_approval_required is True
+    assert cloudflare.operation_category == "security_critical_mutation"
+    assert logs.operation_category == "read_only_investigation"
     assert logs.critical_approval_required is False
     assert haircut.requires_explicit_approval is True
     assert haircut.critical_approval_required is False
     assert investigation.critical_approval_required is False
     assert trading.selected_role != "trading_observer_trader"
     assert trading.canonical_role != "trading_observer_trader_deferred"
+
+
+def test_user_level_fallback_refresh_timer_does_not_take_approval_preflight(monkeypatch):
+    plugin_calls = []
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(
+        agent,
+        "Install a user-level systemd timer for "
+        "/home/hermes/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main fallback refresh. "
+        "Use systemctl --user. No gateway restart. No config/auth/provider mutation. "
+        "No public exposure. No secrets. No Trading.",
+        conversation_history=None,
+    )
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
+    assert plugin_calls
+    assert agent._run_codex_app_server_turn_called is True
+    assert agent._execute_tool_calls_called is False
 
 
 def test_detects_clarify_tool_call_on_assistant_turn():
