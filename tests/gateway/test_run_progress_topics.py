@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import gateway.platforms.base as base_platform
+from hermes_cli.profile_context import build_role_context_for_task, inject_role_execution_debug_header
 from gateway.config import Platform, PlatformConfig, StreamingConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.session import SessionSource
@@ -1039,6 +1040,29 @@ class TransformedStreamAgent:
         }
 
 
+class DebugHeaderStreamAgent:
+    """Streams a response, then returns a final response decorated with the
+    opt-in role debug header so the gateway must edit the streamed message in
+    place instead of dropping the header on the floor.
+    """
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.stream_delta_callback:
+            self.stream_delta_callback("assistant response")
+        role_ctx = build_role_context_for_task("Зафиксируй итог сегодняшней работы по ролям Hermes")
+        return {
+            "final_response": inject_role_execution_debug_header("assistant response", role_ctx),
+            "response_previewed": True,
+            "response_transformed": True,
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 @pytest.mark.asyncio
 async def test_transformed_response_edits_streamed_message_in_place(monkeypatch, tmp_path):
     """When a transform_llm_output hook modifies the response after streaming,
@@ -1069,6 +1093,32 @@ async def test_transformed_response_edits_streamed_message_in_place(monkeypatch,
     edited_texts = [e["content"] for e in adapter.edits]
     assert any("[plugin appended this]" in text for text in edited_texts), (
         f"expected transformed text in adapter.edits, got: {edited_texts!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_debug_header_transformed_response_edits_streamed_message_in_place(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        DebugHeaderStreamAgent,
+        session_id="sess-debug-header-stream",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.MATRIX,
+        chat_id="!room:matrix.example.org",
+        chat_type="group",
+        thread_id="$thread",
+        adapter_cls=MetadataEditProgressCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    edited_texts = [e["content"] for e in adapter.edits]
+    assert any("Hermes role: scribe" in text for text in edited_texts), (
+        f"expected debug header in adapter.edits, got: {edited_texts!r}"
     )
 
 

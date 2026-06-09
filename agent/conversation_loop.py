@@ -5825,7 +5825,9 @@ def run_conversation(
     
     # Opt-in role debug header (HERMES_PROFILE_DEBUG_HEADER) — prefix the
     # delivered response with role metadata for smoke validation.
-    final_response = inject_role_execution_debug_header(final_response, _role_context_result)
+    _wrapped_response = inject_role_execution_debug_header(final_response, _role_context_result)
+    _role_header_applied = isinstance(final_response, str) and _wrapped_response != final_response
+    final_response = _wrapped_response
 
     # Post-loop turn finalization extracted to agent/turn_finalizer.finalize_turn
     # (god-file decomposition Phase 1 step 4). Behavior-neutral: the assembled
@@ -5846,6 +5848,7 @@ def run_conversation(
         _should_review_memory=_should_review_memory,
         _turn_exit_reason=_turn_exit_reason,
         _pending_verification_response=_pending_verification_response,
+        response_pre_transformed=_role_header_applied,
     )
 
 
