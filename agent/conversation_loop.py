@@ -670,10 +670,11 @@ def run_conversation(
         if _role_context_result.profile_context_used:
             _role_user_context = _role_context_result.context_text
             logger.info(
-                "role context: session=%s selected_role=%s canonical_role=%s used=%s",
+                "role context: session=%s selected_role=%s canonical_role=%s operation_category=%s used=%s",
                 agent.session_id or "-",
                 _role_context_result.selected_role,
                 _role_context_result.canonical_role or "-",
+                getattr(_role_context_result, "operation_category", "") or "-",
                 _role_context_result.profile_context_used,
             )
         elif _role_context_result.fallback_reason:
@@ -727,6 +728,7 @@ def run_conversation(
                 "critical_hard_stop": True,
                 "selected_role": getattr(_role_context_result, "selected_role", ""),
                 "canonical_role": getattr(_role_context_result, "canonical_role", None),
+                "operation_category": getattr(_role_context_result, "operation_category", ""),
                 "reviewer_profile": getattr(_role_context_result, "reviewer_profile", None),
                 "approval_reason": getattr(_role_context_result, "approval_reason", ""),
                 "task": original_user_message if isinstance(original_user_message, str) else "",

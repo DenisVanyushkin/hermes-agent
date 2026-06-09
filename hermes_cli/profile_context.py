@@ -32,6 +32,7 @@ class RoleContextResult:
     requires_explicit_approval: bool = False
     critical_approval_required: bool = False
     approval_reason: str = ""
+    operation_category: str = ""
 
 
 @lru_cache(maxsize=4)
@@ -193,6 +194,8 @@ def render_role_execution_debug_header(result: RoleContextResult | None) -> str:
     lines.append(f"Role context: {'used' if result.profile_context_used else 'missing'}")
     lines.append(f"Reviewer: {result.reviewer_profile or 'none'}")
     lines.append(f"Approval: {'required' if result.requires_explicit_approval else 'not_required'}")
+    if result.operation_category:
+        lines.append(f"Operation category: {result.operation_category}")
     if result.profile_context_used is False and result.fallback_reason:
         lines.append(f"Fallback reason: {result.fallback_reason}")
     return "\n".join(lines)
@@ -263,6 +266,7 @@ def build_role_context_for_task(
             requires_explicit_approval=False,
             critical_approval_required=False,
             approval_reason="",
+            operation_category="",
         )
 
     try:
@@ -280,6 +284,7 @@ def build_role_context_for_task(
             requires_explicit_approval=False,
             critical_approval_required=False,
             approval_reason="",
+            operation_category="",
         )
 
     try:
@@ -297,6 +302,7 @@ def build_role_context_for_task(
             requires_explicit_approval=False,
             critical_approval_required=False,
             approval_reason="",
+            operation_category="",
         )
 
     selected_role = resolved_plan.selected_role
@@ -320,6 +326,7 @@ def build_role_context_for_task(
             requires_explicit_approval=resolved_plan.requires_explicit_approval,
             critical_approval_required=resolved_plan.critical_approval_required,
             approval_reason=resolved_plan.approval_reason,
+            operation_category=resolved_plan.operation_category,
         )
 
     record = contracts.get(canonical_role or "", {})
@@ -346,6 +353,7 @@ def build_role_context_for_task(
             requires_explicit_approval=resolved_plan.requires_explicit_approval,
             critical_approval_required=resolved_plan.critical_approval_required,
             approval_reason=resolved_plan.approval_reason,
+            operation_category=resolved_plan.operation_category,
         )
 
     return RoleContextResult(
@@ -361,4 +369,5 @@ def build_role_context_for_task(
         requires_explicit_approval=resolved_plan.requires_explicit_approval,
         critical_approval_required=resolved_plan.critical_approval_required,
         approval_reason=resolved_plan.approval_reason,
+        operation_category=resolved_plan.operation_category,
     )

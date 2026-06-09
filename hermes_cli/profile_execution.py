@@ -40,6 +40,12 @@ _ENGINEER_TERMS = (
     "build",
     "deploy",
     "service",
+    "systemd",
+    "timer",
+    "timers",
+    "cron",
+    "scheduler",
+    "gateway",
     "infra",
     "runtime",
     "webui",
@@ -227,6 +233,19 @@ _NON_MUTATION_GUARDRAILS = (
     "do not activate trading",
 )
 
+_NEGATIVE_SECURITY_GUARDRAILS = (
+    "do not touch cloudflare",
+    "do not change cloudflare",
+    "no public exposure",
+    "no gateway restart",
+    "no secrets",
+    "no secret",
+    "no config auth provider mutation",
+    "no auth mutation",
+    "no provider mutation",
+    "no trading",
+)
+
 _INVESTIGATION_READ_ONLY_HINTS = (
     "investigate",
     "investigation",
@@ -267,6 +286,146 @@ _SENSITIVE_TRIGGER_MAP = {
         "persistent storage",
         "persist untrusted",
     ),
+}
+
+_OPERATION_CATEGORY_GENERAL = "general_task"
+_OPERATION_CATEGORY_READ_ONLY = "read_only_investigation"
+_OPERATION_CATEGORY_NORMAL = "normal_operational_mutation"
+_OPERATION_CATEGORY_SECURITY_CRITICAL = "security_critical_mutation"
+
+_READ_ONLY_OPERATION_TERMS = (
+    "git status",
+    "systemctl status",
+    "systemctl --user status",
+    "journalctl",
+    "list timers",
+    "list services",
+    "list units",
+    "list-units",
+    "status",
+    "inspect logs",
+    "show logs",
+    "show status",
+    "read logs",
+    "read status",
+    "проверь статус",
+    "логи",
+)
+
+_MUTATION_INTENT_TERMS = (
+    "install",
+    "create",
+    "add",
+    "write",
+    "update",
+    "modify",
+    "change",
+    "configure",
+    "enable",
+    "disable",
+    "restart",
+    "deploy",
+    "rollback",
+)
+
+_SCHEDULER_SURFACE_TERMS = (
+    "cron",
+    "crontab",
+    "scheduler",
+    "schedule",
+    "systemd",
+    "timer",
+    "timers",
+    "service",
+)
+
+_USER_LEVEL_OPERATION_TERMS = (
+    "user level",
+    "user-level",
+    "systemctl --user",
+    "user timer",
+    "user service",
+    "user crontab",
+    "crontab -e",
+    "local maintenance",
+    "housekeeping",
+    "fallback refresh",
+    "workingdirectory",
+    "state path",
+)
+
+_ROOT_SYSTEM_SCOPE_TERMS = (
+    "root",
+    "privileged",
+    "system wide",
+    "system-wide",
+    "global",
+    "globally",
+    "/etc/systemd/system",
+    "sudo",
+)
+
+_PUBLIC_EXPOSURE_TERMS = (
+    "cloudflare",
+    "reverse proxy",
+    "firewall",
+    "public exposure",
+    "publicly expose",
+    "open to internet",
+    "open port",
+    "public webui",
+    "expose webui",
+    "public access",
+)
+
+_SECRET_PROVIDER_MUTATION_TERMS = (
+    "secret",
+    "secrets",
+    "token",
+    "tokens",
+    "auth",
+    "authentication",
+    "credential",
+    "credentials",
+    "provider config",
+    "provider credentials",
+    "auth json",
+    ".env",
+)
+
+_GATEWAY_MUTATION_TERMS = (
+    "restart gateway",
+    "gateway restart",
+    "deploy gateway",
+    "gateway deploy",
+    "rollback gateway",
+    "gateway rollback",
+)
+
+_PRODUCTION_DATA_MUTATION_TERMS = (
+    "database migration",
+    "db migration",
+    "schema migration",
+    "repair database",
+    "repair db",
+    "production data deletion",
+    "delete production data",
+)
+
+_GENERIC_HIGH_RISK_RUNTIME_TERMS = (
+    "deploy",
+    "restart",
+    "rollback",
+    "production",
+)
+
+_SECURITY_AUDITOR_TRIGGER_SET = {
+    "auth/session/cookies",
+    "secrets/tokens/env",
+    "tool permissions",
+    "Cloudflare/reverse proxy/firewall",
+    "WebUI public access",
+    "WebUI access model",
 }
 
 _RUNTIME_MUTATION_TERMS = (
@@ -324,6 +483,7 @@ class RoleExecutionPlan:
     requires_explicit_approval: bool
     critical_approval_required: bool
     approval_reason: str
+    operation_category: str
     ordinary_personal_admin: bool
     external_commitment: bool
     sensitive_diff_triggers: list[str]
@@ -342,12 +502,30 @@ def _normalize(text: str) -> str:
     return " ".join(translated.split())
 
 
+def _strip_negative_security_guardrails(normalized_text: str) -> str:
+    sanitized = normalized_text
+    for phrase in _NEGATIVE_SECURITY_GUARDRAILS:
+        sanitized = sanitized.replace(_normalize(phrase), " ")
+    return " ".join(sanitized.split())
+
+
 def _contains(normalized_text: str, phrases: tuple[str, ...]) -> bool:
-    return any(_normalize(phrase) in normalized_text for phrase in phrases)
+    for phrase in phrases:
+        normalized_phrase = _normalize(phrase)
+        if not normalized_phrase:
+            continue
+        pattern = rf"(?:^| ){re.escape(normalized_phrase)}(?: |$)"
+        if re.search(pattern, normalized_text):
+            return True
+    return False
 
 
 def _is_read_only_diagnostic_task(normalized_text: str) -> bool:
     return any(marker in normalized_text for marker in _READ_ONLY_DIAGNOSTIC_MARKERS)
+
+
+def _has_mutation_intent(normalized_text: str) -> bool:
+    return _contains(normalized_text, _MUTATION_INTENT_TERMS)
 
 
 def _dedupe_keep_order(values: list[str]) -> list[str]:
@@ -382,7 +560,7 @@ def _coerce_route_decision(route_decision: RouteDecision | dict[str, Any] | None
 
 
 def classify_sensitive_diff_triggers(task: str, changed_paths: list[str] | None = None) -> list[str]:
-    normalized = _normalize(task)
+    normalized = _strip_negative_security_guardrails(_normalize(task))
     if _ignore_sensitive_surface_classification(normalized):
         return []
     haystacks = [normalized]
@@ -396,15 +574,108 @@ def classify_sensitive_diff_triggers(task: str, changed_paths: list[str] | None 
     return _dedupe_keep_order(hits)
 
 
-def classify_production_runtime_mutation(task: str, changed_paths: list[str] | None = None) -> bool:
+def _task_with_paths(task: str, changed_paths: list[str] | None = None) -> str:
     normalized = _normalize(task)
     if changed_paths:
         normalized = " ".join([normalized, *(_normalize(path) for path in changed_paths)])
-    if _ignore_sensitive_surface_classification(normalized):
+    return normalized
+
+
+def _is_root_or_system_scope_scheduler_mutation(normalized_text: str) -> bool:
+    return _contains(normalized_text, _SCHEDULER_SURFACE_TERMS) and _contains(normalized_text, _ROOT_SYSTEM_SCOPE_TERMS)
+
+
+def _is_security_critical_scheduler_mutation(normalized_text: str) -> bool:
+    if not _contains(normalized_text, _SCHEDULER_SURFACE_TERMS):
         return False
-    if _contains(normalized, _RUNTIME_MUTATION_TERMS):
+    if _is_root_or_system_scope_scheduler_mutation(normalized_text):
         return True
-    return bool(classify_sensitive_diff_triggers(task, changed_paths=changed_paths))
+    if _contains(normalized_text, _PUBLIC_EXPOSURE_TERMS):
+        return True
+    if _contains(normalized_text, _SECRET_PROVIDER_MUTATION_TERMS):
+        return True
+    if _contains(normalized_text, _GATEWAY_MUTATION_TERMS):
+        return True
+    if _contains(normalized_text, _PRODUCTION_DATA_MUTATION_TERMS):
+        return True
+    if _contains(normalized_text, _TRADING_TERMS) and _has_mutation_intent(normalized_text):
+        return True
+    return False
+
+
+def _is_normal_operational_mutation(normalized_text: str) -> bool:
+    if _is_docs_only_status_update(normalized_text):
+        return True
+    if not _has_mutation_intent(normalized_text):
+        return False
+    if _is_security_critical_scheduler_mutation(normalized_text):
+        return False
+    if not _contains(normalized_text, _SCHEDULER_SURFACE_TERMS):
+        return False
+    return (
+        _contains(normalized_text, _USER_LEVEL_OPERATION_TERMS)
+        or "local" in normalized_text
+        or "localhost" in normalized_text
+    )
+
+
+def _is_read_only_investigation(normalized_text: str) -> bool:
+    if _is_docs_only_status_update(normalized_text):
+        return False
+    if _has_mutation_intent(normalized_text):
+        return False
+    return _contains(normalized_text, _READ_ONLY_OPERATION_TERMS)
+
+
+def _security_critical_approval_reason(normalized_text: str, sensitive_triggers: list[str]) -> str:
+    if any(trigger in sensitive_triggers for trigger in ("Cloudflare/reverse proxy/firewall", "WebUI public access")):
+        return "public exposure and ingress mutations require explicit operator approval"
+    if any(trigger in sensitive_triggers for trigger in ("auth/session/cookies", "secrets/tokens/env", "tool permissions")):
+        return "secrets, auth, provider config, or tool-permission mutations require explicit operator approval"
+    if _contains(normalized_text, _GATEWAY_MUTATION_TERMS):
+        return "gateway deploy/restart/rollback affects live service availability and requires explicit operator approval"
+    if _contains(normalized_text, _PRODUCTION_DATA_MUTATION_TERMS):
+        return "production database mutation requires explicit operator approval"
+    if _contains(normalized_text, _GENERIC_HIGH_RISK_RUNTIME_TERMS):
+        return "production/runtime mutation including deploy, restart, or rollback requires explicit operator approval"
+    if _is_root_or_system_scope_scheduler_mutation(normalized_text):
+        return "root/system-wide scheduler mutation requires explicit operator approval"
+    if _contains(normalized_text, _TRADING_TERMS) and _has_mutation_intent(normalized_text):
+        return "scheduled trading execution requires explicit operator approval"
+    return "security-critical runtime mutation requires explicit operator approval"
+
+
+def classify_operation_category(task: str, changed_paths: list[str] | None = None) -> str:
+    normalized = _task_with_paths(task, changed_paths=changed_paths)
+    risk_normalized = _strip_negative_security_guardrails(normalized)
+    sensitive_triggers = classify_sensitive_diff_triggers(task, changed_paths=changed_paths)
+    if _ignore_sensitive_surface_classification(normalized):
+        if _is_docs_only_status_update(normalized):
+            return _OPERATION_CATEGORY_NORMAL
+        return _OPERATION_CATEGORY_READ_ONLY
+    if _contains(risk_normalized, _PUBLIC_EXPOSURE_TERMS):
+        return _OPERATION_CATEGORY_SECURITY_CRITICAL
+    if _contains(risk_normalized, _SECRET_PROVIDER_MUTATION_TERMS) and _has_mutation_intent(risk_normalized):
+        return _OPERATION_CATEGORY_SECURITY_CRITICAL
+    if _contains(risk_normalized, _GATEWAY_MUTATION_TERMS):
+        return _OPERATION_CATEGORY_SECURITY_CRITICAL
+    if _contains(risk_normalized, _PRODUCTION_DATA_MUTATION_TERMS):
+        return _OPERATION_CATEGORY_SECURITY_CRITICAL
+    if _contains(risk_normalized, _GENERIC_HIGH_RISK_RUNTIME_TERMS):
+        return _OPERATION_CATEGORY_SECURITY_CRITICAL
+    if _is_security_critical_scheduler_mutation(risk_normalized):
+        return _OPERATION_CATEGORY_SECURITY_CRITICAL
+    if _is_normal_operational_mutation(risk_normalized):
+        return _OPERATION_CATEGORY_NORMAL
+    if _is_read_only_investigation(normalized):
+        return _OPERATION_CATEGORY_READ_ONLY
+    if sensitive_triggers and _has_mutation_intent(risk_normalized):
+        return _OPERATION_CATEGORY_SECURITY_CRITICAL
+    return _OPERATION_CATEGORY_GENERAL
+
+
+def classify_production_runtime_mutation(task: str, changed_paths: list[str] | None = None) -> bool:
+    return classify_operation_category(task, changed_paths=changed_paths) == _OPERATION_CATEGORY_SECURITY_CRITICAL
 
 
 def classify_external_commitment(task: str) -> bool:
@@ -482,10 +753,16 @@ def _role_intent(role: str) -> str:
     return _ROLE_INTENTS.get(role, "general")
 
 
-def _requires_reviewer(selected_role: str, sensitive_triggers: list[str]) -> tuple[bool, str | None]:
+def _requires_reviewer(
+    selected_role: str,
+    sensitive_triggers: list[str],
+    operation_category: str,
+) -> tuple[bool, str | None]:
     if selected_role == "security_auditor":
         return True, None
-    if sensitive_triggers:
+    if operation_category == _OPERATION_CATEGORY_SECURITY_CRITICAL and any(
+        trigger in _SECURITY_AUDITOR_TRIGGER_SET for trigger in sensitive_triggers
+    ):
         return True, "security_auditor"
     return False, None
 
@@ -505,21 +782,19 @@ def _requires_explicit_approval(
     *,
     selected_role: str,
     external_commitment: bool,
-    production_runtime_mutation: bool,
+    operation_category: str,
     sensitive_triggers: list[str],
     task: str,
 ) -> tuple[bool, str]:
     normalized = _normalize(task)
-    if production_runtime_mutation:
-        return True, "production/runtime mutation requires explicit operator approval"
+    if operation_category == _OPERATION_CATEGORY_SECURITY_CRITICAL:
+        return True, _security_critical_approval_reason(normalized, sensitive_triggers)
     if external_commitment:
         return True, "external commitment must be confirmed before final action"
     if _contains(normalized, _MONEY_TERMS):
         return True, "money/payment risk requires explicit confirmation or escalation"
     if _contains(normalized, _IDENTITY_TERMS):
         return True, "identity-document risk requires explicit confirmation or escalation"
-    if sensitive_triggers and selected_role != "security_auditor":
-        return True, "sensitive diff triggers require reviewer or explicit approval"
     return False, ""
 
 
@@ -579,15 +854,16 @@ def build_role_execution_plan(
         fallback_reason = "routing defaulted to General Operator"
 
     sensitive_triggers = classify_sensitive_diff_triggers(task, changed_paths=changed_paths)
-    production_runtime_mutation = classify_production_runtime_mutation(task, changed_paths=changed_paths)
+    operation_category = classify_operation_category(task, changed_paths=changed_paths)
+    production_runtime_mutation = operation_category == _OPERATION_CATEGORY_SECURITY_CRITICAL
     external_commitment = classify_external_commitment(task)
     durable_outcome_expected = _durable_outcome_expected(selected_role, external_commitment, task)
-    requires_reviewer, reviewer_profile = _requires_reviewer(selected_role, sensitive_triggers)
+    requires_reviewer, reviewer_profile = _requires_reviewer(selected_role, sensitive_triggers, operation_category)
     requires_scribe, scribe_reason = _requires_scribe(selected_role, durable_outcome_expected, task)
     requires_explicit_approval, approval_reason = _requires_explicit_approval(
         selected_role=selected_role,
         external_commitment=external_commitment,
-        production_runtime_mutation=production_runtime_mutation,
+        operation_category=operation_category,
         sensitive_triggers=sensitive_triggers,
         task=task,
     )
@@ -606,7 +882,7 @@ def build_role_execution_plan(
         durable_outcome_expected=durable_outcome_expected,
         production_runtime_mutation=production_runtime_mutation,
     )
-    critical_approval_required = production_runtime_mutation
+    critical_approval_required = operation_category == _OPERATION_CATEGORY_SECURITY_CRITICAL
 
     return RoleExecutionPlan(
         task=task.strip(),
@@ -621,6 +897,7 @@ def build_role_execution_plan(
         requires_explicit_approval=requires_explicit_approval,
         critical_approval_required=critical_approval_required,
         approval_reason=approval_reason,
+        operation_category=operation_category,
         ordinary_personal_admin=ordinary_personal_admin,
         external_commitment=external_commitment,
         sensitive_diff_triggers=sensitive_triggers,

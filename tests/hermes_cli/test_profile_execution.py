@@ -11,6 +11,7 @@ import pytest
 from hermes_cli.profile_execution import (
     RoleExecutionPlan,
     build_role_execution_plan,
+    classify_operation_category,
     classify_external_commitment,
     classify_production_runtime_mutation,
     classify_sensitive_diff_triggers,
@@ -150,6 +151,7 @@ def test_durable_outcome_triggers_scribe_recommendation():
 def test_read_only_status_and_logs_do_not_require_scribe_or_approval():
     plan = _plan("Проверь статус WebUI и логи")
     assert plan.selected_role == "engineer"
+    assert plan.operation_category == "read_only_investigation"
     assert plan.requires_reviewer is False
     assert plan.requires_scribe is False
     assert plan.requires_explicit_approval is False
@@ -257,6 +259,76 @@ def test_cloudflare_investigation_without_change_does_not_require_critical_appro
     assert plan.production_runtime_mutation is False
 
 
+def test_read_only_systemd_timer_inspection_stays_engineer_without_hard_stop():
+    plan = _plan("Inspect systemctl --user status, list timers, list services, and journalctl logs for Hermes fallback refresh timer")
+    assert plan.selected_role == "engineer"
+    assert plan.operation_category == "read_only_investigation"
+    assert plan.reviewer_profile is None
+    assert plan.requires_reviewer is False
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
+    assert plan.production_runtime_mutation is False
+
+
+def test_user_level_fallback_refresh_timer_install_is_normal_operational_mutation_without_hard_stop():
+    plan = _plan(
+        "Install a user-level systemd timer for "
+        "/home/hermes/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main fallback refresh "
+        "with WorkingDirectory=/home/hermes/.hermes/hermes-agent and state path "
+        "~/.hermes/state/model_fallbacks.json. "
+        "Use systemctl --user. No gateway restart. No config/auth/provider mutation. "
+        "No public exposure. No secrets. No Trading."
+    )
+    assert plan.selected_role == "engineer"
+    assert plan.operation_category == "normal_operational_mutation"
+    assert plan.reviewer_profile is None
+    assert plan.requires_reviewer is False
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
+    assert plan.production_runtime_mutation is False
+
+
+def test_root_system_wide_timer_install_is_higher_risk():
+    plan = _plan(
+        "Install a root system-wide systemd timer in /etc/systemd/system "
+        "for Hermes maintenance and enable it globally."
+    )
+    assert plan.selected_role == "engineer"
+    assert plan.operation_category == "security_critical_mutation"
+    assert plan.requires_explicit_approval is True
+    assert plan.critical_approval_required is True
+    assert plan.production_runtime_mutation is True
+
+
+def test_scheduler_job_that_restarts_gateway_requires_critical_approval():
+    plan = _plan("Create a daily scheduler job that restarts the Hermes gateway every day")
+    assert plan.selected_role == "engineer"
+    assert plan.operation_category == "security_critical_mutation"
+    assert plan.requires_explicit_approval is True
+    assert plan.critical_approval_required is True
+    assert plan.production_runtime_mutation is True
+
+
+def test_scheduler_job_that_touches_cloudflare_or_public_exposure_requires_security_auditor():
+    plan = _plan("Create a scheduler job that updates Cloudflare tunnel and firewall rules for public exposure")
+    assert plan.selected_role == "engineer"
+    assert plan.operation_category == "security_critical_mutation"
+    assert plan.reviewer_profile == "security_auditor"
+    assert plan.requires_reviewer is True
+    assert plan.requires_explicit_approval is True
+    assert plan.critical_approval_required is True
+
+
+def test_scheduler_job_that_writes_secrets_or_provider_config_requires_security_auditor():
+    plan = _plan("Create a scheduler job that rotates provider auth tokens and writes secrets into config")
+    assert plan.selected_role == "engineer"
+    assert plan.operation_category == "security_critical_mutation"
+    assert plan.reviewer_profile == "security_auditor"
+    assert plan.requires_reviewer is True
+    assert plan.requires_explicit_approval is True
+    assert plan.critical_approval_required is True
+
+
 def test_investigation_prompt_with_negative_trading_guardrail_routes_to_engineer():
     plan = _plan("Investigate approval-gate regression. Do not activate Trading.")
     assert plan.selected_role == "engineer"
@@ -336,6 +408,7 @@ def test_execution_plan_to_dict_contains_required_fields():
         "requires_explicit_approval",
         "critical_approval_required",
         "approval_reason",
+        "operation_category",
         "ordinary_personal_admin",
         "external_commitment",
         "sensitive_diff_triggers",
@@ -345,3 +418,19 @@ def test_execution_plan_to_dict_contains_required_fields():
         "trading_deferred",
     ]:
         assert field in payload
+
+
+@pytest.mark.parametrize(
+    "task,expected_category",
+    [
+        ("Inspect systemctl --user status and list timers for Hermes fallback refresh", "read_only_investigation"),
+        (
+            "Install a user-level systemd timer for /home/hermes/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main fallback refresh. "
+            "Use systemctl --user. No gateway restart. No config/auth/provider mutation. No public exposure. No secrets.",
+            "normal_operational_mutation",
+        ),
+        ("Install a root system-wide systemd timer in /etc/systemd/system for Hermes maintenance", "security_critical_mutation"),
+    ],
+)
+def test_classify_operation_category(task: str, expected_category: str):
+    assert classify_operation_category(task) == expected_category

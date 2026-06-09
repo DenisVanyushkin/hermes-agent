@@ -106,6 +106,7 @@ def test_engineer_read_only_diagnostics_gets_engineer_context_without_approval_s
     result = build_role_context_for_task("Проверь статус WebUI и логи")
     assert result.selected_role == "engineer"
     assert result.profile_context_used is True
+    assert result.operation_category == "read_only_investigation"
     assert "Engineer" in result.context_text
     assert "Production/runtime mutation requires explicit approval" in result.context_text
 
@@ -243,6 +244,21 @@ def test_cloudflare_investigation_without_change_does_not_hard_stop():
     result = build_role_context_for_task("Investigate approval-gate regression around Cloudflare. Do not change Cloudflare.")
 
     assert result.selected_role == "engineer"
+    assert result.critical_approval_required is False
+
+
+def test_user_level_fallback_refresh_timer_context_keeps_normal_operational_mutation_without_hard_stop():
+    result = build_role_context_for_task(
+        "Install a user-level systemd timer for "
+        "/home/hermes/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main fallback refresh. "
+        "Use systemctl --user. No gateway restart. No config/auth/provider mutation. "
+        "No public exposure. No secrets. No Trading."
+    )
+
+    assert result.selected_role == "engineer"
+    assert result.operation_category == "normal_operational_mutation"
+    assert result.reviewer_profile is None
+    assert result.requires_explicit_approval is False
     assert result.critical_approval_required is False
 
 
