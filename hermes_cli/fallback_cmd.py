@@ -276,6 +276,35 @@ def cmd_fallback_remove(args) -> None:  # noqa: ARG001
     print()
 
 
+def cmd_fallback_refresh(args) -> None:
+    """Refresh sanitized fallback availability metadata without mutating live config."""
+    from hermes_cli.model_fallback_refresh import (
+        DEFAULT_STATE_PATH,
+        format_refresh_report,
+        refresh_model_fallbacks,
+        write_fallback_state,
+    )
+
+    output_path = getattr(args, "output", None) or DEFAULT_STATE_PATH
+    timeout_s = float(getattr(args, "timeout", 1.5) or 1.5)
+    state = refresh_model_fallbacks(output_path=output_path, timeout_s=timeout_s)
+
+    print()
+    if getattr(args, "dry_run", False):
+        print(f"  Dry run - state was not written: {output_path}")
+    else:
+        path = write_fallback_state(state, output_path=output_path)
+        print(f"  Wrote fallback refresh state: {path}")
+    print(f"  Schema version: {state['schema_version']}")
+    print(f"  Config hash:    {state['config_hash']}")
+    print()
+    for line in format_refresh_report(state).splitlines():
+        print(f"  {line}")
+    print()
+    print("  Safe mode: no config/auth mutation, no gateway restart, no deploy.")
+    print()
+
+
 def cmd_fallback_clear(args) -> None:  # noqa: ARG001
     """Remove all fallback entries (with confirmation)."""
     from hermes_cli.config import load_config, save_config
@@ -348,7 +377,9 @@ def cmd_fallback(args) -> None:
         cmd_fallback_remove(args)
     elif sub == "clear":
         cmd_fallback_clear(args)
+    elif sub == "refresh":
+        cmd_fallback_refresh(args)
     else:
         print(f"Unknown fallback subcommand: {sub}")
-        print("Use one of: list, add, remove, clear")
+        print("Use one of: list, add, remove, clear, refresh")
         raise SystemExit(2)
