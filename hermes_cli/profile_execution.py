@@ -282,6 +282,7 @@ class RoleExecutionPlan:
     requires_scribe: bool
     scribe_reason: str
     requires_explicit_approval: bool
+    critical_approval_required: bool
     approval_reason: str
     ordinary_personal_admin: bool
     external_commitment: bool
@@ -532,6 +533,7 @@ def build_role_execution_plan(
         durable_outcome_expected=durable_outcome_expected,
         production_runtime_mutation=production_runtime_mutation,
     )
+    critical_approval_required = production_runtime_mutation
 
     return RoleExecutionPlan(
         task=task.strip(),
@@ -544,6 +546,7 @@ def build_role_execution_plan(
         requires_scribe=requires_scribe,
         scribe_reason=scribe_reason,
         requires_explicit_approval=requires_explicit_approval,
+        critical_approval_required=critical_approval_required,
         approval_reason=approval_reason,
         ordinary_personal_admin=ordinary_personal_admin,
         external_commitment=external_commitment,

@@ -39,7 +39,11 @@ from agent.turn_context import (
 )
 from agent.turn_retry_state import TurnRetryState
 from agent.memory_manager import build_memory_context_block
-from hermes_cli.profile_context import build_role_context_for_task, inject_role_execution_debug_header
+from hermes_cli.profile_context import (
+    build_role_context_for_task,
+    inject_role_execution_debug_header,
+    render_explicit_approval_request,
+)
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
@@ -131,6 +135,10 @@ def _image_error_max_dimension(error: Exception) -> Optional[int]:
     if 512 <= max_dimension <= 8000:
         return max_dimension
     return None
+
+
+def _should_hard_stop_for_approval(result: Any) -> bool:
+    return bool(getattr(result, "critical_approval_required", False))
 
 
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
@@ -748,6 +756,48 @@ def run_conversation(
             )
     except Exception as exc:
         logger.warning("role context build failed: %s", exc)
+
+    if _should_hard_stop_for_approval(_role_context_result):
+        final_response = render_explicit_approval_request(
+            _role_context_result,
+            task_text=original_user_message if isinstance(original_user_message, str) else "",
+        )
+        final_response = inject_role_execution_debug_header(final_response, _role_context_result)
+        approval_msg = {
+            "role": "assistant",
+            "content": final_response,
+            "_approval_gate": {
+                "required": True,
+                "critical_hard_stop": True,
+                "selected_role": getattr(_role_context_result, "selected_role", ""),
+                "canonical_role": getattr(_role_context_result, "canonical_role", None),
+                "reviewer_profile": getattr(_role_context_result, "reviewer_profile", None),
+                "approval_reason": getattr(_role_context_result, "approval_reason", ""),
+                "task": original_user_message if isinstance(original_user_message, str) else "",
+            },
+        }
+        messages.append(approval_msg)
+        agent._session_messages = messages
+        agent._persist_session(messages, conversation_history)
+        return {
+            "final_response": final_response,
+            "last_reasoning": None,
+            "messages": messages,
+            "api_calls": 0,
+            "completed": True,
+            "failed": False,
+            "partial": False,
+            "interrupted": False,
+            "response_transformed": False,
+            "response_previewed": False,
+            "turn_exit_reason": "approval_required_preflight",
+            "model": agent.model,
+            "requested_model": agent._requested_model,
+            "provider": agent.provider,
+            "base_url": agent.base_url,
+            "session_id": agent.session_id,
+        }
+
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
