@@ -269,6 +269,32 @@ def test_haircut_prompt_does_not_take_critical_hard_stop_path(monkeypatch):
     assert agent._execute_tool_calls_called is False
 
 
+def test_docs_only_scribe_prompt_with_cloudflare_evidence_does_not_take_critical_hard_stop(monkeypatch):
+    plugin_calls = []
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(
+        agent,
+        "Зафиксируй финальный статус Hermes roles runtime MVP после live smoke. "
+        "Cloudflare/public exposure prompt PASS. "
+        "Update docs/profile-handoffs/2026-06-09-hermes-role-work.md and docs/state/current-operational-state.md. "
+        "Do not change code. Do not deploy. Do not restart gateway. Do not touch Trading.",
+        conversation_history=None,
+    )
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert plugin_calls
+    assert plugin_calls[0][0] == "pre_llm_call"
+    assert agent._run_codex_app_server_turn_called is True
+    assert agent._execute_tool_calls_called is False
+
+
 def test_role_context_distinguishes_critical_hard_stop_from_other_approval_signals():
     cloudflare = build_role_context_for_task(
         "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения"
