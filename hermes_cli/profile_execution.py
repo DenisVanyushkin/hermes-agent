@@ -233,17 +233,18 @@ _NON_MUTATION_GUARDRAILS = (
     "do not activate trading",
 )
 
-_NEGATIVE_SECURITY_GUARDRAILS = (
-    "do not touch cloudflare",
-    "do not change cloudflare",
-    "no public exposure",
-    "no gateway restart",
-    "no secrets",
-    "no secret",
-    "no config auth provider mutation",
-    "no auth mutation",
-    "no provider mutation",
-    "no trading",
+_NEGATIVE_GUARDRAIL_PREFIXES = (
+    "do not",
+    "don't",
+    "dont",
+    "without",
+    "no",
+    "не",
+    "не трогай",
+    "не менять",
+    "не делай",
+    "не перезапускай",
+    "не деплой",
 )
 
 _INVESTIGATION_READ_ONLY_HINTS = (
@@ -258,7 +259,21 @@ _INVESTIGATION_READ_ONLY_HINTS = (
 
 _SENSITIVE_TRIGGER_MAP = {
     "auth/session/cookies": ("auth", "authentication", "session", "cookie", "cookies"),
-    "secrets/tokens/env": ("secret", "secrets", "token", "tokens", "env", "environment variable", "environment variables"),
+    "secrets/tokens/env": (
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+        "api key",
+        "api keys",
+        "credential",
+        "credentials",
+        "provider credential",
+        "provider credentials",
+        "env",
+        "environment variable",
+        "environment variables",
+    ),
     "SSH": ("ssh",),
     "browser profiles": ("browser profile", "browser profiles", "profile path", "browser-desktop"),
     "file manager / shell / terminal / git / upload permissions": (
@@ -314,6 +329,8 @@ _READ_ONLY_OPERATION_TERMS = (
 
 _MUTATION_INTENT_TERMS = (
     "install",
+    "set up",
+    "setup",
     "create",
     "add",
     "write",
@@ -502,13 +519,6 @@ def _normalize(text: str) -> str:
     return " ".join(translated.split())
 
 
-def _strip_negative_security_guardrails(normalized_text: str) -> str:
-    sanitized = normalized_text
-    for phrase in _NEGATIVE_SECURITY_GUARDRAILS:
-        sanitized = sanitized.replace(_normalize(phrase), " ")
-    return " ".join(sanitized.split())
-
-
 def _contains(normalized_text: str, phrases: tuple[str, ...]) -> bool:
     for phrase in phrases:
         normalized_phrase = _normalize(phrase)
@@ -518,6 +528,45 @@ def _contains(normalized_text: str, phrases: tuple[str, ...]) -> bool:
         if re.search(pattern, normalized_text):
             return True
     return False
+
+
+def _split_task_clauses(task: str) -> list[str]:
+    if not isinstance(task, str) or not task.strip():
+        return []
+    raw_clauses = re.split(r"(?:[\n\r]+|[.;])", task)
+    clauses: list[str] = []
+    for clause in raw_clauses:
+        normalized_clause = _normalize(clause)
+        if normalized_clause:
+            clauses.append(normalized_clause)
+    return clauses
+
+
+def _is_negative_guardrail_clause(normalized_clause: str) -> bool:
+    if not normalized_clause:
+        return False
+    return any(
+        normalized_clause == prefix or normalized_clause.startswith(prefix + " ")
+        for prefix in _NEGATIVE_GUARDRAIL_PREFIXES
+    )
+
+
+def _partition_task_clauses(task: str) -> tuple[list[str], list[str]]:
+    action_clauses: list[str] = []
+    guardrail_clauses: list[str] = []
+    for clause in _split_task_clauses(task):
+        if _is_negative_guardrail_clause(clause):
+            guardrail_clauses.append(clause)
+        else:
+            action_clauses.append(clause)
+    return action_clauses, guardrail_clauses
+
+
+def _compose_normalized_text(clauses: list[str], changed_paths: list[str] | None = None) -> str:
+    parts = list(clauses)
+    if changed_paths:
+        parts.extend(_normalize(path) for path in changed_paths if isinstance(path, str) and path.strip())
+    return " ".join(part for part in parts if part).strip()
 
 
 def _is_read_only_diagnostic_task(normalized_text: str) -> bool:
@@ -560,7 +609,8 @@ def _coerce_route_decision(route_decision: RouteDecision | dict[str, Any] | None
 
 
 def classify_sensitive_diff_triggers(task: str, changed_paths: list[str] | None = None) -> list[str]:
-    normalized = _strip_negative_security_guardrails(_normalize(task))
+    action_clauses, _guardrail_clauses = _partition_task_clauses(task)
+    normalized = _compose_normalized_text(action_clauses, changed_paths=changed_paths)
     if _ignore_sensitive_surface_classification(normalized):
         return []
     haystacks = [normalized]
@@ -575,10 +625,17 @@ def classify_sensitive_diff_triggers(task: str, changed_paths: list[str] | None 
 
 
 def _task_with_paths(task: str, changed_paths: list[str] | None = None) -> str:
-    normalized = _normalize(task)
-    if changed_paths:
-        normalized = " ".join([normalized, *(_normalize(path) for path in changed_paths)])
-    return normalized
+    return _compose_normalized_text(_split_task_clauses(task), changed_paths=changed_paths)
+
+
+def _action_text(task: str, changed_paths: list[str] | None = None) -> str:
+    action_clauses, _guardrail_clauses = _partition_task_clauses(task)
+    return _compose_normalized_text(action_clauses, changed_paths=changed_paths)
+
+
+def _guardrail_text(task: str) -> str:
+    _action_clauses, guardrail_clauses = _partition_task_clauses(task)
+    return " ".join(guardrail_clauses).strip()
 
 
 def _is_root_or_system_scope_scheduler_mutation(normalized_text: str) -> bool:
@@ -647,7 +704,7 @@ def _security_critical_approval_reason(normalized_text: str, sensitive_triggers:
 
 def classify_operation_category(task: str, changed_paths: list[str] | None = None) -> str:
     normalized = _task_with_paths(task, changed_paths=changed_paths)
-    risk_normalized = _strip_negative_security_guardrails(normalized)
+    risk_normalized = _action_text(task, changed_paths=changed_paths)
     sensitive_triggers = classify_sensitive_diff_triggers(task, changed_paths=changed_paths)
     if _ignore_sensitive_surface_classification(normalized):
         if _is_docs_only_status_update(normalized):
@@ -713,6 +770,7 @@ def _ignore_sensitive_surface_classification(normalized_text: str) -> bool:
 
 def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, bool, str]:
     normalized = _normalize(task)
+    action_normalized = _action_text(task)
     docs_first_markers = (
         "зафиксируй",
         "handoff",
@@ -729,6 +787,15 @@ def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, 
         if _contains_any(normalized, _SECURITY_REVIEW_TERMS):
             return "engineer", False, "engineering task with security-sensitive surface"
         return "engineer", False, "engineering / repo / code work detected"
+
+    if _has_mutation_intent(action_normalized) and (
+        _contains(action_normalized, _PUBLIC_EXPOSURE_TERMS)
+        or _contains(action_normalized, _SECRET_PROVIDER_MUTATION_TERMS)
+        or _contains(action_normalized, _GATEWAY_MUTATION_TERMS)
+        or _contains(action_normalized, _SCHEDULER_SURFACE_TERMS)
+        or _contains(action_normalized, _PRODUCTION_DATA_MUTATION_TERMS)
+    ):
+        return "engineer", False, "runtime mutation intent detected"
 
     if _contains_any(normalized, _SECURITY_REVIEW_TERMS):
         return "security_auditor", False, "task explicitly requests security review"

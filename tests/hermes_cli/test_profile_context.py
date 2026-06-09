@@ -262,6 +262,26 @@ def test_user_level_fallback_refresh_timer_context_keeps_normal_operational_muta
     assert result.critical_approval_required is False
 
 
+def test_user_level_fallback_refresh_timer_context_ignores_negative_sensitive_guardrails():
+    result = build_role_context_for_task(
+        "Set up a user-level systemd timer for Hermes fallback refresh daily at 04:30. "
+        "Use /home/hermes/.config/systemd/user/hermes-fallback-refresh.service and "
+        "/home/hermes/.config/systemd/user/hermes-fallback-refresh.timer. "
+        "Command: /home/hermes/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main fallback refresh. "
+        "WorkingDirectory: /home/hermes/.hermes/hermes-agent. "
+        "State file: /home/hermes/.hermes/state/model_fallbacks.json. "
+        "Do not restart gateway. "
+        "Do not touch config/auth/provider/Cloudflare/Trading. "
+        "Validate with systemctl --user and journalctl --user."
+    )
+
+    assert result.selected_role == "engineer"
+    assert result.operation_category == "normal_operational_mutation"
+    assert result.reviewer_profile is None
+    assert result.requires_explicit_approval is False
+    assert result.critical_approval_required is False
+
+
 def test_render_explicit_approval_request_for_critical_mutation():
     result = build_role_context_for_task(
         "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения"
