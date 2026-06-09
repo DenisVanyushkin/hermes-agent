@@ -197,6 +197,21 @@ def test_scribe_prompt_with_do_not_touch_trading_stays_scribe():
     assert result.selected_role != "trading_observer_trader"
 
 
+def test_scribe_final_status_with_cloudflare_evidence_does_not_hard_stop():
+    result = build_role_context_for_task(
+        "Зафиксируй финальный статус Hermes roles runtime MVP после live smoke. "
+        "Live smoke: Cloudflare/public exposure prompt PASS. "
+        "Update docs/profile-handoffs/2026-06-09-hermes-role-work.md and "
+        "docs/state/current-operational-state.md. "
+        "Do not change code. Do not deploy. Do not restart gateway. Do not touch Trading."
+    )
+
+    assert result.selected_role == "scribe"
+    assert result.reviewer_profile is None
+    assert result.critical_approval_required is False
+    assert result.requires_explicit_approval is False
+
+
 def test_investigation_prompt_with_do_not_activate_trading_stays_engineer():
     result = build_role_context_for_task("Investigate approval-gate regression. Do not activate Trading.")
 
@@ -210,6 +225,25 @@ def test_crypto_research_prompt_stays_useful_without_trading_role():
     assert result.selected_role in {"researcher", "general_operator"}
     assert result.selected_role != "trading_observer_trader"
     assert "trading remains deferred" not in result.context_text.lower()
+
+
+def test_docs_only_cloudflare_smoke_update_stays_scribe_without_hard_stop():
+    result = build_role_context_for_task(
+        "Update docs/state/current-operational-state.md with Cloudflare smoke PASS. "
+        "Do not deploy. Do not touch Cloudflare."
+    )
+
+    assert result.selected_role == "scribe"
+    assert result.reviewer_profile is None
+    assert result.critical_approval_required is False
+    assert result.requires_explicit_approval is False
+
+
+def test_cloudflare_investigation_without_change_does_not_hard_stop():
+    result = build_role_context_for_task("Investigate approval-gate regression around Cloudflare. Do not change Cloudflare.")
+
+    assert result.selected_role == "engineer"
+    assert result.critical_approval_required is False
 
 
 def test_render_explicit_approval_request_for_critical_mutation():

@@ -210,6 +210,33 @@ _DURABLE_CAPTURE_TERMS = (
     "update state",
 )
 
+_DOCS_ONLY_TARGET_HINTS = (
+    "docs profile handoffs",
+    "docs state",
+    "current operational state md",
+)
+
+_NON_MUTATION_GUARDRAILS = (
+    "do not change code",
+    "do not deploy",
+    "do not restart",
+    "do not restart gateway",
+    "do not touch cloudflare",
+    "do not change cloudflare",
+    "do not touch trading",
+    "do not activate trading",
+)
+
+_INVESTIGATION_READ_ONLY_HINTS = (
+    "investigate",
+    "investigation",
+    "read only",
+    "read-only",
+    "status",
+    "smoke pass",
+    "smoke result",
+)
+
 _SENSITIVE_TRIGGER_MAP = {
     "auth/session/cookies": ("auth", "authentication", "session", "cookie", "cookies"),
     "secrets/tokens/env": ("secret", "secrets", "token", "tokens", "env", "environment variable", "environment variables"),
@@ -356,6 +383,8 @@ def _coerce_route_decision(route_decision: RouteDecision | dict[str, Any] | None
 
 def classify_sensitive_diff_triggers(task: str, changed_paths: list[str] | None = None) -> list[str]:
     normalized = _normalize(task)
+    if _ignore_sensitive_surface_classification(normalized):
+        return []
     haystacks = [normalized]
     if changed_paths:
         haystacks.extend(_normalize(path) for path in changed_paths)
@@ -371,6 +400,8 @@ def classify_production_runtime_mutation(task: str, changed_paths: list[str] | N
     normalized = _normalize(task)
     if changed_paths:
         normalized = " ".join([normalized, *(_normalize(path) for path in changed_paths)])
+    if _ignore_sensitive_surface_classification(normalized):
+        return False
     if _contains(normalized, _RUNTIME_MUTATION_TERMS):
         return True
     return bool(classify_sensitive_diff_triggers(task, changed_paths=changed_paths))
@@ -387,6 +418,26 @@ def classify_external_commitment(task: str) -> bool:
 
 def _contains_any(normalized_text: str, phrases: tuple[str, ...]) -> bool:
     return _contains(normalized_text, phrases)
+
+
+def _is_docs_only_status_update(normalized_text: str) -> bool:
+    has_docs_target = any(hint in normalized_text for hint in _DOCS_ONLY_TARGET_HINTS)
+    has_docs_intent = _contains_any(normalized_text, _DOCS_TERMS) or "update" in normalized_text
+    has_non_mutation_guardrail = any(phrase in normalized_text for phrase in _NON_MUTATION_GUARDRAILS)
+    return has_docs_target and has_docs_intent and has_non_mutation_guardrail
+
+
+def _is_read_only_sensitive_investigation(normalized_text: str) -> bool:
+    has_investigation = any(hint in normalized_text for hint in _INVESTIGATION_READ_ONLY_HINTS)
+    has_negative_sensitive_guardrail = (
+        "do not change cloudflare" in normalized_text
+        or "do not touch cloudflare" in normalized_text
+    )
+    return has_investigation and has_negative_sensitive_guardrail
+
+
+def _ignore_sensitive_surface_classification(normalized_text: str) -> bool:
+    return _is_docs_only_status_update(normalized_text) or _is_read_only_sensitive_investigation(normalized_text)
 
 
 def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, bool, str]:

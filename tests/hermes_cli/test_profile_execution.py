@@ -212,6 +212,21 @@ def test_cloudflare_public_exposure_requires_narrow_critical_hard_stop():
     assert plan.production_runtime_mutation is True
 
 
+def test_docs_only_scribe_update_with_cloudflare_evidence_does_not_require_critical_approval():
+    plan = _plan(
+        "Зафиксируй финальный статус Hermes roles runtime MVP после live smoke. "
+        "Cloudflare/public exposure prompt PASS. "
+        "Update docs/profile-handoffs/2026-06-09-hermes-role-work.md and "
+        "docs/state/current-operational-state.md. "
+        "Do not change code. Do not deploy. Do not restart gateway."
+    )
+    assert plan.selected_role == "scribe"
+    assert plan.requires_reviewer is False
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
+    assert plan.production_runtime_mutation is False
+
+
 def test_external_commitment_requires_confirmation_but_not_critical_hard_stop():
     plan = _plan("Запиши меня на стрижку")
     assert plan.selected_role == "general_operator"
@@ -224,6 +239,22 @@ def test_investigation_prompt_does_not_require_critical_hard_stop():
     plan = _plan("Investigate approval-gate regression")
     assert plan.requires_explicit_approval is False
     assert plan.critical_approval_required is False
+
+
+def test_docs_only_cloudflare_smoke_update_does_not_require_critical_approval():
+    plan = _plan("Update docs/state/current-operational-state.md with Cloudflare smoke PASS. Do not deploy. Do not touch Cloudflare.")
+    assert plan.selected_role == "scribe"
+    assert plan.requires_reviewer is False
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
+
+
+def test_cloudflare_investigation_without_change_does_not_require_critical_approval():
+    plan = _plan("Investigate approval-gate regression around Cloudflare. Do not change Cloudflare.")
+    assert plan.selected_role == "engineer"
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
+    assert plan.production_runtime_mutation is False
 
 
 def test_investigation_prompt_with_negative_trading_guardrail_routes_to_engineer():
