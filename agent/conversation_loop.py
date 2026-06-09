@@ -49,6 +49,8 @@ from agent.turn_context import (
 )
 from agent.turn_retry_state import TurnRetryState
 from agent.runtime_cwd import resolve_agent_cwd
+from agent.memory_manager import build_memory_context_block
+from hermes_cli.profile_context import build_role_context_for_task
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
@@ -382,6 +384,34 @@ def _try_refresh_nous_paid_entitlement_credentials(agent) -> bool:
         )
     except Exception:
         return False
+
+
+def _compose_turn_user_message_content(
+    base_content: str,
+    *,
+    role_context: str = "",
+    memory_context: str = "",
+    plugin_context: str = "",
+) -> str:
+    """Compose the ephemeral user-message context for a single turn.
+
+    This helper keeps the cached system prompt untouched by appending all
+    turn-specific guidance to the per-turn user message only.
+    """
+    injections: list[str] = []
+    if role_context:
+        injections.append(role_context)
+    if memory_context:
+        fenced_memory = build_memory_context_block(memory_context)
+        if fenced_memory:
+            injections.append(fenced_memory)
+    if plugin_context:
+        injections.append(plugin_context)
+    if not injections:
+        return base_content
+    if not isinstance(base_content, str) or not base_content:
+        return "\n\n".join(injections)
+    return base_content + "\n\n" + "\n\n".join(injections)
 
 
 def _restore_or_build_system_prompt(agent, system_message, conversation_history):
@@ -1025,6 +1055,35 @@ def run_conversation(
     # Commentary deduplication spans all provider continuations and tool calls
     # within one user turn, but must not suppress the same phrase next turn.
     agent._delivered_interim_texts = set()
+    # Role context + Plugin hook: pre_llm_call
+    # Context is ALWAYS injected into the user message, never the
+    # system prompt.  This preserves the prompt cache prefix — the
+    # system prompt stays identical across turns so cached tokens
+    # are reused.  Hermes role context and plugin context both remain
+    # ephemeral (not persisted to session DB).
+    _role_user_context = ""
+    _role_context_result = None
+    try:
+        _role_context_result = build_role_context_for_task(original_user_message)
+        if _role_context_result.profile_context_used:
+            _role_user_context = _role_context_result.context_text
+            logger.info(
+                "role context: session=%s selected_role=%s canonical_role=%s used=%s",
+                agent.session_id or "-",
+                _role_context_result.selected_role,
+                _role_context_result.canonical_role or "-",
+                _role_context_result.profile_context_used,
+            )
+        elif _role_context_result.fallback_reason:
+            logger.warning(
+                "role context omitted: session=%s selected_role=%s canonical_role=%s reason=%s",
+                agent.session_id or "-",
+                _role_context_result.selected_role,
+                _role_context_result.canonical_role or "-",
+                _role_context_result.fallback_reason,
+            )
+    except Exception as exc:
+        logger.warning("role context build failed: %s", exc)
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
@@ -1305,6 +1364,16 @@ def run_conversation(
                 # would rewrite on reload — see the capture in
                 # ``_flush_messages_to_session_db``).
                 api_msg["content"] = _api_content
+            # Merge-both (local role context on top of upstream sidecar):
+            # role context is API-call-time only, prepended to the composed
+            # current-turn content so persisted transcripts stay clean.
+            if (
+                idx == current_turn_user_idx
+                and msg.get("role") == "user"
+                and _role_user_context
+                and isinstance(api_msg.get("content"), str)
+            ):
+                api_msg["content"] = _role_user_context + "\n\n" + api_msg["content"]
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved
