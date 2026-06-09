@@ -42,7 +42,7 @@ def test_preview_only_produces_json_and_writes_nothing(tmp_path: Path):
 
 
 def test_output_contains_all_required_top_level_fields():
-    preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
+    preview = preview_profile("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     payload = preview_to_dict(preview)
 
     for field in [
@@ -91,7 +91,7 @@ def test_validation_status_and_validation_issues_are_surfaced(monkeypatch):
 
 
 def test_route_decision_is_embedded():
-    preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
+    preview = preview_profile("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     payload = preview_to_dict(preview)
 
     assert payload["route_decision"] is not None
@@ -99,7 +99,7 @@ def test_route_decision_is_embedded():
 
 
 def test_execution_plan_is_embedded():
-    preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
+    preview = preview_profile("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     payload = preview_to_dict(preview)
 
     assert payload["execution_plan"] is not None
@@ -123,7 +123,7 @@ def test_preview_reflects_scribe_and_career_routes(task: str, expected_role: str
 
 
 def test_approval_preview_is_embedded():
-    preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
+    preview = preview_profile("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     payload = preview_to_dict(preview)
 
     assert payload["approval_preview"] is not None
@@ -131,23 +131,22 @@ def test_approval_preview_is_embedded():
 
 
 def test_security_review_preview_is_embedded():
-    preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
+    preview = preview_profile("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     payload = preview_to_dict(preview)
 
     assert payload["security_review_preview"] is not None
     assert payload["security_review_preview"]["review"]["reviewed_by_profile"] == "security_auditor"
 
 
-def test_scribe_handoff_preview_is_embedded():
-    preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
+def test_scribe_handoff_preview_is_not_embedded_for_public_exposure_only_task():
+    preview = preview_profile("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     payload = preview_to_dict(preview)
 
-    assert payload["scribe_handoff_preview"] is not None
-    assert payload["scribe_handoff_preview"]["handoff"]["to_profile"] == "scribe"
+    assert payload["scribe_handoff_preview"] is None
 
 
 def test_overall_profile_chain_is_populated():
-    preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
+    preview = preview_profile("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     payload = preview_to_dict(preview)
 
     assert payload["overall_profile_chain"]
@@ -155,7 +154,7 @@ def test_overall_profile_chain_is_populated():
 
 
 def test_blocked_reasons_is_populated():
-    preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
+    preview = preview_profile("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     payload = preview_to_dict(preview)
 
     assert payload["blocked_reasons"]
@@ -163,7 +162,7 @@ def test_blocked_reasons_is_populated():
 
 
 def test_required_operator_actions_is_populated():
-    preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
+    preview = preview_profile("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     payload = preview_to_dict(preview)
 
     assert payload["required_operator_actions"]
@@ -176,7 +175,7 @@ def test_default_write_performed_is_false():
 
 
 def test_security_fail_outranks_approval_required():
-    preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
+    preview = preview_profile("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     payload = preview_to_dict(preview)
 
     assert payload["overall_status"] == "blocked_security_review_failed"
@@ -194,7 +193,7 @@ def test_approval_required_gives_blocked_pending_approval_when_security_does_not
 
 def test_security_conditional_pass_gives_conditional_pending_mitigations():
     preview = preview_profile(
-        "Expose Hermes WebUI through Cloudflare and update docs",
+        "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения",
         security_evidence=["Loopback bind verified", "SSH tunnel only"],
         security_required_changes=["Keep the service loopback-only and behind SSH tunnel"],
         security_residual_risks=["Public exposure remains blocked until network boundary review"],

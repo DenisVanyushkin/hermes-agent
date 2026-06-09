@@ -3,10 +3,14 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from hermes_cli.profile_context import (
     build_role_context_for_task,
     get_profile_contract,
+    inject_role_execution_debug_header,
     load_profile_contracts,
+    render_role_execution_debug_header,
     render_role_context,
 )
 
@@ -101,6 +105,65 @@ def test_engineer_read_only_diagnostics_gets_engineer_context_without_approval_s
     assert result.profile_context_used is True
     assert "Engineer" in result.context_text
     assert "Production/runtime mutation requires explicit approval" in result.context_text
+
+
+def test_debug_header_is_absent_by_default(monkeypatch):
+    monkeypatch.delenv("HERMES_PROFILE_DEBUG_HEADER", raising=False)
+    result = build_role_context_for_task("Зафиксируй итог сегодняшней работы по ролям Hermes")
+
+    assert render_role_execution_debug_header(result) == ""
+
+
+@pytest.mark.parametrize(
+    "task, expected_role",
+    [
+        ("Зафиксируй итог сегодняшней работы по ролям Hermes", "scribe"),
+        ("Запиши меня на стрижку", "general_operator"),
+        ("Оцени вакансию Head of Product для меня", "career_strategist"),
+    ],
+)
+def test_debug_header_is_present_when_enabled(monkeypatch, task: str, expected_role: str):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+    result = build_role_context_for_task(task)
+
+    header = render_role_execution_debug_header(result)
+
+    assert header
+    assert f"Hermes role: {expected_role}" in header
+    assert "Role context: used" in header
+
+
+def test_debug_header_includes_sensitive_review_and_approval_info(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+    result = build_role_context_for_task(
+        "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения"
+    )
+
+    header = render_role_execution_debug_header(result)
+
+    assert result.selected_role == "engineer"
+    assert result.reviewer_profile == "security_auditor"
+    assert result.requires_explicit_approval is True
+    assert "Reviewer: security_auditor" in header
+    assert "Approval: required" in header
+
+
+def test_debug_header_soft_fails_without_role_metadata(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+
+    assert inject_role_execution_debug_header("assistant response", None) == "assistant response"
+
+
+def test_debug_header_does_not_change_selection_or_approval(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+    result = build_role_context_for_task(
+        "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения"
+    )
+
+    assert result.selected_role == "engineer"
+    assert result.reviewer_profile == "security_auditor"
+    assert result.requires_explicit_approval is True
+    assert result.profile_context_used is True
 
 
 def test_trading_role_renders_deferred_and_inactive():

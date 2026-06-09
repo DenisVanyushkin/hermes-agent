@@ -41,6 +41,7 @@ def _route(task: str):
         ("production DB migration for job-intel", "production_db_migration_or_repair"),
         ("repair the production database", "production_db_migration_or_repair"),
         ("change Cloudflare and firewall rules for public exposure", "public_exposure_change"),
+        ("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения", "public_exposure_change"),
         ("change the scheduler timer for nightly jobs", "scheduler_timer_change"),
         ("change tool permissions for browser access", "tool_permission_change"),
         ("rotate auth secret and update credentials for WebUI", "auth_secret_handling_change"),

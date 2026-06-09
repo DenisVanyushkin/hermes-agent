@@ -35,7 +35,7 @@ from agent.iteration_budget import IterationBudget
 from agent.turn_context import build_turn_context
 from agent.turn_retry_state import TurnRetryState
 from agent.memory_manager import build_memory_context_block
-from hermes_cli.profile_context import build_role_context_for_task
+from hermes_cli.profile_context import build_role_context_for_task, inject_role_execution_debug_header
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
@@ -5343,6 +5343,10 @@ def run_conversation(
                 messages.append({"role": "assistant", "content": final_response})
                 break
     
+    # Opt-in role debug header (HERMES_PROFILE_DEBUG_HEADER) — prefix the
+    # delivered response with role metadata for smoke validation.
+    final_response = inject_role_execution_debug_header(final_response, _role_context_result)
+
     # Post-loop turn finalization extracted to agent/turn_finalizer.finalize_turn
     # (god-file decomposition Phase 1 step 4). Behavior-neutral: the assembled
     # result dict is returned exactly as before.

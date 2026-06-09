@@ -15,6 +15,7 @@ from typing import Any
 from hermes_cli.profile_execution import RoleExecutionPlan, build_role_execution_plan
 from hermes_cli.profile_routing import RouteDecision, route_task, load_profile_registry, DEFAULT_PROFILE_REGISTRY_PATH
 from hermes_cli.profile_validation import PROFILE_ID_ALIASES
+from utils import env_var_enabled
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,9 @@ class RoleContextResult:
     profile_context_used: bool
     fallback_reason: str = ""
     profile_status: str = ""
+    requires_reviewer: bool = False
+    reviewer_profile: str | None = None
+    requires_explicit_approval: bool = False
 
 
 @lru_cache(maxsize=4)
@@ -168,6 +172,40 @@ def render_role_context(
     return "\n".join(lines).strip()
 
 
+def _role_execution_debug_header_enabled() -> bool:
+    return env_var_enabled("HERMES_PROFILE_DEBUG_HEADER")
+
+
+def render_role_execution_debug_header(result: RoleContextResult | None) -> str:
+    """Render a compact debug header for smoke validation, gated by env flag."""
+    if not _role_execution_debug_header_enabled():
+        return ""
+    if not isinstance(result, RoleContextResult):
+        return ""
+
+    selected_role = (result.selected_role or "").strip() or "unknown"
+    canonical_role = (result.canonical_role or "").strip()
+    lines = [f"Hermes role: {selected_role}"]
+    if canonical_role and canonical_role != selected_role:
+        lines.append(f"Canonical role: {canonical_role}")
+    lines.append(f"Role context: {'used' if result.profile_context_used else 'missing'}")
+    lines.append(f"Reviewer: {result.reviewer_profile or 'none'}")
+    lines.append(f"Approval: {'required' if result.requires_explicit_approval else 'not_required'}")
+    if result.profile_context_used is False and result.fallback_reason:
+        lines.append(f"Fallback reason: {result.fallback_reason}")
+    return "\n".join(lines)
+
+
+def inject_role_execution_debug_header(response_text: str, result: RoleContextResult | None) -> str:
+    """Prefix a user-facing response with the opt-in role debug header."""
+    if not isinstance(response_text, str) or not response_text.strip():
+        return response_text
+    header = render_role_execution_debug_header(result)
+    if not header:
+        return response_text
+    return header + "\n\n" + response_text
+
+
 def build_role_context_for_task(
     task: str,
     *,
@@ -184,6 +222,9 @@ def build_role_context_for_task(
             context_text="",
             profile_context_used=False,
             fallback_reason="task must be a non-empty string",
+            requires_reviewer=False,
+            reviewer_profile=None,
+            requires_explicit_approval=False,
         )
 
     try:
@@ -196,6 +237,9 @@ def build_role_context_for_task(
             context_text="",
             profile_context_used=False,
             fallback_reason=f"routing failed: {exc}",
+            requires_reviewer=False,
+            reviewer_profile=None,
+            requires_explicit_approval=False,
         )
 
     try:
@@ -208,6 +252,9 @@ def build_role_context_for_task(
             context_text="",
             profile_context_used=False,
             fallback_reason=f"execution plan failed: {exc}",
+            requires_reviewer=False,
+            reviewer_profile=None,
+            requires_explicit_approval=False,
         )
 
     selected_role = resolved_plan.selected_role
@@ -226,6 +273,9 @@ def build_role_context_for_task(
             profile_context_used=False,
             fallback_reason=f"profile contract missing for {selected_role}",
             profile_status="",
+            requires_reviewer=resolved_plan.requires_reviewer,
+            reviewer_profile=resolved_plan.reviewer_profile,
+            requires_explicit_approval=resolved_plan.requires_explicit_approval,
         )
 
     record = contracts.get(canonical_role or "", {})
@@ -247,6 +297,9 @@ def build_role_context_for_task(
             profile_context_used=False,
             fallback_reason=f"role context render failed for {selected_role}",
             profile_status=profile_status,
+            requires_reviewer=resolved_plan.requires_reviewer,
+            reviewer_profile=resolved_plan.reviewer_profile,
+            requires_explicit_approval=resolved_plan.requires_explicit_approval,
         )
 
     return RoleContextResult(
@@ -257,4 +310,7 @@ def build_role_context_for_task(
         profile_context_used=True,
         fallback_reason="",
         profile_status=profile_status,
+        requires_reviewer=resolved_plan.requires_reviewer,
+        reviewer_profile=resolved_plan.reviewer_profile,
+        requires_explicit_approval=resolved_plan.requires_explicit_approval,
     )
