@@ -10,6 +10,7 @@ from hermes_cli.profile_context import (
     get_profile_contract,
     inject_role_execution_debug_header,
     load_profile_contracts,
+    render_explicit_approval_request,
     render_role_debug_header,
     render_role_execution_debug_header,
     role_debug_header_enabled,
@@ -146,6 +147,8 @@ def test_debug_header_includes_sensitive_review_and_approval_info(monkeypatch):
     assert result.selected_role == "engineer"
     assert result.reviewer_profile == "security_auditor"
     assert result.requires_explicit_approval is True
+    assert result.critical_approval_required is True
+    assert result.approval_reason
     assert "Reviewer: security_auditor" in header
     assert "Approval: required" in header
 
@@ -173,7 +176,33 @@ def test_debug_header_does_not_change_selection_or_approval(monkeypatch):
     assert result.selected_role == "engineer"
     assert result.reviewer_profile == "security_auditor"
     assert result.requires_explicit_approval is True
+    assert result.critical_approval_required is True
     assert result.profile_context_used is True
+
+
+def test_external_commitment_does_not_set_critical_hard_stop_metadata():
+    result = build_role_context_for_task("Запиши меня на стрижку")
+
+    assert result.selected_role == "general_operator"
+    assert result.requires_explicit_approval is True
+    assert result.critical_approval_required is False
+    assert "external commitment" in result.context_text.lower()
+
+
+def test_render_explicit_approval_request_for_critical_mutation():
+    result = build_role_context_for_task(
+        "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения"
+    )
+
+    rendered = render_explicit_approval_request(
+        result,
+        task_text="Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения",
+    )
+
+    assert "explicit approval" in rendered.lower()
+    assert "cloudflare" in rendered.lower()
+    assert "reply with explicit approve" in rendered.lower()
+    assert "before any mutation" in rendered.lower() or "before making changes" in rendered.lower()
 
 
 def test_trading_role_renders_deferred_and_inactive():

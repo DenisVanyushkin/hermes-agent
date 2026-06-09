@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from agent.conversation_loop import (
     _assistant_turn_has_tool_call_named,
     _compose_turn_user_message_content,
+    run_conversation,
 )
 from hermes_cli.profile_context import (
     build_role_context_for_task,
@@ -93,6 +94,198 @@ def test_debug_header_is_injected_into_response_path_not_cached_system_prompt(mo
     assert response.startswith("Hermes role: scribe")
     assert "assistant response" in response
     assert "SYSTEM PROMPT" not in response
+
+
+class _DummyToolGuardrails:
+    def reset_for_turn(self):
+        self.reset_called = True
+
+
+class _ApprovalGateAgent:
+    def __init__(self, *, api_mode: str = "anthropic_messages"):
+        self.session_id = "session-approval-gate"
+        self.provider = "openrouter"
+        self.model = "gpt-5.4-mini"
+        self.base_url = "https://example.invalid"
+        self.api_key = ""
+        self.api_mode = api_mode
+        self.platform = "slack"
+        self._memory_write_origin = "assistant_tool"
+        self.max_iterations = 3
+        self._compression_warning = None
+        self._tool_guardrails = _DummyToolGuardrails()
+        self._user_turn_count = 0
+        self._turns_since_memory = 0
+        self._memory_nudge_interval = 0
+        self._tool_guardrail_halt_decision = None
+        self._todo_store = SimpleNamespace(has_items=lambda: False)
+        self._persisted = []
+        self._ensure_db_session_called = False
+        self._restore_primary_runtime_called = False
+        self._execute_tool_calls_called = False
+        self._run_codex_app_server_turn_called = False
+        self._emit_interim_assistant_message_called = False
+        self._requested_model = None
+        self._cached_system_prompt = "SYSTEM PROMPT"
+        self._memory_store = None
+        self._memory_manager = None
+        self._interrupt_requested = False
+        self._interrupt_message = None
+        self._interrupt_thread_signal_pending = False
+        self.quiet_mode = True
+        self.valid_tool_names = []
+        self.tools = []
+        self.compression_enabled = False
+
+    def _ensure_db_session(self):
+        self._ensure_db_session_called = True
+
+    def _restore_primary_runtime(self):
+        self._restore_primary_runtime_called = True
+
+    def _persist_session(self, messages, conversation_history):
+        self._persisted.append((messages, conversation_history))
+
+    def _execute_tool_calls(self, *args, **kwargs):
+        self._execute_tool_calls_called = True
+        raise AssertionError("approval gate should stop before tool execution")
+
+    def _run_codex_app_server_turn(self, **kwargs):
+        self._run_codex_app_server_turn_called = True
+        return {
+            "final_response": "normal path reached",
+            "last_reasoning": None,
+            "messages": kwargs.get("messages", []),
+            "api_calls": 0,
+            "completed": True,
+            "failed": False,
+            "partial": False,
+            "interrupted": False,
+            "response_transformed": False,
+            "response_previewed": False,
+            "turn_exit_reason": "codex_app_server_stub",
+            "model": self.model,
+            "requested_model": self._requested_model,
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "session_id": self.session_id,
+        }
+
+    def _emit_interim_assistant_message(self, *_args, **_kwargs):
+        self._emit_interim_assistant_message_called = True
+        raise AssertionError("approval gate should stop before interim assistant callbacks")
+
+    def _cleanup_dead_connections(self):
+        return False
+
+    def _emit_status(self, *_args, **_kwargs):
+        return None
+
+    def _replay_compression_warning(self):
+        return None
+
+    def _hydrate_todo_store(self, _history):
+        return None
+
+    def _safe_print(self, *_args, **_kwargs):
+        return None
+
+
+def test_approval_required_task_stops_before_tool_execution_and_requests_approval(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+    agent = _ApprovalGateAgent()
+
+    result = run_conversation(
+        agent,
+        "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения",
+        conversation_history=None,
+    )
+
+    assert agent._ensure_db_session_called is True
+    assert agent._restore_primary_runtime_called is True
+    assert agent._execute_tool_calls_called is False
+    assert result["api_calls"] == 0
+    assert result["completed"] is True
+    assert result["failed"] is False
+    assert result["turn_exit_reason"] == "approval_required_preflight"
+    assert result["final_response"].startswith("Hermes role: engineer")
+    assert "explicit approval" in result["final_response"].lower()
+    assert result["messages"][-1]["_approval_gate"]["required"] is True
+    assert result["messages"][-1]["_approval_gate"]["critical_hard_stop"] is True
+    assert result["messages"][-1]["_approval_gate"]["reviewer_profile"] == "security_auditor"
+    assert agent._persisted
+    assert agent._persisted[0][0][-1]["_approval_gate"]["task"].startswith("Настрой публичный доступ")
+
+
+def test_critical_approval_preflight_blocks_plugin_and_interim_paths(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+    plugin_calls = []
+    stream_events = []
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(
+        agent,
+        "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения",
+        conversation_history=None,
+        stream_callback=stream_events.append,
+    )
+
+    assert result["turn_exit_reason"] == "approval_required_preflight"
+    assert "explicit approval" in result["final_response"].lower()
+    assert plugin_calls == []
+    assert agent._run_codex_app_server_turn_called is False
+    assert agent._execute_tool_calls_called is False
+    assert agent._emit_interim_assistant_message_called is False
+    assert stream_events == []
+
+
+def test_haircut_prompt_does_not_take_critical_hard_stop_path(monkeypatch):
+    plugin_calls = []
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(
+        agent,
+        "Запиши меня на стрижку",
+        conversation_history=None,
+    )
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
+    assert plugin_calls
+    assert plugin_calls[0][0] == "pre_llm_call"
+    assert agent._run_codex_app_server_turn_called is True
+    assert agent._execute_tool_calls_called is False
+
+
+def test_role_context_distinguishes_critical_hard_stop_from_other_approval_signals():
+    cloudflare = build_role_context_for_task(
+        "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения"
+    )
+    logs = build_role_context_for_task("Проверь статус WebUI и логи")
+    haircut = build_role_context_for_task("Запиши меня на стрижку")
+    investigation = build_role_context_for_task("Investigate approval-gate regression")
+    trading = build_role_context_for_task("Make a BTC trade")
+
+    assert cloudflare.requires_explicit_approval is True
+    assert cloudflare.critical_approval_required is True
+    assert logs.critical_approval_required is False
+    assert haircut.requires_explicit_approval is True
+    assert haircut.critical_approval_required is False
+    assert investigation.critical_approval_required is False
+    assert trading.selected_role == "trading_observer_trader"
+    assert "deferred" in trading.context_text.lower()
 
 
 def test_detects_clarify_tool_call_on_assistant_turn():

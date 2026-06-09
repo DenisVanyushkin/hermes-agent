@@ -30,6 +30,8 @@ class RoleContextResult:
     requires_reviewer: bool = False
     reviewer_profile: str | None = None
     requires_explicit_approval: bool = False
+    critical_approval_required: bool = False
+    approval_reason: str = ""
 
 
 @lru_cache(maxsize=4)
@@ -216,6 +218,30 @@ def render_role_debug_header(result: RoleContextResult | None) -> str:
     return render_role_execution_debug_header(result)
 
 
+def render_explicit_approval_request(
+    result: RoleContextResult | None,
+    *,
+    task_text: str = "",
+) -> str:
+    """Render the user-facing approval request for critical mutations."""
+    if not isinstance(result, RoleContextResult):
+        return ""
+
+    lines = ["I need explicit approval before any mutation-capable changes."]
+    if isinstance(task_text, str) and task_text.strip():
+        lines.extend(["", "Planned action:", f"- {task_text.strip()}"])
+    if result.approval_reason:
+        lines.extend(["", "Why approval is required:", f"- {result.approval_reason}"])
+    lines.extend(
+        [
+            "",
+            "I will stop here before file writes, runtime changes, or external system mutations.",
+            'Reply with explicit approve if you want me to proceed, or adjust the scope.',
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
 def build_role_context_for_task(
     task: str,
     *,
@@ -235,6 +261,8 @@ def build_role_context_for_task(
             requires_reviewer=False,
             reviewer_profile=None,
             requires_explicit_approval=False,
+            critical_approval_required=False,
+            approval_reason="",
         )
 
     try:
@@ -250,6 +278,8 @@ def build_role_context_for_task(
             requires_reviewer=False,
             reviewer_profile=None,
             requires_explicit_approval=False,
+            critical_approval_required=False,
+            approval_reason="",
         )
 
     try:
@@ -265,6 +295,8 @@ def build_role_context_for_task(
             requires_reviewer=False,
             reviewer_profile=None,
             requires_explicit_approval=False,
+            critical_approval_required=False,
+            approval_reason="",
         )
 
     selected_role = resolved_plan.selected_role
@@ -286,6 +318,8 @@ def build_role_context_for_task(
             requires_reviewer=resolved_plan.requires_reviewer,
             reviewer_profile=resolved_plan.reviewer_profile,
             requires_explicit_approval=resolved_plan.requires_explicit_approval,
+            critical_approval_required=resolved_plan.critical_approval_required,
+            approval_reason=resolved_plan.approval_reason,
         )
 
     record = contracts.get(canonical_role or "", {})
@@ -310,6 +344,8 @@ def build_role_context_for_task(
             requires_reviewer=resolved_plan.requires_reviewer,
             reviewer_profile=resolved_plan.reviewer_profile,
             requires_explicit_approval=resolved_plan.requires_explicit_approval,
+            critical_approval_required=resolved_plan.critical_approval_required,
+            approval_reason=resolved_plan.approval_reason,
         )
 
     return RoleContextResult(
@@ -323,4 +359,6 @@ def build_role_context_for_task(
         requires_reviewer=resolved_plan.requires_reviewer,
         reviewer_profile=resolved_plan.reviewer_profile,
         requires_explicit_approval=resolved_plan.requires_explicit_approval,
+        critical_approval_required=resolved_plan.critical_approval_required,
+        approval_reason=resolved_plan.approval_reason,
     )

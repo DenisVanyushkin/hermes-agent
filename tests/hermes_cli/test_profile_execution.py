@@ -153,6 +153,7 @@ def test_read_only_status_and_logs_do_not_require_scribe_or_approval():
     assert plan.requires_reviewer is False
     assert plan.requires_scribe is False
     assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
     assert plan.ordinary_personal_admin is False
     assert plan.durable_outcome_expected is False
     assert plan.post_change_review_policy["invoke_scribe"] is False
@@ -169,6 +170,7 @@ def test_mutation_tasks_require_explicit_approval(task: str):
     plan = _plan(task)
     assert plan.selected_role == "engineer"
     assert plan.requires_explicit_approval is True
+    assert plan.critical_approval_required is True
     assert plan.production_runtime_mutation is True
 
 
@@ -191,6 +193,30 @@ def test_trading_task_remains_deferred():
     assert plan.trading_deferred is True
     assert plan.selected_role == "trading_observer_trader"
     assert plan.fallback_used is True
+    assert plan.critical_approval_required is True
+
+
+def test_cloudflare_public_exposure_requires_narrow_critical_hard_stop():
+    plan = _plan("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
+    assert plan.selected_role == "engineer"
+    assert plan.requires_explicit_approval is True
+    assert plan.critical_approval_required is True
+    assert plan.external_commitment is False
+    assert plan.production_runtime_mutation is True
+
+
+def test_external_commitment_requires_confirmation_but_not_critical_hard_stop():
+    plan = _plan("Запиши меня на стрижку")
+    assert plan.selected_role == "general_operator"
+    assert plan.external_commitment is True
+    assert plan.requires_explicit_approval is True
+    assert plan.critical_approval_required is False
+
+
+def test_investigation_prompt_does_not_require_critical_hard_stop():
+    plan = _plan("Investigate approval-gate regression")
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
 
 
 def test_execution_plan_serialization_round_trip():
@@ -257,6 +283,7 @@ def test_execution_plan_to_dict_contains_required_fields():
         "requires_scribe",
         "scribe_reason",
         "requires_explicit_approval",
+        "critical_approval_required",
         "approval_reason",
         "ordinary_personal_admin",
         "external_commitment",
