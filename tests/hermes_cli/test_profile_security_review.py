@@ -37,7 +37,7 @@ def _json_output(result: subprocess.CompletedProcess[str]) -> dict:
 @pytest.mark.parametrize(
     "task, expected_trigger",
     [
-        ("Expose Hermes WebUI through Cloudflare and update docs", "public exposure"),
+        ("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения", "public exposure"),
         ("Review the WebUI access model, auth/session cookies, and local access", "WebUI access model"),
         ("Audit auth/session cookies and login flow", "auth/session/cookies"),
         ("Review secrets, tokens, and API keys handling", "secrets/tokens/API keys"),
@@ -141,7 +141,7 @@ def test_existing_artifact_is_not_overwritten_silently(tmp_path: Path):
 
 
 def test_route_and_approval_metadata_are_serialized(tmp_path: Path):
-    task = "Expose Hermes WebUI through Cloudflare and update docs"
+    task = "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения"
     route_decision = route_task(task)
     approval_preview = classify_engineer_approval(task, route_decision=route_decision)
     result = preview_security_review(
@@ -165,7 +165,7 @@ def test_non_security_task_returns_not_applicable(tmp_path: Path):
 
 
 def test_security_sensitive_task_with_insufficient_evidence_returns_fail(tmp_path: Path):
-    result = preview_security_review("Expose Hermes WebUI through Cloudflare and update docs", output_root=tmp_path)
+    result = preview_security_review("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения", output_root=tmp_path)
     assert result.review.security_review_status == "fail"
     assert "insufficiently evidenced" in result.review.status_reason
 
@@ -195,14 +195,14 @@ def test_security_sensitive_task_with_sufficient_evidence_and_no_required_change
 
 
 def test_webui_public_exposure_without_mitigations_does_not_return_pass(tmp_path: Path):
-    result = preview_security_review("Expose Hermes WebUI through Cloudflare and update docs", output_root=tmp_path)
+    result = preview_security_review("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения", output_root=tmp_path)
     assert result.review.security_review_status == "fail"
     assert result.review.security_review_status != "pass"
 
 
 def test_webui_public_exposure_with_explicit_mitigations_returns_conditional_pass_not_pass(tmp_path: Path):
     result = preview_security_review(
-        "Expose Hermes WebUI through Cloudflare and update docs",
+        "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения",
         output_root=tmp_path,
         evidence=["Loopback bind verified", "SSH tunnel required", "Password auth enabled"],
         required_changes=["Keep the service loopback-only and behind SSH tunnel"],

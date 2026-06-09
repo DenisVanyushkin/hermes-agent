@@ -3,7 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent.conversation_loop import _compose_turn_user_message_content
-from hermes_cli.profile_context import build_role_context_for_task
+from hermes_cli.profile_context import (
+    build_role_context_for_task,
+    inject_role_execution_debug_header,
+)
 
 
 def test_role_context_is_injected_into_user_message_ephemeral_context():
@@ -76,3 +79,22 @@ def test_role_context_module_path_is_additive_only():
     role_context = "Role: Engineer\nPurpose: ..."
     composed = _compose_turn_user_message_content(base, role_context=role_context)
     assert composed == base + "\n\n" + role_context
+
+
+def test_debug_header_is_injected_into_response_path_not_cached_system_prompt(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+    result = build_role_context_for_task("Зафиксируй итог сегодняшней работы по ролям Hermes")
+
+    response = inject_role_execution_debug_header("assistant response", result)
+
+    assert response.startswith("Hermes role: scribe")
+    assert "assistant response" in response
+    assert "SYSTEM PROMPT" not in response
+
+
+def test_debug_header_soft_fails_and_preserves_response_when_metadata_missing(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+
+    response = inject_role_execution_debug_header("assistant response", None)
+
+    assert response == "assistant response"
