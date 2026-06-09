@@ -180,9 +180,9 @@ _MUTATION_KEYWORDS = {
 }
 
 _READ_ONLY_KEYWORDS = {
-    "status": ("status", "check status", "show status", "read status"),
-    "health_check": ("health check", "health", "check health", "show health"),
-    "log_inspection": ("inspect logs", "log inspection", "read logs", "view logs", "logs"),
+    "status": ("status", "check status", "show status", "read status", "проверь статус", "статус webui"),
+    "health_check": ("health check", "health", "check health", "show health", "проверка здоровья"),
+    "log_inspection": ("inspect logs", "log inspection", "read logs", "view logs", "show logs", "show webui logs", "проверь логи", "посмотри логи", "логи", "logs"),
     "config_read": ("config read", "read config", "view config", "show config"),
     "git_status_diff_read": ("git status", "git diff", "diff read", "read diff"),
     "systemctl_status": ("systemctl status",),

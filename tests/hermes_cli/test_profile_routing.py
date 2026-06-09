@@ -70,6 +70,36 @@ def test_route_scribe_for_docs_and_state_terms():
     assert decision.route_chain[0].model_tier == "standard"
 
 
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Зафиксируй итог сегодняшней работы по ролям Hermes",
+        "Запиши итог сегодняшней работы в документацию",
+        "Write a handoff for today's Hermes role work",
+    ],
+)
+def test_route_scribe_for_durable_memory_and_handoff_terms(task: str):
+    decision = _route(task)
+
+    assert decision.primary_profile == "scribe"
+    assert _hop_ids(decision) == ["scribe"]
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Оцени вакансию Head of Product для меня",
+        "Стоит ли откликаться на VP Product role?",
+        "Подготовь CV под эту вакансию",
+    ],
+)
+def test_route_career_strategist_for_vacancy_and_job_fit_terms(task: str):
+    decision = _route(task)
+
+    assert decision.primary_profile == "career_strategist"
+    assert _hop_ids(decision) == ["career_strategist"]
+
+
 def test_route_general_operator_for_personal_admin_tasks():
     decision = _route("Book me a haircut")
 

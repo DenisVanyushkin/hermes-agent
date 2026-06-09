@@ -107,6 +107,21 @@ def test_execution_plan_is_embedded():
     assert payload["execution_plan"]["post_change_review_policy"]["summarize_diff"] is True
 
 
+@pytest.mark.parametrize(
+    "task, expected_role",
+    [
+        ("Зафиксируй итог сегодняшней работы по ролям Hermes", "scribe"),
+        ("Оцени вакансию Head of Product для меня", "career_strategist"),
+    ],
+)
+def test_preview_reflects_scribe_and_career_routes(task: str, expected_role: str):
+    preview = preview_profile(task)
+    payload = preview_to_dict(preview)
+
+    assert payload["selected_role"] == expected_role
+    assert payload["overall_status"] == "preview_ready"
+
+
 def test_approval_preview_is_embedded():
     preview = preview_profile("Expose Hermes WebUI through Cloudflare and update docs")
     payload = preview_to_dict(preview)

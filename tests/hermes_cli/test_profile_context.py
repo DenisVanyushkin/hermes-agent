@@ -81,6 +81,28 @@ def test_runtime_alias_chief_hermes_maps_to_chief_coordinator():
     assert contract["canonical_id"] == "chief_coordinator"
 
 
+def test_scribe_durable_memory_task_gets_scribe_context():
+    result = build_role_context_for_task("Зафиксируй итог сегодняшней работы по ролям Hermes")
+    assert result.selected_role == "scribe"
+    assert result.profile_context_used is True
+    assert "Scribe" in result.context_text
+
+
+def test_career_vacancy_task_gets_career_strategist_context():
+    result = build_role_context_for_task("Оцени вакансию Head of Product для меня")
+    assert result.selected_role == "career_strategist"
+    assert result.profile_context_used is True
+    assert "Career Strategist" in result.context_text
+
+
+def test_engineer_read_only_diagnostics_gets_engineer_context_without_approval_signal():
+    result = build_role_context_for_task("Проверь статус WebUI и логи")
+    assert result.selected_role == "engineer"
+    assert result.profile_context_used is True
+    assert "Engineer" in result.context_text
+    assert "Production/runtime mutation requires explicit approval" in result.context_text
+
+
 def test_trading_role_renders_deferred_and_inactive():
     result = build_role_context_for_task("Make a BTC trade")
     assert result.selected_role == "trading_observer_trader"
