@@ -10,7 +10,9 @@ from hermes_cli.profile_context import (
     get_profile_contract,
     inject_role_execution_debug_header,
     load_profile_contracts,
+    render_role_debug_header,
     render_role_execution_debug_header,
+    role_debug_header_enabled,
     render_role_context,
 )
 
@@ -152,6 +154,14 @@ def test_debug_header_soft_fails_without_role_metadata(monkeypatch):
     monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
 
     assert inject_role_execution_debug_header("assistant response", None) == "assistant response"
+
+
+def test_debug_header_compat_aliases_match_current_helpers(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+    result = build_role_context_for_task("Запиши меня на стрижку")
+
+    assert role_debug_header_enabled() is True
+    assert render_role_debug_header(result) == render_role_execution_debug_header(result)
 
 
 def test_debug_header_does_not_change_selection_or_approval(monkeypatch):

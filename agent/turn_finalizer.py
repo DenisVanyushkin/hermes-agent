@@ -82,7 +82,7 @@ def finalize_turn(
     _should_review_memory,
     _turn_exit_reason,
     _pending_verification_response=None,
-    _pending_verification_response_previewed=False,
+    response_pre_transformed=False,
 ):
     """Run the post-loop finalization and return the turn ``result`` dict.
 
@@ -480,7 +480,7 @@ def finalize_turn(
         except Exception as _exp_err:
             logger.debug("turn-completion explainer failed: %s", _exp_err)
 
-    _response_transformed = False
+    _response_transformed = bool(response_pre_transformed)
 
     # Plugin hook: transform_llm_output
     # Fired once per turn after the tool-calling loop completes.
