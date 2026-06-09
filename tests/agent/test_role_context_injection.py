@@ -343,6 +343,37 @@ def test_user_level_fallback_refresh_timer_does_not_take_approval_preflight(monk
     assert agent._execute_tool_calls_called is False
 
 
+def test_user_level_fallback_refresh_timer_with_negative_guardrails_does_not_take_approval_preflight(monkeypatch):
+    plugin_calls = []
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(
+        agent,
+        "Set up a user-level systemd timer for Hermes fallback refresh daily at 04:30. "
+        "Use /home/hermes/.config/systemd/user/hermes-fallback-refresh.service and "
+        "/home/hermes/.config/systemd/user/hermes-fallback-refresh.timer. "
+        "Command: /home/hermes/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main fallback refresh. "
+        "WorkingDirectory: /home/hermes/.hermes/hermes-agent. "
+        "State file: /home/hermes/.hermes/state/model_fallbacks.json. "
+        "Do not restart gateway. "
+        "Do not touch config/auth/provider/Cloudflare/Trading. "
+        "Validate with systemctl --user and journalctl --user.",
+        conversation_history=None,
+    )
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
+    assert plugin_calls
+    assert agent._run_codex_app_server_turn_called is True
+    assert agent._execute_tool_calls_called is False
+
+
 def test_detects_clarify_tool_call_on_assistant_turn():
     clarify_tool_call = SimpleNamespace(function=SimpleNamespace(name="clarify"))
     memory_tool_call = SimpleNamespace(function=SimpleNamespace(name="memory"))

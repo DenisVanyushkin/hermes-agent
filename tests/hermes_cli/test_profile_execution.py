@@ -288,6 +288,47 @@ def test_user_level_fallback_refresh_timer_install_is_normal_operational_mutatio
     assert plan.production_runtime_mutation is False
 
 
+def test_user_level_fallback_refresh_timer_with_negative_guardrails_does_not_trigger_sensitive_hard_stop():
+    plan = _plan(
+        "Set up a user-level systemd timer for Hermes fallback refresh daily at 04:30. "
+        "Use /home/hermes/.config/systemd/user/hermes-fallback-refresh.service and "
+        "/home/hermes/.config/systemd/user/hermes-fallback-refresh.timer. "
+        "Command: /home/hermes/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main fallback refresh. "
+        "WorkingDirectory: /home/hermes/.hermes/hermes-agent. "
+        "State file: /home/hermes/.hermes/state/model_fallbacks.json. "
+        "Do not restart gateway. "
+        "Do not touch config/auth/provider/Cloudflare/Trading. "
+        "Validate with systemctl --user and journalctl --user."
+    )
+    assert plan.selected_role == "engineer"
+    assert plan.operation_category == "normal_operational_mutation"
+    assert plan.reviewer_profile is None
+    assert plan.requires_reviewer is False
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
+    assert plan.production_runtime_mutation is False
+
+
+def test_user_level_fallback_refresh_timer_with_do_not_restart_gateway_does_not_trigger_gateway_hard_stop():
+    plan = _plan(
+        "Set up a user-level systemd timer for Hermes fallback refresh daily at 04:30. "
+        "Use systemctl --user. Do not restart gateway."
+    )
+    assert plan.operation_category == "normal_operational_mutation"
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
+
+
+def test_user_level_fallback_refresh_timer_with_do_not_deploy_does_not_trigger_deploy_hard_stop():
+    plan = _plan(
+        "Set up a user-level systemd timer for Hermes fallback refresh daily at 04:30. "
+        "Use systemctl --user. Do not deploy."
+    )
+    assert plan.operation_category == "normal_operational_mutation"
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
+
+
 def test_root_system_wide_timer_install_is_higher_risk():
     plan = _plan(
         "Install a root system-wide systemd timer in /etc/systemd/system "
@@ -321,6 +362,26 @@ def test_scheduler_job_that_touches_cloudflare_or_public_exposure_requires_secur
 
 def test_scheduler_job_that_writes_secrets_or_provider_config_requires_security_auditor():
     plan = _plan("Create a scheduler job that rotates provider auth tokens and writes secrets into config")
+    assert plan.selected_role == "engineer"
+    assert plan.operation_category == "security_critical_mutation"
+    assert plan.reviewer_profile == "security_auditor"
+    assert plan.requires_reviewer is True
+    assert plan.requires_explicit_approval is True
+    assert plan.critical_approval_required is True
+
+
+def test_actual_cloudflare_mutation_still_hard_stops():
+    plan = _plan("Set up Cloudflare Tunnel for Hermes WebUI")
+    assert plan.selected_role == "engineer"
+    assert plan.operation_category == "security_critical_mutation"
+    assert plan.reviewer_profile == "security_auditor"
+    assert plan.requires_reviewer is True
+    assert plan.requires_explicit_approval is True
+    assert plan.critical_approval_required is True
+
+
+def test_actual_provider_auth_mutation_still_hard_stops():
+    plan = _plan("Update OpenRouter API key and provider credentials")
     assert plan.selected_role == "engineer"
     assert plan.operation_category == "security_critical_mutation"
     assert plan.reviewer_profile == "security_auditor"
@@ -427,6 +488,12 @@ def test_execution_plan_to_dict_contains_required_fields():
         (
             "Install a user-level systemd timer for /home/hermes/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main fallback refresh. "
             "Use systemctl --user. No gateway restart. No config/auth/provider mutation. No public exposure. No secrets.",
+            "normal_operational_mutation",
+        ),
+        (
+            "Set up a user-level systemd timer for Hermes fallback refresh daily at 04:30. "
+            "Use systemctl --user. Do not restart gateway. "
+            "Do not touch config/auth/provider/Cloudflare/Trading. Do not deploy.",
             "normal_operational_mutation",
         ),
         ("Install a root system-wide systemd timer in /etc/systemd/system for Hermes maintenance", "security_critical_mutation"),
