@@ -35,6 +35,7 @@ from agent.iteration_budget import IterationBudget
 from agent.turn_context import build_turn_context
 from agent.turn_retry_state import TurnRetryState
 from agent.memory_manager import build_memory_context_block
+from hermes_cli.profile_context import build_role_context_for_task
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
@@ -277,6 +278,34 @@ def _try_refresh_nous_paid_entitlement_credentials(agent) -> bool:
         )
     except Exception:
         return False
+
+
+def _compose_turn_user_message_content(
+    base_content: str,
+    *,
+    role_context: str = "",
+    memory_context: str = "",
+    plugin_context: str = "",
+) -> str:
+    """Compose the ephemeral user-message context for a single turn.
+
+    This helper keeps the cached system prompt untouched by appending all
+    turn-specific guidance to the per-turn user message only.
+    """
+    injections: list[str] = []
+    if role_context:
+        injections.append(role_context)
+    if memory_context:
+        fenced_memory = build_memory_context_block(memory_context)
+        if fenced_memory:
+            injections.append(fenced_memory)
+    if plugin_context:
+        injections.append(plugin_context)
+    if not injections:
+        return base_content
+    if not isinstance(base_content, str) or not base_content:
+        return "\n\n".join(injections)
+    return base_content + "\n\n" + "\n\n".join(injections)
 
 
 def _restore_or_build_system_prompt(agent, system_message, conversation_history):
@@ -602,6 +631,36 @@ def run_conversation(
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
 
+    # Role context + Plugin hook: pre_llm_call
+    # Context is ALWAYS injected into the user message, never the
+    # system prompt.  This preserves the prompt cache prefix — the
+    # system prompt stays identical across turns so cached tokens
+    # are reused.  Hermes role context and plugin context both remain
+    # ephemeral (not persisted to session DB).
+    _role_user_context = ""
+    _role_context_result = None
+    try:
+        _role_context_result = build_role_context_for_task(original_user_message)
+        if _role_context_result.profile_context_used:
+            _role_user_context = _role_context_result.context_text
+            logger.info(
+                "role context: session=%s selected_role=%s canonical_role=%s used=%s",
+                agent.session_id or "-",
+                _role_context_result.selected_role,
+                _role_context_result.canonical_role or "-",
+                _role_context_result.profile_context_used,
+            )
+        elif _role_context_result.fallback_reason:
+            logger.warning(
+                "role context omitted: session=%s selected_role=%s canonical_role=%s reason=%s",
+                agent.session_id or "-",
+                _role_context_result.selected_role,
+                _role_context_result.canonical_role or "-",
+                _role_context_result.fallback_reason,
+            )
+    except Exception as exc:
+        logger.warning("role context build failed: %s", exc)
+
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
     final_response = None
@@ -789,22 +848,19 @@ def run_conversation(
             api_msg = msg.copy()
 
             # Inject ephemeral context into the current turn's user message.
-            # Sources: memory manager prefetch + plugin pre_llm_call hooks
-            # with target="user_message" (the default).  Both are
-            # API-call-time only — the original message in `messages` is
-            # never mutated, so nothing leaks into session persistence.
+            # Sources: Hermes role context + memory manager prefetch + plugin
+            # pre_llm_call hooks with target="user_message" (the default).
+            # All are API-call-time only — the original message in `messages`
+            # is never mutated, so nothing leaks into session persistence.
             if idx == current_turn_user_idx and msg.get("role") == "user":
-                _injections = []
-                if _ext_prefetch_cache:
-                    _fenced = build_memory_context_block(_ext_prefetch_cache)
-                    if _fenced:
-                        _injections.append(_fenced)
-                if _plugin_user_context:
-                    _injections.append(_plugin_user_context)
-                if _injections:
-                    _base = api_msg.get("content", "")
-                    if isinstance(_base, str):
-                        api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                _base = api_msg.get("content", "")
+                if isinstance(_base, str):
+                    api_msg["content"] = _compose_turn_user_message_content(
+                        _base,
+                        role_context=_role_user_context,
+                        memory_context=_ext_prefetch_cache,
+                        plugin_context=_plugin_user_context,
+                    )
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved
