@@ -206,6 +206,16 @@ def inject_role_execution_debug_header(response_text: str, result: RoleContextRe
     return header + "\n\n" + response_text
 
 
+def role_debug_header_enabled() -> bool:
+    """Backward-compatible alias for the opt-in debug-header flag."""
+    return _role_execution_debug_header_enabled()
+
+
+def render_role_debug_header(result: RoleContextResult | None) -> str:
+    """Backward-compatible alias for the opt-in debug header renderer."""
+    return render_role_execution_debug_header(result)
+
+
 def build_role_context_for_task(
     task: str,
     *,
