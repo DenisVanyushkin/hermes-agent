@@ -113,6 +113,11 @@ _INFRA_TERMS = (
     "build",
     "migration",
     "repair",
+    "investigate",
+    "regression",
+    "approval gate",
+    "approval gate regression",
+    "approval-gate",
 )
 
 _CAREER_TERMS = (
@@ -163,6 +168,9 @@ _DOCS_TERMS = (
     "summarize today's work",
     "today's work",
     "today's hermes role work",
+    "final status",
+    "status update",
+    "финальный статус",
     "зафиксируй",
     "зафиксируй итог",
     "зафиксируй решение",
@@ -187,6 +195,16 @@ _RESEARCH_TERMS = (
     "due diligence",
     "market overview",
     "current context",
+    "btc",
+    "bitcoin",
+    "crypto",
+    "binance",
+    "coinbase",
+    "exchange fees",
+    "fees",
+    "commissions",
+    "комиссии",
+    "купить btc",
 )
 
 
@@ -306,6 +324,17 @@ def _determine_primary_profile(normalized_text: str, matched: dict[str, list[str
     has_docs = bool(matched["docs"])
     has_research = bool(matched["research"])
 
+    docs_first_markers = (
+        "зафиксируй",
+        "handoff",
+        "final status",
+        "финальный статус",
+        "update docs",
+        "update state",
+        "status update",
+    )
+    if has_docs and any(marker in normalized_text for marker in docs_first_markers):
+        return "scribe"
     if has_infra:
         return "engineer"
     if has_security:
