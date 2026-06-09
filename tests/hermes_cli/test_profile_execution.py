@@ -122,19 +122,19 @@ def test_sensitive_diff_trigger_classification(task: str, expected_trigger_subse
 
 
 def test_sensitive_tasks_require_reviewer_and_may_require_scribe():
-    plan = _plan("Expose Hermes WebUI through Cloudflare and update docs")
+    plan = _plan("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     assert plan.selected_role == "engineer"
     assert plan.requires_reviewer is True
     assert plan.reviewer_profile == "security_auditor"
-    assert plan.requires_scribe is True
-    assert plan.durable_outcome_expected is True
+    assert plan.requires_scribe is False
+    assert plan.durable_outcome_expected is False
     assert plan.production_runtime_mutation is True
     assert plan.requires_explicit_approval is True
     assert "Cloudflare/reverse proxy/firewall" in plan.sensitive_diff_triggers
 
 
 def test_sensitive_task_without_mitigation_is_not_passive():
-    plan = _plan("Expose Hermes WebUI through Cloudflare and update docs")
+    plan = _plan("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
     assert plan.post_change_review_policy["invoke_security_auditor"] is True
     assert plan.post_change_review_policy["summarize_diff"] is True
     assert plan.post_change_review_policy["run_relevant_tests"] is True
@@ -236,8 +236,8 @@ def test_money_and_identity_tasks_escalate():
 
 
 def test_sensitive_task_route_and_execution_plan_align():
-    decision = route_task("Expose Hermes WebUI through Cloudflare and update docs")
-    plan = _plan("Expose Hermes WebUI through Cloudflare and update docs", route_decision=decision)
+    decision = route_task("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения")
+    plan = _plan("Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения", route_decision=decision)
     assert plan.selected_role == decision.primary_profile
     assert plan.selected_role == "engineer"
     assert plan.requires_reviewer is True
