@@ -12820,6 +12820,26 @@ def main():
         "clear",
         help="Remove all fallback entries",
     )
+    fallback_refresh = fallback_subparsers.add_parser(
+        "refresh",
+        help="Refresh sanitized fallback availability metadata without mutating live config",
+    )
+    fallback_refresh.add_argument(
+        "--output",
+        default=None,
+        help="Where to write the sanitized refresh state (default: ~/.hermes/state/model_fallbacks.json)",
+    )
+    fallback_refresh.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute and print the refresh report without writing the state file",
+    )
+    fallback_refresh.add_argument(
+        "--timeout",
+        type=float,
+        default=1.5,
+        help="Per-candidate probe timeout budget in seconds for future probe backends",
+    )
     fallback_parser.set_defaults(func=cmd_fallback)
 
     # =========================================================================
