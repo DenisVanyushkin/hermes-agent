@@ -192,27 +192,26 @@ def test_route_task_still_uses_python_constants():
 
 
 # ---------------------------------------------------------------------------
-# 7. route_task() still uses Python constants (not YAML) for routing
+# 7. route_task() uses the real YAML routing triggers (Slice 2C)
 # ---------------------------------------------------------------------------
 
-def test_route_task_is_unaffected_by_yaml_triggers_file(tmp_path):
-    # Write a triggers YAML with completely different (nonsense) terms.
-    # route_task() must produce the same result regardless.
-    fake_triggers = tmp_path / "fake-triggers.yaml"
-    fake_triggers.write_text(
-        "schema_version: 1\ndomains: {}\ndocs_first_markers: {en: [], ru: []}\n",
-        encoding="utf-8",
-    )
-    # Route with a well-known infra prompt — result must be 'engineer' even though
-    # a fake YAML exists on disk (route_task doesn't load it at all).
-    decision = route_task(
-        "deploy docker to production",
-        registry_path=_REGISTRY_PATH,
-        policy_path=_POLICY_PATH,
-    )
-    assert decision.primary_profile == "engineer", (
-        "route_task() should use Python constants, not the YAML triggers file"
-    )
+def test_route_task_uses_yaml_routing_triggers(monkeypatch):
+    # Slice 2C: route_task() now sources triggers from the real YAML. The real
+    # YAML contains 'deploy' as an infra trigger, so this must still route to
+    # 'engineer'. (Fallback / invalid-YAML behavior tested in test_profile_routing.py.)
+    import hermes_cli.profile_routing as _mod
+    _mod._clear_routing_terms_cache()
+    try:
+        decision = route_task(
+            "deploy docker to production",
+            registry_path=_REGISTRY_PATH,
+            policy_path=_POLICY_PATH,
+        )
+        assert decision.primary_profile == "engineer", (
+            "real YAML has 'deploy' as infra trigger; route_task() should return 'engineer'"
+        )
+    finally:
+        _mod._clear_routing_terms_cache()
 
 
 # ---------------------------------------------------------------------------

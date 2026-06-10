@@ -287,3 +287,70 @@ def test_decision_to_dict_preserves_route_chain():
     assert payload["route_chain"][0]["profile_id"] == "researcher"
     assert payload["selected_profiles"] == ["researcher"]
     assert payload["coordinator_profile"] == "chief_hermes"
+
+
+# ---------------------------------------------------------------------------
+# Slice 2C: YAML-backed routing path tests
+# ---------------------------------------------------------------------------
+
+import hermes_cli.profile_routing as _routing_mod
+
+
+@pytest.fixture(autouse=True)
+def _clear_routing_cache():
+    """Clear the active routing terms cache before and after each test for isolation."""
+    _routing_mod._clear_routing_terms_cache()
+    yield
+    _routing_mod._clear_routing_terms_cache()
+
+
+def test_yaml_routing_path_active_for_unique_trigger(tmp_path, monkeypatch):
+    """route_task() routes via YAML when YAML is valid.
+
+    A docs trigger present only in the injected YAML causes scribe routing.
+    If constants were used instead, the result would be general_operator.
+    """
+    unique = "__hermes_yaml_2c_docs_trigger__"
+    yaml_path = tmp_path / "triggers.yaml"
+    content = (
+        "schema_version: 1\n"
+        "domains:\n"
+        "  security:\n    triggers:\n      en: []\n      ru: []\n"
+        "  infra:\n    triggers:\n      en: []\n      ru: []\n"
+        "  career:\n    triggers:\n      en: []\n      ru: []\n"
+        "  docs:\n    triggers:\n      en: ['" + unique + "']\n      ru: []\n"
+        "  research:\n    triggers:\n      en: []\n      ru: []\n"
+        "docs_first_markers:\n  en: []\n  ru: []\n"
+    )
+    yaml_path.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(_routing_mod, "_DEFAULT_ROUTING_TRIGGERS_PATH", yaml_path)
+    _routing_mod._clear_routing_terms_cache()
+
+    decision = _route(unique)
+    assert decision.primary_profile == "scribe", (
+        "Expected 'scribe' via YAML-injected docs trigger, got "
+        + repr(decision.primary_profile)
+        + ". route_task() may still be reading Python constants."
+    )
+
+
+def test_routing_falls_back_to_constants_when_yaml_missing(monkeypatch):
+    """When YAML is missing, route_task() uses Python constants without raising."""
+    monkeypatch.setattr(
+        _routing_mod, "_DEFAULT_ROUTING_TRIGGERS_PATH", Path("/nonexistent/routing-triggers.yaml")
+    )
+    _routing_mod._clear_routing_terms_cache()
+
+    decision = _route("deploy docker to production host")
+    assert decision.primary_profile == "engineer"
+
+
+def test_routing_falls_back_to_constants_when_yaml_malformed(tmp_path, monkeypatch):
+    """When YAML is malformed, route_task() uses Python constants without raising."""
+    bad_yaml = tmp_path / "bad-triggers.yaml"
+    bad_yaml.write_text("{ this is: [not valid yaml", encoding="utf-8")
+    monkeypatch.setattr(_routing_mod, "_DEFAULT_ROUTING_TRIGGERS_PATH", bad_yaml)
+    _routing_mod._clear_routing_terms_cache()
+
+    decision = _route("оцени вакансию")
+    assert decision.primary_profile == "career_strategist"
