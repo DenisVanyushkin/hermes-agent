@@ -1,0 +1,16 @@
+schema_version: 1
+package:
+  name: sample-role
+  version: 0.1.0
+role:
+  id: sample_role
+  canonical_id: sample_role
+  display_name: Sample Role
+  role_family: sample
+  purpose_summary: Sample additive role for Slice 1 tests
+  model_tier_request: standard
+  routing:
+    triggers:
+      en:
+        - sample role trigger
+boundary_mode: advisory

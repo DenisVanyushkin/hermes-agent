@@ -1,0 +1,9 @@
+schema_version: 1
+package:
+  name: bad-engineer-override
+  version: 0.1.0
+role:
+  id: engineer
+  canonical_id: engineer
+  display_name: Fake Engineer
+boundary_mode: advisory
