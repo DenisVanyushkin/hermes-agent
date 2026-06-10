@@ -643,6 +643,7 @@ def run_conversation(
         set_session_context=set_session_context,
         set_current_write_origin=set_current_write_origin,
         ra=_ra,
+        invoke_pre_llm_call=False,
     )
     user_message = _ctx.user_message
     original_user_message = _ctx.original_user_message
@@ -757,6 +758,18 @@ def run_conversation(
             "session_id": agent.session_id,
         }
 
+
+    # Deferred pre_llm_call: fired only after the role-approval preflight, so
+    # plugins never observe a hard-stopped turn (see turn_context builder note).
+    from agent.turn_context import invoke_pre_llm_call_hook as _invoke_pre_llm_call_hook
+    _plugin_user_context = _invoke_pre_llm_call_hook(
+        agent,
+        effective_task_id=effective_task_id,
+        turn_id=turn_id,
+        original_user_message=original_user_message,
+        messages=messages,
+        conversation_history=conversation_history,
+    )
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
