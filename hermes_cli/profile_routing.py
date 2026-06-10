@@ -12,6 +12,7 @@ from typing import Any, Iterable
 import json
 import string
 
+import logging
 import yaml
 
 from hermes_cli.profile_request_context import routing_request_text
@@ -224,9 +225,21 @@ _DOCS_FIRST_MARKERS = (
     "status update",
 )
 
-# Path to the YAML routing triggers data model (Slice 2A). Used by parity tests
-# and future Slice 2C migration only — not used by route_task().
+# Path to the YAML routing triggers data model. Loaded by route_task() at runtime.
+# Parity tests and fallback also use this path. Monkeypatch for test isolation.
 _DEFAULT_ROUTING_TRIGGERS_PATH = Path(__file__).resolve().parents[1] / "config" / "hermes-routing-triggers.yaml"
+
+# Module-level cache for active routing terms. Cleared in tests via _clear_routing_terms_cache().
+_active_routing_terms_cache: "dict[str, list[str]] | None" = None
+
+
+def _clear_routing_terms_cache() -> None:
+    """Clear the cached active routing terms. Used in tests for path isolation."""
+    global _active_routing_terms_cache
+    _active_routing_terms_cache = None
+
+
+_logger = logging.getLogger(__name__)
 
 
 
@@ -345,6 +358,34 @@ def get_builtin_routing_terms_from_yaml(
 
     return result
 
+def get_active_builtin_routing_terms() -> dict[str, list[str]]:
+    """Return routing terms used by runtime.
+
+    Runtime source:
+    1. YAML config/hermes-routing-triggers.yaml if load succeeds and schema is valid.
+    2. Python constants fallback if YAML cannot be loaded.
+
+    Result is cached at module level; call _clear_routing_terms_cache() between tests.
+    """
+    global _active_routing_terms_cache
+    if _active_routing_terms_cache is not None:
+        return _active_routing_terms_cache
+    try:
+        terms = get_builtin_routing_terms_from_yaml(_DEFAULT_ROUTING_TRIGGERS_PATH)
+        for domain in _ROUTING_DOMAINS:
+            if domain not in terms:
+                raise RoutingError(f"YAML missing required domain {domain!r}")
+        if "docs_first_markers" not in terms:
+            raise RoutingError("YAML missing docs_first_markers")
+        _active_routing_terms_cache = terms
+        return terms
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("YAML routing triggers unavailable, using Python constants: %s", exc)
+        fallback = get_builtin_routing_terms_from_constants()
+        _active_routing_terms_cache = fallback
+        return fallback
+
+
 def _validate_loaded_architecture(registry: dict[str, Any], policy: dict[str, Any]) -> None:
     issues = []
     issues.extend(validate_profile_registry(registry))
@@ -416,14 +457,18 @@ def resolve_profile_model(profile_id: str, policy: dict[str, Any]) -> ResolvedMo
     )
 
 
-def _determine_primary_profile(normalized_text: str, matched: dict[str, list[str]]) -> str:
+def _determine_primary_profile(
+    normalized_text: str,
+    matched: dict[str, list[str]],
+    docs_first_markers: "tuple[str, ...] | list[str]" = _DOCS_FIRST_MARKERS,
+) -> str:
     has_security = bool(matched["security"])
     has_infra = bool(matched["infra"])
     has_career = bool(matched["career"])
     has_docs = bool(matched["docs"])
     has_research = bool(matched["research"])
 
-    docs_first_markers = _DOCS_FIRST_MARKERS
+    docs_first_markers = docs_first_markers
     if has_docs and any(marker in normalized_text for marker in docs_first_markers):
         return "scribe"
     if has_infra:
@@ -509,15 +554,18 @@ def route_task(
     _validate_loaded_architecture(registry, policy)
 
     normalized_text = _normalize(routing_request_text(request_text))
+    active_terms = get_active_builtin_routing_terms()
     matched = {
-        "security": _contains_any(normalized_text, _SECURITY_TERMS),
-        "infra": _contains_any(normalized_text, _INFRA_TERMS),
-        "career": _contains_any(normalized_text, _CAREER_TERMS),
-        "docs": _contains_any(normalized_text, _DOCS_TERMS),
-        "research": _contains_any(normalized_text, _RESEARCH_TERMS),
+        "security": _contains_any(normalized_text, active_terms["security"]),
+        "infra": _contains_any(normalized_text, active_terms["infra"]),
+        "career": _contains_any(normalized_text, active_terms["career"]),
+        "docs": _contains_any(normalized_text, active_terms["docs"]),
+        "research": _contains_any(normalized_text, active_terms["research"]),
     }
 
-    primary_profile = _determine_primary_profile(normalized_text, matched)
+    primary_profile = _determine_primary_profile(
+        normalized_text, matched, active_terms.get("docs_first_markers", list(_DOCS_FIRST_MARKERS))
+    )
     overlays = _build_overlays(primary_profile, matched, normalized_text)
 
     route_profiles: list[tuple[str, str]] = []
