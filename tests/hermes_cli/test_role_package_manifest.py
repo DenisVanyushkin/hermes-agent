@@ -230,3 +230,92 @@ def test_schema_version_string_rejected(tmp_path: Path) -> None:
     _, errors, _ = validate_manifest_path(pkg_dir)
 
     assert any("schema_version" in e for e in errors)
+
+# ---------------------------------------------------------------------------
+# env_requires validation (Slice 5)
+# ---------------------------------------------------------------------------
+
+
+class TestEnvRequiresValidation:
+    def _pkg(self, env_requires=None, **extra):
+        data = {
+            "schema_version": 1,
+            "package": {"name": "env-test-role", "version": "0.1.0"},
+            "role": {
+                "id": "env_test_role",
+                "canonical_id": "env_test_role",
+                "display_name": "Env Test Role",
+            },
+            "boundary_mode": "advisory",
+        }
+        if env_requires is not None:
+            data["env_requires"] = env_requires
+        data.update(extra)
+        return data
+
+    def test_valid_env_requires_accepted(self, tmp_path):
+        data = self._pkg(env_requires=[
+            {"name": "SAMPLE_FAKE_TOKEN", "description": "Fake token for tests", "required": False}
+        ])
+        _write_manifest(tmp_path / "pkg", data)
+        manifest, errors, _ = validate_manifest_path(tmp_path / "pkg")
+        assert errors == []
+        assert manifest is not None
+
+    def test_wildcard_env_name_rejected(self, tmp_path):
+        for bad_name in ["*", "FOO_*", "*_TOKEN", "FOO*"]:
+            data = self._pkg(env_requires=[{"name": bad_name}])
+            _write_manifest(tmp_path / bad_name.replace("*", "STAR"), data)
+            _, errors, _ = validate_manifest_path(tmp_path / bad_name.replace("*", "STAR"))
+            assert any("wildcard" in e.lower() or "invalid" in e.lower() for e in errors), (
+                f"Expected error for wildcard env name {bad_name!r}, got: {errors}"
+            )
+
+    def test_invalid_env_var_name_rejected(self, tmp_path):
+        bad_names = ["123STARTS_WITH_DIGIT", "has-hyphen", "has space", ""]
+        for idx, bad_name in enumerate(bad_names):
+            data = self._pkg(env_requires=[{"name": bad_name}])
+            pkg_dir = tmp_path / f"bad_name_{idx}"
+            _write_manifest(pkg_dir, data)
+            _, errors, _ = validate_manifest_path(pkg_dir)
+            assert errors, f"Expected error for invalid env name {bad_name!r}"
+
+    def test_missing_name_field_rejected(self, tmp_path):
+        data = self._pkg(env_requires=[{"description": "no name field"}])
+        _write_manifest(tmp_path / "noname", data)
+        _, errors, _ = validate_manifest_path(tmp_path / "noname")
+        assert errors
+
+    def test_env_requires_not_a_list_rejected(self, tmp_path):
+        data = self._pkg()
+        data["env_requires"] = "SINGLE_STRING"
+        _write_manifest(tmp_path / "notlist", data)
+        _, errors, _ = validate_manifest_path(tmp_path / "notlist")
+        assert errors
+
+    def test_default_value_field_rejected(self, tmp_path):
+        data = self._pkg(env_requires=[
+            {"name": "SAMPLE_FAKE_TOKEN", "default": "some_default_value"}
+        ])
+        _write_manifest(tmp_path / "withdefault", data)
+        _, errors, _ = validate_manifest_path(tmp_path / "withdefault")
+        assert any("default" in e.lower() or "value" in e.lower() for e in errors)
+
+    def test_secret_looking_description_warns(self, tmp_path):
+        # sk-* pattern in description produces a warning, not a hard error.
+        data = self._pkg(env_requires=[
+            {"name": "SAMPLE_FAKE_TOKEN", "description": "sk-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE"}
+        ])
+        _write_manifest(tmp_path / "secretdesc", data)
+        _, errors, warnings = validate_manifest_path(tmp_path / "secretdesc")
+        assert errors == [], "sk-* in description should be a warning, not a hard error"
+        assert any("secret" in w.lower() or "sk-" in w for w in warnings), (
+            f"Expected warning for sk-* in description, got warnings={warnings}"
+        )
+
+    def test_absent_env_requires_is_ok(self, tmp_path):
+        data = self._pkg()  # no env_requires key
+        _write_manifest(tmp_path / "noenv", data)
+        manifest, errors, _ = validate_manifest_path(tmp_path / "noenv")
+        assert errors == []
+        assert manifest is not None

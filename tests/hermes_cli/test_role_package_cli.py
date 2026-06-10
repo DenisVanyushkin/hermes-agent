@@ -345,3 +345,80 @@ def test_remove_one_of_two_leaves_other(tmp_path: Path, hermetic_home: Path) -> 
     packages = list_packages(hermetic_home)
     assert len(packages) == 1
     assert packages[0]["name"] == "role-1"
+
+
+# ---------------------------------------------------------------------------
+# Task 2b: accepted_env persistence tests
+# ---------------------------------------------------------------------------
+
+class TestAcceptEnvCLI:
+    """Tests for --accept-env install flag and accepted_env lockfile persistence."""
+
+    def _make_manifest(
+        self,
+        tmp_path: Path,
+        name: str = "test-pkg",
+        env_requires: list | None = None,
+    ) -> Path:
+        data: dict = {
+            "schema_version": 1,
+            "package": {"name": name, "version": "0.1.0"},
+            "role": {
+                "id": f"{name}-id",
+                "canonical_id": f"{name}-id",
+                "display_name": name,
+            },
+        }
+        if env_requires is not None:
+            data["env_requires"] = env_requires
+        src = tmp_path / name
+        src.mkdir(exist_ok=True)
+        (src / "role-package.yaml").write_text(
+            yaml.safe_dump(data, sort_keys=False), encoding="utf-8"
+        )
+        return src
+
+    def test_install_without_accept_env_stores_empty_list(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """accepted_env defaults to [] when install_package called without accept_env."""
+        src = self._make_manifest(tmp_path, env_requires=[{"name": "FOO"}])
+        install_package(src, hermetic_home)
+        lock = read_lockfile(get_role_packages_dir(hermetic_home))
+        entry = lock["packages"]["test-pkg"]
+        assert entry.get("accepted_env", []) == []
+
+    def test_install_with_accept_env_persists_names(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """accepted_env list is written to lockfile when accept_env is supplied."""
+        src = self._make_manifest(
+            tmp_path,
+            env_requires=[{"name": "FOO"}, {"name": "BAR"}],
+        )
+        install_package(src, hermetic_home, accept_env=["FOO", "BAR"])
+        lock = read_lockfile(get_role_packages_dir(hermetic_home))
+        entry = lock["packages"]["test-pkg"]
+        assert sorted(entry.get("accepted_env", [])) == ["BAR", "FOO"]
+
+    def test_accept_env_only_allows_declared_names(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """Accepting an env var not declared in env_requires raises RolePackageError."""
+        src = self._make_manifest(tmp_path, env_requires=[{"name": "FOO"}])
+        with pytest.raises(RolePackageError, match="not declared"):
+            install_package(src, hermetic_home, accept_env=["UNDECLARED_VAR"])
+
+    def test_reinstall_updates_accepted_env(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """Re-installing with force=True updates accepted_env in the lockfile."""
+        src = self._make_manifest(
+            tmp_path,
+            env_requires=[{"name": "FOO"}, {"name": "BAR"}],
+        )
+        install_package(src, hermetic_home, accept_env=["FOO"])
+        install_package(src, hermetic_home, force=True, accept_env=["FOO", "BAR"])
+        lock = read_lockfile(get_role_packages_dir(hermetic_home))
+        entry = lock["packages"]["test-pkg"]
+        assert sorted(entry.get("accepted_env", [])) == ["BAR", "FOO"]

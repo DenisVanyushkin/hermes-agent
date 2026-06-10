@@ -1438,7 +1438,35 @@ def skill_view(
             try:
                 from tools.env_passthrough import register_env_passthrough
 
-                register_env_passthrough(available_env_names)
+                # Apply three-gate cap for package-owned skills.
+                # For built-in/external skills (cap returns None), pass through
+                # as-is (uncapped — unchanged from pre-Slice5 behaviour).
+                try:
+                    from hermes_cli.role_packages import cap_env_passthrough_for_skill
+                    capped = cap_env_passthrough_for_skill(
+                        skill_path=skill_md,
+                        skill_env_names=set(available_env_names),
+                    )
+                except Exception:
+                    logger.debug(
+                        "cap_env_passthrough_for_skill unavailable for skill %s",
+                        skill_name,
+                        exc_info=True,
+                    )
+                    capped = None
+
+                if capped is None:
+                    # Built-in skill — no cap applied.
+                    register_env_passthrough(available_env_names)
+                elif capped:
+                    # Package skill — register only the capped set.
+                    register_env_passthrough(capped)
+                else:
+                    # Package skill with empty allowlist — register nothing.
+                    logger.debug(
+                        "Env passthrough fully capped for package skill %s",
+                        skill_name,
+                    )
             except Exception:
                 logger.debug(
                     "Could not register env passthrough for skill %s",

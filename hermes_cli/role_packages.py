@@ -37,6 +37,23 @@ VALID_BOUNDARY_MODES: frozenset[str] = frozenset({"advisory", "observe_warn", "e
 # Package names: lowercase, start with letter, alphanumeric + hyphens, max 64 chars.
 _PACKAGE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
+# Valid env var name: must start with letter or underscore; alphanumeric + underscore only.
+# Wildcards (*, FOO_*, *_TOKEN) are explicitly rejected.
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_WILDCARD_CHARS = frozenset({"*", "?"})
+
+# Hard-error patterns: clearly secret-shaped, minimal false positives.
+_SECRET_HARD_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),                          # OpenAI-style API key
+    re.compile(r"ghp_[A-Za-z0-9]{36}"),                          # GitHub PAT
+    re.compile(r"(?i)(password|passwd|secret)\s*[:=]\s*\S+"),    # password=...
+]
+# Warning-only patterns: broad heuristics with meaningful false-positive rate.
+_SECRET_WARN_PATTERNS = [
+    re.compile(r"[A-Za-z0-9+/]{40,}={0,2}"),  # Base64-length (too broad for hard error)
+]
+
+
 _REQUIRED_TOP_FIELDS: frozenset[str] = frozenset({"schema_version", "package", "role"})
 _REQUIRED_PACKAGE_FIELDS: frozenset[str] = frozenset({"name", "version"})
 _REQUIRED_ROLE_FIELDS: frozenset[str] = frozenset({"id", "canonical_id", "display_name"})
@@ -95,6 +112,7 @@ class LockfileEntry:
     source_path: str      # original source path
     role_id: str
     canonical_id: str
+    accepted_env: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -190,6 +208,59 @@ def _builtin_reserved_ids() -> frozenset[str]:
     return frozenset(ACTIVE_PROFILE_IDS | DEFERRED_PROFILE_IDS | CANONICAL_PROFILE_IDS | aliases)
 
 
+def _validate_env_requires(
+    env_requires: list[Any],
+) -> tuple[list[str], list[str]]:
+    """Validate manifest env_requires list.
+
+    Returns (errors, warnings). Errors block install; warnings are surfaced only.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not isinstance(env_requires, list):
+        errors.append("env_requires must be a list")
+        return errors, warnings
+    for idx, entry in enumerate(env_requires):
+        if not isinstance(entry, dict):
+            errors.append(f"env_requires[{idx}]: must be a mapping, got {type(entry).__name__}")
+            continue
+        name = entry.get("name")
+        if name is None:
+            errors.append(f"env_requires[{idx}]: missing 'name' field")
+            continue
+        if not isinstance(name, str):
+            errors.append(f"env_requires[{idx}]: 'name' must be a string")
+            continue
+        if any(c in name for c in _WILDCARD_CHARS):
+            errors.append(
+                f"env_requires[{idx}]: name {name!r} contains wildcard character"
+                " — only exact var names allowed"
+            )
+            continue
+        if not _ENV_VAR_NAME_RE.match(name):
+            errors.append(
+                f"env_requires[{idx}]: name {name!r} is not a valid env-var name"
+                " (must match [A-Za-z_][A-Za-z0-9_]*)"
+            )
+            continue
+        if "default" in entry:
+            errors.append(
+                f"env_requires[{idx}]: 'default' field is not allowed"
+                " — manifests must not supply default values for env vars"
+            )
+        description = entry.get("description", "")
+        if isinstance(description, str):
+            desc_text = description
+            for pat in (*_SECRET_HARD_PATTERNS, *_SECRET_WARN_PATTERNS):
+                if pat.search(desc_text):
+                    warnings.append(
+                        f"env_requires[{idx}]: description for {name!r} may contain"
+                        " a secret-looking value"
+                    )
+                    break
+    return errors, warnings
+
+
 def _load_manifest(manifest_path: Path) -> dict[str, Any]:
     """Load and parse a role-package.yaml. Raises ValueError on any problem."""
     try:
@@ -240,6 +311,12 @@ def _load_manifest(manifest_path: Path) -> dict[str, Any]:
         raise ValueError(
             f"invalid boundary_mode {boundary_mode!r}; valid: {sorted(VALID_BOUNDARY_MODES)}"
         )
+
+    env_requires = data.get("env_requires")
+    if env_requires is not None:
+        env_errors, _ = _validate_env_requires(env_requires)
+        if env_errors:
+            raise ValueError("env_requires validation failed: " + "; ".join(env_errors))
 
     return data
 
@@ -306,6 +383,11 @@ def validate_manifest_path(
                 errors.append(f"[{f.code}] {f.message}")
             else:
                 warnings.append(f"[{f.code}] {f.message}")
+
+    env_requires = manifest.get("env_requires") if manifest else None
+    if env_requires is not None:
+        _, env_warnings = _validate_env_requires(env_requires)
+        warnings.extend(env_warnings)
 
     return manifest, errors, warnings
 
@@ -453,6 +535,7 @@ def install_package(
     hermes_home: Path | None = None,
     *,
     force: bool = False,
+    accept_env: list[str] | None = None,
 ) -> InstalledPackage:
     """Install a role package from a local directory.
 
@@ -494,6 +577,21 @@ def install_package(
         shutil.rmtree(dest_dir)
     shutil.copytree(source_path, dest_dir)
 
+    # Validate accept_env against declared env_requires.
+    declared_names: set[str] = {
+        str(e["name"])
+        for e in (manifest.get("env_requires") or [])
+        if isinstance(e, dict) and "name" in e
+    }
+    normalized_accept_env: list[str] = []
+    if accept_env:
+        undeclared = sorted(set(accept_env) - declared_names)
+        if undeclared:
+            raise RolePackageError(
+                f"accept_env contains names not declared in env_requires: {undeclared}"
+            )
+        normalized_accept_env = sorted(set(accept_env) & declared_names)
+
     # Write lockfile entry.
     entry = LockfileEntry(
         name=name,
@@ -504,6 +602,7 @@ def install_package(
         source_path=str(source_path),
         role_id=role_id,
         canonical_id=canonical_id,
+        accepted_env=normalized_accept_env,
     )
     _add_lockfile_entry(packages_dir, entry)
 
@@ -639,3 +738,99 @@ def clear_registry_cache() -> None:
         _load_profile_registry_cached.cache_clear()
     except Exception:  # noqa: BLE001
         pass
+
+
+# ---------------------------------------------------------------------------
+# Skill directory helpers (Slice 5)
+# ---------------------------------------------------------------------------
+
+_SKILLS_SUBDIR = "skills"
+
+
+def get_package_skill_dirs(hermes_home: Path | None = None) -> list[Path]:
+    """Return a list of skill directories contributed by installed packages.
+
+    Only directories that actually exist on disk are returned. The list
+    order is deterministic (sorted by package name).
+    """
+    packages_dir = get_role_packages_dir(hermes_home)
+    if not packages_dir.is_dir():
+        return []
+    result: list[Path] = []
+    for pkg_dir in sorted(packages_dir.iterdir()):
+        if not pkg_dir.is_dir():
+            continue
+        skills_dir = pkg_dir / _SKILLS_SUBDIR
+        if skills_dir.is_dir():
+            result.append(skills_dir)
+    return result
+
+
+def get_package_for_skill_path(
+    skill_path: Path,
+    hermes_home: Path | None = None,
+) -> str | None:
+    """Return the package name that owns *skill_path*, or None.
+
+    A path is "owned" by a package when it lives under
+    ``<packages_dir>/<pkg_name>/`` (at any depth).
+    """
+    packages_dir = get_role_packages_dir(hermes_home).resolve()
+    try:
+        relative = skill_path.resolve().relative_to(packages_dir)
+    except ValueError:
+        return None
+    # First component of the relative path is the package name.
+    parts = relative.parts
+    if not parts:
+        return None
+    return parts[0]
+
+
+def cap_env_passthrough_for_skill(
+    skill_path: Path,
+    skill_env_names: set[str],
+    hermes_home: Path | None = None,
+) -> list[str] | None:
+    """Apply the three-gate env passthrough cap for a package-owned skill.
+
+    Returns:
+        - ``None`` if the skill is not owned by any installed package
+          (caller should treat it as a built-in skill and apply no cap).
+        - A sorted list of env var names that pass all three gates:
+          ``skill_required_env ∩ manifest.env_requires ∩ accepted_consents``
+          (may be empty).
+    """
+    pkg_name = get_package_for_skill_path(skill_path, hermes_home)
+    if pkg_name is None:
+        return None
+
+    packages_dir = get_role_packages_dir(hermes_home)
+    pkg_dir = packages_dir / pkg_name
+
+    # Gate 1: manifest.env_requires
+    manifest_path = pkg_dir / MANIFEST_FILENAME
+    try:
+        manifest = _load_manifest(manifest_path)
+    except ValueError:
+        logger.warning(
+            "cap_env_passthrough_for_skill: could not load manifest for %s, "
+            "returning empty allowlist",
+            pkg_name,
+        )
+        return []
+
+    declared: set[str] = {
+        str(e["name"])
+        for e in (manifest.get("env_requires") or [])
+        if isinstance(e, dict) and "name" in e
+    }
+
+    # Gate 2: accepted_env from lockfile
+    lock = read_lockfile(packages_dir)
+    pkg_entry = lock.get("packages", {}).get(pkg_name, {})
+    accepted: set[str] = set(pkg_entry.get("accepted_env", []))
+
+    # Three-gate intersection
+    allowed = skill_env_names & declared & accepted
+    return sorted(allowed)

@@ -504,6 +504,11 @@ def get_all_skills_dirs() -> List[Path]:
     """
     dirs = [get_skills_dir()]
     dirs.extend(get_external_skills_dirs())
+    try:
+        from hermes_cli.role_packages import get_package_skill_dirs  # noqa: PLC0415
+        dirs.extend(get_package_skill_dirs())
+    except Exception:
+        logger.debug("Could not load package skill dirs", exc_info=True)
     return dirs
 
 
