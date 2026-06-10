@@ -464,6 +464,7 @@ from hermes_cli.subcommands.acp import build_acp_parser
 from hermes_cli.subcommands.tools import build_tools_parser
 from hermes_cli.subcommands.insights import build_insights_parser
 from hermes_cli.subcommands.skills import build_skills_parser
+from hermes_cli.subcommands.role import build_role_parser, cmd_role
 from hermes_cli.subcommands.pairing import build_pairing_parser
 from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
@@ -17270,6 +17271,11 @@ def main():
     # profile command  (parser built in hermes_cli/subcommands/profile.py)
     # =========================================================================
     build_profile_parser(subparsers, cmd_profile=cmd_profile)
+
+    # =========================================================================
+    # role command  (parser built in hermes_cli/subcommands/role.py)
+    # =========================================================================
+    build_role_parser(subparsers, cmd_role=cmd_role)
 
     # =========================================================================
     # completion command
