@@ -1,0 +1,14 @@
+schema_version: 1
+package:
+  name: exact-trigger-role
+  version: 0.1.0
+role:
+  id: exact_trigger_role
+  canonical_id: exact_trigger_role
+  display_name: Exact Trigger Role
+  role_family: test
+  routing:
+    triggers:
+      en:
+      - deploy
+boundary_mode: advisory

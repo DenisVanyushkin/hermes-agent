@@ -1,0 +1,14 @@
+schema_version: 1
+package:
+  name: routing-flip-role
+  version: 0.1.0
+role:
+  id: routing_flip_role
+  canonical_id: routing_flip_role
+  display_name: Routing Flip Role
+  role_family: test
+  routing:
+    triggers:
+      en:
+      - container
+boundary_mode: advisory

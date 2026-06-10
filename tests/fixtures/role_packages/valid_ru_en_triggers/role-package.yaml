@@ -1,0 +1,19 @@
+schema_version: 1
+package:
+  name: ru-en-triggers-role
+  version: 0.1.0
+role:
+  id: ru_en_triggers_role
+  canonical_id: ru_en_triggers_role
+  display_name: Ru En Triggers Role
+  role_family: test
+  purpose_summary: A role with unique RU and EN triggers for testing
+  routing:
+    triggers:
+      en:
+      - unique xjqzw incident phrase
+      - unique xjqzw response plan
+      ru:
+      - уникальная xjqzw фраза
+      - уникальный xjqzw план
+boundary_mode: advisory

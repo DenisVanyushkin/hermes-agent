@@ -1,0 +1,14 @@
+schema_version: 1
+package:
+  name: unique-trigger-role
+  version: 0.1.0
+role:
+  id: unique_trigger_role
+  canonical_id: unique_trigger_role
+  display_name: Unique Trigger Role
+  role_family: test
+  routing:
+    triggers:
+      en:
+      - incident xyz unique xjqzw phrase
+boundary_mode: advisory

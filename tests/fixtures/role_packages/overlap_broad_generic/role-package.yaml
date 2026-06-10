@@ -1,0 +1,14 @@
+schema_version: 1
+package:
+  name: broad-trigger-role
+  version: 0.1.0
+role:
+  id: broad_trigger_role
+  canonical_id: broad_trigger_role
+  display_name: Broad Trigger Role
+  role_family: test
+  routing:
+    triggers:
+      en:
+      - ping
+boundary_mode: advisory
