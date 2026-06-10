@@ -712,6 +712,7 @@ def run_conversation(
         # MoA turns append per-call aggregated context to the API copy of the
         # user message, so no byte-stable api_content sidecar can be stamped.
         moa_active=bool(moa_config),
+        invoke_pre_llm_call=False,
     )
     user_message = _ctx.user_message
     original_user_message = _ctx.original_user_message
@@ -829,6 +830,18 @@ def run_conversation(
             "session_id": agent.session_id,
         }
 
+
+    # Deferred pre_llm_call: fired only after the role-approval preflight, so
+    # plugins never observe a hard-stopped turn (see turn_context builder note).
+    from agent.turn_context import invoke_pre_llm_call_hook as _invoke_pre_llm_call_hook
+    _plugin_user_context = _invoke_pre_llm_call_hook(
+        agent,
+        effective_task_id=effective_task_id,
+        turn_id=turn_id,
+        original_user_message=original_user_message,
+        messages=messages,
+        conversation_history=conversation_history,
+    )
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
