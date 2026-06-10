@@ -1,0 +1,698 @@
+version: '1'
+schema_version: '1'
+generated_by: tests/fixtures/role_packages/generate_corpus.py
+note: 'DO NOT edit by hand. Corpus updates require explicit golden approval: run the generator, review the diff, commit alongside
+  the routing change.'
+entries:
+- id: benign_en_admin_task
+  description: safe admin task with no domain triggers → general_operator
+  category: benign
+  lang: en
+  prompt: Help me with a simple safe admin task
+  expected:
+    primary_profile: general_operator
+    route_chain:
+    - general_operator
+    confidence: low
+    ambiguity_reasons:
+    - no specific domain trigger matched; defaulting to general_operator metadata only
+    max_chain_limit_applied: false
+- id: benign_en_haircut
+  description: personal errand with no domain triggers → general_operator
+  category: benign
+  lang: en
+  prompt: Book me a haircut appointment for tomorrow
+  expected:
+    primary_profile: general_operator
+    route_chain:
+    - general_operator
+    confidence: low
+    ambiguity_reasons:
+    - no specific domain trigger matched; defaulting to general_operator metadata only
+    max_chain_limit_applied: false
+- id: benign_en_reminder
+  description: timer/reminder prompt with no domain triggers → general_operator
+  category: benign
+  lang: en
+  prompt: Set a reminder for tomorrow at 9am
+  expected:
+    primary_profile: general_operator
+    route_chain:
+    - general_operator
+    confidence: low
+    ambiguity_reasons:
+    - no specific domain trigger matched; defaulting to general_operator metadata only
+    max_chain_limit_applied: false
+- id: benign_ru_help
+  description: Russian personal errand with no domain triggers → general_operator
+  category: benign
+  lang: ru
+  prompt: Помоги мне с личными делами
+  expected:
+    primary_profile: general_operator
+    route_chain:
+    - general_operator
+    confidence: low
+    ambiguity_reasons:
+    - no specific domain trigger matched; defaulting to general_operator metadata only
+    max_chain_limit_applied: false
+- id: benign_ru_reminder
+  description: Russian reminder prompt with no domain triggers → general_operator
+  category: benign
+  lang: ru
+  prompt: Напомни мне о встрече завтра утром
+  expected:
+    primary_profile: general_operator
+    route_chain:
+    - general_operator
+    confidence: low
+    ambiguity_reasons:
+    - no specific domain trigger matched; defaulting to general_operator metadata only
+    max_chain_limit_applied: false
+- id: career_en_cv_cover_letter
+  description: cv + cover letter trigger career_strategist
+  category: career
+  lang: en
+  prompt: Help me update my CV and cover letter for this application
+  expected:
+    primary_profile: career_strategist
+    route_chain:
+    - career_strategist
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: career_en_interview_strategy
+  description: interview + application strategy trigger career_strategist
+  category: career
+  lang: en
+  prompt: Prepare me for the interview using an application strategy
+  expected:
+    primary_profile: career_strategist
+    route_chain:
+    - career_strategist
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: career_en_job_intel_opportunity
+  description: job-intel + job opportunity trigger career_strategist
+  category: career
+  lang: en
+  prompt: Review this job-intel report for the latest job opportunity
+  expected:
+    primary_profile: career_strategist
+    route_chain:
+    - career_strategist
+    - researcher
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: career, research'
+    - 'route chain includes follow-up hops: researcher'
+    max_chain_limit_applied: false
+- id: career_en_vacancy_apply
+  description: vacancy + apply trigger career_strategist
+  category: career
+  lang: en
+  prompt: I found a vacancy for a Head of Product role — should I apply?
+  expected:
+    primary_profile: career_strategist
+    route_chain:
+    - career_strategist
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: career_ru_karyer_strategiya
+  description: 'Russian: карьер triggers career_strategist'
+  category: career
+  lang: ru
+  prompt: Помоги выстроить карьерную стратегию для роли CPO
+  expected:
+    primary_profile: career_strategist
+    route_chain:
+    - career_strategist
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: career_ru_otsenka_vakansii
+  description: 'Russian: оцени вакансию triggers career_strategist'
+  category: career
+  lang: ru
+  prompt: Оцени вакансию Head of Product для меня
+  expected:
+    primary_profile: career_strategist
+    route_chain:
+    - career_strategist
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: career_ru_rezyume_soprov
+  description: 'Russian: резюме + сопроводительное письмо trigger career_strategist'
+  category: career
+  lang: ru
+  prompt: Подготовь резюме и сопроводительное письмо для вакансии CPO
+  expected:
+    primary_profile: career_strategist
+    route_chain:
+    - career_strategist
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: career_ru_stoit_li_otklikat
+  description: 'Russian: стоит ли откликаться triggers career_strategist'
+  category: career
+  lang: ru
+  prompt: Стоит ли откликаться на роль VP Product в этой компании?
+  expected:
+    primary_profile: career_strategist
+    route_chain:
+    - career_strategist
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_en_capture_durable_memory
+  description: capture durable memory trigger scribe
+  category: docs
+  lang: en
+  prompt: Capture durable memory of today's work and capture the outcome
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_en_profile_handoff
+  description: profile handoff + record the decision trigger scribe
+  category: docs
+  lang: en
+  prompt: Write a profile handoff to record the decision we made today
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_en_runbook_state_decision
+  description: runbook + state + decision trigger scribe
+  category: docs
+  lang: en
+  prompt: Create a runbook capturing the system state and key decisions
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_en_update_docs_state
+  description: update docs + update state trigger scribe
+  category: docs
+  lang: en
+  prompt: Update docs and update state for this configuration change
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: infra, docs'
+    max_chain_limit_applied: false
+- id: docs_first_en_final_status_over_infra
+  description: final status (docs-first marker) beats docker (infra) for primary
+  category: docs_first
+  lang: en
+  prompt: Provide a final status of the docker deployment process
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: infra, docs'
+    max_chain_limit_applied: false
+- id: docs_first_en_handoff_today
+  description: handoff (docs-first marker) routes to scribe
+  category: docs_first
+  lang: en
+  prompt: Write a handoff for today's hermes role work
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_first_en_status_update
+  description: status update (docs-first marker) routes to scribe
+  category: docs_first
+  lang: en
+  prompt: Please provide a status update on the current project
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_first_en_update_state
+  description: update state (docs-first marker) routes to scribe
+  category: docs_first
+  lang: en
+  prompt: Update state for the current system configuration
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_first_ru_finalnyy_status
+  description: 'Russian: финальный статус (docs-first marker) routes to scribe'
+  category: docs_first
+  lang: ru
+  prompt: Зафиксируй финальный статус Hermes roles MVP
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_ru_handoff
+  description: 'Russian: напиши handoff triggers scribe'
+  category: docs
+  lang: ru
+  prompt: Напиши handoff для команды по итогам сессии
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_ru_obnovit_docs
+  description: 'Russian: обнови docs + обнови документацию trigger scribe'
+  category: docs
+  lang: ru
+  prompt: Обнови docs и обнови документацию по последнему изменению
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_ru_zafiksiruy_itog
+  description: 'Russian: зафиксируй итог triggers scribe'
+  category: docs
+  lang: ru
+  prompt: Зафиксируй итог сегодняшней работы по ролям
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_ru_zapishi_sohrani
+  description: 'Russian: запиши итог + сохрани в документацию trigger scribe'
+  category: docs
+  lang: ru
+  prompt: Запиши итог и сохрани в документацию
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: infra_en_database_rollback
+  description: database + rollback trigger engineer
+  category: infra
+  lang: en
+  prompt: The database migration failed — prepare a rollback plan
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: infra_en_deploy_webui
+  description: deploy + webui trigger engineer
+  category: infra
+  lang: en
+  prompt: Deploy the webui service to the production host
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: infra_en_docker_logs
+  description: docker + logs trigger engineer
+  category: infra
+  lang: en
+  prompt: Check the docker container logs for errors
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: infra_en_monitoring_regression
+  description: monitoring + regression + investigate trigger engineer
+  category: infra
+  lang: en
+  prompt: Investigate the monitoring regression in the approval-gate service
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: infra_en_rebase_build
+  description: rebase + build trigger engineer
+  category: infra
+  lang: en
+  prompt: Apply the rebase and rebuild the production service
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: infra, career'
+    max_chain_limit_applied: false
+- id: infra_en_systemd_reload
+  description: systemd + reload trigger engineer
+  category: infra
+  lang: en
+  prompt: Reload the systemd service configuration after the patch
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: overlay_career_researcher
+  description: career_strategist primary + researcher overlay
+  category: overlay
+  lang: en
+  prompt: job opportunity review requiring company research and a CV update
+  expected:
+    primary_profile: career_strategist
+    route_chain:
+    - career_strategist
+    - researcher
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: career, research'
+    - 'route chain includes follow-up hops: researcher'
+    max_chain_limit_applied: false
+- id: overlay_engineer_scribe
+  description: engineer primary + scribe overlay from docs signal
+  category: overlay
+  lang: en
+  prompt: operational change with durable state impact
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: infra, docs'
+    - 'route chain includes follow-up hops: scribe'
+    max_chain_limit_applied: false
+- id: overlay_engineer_security_scribe
+  description: engineer primary + security + scribe overlays (3-hop chain)
+  category: overlay
+  lang: en
+  prompt: production WebUI exposure change
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    - security_auditor
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: security, infra'
+    - 'route chain includes follow-up hops: security_auditor, scribe'
+    max_chain_limit_applied: false
+- id: overlay_max_chain_boundary_3_hops
+  description: maximum 3-hop chain — at the limit but not truncated
+  category: overlay
+  lang: en
+  prompt: production WebUI exposure change
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    - security_auditor
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: security, infra'
+    - 'route chain includes follow-up hops: security_auditor, scribe'
+    max_chain_limit_applied: false
+- id: overlay_security_scribe
+  description: security_auditor primary + scribe overlay from document signal
+  category: overlay
+  lang: en
+  prompt: Review the auth tokens and document the security findings
+  expected:
+    primary_profile: security_auditor
+    route_chain:
+    - security_auditor
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: security, docs'
+    - 'route chain includes follow-up hops: scribe'
+    max_chain_limit_applied: false
+- id: research_en_btc_fees_coinbase
+  description: bitcoin + coinbase + fees trigger researcher
+  category: research
+  lang: en
+  prompt: Compare bitcoin fees on binance and coinbase
+  expected:
+    primary_profile: researcher
+    route_chain:
+    - researcher
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: research_en_due_diligence
+  description: due diligence + company research trigger researcher
+  category: research
+  lang: en
+  prompt: Do due diligence and company research for the current context
+  expected:
+    primary_profile: researcher
+    route_chain:
+    - researcher
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: research_en_news_digest_market
+  description: news + digest + market overview trigger researcher
+  category: research
+  lang: en
+  prompt: Give me a news digest and market overview for this week
+  expected:
+    primary_profile: researcher
+    route_chain:
+    - researcher
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: research_en_weather_forecast
+  description: weather trigger researcher
+  category: research
+  lang: en
+  prompt: What is the weather forecast for today?
+  expected:
+    primary_profile: researcher
+    route_chain:
+    - researcher
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: research_ru_kupit_btc_komissii
+  description: 'Russian: купить btc + комиссии trigger researcher'
+  category: research
+  lang: ru
+  prompt: Где лучше купить BTC? Сравни комиссии на разных биржах
+  expected:
+    primary_profile: researcher
+    route_chain:
+    - researcher
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: research_ru_pogoda_prognoz
+  description: 'Russian: погода + прогноз погоды trigger researcher'
+  category: research
+  lang: ru
+  prompt: Какой прогноз погоды на сегодня в Алматы?
+  expected:
+    primary_profile: researcher
+    route_chain:
+    - researcher
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: security_en_auth_tokens
+  description: auth + tokens trigger security_auditor
+  category: security
+  lang: en
+  prompt: Please check the auth tokens for exposure in the production system
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    - security_auditor
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: security, infra'
+    - 'route chain includes follow-up hops: security_auditor, scribe'
+    max_chain_limit_applied: false
+- id: security_en_cloudflare_firewall_permissions
+  description: cloudflare + firewall + permissions trigger security_auditor
+  category: security
+  lang: en
+  prompt: Review the cloudflare firewall permissions configuration
+  expected:
+    primary_profile: security_auditor
+    route_chain:
+    - security_auditor
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: security_en_privileged_browser_profile
+  description: privileged + browser profile trigger security_auditor
+  category: security
+  lang: en
+  prompt: Review the privileged browser profile — it may expose tokens
+  expected:
+    primary_profile: security_auditor
+    route_chain:
+    - security_auditor
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: security_en_scheduler_tool_boundary
+  description: scheduler + tool-boundary trigger security_auditor
+  category: security
+  lang: en
+  prompt: The scheduler has a tool-boundary privilege escalation risk
+  expected:
+    primary_profile: security_auditor
+    route_chain:
+    - security_auditor
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: security_en_secrets_public_access
+  description: secrets + public access trigger security_auditor
+  category: security
+  lang: en
+  prompt: There are secrets exposed via public access — review immediately
+  expected:
+    primary_profile: security_auditor
+    route_chain:
+    - security_auditor
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: security_en_security_audit_threat_model
+  description: security audit + threat model trigger security_auditor
+  category: security
+  lang: en
+  prompt: Perform a security audit and produce a threat model for the gateway
+  expected:
+    primary_profile: security_auditor
+    route_chain:
+    - security_auditor
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: strip_cronjob_response_hot_infra_terms
+  description: infra hot terms inside cronjob response block are stripped; weather drives routing
+  category: stripping
+  lang: en
+  prompt: 'Cronjob response: hermes-rebase-local-customizations result
+
+    docker systemd deploy database production monitoring logs
+
+
+    What is the weather forecast for today?'
+  expected:
+    primary_profile: researcher
+    route_chain:
+    - researcher
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: strip_replying_to_no_hot_terms_benign
+  description: replying-to line passes through routing but contains no trigger terms; prompt is benign
+  category: stripping
+  lang: en
+  prompt: '[Replying to: morning-greeting-note]
+
+    Help me plan my day'
+  expected:
+    primary_profile: general_operator
+    route_chain:
+    - general_operator
+    confidence: low
+    ambiguity_reasons:
+    - no specific domain trigger matched; defaulting to general_operator metadata only
+    max_chain_limit_applied: false
+- id: strip_thread_context_hot_security_terms
+  description: security hot terms inside thread context block are stripped; weather drives routing
+  category: stripping
+  lang: en
+  prompt: '[Thread context from Slack]
+
+    [thread reply] auth secrets token exposure cloudflare firewall permissions
+
+    [End of thread context]
+
+
+    What is the weather forecast for today?'
+  expected:
+    primary_profile: researcher
+    route_chain:
+    - researcher
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: strip_thread_context_replying_to_engineer_no_security_overlay
+  description: security terms in thread body stripped; replying-to line with rebase keeps engineer primary; no security overlay
+  category: stripping
+  lang: en
+  prompt: '[Replying to: hermes-rebase-local-customizations]
+
+    [Thread context from Slack thread]
+
+    [thread reply] provider credentials changed, gateway deploy, auth json conflicts
+
+    [End of thread context]
+
+
+    отчет вызывает у меня двоякое ощущение. давай его полностью переделаем. сделай план и покажи мне'
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
