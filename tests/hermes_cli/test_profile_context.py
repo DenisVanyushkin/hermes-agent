@@ -247,6 +247,23 @@ def test_cloudflare_investigation_without_change_does_not_hard_stop():
     assert result.critical_approval_required is False
 
 
+def test_role_context_ignores_thread_context_for_approval_and_reviewer_selection():
+    result = build_role_context_for_task(
+        "Сделай план и переделай структуру отчета.\n\n"
+        "[Replying to: hermes-rebase-local-customizations]\n"
+        "[Thread context from Slack thread]\n"
+        "[thread parent] Cronjob Response: hermes-rebase-local-customizations\n"
+        "[thread reply] auth provider gateway cloudflare firewall token rotation\n"
+        "[End of thread context]"
+    )
+
+    assert result.selected_role == "engineer"
+    assert result.reviewer_profile is None
+    assert result.requires_reviewer is False
+    assert result.requires_explicit_approval is False
+    assert result.critical_approval_required is False
+
+
 def test_user_level_fallback_refresh_timer_context_keeps_normal_operational_mutation_without_hard_stop():
     result = build_role_context_for_task(
         "Install a user-level systemd timer for "

@@ -259,6 +259,44 @@ def test_cloudflare_investigation_without_change_does_not_require_critical_appro
     assert plan.production_runtime_mutation is False
 
 
+def test_thread_context_with_sensitive_cron_report_does_not_trigger_critical_hard_stop():
+    task = (
+        "Давай его полностью переделаем как продуктовый отчет и покажи мне план.\n\n"
+        "[Replying to: hermes-rebase-local-customizations]\n"
+        "[Thread context from Slack thread]\n"
+        "[thread parent] Cronjob Response: hermes-rebase-local-customizations\n"
+        "[thread reply] provider credentials changed, gateway deploy, auth json conflicts\n"
+        "[End of thread context]"
+    )
+
+    plan = _plan(task)
+
+    assert plan.selected_role == "engineer"
+    assert plan.operation_category in {"read_only_investigation", "general_task"}
+    assert plan.reviewer_profile is None
+    assert plan.requires_reviewer is False
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
+
+
+def test_quoted_sensitive_terms_do_not_trigger_hard_stop_when_latest_instruction_is_read_only():
+    task = (
+        "Сделай план по переработке отчета и перечисли конфликтующие фичи.\n\n"
+        "[Replying to: cron report]\n"
+        "Cronjob Response:\n"
+        "rotate provider credentials after gateway deploy\n"
+        "-------------\n"
+    )
+
+    plan = _plan(task)
+
+    assert plan.selected_role == "engineer"
+    assert plan.reviewer_profile is None
+    assert plan.requires_reviewer is False
+    assert plan.requires_explicit_approval is False
+    assert plan.critical_approval_required is False
+
+
 def test_read_only_systemd_timer_inspection_stays_engineer_without_hard_stop():
     plan = _plan("Inspect systemctl --user status, list timers, list services, and journalctl logs for Hermes fallback refresh timer")
     assert plan.selected_role == "engineer"

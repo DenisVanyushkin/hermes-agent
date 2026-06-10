@@ -374,6 +374,34 @@ def test_user_level_fallback_refresh_timer_with_negative_guardrails_does_not_tak
     assert agent._execute_tool_calls_called is False
 
 
+def test_thread_context_with_sensitive_cron_report_does_not_take_approval_preflight(monkeypatch):
+    plugin_calls = []
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(
+        agent,
+        "отчет вызывает у меня двоякое ощущение. давай его полностью переделаем. сделай план и покажи мне\n\n"
+        "[Replying to: hermes-rebase-local-customizations]\n"
+        "[Thread context from Slack thread]\n"
+        "[thread parent] Cronjob Response: hermes-rebase-local-customizations\n"
+        "[thread reply] provider credentials changed, gateway deploy, auth json conflicts\n"
+        "[End of thread context]",
+        conversation_history=None,
+    )
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
+    assert plugin_calls
+    assert agent._run_codex_app_server_turn_called is True
+    assert agent._execute_tool_calls_called is False
+
+
 def test_detects_clarify_tool_call_on_assistant_turn():
     clarify_tool_call = SimpleNamespace(function=SimpleNamespace(name="clarify"))
     memory_tool_call = SimpleNamespace(function=SimpleNamespace(name="memory"))

@@ -132,6 +132,20 @@ def test_route_engineer_for_investigation_with_negative_trading_guardrail():
     assert "trading_observer_trader_deferred" not in decision.selected_profiles
 
 
+def test_route_thread_context_does_not_add_security_overlay_for_read_only_report_redesign():
+    decision = _route(
+        "[Replying to: hermes-rebase-local-customizations]\n"
+        "[Thread context from Slack thread]\n"
+        "[thread parent] Cronjob Response: hermes-rebase-local-customizations\n"
+        "[thread reply] provider credentials changed, gateway deploy, auth json conflicts\n"
+        "[End of thread context]\n\n"
+        "отчет вызывает у меня двоякое ощущение. давай его полностью переделаем. сделай план и покажи мне"
+    )
+
+    assert decision.primary_profile == "engineer"
+    assert decision.selected_profiles == ["engineer"]
+
+
 def test_route_researcher_for_current_info_terms():
     decision = _route("weather news company research current facts digest report")
 
