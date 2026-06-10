@@ -219,7 +219,7 @@ def _cmd_validate(args, hermes_home) -> None:
             print(f"error: {args.path_or_name!r} is not a directory and not an installed package name", file=sys.stderr)
             sys.exit(1)
 
-    manifest, errors, warnings = validate_manifest_path(target)
+    manifest, errors, warnings = validate_manifest_path(target, check_overlap=True)
 
     for warn in warnings:
         print(f"warning: {warn}")

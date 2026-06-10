@@ -1,0 +1,18 @@
+schema_version: 1
+package:
+  name: acknowledged-role
+  version: 0.1.0
+role:
+  id: acknowledged_role
+  canonical_id: acknowledged_role
+  display_name: Acknowledged Role
+  role_family: test
+  routing:
+    triggers:
+      en:
+      - deploy
+    overlap_notes:
+    - conflicts_with: engineer
+      trigger: deploy
+      rationale: This role extends deploy workflows for a specific environment
+boundary_mode: advisory
