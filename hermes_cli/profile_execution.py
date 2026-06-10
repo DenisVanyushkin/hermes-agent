@@ -12,6 +12,7 @@ import json
 import re
 
 from hermes_cli.profile_approval import ApprovalPreview
+from hermes_cli.profile_request_context import classification_request_text, routing_request_text
 from hermes_cli.profile_routing import RouteDecision, route_task
 
 
@@ -60,6 +61,7 @@ _ENGINEER_TERMS = (
     "regression",
     "approval gate",
     "approval-gate",
+    "rebase",
 )
 
 _PERSONAL_ADMIN_TERMS = (
@@ -517,22 +519,9 @@ class RoleExecutionError(RuntimeError):
     """Raised when role execution planning cannot be produced safely."""
 
 
-_CRON_ROLE_ROUTING_BANNER_RE = re.compile(
-    r'^\[important:\s+you are running as a scheduled cron job\..*?nothing more\.\]\s*',
-    re.IGNORECASE | re.DOTALL,
-)
-
-
 def _normalize(text: str) -> str:
-    translated = text.lower().translate(str.maketrans({ch: " " for ch in "!\"#$%&'()*+,./:;<=>?@[\\]^`{|}~"}))
+    translated = text.lower().translate(str.maketrans({ch: " " for ch in "!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~"}))
     return " ".join(translated.split())
-
-
-def _strip_cron_role_routing_banner(task: str) -> str:
-    if not isinstance(task, str) or not task.strip():
-        return ""
-    stripped = task.lstrip()
-    return _CRON_ROLE_ROUTING_BANNER_RE.sub("", stripped, count=1)
 
 
 def _contains(normalized_text: str, phrases: tuple[str, ...]) -> bool:
@@ -570,7 +559,7 @@ def _is_negative_guardrail_clause(normalized_clause: str) -> bool:
 def _partition_task_clauses(task: str) -> tuple[list[str], list[str]]:
     action_clauses: list[str] = []
     guardrail_clauses: list[str] = []
-    for clause in _split_task_clauses(task):
+    for clause in _split_task_clauses(classification_request_text(task)):
         if _is_negative_guardrail_clause(clause):
             guardrail_clauses.append(clause)
         else:
@@ -641,7 +630,7 @@ def classify_sensitive_diff_triggers(task: str, changed_paths: list[str] | None 
 
 
 def _task_with_paths(task: str, changed_paths: list[str] | None = None) -> str:
-    return _compose_normalized_text(_split_task_clauses(task), changed_paths=changed_paths)
+    return _compose_normalized_text(_split_task_clauses(classification_request_text(task)), changed_paths=changed_paths)
 
 
 def _action_text(task: str, changed_paths: list[str] | None = None) -> str:
@@ -752,7 +741,7 @@ def classify_production_runtime_mutation(task: str, changed_paths: list[str] | N
 
 
 def classify_external_commitment(task: str) -> bool:
-    normalized = _normalize(task)
+    normalized = _normalize(classification_request_text(task))
     if _contains(normalized, _EXTERNAL_COMMITMENT_TERMS):
         if "draft message" in normalized or "draft a message" in normalized:
             return False
@@ -785,7 +774,7 @@ def _ignore_sensitive_surface_classification(normalized_text: str) -> bool:
 
 
 def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, bool, str]:
-    routing_task = _strip_cron_role_routing_banner(task)
+    routing_task = routing_request_text(task)
     normalized = _normalize(routing_task)
     action_normalized = _action_text(routing_task)
     docs_first_markers = (
@@ -853,7 +842,7 @@ def _requires_reviewer(
 
 def _requires_scribe(selected_role: str, durable_outcome_expected: bool, task: str) -> tuple[bool, str]:
     if selected_role == "scribe":
-        normalized = _normalize(task)
+        normalized = _normalize(classification_request_text(task))
         if "handoff" in normalized or "document" in normalized or "docs" in normalized:
             return True, "durable handoff/documentation outcome should be recorded"
         return True, "selected role is documentation/memory capture"
@@ -870,7 +859,7 @@ def _requires_explicit_approval(
     sensitive_triggers: list[str],
     task: str,
 ) -> tuple[bool, str]:
-    normalized = _normalize(task)
+    normalized = _normalize(classification_request_text(task))
     if operation_category == _OPERATION_CATEGORY_SECURITY_CRITICAL:
         return True, _security_critical_approval_reason(normalized, sensitive_triggers)
     if external_commitment:
@@ -883,7 +872,7 @@ def _requires_explicit_approval(
 
 
 def _durable_outcome_expected(selected_role: str, external_commitment: bool, task: str) -> bool:
-    normalized = _normalize(task)
+    normalized = _normalize(classification_request_text(task))
     if _is_read_only_diagnostic_task(normalized):
         return False
     if selected_role == "scribe":
