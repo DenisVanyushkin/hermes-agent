@@ -14,6 +14,7 @@ import string
 
 import yaml
 
+from hermes_cli.profile_request_context import routing_request_text
 from hermes_cli.profile_validation import (
     ACTIVE_PROFILE_IDS,
     DEFAULT_MODEL_POLICY_PATH,
@@ -118,6 +119,7 @@ _INFRA_TERMS = (
     "approval gate",
     "approval gate regression",
     "approval-gate",
+    "rebase",
 )
 
 _CAREER_TERMS = (
@@ -420,7 +422,7 @@ def route_task(
     policy = load_model_policy(policy_path)
     _validate_loaded_architecture(registry, policy)
 
-    normalized_text = _normalize(request_text)
+    normalized_text = _normalize(routing_request_text(request_text))
     matched = {
         "security": _contains_any(normalized_text, _SECURITY_TERMS),
         "infra": _contains_any(normalized_text, _INFRA_TERMS),
