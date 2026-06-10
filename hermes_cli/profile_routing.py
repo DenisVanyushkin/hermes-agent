@@ -187,6 +187,9 @@ _DOCS_TERMS = (
 
 _RESEARCH_TERMS = (
     "weather",
+    "погода",
+    "погоды",
+    "прогноз погоды",
     "news",
     "company research",
     "current facts",
