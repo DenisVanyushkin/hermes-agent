@@ -1,0 +1,14 @@
+schema_version: 1
+package:
+  name: substring-role
+  version: 0.1.0
+role:
+  id: substring_role
+  canonical_id: substring_role
+  display_name: Substring Role
+  role_family: test
+  routing:
+    triggers:
+      en:
+      - deploy containers
+boundary_mode: advisory

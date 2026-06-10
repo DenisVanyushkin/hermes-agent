@@ -248,6 +248,7 @@ def validate_manifest_path(
     source_path: Path,
     *,
     check_builtin_collision: bool = True,
+    check_overlap: bool = False,
     known_ids: set[str] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str], list[str]]:
     """Validate a role-package.yaml at source_path/role-package.yaml.
@@ -295,6 +296,16 @@ def validate_manifest_path(
     purpose = role.get("purpose_summary")
     if not purpose:
         warnings.append("role.purpose_summary is missing; recommended for operator docs")
+
+    # Overlap / routing-flip validation (Slice 4, opt-in)
+    if check_overlap and manifest is not None and not errors:
+        from hermes_cli.role_overlap import validate_package_overlap  # noqa: PLC0415
+        pkg_name = str(manifest.get("package", {}).get("name", source_path.name))
+        for f in validate_package_overlap(manifest, pkg_name):
+            if f.severity == "ERROR":
+                errors.append(f"[{f.code}] {f.message}")
+            else:
+                warnings.append(f"[{f.code}] {f.message}")
 
     return manifest, errors, warnings
 
@@ -455,7 +466,7 @@ def install_package(
     if not source_path.is_dir():
         raise RolePackageError(f"source path is not a directory: {source_path}")
 
-    manifest, errors, warnings = validate_manifest_path(source_path)
+    manifest, errors, warnings = validate_manifest_path(source_path, check_overlap=True)
     if errors:
         raise RolePackageError("manifest validation failed:\n" + "\n".join(f"  - {e}" for e in errors))
 
