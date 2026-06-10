@@ -164,3 +164,19 @@ A healthy system usually shows:
 - current branch = `local/customizations`
 - clean status
 - a short, understandable stack of local commits on top of upstream
+
+## Role-package hunk ledger (placeholder)
+
+Planned role-package work (docs/audit/05–07) will touch the following
+upstream-active files with small call-out hunks. Every hunk added there must
+be listed here (file, anchor, purpose) so post-rebase repair stays mechanical:
+
+- agent/conversation_loop.py — role context build + approval preflight + deferred pre_llm_call (present today)
+- agent/turn_context.py — invoke_pre_llm_call deferral kwarg (present today)
+- agent/turn_finalizer.py — requested_model field, response_pre_transformed kwarg (present today)
+- hermes_cli/main.py — future `hermes role` subparser wiring
+- agent/skill_utils.py — future package skill dirs
+- tools/env_passthrough.py — future manifest-capped passthrough
+- hermes_cli/plugins.py — future role-policy check in get_pre_tool_call_block_message
+- agent/tool_executor.py — future contextvars propagation
+- tools/approval.py — future role-scoped pattern table (v1+)
