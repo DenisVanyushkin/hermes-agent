@@ -354,3 +354,102 @@ def test_routing_falls_back_to_constants_when_yaml_malformed(tmp_path, monkeypat
 
     decision = _route("оцени вакансию")
     assert decision.primary_profile == "career_strategist"
+
+
+# ---------------------------------------------------------------------------
+# Slice 2D: YAML routing policy tests
+# ---------------------------------------------------------------------------
+
+def test_yaml_policy_max_chain_length_caps_route_chain(tmp_path, monkeypatch):
+    """route_task() honours max_chain_length from YAML policy.
+
+    Inject a YAML with max_chain_length=1 and verify a naturally-3-hop task
+    is truncated to 1 hop with max_chain_limit_applied=True.
+    """
+    import yaml as _yaml
+    import hermes_cli.profile_routing as _mod
+
+    real_path = REPO_ROOT / "config" / "hermes-routing-triggers.yaml"
+    real_data = _yaml.safe_load(real_path.read_text(encoding="utf-8"))
+    real_data["policy"]["overlays"]["max_chain_length"] = 1
+
+    tmp_yaml = tmp_path / "triggers.yaml"
+    tmp_yaml.write_text(_yaml.dump(real_data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr(_mod, "_DEFAULT_ROUTING_TRIGGERS_PATH", tmp_yaml)
+    _mod._clear_routing_terms_cache()
+    _mod._clear_routing_policy_cache()
+
+    # 3-hop task: engineer + security_auditor + scribe
+    decision = route_task(
+        "production WebUI exposure change",
+        registry_path=REGISTRY_PATH,
+        policy_path=POLICY_PATH,
+    )
+    chain = [h.profile_id for h in decision.route_chain]
+    assert len(chain) == 1, f"Expected chain of 1 with cap; got {chain}"
+    assert decision.max_chain_limit_applied is True
+
+
+def test_yaml_policy_overlay_rule_disable_removes_overlay(tmp_path, monkeypatch):
+    """Removing the engineer→security_auditor overlay rule from YAML suppresses that overlay.
+
+    Without the rule, 'production WebUI exposure change' should NOT add security_auditor.
+    """
+    import yaml as _yaml
+    import hermes_cli.profile_routing as _mod
+
+    real_path = REPO_ROOT / "config" / "hermes-routing-triggers.yaml"
+    real_data = _yaml.safe_load(real_path.read_text(encoding="utf-8"))
+
+    # Strip the engineer→security_auditor overlay rule
+    rules = real_data["policy"]["overlays"]["rules"]
+    real_data["policy"]["overlays"]["rules"] = [
+        r for r in rules
+        if not (r.get("when_primary") == "engineer" and r.get("add_profile") == "security_auditor")
+    ]
+
+    tmp_yaml = tmp_path / "triggers.yaml"
+    tmp_yaml.write_text(_yaml.dump(real_data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr(_mod, "_DEFAULT_ROUTING_TRIGGERS_PATH", tmp_yaml)
+    _mod._clear_routing_terms_cache()
+    _mod._clear_routing_policy_cache()
+
+    decision = route_task(
+        "production WebUI exposure change",
+        registry_path=REGISTRY_PATH,
+        policy_path=POLICY_PATH,
+    )
+    assert "security_auditor" not in decision.selected_profiles, (
+        "engineer→security_auditor overlay rule was removed from YAML; overlay must not appear"
+    )
+
+
+def test_yaml_policy_fallback_on_missing_policy_section(tmp_path, monkeypatch):
+    """YAML without 'policy' section falls back to hardcoded policy; route_task() still works."""
+    import yaml as _yaml
+    import hermes_cli.profile_routing as _mod
+
+    real_path = REPO_ROOT / "config" / "hermes-routing-triggers.yaml"
+    real_data = _yaml.safe_load(real_path.read_text(encoding="utf-8"))
+    del real_data["policy"]
+
+    tmp_yaml = tmp_path / "triggers_no_policy.yaml"
+    tmp_yaml.write_text(_yaml.dump(real_data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr(_mod, "_DEFAULT_ROUTING_TRIGGERS_PATH", tmp_yaml)
+    _mod._clear_routing_terms_cache()
+    _mod._clear_routing_policy_cache()
+
+    # Should still work via fallback
+    decision = route_task(
+        "production WebUI exposure change",
+        registry_path=REGISTRY_PATH,
+        policy_path=POLICY_PATH,
+    )
+    assert decision.primary_profile == "engineer"
+    assert "security_auditor" in decision.selected_profiles
+
+
+def test_clear_routing_policy_cache_exists():
+    """_clear_routing_policy_cache() must be importable and callable (needed by test fixtures)."""
+    from hermes_cli.profile_routing import _clear_routing_policy_cache
+    _clear_routing_policy_cache()  # must not raise

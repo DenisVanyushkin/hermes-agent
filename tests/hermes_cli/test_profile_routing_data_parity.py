@@ -228,3 +228,126 @@ def test_profile_architecture_validator_passes():
     assert result.returncode == 0, (
         f"validate_profile_architecture.py failed:\n{result.stdout}\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 9. YAML policy section shape (Slice 2D)
+# ---------------------------------------------------------------------------
+
+def test_yaml_policy_section_exists(triggers_raw):
+    assert "policy" in triggers_raw, "'policy' section missing from hermes-routing-triggers.yaml"
+
+
+def test_yaml_policy_primary_domain_order_present(triggers_raw):
+    policy = triggers_raw.get("policy", {})
+    assert "primary_domain_order" in policy, "policy.primary_domain_order missing"
+
+
+def test_yaml_policy_primary_domain_order_contains_all_domains(triggers_raw):
+    policy = triggers_raw.get("policy", {})
+    order = policy.get("primary_domain_order", [])
+    for domain in _ROUTING_DOMAINS:
+        assert domain in order, f"domain {domain!r} missing from policy.primary_domain_order"
+
+
+def test_yaml_policy_primary_domain_order_no_duplicates(triggers_raw):
+    policy = triggers_raw.get("policy", {})
+    order = list(policy.get("primary_domain_order", []))
+    counts = Counter(order)
+    dupes = {d: n for d, n in counts.items() if n > 1}
+    assert not dupes, f"policy.primary_domain_order has duplicates: {dupes}"
+
+
+def test_yaml_policy_docs_first_enabled(triggers_raw):
+    policy = triggers_raw.get("policy", {})
+    docs_first = policy.get("docs_first", {})
+    assert docs_first.get("enabled") is True, "policy.docs_first.enabled must be true"
+
+
+def test_yaml_policy_overlays_enabled(triggers_raw):
+    policy = triggers_raw.get("policy", {})
+    overlays = policy.get("overlays", {})
+    assert overlays.get("enabled") is True, "policy.overlays.enabled must be true"
+
+
+def test_yaml_policy_max_chain_length(triggers_raw):
+    policy = triggers_raw.get("policy", {})
+    overlays = policy.get("overlays", {})
+    assert overlays.get("max_chain_length") == 3, (
+        f"policy.overlays.max_chain_length must be 3, got {overlays.get('max_chain_length')!r}"
+    )
+
+
+def test_yaml_policy_overlay_rules_present(triggers_raw):
+    policy = triggers_raw.get("policy", {})
+    overlays = policy.get("overlays", {})
+    rules = overlays.get("rules", [])
+    assert len(rules) >= 1, "policy.overlays.rules must not be empty"
+
+
+def test_yaml_policy_overlay_rules_reference_valid_domains(triggers_raw):
+    policy = triggers_raw.get("policy", {})
+    overlays = policy.get("overlays", {})
+    valid_domains = set(_ROUTING_DOMAINS)
+    for rule in overlays.get("rules", []):
+        for domain in rule.get("add_if_any_domain_matches", []):
+            assert domain in valid_domains, (
+                f"overlay rule references unknown domain {domain!r} in add_if_any_domain_matches"
+            )
+
+
+def test_yaml_policy_overlay_rules_reference_valid_profiles(triggers_raw):
+    policy = triggers_raw.get("policy", {})
+    overlays = policy.get("overlays", {})
+    # Known routable profile IDs from the architecture.
+    known_profiles = {
+        "engineer", "security_auditor", "career_strategist", "scribe",
+        "researcher", "general_operator", "chief_hermes",
+    }
+    for rule in overlays.get("rules", []):
+        wp = rule.get("when_primary")
+        assert wp in known_profiles, f"overlay rule when_primary={wp!r} is not a known profile"
+        ap = rule.get("add_profile")
+        assert ap in known_profiles, f"overlay rule add_profile={ap!r} is not a known profile"
+
+
+# ---------------------------------------------------------------------------
+# 10. YAML policy is active at runtime (Slice 2D)
+# ---------------------------------------------------------------------------
+
+def test_route_task_uses_yaml_routing_policy(monkeypatch):
+    """route_task() reads max_chain_length from YAML policy.
+
+    Inject a temp YAML that is identical to the real one except max_chain_length=1,
+    then assert that a 3-hop task is truncated to 1 hop.
+    """
+    import hermes_cli.profile_routing as _mod
+
+    # Load real triggers and override max_chain_length.
+    real_data = load_routing_triggers(_TRIGGERS_PATH)
+    real_data["policy"]["overlays"]["max_chain_length"] = 1
+
+    tmp_path = _TRIGGERS_PATH.parent.parent / "tests" / "fixtures" / "_tmp_policy_test_triggers.yaml"
+    try:
+        import yaml as _yaml
+        tmp_path.write_text(_yaml.dump(real_data, allow_unicode=True), encoding="utf-8")
+        monkeypatch.setattr(_mod, "_DEFAULT_ROUTING_TRIGGERS_PATH", tmp_path)
+        _mod._clear_routing_terms_cache()
+        _mod._clear_routing_policy_cache()
+
+        # "production WebUI exposure change" → engineer + security_auditor + scribe (3 hops without cap)
+        decision = route_task(
+            "production WebUI exposure change",
+            registry_path=_REGISTRY_PATH,
+            policy_path=_POLICY_PATH,
+        )
+        chain = [h.profile_id for h in decision.route_chain]
+        assert len(chain) == 1, (
+            f"max_chain_length=1 should truncate chain to 1 hop; got {chain}"
+        )
+        assert decision.max_chain_limit_applied is True
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        _mod._clear_routing_terms_cache()
+        _mod._clear_routing_policy_cache()
