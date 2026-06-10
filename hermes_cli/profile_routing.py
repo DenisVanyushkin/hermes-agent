@@ -212,6 +212,23 @@ _RESEARCH_TERMS = (
     "купить btc",
 )
 
+# Python constants remain authoritative until Slice 2C. _DOCS_FIRST_MARKERS is
+# exposed at module level so parity helpers and tests can reference it directly.
+_DOCS_FIRST_MARKERS = (
+    "зафиксируй",
+    "handoff",
+    "final status",
+    "финальный статус",
+    "update docs",
+    "update state",
+    "status update",
+)
+
+# Path to the YAML routing triggers data model (Slice 2A). Used by parity tests
+# and future Slice 2C migration only — not used by route_task().
+_DEFAULT_ROUTING_TRIGGERS_PATH = Path(__file__).resolve().parents[1] / "config" / "hermes-routing-triggers.yaml"
+
+
 
 def _normalize(text: str) -> str:
     translated = text.lower().translate(str.maketrans({ch: " " for ch in string.punctuation}))
@@ -250,6 +267,83 @@ def load_profile_registry(path: Path | str = DEFAULT_PROFILE_REGISTRY_PATH) -> d
 def load_model_policy(path: Path | str = DEFAULT_MODEL_POLICY_PATH) -> dict[str, Any]:
     return _load_yaml_file(Path(path))
 
+
+
+
+# ---------------------------------------------------------------------------
+# Slice 2A parity helpers — Python constants remain authoritative until Slice 2C.
+# These helpers expose both paths (constants and YAML) for dual-path parity tests.
+# route_task() does NOT use these helpers; it reads Python constants directly.
+# ---------------------------------------------------------------------------
+
+_ROUTING_DOMAINS = ("security", "infra", "career", "docs", "research")
+
+_CONSTANTS_BY_DOMAIN: dict[str, tuple[str, ...]] = {
+    "security": _SECURITY_TERMS,
+    "infra": _INFRA_TERMS,
+    "career": _CAREER_TERMS,
+    "docs": _DOCS_TERMS,
+    "research": _RESEARCH_TERMS,
+}
+
+
+def get_builtin_routing_terms_from_constants() -> dict[str, list[str]]:
+    """Return routing trigger terms from authoritative Python constants.
+
+    Flat sorted list per domain plus docs_first_markers.
+    No language split is available in constants; all terms are returned together.
+    Python constants remain authoritative until Slice 2C.
+    """
+    result: dict[str, list[str]] = {
+        domain: sorted(terms) for domain, terms in _CONSTANTS_BY_DOMAIN.items()
+    }
+    result["docs_first_markers"] = sorted(_DOCS_FIRST_MARKERS)
+    return result
+
+
+def load_routing_triggers(path: Path | str = _DEFAULT_ROUTING_TRIGGERS_PATH) -> dict[str, Any]:
+    """Load the YAML routing triggers data model (config/hermes-routing-triggers.yaml).
+
+    Used for parity validation and future Slice 2C migration only.
+    route_task() does NOT call this function.
+    """
+    return _load_yaml_file(Path(path))
+
+
+def get_builtin_routing_terms_from_yaml(
+    path: Path | str = _DEFAULT_ROUTING_TRIGGERS_PATH,
+) -> dict[str, list[str]]:
+    """Return routing trigger terms from the YAML data model (flattened en+ru per domain).
+
+    For parity comparison against get_builtin_routing_terms_from_constants().
+    Used for parity validation and future Slice 2C migration only.
+    route_task() does NOT call this function.
+    """
+    data = load_routing_triggers(path)
+    domains_data = data.get("domains", {})
+    if not isinstance(domains_data, dict):
+        raise RoutingError("hermes-routing-triggers.yaml: 'domains' must be a mapping")
+
+    result: dict[str, list[str]] = {}
+    for domain in _ROUTING_DOMAINS:
+        domain_entry = domains_data.get(domain, {})
+        if not isinstance(domain_entry, dict):
+            raise RoutingError(f"hermes-routing-triggers.yaml: domain {domain!r} must be a mapping")
+        triggers = domain_entry.get("triggers", {})
+        if not isinstance(triggers, dict):
+            raise RoutingError(f"hermes-routing-triggers.yaml: domain {domain!r} triggers must be a mapping")
+        en_terms: list[str] = list(triggers.get("en") or [])
+        ru_terms: list[str] = list(triggers.get("ru") or [])
+        result[domain] = sorted(en_terms + ru_terms)
+
+    dfm_data = data.get("docs_first_markers", {})
+    if not isinstance(dfm_data, dict):
+        raise RoutingError("hermes-routing-triggers.yaml: 'docs_first_markers' must be a mapping")
+    dfm_en: list[str] = list(dfm_data.get("en") or [])
+    dfm_ru: list[str] = list(dfm_data.get("ru") or [])
+    result["docs_first_markers"] = sorted(dfm_en + dfm_ru)
+
+    return result
 
 def _validate_loaded_architecture(registry: dict[str, Any], policy: dict[str, Any]) -> None:
     issues = []
@@ -329,15 +423,7 @@ def _determine_primary_profile(normalized_text: str, matched: dict[str, list[str
     has_docs = bool(matched["docs"])
     has_research = bool(matched["research"])
 
-    docs_first_markers = (
-        "зафиксируй",
-        "handoff",
-        "final status",
-        "финальный статус",
-        "update docs",
-        "update state",
-        "status update",
-    )
+    docs_first_markers = _DOCS_FIRST_MARKERS
     if has_docs and any(marker in normalized_text for marker in docs_first_markers):
         return "scribe"
     if has_infra:

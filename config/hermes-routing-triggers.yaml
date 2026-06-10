@@ -1,0 +1,183 @@
+# Routing trigger data model for Hermes Profile Architecture.
+#
+# IMPORTANT: Python constants in hermes_cli/profile_routing.py remain
+# AUTHORITATIVE until Slice 2C. This file is used ONLY for:
+#   - Dual-path parity validation (see tests/hermes_cli/test_profile_routing_data_parity.py)
+#   - Future migration to YAML-driven routing (Slice 2C)
+#
+# Do NOT change route_task() behavior based on this file until Slice 2C lands.
+# Every change here must be reflected in the Python constants and vice versa.
+schema_version: 1
+
+domains:
+  security:
+    # EN-only: no Russian security trigger terms defined in _SECURITY_TERMS.
+    triggers:
+      en:
+        - auth
+        - authentication
+        - secrets
+        - secret
+        - tokens
+        - token
+        - exposure
+        - public access
+        - cloudflare
+        - firewall
+        - permissions
+        - permission
+        - scheduler
+        - tool boundary
+        - tool-boundary
+        - browser profile
+        - privileged
+        - security review
+        - security audit
+        - audit
+        - threat model
+      ru: []
+
+  infra:
+    # EN-only: no Russian infra trigger terms defined in _INFRA_TERMS.
+    triggers:
+      en:
+        - webui
+        - deploy
+        - docker
+        - systemd
+        - smoke
+        - rollback
+        - logs
+        - log
+        - db
+        - database
+        - monitoring
+        - runtime
+        - production
+        - host
+        - service
+        - operational
+        - change
+        - restart
+        - reload
+        - patch
+        - build
+        - migration
+        - repair
+        - investigate
+        - regression
+        - approval gate
+        - approval gate regression
+        - approval-gate
+        - rebase
+      ru: []
+
+  career:
+    triggers:
+      en:
+        - vacancy
+        - cv
+        - cover letter
+        - recruiter
+        - recruiter message
+        - head of product
+        - vp product
+        - cpo
+        - career
+        - job
+        - role fit
+        - apply
+        - application
+        - job intel
+        - job-intel
+        - job opportunity
+        - interview
+        - application strategy
+      ru:
+        - оцени вакансию
+        - стоит ли откликаться
+        - зааплаиться
+        - отклик
+        - резюме
+        - сопроводительное письмо
+        - карьер
+
+  docs:
+    triggers:
+      en:
+        - docs
+        - documentation
+        - document
+        - runbook
+        - state
+        - decision
+        - open question
+        - profile handoff
+        - handoff
+        - record the decision
+        - write handoff
+        - update state
+        - update docs
+        - update documentation
+        - capture durable memory
+        - capture the outcome
+        - summarize today's work
+        - today's work
+        - today's hermes role work
+        - final status
+        - status update
+      ru:
+        - финальный статус
+        - зафиксируй
+        - зафиксируй итог
+        - зафиксируй решение
+        - зафиксируй сегодняшнюю работу
+        - запиши итог
+        - сохрани итог
+        - сохрани в документацию
+        - напиши handoff
+        - сделай handoff
+        - обнови state
+        - обнови docs
+        - обнови документацию
+
+  research:
+    triggers:
+      en:
+        - weather
+        - news
+        - company research
+        - current facts
+        - digest
+        - report
+        - due diligence
+        - market overview
+        - current context
+        - btc
+        - bitcoin
+        - crypto
+        - binance
+        - coinbase
+        - exchange fees
+        - fees
+        - commissions
+      ru:
+        - погода
+        - погоды
+        - прогноз погоды
+        - купить btc
+        - комиссии
+
+# Docs-first markers: phrases that elevate 'scribe' over 'engineer'/'security_auditor'
+# when docs signals are also present. Checked against the full normalized request text.
+# Mixed EN/RU; split here for documentation clarity only — all markers apply regardless of language.
+docs_first_markers:
+  en:
+    - handoff
+    - final status
+    - update docs
+    - update state
+    - status update
+  ru:
+    - зафиксируй
+    - финальный статус
