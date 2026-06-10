@@ -113,6 +113,9 @@ _RESEARCH_TERMS = (
     "company research",
     "news",
     "weather",
+    "погода",
+    "погоды",
+    "прогноз погоды",
     "report",
     "digest",
     "btc",
@@ -514,9 +517,22 @@ class RoleExecutionError(RuntimeError):
     """Raised when role execution planning cannot be produced safely."""
 
 
+_CRON_ROLE_ROUTING_BANNER_RE = re.compile(
+    r'^\[important:\s+you are running as a scheduled cron job\..*?nothing more\.\]\s*',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 def _normalize(text: str) -> str:
     translated = text.lower().translate(str.maketrans({ch: " " for ch in "!\"#$%&'()*+,./:;<=>?@[\\]^`{|}~"}))
     return " ".join(translated.split())
+
+
+def _strip_cron_role_routing_banner(task: str) -> str:
+    if not isinstance(task, str) or not task.strip():
+        return ""
+    stripped = task.lstrip()
+    return _CRON_ROLE_ROUTING_BANNER_RE.sub("", stripped, count=1)
 
 
 def _contains(normalized_text: str, phrases: tuple[str, ...]) -> bool:
@@ -769,8 +785,9 @@ def _ignore_sensitive_surface_classification(normalized_text: str) -> bool:
 
 
 def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, bool, str]:
-    normalized = _normalize(task)
-    action_normalized = _action_text(task)
+    routing_task = _strip_cron_role_routing_banner(task)
+    normalized = _normalize(routing_task)
+    action_normalized = _action_text(routing_task)
     docs_first_markers = (
         "зафиксируй",
         "handoff",
