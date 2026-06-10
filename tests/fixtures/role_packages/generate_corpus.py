@@ -461,5 +461,72 @@ def generate() -> None:
         print(f"  {pp:30s} {cnt}")
 
 
+def check_parity() -> bool:
+    """Compare routing terms from Python constants vs YAML triggers file.
+
+    Returns True if they match, False (with printed diff) otherwise.
+    """
+    from hermes_cli.profile_routing import (
+        get_builtin_routing_terms_from_constants,
+        get_builtin_routing_terms_from_yaml,
+        _ROUTING_DOMAINS,
+    )
+
+    _TRIGGERS_PATH = _REPO_ROOT / "config" / "hermes-routing-triggers.yaml"
+    constants = get_builtin_routing_terms_from_constants()
+    yaml_terms = get_builtin_routing_terms_from_yaml(_TRIGGERS_PATH)
+
+    all_keys = list(_ROUTING_DOMAINS) + ["docs_first_markers"]
+    mismatches: list[str] = []
+    for key in all_keys:
+        c_set = set(constants.get(key, []))
+        y_set = set(yaml_terms.get(key, []))
+        missing = c_set - y_set
+        extra = y_set - c_set
+        if missing:
+            mismatches.append(f"  [{key}] in constants but missing from YAML: {sorted(missing)}")
+        if extra:
+            mismatches.append(f"  [{key}] extra in YAML not in constants: {sorted(extra)}")
+
+    if mismatches:
+        print("PARITY MISMATCH:")
+        for m in mismatches:
+            print(m)
+        return False
+    print(f"Parity check passed — all {len(all_keys)} domains match.")
+    return True
+
+
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Golden routing corpus generator")
+    parser.add_argument(
+        "--source",
+        choices=["constants", "yaml"],
+        default="constants",
+        help=(
+            "Authoritative source for corpus generation. "
+            "'constants' (default) uses Python constants (authoritative until Slice 2C). "
+            "'yaml' uses config/hermes-routing-triggers.yaml (for future migration testing)."
+        ),
+    )
+    parser.add_argument(
+        "--check-parity",
+        action="store_true",
+        help="Compare routing terms from constants vs YAML and report mismatches. Does not generate a corpus.",
+    )
+    args = parser.parse_args()
+
+    if args.check_parity:
+        ok = check_parity()
+        sys.exit(0 if ok else 1)
+
+    if args.source == "yaml":
+        print(
+            "WARNING: --source yaml generates corpus from YAML triggers (not authoritative). "
+            "Python constants remain authoritative until Slice 2C. "
+            "Do NOT commit a corpus generated with --source yaml as the golden corpus."
+        )
+
     generate()
