@@ -602,6 +602,18 @@ def _resolve_skill_dir(name: str, category: str = None) -> Path:
     return _skills_dir() / name
 
 
+def _is_package_skill_path(skill_path: "Path") -> bool:
+    """Return True when skill_path lives inside an installed role package.
+
+    Best-effort — returns False on any import or resolution error.
+    """
+    try:
+        from hermes_cli.role_packages import get_package_for_skill_path
+        return get_package_for_skill_path(skill_path) is not None
+    except Exception:
+        return False
+
+
 def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     """
     Find a skill by name across all skill directories.
@@ -1370,6 +1382,17 @@ def skill_manage(
     )
     if gate_result is not None:
         return gate_result
+
+    # Package-owned skills must not be modified by the agent — they are managed
+    # via `hermes package install`. Guard all write actions.
+    if action != "create":
+        skill_info = _find_skill(name)
+        if skill_info and _is_package_skill_path(skill_info["path"]):
+            return tool_error(
+                f"Skill '{name}' is owned by an installed role package and cannot"
+                " be modified directly. Use 'hermes package install' to update it.",
+                success=False,
+            )
 
     if action == "create":
         if not content:
