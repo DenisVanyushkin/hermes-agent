@@ -67,6 +67,29 @@ class RouteDecision:
     max_chain_limit_applied: bool
 
 
+@dataclass(frozen=True)
+class OverlayRule:
+    id: str
+    when_primary: str
+    add_if_any_domain_matches: list[str]
+    add_profile: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class OverlayPolicy:
+    enabled: bool
+    max_chain_length: int
+    rules: list[OverlayRule]
+
+
+@dataclass(frozen=True)
+class RoutingPolicy:
+    primary_domain_order: list[str]
+    docs_first_enabled: bool
+    overlays: OverlayPolicy
+
+
 _SECURITY_TERMS = (
     "auth",
     "authentication",
@@ -234,9 +257,41 @@ _active_routing_terms_cache: "dict[str, list[str]] | None" = None
 
 
 def _clear_routing_terms_cache() -> None:
-    """Clear the cached active routing terms. Used in tests for path isolation."""
-    global _active_routing_terms_cache
+    """Clear the cached active routing terms and policy. Used in tests for path isolation."""
+    global _active_routing_terms_cache, _active_routing_policy_cache
     _active_routing_terms_cache = None
+    _active_routing_policy_cache = None
+
+
+
+_FALLBACK_ROUTING_POLICY = RoutingPolicy(
+    primary_domain_order=["infra", "security", "career", "docs", "research"],
+    docs_first_enabled=True,
+    overlays=OverlayPolicy(
+        enabled=True,
+        max_chain_length=3,
+        rules=[
+            OverlayRule("engineer_security_overlay", "engineer", ["security"], "security_auditor",
+                        "security-sensitive risk overlay detected"),
+            OverlayRule("career_researcher_overlay", "career_strategist", ["research"], "researcher",
+                        "company research/current facts requested alongside job-intel analysis"),
+            OverlayRule("engineer_scribe_overlay", "engineer", ["docs", "security"], "scribe",
+                        "documentation/state handoff follow-up required"),
+            OverlayRule("security_auditor_scribe_overlay", "security_auditor", ["docs"], "scribe",
+                        "documentation/state handoff follow-up required"),
+            OverlayRule("career_scribe_overlay", "career_strategist", ["docs"], "scribe",
+                        "documentation/state handoff follow-up required"),
+        ],
+    ),
+)
+
+# Module-level cache for active routing policy. Cleared in tests via _clear_routing_policy_cache().
+_active_routing_policy_cache: "RoutingPolicy | None" = None
+
+
+def _clear_routing_policy_cache() -> None:
+    global _active_routing_policy_cache
+    _active_routing_policy_cache = None
 
 
 _logger = logging.getLogger(__name__)
@@ -386,6 +441,80 @@ def get_active_builtin_routing_terms() -> dict[str, list[str]]:
         return fallback
 
 
+
+
+def _parse_routing_policy(data: dict) -> RoutingPolicy:
+    """Parse and validate 'policy' section from YAML routing triggers data."""
+    policy_data = data.get("policy")
+    if not isinstance(policy_data, dict):
+        raise RoutingError("YAML policy section missing or not a mapping")
+
+    order = policy_data.get("primary_domain_order")
+    if not isinstance(order, list) or not order:
+        raise RoutingError("YAML policy.primary_domain_order missing or empty")
+
+    docs_first = policy_data.get("docs_first", {})
+    if not isinstance(docs_first, dict):
+        raise RoutingError("YAML policy.docs_first must be a mapping")
+    docs_first_enabled = bool(docs_first.get("enabled", True))
+
+    overlays_data = policy_data.get("overlays", {})
+    if not isinstance(overlays_data, dict):
+        raise RoutingError("YAML policy.overlays must be a mapping")
+    overlays_enabled = bool(overlays_data.get("enabled", True))
+    max_chain_length = overlays_data.get("max_chain_length", 3)
+    if not isinstance(max_chain_length, int) or max_chain_length < 1:
+        raise RoutingError("YAML policy.overlays.max_chain_length must be a positive integer")
+
+    raw_rules = overlays_data.get("rules", [])
+    if not isinstance(raw_rules, list):
+        raise RoutingError("YAML policy.overlays.rules must be a list")
+    rules: list[OverlayRule] = []
+    for i, rule in enumerate(raw_rules):
+        if not isinstance(rule, dict):
+            raise RoutingError(f"YAML overlay rule [{i}] must be a mapping")
+        rule_id = str(rule.get("id") or f"rule_{i}")
+        when_primary = rule.get("when_primary")
+        add_profile = rule.get("add_profile")
+        domains = rule.get("add_if_any_domain_matches", [])
+        reason = str(rule.get("reason") or "")
+        if not isinstance(when_primary, str) or not when_primary:
+            raise RoutingError(f"YAML overlay rule [{i}] missing when_primary")
+        if not isinstance(add_profile, str) or not add_profile:
+            raise RoutingError(f"YAML overlay rule [{i}] missing add_profile")
+        if not isinstance(domains, list) or not domains:
+            raise RoutingError(f"YAML overlay rule [{i}] missing add_if_any_domain_matches")
+        rules.append(OverlayRule(rule_id, when_primary, list(domains), add_profile, reason))
+
+    return RoutingPolicy(
+        primary_domain_order=list(order),
+        docs_first_enabled=docs_first_enabled,
+        overlays=OverlayPolicy(enabled=overlays_enabled, max_chain_length=max_chain_length, rules=rules),
+    )
+
+
+def get_active_builtin_routing_policy() -> RoutingPolicy:
+    """Return the active routing policy.
+
+    Source priority:
+    1. 'policy' section in config/hermes-routing-triggers.yaml if valid.
+    2. _FALLBACK_ROUTING_POLICY (Python constants) if YAML is missing/malformed.
+
+    Result is cached at module level; call _clear_routing_policy_cache() between tests.
+    """
+    global _active_routing_policy_cache
+    if _active_routing_policy_cache is not None:
+        return _active_routing_policy_cache
+    try:
+        data = load_routing_triggers(_DEFAULT_ROUTING_TRIGGERS_PATH)
+        policy = _parse_routing_policy(data)
+        _active_routing_policy_cache = policy
+        return policy
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("YAML routing policy unavailable, using Python fallback: %s", exc)
+        _active_routing_policy_cache = _FALLBACK_ROUTING_POLICY
+        return _FALLBACK_ROUTING_POLICY
+
 def _validate_loaded_architecture(registry: dict[str, Any], policy: dict[str, Any]) -> None:
     issues = []
     issues.extend(validate_profile_registry(registry))
@@ -457,54 +586,52 @@ def resolve_profile_model(profile_id: str, policy: dict[str, Any]) -> ResolvedMo
     )
 
 
+_DOMAIN_TO_PROFILE: dict[str, str] = {
+    "infra": "engineer",
+    "security": "security_auditor",
+    "career": "career_strategist",
+    "docs": "scribe",
+    "research": "researcher",
+}
+
+
 def _determine_primary_profile(
     normalized_text: str,
     matched: dict[str, list[str]],
     docs_first_markers: "tuple[str, ...] | list[str]" = _DOCS_FIRST_MARKERS,
+    policy: "RoutingPolicy | None" = None,
 ) -> str:
-    has_security = bool(matched["security"])
-    has_infra = bool(matched["infra"])
-    has_career = bool(matched["career"])
-    has_docs = bool(matched["docs"])
-    has_research = bool(matched["research"])
-
-    docs_first_markers = docs_first_markers
-    if has_docs and any(marker in normalized_text for marker in docs_first_markers):
-        return "scribe"
-    if has_infra:
-        return "engineer"
-    if has_security:
-        return "security_auditor"
-    if has_career:
-        return "career_strategist"
-    if has_docs:
-        return "scribe"
-    if has_research:
-        return "researcher"
+    if policy is None:
+        policy = get_active_builtin_routing_policy()
+    if policy.docs_first_enabled and matched.get("docs"):
+        if any(marker in normalized_text for marker in docs_first_markers):
+            return "scribe"
+    for domain in policy.primary_domain_order:
+        if matched.get(domain):
+            return _DOMAIN_TO_PROFILE.get(domain, "general_operator")
     return "general_operator"
 
 
-def _build_overlays(primary_profile: str, matched: dict[str, list[str]], normalized_text: str) -> list[tuple[str, str]]:
+def _build_overlays(
+    primary_profile: str,
+    matched: dict[str, list[str]],
+    normalized_text: str,
+    policy: "RoutingPolicy | None" = None,
+) -> list[tuple[str, str]]:
+    if policy is None:
+        policy = get_active_builtin_routing_policy()
+    if not policy.overlays.enabled:
+        return []
     overlays: list[tuple[str, str]] = []
-
-    security_overlay_needed = bool(matched["security"]) and primary_profile != "security_auditor"
-    researcher_overlay_needed = bool(matched["research"]) and primary_profile == "career_strategist"
-
-    docs_follow_up_needed = False
-    if primary_profile == "engineer":
-        docs_follow_up_needed = bool(matched["docs"]) or bool(matched["security"])
-    elif primary_profile == "security_auditor":
-        docs_follow_up_needed = bool(matched["docs"]) or "document" in normalized_text or "documenting" in normalized_text
-    elif primary_profile == "career_strategist":
-        docs_follow_up_needed = bool(matched["docs"]) and ("document" in normalized_text or "handoff" in normalized_text)
-
-    if primary_profile == "engineer" and security_overlay_needed:
-        overlays.append(("security_auditor", "security-sensitive risk overlay detected"))
-    if primary_profile == "career_strategist" and researcher_overlay_needed:
-        overlays.append(("researcher", "company research/current facts requested alongside job-intel analysis"))
-    if primary_profile in {"engineer", "security_auditor", "career_strategist"} and docs_follow_up_needed:
-        overlays.append(("scribe", "documentation/state handoff follow-up required"))
-
+    added_profiles: set[str] = set()
+    for rule in policy.overlays.rules:
+        if rule.when_primary != primary_profile:
+            continue
+        if rule.add_profile in added_profiles:
+            continue
+        if any(matched.get(d) for d in rule.add_if_any_domain_matches):
+            overlays.append((rule.add_profile, rule.reason))
+            added_profiles.add(rule.add_profile)
     return overlays
 
 
@@ -553,6 +680,7 @@ def route_task(
     policy = load_model_policy(policy_path)
     _validate_loaded_architecture(registry, policy)
 
+    routing_policy = get_active_builtin_routing_policy()
     normalized_text = _normalize(routing_request_text(request_text))
     active_terms = get_active_builtin_routing_terms()
     matched = {
@@ -564,18 +692,23 @@ def route_task(
     }
 
     primary_profile = _determine_primary_profile(
-        normalized_text, matched, active_terms.get("docs_first_markers", list(_DOCS_FIRST_MARKERS))
+        normalized_text, matched,
+        active_terms.get("docs_first_markers", list(_DOCS_FIRST_MARKERS)),
+        routing_policy,
     )
-    overlays = _build_overlays(primary_profile, matched, normalized_text)
+    overlays = _build_overlays(primary_profile, matched, normalized_text, routing_policy)
 
     route_profiles: list[tuple[str, str]] = []
     if primary_profile != "chief_hermes":
         route_profiles.append((primary_profile, "primary route selected from matched task signals"))
     route_profiles.extend(overlays)
 
+    effective_max_chain_limit = (
+        routing_policy.overlays.max_chain_length if max_chain_limit == 3 else max_chain_limit
+    )
     max_chain_limit_applied = False
-    if len(route_profiles) > max_chain_limit:
-        route_profiles = route_profiles[:max_chain_limit]
+    if len(route_profiles) > effective_max_chain_limit:
+        route_profiles = route_profiles[:effective_max_chain_limit]
         max_chain_limit_applied = True
 
     route_chain: list[RouteHop] = []

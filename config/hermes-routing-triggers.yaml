@@ -9,6 +9,60 @@
 # Every change here must be reflected in the Python constants and vice versa.
 schema_version: 1
 
+# policy section to prepend to hermes-routing-triggers.yaml
+
+policy:
+  # Primary domain evaluation order for _determine_primary_profile().
+  # The first matching domain wins (unless docs_first markers override).
+  # Python fallback: _FALLBACK_ROUTING_POLICY.primary_domain_order
+  primary_domain_order:
+    - infra
+    - security
+    - career
+    - docs
+    - research
+
+  # When enabled, a docs-domain match combined with any docs_first_marker
+  # elevates 'scribe' above even infra/security in _determine_primary_profile().
+  docs_first:
+    enabled: true
+
+  overlays:
+    enabled: true
+    # Maximum number of hops in route_chain (primary + overlays).
+    max_chain_length: 3
+    # Rules are evaluated in order; each rule adds at most one overlay hop.
+    # when_primary: primary profile ID that triggers this rule
+    # add_if_any_domain_matches: overlay is added if ANY listed domain has keyword hits
+    # add_profile: overlay profile to append
+    rules:
+      - id: engineer_security_overlay
+        when_primary: engineer
+        add_if_any_domain_matches: [security]
+        add_profile: security_auditor
+        reason: security-sensitive risk overlay detected
+      - id: career_researcher_overlay
+        when_primary: career_strategist
+        add_if_any_domain_matches: [research]
+        add_profile: researcher
+        reason: company research/current facts requested alongside job-intel analysis
+      - id: engineer_scribe_overlay
+        when_primary: engineer
+        add_if_any_domain_matches: [docs, security]
+        add_profile: scribe
+        reason: documentation/state handoff follow-up required
+      - id: security_auditor_scribe_overlay
+        when_primary: security_auditor
+        add_if_any_domain_matches: [docs]
+        add_profile: scribe
+        reason: documentation/state handoff follow-up required
+      - id: career_scribe_overlay
+        when_primary: career_strategist
+        add_if_any_domain_matches: [docs]
+        add_profile: scribe
+        reason: documentation/state handoff follow-up required
+
+
 domains:
   security:
     # EN-only: no Russian security trigger terms defined in _SECURITY_TERMS.
