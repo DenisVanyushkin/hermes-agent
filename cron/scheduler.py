@@ -2540,6 +2540,14 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
                 logger.warning("context_from: failed to read output for job %r: %s", source_job_id, e)
                 # silent skip — do not pollute the prompt with error messages
 
+    job_title = str(job.get("name") or "").strip()
+    if job_title:
+        prompt = (
+            "## Scheduled Task Metadata\n"
+            f"Title: {job_title}\n\n"
+            f"{prompt}"
+        )
+
     # Always prepend cron execution guidance so the agent knows how
     # delivery works and can suppress delivery when appropriate.
     cron_hint = (

@@ -5509,3 +5509,61 @@ class TestSetCronSessionTitle:
         from cron.scheduler import _set_cron_session_title
         assert _set_cron_session_title(None, "sess-1", "X") is None
         assert _set_cron_session_title(MagicMock(), "", "X") is None
+
+
+class TestScheduledJobRoleRouting:
+    def _classify(self, job: dict):
+        from hermes_cli.profile_context import build_role_context_for_task
+
+        prompt = _build_job_prompt(job)
+        return build_role_context_for_task(prompt)
+
+    def test_weather_job_title_routes_to_researcher_or_general_operator_not_engineer(self):
+        result = self._classify({
+            "id": "weather123abc",
+            "name": "Ежедневный прогноз погоды Алматы",
+            "prompt": "Дай краткий прогноз погоды в Алматы на сегодня.",
+        })
+
+        assert result.selected_role in {"researcher", "general_operator"}
+        assert result.selected_role != "engineer"
+
+    def test_nightly_digest_job_title_routes_to_researcher_not_engineer(self):
+        result = self._classify({
+            "id": "digest123abcd",
+            "name": "Nightly interesting-message digest",
+            "prompt": "Summarize the most interesting messages and themes from today into a concise digest.",
+        })
+
+        assert result.selected_role == "researcher"
+        assert result.selected_role != "engineer"
+
+    def test_repo_diagnostics_job_stays_engineer(self):
+        result = self._classify({
+            "id": "engine123abcd",
+            "name": "Repo test and diagnostics",
+            "prompt": "Run repo diagnostics, inspect failing tests, and summarize what needs fixing.",
+        })
+
+        assert result.selected_role == "engineer"
+
+    def test_docs_memory_job_stays_scribe(self):
+        result = self._classify({
+            "id": "scribe123abcd",
+            "name": "Docs handoff refresh",
+            "prompt": "Update the handoff and record durable memory for today's Hermes work.",
+        })
+
+        assert result.selected_role == "scribe"
+
+    def test_cloudflare_mutation_job_preserves_security_hard_stop(self):
+        result = self._classify({
+            "id": "secure123abcd",
+            "name": "Cloudflare exposure mutation",
+            "prompt": "Update Cloudflare tunnel and firewall rules for public exposure.",
+        })
+
+        assert result.selected_role == "engineer"
+        assert result.reviewer_profile == "security_auditor"
+        assert result.requires_explicit_approval is True
+        assert result.critical_approval_required is True
