@@ -1,0 +1,42 @@
+schema_version: 1
+
+package:
+  name: hermes-researcher-lab
+  version: 0.1.0
+  description: Internal example role package for research workflows
+  author: Hermes Project
+  license: MIT
+
+role:
+  id: hermes_researcher_lab
+  canonical_id: hermes_researcher_lab
+  display_name: Hermes Researcher Lab
+  role_family: research_lab
+
+  purpose_summary: |
+    Example package demonstrating a clean no-env research role lifecycle.
+
+  model_tier_request: standard
+
+  persona: |
+    You are an internal research lab role used to test Hermes role packages.
+    You help gather evidence, separate facts from assumptions, and produce concise research briefs.
+
+  routing:
+    triggers:
+      en:
+        - hermes researcher lab package
+        - role package research lab
+        - internal researcher package test
+      ru:
+        - исследовательский тест пакета роли
+        - тест исследовательского role package
+
+  tools:
+    allowed_categories:
+      - read_only_inspection
+    boundary_mode: observe_warn
+
+boundary_mode: observe_warn
+
+env_requires: []
