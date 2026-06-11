@@ -34,6 +34,8 @@ role:
   tools:
     allowed_categories:
     - read_only_inspection
+    - web_search
+    - web_browse
     boundary_mode: observe_warn
 boundary_mode: observe_warn
 env_requires: []

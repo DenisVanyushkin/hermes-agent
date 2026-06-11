@@ -326,3 +326,119 @@ class TestGoldenCorpusUnaffected:
                 failures.append(f"{prompt!r}: expected {expected!r}, got {actual!r}")
 
         assert not failures, "Golden corpus failures:\n" + "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# New taxonomy categories — pre-v1 pass
+# ---------------------------------------------------------------------------
+
+
+class TestNewTaxonomyCategories:
+    """Verify web_search, web_browse, job_intel_read are accepted by the validator
+    and that the updated shadow manifests pass without errors."""
+
+    def test_web_search_in_known_categories(self) -> None:
+        from hermes_cli.role_packages import KNOWN_TOOL_CATEGORIES
+        assert "web_search" in KNOWN_TOOL_CATEGORIES
+
+    def test_web_browse_in_known_categories(self) -> None:
+        from hermes_cli.role_packages import KNOWN_TOOL_CATEGORIES
+        assert "web_browse" in KNOWN_TOOL_CATEGORIES
+
+    def test_job_intel_read_in_known_categories(self) -> None:
+        from hermes_cli.role_packages import KNOWN_TOOL_CATEGORIES
+        assert "job_intel_read" in KNOWN_TOOL_CATEGORIES
+
+    def test_researcher_manifest_has_web_search(self) -> None:
+        import yaml as _yaml
+        data = _yaml.safe_load(
+            (SHADOW_DIR / "hermes-researcher-core" / "role-package.yaml").read_text(encoding="utf-8")
+        )
+        cats = data.get("role", {}).get("tools", {}).get("allowed_categories", [])
+        assert "web_search" in cats, "researcher-core missing web_search"
+        assert "web_browse" in cats, "researcher-core missing web_browse"
+
+    def test_career_strategist_manifest_has_job_intel_read(self) -> None:
+        import yaml as _yaml
+        data = _yaml.safe_load(
+            (SHADOW_DIR / "hermes-career-strategist-core" / "role-package.yaml").read_text(encoding="utf-8")
+        )
+        cats = data.get("role", {}).get("tools", {}).get("allowed_categories", [])
+        assert "job_intel_read" in cats, "career-strategist-core missing job_intel_read"
+        assert "web_search" in cats, "career-strategist-core missing web_search"
+        assert "web_browse" in cats, "career-strategist-core missing web_browse"
+
+    def test_engineer_manifest_has_shell_general(self) -> None:
+        import yaml as _yaml
+        data = _yaml.safe_load(
+            (SHADOW_DIR / "hermes-engineer-core" / "role-package.yaml").read_text(encoding="utf-8")
+        )
+        cats = data.get("role", {}).get("tools", {}).get("allowed_categories", [])
+        assert "shell_general" in cats, "engineer-core missing shell_general"
+
+    def test_researcher_manifest_validates_with_new_categories(self) -> None:
+        pkg = SHADOW_DIR / "hermes-researcher-core"
+        _, errors, _ = validate_manifest_path(pkg, check_builtin_collision=False)
+        assert errors == [], f"researcher-core invalid: {errors}"
+
+    def test_career_strategist_manifest_validates_with_new_categories(self) -> None:
+        pkg = SHADOW_DIR / "hermes-career-strategist-core"
+        _, errors, _ = validate_manifest_path(pkg, check_builtin_collision=False)
+        assert errors == [], f"career-strategist-core invalid: {errors}"
+
+    def test_engineer_manifest_validates_with_shell_general(self) -> None:
+        pkg = SHADOW_DIR / "hermes-engineer-core"
+        _, errors, _ = validate_manifest_path(pkg, check_builtin_collision=False)
+        assert errors == [], f"engineer-core invalid: {errors}"
+
+    def test_new_categories_are_all_observe_warn_only(self) -> None:
+        """New categories are taxonomy-only; shadow manifests must remain observe_warn."""
+        import yaml as _yaml
+        for pkg_name in ("hermes-researcher-core", "hermes-engineer-core",
+                         "hermes-career-strategist-core"):
+            data = _yaml.safe_load(
+                (SHADOW_DIR / pkg_name / "role-package.yaml").read_text(encoding="utf-8")
+            )
+            assert data.get("boundary_mode") == "observe_warn", (
+                f"{pkg_name}: boundary_mode must stay observe_warn after taxonomy update"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Pre-v1 golden corpus gap cases
+# ---------------------------------------------------------------------------
+
+
+class TestPreV1CorpusGaps:
+    """The 7 corpus cases added from the 2026-06-11 calibration report."""
+
+    _EXPECTED = {
+        "infra_ru_fallback_deploy": "general_operator",
+        "infra_ru_fallback_docker": "general_operator",
+        "docs_first_ru_zafiksiruy_reshenie": "scribe",
+        "docs_first_ru_obnovit_state_handoff": "scribe",
+        "docs_infra_no_docs_first": "engineer",
+        "security_infra_change": "engineer",
+        "research_pure_due_diligence": "researcher",
+    }
+
+    def test_all_seven_cases_route_correctly(self) -> None:
+        from hermes_cli.profile_routing import route_task
+        import yaml as _yaml
+
+        corpus_path = REPO_ROOT / "tests" / "fixtures" / "role_packages" / "golden_routing_corpus.yaml"
+        corpus = _yaml.safe_load(corpus_path.read_text(encoding="utf-8"))
+        entries_by_id = {e["id"]: e for e in corpus.get("entries", [])}
+
+        failures = []
+        for entry_id, expected_primary in self._EXPECTED.items():
+            entry = entries_by_id.get(entry_id)
+            if entry is None:
+                failures.append(f"{entry_id!r}: missing from corpus")
+                continue
+            prompt = entry.get("prompt", "")
+            actual = route_task(prompt).primary_profile
+            if actual != expected_primary:
+                failures.append(f"{entry_id!r}: expected {expected_primary!r}, got {actual!r}")
+
+        assert not failures, "Pre-v1 corpus gap failures:\n" + "\n".join(failures)

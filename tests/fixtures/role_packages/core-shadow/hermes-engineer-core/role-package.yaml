@@ -36,6 +36,7 @@ role:
     allowed_categories:
     - read_only_inspection
     - repo_edit
+    - shell_general
     boundary_mode: observe_warn
 boundary_mode: observe_warn
 env_requires: []
