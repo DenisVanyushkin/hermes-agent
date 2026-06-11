@@ -246,6 +246,126 @@ def test_critical_approval_preflight_blocks_plugin_and_interim_paths(monkeypatch
     assert stream_events == []
 
 
+def test_explicit_approval_outside_quoted_context_unblocks_pending_gate(monkeypatch):
+    plugin_calls = []
+    captured = {}
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    def _capture_codex_turn(**kwargs):
+        captured.update(kwargs)
+        return {
+            "final_response": "normal path reached",
+            "last_reasoning": None,
+            "messages": kwargs.get("messages", []),
+            "api_calls": 0,
+            "completed": True,
+            "failed": False,
+            "partial": False,
+            "interrupted": False,
+            "response_transformed": False,
+            "response_previewed": False,
+            "turn_exit_reason": "codex_app_server_stub",
+            "model": agent.model,
+            "requested_model": agent._requested_model,
+            "provider": agent.provider,
+            "base_url": agent.base_url,
+            "session_id": agent.session_id,
+        }
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+    agent._run_codex_app_server_turn = _capture_codex_turn
+
+    prior_task = (
+        "Create ~/.hermes/skills/role-package-author/SKILL.md\n"
+        "Create docs/profile-handoffs/2026-06-11-role-package-author-skill.md\n"
+        "Run read-only tests"
+    )
+    conversation_history = [
+        {"role": "user", "content": "# Task: Create a Hermes Skill for Authoring Role Packages"},
+        {
+            "role": "assistant",
+            "content": "I need explicit approval before any mutation-capable changes.",
+            "_approval_gate": {
+                "required": True,
+                "critical_hard_stop": True,
+                "selected_role": "scribe",
+                "canonical_role": "scribe",
+                "operation_category": "security_critical_mutation",
+                "reviewer_profile": None,
+                "approval_reason": "writes under ~/.hermes require explicit approval",
+                "task": prior_task,
+                "model_selection": {"policy_name": "approval_critical"},
+            },
+        },
+    ]
+
+    approval_reply = (
+        '[Replying to: "# Task: Create a Hermes Skill for Authoring Role Packages ..."]\n'
+        "[denis] approve\n"
+        "Proceed with the task exactly as scoped.\n"
+        "Clarifications:\n"
+        "- Creating ~/.hermes/skills/role-package-author/SKILL.md is approved.\n"
+        "- Creating the report under docs/profile-handoffs/ is approved.\n"
+        "- Running read-only verification commands and relevant tests is approved.\n"
+        "- Do not read .env, auth.json, provider config, or secret files.\n"
+        "- Do not run hermes role install.\n"
+        "- Do not create or install any generated role package.\n"
+    )
+
+    result = run_conversation(
+        agent,
+        approval_reply,
+        conversation_history=conversation_history,
+    )
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
+    assert plugin_calls
+    assert agent._run_codex_app_server_turn_called is False
+    assert "Create ~/.hermes/skills/role-package-author/SKILL.md" in captured["user_message"]
+    assert "Do not read .env, auth.json, provider config, or secret files." in captured["user_message"]
+    assert "[Replying to:" not in captured["user_message"]
+    assert captured["original_user_message"] == approval_reply
+
+
+def test_quoted_approve_without_live_consent_does_not_unblock_pending_gate(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    conversation_history = [
+        {"role": "user", "content": "Set up Cloudflare Tunnel for Hermes WebUI"},
+        {
+            "role": "assistant",
+            "content": "I need explicit approval before any mutation-capable changes.",
+            "_approval_gate": {
+                "required": True,
+                "critical_hard_stop": True,
+                "selected_role": "engineer",
+                "canonical_role": "engineer",
+                "operation_category": "security_critical_mutation",
+                "reviewer_profile": "security_auditor",
+                "approval_reason": "Cloudflare/public exposure changes require explicit approval",
+                "task": "Set up Cloudflare Tunnel for Hermes WebUI",
+                "model_selection": {"policy_name": "approval_critical"},
+            },
+        },
+    ]
+
+    result = run_conversation(
+        agent,
+        '[Replying to: "approve"]\nNo, do not proceed yet.',
+        conversation_history=conversation_history,
+    )
+
+    assert result["turn_exit_reason"] == "approval_required_preflight"
+    assert "explicit approval" in result["final_response"].lower()
+    assert agent._run_codex_app_server_turn_called is False
+
+
 def test_haircut_prompt_does_not_take_critical_hard_stop_path(monkeypatch):
     plugin_calls = []
 
