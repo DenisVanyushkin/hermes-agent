@@ -124,6 +124,33 @@ def _should_hard_stop_for_approval(result: Any) -> bool:
     return bool(getattr(result, "critical_approval_required", False))
 
 
+def _should_preflight_block_for_profile_context(
+    result: Any,
+    *,
+    pending_gate: dict[str, Any] | None = None,
+    short_circuit_taken: bool = False,
+) -> bool:
+    """Return True when role metadata should stop the turn before the model runs.
+
+    Current policy is action-gated rather than topic-gated: profile execution
+    metadata may still mark a task as security-critical for summaries,
+    reviewer hints, and model selection, but text-only turns must not trigger
+    an interactive approval prompt before any concrete tool or command is
+    proposed. Actual mutation approval remains enforced at tool execution time.
+
+    Existing pending approval gates are still blocking until the user either
+    explicitly approves them or starts a new turn without the pending-gate
+    context. That replay behavior remains here so this seam can later be
+    replaced by a dedicated approval decision model without changing callers.
+
+    This helper is the seam for a future dedicated approval-decision model.
+    """
+
+    if pending_gate is not None and not short_circuit_taken:
+        return True
+    return False
+
+
 def _latest_pending_approval_gate(messages: list[dict[str, Any]], current_turn_user_idx: int) -> dict[str, Any] | None:
     """Return the latest unresolved profile approval gate before this user turn."""
 
@@ -934,7 +961,11 @@ def run_conversation(
             "selection_error": str(exc),
         }
 
-    if _should_hard_stop_for_approval(_role_context_result):
+    if _should_preflight_block_for_profile_context(
+        _role_context_result,
+        pending_gate=_pending_approval_gate,
+        short_circuit_taken=_short_circuit_taken,
+    ):
         final_response = render_explicit_approval_request(
             _role_context_result,
             task_text=original_user_message if isinstance(original_user_message, str) else "",
