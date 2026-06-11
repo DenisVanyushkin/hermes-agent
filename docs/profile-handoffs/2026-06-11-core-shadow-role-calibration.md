@@ -342,19 +342,16 @@ Total: 7 new entries recommended. All verified against current routing.
 
 ### Pre-activation Requirements (must be done before activating any package routing)
 
-1. **Add `web_search`/`browser` to `KNOWN_TOOL_CATEGORIES`**
-   Blocks researcher and career_strategist manifest completion.
+1. ~~**Add `web_search`/`browser` to `KNOWN_TOOL_CATEGORIES`**~~ **✓ DONE 2026-06-11** — `web_search`, `web_browse`, `job_intel_read` added to `KNOWN_TOOL_CATEGORIES` and `hermes-role-tool-map.yaml`.
 
-2. **Add `job_intel_read` to `KNOWN_TOOL_CATEGORIES`**
-   Blocks career_strategist manifest completion.
+2. ~~**Add `job_intel_read` to `KNOWN_TOOL_CATEGORIES`**~~ **✓ DONE 2026-06-11** — included in item 1 above.
 
-3. **Add `shell_general` to engineer-core manifest** (already in KNOWN_TOOL_CATEGORIES)
-   `shell_general` exists; just needs to be declared in the manifest.
+3. ~~**Add `shell_general` to engineer-core manifest**~~ **✓ DONE 2026-06-11** — `shell_general` added to `hermes-engineer-core` allowed_categories.
 
 4. **Add `model_tier_request: reasoning/critical` machinery**
    Without this, engineer and security_auditor packages run on the wrong model tier.
 
-5. **Extend golden corpus** with the 7 missing entries identified above.
+5. ~~**Extend golden corpus** with the 7 missing entries identified above.~~ **✓ DONE 2026-06-11** — 7 entries added.
 
 ### Activation Sequence (once pre-activation requirements are met)
 
@@ -390,6 +387,22 @@ test_profile_validation.py            }
 scripts/validate_profile_architecture.py: PASSED
 
 Total: 339 passed, 0 failed
+
+---
+
+## Post-Taxonomy-Gap Update (2026-06-11)
+
+Pre-activation requirements 1, 2, 3, 5 closed in commit `test(roles): add shadow role taxonomy and routing corpus gaps`:
+
+- **`web_search`, `web_browse`, `job_intel_read`** added to `KNOWN_TOOL_CATEGORIES` and `hermes-role-tool-map.yaml`
+- **`shell_general`** added to `hermes-engineer-core` manifest
+- **7 golden corpus entries** added covering: Russian infra fallback (×2), Russian docs-first (×2), infra+docs overlay, security+infra chain, pure research
+- **`test_core_shadow_role_packages.py`** extended with `TestNewTaxonomyCategories` (11 tests) and `TestPreV1CorpusGaps` (1 test)
+
+Remaining pre-v1 blockers:
+- `model_tier_request: reasoning` machinery (engineer)
+- `model_tier_request: critical` machinery (security_auditor)
+- observe_warn calibration run (≥1 week, <5% false positive rate per role before routing activation)
 ```
 
 ---

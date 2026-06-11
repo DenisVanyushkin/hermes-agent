@@ -459,7 +459,36 @@ allowed_categories:
 
 Roles allowed to be exploratory or speculative.
 
-**Enforcement note:** In MVP, categories are advisory only. In v1, they become enforced at dispatch for `enforced_tools` boundary mode.
+### Web Search
+
+```yaml
+allowed_categories:
+  - web_search
+```
+
+Read-only web search and query tools (`web_search`, `web_extract`).
+
+### Web Browse
+
+```yaml
+allowed_categories:
+  - web_browse
+```
+
+Read-only browser navigation and page inspection (`browser_navigate`, `browser_snapshot`, etc.).
+
+### Job Intel Read
+
+```yaml
+allowed_categories:
+  - job_intel_read
+```
+
+Read-only access to job-intelligence pipeline data and state. No writes to job pipeline.
+
+**Enforcement note:** In MVP, categories are advisory only. In v1, they become enforced at dispatch for `enforced_tools` boundary mode. The categories `web_search`, `web_browse`, and `job_intel_read` are taxonomy additions from the pre-v1 calibration pass — accepted by validation but not yet enforced.
+
+**`shell_general` note:** Mutation-capable. Declaring it in a manifest does not bypass or lower the existing approval gate at the tool/action boundary. All shell actions still require the same user approval as built-in roles.
 
 ## Complete Example
 

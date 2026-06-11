@@ -435,6 +435,23 @@ hermes role validate ~/.hermes/role-packages/my-other-pkg
 hermes role install ~/my-advisor
 ```
 
+## Tool Category Taxonomy
+
+Valid `allowed_categories` values in manifests:
+
+| Category | Type | Notes |
+|---|---|---|
+| `read_only_inspection` | Active | Files, search, logs |
+| `repo_edit` | Active | File and code mutations |
+| `shell_general` | Active | Shell; mutation-capable; approval-gated |
+| `production_deploy` | Placeholder | Observe-only; no enforcement |
+| `secrets_read` | Placeholder | Observe-only; no enforcement |
+| `web_search` | Taxonomy | No enforcement yet (pre-v1) |
+| `web_browse` | Taxonomy | No enforcement yet (pre-v1) |
+| `job_intel_read` | Taxonomy | No enforcement yet (pre-v1) |
+
+Taxonomy categories are accepted by the manifest validator and produce observe_warn log entries. They will become enforceable when `enforced_tools` mode is activated in v1.
+
 ## Safety Guidelines
 
 ### Never Put Secrets in Packages

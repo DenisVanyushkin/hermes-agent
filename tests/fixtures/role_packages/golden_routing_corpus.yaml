@@ -696,3 +696,107 @@ entries:
     confidence: high
     ambiguity_reasons: []
     max_chain_limit_applied: false
+
+# ---------------------------------------------------------------------------
+# Pre-v1 gap entries — added 2026-06-11 from core shadow role calibration.
+# ---------------------------------------------------------------------------
+
+- id: infra_ru_fallback_deploy
+  description: Russian infra deploy prompt has no RU infra triggers; falls back to general_operator (documented limitation)
+  category: infra
+  lang: ru
+  prompt: "Задеплой сервис на прод хост"
+  expected:
+    primary_profile: general_operator
+    route_chain:
+    - general_operator
+    confidence: low
+    ambiguity_reasons:
+    - no specific domain trigger matched; defaulting to general_operator metadata only
+    max_chain_limit_applied: false
+
+- id: infra_ru_fallback_docker
+  description: Russian docker-logs prompt has no RU infra triggers; falls back to general_operator (documented limitation)
+  category: infra
+  lang: ru
+  prompt: "Проверь докер логи на ошибки"
+  expected:
+    primary_profile: general_operator
+    route_chain:
+    - general_operator
+    confidence: low
+    ambiguity_reasons:
+    - no specific domain trigger matched; defaulting to general_operator metadata only
+    max_chain_limit_applied: false
+
+- id: docs_first_ru_zafiksiruy_reshenie
+  description: Russian docs-first trigger (зафиксируй) routes to scribe
+  category: docs_first
+  lang: ru
+  prompt: "Зафиксируй решение о деплое"
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+
+- id: docs_first_ru_obnovit_state_handoff
+  description: Russian update-state + handoff signal routes to scribe via docs-first rule
+  category: docs_first
+  lang: ru
+  prompt: "Обнови state и сделай handoff после изменения"
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+
+- id: docs_infra_no_docs_first
+  description: "update runbook + deploy → engineer primary with scribe overlay; docs signal not strong enough for docs-first"
+  category: overlay
+  lang: en
+  prompt: "update the runbook after the deploy"
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: infra, docs'
+    - 'route chain includes follow-up hops: scribe'
+    max_chain_limit_applied: false
+
+- id: security_infra_change
+  description: security audit required for a change → engineer primary + security_auditor + scribe chain
+  category: overlay
+  lang: en
+  prompt: "security audit is required for this change"
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    - security_auditor
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: security, infra'
+    - 'route chain includes follow-up hops: security_auditor, scribe'
+    max_chain_limit_applied: false
+
+- id: research_pure_due_diligence
+  description: pure research prompt (due diligence) routes to researcher
+  category: research
+  lang: en
+  prompt: "Review this company for due diligence"
+  expected:
+    primary_profile: researcher
+    route_chain:
+    - researcher
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
