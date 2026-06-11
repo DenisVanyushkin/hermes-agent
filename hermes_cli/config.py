@@ -2679,6 +2679,22 @@ DEFAULT_CONFIG = {
         # pruning (for operators who manage cleanup externally). Default 50.
         "output_retention": 50,
     },
+    "role_packages": {
+        # Selected-role package context activation.
+        # When enabled, after built-in routing selects a role, the corresponding
+        # package manifest is loaded from package_path and its context replaces
+        # the built-in role context block.
+        # Built-in routing is NOT replaced; it remains authoritative.
+        # Default: disabled. Set enabled: true in config.yaml to activate.
+        "routing": {
+            "enabled": False,
+            "activation_mode": "selected_roles",
+            "active_roles": [],
+            "package_path": None,
+            "fallback_to_builtin": True,
+        }
+    },
+
 
     # Kanban multi-agent coordination — controls the dispatcher loop that
     # spawns workers for ready tasks. The dispatcher ticks every N seconds
