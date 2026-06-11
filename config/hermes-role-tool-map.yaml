@@ -1,5 +1,30 @@
 schema_version: 1
 
+# ---------------------------------------------------------------------------
+# Hermes Role Tool Category Map
+#
+# Maps tool names to category names used by the role policy evaluator
+# (hermes_cli/role_policy.py).  role packages declare allowed_categories in
+# their manifest; evaluate_role_tool_policy() uses this map to classify each
+# dispatched tool and decide whether to would_block it.
+#
+# Placeholder categories (marked [PLACEHOLDER]):
+#   Some categories are defined but contain only unconfirmed placeholder tool
+#   names. These exist so the policy logic compiles and the observe_warn
+#   evaluator can produce would_block=True / enforced=False log entries, but
+#   they cannot yet enforce anything because no real tool names are mapped.
+#
+#   Resolving these requires either:
+#   (a) identifying the actual tool names used for production deployment / secret
+#       access in the live codebase and mapping them here, or
+#   (b) implementing a shell-argument classifier that infers the category at
+#       runtime from command arguments rather than from a static tool name.
+#
+#   Until either of those is done, production_deploy and secrets_read are
+#   OBSERVE-ONLY PLACEHOLDERS. They will never block real tools even under
+#   enforced_tools boundary_mode.
+# ---------------------------------------------------------------------------
+
 categories:
   read_only_inspection:
     description: >-
@@ -87,17 +112,24 @@ categories:
       - text_to_speech
       - mixture_of_agents
 
+  # [PLACEHOLDER] — observe-only; enforcement not yet possible.
+  # See header comment above for resolution path.
   production_deploy:
     description: >-
-      Tools for deploying and managing production infrastructure.
+      [PLACEHOLDER] Tools for deploying and managing production infrastructure.
       Includes container orchestration and deployment automation.
-      [unconfirmed - no tools found in codebase yet]
+      No confirmed tool names mapped yet — this category will produce
+      would_block=True / enforced=False log entries for advisory observation
+      only. Enforcement requires real tool name mapping or a shell-argument
+      classifier. Do not use in enforced_tools boundary_mode.
     tools:
-      - deploy  # [unconfirmed]
+      - deploy  # [unconfirmed placeholder — no actual tool by this name exists]
 
+  # [PLACEHOLDER] — observe-only; enforcement not yet possible.
+  # See header comment above for resolution path.
   secrets_read:
     description: >-
-      Tools for accessing secrets, credentials, and sensitive configuration.
-      Used for authentication and environment variable management.
-      [unconfirmed - no tools found in codebase yet]
+      [PLACEHOLDER] Tools for accessing secrets, credentials, and sensitive
+      configuration. Used for authentication and environment variable management.
+      No tool names mapped yet — this category cannot currently block anything.
     tools: []

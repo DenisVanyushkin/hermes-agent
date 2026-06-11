@@ -1,10 +1,10 @@
 """``hermes role`` subcommand — role package lifecycle CLI.
 
 Commands:
-  hermes role install <path> [--force]
+  hermes role install <path> [--force] [--accept-env VAR ...]
   hermes role list
   hermes role info <name>
-  hermes role validate <path-or-name>
+  hermes role validate <path-or-name> [--schema-only]
   hermes role remove <name>
 
 Handler injected from main.py to avoid circular imports.
@@ -45,6 +45,19 @@ def build_role_parser(subparsers, *, cmd_role: Callable) -> None:
         action="store_true",
         help="Overwrite an existing installation with the same package name",
     )
+    install_p.add_argument(
+        "--accept-env",
+        dest="accept_env",
+        action="append",
+        default=[],
+        metavar="VAR",
+        help=(
+            "Grant consent to pass the named env var through to this package's skills. "
+            "Repeat or comma-separate for multiple vars (e.g. --accept-env FOO --accept-env BAR "
+            "or --accept-env FOO,BAR). Only vars declared in the manifest env_requires are "
+            "persisted; undeclared names are rejected."
+        ),
+    )
 
     # list
     role_subs.add_parser(
@@ -65,12 +78,23 @@ def build_role_parser(subparsers, *, cmd_role: Callable) -> None:
         help="Validate a role package manifest",
         description=(
             "Validate a local directory or an installed package by name. "
+            "Runs schema validation and routing-overlap checks by default. "
             "Exits non-zero on hard errors."
         ),
     )
     validate_p.add_argument(
         "path_or_name",
         help="Local directory path containing role-package.yaml, or installed package name",
+    )
+    validate_p.add_argument(
+        "--schema-only",
+        dest="schema_only",
+        action="store_true",
+        help=(
+            "Skip routing-overlap and golden-corpus checks; validate schema and "
+            "built-in ID collision only. Use when you want to check manifest "
+            "structure without requiring a golden corpus."
+        ),
     )
 
     # remove
@@ -102,10 +126,12 @@ def cmd_role(args) -> None:
         print("Usage: hermes role <command>")
         print("")
         print("Commands:")
-        print("  install <path> [--force]   Install a role package from a local directory")
+        print("  install <path> [--force] [--accept-env VAR ...]")
+        print("                             Install a role package from a local directory")
         print("  list                       List installed role packages")
         print("  info <name>                Show details for an installed package")
-        print("  validate <path-or-name>    Validate a manifest (local path or package name)")
+        print("  validate <path-or-name> [--schema-only]")
+        print("                             Validate a manifest (local path or package name)")
         print("  remove <name>              Remove an installed package")
         return
 
@@ -131,14 +157,26 @@ def cmd_role(args) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _parse_accept_env(raw_values: list[str]) -> list[str]:
+    """Normalize --accept-env values: expand comma-separated, trim, de-duplicate."""
+    seen: dict[str, None] = {}
+    for token in raw_values:
+        for part in token.split(","):
+            name = part.strip()
+            if name:
+                seen[name] = None
+    return list(seen)
+
+
 def _cmd_install(args, hermes_home) -> None:
     from hermes_cli.role_packages import RolePackageError, install_package
     from pathlib import Path
 
     source = Path(args.path).resolve()
     force = getattr(args, "force", False)
+    accept_env = _parse_accept_env(getattr(args, "accept_env", []) or [])
     try:
-        pkg = install_package(source, hermes_home, force=force)
+        pkg = install_package(source, hermes_home, force=force, accept_env=accept_env or None)
     except RolePackageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -219,7 +257,10 @@ def _cmd_validate(args, hermes_home) -> None:
             print(f"error: {args.path_or_name!r} is not a directory and not an installed package name", file=sys.stderr)
             sys.exit(1)
 
-    manifest, errors, warnings = validate_manifest_path(target, check_overlap=True)
+    schema_only = getattr(args, "schema_only", False)
+    manifest, errors, warnings = validate_manifest_path(
+        target, check_overlap=not schema_only
+    )
 
     for warn in warnings:
         print(f"warning: {warn}")
