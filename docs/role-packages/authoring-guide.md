@@ -175,10 +175,12 @@ role:
   purpose_summary: |               # One sentence
     What this role does and why.
   
-  model_tier_request: standard     # "standard" or "advanced"
+  model_tier_request: standard     # "standard", "reasoning", or "critical"
   
   persona: |                       # Optional: persona text for context injection
     You are a [role]. [Personality]. [Boundaries].
+  
+  model_tier_request: standard     # "standard", "reasoning", or "critical" (see below)
   
   routing:
     triggers:
@@ -346,6 +348,32 @@ Example conflict detection:
 ❌ "deploy" overlaps with built-in "deployer" (substring)
 ✓ "deploy-advisory" is unique
 ```
+
+## Model Tier Request
+
+The `model_tier_request` field declares the model capability tier the role needs.
+
+```yaml
+role:
+  model_tier_request: standard    # default — low-risk, most roles
+  model_tier_request: reasoning   # high-reasoning; for engineering and analysis roles
+  model_tier_request: critical    # security-review tier; restricted to security role families
+```
+
+**Values:**
+
+| Value | Meaning | Typical role families |
+|---|---|---|
+| `standard` | Default; all general roles | advisor, docs, research, career |
+| `reasoning` | High-reasoning model tier | engineering, analysis |
+| `critical` | Security-review tier | security, security_audit, security_auditor |
+
+**Important notes:**
+
+- This is a **request / metadata** field in MVP. Package routing is not active, so the agent does not yet act on this value at dispatch time.
+- `critical` is **restricted** to role families `security`, `security_audit`, and `security_auditor`. Declaring `critical` for any other family is a validation error.
+- Model tier does **not grant tool permissions**. Tool access is controlled by `allowed_categories` and the approval gate at the tool/action boundary, independently of model tier.
+- Omitting `model_tier_request` defaults to `standard`.
 
 ## Boundary Modes
 

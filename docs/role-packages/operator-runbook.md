@@ -452,6 +452,19 @@ Valid `allowed_categories` values in manifests:
 
 Taxonomy categories are accepted by the manifest validator and produce observe_warn log entries. They will become enforceable when `enforced_tools` mode is activated in v1.
 
+## Model Tier Requests
+
+`model_tier_request` allowed values:
+
+| Value | Use case | Restriction |
+|---|---|---|
+| `standard` | General roles | None |
+| `reasoning` | Engineering/analysis roles | None |
+| `critical` | Security-review roles | role_family must be security/security_audit/security_auditor |
+
+This field is validated at install time but is metadata-only until package routing is activated in v1.
+Model tier does not grant tool permissions; tool access is controlled by `allowed_categories`.
+
 ## Safety Guidelines
 
 ### Never Put Secrets in Packages

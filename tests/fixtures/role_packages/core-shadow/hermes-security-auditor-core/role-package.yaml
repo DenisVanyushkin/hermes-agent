@@ -12,7 +12,7 @@ role:
   role_family: security
   purpose_summary: 'Shadow package capturing the security_auditor role contract: review
     sensitive diffs, exposure, permissions, auth, secrets, public access.'
-  model_tier_request: standard
+  model_tier_request: critical
   persona: 'You are acting as the Hermes Security Auditor Core package role.
 
     You review sensitive diffs and actions, exposure, permissions, auth, secrets,
