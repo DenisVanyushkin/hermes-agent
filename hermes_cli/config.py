@@ -2836,6 +2836,22 @@ DEFAULT_CONFIG = {
         # HERMES_CRON_SESSION_DB_TIMEOUT env var. 0 = unlimited (skip the bound).
         "session_db_timeout_seconds": 10,
     },
+    "role_packages": {
+        # Selected-role package context activation.
+        # When enabled, after built-in routing selects a role, the corresponding
+        # package manifest is loaded from package_path and its context replaces
+        # the built-in role context block.
+        # Built-in routing is NOT replaced; it remains authoritative.
+        # Default: disabled. Set enabled: true in config.yaml to activate.
+        "routing": {
+            "enabled": False,
+            "activation_mode": "selected_roles",
+            "active_roles": [],
+            "package_path": None,
+            "fallback_to_builtin": True,
+        }
+    },
+
 
     # Kanban multi-agent coordination — controls the dispatcher loop that
     # spawns workers for ready tasks. The dispatcher ticks every N seconds
