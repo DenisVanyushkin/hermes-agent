@@ -37,6 +37,35 @@ _APPROVAL_GRANT_RE = re.compile(
 )
 
 
+def _is_reply_quote_line(line: str) -> bool:
+    return line.strip().lower().startswith("[replying to:")
+
+
+def _reply_quote_region_closed(line: str) -> bool:
+    return line.strip().endswith('"]')
+
+
+def _strip_leading_reply_quote_region(text: str) -> str:
+    """Drop Slack-style multiline reply quotes before the live user message."""
+
+    kept: list[str] = []
+    in_reply_quote = False
+
+    for raw_line in text.splitlines():
+        if in_reply_quote:
+            if _reply_quote_region_closed(raw_line):
+                in_reply_quote = False
+            continue
+
+        if not kept and _is_reply_quote_line(raw_line):
+            in_reply_quote = not _reply_quote_region_closed(raw_line)
+            continue
+
+        kept.append(raw_line)
+
+    return "\n".join(kept).strip()
+
+
 def routing_request_text(task: str) -> str:
     """Return routing text with safe reply pointers but without evidence bodies."""
 
@@ -94,6 +123,7 @@ def classification_request_text(task: str) -> str:
         return ""
 
     stripped = _CRON_ROLE_ROUTING_BANNER_RE.sub("", task.lstrip(), count=1).strip()
+    stripped = _strip_leading_reply_quote_region(stripped)
     if not stripped:
         return ""
 
