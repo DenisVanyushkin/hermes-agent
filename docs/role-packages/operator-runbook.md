@@ -24,6 +24,32 @@ hermes role remove hermes-researcher-lab
 Both packages are regression-tested via `tests/hermes_cli/test_example_role_packages.py`.
 Their routing triggers are not active in MVP.
 
+
+## Core Shadow Packages
+
+Five shadow packages mirror the current built-in Hermes roles under
+`tests/fixtures/role_packages/core-shadow/`:
+
+| Package | Shadow of | Role ID |
+|---|---|---|
+| `hermes-scribe-core` | `scribe` | `hermes_scribe_core` |
+| `hermes-researcher-core` | `researcher` | `hermes_researcher_core` |
+| `hermes-engineer-core` | `engineer` | `hermes_engineer_core` |
+| `hermes-security-auditor-core` | `security_auditor` | `hermes_security_auditor_core` |
+| `hermes-career-strategist-core` | `career_strategist` | `hermes_career_strategist_core` |
+
+These are **not active replacements**. They exist as:
+
+- **migration preparation fixtures** — installable, validated package-form versions of the built-in roles
+- **authoring references** — examples of real-world manifests with complete personas, triggers, tool declarations, and MANIFEST.md docs
+- **regression tests** — `tests/hermes_cli/test_core_shadow_role_packages.py` validates all five on every test run
+
+**Package routing is not active.** Built-in domain-keyword routing (infra → engineer, security → security_auditor, etc.) remains authoritative. The shadow packages are installed and removed cleanly without affecting built-in routing.
+
+**Boundary mode:** All five use `observe_warn` — the system logs what it would block but does not enforce.
+
+**Future v1 migration path:** After observe_warn calibration, promote shadow triggers into the live routing layer. Enable `enforced_tools` after calibration shows near-zero false positives. Retire built-in profiles once package routing is proven stable.
+
 ## Quick Reference
 
 | Task | Command |
