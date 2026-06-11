@@ -19,6 +19,22 @@ _THREAD_CONTEXT_LINE_PREFIXES = (
 )
 _CRONJOB_RESPONSE_PREFIX = "cronjob response:"
 _SEPARATOR_RE = re.compile(r"^-{3,}\s*$")
+_BRACKETED_SPEAKER_RE = re.compile(r"^\[[^\]\n]{1,80}\]\s*")
+_APPROVAL_CONSTRAINT_PREFIXES = (
+    "do not",
+    "don't",
+    "dont",
+    "do not read",
+    "do not print",
+    "do not run",
+    "no ",
+    "не ",
+    "не",
+)
+_APPROVAL_GRANT_RE = re.compile(
+    r"^(approve|approved|yes\b.*proceed|yes\b|proceed\b|go ahead|разрешаю|одобряю|да[, ]+выполняй|да[, ]+делай)\b",
+    re.IGNORECASE,
+)
 
 
 def routing_request_text(task: str) -> str:
@@ -115,3 +131,56 @@ def classification_request_text(task: str) -> str:
 
     cleaned = "\n".join(kept).strip()
     return cleaned or stripped
+
+
+def approval_intent_text(task: str) -> str:
+    """Return the latest user approval utterance without quoted/reply context."""
+
+    cleaned = classification_request_text(task)
+    if not cleaned:
+        return ""
+
+    kept: list[str] = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("```"):
+            continue
+        if line.startswith(">"):
+            continue
+        if line.lower().startswith("[replying to:"):
+            continue
+        line = _BRACKETED_SPEAKER_RE.sub("", line, count=1).strip()
+        if not line:
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def approval_constraints_text(task: str) -> list[str]:
+    """Extract narrowing constraints from the latest approval utterance."""
+
+    cleaned = approval_intent_text(task)
+    if not cleaned:
+        return []
+
+    constraints: list[str] = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip().lstrip("-* ").strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if any(lower.startswith(prefix) for prefix in _APPROVAL_CONSTRAINT_PREFIXES):
+            constraints.append(line)
+    return constraints
+
+
+def has_explicit_approval(task: str) -> bool:
+    """Return True when the latest user utterance clearly grants approval."""
+
+    cleaned = approval_intent_text(task)
+    if not cleaned:
+        return False
+    first_line = cleaned.splitlines()[0].strip()
+    return bool(_APPROVAL_GRANT_RE.match(first_line))

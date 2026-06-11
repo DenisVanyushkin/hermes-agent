@@ -221,6 +221,28 @@ def render_role_debug_header(result: RoleContextResult | None) -> str:
     return render_role_execution_debug_header(result)
 
 
+def _planned_action_lines(task_text: str) -> list[str]:
+    if not isinstance(task_text, str):
+        return []
+    items: list[str] = []
+    for raw_line in task_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = line.lstrip("-* ").strip()
+        if not line:
+            continue
+        items.append(line)
+        if len(items) >= 5:
+            break
+    if items:
+        return items
+    compact = " ".join(task_text.split())
+    if not compact:
+        return []
+    return [compact[:220] + ("..." if len(compact) > 220 else "")]
+
+
 def render_explicit_approval_request(
     result: RoleContextResult | None,
     *,
@@ -231,8 +253,10 @@ def render_explicit_approval_request(
         return ""
 
     lines = ["I need explicit approval before any mutation-capable changes."]
-    if isinstance(task_text, str) and task_text.strip():
-        lines.extend(["", "Planned action:", f"- {task_text.strip()}"])
+    planned_action = _planned_action_lines(task_text)
+    if planned_action:
+        lines.extend(["", "Planned action:"])
+        lines.extend(f"- {item}" for item in planned_action)
     if result.approval_reason:
         lines.extend(["", "Why approval is required:", f"- {result.approval_reason}"])
     lines.extend(

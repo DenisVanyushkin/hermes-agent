@@ -16,6 +16,10 @@ from hermes_cli.profile_context import (
     role_debug_header_enabled,
     render_role_context,
 )
+from hermes_cli.profile_request_context import (
+    approval_constraints_text,
+    approval_intent_text,
+)
 
 
 def test_load_profile_contracts_contains_canonical_roles():
@@ -262,6 +266,43 @@ def test_role_context_ignores_thread_context_for_approval_and_reviewer_selection
     assert result.requires_reviewer is False
     assert result.requires_explicit_approval is False
     assert result.critical_approval_required is False
+
+
+def test_approval_intent_text_prefers_latest_user_approval_outside_quoted_context():
+    text = (
+        '[Replying to: "# Task: Create a Hermes Skill for Authoring Role Packages ..."]\n'
+        "[denis] approve\n"
+        "Proceed with the task exactly as scoped.\n"
+        "Clarifications:\n"
+        "- Creating ~/.hermes/skills/role-package-author/SKILL.md is approved.\n"
+        "- Do not read .env, auth.json, provider config, or secret files.\n"
+        "- Do not run hermes role install.\n"
+    )
+
+    cleaned = approval_intent_text(text)
+
+    assert cleaned.startswith("approve")
+    assert "[Replying to:" not in cleaned
+    assert "role-package-author" in cleaned
+    assert "Do not read .env" in cleaned
+
+
+def test_approval_constraints_text_preserves_narrowing_constraints_without_quote_noise():
+    text = (
+        '[Replying to: "approve"]\n'
+        "[denis] approve\n"
+        "Do not read .env.\n"
+        "Do not print secrets.\n"
+        "Do not run hermes role install.\n"
+    )
+
+    constraints = approval_constraints_text(text)
+
+    assert constraints == [
+        "Do not read .env.",
+        "Do not print secrets.",
+        "Do not run hermes role install.",
+    ]
 
 
 def test_user_level_fallback_refresh_timer_context_keeps_normal_operational_mutation_without_hard_stop():
