@@ -1,0 +1,14 @@
+schema_version: 1
+package:
+  name: policy-observe-warn-allowlist-miss
+  version: 0.1.0
+role:
+  id: policy_observe_warn_allowlist_miss
+  canonical_id: policy_observe_warn_allowlist_miss
+  display_name: Observe Warn Allowlist Miss Role
+  role_family: test
+  purpose_summary: Fixture for observe_warn where tool category is not in allowed list
+  tools:
+    allowed_categories:
+      - read_only_inspection
+boundary_mode: observe_warn
