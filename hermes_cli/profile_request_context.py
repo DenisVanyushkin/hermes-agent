@@ -32,7 +32,7 @@ _APPROVAL_CONSTRAINT_PREFIXES = (
     "не",
 )
 _APPROVAL_GRANT_RE = re.compile(
-    r"^(approve|approved|yes\b.*proceed|yes\b|proceed\b|go ahead|разрешаю|одобряю|да[, ]+выполняй|да[, ]+делай)\b",
+    r"^(?:approve|approved|yes(?:[, ]+proceed)?|proceed|go ahead|разрешаю|одобряю|да[, ]+(?:выполняй|делай))[.! ]*$",
     re.IGNORECASE,
 )
 
