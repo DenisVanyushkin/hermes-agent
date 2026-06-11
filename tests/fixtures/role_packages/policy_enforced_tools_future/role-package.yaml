@@ -1,0 +1,14 @@
+schema_version: 1
+package:
+  name: policy-enforced-tools-future
+  version: 0.1.0
+role:
+  id: policy_enforced_tools_future
+  canonical_id: policy_enforced_tools_future
+  display_name: Enforced Tools Future Role
+  role_family: test
+  purpose_summary: Fixture for enforced_tools mode (treated as observe_warn in Slice 6)
+  tools:
+    denied_categories:
+      - production_deploy
+boundary_mode: enforced_tools

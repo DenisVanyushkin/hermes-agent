@@ -1,0 +1,15 @@
+schema_version: 1
+package:
+  name: policy-observe-warn-denied
+  version: 0.1.0
+role:
+  id: policy_observe_warn_denied
+  canonical_id: policy_observe_warn_denied
+  display_name: Observe Warn Denied Role
+  role_family: test
+  purpose_summary: Fixture for observe_warn with denied_categories
+  tools:
+    denied_categories:
+      - production_deploy
+      - secrets_read
+boundary_mode: observe_warn

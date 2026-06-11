@@ -34,6 +34,16 @@ SUPPORTED_SCHEMA_VERSION = 1
 
 VALID_BOUNDARY_MODES: frozenset[str] = frozenset({"advisory", "observe_warn", "enforced_tools"})
 
+# Known tool categories — must stay in sync with config/hermes-role-tool-map.yaml.
+# Sync is enforced by tests/hermes_cli/test_role_policy.py::TestCategoryMapSync.
+KNOWN_TOOL_CATEGORIES: frozenset[str] = frozenset({
+    "read_only_inspection",
+    "repo_edit",
+    "shell_general",
+    "production_deploy",
+    "secrets_read",
+})
+
 # Package names: lowercase, start with letter, alphanumeric + hyphens, max 64 chars.
 _PACKAGE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
@@ -261,6 +271,43 @@ def _validate_env_requires(
     return errors, warnings
 
 
+def _validate_role_tools(role_tools_raw: Any) -> list[str]:
+    """Validate the ``role.tools`` sub-mapping.
+
+    Returns a list of hard-error strings (empty = valid).
+    """
+    errors: list[str] = []
+    if role_tools_raw is None:
+        return errors
+    if not isinstance(role_tools_raw, dict):
+        errors.append("role.tools must be a mapping")
+        return errors
+
+    for field_name in ("allowed_categories", "denied_categories"):
+        value = role_tools_raw.get(field_name)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            errors.append(f"role.tools.{field_name} must be a list")
+            continue
+        seen: set[str] = set()
+        for i, cat in enumerate(value):
+            cat_str = str(cat)
+            if cat_str in seen:
+                errors.append(
+                    f"role.tools.{field_name}[{i}]: duplicate category {cat_str!r}"
+                )
+            else:
+                seen.add(cat_str)
+            if cat_str not in KNOWN_TOOL_CATEGORIES:
+                errors.append(
+                    f"role.tools.{field_name}[{i}]: unknown category {cat_str!r}; "
+                    f"known: {sorted(KNOWN_TOOL_CATEGORIES)}"
+                )
+
+    return errors
+
+
 def _load_manifest(manifest_path: Path) -> dict[str, Any]:
     """Load and parse a role-package.yaml. Raises ValueError on any problem."""
     try:
@@ -317,6 +364,14 @@ def _load_manifest(manifest_path: Path) -> dict[str, Any]:
         env_errors, _ = _validate_env_requires(env_requires)
         if env_errors:
             raise ValueError("env_requires validation failed: " + "; ".join(env_errors))
+
+    # role.tools validation (Slice 6)
+    role_tools_errors = _validate_role_tools(data.get("role", {}).get("tools"))
+    if role_tools_errors:
+        raise ValueError(
+            "role.tools validation failed:\n"
+            + "\n".join(f"  - {e}" for e in role_tools_errors)
+        )
 
     return data
 

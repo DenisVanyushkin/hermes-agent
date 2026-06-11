@@ -1,0 +1,15 @@
+schema_version: 1
+package:
+  name: policy-observe-warn-allowed
+  version: 0.1.0
+role:
+  id: policy_observe_warn_allowed
+  canonical_id: policy_observe_warn_allowed
+  display_name: Observe Warn Allowed Role
+  role_family: test
+  purpose_summary: Fixture for observe_warn with allowed_categories
+  tools:
+    allowed_categories:
+      - read_only_inspection
+      - repo_edit
+boundary_mode: observe_warn
