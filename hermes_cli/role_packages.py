@@ -34,6 +34,23 @@ SUPPORTED_SCHEMA_VERSION = 1
 
 VALID_BOUNDARY_MODES: frozenset[str] = frozenset({"advisory", "observe_warn", "enforced_tools"})
 
+# Valid model tier requests for role packages.
+# standard  — default / low-risk model tier (already the MVP default).
+# reasoning — high-reasoning tier; intended for engineer-style roles.
+# critical  — highest-care / security-review tier; restricted to security role families.
+# Unknown values are rejected at manifest validation time.
+VALID_MODEL_TIERS: frozenset[str] = frozenset({"standard", "reasoning", "critical"})
+
+# Role families that are permitted to declare model_tier_request: critical.
+# The guard is narrow: packages outside these families must use standard or reasoning.
+# This is metadata-only in MVP (no routing consumes it yet); the guard prevents accidental
+# mis-declaration and preserves the intent that critical is a security-review escalation.
+_CRITICAL_TIER_ROLE_FAMILIES: frozenset[str] = frozenset({
+    "security",
+    "security_audit",
+    "security_auditor",
+})
+
 # Known tool categories — must stay in sync with config/hermes-role-tool-map.yaml.
 # Sync is enforced by tests/hermes_cli/test_role_policy.py::TestCategoryMapSync.
 KNOWN_TOOL_CATEGORIES: frozenset[str] = frozenset({
@@ -358,6 +375,23 @@ def _load_manifest(manifest_path: Path) -> dict[str, Any]:
     missing_role = _REQUIRED_ROLE_FIELDS - role.keys()
     if missing_role:
         raise ValueError(f"missing role fields: {sorted(missing_role)}")
+
+    # model_tier_request validation
+    model_tier = role.get("model_tier_request", "standard")
+    if model_tier not in VALID_MODEL_TIERS:
+        raise ValueError(
+            f"Invalid model_tier_request: {model_tier!r}. "
+            f"Allowed values: {', '.join(sorted(VALID_MODEL_TIERS))}."
+        )
+    if model_tier == "critical":
+        role_family = str(role.get("role_family", "")).lower()
+        if role_family not in _CRITICAL_TIER_ROLE_FAMILIES:
+            raise ValueError(
+                f"model_tier_request 'critical' is restricted to role families: "
+                f"{sorted(_CRITICAL_TIER_ROLE_FAMILIES)}. "
+                f"Got role_family={role_family!r}. "
+                f"Use 'reasoning' for high-capability non-security roles."
+            )
 
     boundary_mode = data.get("boundary_mode", "advisory")
     if boundary_mode not in VALID_BOUNDARY_MODES:

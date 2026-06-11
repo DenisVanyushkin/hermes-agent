@@ -442,3 +442,50 @@ class TestPreV1CorpusGaps:
                 failures.append(f"{entry_id!r}: expected {expected_primary!r}, got {actual!r}")
 
         assert not failures, "Pre-v1 corpus gap failures:\n" + "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# Model tier requests in shadow manifests
+# ---------------------------------------------------------------------------
+
+
+class TestShadowModelTierRequests:
+    """Shadow manifests must declare the correct model_tier_request to match built-ins."""
+
+    def _tier(self, pkg_name: str) -> str:
+        import yaml as _yaml
+        data = _yaml.safe_load(
+            (SHADOW_DIR / pkg_name / "role-package.yaml").read_text(encoding="utf-8")
+        )
+        return data.get("role", {}).get("model_tier_request", "standard")
+
+    def test_engineer_requests_reasoning_tier(self) -> None:
+        assert self._tier("hermes-engineer-core") == "reasoning", (
+            "engineer-core must request reasoning tier to match built-in engineer model"
+        )
+
+    def test_security_auditor_requests_critical_tier(self) -> None:
+        assert self._tier("hermes-security-auditor-core") == "critical", (
+            "security-auditor-core must request critical tier to match built-in security_auditor model"
+        )
+
+    def test_scribe_uses_standard_tier(self) -> None:
+        assert self._tier("hermes-scribe-core") == "standard"
+
+    def test_researcher_uses_standard_tier(self) -> None:
+        assert self._tier("hermes-researcher-core") == "standard"
+
+    def test_career_strategist_uses_standard_tier(self) -> None:
+        assert self._tier("hermes-career-strategist-core") == "standard"
+
+    def test_engineer_manifest_validates_with_reasoning(self) -> None:
+        _, errors, _ = validate_manifest_path(
+            SHADOW_DIR / "hermes-engineer-core", check_builtin_collision=False
+        )
+        assert errors == [], f"engineer-core with reasoning tier failed: {errors}"
+
+    def test_security_auditor_manifest_validates_with_critical(self) -> None:
+        _, errors, _ = validate_manifest_path(
+            SHADOW_DIR / "hermes-security-auditor-core", check_builtin_collision=False
+        )
+        assert errors == [], f"security-auditor-core with critical tier failed: {errors}"

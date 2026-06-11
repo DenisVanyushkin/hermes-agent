@@ -10,6 +10,7 @@ import yaml
 
 from hermes_cli.role_packages import (
     VALID_BOUNDARY_MODES,
+    VALID_MODEL_TIERS,
     PackageLoadStatus,
     RolePackageError,
     _load_manifest,
@@ -398,3 +399,91 @@ class TestRoleToolsValidation:
         _write_manifest(tmp_path / "advisory_no_tools", data)
         manifest, errors, _ = validate_manifest_path(tmp_path / "advisory_no_tools")
         assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# model_tier_request validation
+# ---------------------------------------------------------------------------
+
+
+class TestModelTierValidation:
+    """Tests for role.model_tier_request field validation."""
+
+    def _pkg(self, model_tier=None, role_family=None):
+        data = {
+            "schema_version": 1,
+            "package": {"name": "tier-test-role", "version": "0.1.0"},
+            "role": {
+                "id": "tier_test_role",
+                "canonical_id": "tier_test_role",
+                "display_name": "Tier Test Role",
+            },
+            "boundary_mode": "advisory",
+        }
+        if model_tier is not None:
+            data["role"]["model_tier_request"] = model_tier
+        if role_family is not None:
+            data["role"]["role_family"] = role_family
+        return data
+
+    def test_valid_model_tiers_constant(self):
+        assert VALID_MODEL_TIERS == frozenset({"standard", "reasoning", "critical"})
+
+    def test_standard_accepted(self, tmp_path):
+        _write_manifest(tmp_path / "p", self._pkg(model_tier="standard"))
+        manifest, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        assert errors == []
+
+    def test_reasoning_accepted(self, tmp_path):
+        _write_manifest(tmp_path / "p", self._pkg(model_tier="reasoning"))
+        manifest, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        assert errors == []
+
+    def test_critical_accepted_for_security_family(self, tmp_path):
+        _write_manifest(tmp_path / "p", self._pkg(model_tier="critical", role_family="security"))
+        manifest, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        assert errors == []
+
+    def test_critical_accepted_for_security_auditor_family(self, tmp_path):
+        _write_manifest(tmp_path / "p", self._pkg(model_tier="critical", role_family="security_auditor"))
+        manifest, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        assert errors == []
+
+    def test_critical_rejected_for_non_security_family(self, tmp_path):
+        _write_manifest(tmp_path / "p", self._pkg(model_tier="critical", role_family="engineering"))
+        _, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        assert any("critical" in e for e in errors), f"expected critical rejection error, got: {errors}"
+
+    def test_critical_rejected_for_advisor_family(self, tmp_path):
+        _write_manifest(tmp_path / "p", self._pkg(model_tier="critical", role_family="advisor"))
+        _, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        assert any("critical" in e for e in errors)
+
+    def test_unknown_tier_rejected(self, tmp_path):
+        _write_manifest(tmp_path / "p", self._pkg(model_tier="experimental"))
+        _, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        assert any("Invalid model_tier_request" in e or "experimental" in e for e in errors), (
+            f"expected unknown tier rejection, got: {errors}"
+        )
+
+    def test_unknown_tier_error_message_is_clear(self, tmp_path):
+        _write_manifest(tmp_path / "p", self._pkg(model_tier="unknown_value"))
+        _, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        msg = " ".join(errors)
+        assert "Invalid model_tier_request" in msg
+        assert "standard" in msg
+        assert "reasoning" in msg
+        assert "critical" in msg
+
+    def test_omitted_model_tier_defaults_to_standard(self, tmp_path):
+        # Omitting model_tier_request is valid; defaults to standard behaviour.
+        data = self._pkg()  # no model_tier
+        _write_manifest(tmp_path / "p", data)
+        manifest, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        assert errors == []
+
+    def test_critical_without_role_family_rejected(self, tmp_path):
+        # critical with no role_family (empty string treated as unknown family)
+        _write_manifest(tmp_path / "p", self._pkg(model_tier="critical"))
+        _, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        assert any("critical" in e for e in errors)
