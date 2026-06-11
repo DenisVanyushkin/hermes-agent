@@ -287,6 +287,30 @@ def test_approval_intent_text_prefers_latest_user_approval_outside_quoted_contex
     assert "Do not read .env" in cleaned
 
 
+def test_approval_intent_text_ignores_multiline_slack_reply_quote_region():
+    text = (
+        '[Replying to: "# Task: Create a Hermes Skill for Authoring Role Packages\n'
+        "\n"
+        "## Goal\n"
+        "\n"
+        "Create a user-owned Hermes skill that helps operators and contributors create new role package skeletons safely.\n"
+        "\n"
+        "The skill should guide role package authoring, generate a valid role-package.yaml, create optional skill scaffolds.\n"
+        "\n"
+        'Prefe"]\n'
+        "[denis] approve\n"
+        "Proceed with the task exactly as scoped.\n"
+        "- Do not read .env, auth.json, provider config, or secret files.\n"
+    )
+
+    cleaned = approval_intent_text(text)
+
+    assert cleaned.startswith("approve")
+    assert "[Replying to:" not in cleaned
+    assert "role package skeletons safely" not in cleaned
+    assert "Do not read .env, auth.json, provider config, or secret files." in cleaned
+
+
 def test_approval_constraints_text_preserves_narrowing_constraints_without_quote_noise():
     text = (
         '[Replying to: "approve"]\n'
