@@ -158,7 +158,62 @@ def _latest_pending_approval_gate(messages: list[dict[str, Any]], current_turn_u
         gate = msg.get("_approval_gate")
         if isinstance(gate, dict) and gate.get("required") and gate.get("critical_hard_stop"):
             return gate
+        if msg.get("role") == "assistant":
+            reconstructed = _reconstruct_pending_gate_from_prompt(messages, idx)
+            if reconstructed is not None:
+                return reconstructed
     return None
+
+
+def _reconstruct_pending_gate_from_prompt(messages: list[dict[str, Any]], assistant_idx: int) -> dict[str, Any] | None:
+    """Recover a pending approval gate from replayed assistant text-only history."""
+
+    if assistant_idx <= 0 or assistant_idx >= len(messages):
+        return None
+    assistant_msg = messages[assistant_idx]
+    if not isinstance(assistant_msg, dict) or assistant_msg.get("role") != "assistant":
+        return None
+    content = assistant_msg.get("content")
+    if not isinstance(content, str):
+        return None
+    lowered = content.lower()
+    if "i need explicit approval before any mutation-capable changes." not in lowered:
+        return None
+    if "reply with explicit approve if you want me to proceed" not in lowered:
+        return None
+
+    prior_user_task = ""
+    for idx in range(assistant_idx - 1, -1, -1):
+        prior = messages[idx]
+        if isinstance(prior, dict) and prior.get("role") == "user":
+            prior_user_task = str(prior.get("content") or "").strip()
+            break
+    if not prior_user_task:
+        return None
+
+    def _match(pattern: str) -> str | None:
+        m = re.search(pattern, content, re.IGNORECASE | re.MULTILINE)
+        if not m:
+            return None
+        value = str(m.group(1) or "").strip()
+        return value or None
+
+    reviewer = _match(r"^Reviewer:\s*(.+)$")
+    role = _match(r"^Hermes role:\s*(.+)$")
+    operation_category = _match(r"^Operation category:\s*(.+)$")
+
+    return {
+        "required": True,
+        "critical_hard_stop": True,
+        "selected_role": (role or "").lower().replace(" ", "_"),
+        "canonical_role": None,
+        "operation_category": operation_category or "",
+        "reviewer_profile": None if not reviewer or reviewer.lower() == "none" else reviewer,
+        "approval_reason": "",
+        "task": prior_user_task,
+        "model_selection": None,
+        "_reconstructed": True,
+    }
 
 
 def _pending_gate_denied_or_deferred(task: str) -> bool:
@@ -199,6 +254,32 @@ def _compose_pending_gate_execution_prompt(pending_gate: dict[str, Any], approva
         ]
     )
     return "\n".join(lines).strip()
+
+
+def _log_approval_debug(
+    agent: Any,
+    *,
+    raw_text: str,
+    approval_view: str,
+    pending_gate: dict[str, Any] | None,
+    short_circuit_taken: bool,
+    approval_intent: str,
+) -> None:
+    first_line = ""
+    if approval_view:
+        first_line = approval_view.splitlines()[0][:160]
+    logger.debug(
+        "event=approval_debug session_id=%s pending_gate_found=%s approval_intent=%s "
+        "approval_view_first_line=%r raw_view_has_reply_context=%s clean_view_has_reply_context=%s "
+        "short_circuit_taken=%s",
+        getattr(agent, "session_id", "") or "",
+        pending_gate is not None,
+        approval_intent,
+        first_line,
+        "[replying to:" in raw_text.lower(),
+        "[replying to:" in approval_view.lower(),
+        short_circuit_taken,
+    )
 
 
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
@@ -799,8 +880,52 @@ def run_conversation(
     _model_selection_result = None
     _pending_approval_gate = _latest_pending_approval_gate(messages, current_turn_user_idx)
     _effective_task_for_routing = original_user_message
+    _approval_view = approval_intent_text(original_user_message) if isinstance(original_user_message, str) else ""
+    _has_explicit_approval_intent = has_explicit_approval(original_user_message) if isinstance(original_user_message, str) else False
+    _approval_intent_label = (
+        "approve"
+        if _has_explicit_approval_intent
+        else "reject"
+        if isinstance(original_user_message, str) and _pending_gate_denied_or_deferred(original_user_message)
+        else "none"
+    )
+    _short_circuit_taken = False
+    if _has_explicit_approval_intent and _pending_approval_gate is None:
+        _log_approval_debug(
+            agent,
+            raw_text=original_user_message,
+            approval_view=_approval_view,
+            pending_gate=None,
+            short_circuit_taken=False,
+            approval_intent=_approval_intent_label,
+        )
+        final_response = (
+            "I don't have a pending approval request in this session to apply that approval to.\n\n"
+            "Please restate the task you want me to run, or reply directly to the approval request message."
+        )
+        messages.append({"role": "assistant", "content": final_response})
+        agent._session_messages = messages
+        agent._persist_session(messages, conversation_history)
+        return {
+            "final_response": final_response,
+            "last_reasoning": None,
+            "messages": messages,
+            "api_calls": 0,
+            "completed": True,
+            "failed": False,
+            "partial": False,
+            "interrupted": False,
+            "response_transformed": False,
+            "response_previewed": False,
+            "turn_exit_reason": "no_pending_approval_to_apply",
+            "model": agent.model,
+            "requested_model": agent._requested_model,
+            "provider": agent.provider,
+            "base_url": agent.base_url,
+            "session_id": agent.session_id,
+        }
     if _pending_approval_gate and isinstance(original_user_message, str):
-        if has_explicit_approval(original_user_message):
+        if _has_explicit_approval_intent:
             _effective_task_for_routing = str(_pending_approval_gate.get("task") or "").strip() or original_user_message
             _approved_task_prompt = _compose_pending_gate_execution_prompt(
                 _pending_approval_gate,
@@ -812,11 +937,21 @@ def run_conversation(
                     current_user_msg["content"] = _approved_task_prompt
             user_message = _approved_task_prompt
             agent._persist_user_message_override = original_user_message
+            _short_circuit_taken = True
         elif _pending_gate_denied_or_deferred(original_user_message):
             _effective_task_for_routing = str(_pending_approval_gate.get("task") or "").strip() or original_user_message
+    if isinstance(original_user_message, str):
+        _log_approval_debug(
+            agent,
+            raw_text=original_user_message,
+            approval_view=_approval_view,
+            pending_gate=_pending_approval_gate,
+            short_circuit_taken=_short_circuit_taken,
+            approval_intent=_approval_intent_label,
+        )
     try:
         _role_context_result = build_role_context_for_task(_effective_task_for_routing)
-        if _pending_approval_gate and isinstance(original_user_message, str) and has_explicit_approval(original_user_message):
+        if _pending_approval_gate and isinstance(original_user_message, str) and _has_explicit_approval_intent:
             _role_context_result = replace(
                 _role_context_result,
                 task=str(_pending_approval_gate.get("task") or _role_context_result.task),

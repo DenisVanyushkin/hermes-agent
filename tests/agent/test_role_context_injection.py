@@ -366,6 +366,107 @@ def test_quoted_approve_without_live_consent_does_not_unblock_pending_gate(monke
     assert agent._run_codex_app_server_turn_called is False
 
 
+def test_explicit_approval_unblocks_replayed_gateway_prompt_without_metadata(monkeypatch):
+    plugin_calls = []
+    captured = {}
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    def _capture_codex_turn(**kwargs):
+        captured.update(kwargs)
+        return {
+            "final_response": "normal path reached",
+            "last_reasoning": None,
+            "messages": kwargs.get("messages", []),
+            "api_calls": 0,
+            "completed": True,
+            "failed": False,
+            "partial": False,
+            "interrupted": False,
+            "response_transformed": False,
+            "response_previewed": False,
+            "turn_exit_reason": "codex_app_server_stub",
+            "model": agent.model,
+            "requested_model": agent._requested_model,
+            "provider": agent.provider,
+            "base_url": agent.base_url,
+            "session_id": agent.session_id,
+        }
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+    agent._run_codex_app_server_turn = _capture_codex_turn
+
+    prior_task = (
+        "[denis] # Task: Create a Hermes Skill for Authoring Role Packages\n"
+        "## Goal\n"
+        "Create a user-owned Hermes skill that helps operators and contributors create new role package skeletons safely."
+    )
+    conversation_history = [
+        {"role": "user", "content": prior_task},
+        {
+            "role": "assistant",
+            "content": (
+                "Hermes role: scribe\n"
+                "Reviewer: security_auditor\n"
+                "Approval: required\n"
+                "Operation category: security_critical_mutation\n\n"
+                "I need explicit approval before any mutation-capable changes.\n\n"
+                "Planned action:\n"
+                f"- {prior_task}\n\n"
+                "I will stop here before file writes, runtime changes, or external system mutations.\n"
+                "Reply with explicit approve if you want me to proceed, or adjust the scope."
+            ),
+        },
+    ]
+
+    approval_reply = (
+        '[Replying to: "# Task: Create a Hermes Skill for Authoring Role Packages Goal Create a user-owned Hermes skill..."]\n'
+        "[denis] approve\n"
+        "Proceed with the task exactly as scoped.\n"
+        "Clarifications:\n"
+        "- Creating ~/.hermes/skills/role-package-author/SKILL.md is approved.\n"
+        "- Creating the report under docs/profile-handoffs/ is approved.\n"
+        "- Running read-only verification commands and relevant tests is approved.\n"
+        "- Do not read .env, auth.json, provider config, or secret files.\n"
+        "- Do not run hermes role install.\n"
+        "- Do not create or install any generated role package.\n"
+        "- Do not modify built-in roles.\n"
+        "- Do not enable enforcement or package routing.\n"
+        "- Do not print secrets.\n"
+    )
+
+    result = run_conversation(
+        agent,
+        approval_reply,
+        conversation_history=conversation_history,
+    )
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
+    assert plugin_calls
+    assert "Create a Hermes Skill for Authoring Role Packages" in captured["user_message"]
+    assert "Do not read .env, auth.json, provider config, or secret files." in captured["user_message"]
+    assert "[Replying to:" not in captured["user_message"]
+
+
+def test_explicit_approve_without_pending_gate_reports_missing_pending_request(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(
+        agent,
+        "approve\nProceed with the task exactly as scoped.",
+        conversation_history=None,
+    )
+
+    assert result["turn_exit_reason"] == "no_pending_approval_to_apply"
+    assert "don't have a pending approval request" in result["final_response"].lower()
+    assert agent._run_codex_app_server_turn_called is False
+
+
 def test_haircut_prompt_does_not_take_critical_hard_stop_path(monkeypatch):
     plugin_calls = []
 

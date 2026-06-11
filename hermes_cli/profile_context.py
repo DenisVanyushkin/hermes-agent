@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_cli.profile_execution import RoleExecutionPlan, build_role_execution_plan
+from hermes_cli.profile_request_context import classification_request_text
 from hermes_cli.profile_routing import RouteDecision, route_task, load_profile_registry, DEFAULT_PROFILE_REGISTRY_PATH
 from hermes_cli.profile_validation import PROFILE_ID_ALIASES
 from utils import env_var_enabled
@@ -224,8 +225,9 @@ def render_role_debug_header(result: RoleContextResult | None) -> str:
 def _planned_action_lines(task_text: str) -> list[str]:
     if not isinstance(task_text, str):
         return []
+    cleaned_task_text = classification_request_text(task_text) or task_text
     items: list[str] = []
-    for raw_line in task_text.splitlines():
+    for raw_line in cleaned_task_text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
@@ -237,7 +239,7 @@ def _planned_action_lines(task_text: str) -> list[str]:
             break
     if items:
         return items
-    compact = " ".join(task_text.split())
+    compact = " ".join(cleaned_task_text.split())
     if not compact:
         return []
     return [compact[:220] + ("..." if len(compact) > 220 else "")]
