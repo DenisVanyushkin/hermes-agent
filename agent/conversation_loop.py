@@ -16,6 +16,7 @@ resolved through :func:`_ra` so those patches keep working.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import logging
 import os
@@ -39,6 +40,11 @@ from hermes_cli.profile_context import (
     build_role_context_for_task,
     inject_role_execution_debug_header,
     render_explicit_approval_request,
+)
+from hermes_cli.profile_request_context import (
+    approval_constraints_text,
+    approval_intent_text,
+    has_explicit_approval,
 )
 from hermes_cli.model_selection import model_selection_to_dict, select_model_policy
 from agent.message_sanitization import (
@@ -116,6 +122,59 @@ def _image_error_max_dimension(error: Exception) -> Optional[int]:
 
 def _should_hard_stop_for_approval(result: Any) -> bool:
     return bool(getattr(result, "critical_approval_required", False))
+
+
+def _latest_pending_approval_gate(messages: list[dict[str, Any]], current_turn_user_idx: int) -> dict[str, Any] | None:
+    """Return the latest unresolved profile approval gate before this user turn."""
+
+    for idx in range(current_turn_user_idx - 1, -1, -1):
+        msg = messages[idx]
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        gate = msg.get("_approval_gate")
+        if isinstance(gate, dict) and gate.get("required") and gate.get("critical_hard_stop"):
+            return gate
+    return None
+
+
+def _pending_gate_denied_or_deferred(task: str) -> bool:
+    cleaned = approval_intent_text(task).lower()
+    if not cleaned:
+        return False
+    if cleaned.startswith("no"):
+        return True
+    return "do not proceed" in cleaned or "don't proceed" in cleaned or "not proceed yet" in cleaned
+
+
+def _compose_pending_gate_execution_prompt(pending_gate: dict[str, Any], approval_reply: str) -> str:
+    """Build the model-facing task when the user approves a pending gate."""
+
+    task = str(pending_gate.get("task") or "").strip()
+    lines = [
+        "The user explicitly approved the previously blocked scoped action.",
+        "Proceed with the already-approved task below and preserve its original scope.",
+        "",
+        "Approved task:",
+    ]
+    task_lines = [line.strip() for line in task.splitlines() if line.strip()]
+    if task_lines:
+        lines.extend(f"- {line}" for line in task_lines)
+    else:
+        lines.append("- Continue with the previously approved scoped action.")
+
+    constraints = approval_constraints_text(approval_reply)
+    if constraints:
+        lines.extend(["", "Additional constraints from the latest approval reply:"])
+        lines.extend(f"- {line}" for line in constraints)
+
+    lines.extend(
+        [
+            "",
+            "Do not treat quoted/reply context as a new task.",
+            "Do not treat constraints as requested actions.",
+        ]
+    )
+    return "\n".join(lines).strip()
 
 
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
@@ -666,8 +725,33 @@ def run_conversation(
     _role_user_context = ""
     _role_context_result = None
     _model_selection_result = None
+    _pending_approval_gate = _latest_pending_approval_gate(messages, current_turn_user_idx)
+    _effective_task_for_routing = original_user_message
+    if _pending_approval_gate and isinstance(original_user_message, str):
+        if has_explicit_approval(original_user_message):
+            _effective_task_for_routing = str(_pending_approval_gate.get("task") or "").strip() or original_user_message
+            _approved_task_prompt = _compose_pending_gate_execution_prompt(
+                _pending_approval_gate,
+                original_user_message,
+            )
+            if 0 <= current_turn_user_idx < len(messages):
+                current_user_msg = messages[current_turn_user_idx]
+                if isinstance(current_user_msg, dict) and current_user_msg.get("role") == "user":
+                    current_user_msg["content"] = _approved_task_prompt
+            user_message = _approved_task_prompt
+            agent._persist_user_message_override = original_user_message
+        elif _pending_gate_denied_or_deferred(original_user_message):
+            _effective_task_for_routing = str(_pending_approval_gate.get("task") or "").strip() or original_user_message
     try:
-        _role_context_result = build_role_context_for_task(original_user_message)
+        _role_context_result = build_role_context_for_task(_effective_task_for_routing)
+        if _pending_approval_gate and isinstance(original_user_message, str) and has_explicit_approval(original_user_message):
+            _role_context_result = replace(
+                _role_context_result,
+                task=str(_pending_approval_gate.get("task") or _role_context_result.task),
+                requires_explicit_approval=False,
+                critical_approval_required=False,
+                approval_reason="",
+            )
         if _role_context_result.profile_context_used:
             _role_user_context = _role_context_result.context_text
             logger.info(
@@ -693,7 +777,7 @@ def run_conversation(
         _model_selection_result = select_model_policy(
             selected_role=getattr(_role_context_result, "selected_role", ""),
             canonical_role=getattr(_role_context_result, "canonical_role", None),
-            task_text=original_user_message if isinstance(original_user_message, str) else "",
+            task_text=_effective_task_for_routing if isinstance(_effective_task_for_routing, str) else "",
             critical_approval_required=bool(getattr(_role_context_result, "critical_approval_required", False)),
         )
         agent._model_selection = model_selection_to_dict(_model_selection_result)
