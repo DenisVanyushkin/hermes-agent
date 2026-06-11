@@ -7,6 +7,7 @@ role_context block for task execution.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,14 @@ from hermes_cli.profile_request_context import classification_request_text
 from hermes_cli.profile_routing import RouteDecision, route_task, load_profile_registry, DEFAULT_PROFILE_REGISTRY_PATH
 from hermes_cli.profile_validation import PROFILE_ID_ALIASES
 from utils import env_var_enabled
+from hermes_cli.role_package_activation import (
+    RolePackageRoutingConfig,
+    activate_package_for_role,
+    load_role_package_routing_config,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -34,6 +43,7 @@ class RoleContextResult:
     critical_approval_required: bool = False
     approval_reason: str = ""
     operation_category: str = ""
+    context_source: str = "builtin"
 
 
 @lru_cache(maxsize=4)
@@ -277,6 +287,7 @@ def build_role_context_for_task(
     route_decision: RouteDecision | dict[str, Any] | None = None,
     execution_plan: RoleExecutionPlan | dict[str, Any] | None = None,
     registry_path: Path | str = DEFAULT_PROFILE_REGISTRY_PATH,
+    role_package_routing_config: RolePackageRoutingConfig | None = None,
 ) -> RoleContextResult:
     """Build a compact role-context block for a task, failing soft on errors."""
     if not isinstance(task, str) or not task.strip():
@@ -333,6 +344,42 @@ def build_role_context_for_task(
 
     selected_role = resolved_plan.selected_role
     canonical_role = _canonical_role_id(selected_role)
+
+    # Package activation: attempt selected-role package context override.
+    # Falls back silently to built-in context on any failure.
+    _pkg_routing_cfg = role_package_routing_config
+    if _pkg_routing_cfg is None:
+        try:
+            from hermes_cli.config import load_config_readonly  # lazy import; hot path
+            _pkg_routing_cfg = load_role_package_routing_config(load_config_readonly())
+        except Exception:
+            pass
+
+    if _pkg_routing_cfg is not None and _pkg_routing_cfg.enabled:
+        try:
+            pkg_result = activate_package_for_role(
+                selected_role, _pkg_routing_cfg, prompt_text=task
+            )
+            if pkg_result.activated:
+                return RoleContextResult(
+                    task=task.strip(),
+                    selected_role=selected_role,
+                    canonical_role=canonical_role,
+                    context_text=pkg_result.context_text,
+                    profile_context_used=True,
+                    fallback_reason="",
+                    profile_status="",
+                    requires_reviewer=resolved_plan.requires_reviewer,
+                    reviewer_profile=resolved_plan.reviewer_profile,
+                    requires_explicit_approval=resolved_plan.requires_explicit_approval,
+                    critical_approval_required=resolved_plan.critical_approval_required,
+                    approval_reason=resolved_plan.approval_reason,
+                    operation_category=resolved_plan.operation_category,
+                    context_source="package",
+                )
+        except Exception as _pkg_exc:
+            logger.warning("package activation hook exception: %s", _pkg_exc)
+
     contracts = load_profile_contracts(registry_path)
     contract = get_profile_contract(selected_role, contracts=contracts, registry_path=registry_path)
     if contract is None and canonical_role:
