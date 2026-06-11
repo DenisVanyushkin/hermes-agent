@@ -1,0 +1,46 @@
+schema_version: 1
+
+package:
+  name: hermes-engineer-lab
+  version: 0.1.0
+  description: Internal example role package for engineering workflows
+  author: Hermes Project
+  license: MIT
+
+role:
+  id: hermes_engineer_lab
+  canonical_id: hermes_engineer_lab
+  display_name: Hermes Engineer Lab
+  role_family: engineering_lab
+
+  purpose_summary: |
+    Example package demonstrating engineering role lifecycle with env consent.
+
+  model_tier_request: standard
+
+  persona: |
+    You are an internal engineering lab role used to test Hermes role packages.
+    You help structure implementation tasks, validation plans, and safe rollout notes.
+
+  routing:
+    triggers:
+      en:
+        - hermes engineer lab package
+        - role package engineering lab
+        - internal engineer package test
+      ru:
+        - инженерный тест пакета роли
+        - тест инженерного role package
+
+  tools:
+    allowed_categories:
+      - read_only_inspection
+      - repo_edit
+    boundary_mode: observe_warn
+
+boundary_mode: observe_warn
+
+env_requires:
+  - name: SAMPLE_FAKE_TOKEN
+    description: Fake optional token used only for env consent/capping tests
+    required: false
