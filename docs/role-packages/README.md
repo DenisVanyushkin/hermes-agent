@@ -328,6 +328,25 @@ Then verify skills appear:
 hermes role info my-role
 ```
 
+## Tool Category Taxonomy
+
+Manifests declare tool scope via `allowed_categories`. Valid categories and their semantics:
+
+| Category | Semantics | Status |
+|---|---|---|
+| `read_only_inspection` | File reads, code search, system inspection, logs, audit trails | Active |
+| `repo_edit` | File writes, patches, code changes, config updates | Active |
+| `shell_general` | General shell commands; mutation-capable — must remain approval-gated | Active |
+| `production_deploy` | Production deployment tools | Placeholder (observe-only) |
+| `secrets_read` | Secrets and credential access | Placeholder (observe-only) |
+| `web_search` | Read-only web search and query tools | Taxonomy-only (no enforcement yet) |
+| `web_browse` | Read-only browser navigation and page inspection | Taxonomy-only (no enforcement yet) |
+| `job_intel_read` | Read-only access to job-intelligence data | Taxonomy-only (no enforcement yet) |
+
+**Taxonomy-only categories** (`web_search`, `web_browse`, `job_intel_read`) are accepted by the manifest validator but carry no enforcement behavior in MVP. Shadow packages may declare them; the `observe_warn` evaluator will log would-be decisions without blocking. Enforcement follows in v1.
+
+**`shell_general` note:** This category is mutation-capable (arbitrary shell commands). Even though it appears in role package manifests, all actual shell actions pass through the existing approval gate at the tool/action boundary. Declaring `shell_general` in a manifest does not lower or bypass approval requirements.
+
 ## Production v1 Roadmap
 
 The next major version will add:

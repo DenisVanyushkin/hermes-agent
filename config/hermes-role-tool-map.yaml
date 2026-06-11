@@ -133,3 +133,49 @@ categories:
       configuration. Used for authentication and environment variable management.
       No tool names mapped yet — this category cannot currently block anything.
     tools: []
+
+  # ---------------------------------------------------------------------------
+  # Fine-grained read-only categories — pre-v1 taxonomy pass.
+  # These are TAXONOMY ONLY in MVP. No enforcement occurs; tools in these
+  # categories are still allowed by observe_warn packages. Enforcement will
+  # follow in v1 once enforced_tools boundary_mode is activated.
+  # ---------------------------------------------------------------------------
+
+  web_search:
+    description: >-
+      Read-only web search and query tools. Sends search queries to external
+      engines; receives results. No mutations. Fine-grained sub-category of
+      read_only_inspection for packages that need explicit web-search scope.
+    tools:
+      - web_search
+      - web_extract
+      - x_search
+
+  web_browse:
+    description: >-
+      Read-only browser navigation and web-page inspection tools. Covers
+      automated browser actions for reading page content, screenshots, and
+      DOM inspection. No form submissions or mutations. Fine-grained
+      sub-category of read_only_inspection.
+    tools:
+      - browser_navigate
+      - browser_click
+      - browser_type
+      - browser_press
+      - browser_scroll
+      - browser_back
+      - browser_snapshot
+      - browser_console
+      - browser_get_images
+      - browser_vision
+      - browser_cdp
+      - browser_dialog
+      - computer_use
+
+  job_intel_read:
+    description: >-
+      Read-only access to job-intelligence data and state. Covers queries
+      against the job_intel SQLite database and pipeline results. No writes
+      to the job pipeline; no external job-board scraping.
+      [PLACEHOLDER] No confirmed tool names mapped yet — observe-only.
+    tools: []

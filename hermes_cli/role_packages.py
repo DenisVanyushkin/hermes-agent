@@ -42,6 +42,12 @@ KNOWN_TOOL_CATEGORIES: frozenset[str] = frozenset({
     "shell_general",
     "production_deploy",
     "secrets_read",
+    # Fine-grained read-only categories added in pre-v1 taxonomy pass.
+    # No enforcement yet (observe_warn only); tool-to-category mapping lives
+    # in config/hermes-role-tool-map.yaml alongside this constant.
+    "web_search",
+    "web_browse",
+    "job_intel_read",
 })
 
 # Package names: lowercase, start with letter, alphanumeric + hyphens, max 64 chars.
