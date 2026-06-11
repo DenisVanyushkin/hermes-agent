@@ -1,0 +1,11 @@
+schema_version: 1
+package:
+  name: policy-advisory
+  version: 0.1.0
+role:
+  id: policy_advisory
+  canonical_id: policy_advisory
+  display_name: Policy Advisory Role
+  role_family: test
+  purpose_summary: Fixture for advisory boundary_mode policy tests
+boundary_mode: advisory

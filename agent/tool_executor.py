@@ -385,6 +385,21 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         except Exception:
             pass
 
+        # Observe-only role policy check — Slice 6.
+        # Dispatch integration is structurally present but live-dormant until
+        # active package role context is wired.
+        # TODO(slice-routing): pass real active package manifest once roles are routable.
+        try:
+            from hermes_cli.role_policy import observe_and_log as _observe_role_policy
+            _observe_role_policy(
+                role_manifest=None,
+                role_package="",
+                tool_name=function_name,
+                tool_args=function_args if isinstance(function_args, dict) else {},
+            )
+        except Exception:
+            pass
+
         function_args, middleware_trace = _apply_tool_request_middleware_for_agent(
             agent,
             function_name=function_name,

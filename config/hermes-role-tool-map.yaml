@@ -1,0 +1,103 @@
+schema_version: 1
+
+categories:
+  read_only_inspection:
+    description: >-
+      Tools for viewing files, searching code, inspecting system state, and
+      fetching external data. No mutations to files or system state.
+    tools:
+      - read_file
+      - search_files
+      - web_search
+      - web_extract
+      - session_search
+      - memory
+      - skills_list
+      - skill_view
+      - browser_navigate
+      - browser_click
+      - browser_type
+      - browser_press
+      - browser_scroll
+      - browser_back
+      - browser_snapshot
+      - browser_console
+      - browser_get_images
+      - browser_vision
+      - browser_cdp
+      - browser_dialog
+      - vision_analyze
+      - video_analyze
+      - read_terminal
+      - x_search
+      - ha_list_entities
+      - ha_list_services
+      - ha_get_state
+      - kanban_list
+      - kanban_show
+      - clarify
+      - computer_use
+      - feishu_doc_read
+      - yb_search_sticker
+      - yb_query_group_members
+      - yb_query_group_info
+      - file_search
+
+  repo_edit:
+    description: >-
+      Tools for modifying file contents, state, and creating tasks.
+      Used for code changes, configuration updates, data file manipulation,
+      and message/communication changes.
+    tools:
+      - write_file
+      - patch
+      - skill_manage
+      - send_message
+      - todo
+      - kanban_create
+      - kanban_complete
+      - kanban_link
+      - kanban_unblock
+      - kanban_block
+      - kanban_comment
+      - kanban_heartbeat
+      - discord
+      - discord_admin
+      - feishu_drive_add_comment
+      - feishu_drive_list_comments
+      - feishu_drive_list_comment_replies
+      - feishu_drive_reply_comment
+      - yb_send_dm
+      - yb_send_sticker
+
+  shell_general:
+    description: >-
+      Tools for executing shell commands, code in sandboxes, and
+      delegating tasks to other agents. Includes process control and
+      multi-agent coordination.
+    tools:
+      - terminal
+      - execute_code
+      - process
+      - delegate_task
+      - cronjob
+      - ha_call_service
+      - image_generate
+      - video_generate
+      - text_to_speech
+      - mixture_of_agents
+
+  production_deploy:
+    description: >-
+      Tools for deploying and managing production infrastructure.
+      Includes container orchestration and deployment automation.
+      [unconfirmed - no tools found in codebase yet]
+    tools:
+      - deploy  # [unconfirmed]
+
+  secrets_read:
+    description: >-
+      Tools for accessing secrets, credentials, and sensitive configuration.
+      Used for authentication and environment variable management.
+      [unconfirmed - no tools found in codebase yet]
+    tools: []

@@ -319,3 +319,82 @@ class TestEnvRequiresValidation:
         manifest, errors, _ = validate_manifest_path(tmp_path / "noenv")
         assert errors == []
         assert manifest is not None
+
+
+# ---------------------------------------------------------------------------
+# role.tools validation (Slice 6)
+# ---------------------------------------------------------------------------
+
+
+class TestRoleToolsValidation:
+    def _pkg(self, role_tools=None, boundary_mode="observe_warn"):
+        data = {
+            "schema_version": 1,
+            "package": {"name": "policy-role", "version": "0.1.0"},
+            "role": {
+                "id": "policy_role",
+                "canonical_id": "policy_role",
+                "display_name": "Policy Role",
+            },
+            "boundary_mode": boundary_mode,
+        }
+        if role_tools is not None:
+            data["role"]["tools"] = role_tools
+        return data
+
+    def test_valid_allowed_categories_accepted(self, tmp_path):
+        data = self._pkg(role_tools={"allowed_categories": ["read_only_inspection", "repo_edit"]})
+        _write_manifest(tmp_path / "valid_allowed", data)
+        manifest, errors, _ = validate_manifest_path(tmp_path / "valid_allowed")
+        assert errors == []
+        assert manifest is not None
+
+    def test_valid_denied_categories_accepted(self, tmp_path):
+        data = self._pkg(role_tools={"denied_categories": ["production_deploy", "secrets_read"]})
+        _write_manifest(tmp_path / "valid_denied", data)
+        manifest, errors, _ = validate_manifest_path(tmp_path / "valid_denied")
+        assert errors == []
+        assert manifest is not None
+
+    def test_unknown_category_in_allowed_rejected(self, tmp_path):
+        data = self._pkg(role_tools={"allowed_categories": ["read_only_inspection", "totally_made_up"]})
+        _write_manifest(tmp_path / "bad_allowed", data)
+        _, errors, _ = validate_manifest_path(tmp_path / "bad_allowed")
+        assert any("totally_made_up" in e or "unknown" in e.lower() for e in errors), errors
+
+    def test_unknown_category_in_denied_rejected(self, tmp_path):
+        data = self._pkg(role_tools={"denied_categories": ["nonexistent_cat"]})
+        _write_manifest(tmp_path / "bad_denied", data)
+        _, errors, _ = validate_manifest_path(tmp_path / "bad_denied")
+        assert any("nonexistent_cat" in e or "unknown" in e.lower() for e in errors), errors
+
+    def test_non_list_allowed_categories_rejected(self, tmp_path):
+        data = self._pkg(role_tools={"allowed_categories": "read_only_inspection"})
+        _write_manifest(tmp_path / "non_list", data)
+        _, errors, _ = validate_manifest_path(tmp_path / "non_list")
+        assert errors
+
+    def test_duplicate_category_in_allowed_rejected(self, tmp_path):
+        data = self._pkg(role_tools={"allowed_categories": ["read_only_inspection", "read_only_inspection"]})
+        _write_manifest(tmp_path / "dup_allowed", data)
+        _, errors, _ = validate_manifest_path(tmp_path / "dup_allowed")
+        assert errors
+
+    def test_duplicate_category_in_denied_rejected(self, tmp_path):
+        data = self._pkg(role_tools={"denied_categories": ["production_deploy", "production_deploy"]})
+        _write_manifest(tmp_path / "dup_denied", data)
+        _, errors, _ = validate_manifest_path(tmp_path / "dup_denied")
+        assert errors
+
+    def test_no_role_tools_is_valid(self, tmp_path):
+        data = self._pkg()  # no role.tools
+        _write_manifest(tmp_path / "no_tools", data)
+        manifest, errors, _ = validate_manifest_path(tmp_path / "no_tools")
+        assert errors == []
+        assert manifest is not None
+
+    def test_advisory_mode_no_role_tools_is_valid(self, tmp_path):
+        data = self._pkg(boundary_mode="advisory")
+        _write_manifest(tmp_path / "advisory_no_tools", data)
+        manifest, errors, _ = validate_manifest_path(tmp_path / "advisory_no_tools")
+        assert errors == []
