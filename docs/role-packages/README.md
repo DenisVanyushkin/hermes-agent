@@ -217,6 +217,12 @@ MVP supports two boundary modes:
 
 **Enforced_tools** mode (which blocks denied tool calls) is not active in MVP. It will be implemented in production v1 after observe_warn calibration.
 
+### Model Tier Requests Validated But Not Dispatched
+
+`model_tier_request` values (`standard`, `reasoning`, `critical`) are validated in manifests but the agent does not yet select models based on package declarations. This is metadata preparation for v1 routing activation. The built-in role model selection is unchanged.
+
+`critical` is restricted to security role families (validated at install time).
+
 ### Routing Triggers Inactive
 
 Package routing triggers are validated and stored, but are not active in MVP. Built-in routing is unchanged.

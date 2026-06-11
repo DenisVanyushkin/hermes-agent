@@ -348,8 +348,7 @@ Total: 7 new entries recommended. All verified against current routing.
 
 3. ~~**Add `shell_general` to engineer-core manifest**~~ **✓ DONE 2026-06-11** — `shell_general` added to `hermes-engineer-core` allowed_categories.
 
-4. **Add `model_tier_request: reasoning/critical` machinery**
-   Without this, engineer and security_auditor packages run on the wrong model tier.
+4. ~~**Add `model_tier_request: reasoning/critical` machinery**~~ **✓ DONE 2026-06-11** — `VALID_MODEL_TIERS` added; `reasoning` and `critical` validated; engineer updated to `reasoning`, security_auditor to `critical`.
 
 5. ~~**Extend golden corpus** with the 7 missing entries identified above.~~ **✓ DONE 2026-06-11** — 7 entries added.
 
@@ -399,10 +398,9 @@ Pre-activation requirements 1, 2, 3, 5 closed in commit `test(roles): add shadow
 - **7 golden corpus entries** added covering: Russian infra fallback (×2), Russian docs-first (×2), infra+docs overlay, security+infra chain, pure research
 - **`test_core_shadow_role_packages.py`** extended with `TestNewTaxonomyCategories` (11 tests) and `TestPreV1CorpusGaps` (1 test)
 
-Remaining pre-v1 blockers:
-- `model_tier_request: reasoning` machinery (engineer)
-- `model_tier_request: critical` machinery (security_auditor)
+Remaining pre-v1 blockers after `feat(roles): support package model tier requests` commit:
 - observe_warn calibration run (≥1 week, <5% false positive rate per role before routing activation)
+- package routing activation (behind feature flag; scribe first in v1 sequence)
 ```
 
 ---
