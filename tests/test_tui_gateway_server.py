@@ -4017,7 +4017,11 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
             self._target = target
 
         def start(self):
-            self._target()
+            import contextvars
+            # Run in an isolated copy of the current context so that
+            # contextvar mutations (e.g. _SESSION_KEY set by _set_session_context)
+            # do not leak into the main thread and pollute subsequent tests.
+            contextvars.copy_context().run(self._target)
 
     server._sessions["sid"] = _session(agent=_Agent())
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
