@@ -422,3 +422,304 @@ class TestAcceptEnvCLI:
         lock = read_lockfile(get_role_packages_dir(hermetic_home))
         entry = lock["packages"]["test-pkg"]
         assert sorted(entry.get("accepted_env", [])) == ["BAR", "FOO"]
+
+
+# ---------------------------------------------------------------------------
+# G1: --accept-env CLI flag tests (RED: fail until flag is added to parser)
+# ---------------------------------------------------------------------------
+
+
+class TestAcceptEnvCLIFlag:
+    """Tests for --accept-env CLI flag on hermes role install.
+
+    These tests verify that the argparse-level flag is wired up and that
+    accepted_env is correctly written to the lockfile.
+    """
+
+    def _make_env_pkg(
+        self,
+        tmp_path: Path,
+        name: str = "env-test-pkg",
+        env_requires: list | None = None,
+    ) -> Path:
+        env_requires = env_requires or [{"name": "FAKE_TOKEN"}, {"name": "ANOTHER_TOKEN"}]
+        data = {
+            "schema_version": 1,
+            "package": {"name": name, "version": "0.1.0"},
+            "role": {
+                "id": f"{name.replace('-', '_')}_id",
+                "canonical_id": f"{name.replace('-', '_')}_id",
+                "display_name": name,
+            },
+            "env_requires": env_requires,
+        }
+        src = tmp_path / name
+        src.mkdir(exist_ok=True)
+        (src / "role-package.yaml").write_text(
+            yaml.safe_dump(data, sort_keys=False), encoding="utf-8"
+        )
+        return src
+
+    def _build_install_args(self, path: Path, accept_env: list[str] | None = None, force: bool = False):
+        """Parse CLI args for 'hermes role install' using the real arg parser."""
+        import argparse
+        from hermes_cli.subcommands.role import build_role_parser
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest="command")
+        from hermes_cli.subcommands.role import cmd_role
+        build_role_parser(subparsers, cmd_role=cmd_role)
+
+        argv = ["role", "install", str(path)]
+        if accept_env:
+            for val in accept_env:
+                argv += ["--accept-env", val]
+        if force:
+            argv.append("--force")
+        return parser.parse_args(argv)
+
+    def test_accept_env_single_flag_written_to_lockfile(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """--accept-env FAKE_TOKEN writes FAKE_TOKEN to lockfile accepted_env."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = self._make_env_pkg(tmp_path)
+        args = self._build_install_args(src, accept_env=["FAKE_TOKEN"])
+        cmd_role(args)
+
+        lock = read_lockfile(get_role_packages_dir(hermetic_home))
+        entry = lock["packages"]["env-test-pkg"]
+        assert "FAKE_TOKEN" in entry.get("accepted_env", [])
+
+    def test_accept_env_repeated_flags_accepted(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """--accept-env FOO --accept-env BAR writes both to lockfile."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = self._make_env_pkg(tmp_path)
+        args = self._build_install_args(src, accept_env=["FAKE_TOKEN", "ANOTHER_TOKEN"])
+        cmd_role(args)
+
+        lock = read_lockfile(get_role_packages_dir(hermetic_home))
+        entry = lock["packages"]["env-test-pkg"]
+        assert sorted(entry.get("accepted_env", [])) == ["ANOTHER_TOKEN", "FAKE_TOKEN"]
+
+    def test_accept_env_comma_separated_values(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """--accept-env FOO,BAR writes both tokens to lockfile."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = self._make_env_pkg(tmp_path)
+        # Simulate comma-separated in a single flag value
+        args = self._build_install_args(src, accept_env=["FAKE_TOKEN,ANOTHER_TOKEN"])
+        cmd_role(args)
+
+        lock = read_lockfile(get_role_packages_dir(hermetic_home))
+        entry = lock["packages"]["env-test-pkg"]
+        assert sorted(entry.get("accepted_env", [])) == ["ANOTHER_TOKEN", "FAKE_TOKEN"]
+
+    def test_accept_env_undeclared_var_exits_nonzero(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """--accept-env of a var not in env_requires causes non-zero exit."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = self._make_env_pkg(tmp_path)
+        args = self._build_install_args(src, accept_env=["UNDECLARED_FAKE_VAR"])
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_role(args)
+        assert exc_info.value.code != 0
+
+    def test_install_no_accept_env_stores_empty_list(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """No --accept-env flag leaves accepted_env as empty list."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = self._make_env_pkg(tmp_path)
+        args = self._build_install_args(src)
+        cmd_role(args)
+
+        lock = read_lockfile(get_role_packages_dir(hermetic_home))
+        entry = lock["packages"]["env-test-pkg"]
+        assert entry.get("accepted_env", []) == []
+
+
+# ---------------------------------------------------------------------------
+# G2: install exit code tests (confirm correct non-zero exit on failure)
+# ---------------------------------------------------------------------------
+
+
+class TestInstallExitCodes:
+    """Confirm that install CLI returns correct exit codes.
+
+    These tests document and protect the existing correct behavior.
+    """
+
+    def _make_overlap_pkg(self, tmp_path: Path) -> Path:
+        """Create a package with a trigger that collides with a built-in."""
+        data = {
+            "schema_version": 1,
+            "package": {"name": "exit-code-overlap-pkg", "version": "0.1.0"},
+            "role": {
+                "id": "exit_code_overlap_role",
+                "canonical_id": "exit_code_overlap_role",
+                "display_name": "Exit Code Overlap Role",
+                "routing": {"triggers": {"en": ["deploy"]}},
+            },
+            "boundary_mode": "observe_warn",
+        }
+        src = tmp_path / "overlap-pkg"
+        src.mkdir()
+        (src / "role-package.yaml").write_text(
+            yaml.safe_dump(data, sort_keys=False), encoding="utf-8"
+        )
+        return src
+
+    def _cmd_install_args(self, path: Path) -> object:
+        import argparse
+        from hermes_cli.subcommands.role import build_role_parser, cmd_role
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest="command")
+        build_role_parser(subparsers, cmd_role=cmd_role)
+        return parser.parse_args(["role", "install", str(path)])
+
+    def test_overlap_package_install_exits_nonzero(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """Install of overlap-trigger package exits non-zero."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = self._make_overlap_pkg(tmp_path)
+        args = self._cmd_install_args(src)
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_role(args)
+        assert exc_info.value.code != 0
+
+    def test_invalid_manifest_install_exits_nonzero(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """Install of package with invalid manifest exits non-zero."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = tmp_path / "bad-pkg"
+        src.mkdir()
+        (src / "role-package.yaml").write_text("not: valid: yaml:\n", encoding="utf-8")
+
+        args = self._cmd_install_args(src)
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_role(args)
+        assert exc_info.value.code != 0
+
+    def test_valid_package_install_exits_zero(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """Install of valid package exits zero (does not raise SystemExit)."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = tmp_path / "good-pkg"
+        src.mkdir()
+        data = {
+            "schema_version": 1,
+            "package": {"name": "good-pkg", "version": "0.1.0"},
+            "role": {"id": "good_pkg_role", "canonical_id": "good_pkg_role", "display_name": "Good"},
+        }
+        (src / "role-package.yaml").write_text(
+            yaml.safe_dump(data, sort_keys=False), encoding="utf-8"
+        )
+        args = self._cmd_install_args(src)
+        # Should NOT raise — no sys.exit(1)
+        cmd_role(args)
+
+
+# ---------------------------------------------------------------------------
+# G4: validate --schema-only flag tests
+# ---------------------------------------------------------------------------
+
+
+class TestValidateSchemaOnlyFlag:
+    """Tests for hermes role validate --schema-only flag."""
+
+    def _make_overlap_pkg(self, tmp_path: Path) -> Path:
+        """Create a package whose schema is valid but whose trigger overlaps a built-in."""
+        data = {
+            "schema_version": 1,
+            "package": {"name": "schema-only-overlap-pkg", "version": "0.1.0"},
+            "role": {
+                "id": "schema_only_overlap_role",
+                "canonical_id": "schema_only_overlap_role",
+                "display_name": "Schema Only Overlap Role",
+                "routing": {"triggers": {"en": ["deploy"]}},
+            },
+            "boundary_mode": "observe_warn",
+        }
+        src = tmp_path / "schema-only-overlap-pkg"
+        src.mkdir()
+        (src / "role-package.yaml").write_text(
+            yaml.safe_dump(data, sort_keys=False), encoding="utf-8"
+        )
+        return src
+
+    def _cmd_validate_args(self, path: Path, schema_only: bool = False) -> object:
+        import argparse
+        from hermes_cli.subcommands.role import build_role_parser, cmd_role
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest="command")
+        build_role_parser(subparsers, cmd_role=cmd_role)
+        argv = ["role", "validate", str(path)]
+        if schema_only:
+            argv.append("--schema-only")
+        return parser.parse_args(argv)
+
+    def test_validate_default_catches_overlap_and_exits_nonzero(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """Default validate catches overlap trigger and exits non-zero."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = self._make_overlap_pkg(tmp_path)
+        args = self._cmd_validate_args(src, schema_only=False)
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_role(args)
+        assert exc_info.value.code != 0
+
+    def test_validate_schema_only_skips_overlap_and_exits_zero(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """--schema-only skips overlap validation; valid schema exits zero."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = self._make_overlap_pkg(tmp_path)
+        args = self._cmd_validate_args(src, schema_only=True)
+        # Should NOT raise — overlap check skipped, schema is valid
+        cmd_role(args)
+
+    def test_validate_unique_trigger_exits_zero(
+        self, tmp_path: Path, hermetic_home: Path
+    ) -> None:
+        """Validate of package with unique trigger exits zero by default."""
+        from hermes_cli.subcommands.role import cmd_role
+
+        src = tmp_path / "unique-pkg"
+        src.mkdir()
+        data = {
+            "schema_version": 1,
+            "package": {"name": "unique-pkg", "version": "0.1.0"},
+            "role": {
+                "id": "unique_pkg_role",
+                "canonical_id": "unique_pkg_role",
+                "display_name": "Unique Role",
+                "routing": {"triggers": {"en": ["xyzzy_unique_nonexistent_trigger_42"]}},
+            },
+        }
+        (src / "role-package.yaml").write_text(
+            yaml.safe_dump(data, sort_keys=False), encoding="utf-8"
+        )
+        args = self._cmd_validate_args(src)
+        # Should NOT raise
+        cmd_role(args)
