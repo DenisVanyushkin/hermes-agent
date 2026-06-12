@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, is_dataclass
 import logging
 import os
 import re
@@ -13,6 +14,14 @@ from .models import Evaluation, Vacancy
 from .runtime import capture_runtime_provenance, parse_iso_datetime
 
 logger = logging.getLogger(__name__)
+
+
+def _json_safe_default(value: Any) -> Any:
+    if is_dataclass(value):
+        return asdict(value)
+    if hasattr(value, "__dict__"):
+        return dict(value.__dict__)
+    return str(value)
 
 
 def canonical_source_key(value: str | None) -> str:
@@ -64,6 +73,101 @@ CREATE TABLE IF NOT EXISTS vacancies (
     last_seen_at TEXT NOT NULL,
     repost_count INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'new'
+);
+
+CREATE TABLE IF NOT EXISTS opportunities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vacancy_id INTEGER,
+    company TEXT,
+    company_normalized TEXT,
+    title TEXT,
+    title_normalized TEXT,
+    location TEXT,
+    remote_policy TEXT,
+    source TEXT NOT NULL,
+    source_url TEXT,
+    canonical_url TEXT,
+    ats TEXT,
+    ats_job_id TEXT,
+    description TEXT,
+    description_hash TEXT,
+    status TEXT NOT NULL DEFAULT 'discovered',
+    score INTEGER,
+    confidence TEXT,
+    recommendation TEXT,
+    slack_channel_id TEXT,
+    slack_message_ts TEXT,
+    slack_thread_ts TEXT,
+    artifact_bundle_id INTEGER,
+    next_action_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_seen_at TEXT,
+    FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS opportunity_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opportunity_id INTEGER,
+    event_type TEXT NOT NULL,
+    event_source TEXT NOT NULL,
+    actor TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS opportunity_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opportunity_id INTEGER NOT NULL,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    owner TEXT NOT NULL DEFAULT 'denis',
+    due_at TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS opportunity_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opportunity_id INTEGER NOT NULL,
+    artifact_type TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    content_path TEXT,
+    content_text TEXT,
+    summary TEXT,
+    model TEXT,
+    qa_status TEXT,
+    qa_notes TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS opportunity_contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opportunity_id INTEGER NOT NULL,
+    name TEXT,
+    role TEXT,
+    company TEXT,
+    email TEXT,
+    linkedin_url TEXT,
+    source TEXT,
+    confidence TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS slack_message_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opportunity_id INTEGER NOT NULL,
+    slack_channel_id TEXT NOT NULL,
+    slack_message_ts TEXT NOT NULL,
+    slack_thread_ts TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(slack_channel_id, slack_message_ts),
+    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS vacancy_evaluations (
@@ -219,6 +323,30 @@ CREATE TABLE IF NOT EXISTS vacancy_card_decisions (
     UNIQUE(run_id, card_key),
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
     FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_intel_performance_spans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    span_name TEXT NOT NULL,
+    parent_span_name TEXT,
+    source_name TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ok',
+    found_count INTEGER,
+    normalized_count INTEGER,
+    accepted_count INTEGER,
+    duplicate_count INTEGER,
+    rejected_count INTEGER,
+    new_card_keys INTEGER,
+    cards_sent INTEGER,
+    error_count INTEGER,
+    retry_count INTEGER,
+    timeout_count INTEGER,
+    metadata_json TEXT,
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
 
 
@@ -741,8 +869,8 @@ PRAGMA foreign_keys=ON;
                     now,
                     "running",
                     merged_notes,
-                    json.dumps(merged_metadata, ensure_ascii=False),
-                    json.dumps(runtime_provenance, ensure_ascii=False),
+                    json.dumps(merged_metadata, ensure_ascii=False, default=_json_safe_default),
+                    json.dumps(runtime_provenance, ensure_ascii=False, default=_json_safe_default),
                     run_type,
                 ),
             )
@@ -770,8 +898,8 @@ PRAGMA foreign_keys=ON;
                     datetime.now(timezone.utc).isoformat(),
                     status,
                     notes,
-                    json.dumps(existing_metadata, ensure_ascii=False),
-                    json.dumps(existing_provenance, ensure_ascii=False),
+                    json.dumps(existing_metadata, ensure_ascii=False, default=_json_safe_default),
+                    json.dumps(existing_provenance, ensure_ascii=False, default=_json_safe_default),
                     run_id,
                 ),
             )
@@ -1158,6 +1286,29 @@ PRAGMA foreign_keys=ON;
             )
             return int(cur.lastrowid)
 
+    def update_notification_payload(self, notification_id: int, payload: dict[str, Any] | None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE notifications SET payload_json = ? WHERE id = ?",
+                (json.dumps(payload or {}, ensure_ascii=False, default=_json_safe_default), notification_id),
+            )
+
+    def fetch_notifications_for_run(
+        self,
+        run_id: int,
+        *,
+        message_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM notifications WHERE run_id = ?"
+        params: list[Any] = [run_id]
+        if message_type:
+            sql += " AND message_type = ?"
+            params.append(message_type)
+        sql += " ORDER BY id ASC"
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
     def latest_notification_for_card(
         self,
         card_key: str,
@@ -1337,6 +1488,124 @@ PRAGMA foreign_keys=ON;
                 (run_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def fetch_source_kpi_rows(self, run_id: int) -> list[dict[str, Any]]:
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM source_kpi_run
+                WHERE run_id = ?
+                ORDER BY runtime_seconds DESC, source ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_performance_spans(self, run_id: int, spans: list[dict[str, Any]]) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM job_intel_performance_spans WHERE run_id = ?", (run_id,))
+            if not spans:
+                return
+            conn.executemany(
+                """
+                INSERT INTO job_intel_performance_spans (
+                    run_id, span_name, parent_span_name, source_name,
+                    started_at, finished_at, duration_ms, status,
+                    found_count, normalized_count, accepted_count, duplicate_count,
+                    rejected_count, new_card_keys, cards_sent,
+                    error_count, retry_count, timeout_count, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        int(row["run_id"]),
+                        row["span_name"],
+                        row.get("parent_span_name"),
+                        row.get("source_name"),
+                        row["started_at"],
+                        row["finished_at"],
+                        int(row["duration_ms"] or 0),
+                        row.get("status") or "ok",
+                        row.get("found_count"),
+                        row.get("normalized_count"),
+                        row.get("accepted_count"),
+                        row.get("duplicate_count"),
+                        row.get("rejected_count"),
+                        row.get("new_card_keys"),
+                        row.get("cards_sent"),
+                        row.get("error_count"),
+                        row.get("retry_count"),
+                        row.get("timeout_count"),
+                        row.get("metadata_json"),
+                    )
+                    for row in spans
+                ],
+            )
+
+    def fetch_performance_spans(self, run_id: int) -> list[dict[str, Any]]:
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM job_intel_performance_spans
+                WHERE run_id = ?
+                ORDER BY duration_ms DESC, id ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_daily_run_span_durations(self, span_name: str, *, limit: int = 5, exclude_run_id: int | None = None) -> list[int]:
+        sql = """
+            SELECT p.duration_ms
+            FROM job_intel_performance_spans p
+            JOIN runs r ON r.id = p.run_id
+            WHERE p.span_name = ?
+              AND r.mode = 'daily'
+              AND r.run_type = 'production'
+        """
+        params: list[Any] = [span_name]
+        if exclude_run_id is not None:
+            sql += " AND p.run_id <> ?"
+            params.append(exclude_run_id)
+        sql += " ORDER BY p.run_id DESC LIMIT ?"
+        params.append(limit)
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [int(row[0] or 0) for row in rows]
+
+    def recent_daily_runs_with_spans(self, *, limit: int = 7) -> tuple[list[dict[str, Any]], dict[int, list[dict[str, Any]]]]:
+        with self.connect(read_only=True) as conn:
+            run_rows = conn.execute(
+                """
+                SELECT *
+                FROM runs
+                WHERE mode = 'daily'
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            runs = [dict(row) for row in run_rows]
+            if not runs:
+                return [], {}
+            run_ids = [int(row["id"]) for row in runs]
+            placeholders = ",".join(["?"] * len(run_ids))
+            span_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM job_intel_performance_spans
+                WHERE run_id IN ({placeholders})
+                ORDER BY run_id DESC, duration_ms DESC, id ASC
+                """,
+                run_ids,
+            ).fetchall()
+        spans_by_run: dict[int, list[dict[str, Any]]] = {}
+        for row in span_rows:
+            payload = dict(row)
+            spans_by_run.setdefault(int(payload["run_id"]), []).append(payload)
+        return runs, spans_by_run
 
 
     def upsert_source_kpi_run(self, run_id: int, source: str, kpi: dict[str, Any]) -> None:

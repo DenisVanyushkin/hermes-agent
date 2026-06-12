@@ -187,6 +187,10 @@ Implementation must not start until `08-pre-implementation-readiness.md` returns
   - **Content:** optional future routing improvement.
   - **DoD:** deterministic routing remains default; model-assisted mode is observable, testable, and fail-soft.
 
+- [>] **Stale-thread follow-up bot**
+  - **Content:** watches messages or tasks explicitly marked for later, then resurfaces them only after they’ve actually gone stale; includes the original context plus a suggested next action.
+  - **DoD:** avoids noisy repeat nudges, works cleanly for Telegram/ops/trading follow-ups, and only pings when the item is genuinely stale.
+
 ## Core Shadow Packages (Migration Preparation)
 
 **Status:** COMPLETE (2026-06-11)

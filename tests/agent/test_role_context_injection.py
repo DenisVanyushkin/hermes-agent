@@ -5,12 +5,18 @@ from types import SimpleNamespace
 from agent.conversation_loop import (
     _assistant_turn_has_tool_call_named,
     _compose_turn_user_message_content,
+    _should_preflight_block_for_profile_context,
     run_conversation,
 )
 from hermes_cli.profile_context import (
     build_role_context_for_task,
     inject_role_execution_debug_header,
     RoleContextResult,
+)
+from hermes_cli.profile_request_context import (
+    approval_constraints_text,
+    approval_intent_text,
+    has_explicit_approval,
 )
 
 
@@ -70,6 +76,15 @@ def test_engineer_task_injects_engineering_context():
     assert result.selected_role == "engineer"
     assert "Engineer" in composed
     assert "Production/runtime mutation requires explicit approval" in composed
+
+
+def test_profile_context_critical_metadata_does_not_trigger_preflight_block():
+    result = build_role_context_for_task(
+        "Настрой публичный доступ к Hermes WebUI через Cloudflare Tunnel и внеси необходимые изменения"
+    )
+
+    assert result.critical_approval_required is True
+    assert _should_preflight_block_for_profile_context(result) is False
 
 
 def test_security_auditor_and_scribe_are_not_auto_invoked_for_ordinary_tasks():
@@ -194,7 +209,7 @@ class _ApprovalGateAgent:
 
 def test_approval_required_task_stops_before_tool_execution_and_requests_approval(monkeypatch):
     monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
-    agent = _ApprovalGateAgent()
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
 
     result = run_conversation(
         agent,
@@ -208,17 +223,13 @@ def test_approval_required_task_stops_before_tool_execution_and_requests_approva
     assert result["api_calls"] == 0
     assert result["completed"] is True
     assert result["failed"] is False
-    assert result["turn_exit_reason"] == "approval_required_preflight"
-    assert result["final_response"].startswith("Hermes role: engineer")
-    assert "explicit approval" in result["final_response"].lower()
-    assert result["messages"][-1]["_approval_gate"]["required"] is True
-    assert result["messages"][-1]["_approval_gate"]["critical_hard_stop"] is True
-    assert result["messages"][-1]["_approval_gate"]["reviewer_profile"] == "security_auditor"
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
     assert agent._persisted
-    assert agent._persisted[0][0][-1]["_approval_gate"]["task"].startswith("Настрой публичный доступ")
+    assert "_approval_gate" not in agent._persisted[0][0][-1]
 
 
-def test_critical_approval_preflight_blocks_plugin_and_interim_paths(monkeypatch):
+def test_security_critical_text_prompt_reaches_normal_model_path_without_preflight_block(monkeypatch):
     monkeypatch.setenv("HERMES_PROFILE_DEBUG_HEADER", "1")
     plugin_calls = []
     stream_events = []
@@ -237,13 +248,84 @@ def test_critical_approval_preflight_blocks_plugin_and_interim_paths(monkeypatch
         stream_callback=stream_events.append,
     )
 
-    assert result["turn_exit_reason"] == "approval_required_preflight"
-    assert "explicit approval" in result["final_response"].lower()
-    assert plugin_calls == []
-    assert agent._run_codex_app_server_turn_called is False
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
+    assert plugin_calls
+    assert plugin_calls[0][0] == "pre_llm_call"
+    assert agent._run_codex_app_server_turn_called is True
     assert agent._execute_tool_calls_called is False
     assert agent._emit_interim_assistant_message_called is False
     assert stream_events == []
+
+
+def test_prompt_lookup_with_sensitive_terms_does_not_take_preflight_approval(monkeypatch):
+    plugin_calls = []
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(
+        agent,
+        "дай полный промпт market-intelligence-14day-pilot-status. "
+        "Внутри могут быть .env, auth.json, secrets, provider config, do not write files.",
+        conversation_history=None,
+    )
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
+    assert plugin_calls
+    assert agent._run_codex_app_server_turn_called is True
+    assert agent._execute_tool_calls_called is False
+
+
+def test_restart_plan_prompt_does_not_take_preflight_approval(monkeypatch):
+    plugin_calls = []
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(
+        agent,
+        "составь план рестарта hermes-gateway, но ничего не выполняй",
+        conversation_history=None,
+    )
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
+    assert plugin_calls
+    assert agent._run_codex_app_server_turn_called is True
+    assert agent._execute_tool_calls_called is False
+
+
+def test_constraints_only_secret_terms_do_not_take_preflight_approval(monkeypatch):
+    plugin_calls = []
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        plugin_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", _fake_invoke_hook)
+    agent = _ApprovalGateAgent(api_mode="codex_app_server")
+
+    result = run_conversation(
+        agent,
+        "создай текст: не читай .env, не читай auth.json, не печатай secrets",
+        conversation_history=None,
+    )
+
+    assert result["turn_exit_reason"] == "codex_app_server_stub"
+    assert result["final_response"] == "normal path reached"
+    assert plugin_calls
+    assert agent._run_codex_app_server_turn_called is True
+    assert agent._execute_tool_calls_called is False
 
 
 def test_explicit_approval_outside_quoted_context_unblocks_pending_gate(monkeypatch):
@@ -423,9 +505,32 @@ def test_explicit_approval_unblocks_replayed_gateway_prompt_without_metadata(mon
     ]
 
     approval_reply = (
-        '[Replying to: "# Task: Create a Hermes Skill for Authoring Role Packages Goal Create a user-owned Hermes skill..."]\n'
+        '[Replying to: "# Task: Create a Hermes Skill for Authoring Role Packages\n'
+        "\n"
+        "## Goal\n"
+        "\n"
+        "Create a user-owned Hermes skill that helps operators and contributors create new role package skeletons safely.\n"
+        "\n"
+        "The skill should guide role package authoring, generate a valid role-package.yaml, create optional skill scaffolds, and produce validation/install commands.\n"
+        "\n"
+        "The skill must not install packages automatically.\n"
+        "\n"
+        "## Skill Name\n"
+        "\n"
+        "Use:\n"
+        "\n"
+        "text role-package-author\n"
+        "\n"
+        "Alternative acceptable name:\n"
+        "\n"
+        "text create-role-package\n"
+        "\n"
+        'Prefe"]\n'
+        "\n"
         "[denis] approve\n"
+        "\n"
         "Proceed with the task exactly as scoped.\n"
+        "\n"
         "Clarifications:\n"
         "- Creating ~/.hermes/skills/role-package-author/SKILL.md is approved.\n"
         "- Creating the report under docs/profile-handoffs/ is approved.\n"
@@ -450,6 +555,51 @@ def test_explicit_approval_unblocks_replayed_gateway_prompt_without_metadata(mon
     assert "Create a Hermes Skill for Authoring Role Packages" in captured["user_message"]
     assert "Do not read .env, auth.json, provider config, or secret files." in captured["user_message"]
     assert "[Replying to:" not in captured["user_message"]
+
+
+def test_multiline_slack_reply_quote_preserves_approval_and_constraints():
+    approval_reply = (
+        '[Replying to: "# Task: Create a Hermes Skill for Authoring Role Packages\n'
+        "\n"
+        "## Goal\n"
+        "\n"
+        "Create a user-owned Hermes skill that helps operators and contributors create new role package skeletons safely.\n"
+        "\n"
+        "The skill should guide role package authoring, generate a valid role-package.yaml, create optional skill scaffolds, and produce validation/install commands.\n"
+        "\n"
+        "The skill must not install packages automatically.\n"
+        "\n"
+        "## Skill Name\n"
+        "\n"
+        "Use:\n"
+        "\n"
+        "text role-package-author\n"
+        "\n"
+        "Alternative acceptable name:\n"
+        "\n"
+        "text create-role-package\n"
+        "\n"
+        'Prefe"]\n'
+        "\n"
+        "[denis] approve\n"
+        "\n"
+        "Proceed with the task exactly as scoped.\n"
+        "\n"
+        "Clarifications:\n"
+        "- Creating ~/.hermes/skills/role-package-author/SKILL.md is approved.\n"
+        "- Creating the report under docs/profile-handoffs/ is approved.\n"
+        "- Running read-only verification commands and relevant tests is approved.\n"
+        "- Do not read .env, auth.json, provider config, or secret files.\n"
+        "- Do not run hermes role install.\n"
+        "- Do not create or install any generated role package.\n"
+        "- Do not modify built-in roles.\n"
+        "- Do not enable enforcement or package routing.\n"
+        "- Do not print secrets.\n"
+    )
+
+    assert approval_intent_text(approval_reply).splitlines()[0] == "approve"
+    assert has_explicit_approval(approval_reply) is True
+    assert "Do not read .env, auth.json, provider config, or secret files." in approval_constraints_text(approval_reply)
 
 
 def test_explicit_approve_without_pending_gate_reports_missing_pending_request(monkeypatch):
