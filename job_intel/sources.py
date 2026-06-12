@@ -504,6 +504,7 @@ def _browser_worker_payload(command: str, *args: str, timeout: int = 240) -> dic
 
 def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]:
     fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
+    fetch_linkedin_vacancies.last_trace = None  # type: ignore[attr-defined]
     if not browser_native_available():
         raise SourceFetchError("Playwright is not installed, so LinkedIn browser-native acquisition is unavailable.")
     config = _browser_config("linkedin")
@@ -511,6 +512,7 @@ def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]
     try:
         payload = _browser_worker_payload("linkedin", query, str(max_pages))
         fetch_linkedin_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
+        fetch_linkedin_vacancies.last_trace = payload.get("search_trace")  # type: ignore[attr-defined]
         return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]
     except BrowserNativeUnavailable as exc:
         raise SourceFetchError(str(exc)) from exc
@@ -555,6 +557,7 @@ def _request_json(url: str, *, params: dict[str, object], headers: dict[str, str
 
 def fetch_headhunter_vacancies(query: str, *, per_page: int = 20) -> list[Vacancy]:
     fetch_headhunter_vacancies.last_health = None  # type: ignore[attr-defined]
+    fetch_headhunter_vacancies.last_trace = None  # type: ignore[attr-defined]
     if not browser_native_available():
         raise SourceFetchError("Playwright is not installed, so HeadHunter browser-native acquisition is unavailable.")
     config = _browser_config("headhunter")
@@ -562,6 +565,7 @@ def fetch_headhunter_vacancies(query: str, *, per_page: int = 20) -> list[Vacanc
     try:
         payload = _browser_worker_payload("headhunter", query, str(per_page))
         fetch_headhunter_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
+        fetch_headhunter_vacancies.last_trace = payload.get("search_trace")  # type: ignore[attr-defined]
         return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]
     except BrowserNativeUnavailable as exc:
         raise SourceFetchError(str(exc)) from exc
@@ -577,23 +581,25 @@ def _format_salary(salary: dict | None) -> str | None:
 
 
 ROLE_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
-    ("core_executive_product", ("VP Product", "Head of Product", "Director Product", "Chief Product Officer", "Product Lead")),
-    ("growth_monetization", ("Growth Product Lead", "Monetization Product Lead", "Product Strategy Lead", "Product Growth Lead")),
-    ("platform_ecosystem", ("Platform Product Lead", "Ecosystem Product Lead", "Digital Products Lead", "Consumer Product Lead")),
-    ("consumer_digital", ("VP Product", "Head of Product", "Director Product", "Product Lead")),
+    ("core_executive_product", ("VP Product", "Head of Product", "Product Director", "Director of Product", "Chief Product Officer")),
+    ("gm_and_digital", ("GM Product", "Head of Digital Products", "Regional Product Lead", "Product Operations Director")),
+    ("platform_ecosystem", ("Head of Platform", "Head of Ecosystem", "Marketplace Product Lead", "Consumer Product Lead")),
+    ("growth_monetization", ("Head of Monetization", "Head of Growth Product", "Growth Product Lead", "Product Strategy Lead")),
+    ("payments_specialist", ("Payments Product Lead", "Platform Product Lead", "Digital Products Lead", "Product Lead")),
 ]
 
 CONTEXT_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
-    ("fintech_telecom", ("fintech", "telecom", "payments", "wallet", "banking")),
-    ("consumer_platform", ("consumer", "B2C", "platform", "superapp", "digital products")),
-    ("growth_revenue", ("growth", "monetization", "subscriptions", "marketplace", "engagement")),
-    ("ai_products", ("AI products", "artificial intelligence", "machine learning")),
+    ("payments_fintech", ("payments", "fintech", "banking", "wallets")),
+    ("platform_ecosystem", ("marketplace", "superapp", "ecosystem", "platform")),
+    ("growth_revenue", ("monetization", "subscriptions", "consumer growth", "B2C")),
+    ("digital_transformation", ("digital products", "product transformation", "AI products")),
 ]
 
 GEO_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
-    ("global_remote", ("remote", "Europe")),
-    ("emea", ("UAE", "MENA", "Germany", "UK")),
-    ("eu_apac", ("Netherlands", "Poland", "Singapore", "Kazakhstan")),
+    ("remote_europe", ("remote", "Europe", "UK", "Germany")),
+    ("eu_gcc", ("Netherlands", "Poland", "UAE", "Saudi Arabia", "GCC")),
+    ("apac_core", ("Singapore", "Indonesia", "Malaysia", "Thailand", "APAC")),
+    ("apac_plus", ("Australia", "Kazakhstan")),
 ]
 
 

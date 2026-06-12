@@ -101,6 +101,156 @@ def test_delivery_creates_opportunity_and_mapping_without_downgrading_existing_s
     assert row["vacancy_id"] == legacy["vacancy_id"]
 
 
+def test_successful_delivery_creates_legacy_row_and_crm_mapping(tmp_path, monkeypatch):
+    store = make_store(tmp_path, monkeypatch)
+    vacancy, vacancy_id = seed_vacancy(store)
+    monkeypatch.setattr(
+        cli,
+        "_deliver_to_slack",
+        lambda body, channel, prefer_gateway=True: cli.SlackDeliveryResult(
+            success=True,
+            attempts=1,
+            status="sent",
+            message_ts="1760000000.123456",
+            channel_id="C123",
+            platform_message_id="C123:1760000000.123456",
+        ),
+    )
+
+    deliveries = cli._deliver_vacancy_notifications(
+        store=store,
+        run_id=None,
+        channel="executive_search_report",
+        items=[(vacancy, Evaluation(score=95, tier="strong_fit", recommendation="strong_fit"), vacancy_id)],
+    )
+
+    service = CRMService.from_store(store)
+    opportunity = service.find_opportunity_by_slack_message("C123", "1760000000.123456")
+    assert deliveries[0]["message_ts"] == "1760000000.123456"
+    assert opportunity is not None
+    assert store.find_vacancy_message(slack_channel="C123", slack_message_ts="1760000000.123456") is not None
+
+
+def test_delivery_failure_does_not_create_crm_mapping(tmp_path, monkeypatch):
+    store = make_store(tmp_path, monkeypatch)
+    vacancy, vacancy_id = seed_vacancy(store)
+    monkeypatch.setattr(
+        cli,
+        "_deliver_to_slack",
+        lambda body, channel, prefer_gateway=True: cli.SlackDeliveryResult(
+            success=False,
+            attempts=1,
+            status="failed",
+            error="boom",
+        ),
+    )
+
+    cli._deliver_vacancy_notifications(
+        store=store,
+        run_id=None,
+        channel="executive_search_report",
+        items=[(vacancy, Evaluation(score=95, tier="strong_fit", recommendation="strong_fit"), vacancy_id)],
+    )
+
+    service = CRMService.from_store(store)
+    assert service.find_opportunity_by_slack_message("C123", "1760000000.123456") is None
+    with store.connect(read_only=True) as conn:
+        assert int(conn.execute("SELECT COUNT(*) FROM slack_message_map").fetchone()[0]) == 0
+
+
+def test_delivery_mapping_uses_real_channel_id_not_alias(tmp_path, monkeypatch):
+    store = make_store(tmp_path, monkeypatch)
+    vacancy, vacancy_id = seed_vacancy(store)
+    monkeypatch.setattr(
+        cli,
+        "_deliver_to_slack",
+        lambda body, channel, prefer_gateway=True: cli.SlackDeliveryResult(
+            success=True,
+            attempts=1,
+            status="sent",
+            message_ts="1760000000.123456",
+            channel_id="C0B4MM6D52A",
+            platform_message_id="C0B4MM6D52A:1760000000.123456",
+        ),
+    )
+
+    cli._deliver_vacancy_notifications(
+        store=store,
+        run_id=None,
+        channel="executive_search_report",
+        items=[(vacancy, Evaluation(score=95, tier="strong_fit", recommendation="strong_fit"), vacancy_id)],
+    )
+
+    service = CRMService.from_store(store)
+    assert service.find_opportunity_by_slack_message("C0B4MM6D52A", "1760000000.123456") is not None
+    assert store.find_vacancy_message(slack_channel="C0B4MM6D52A", slack_message_ts="1760000000.123456") is not None
+
+
+def test_delivery_mapping_idempotent(tmp_path, monkeypatch):
+    store = make_store(tmp_path, monkeypatch)
+    vacancy, vacancy_id = seed_vacancy(store)
+    monkeypatch.setattr(
+        cli,
+        "_deliver_to_slack",
+        lambda body, channel, prefer_gateway=True: cli.SlackDeliveryResult(
+            success=True,
+            attempts=1,
+            status="sent",
+            message_ts="1760000000.123456",
+            channel_id="C123",
+            platform_message_id="C123:1760000000.123456",
+        ),
+    )
+
+    items = [(vacancy, Evaluation(score=95, tier="strong_fit", recommendation="strong_fit"), vacancy_id)]
+    cli._deliver_vacancy_notifications(store=store, run_id=None, channel="executive_search_report", items=items)
+    cli._deliver_vacancy_notifications(store=store, run_id=None, channel="executive_search_report", items=items)
+
+    with store.connect(read_only=True) as conn:
+        assert int(conn.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]) == 1
+        assert int(conn.execute("SELECT COUNT(*) FROM slack_message_map").fetchone()[0]) == 1
+
+
+def test_reaction_after_delivery_mapping_hits_crm(tmp_path, monkeypatch):
+    store = make_store(tmp_path, monkeypatch)
+    vacancy, vacancy_id = seed_vacancy(store)
+    monkeypatch.setattr(
+        cli,
+        "_deliver_to_slack",
+        lambda body, channel, prefer_gateway=True: cli.SlackDeliveryResult(
+            success=True,
+            attempts=1,
+            status="sent",
+            message_ts="1760000000.123456",
+            channel_id="C123",
+            platform_message_id="C123:1760000000.123456",
+        ),
+    )
+
+    cli._deliver_vacancy_notifications(
+        store=store,
+        run_id=None,
+        channel="executive_search_report",
+        items=[(vacancy, Evaluation(score=95, tier="strong_fit", recommendation="strong_fit"), vacancy_id)],
+    )
+
+    service = CRMService.from_store(store)
+    service.handle_slack_reaction_event(
+        slack_channel_id="C123",
+        slack_message_ts="1760000000.123456",
+        reaction="eyes",
+        event_type="reaction_added",
+        actor="U_TEST",
+        payload={"reaction": "eyes"},
+    )
+
+    opportunity = service.find_opportunity_by_slack_message("C123", "1760000000.123456")
+    assert opportunity is not None
+    assert service.get_opportunity(opportunity["id"])["status"] == "watchlist"
+    tasks = [task for task in service.repo.list_tasks(opportunity["id"]) if task["task_type"] == "review_opportunity" and task["status"] == "open"]
+    assert len(tasks) == 1
+
+
 def test_deliver_to_slack_bootstraps_hermes_env_before_send(monkeypatch):
     monkeypatch.delenv("JOB_INTEL_SLACK_WEBHOOK_URL", raising=False)
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)

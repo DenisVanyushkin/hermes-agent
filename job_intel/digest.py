@@ -54,6 +54,16 @@ _BREAKDOWN_LABELS = {
     "generic_remote_noise": "generic remote board noise",
 }
 
+TITLE_FUNCTION_BLOCKER_BUCKETS = (
+    "product_design_function",
+    "product_marketing_function",
+    "product_legal_function",
+    "product_finance_function",
+    "product_analytics_ic_function",
+    "product_operations_non_ownership",
+    "adjacent_non_target_function",
+)
+
 
 def _format_breakdown(evaluation: Evaluation, *, limit: int = 6) -> list[str]:
     items: list[tuple[int, str]] = []
@@ -78,9 +88,15 @@ def reject_reason_bucket(vacancy: Vacancy, evaluation: Evaluation, *, duplicate:
     if duplicate:
         return "duplicate"
     title = (vacancy.title or "").lower()
-    reasons = " ".join(evaluation.reasons or []).lower()
-    concerns = " ".join(evaluation.concerns or []).lower()
+    reason_tokens = [str(item or "").lower() for item in (evaluation.reasons or [])]
+    concern_tokens = [str(item or "").lower() for item in (evaluation.concerns or [])]
+    reasons = " ".join(reason_tokens)
+    concerns = " ".join(concern_tokens)
     breakdown = evaluation.raw_breakdown or {}
+
+    for blocker in TITLE_FUNCTION_BLOCKER_BUCKETS:
+        if blocker in reason_tokens or blocker in concern_tokens or blocker in reasons or blocker in concerns:
+            return blocker
 
     if "restricted geography" in concerns or "restricted geography" in reasons or "sanctions" in reasons:
         return "geography mismatch"
@@ -175,6 +191,7 @@ def format_executive_opportunity_report(
     vacancy_card_sent: int = 0,
     vacancy_card_suppressed: int = 0,
     operator_footer: str | None = None,
+    performance_block: str | None = None,
     dual_scores: dict[str, dict[str, object]] | None = None,
 ) -> str:
     try:
@@ -195,6 +212,7 @@ def format_executive_opportunity_report(
             vacancy_card_sent=vacancy_card_sent,
             vacancy_card_suppressed=vacancy_card_suppressed,
             operator_footer=operator_footer,
+            performance_block=performance_block,
             dual_scores=dual_scores,
         )
     except Exception as exc:
@@ -219,6 +237,7 @@ def _format_executive_opportunity_report_inner(
     vacancy_card_sent: int = 0,
     vacancy_card_suppressed: int = 0,
     operator_footer: str | None = None,
+    performance_block: str | None = None,
     dual_scores: dict[str, dict[str, object]] | None = None,
 ) -> str:
     import datetime as _dt
@@ -309,6 +328,10 @@ def _format_executive_opportunity_report_inner(
         top_unknowns = sorted(unknown_counts.items(), key=lambda x: x[1], reverse=True)[:3]
         unknowns_str = ", ".join(f"{r} {c}" for r, c in top_unknowns)
         lines.append(f"*Data Gaps* ({total_unknowns} unknowns): {unknowns_str}")
+        lines.append("")
+
+    if performance_block:
+        lines.append(performance_block.strip())
         lines.append("")
 
     # --- Sources ---
