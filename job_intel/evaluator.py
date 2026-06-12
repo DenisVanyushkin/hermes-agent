@@ -98,6 +98,114 @@ PRODUCT_DOMAIN_TOKENS = (
     "product manager",
 )
 
+TITLE_FUNCTION_BLOCKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "product_design_function",
+        (
+            r"\bhead of product design\b",
+            r"\bdirector of product design\b",
+            r"\bhead,\s*product design\b",
+            r"\bdirector,\s*product design\b",
+            r"\bvp product design\b",
+            r"\bvp,\s*product design\b",
+            r"\bvice president of product design\b",
+            r"\bvice president,\s*product design\b",
+            r"\bproduct design lead\b",
+            r"\bproduct design manager\b",
+            r"\bproduct designer\b",
+        ),
+    ),
+    (
+        "product_marketing_function",
+        (
+            r"\bhead of product marketing\b",
+            r"\bdirector of product marketing\b",
+            r"\bhead,\s*product marketing\b",
+            r"\bdirector,\s*product marketing\b",
+            r"\bvp product marketing\b",
+            r"\bvp,\s*product marketing\b",
+            r"\bvice president of product marketing\b",
+            r"\bvice president,\s*product marketing\b",
+            r"\bproduct marketing lead\b",
+            r"\bproduct marketing manager\b",
+            r"\bteam lead / head of product marketing\b",
+            r"\bteam lead and head of product marketing\b",
+        ),
+    ),
+    (
+        "product_legal_function",
+        (
+            r"\bproduct legal\b",
+            r"\bdirector,\s*product legal\b",
+            r"\bproduct counsel\b",
+            r"\bdirector,\s*product counsel\b",
+            r"\bproduct lawyer\b",
+        ),
+    ),
+    (
+        "product_finance_function",
+        (
+            r"\bproduct finance\b",
+            r"\bdirector,\s*product finance\b",
+            r"\bproduct finance manager\b",
+            r"\bproduct finance lead\b",
+        ),
+    ),
+    (
+        "product_analytics_ic_function",
+        (
+            r"\bproduct analyst\b",
+            r"\bproduct analytics manager\b",
+            r"\bproduct analytics analyst\b",
+            r"\bproduct analytics specialist\b",
+            r"\bproduct analytics associate\b",
+        ),
+    ),
+    (
+        "product_operations_non_ownership",
+        (
+            r"\bproduct operations manager\b",
+            r"\bproduct operations specialist\b",
+            r"\bproduct operations analyst\b",
+            r"\bproduct operations coordinator\b",
+            r"\bproduct ops manager\b",
+            r"\bproduct ops specialist\b",
+            r"\bproduct ops analyst\b",
+            r"\bproduct ops coordinator\b",
+        ),
+    ),
+)
+
+TARGET_PRODUCT_LEADERSHIP_PATTERNS: tuple[str, ...] = (
+    r"\bchief product officer\b",
+    r"\bcpo\b",
+    r"\bvp\b(?:[\s,/-]+.*)?\bproduct\b",
+    r"\bvice president\b.*\bproduct\b",
+    r"\bhead of\b.*\bproduct\b",
+    r"\bdirector\b.*\bproduct\b",
+    r"\bproduct director\b",
+    r"\bgm\b.*\bproduct\b",
+    r"\bgeneral manager\b.*\bproduct\b",
+    r"\bproduct lead\b",
+    r"\bhead of platform\b",
+    r"\bhead of monetization\b",
+    r"\bhead of ecosystem\b",
+    r"\bhead of digital products?\b",
+    r"\bhead of growth product\b",
+    r"\bgrowth product lead\b",
+)
+
+PRODUCT_OPS_EXECUTIVE_AMBIGUOUS_PATTERNS: tuple[str, ...] = (
+    r"\bhead of product operations\b",
+    r"\bdirector of product operations\b",
+    r"\bvp product operations\b",
+    r"\bvice president of product operations\b",
+    r"\bhead of product ops\b",
+    r"\bdirector of product ops\b",
+    r"\bvp product ops\b",
+    r"\bvice president of product ops\b",
+)
+
 
 def _target_company_names() -> set[str]:
     cfg = _cfg().get("target_companies") or {}
@@ -142,6 +250,38 @@ def _executive_seniority_in_title(title: str) -> bool:
     return any(tok in t for tok in ("chief", "cpo", "vp", "vice president", "director", "head of", "gm", "general manager", "lead"))
 
 
+def _title_function_blocker(title: str) -> str | None:
+    title_l = re.sub(r"\s+", " ", (title or "").strip().lower())
+    for blocker, patterns in TITLE_FUNCTION_BLOCKERS:
+        if any(re.search(pattern, title_l, re.I) for pattern in patterns):
+            return blocker
+    return None
+
+
+def _match_any_pattern(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+def _is_target_product_leadership_title(title: str) -> bool:
+    return _match_any_pattern(title, TARGET_PRODUCT_LEADERSHIP_PATTERNS)
+
+
+def _is_executive_product_ops_title(title: str) -> bool:
+    return _match_any_pattern(title, PRODUCT_OPS_EXECUTIVE_AMBIGUOUS_PATTERNS)
+
+
+def _blocked_title_function_evaluation(vacancy: Vacancy, blocker: str) -> Evaluation:
+    return Evaluation(
+        score=0,
+        tier="reject",
+        recommendation="reject",
+        salary_tier=salary_tier_for(vacancy, 0),
+        concerns=[blocker, "adjacent non-target product function in title"],
+        reasons=[blocker, "adjacent_non_target_function", "title function outside target product leadership thesis"],
+        raw_breakdown={blocker: -100, "adjacent_non_target_function": -100},
+    )
+
+
 _ROLE_CLASSIFICATION_PATTERNS: list[tuple[str, tuple[str, ...], bool]] = [
     ("chief_product_officer", (r"\bchief product officer\b", r"\bcpo\b"), True),
     ("vp_product", (r"\bvice president\b.*\bproduct\b", r"\bvp\b(?:[\s,/-]+(?:product|product & growth|product growth|growth product|products))?\b"), True),
@@ -177,12 +317,27 @@ def classify_vacancy(vacancy: Vacancy) -> dict[str, Any]:
             "matched_signals": ["non_product_exec_title_blocked"],
         }
 
+    blocker = _title_function_blocker(title)
+    if blocker:
+        return {
+            "raw_title": vacancy.title,
+            "normalized_title": title,
+            "classification": blocker,
+            "executive_detected": False,
+            "matched_signals": [blocker],
+        }
+
     # High-precision pattern-based classification.
     for name, patterns, is_leadership_signal in _ROLE_CLASSIFICATION_PATTERNS:
         if any(re.search(pattern, title_lower) or re.search(pattern, text_lower) for pattern in patterns):
             role_classification = name
             executive_detected = is_leadership_signal
             break
+
+    if role_classification == "other" and _is_target_product_leadership_title(title_lower):
+        role_classification = "target_product_leadership"
+        executive_detected = True
+        matched_signals.append("target_product_leadership_title")
 
     # Executive product leadership requires BOTH product-domain signal AND seniority signal.
     if role_classification == "other":
@@ -268,6 +423,9 @@ def score_vacancy_v1(vacancy: Vacancy) -> Evaluation:
     cfg = _cfg()["scoring"]
     text = _text(vacancy)
     classification = classify_vacancy(vacancy)
+    blocker = _title_function_blocker(vacancy.title)
+    if blocker:
+        return _blocked_title_function_evaluation(vacancy, blocker)
     score = 0
     matched: list[str] = []
     concerns: list[str] = []
@@ -428,6 +586,9 @@ def score_vacancy_v2(vacancy: Vacancy) -> Evaluation:
     cfg = _cfg()["scoring"]
     text = _text(vacancy)
     classification = classify_vacancy(vacancy)
+    blocker = _title_function_blocker(vacancy.title)
+    if blocker:
+        return _blocked_title_function_evaluation(vacancy, blocker)
 
     score = 0
     matched: list[str] = []
@@ -674,6 +835,7 @@ def score_vacancy_v3_shadow(vacancy: Vacancy) -> dict[str, Any]:
     text = _text(vacancy)
     title = (vacancy.title or "").strip()
     title_l = title.lower()
+    blocker = _title_function_blocker(title)
 
     non_product_patterns = (
         r"\bvp\b.*\b(data|revenue|sales|operations)\b",
@@ -684,49 +846,35 @@ def score_vacancy_v3_shadow(vacancy: Vacancy) -> dict[str, Any]:
         r"\bsite reliability engineer\b",
         r"\bsoftware engineer\b",
         r"\bdata scientist\b",
-        r"\bproduct designer\b",
     )
-    core_product_patterns = (
-        r"\bchief product officer\b",
-        r"\bcpo\b",
-        r"\bvp\b.*\bproduct\b",
-        r"\bvice president\b.*\bproduct\b",
-        r"\bhead of\b.*\bproduct\b",
-        r"\bdirector\b.*\bproduct\b",
-        r"\bproduct director\b",
-        r"\bgm\b.*\bproduct\b",
-        r"\bgeneral manager\b.*\bproduct\b",
-    )
-    adjacent_patterns = (
-        r"\bproduct design\b",
-        r"\bproduct marketing\b",
-        r"\bgrowth\b",
-        r"\bstrategy\b",
-    )
-
-    def _match_any(patterns: tuple[str, ...], hay: str) -> bool:
-        return any(re.search(p, hay, re.I) for p in patterns)
+    core_product_patterns = TARGET_PRODUCT_LEADERSHIP_PATTERNS
+    adjacent_patterns = PRODUCT_OPS_EXECUTIVE_AMBIGUOUS_PATTERNS
 
     gates: dict[str, dict[str, str]] = {}
 
     # G0: Core Product Function Required
-    if _match_any(non_product_patterns, title_l):
+    if blocker:
+        g0 = ("FAIL", blocker)
+        function_class = "adjacent_non_target_function"
+    elif _match_any_pattern(title_l, non_product_patterns):
         g0 = ("FAIL", "non-product function")
         function_class = "non_product"
-    elif _match_any(core_product_patterns, title_l):
+    elif _match_any_pattern(title_l, core_product_patterns):
         g0 = ("PASS", "core product title")
         function_class = "core_product"
-    elif _match_any(adjacent_patterns, title_l):
-        g0 = ("UNKNOWN", "product-adjacent title")
-        function_class = "product_adjacent"
+    elif _match_any_pattern(title_l, adjacent_patterns):
+        g0 = ("UNKNOWN", "product operations leadership ambiguous")
+        function_class = "product_ops_executive_ambiguous"
     else:
         g0 = ("UNKNOWN", "function ambiguous")
         function_class = "unknown"
     gates["G0"] = {"status": g0[0], "reason": g0[1]}
 
     # G1: Product Leadership Required
-    if re.search(r"\b(chief|cpo|vp|vice president|head of|director|gm|general manager)\b", title_l) and "product" in title_l:
-        g1 = ("PASS", "explicit product leadership title")
+    if _is_target_product_leadership_title(title_l):
+        g1 = ("PASS", "explicit target product leadership title")
+    elif _is_executive_product_ops_title(title_l):
+        g1 = ("PASS", "executive product operations title")
     elif re.search(r"\b(chief|vp|vice president|head of|director|gm|general manager)\b", title_l) and "product" not in title_l:
         g1 = ("FAIL", "leadership without product function")
     elif re.search(r"\b(product lead|group product manager)\b", title_l):
@@ -752,6 +900,8 @@ def score_vacancy_v3_shadow(vacancy: Vacancy) -> dict[str, Any]:
         g3 = ("PASS", "product ownership/strategy evidence")
     elif "product" in text and re.search(r"\b(director|head|vp|chief|gm)\b", title_l):
         g3 = ("UNKNOWN", "product role present, ownership explicitness unclear")
+    elif _is_target_product_leadership_title(title_l) or _is_executive_product_ops_title(title_l):
+        g3 = ("UNKNOWN", "target leadership title present, ownership explicitness unclear")
     elif "product" not in text:
         g3 = ("FAIL", "no product ownership domain")
     else:
@@ -800,6 +950,9 @@ def score_vacancy_v3_shadow(vacancy: Vacancy) -> dict[str, Any]:
 
     breakdown = {"hard_gate_model_v3": score, "company_context": company_context}
     reasons = [f"{k}:{v['status']}:{v['reason']}" for k, v in gates.items()]
+    if blocker:
+        reasons.insert(0, blocker)
+        reasons.insert(1, "adjacent_non_target_function")
 
     return {
         "score": score,

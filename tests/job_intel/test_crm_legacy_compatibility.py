@@ -60,7 +60,6 @@ def seed_legacy_message_and_crm_mapping(store: JobIntelStore) -> tuple[int, str]
         card_key="card:1",
         notification_id=None,
         slack_channel="C123",
-        slack_channel_id="C123",
         slack_message_ts=slack_message_ts,
         message_type="vacancy_card",
         company="Acme",

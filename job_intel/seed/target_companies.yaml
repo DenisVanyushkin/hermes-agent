@@ -1,16 +1,45 @@
 target_companies:
   high_priority:
-    - name: Adapty
-      category: mobile subscription infrastructure
-      website: https://adapty.io
+    - name: Airwallex
+      category: global payments platform
+      website: https://www.airwallex.com
       career_paths:
         - /careers
         - /jobs
-        - /openings
-        - /company/careers
-    - name: RevenueCat
-      category: subscription platform
-      website: https://www.revenuecat.com
+    - name: Wise
+      category: fintech
+      website: https://wise.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Wolt
+      category: marketplace ecosystem
+      website: https://wolt.com
+      career_paths:
+        - /en/jobs
+        - /jobs
+        - /careers
+    - name: GitLab
+      category: product-led SaaS
+      website: https://about.gitlab.com
+      career_paths:
+        - /jobs
+        - /careers
+    - name: Canva
+      category: B2C design platform
+      website: https://www.canva.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Miro
+      category: collaboration platform
+      website: https://miro.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Deel
+      category: global payroll platform
+      website: https://www.deel.com
       career_paths:
         - /careers
         - /jobs
@@ -27,15 +56,28 @@ target_companies:
         - /careers
         - /jobs
         - /careers/jobs
-    - name: Wise
-      category: fintech
-      website: https://wise.com
+    - name: N26
+      category: digital banking
+      website: https://n26.com
+      career_paths:
+        - /en-eu/careers
+        - /careers
+        - /jobs
+    - name: Adyen
+      category: payments infrastructure
+      website: https://www.adyen.com
       career_paths:
         - /careers
         - /jobs
-    - name: Miro
-      category: SaaS platform
-      website: https://miro.com
+    - name: RevenueCat
+      category: subscription platform
+      website: https://www.revenuecat.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Adapty
+      category: mobile subscription infrastructure
+      website: https://adapty.io
       career_paths:
         - /careers
         - /jobs
@@ -51,63 +93,33 @@ target_companies:
       career_paths:
         - /careers
         - /jobs
-    - name: Yassir
-      category: superapp
-      website: https://yassir.com
-      career_paths:
-        - /careers
-        - /jobs
-    - name: Careem
-      category: superapp
-      website: https://careem.com
-      career_paths:
-        - /careers
-        - /jobs
-    - name: Talabat
-      category: ecosystem platform
-      website: https://www.talabat.com
-      career_paths:
-        - /careers
-        - /jobs
     - name: inDrive
       category: mobility platform
       website: https://indrive.com
       career_paths:
         - /careers
         - /jobs
-    - name: Dubizzle Group
-      category: marketplace ecosystem
-      website: https://dubizzle.com
-      career_paths:
-        - /careers
-        - /jobs
-    - name: Glovo
-      category: platform business
-      website: https://glovoapp.com
-      career_paths:
-        - /careers
-        - /jobs
-    - name: Delivery Hero
-      category: digital ecosystem
-      website: https://www.deliveryhero.com
-      career_paths:
-        - /careers
-        - /jobs
-    - name: Airalo
-      category: telecom-adjacent digital platform
-      website: https://www.airalo.com
-      career_paths:
-        - /careers
-        - /jobs
-    - name: Headway
-      category: subscription mobile products
-      website: https://headway.co
-      career_paths:
-        - /careers
-        - /jobs
     - name: Moniepoint
       category: fintech scale-up
       website: https://moniepoint.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Ramp
+      category: finance automation platform
+      website: https://ramp.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Vercel
+      category: developer platform
+      website: https://vercel.com
+      career_paths:
+        - /careers
+        - /jobs
+    - name: Cursor
+      category: AI developer tooling
+      website: https://cursor.com
       career_paths:
         - /careers
         - /jobs

@@ -55,7 +55,28 @@ git -C "$REPO" diff --name-only "$BASE..$UPSTREAM_REF" >"$upstream_files_file" |
 git -C "$REPO" log --no-merges --format='%h %s' "$BASE..HEAD" >"$local_commits_file" || true
 git -C "$REPO" diff --name-only "$BASE..HEAD" >"$local_files_file" || true
 
-python - "$REPO" "$BRANCH" "$UPSTREAM_REF" "$HEAD" "$UPSTREAM_HEAD" "$BASE" "$UPSTREAM_AHEAD" "$LOCAL_AHEAD" "$status_file" "$upstream_commits_file" "$upstream_files_file" "$local_commits_file" "$local_files_file" <<'PY'
+resolve_python() {
+  for candidate in \
+    /usr/local/bin/python3 \
+    /usr/bin/python3 \
+    /bin/python3 \
+    "$(command -v python3 2>/dev/null || true)" \
+    "$(command -v python 2>/dev/null || true)"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+PYTHON_BIN="$(resolve_python || true)"
+if [ -z "$PYTHON_BIN" ]; then
+  echo "Neither python3 nor python found (checked common absolute paths and PATH); cannot run preflight report." >&2
+  exit 127
+fi
+
+"$PYTHON_BIN" - "$REPO" "$BRANCH" "$UPSTREAM_REF" "$HEAD" "$UPSTREAM_HEAD" "$BASE" "$UPSTREAM_AHEAD" "$LOCAL_AHEAD" "$status_file" "$upstream_commits_file" "$upstream_files_file" "$local_commits_file" "$local_files_file" <<'PY'
 from __future__ import annotations
 
 import re

@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+from time import perf_counter
 import traceback
 from pathlib import Path
 from typing import Any
@@ -298,11 +299,20 @@ def _ensure_browser_desktop(source: str, *, force_recycle: bool = False) -> str:
     return cdp_url
 
 
-def _payload(*, ok: bool, vacancies: list[Vacancy] | None = None, session_health: dict[str, Any] | None = None, error: str | None = None, error_type: str | None = None) -> dict[str, Any]:
+def _payload(
+    *,
+    ok: bool,
+    vacancies: list[Vacancy] | None = None,
+    session_health: dict[str, Any] | None = None,
+    search_trace: dict[str, Any] | None = None,
+    error: str | None = None,
+    error_type: str | None = None,
+) -> dict[str, Any]:
     return {
         "ok": ok,
         "vacancies": [vacancy.model_dump(mode="json") for vacancy in (vacancies or [])],
         "session_health": session_health,
+        "search_trace": search_trace,
         "error": error,
         "error_type": error_type,
     }
@@ -313,13 +323,20 @@ def _with_browser_source(source: str, fn):
     config = resolve_browser_config(source)
     _ensure_required_browser_profile(source, config)
     last_exc: Exception | None = None
+    browser_start_ms = 0
     for attempt in range(2):
+        started = perf_counter()
         cdp_url = _ensure_browser_desktop(source, force_recycle=attempt > 0)
+        browser_start_ms += int(round((perf_counter() - started) * 1000))
         if cdp_url:
             os.environ["JOB_INTEL_BROWSER_CDP_URL"] = cdp_url
         try:
             with BrowserSourceClient(config) as client:
-                return fn(client)
+                vacancies, session_health = fn(client)
+                search_trace = client.last_search_trace_snapshot()
+                search_trace["browser_start_ms"] = int(search_trace.get("browser_start_ms") or 0) + browser_start_ms
+                search_trace["browser_attach_retry_count"] = attempt
+                return vacancies, session_health, search_trace
         except Exception as exc:
             last_exc = exc
             if source in _CDP_TARGETS and attempt == 0 and _should_retry_attach(exc):
@@ -332,14 +349,14 @@ def _with_browser_source(source: str, fn):
     raise BrowserNativeUnavailable(f"browser worker failed for {source}")
 
 
-def _run_linkedin(query: str, *, max_pages: int) -> tuple[list[Vacancy], dict[str, Any]]:
+def _run_linkedin(query: str, *, max_pages: int) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     def _run(client: BrowserSourceClient) -> tuple[list[Vacancy], dict[str, Any]]:
         vacancies = client.search_linkedin(query, max_pages=max_pages)
         return vacancies, client.session_health_snapshot()
     return _with_browser_source("linkedin", _run)
 
 
-def _run_headhunter(query: str, *, per_page: int) -> tuple[list[Vacancy], dict[str, Any]]:
+def _run_headhunter(query: str, *, per_page: int) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     max_pages = max(1, (per_page + 24) // 25)
     def _run(client: BrowserSourceClient) -> tuple[list[Vacancy], dict[str, Any]]:
         vacancies = client.search_headhunter(query, max_pages=max_pages)[:per_page]
@@ -347,7 +364,7 @@ def _run_headhunter(query: str, *, per_page: int) -> tuple[list[Vacancy], dict[s
     return _with_browser_source("headhunter", _run)
 
 
-def _probe(source: str) -> tuple[list[Vacancy], dict[str, Any]]:
+def _probe(source: str) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     def _run(client: BrowserSourceClient) -> tuple[list[Vacancy], dict[str, Any]]:
         if os.getenv("JOB_INTEL_BROWSER_CAPTURE_EXISTING_PAGES", "").strip():
             client.capture_existing_pages(label=f"{source}-probe-state")
@@ -373,17 +390,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.cmd == "linkedin":
-            vacancies, session_health = _run_linkedin(args.query, max_pages=args.max_pages)
+            vacancies, session_health, search_trace = _run_linkedin(args.query, max_pages=args.max_pages)
         elif args.cmd == "headhunter":
-            vacancies, session_health = _run_headhunter(args.query, per_page=args.per_page)
+            vacancies, session_health, search_trace = _run_headhunter(args.query, per_page=args.per_page)
         else:
-            vacancies, session_health = _probe(args.source)
+            vacancies, session_health, search_trace = _probe(args.source)
     except Exception as exc:
-        print(json.dumps(_payload(ok=False, error=str(exc), error_type=type(exc).__name__, session_health=None)))
+        print(json.dumps(_payload(ok=False, error=str(exc), error_type=type(exc).__name__, session_health=None, search_trace=None)))
         traceback.print_exc(file=sys.stderr)
         return 1
 
-    print(json.dumps(_payload(ok=True, vacancies=vacancies, session_health=session_health)))
+    print(json.dumps(_payload(ok=True, vacancies=vacancies, session_health=session_health, search_trace=search_trace)))
     return 0
 
 

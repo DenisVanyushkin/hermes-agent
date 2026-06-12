@@ -42,6 +42,34 @@
     ]
   },
   {
+    "company_name": "N26",
+    "tier": "tier1",
+    "ats_vendor": "greenhouse",
+    "ats_slug": "n26",
+    "collection_url": "https://job-boards.greenhouse.io/n26",
+    "validation_url": "https://n26.com/en-eu/careers/positions/7988511?gh_jid=7988511",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://boards-api.greenhouse.io/v1/boards/n26/jobs",
+      "https://n26.com/en-eu/careers",
+      "https://n26.com/en-eu/careers/positions/7988511?gh_jid=7988511"
+    ]
+  },
+  {
+    "company_name": "Vercel",
+    "tier": "tier2",
+    "ats_vendor": "greenhouse",
+    "ats_slug": "vercel",
+    "collection_url": "https://job-boards.greenhouse.io/vercel",
+    "validation_url": "https://job-boards.greenhouse.io/vercel/jobs/5199830004",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://job-boards.greenhouse.io/vercel",
+      "https://job-boards.greenhouse.io/vercel/jobs/5199830004",
+      "https://boards-api.greenhouse.io/v1/boards/vercel/jobs"
+    ]
+  },
+  {
     "company_name": "Wise",
     "tier": "tier1",
     "ats_vendor": "smartrecruiters",
@@ -109,6 +137,20 @@
       "https://jobs.ashbyhq.com/airwallex",
       "https://jobs.ashbyhq.com/airwallex/bab7f388-1bfc-41f7-b5d5-6b201a221fed",
       "https://api.ashbyhq.com/posting-api/job-board/airwallex"
+    ]
+  },
+  {
+    "company_name": "Ramp",
+    "tier": "tier2",
+    "ats_vendor": "ashby",
+    "ats_slug": "ramp",
+    "collection_url": "https://jobs.ashbyhq.com/ramp",
+    "validation_url": "https://jobs.ashbyhq.com/ramp/78b98c66-af59-4fa8-a5ae-d8af8d737976",
+    "acquisition_enabled": true,
+    "evidence": [
+      "https://jobs.ashbyhq.com/ramp",
+      "https://jobs.ashbyhq.com/ramp/78b98c66-af59-4fa8-a5ae-d8af8d737976",
+      "https://api.ashbyhq.com/posting-api/job-board/ramp"
     ]
   }
 ]
