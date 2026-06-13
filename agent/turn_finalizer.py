@@ -40,6 +40,9 @@ def _is_pure_tool_call_tail(msg: dict) -> bool:
     if not msg.get("tool_calls"):
         return False
     return not flatten_message_text(msg.get("content")).strip()
+from hermes_cli.profile_execution import build_role_execution_plan
+from hermes_cli.review_gate import decision_to_dict as review_gate_to_dict
+from hermes_cli.review_gate import evaluate_review_gate, render_review_gate_block_message
 
 
 def finalize_turn(
@@ -273,6 +276,57 @@ def finalize_turn(
         _apply_override = getattr(agent, "_apply_persist_user_message_override", None)
         if callable(_apply_override):
             _apply_override(messages)
+
+        if final_response and not interrupted:
+            try:
+                review_task = (
+                    original_user_message
+                    if isinstance(original_user_message, str) and original_user_message.strip()
+                    else str(user_message or "")
+                )
+                review_plan = build_role_execution_plan(review_task)
+                review_gate = evaluate_review_gate(review_plan, messages)
+                if review_gate.review_required and review_gate.mode == "observe":
+                    logger.info(
+                        "review gate observe: session=%s changed_paths=%d reviewer_tier=%s reviewer_model=%s/%s",
+                        agent.session_id or "-",
+                        review_gate.changed_path_count,
+                        review_gate.reviewer_tier,
+                        review_gate.reviewer_provider,
+                        review_gate.reviewer_model,
+                    )
+                if review_gate.blocking:
+                    completed = False
+                    final_response = render_review_gate_block_message(review_gate)
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": final_response,
+                            "_review_gate": {
+                                "required": True,
+                                "status": review_gate.status,
+                                "mode": review_gate.mode,
+                                "review_required": True,
+                                "selected_role": review_plan.selected_role,
+                                "reviewer_tier": review_gate.reviewer_tier,
+                                "reviewer_provider": review_gate.reviewer_provider,
+                                "reviewer_model": review_gate.reviewer_model,
+                                "changed_paths": list(review_gate.changed_paths),
+                                "packet": review_gate_to_dict(review_gate),
+                            },
+                        }
+                    )
+                    logger.info(
+                        "review gate blocked completion: session=%s changed_paths=%d reviewer_tier=%s reviewer_model=%s/%s",
+                        agent.session_id or "-",
+                        review_gate.changed_path_count,
+                        review_gate.reviewer_tier,
+                        review_gate.reviewer_provider,
+                        review_gate.reviewer_model,
+                    )
+            except Exception as review_gate_err:
+                logger.warning("review gate evaluation failed: %s", review_gate_err)
+
         agent._persist_session(messages, conversation_history)
     except Exception as _persist_err:
         _cleanup_errors.append(f"persist_session: {_persist_err}")

@@ -513,6 +513,7 @@ class RoleExecutionPlan:
     post_change_review_policy: dict[str, Any]
     durable_outcome_expected: bool
     trading_deferred: bool
+    review_gate_candidate: bool = False
 
 
 class RoleExecutionError(RuntimeError):
@@ -900,6 +901,7 @@ def _post_change_review_policy(
         "run_relevant_tests": should_run_tests,
         "invoke_security_auditor": requires_reviewer,
         "invoke_scribe": requires_scribe and durable_outcome_expected,
+        "review_gate_candidate": selected_role == "engineer" and not production_runtime_mutation,
         "sensitive_diff_triggers": list(sensitive_triggers),
         "note": (
             "review sensitive surfaces with Security Auditor and record durable outcomes with Scribe"
@@ -978,6 +980,7 @@ def build_role_execution_plan(
         post_change_review_policy=post_change_review_policy,
         durable_outcome_expected=durable_outcome_expected,
         trading_deferred=trading_deferred,
+        review_gate_candidate=selected_role == "engineer" and not production_runtime_mutation,
     )
 
 
