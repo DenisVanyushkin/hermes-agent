@@ -36,7 +36,6 @@ _ENGINEER_TERMS = (
     "tests",
     "code",
     "repository",
-    "repo",
     "implement",
     "build",
     "deploy",
@@ -62,6 +61,25 @@ _ENGINEER_TERMS = (
     "approval gate",
     "approval-gate",
     "rebase",
+    "git",
+    "repository",
+    "commit",
+    "push",
+    "merge",
+    "origin",
+    "git commit",
+    "git push",
+    "git merge",
+    "git status",
+    "закоммить",
+    "закоммить изменения",
+    "закоммить все",
+    "пушни",
+    "запушь",
+    "смерджи",
+    "ориджин",
+    "коммит",
+    "репо",
 )
 
 _PERSONAL_ADMIN_TERMS = (
@@ -310,8 +328,48 @@ _SENSITIVE_TRIGGER_MAP = {
 
 _OPERATION_CATEGORY_GENERAL = "general_task"
 _OPERATION_CATEGORY_READ_ONLY = "read_only_investigation"
+_OPERATION_CATEGORY_REPO_MUTATION = "repo_mutation"
+_OPERATION_CATEGORY_GIT_REMOTE_MUTATION = "git_remote_mutation"
 _OPERATION_CATEGORY_NORMAL = "normal_operational_mutation"
 _OPERATION_CATEGORY_SECURITY_CRITICAL = "security_critical_mutation"
+
+_REPO_MUTATION_TERMS = (
+    "fix",
+    "bug",
+    "debug",
+    "pytest",
+    "test suite",
+    "tests",
+    "code",
+    "repository",
+    "implement",
+    "patch",
+    "commit",
+    "закоммить",
+    "закоммить изменения",
+    "закоммить все",
+    "коммит",
+    "репо",
+)
+
+_GIT_REMOTE_MUTATION_TERMS = (
+    "push",
+    "git push",
+    "merge",
+    "git merge",
+    "origin",
+    "ориджин",
+    "запушь",
+    "пушни",
+    "смерджи",
+)
+
+_MATERIAL_OPERATION_CATEGORIES = {
+    _OPERATION_CATEGORY_REPO_MUTATION,
+    _OPERATION_CATEGORY_GIT_REMOTE_MUTATION,
+    _OPERATION_CATEGORY_NORMAL,
+    _OPERATION_CATEGORY_SECURITY_CRITICAL,
+}
 
 _READ_ONLY_OPERATION_TERMS = (
     "git status",
@@ -348,6 +406,16 @@ _MUTATION_INTENT_TERMS = (
     "restart",
     "deploy",
     "rollback",
+    "commit",
+    "push",
+    "merge",
+    "закоммить",
+    "закоммить изменения",
+    "закоммить все",
+    "пушни",
+    "запушь",
+    "смерджи",
+    "коммит",
 )
 
 _SCHEDULER_SURFACE_TERMS = (
@@ -682,6 +750,30 @@ def _is_normal_operational_mutation(normalized_text: str) -> bool:
     )
 
 
+def _contains_any(normalized_text: str, phrases: tuple[str, ...]) -> bool:
+    return _contains(normalized_text, phrases)
+
+
+def _is_docs_only_status_update(normalized_text: str) -> bool:
+    has_docs_target = any(hint in normalized_text for hint in _DOCS_ONLY_TARGET_HINTS)
+    has_docs_intent = _contains_any(normalized_text, _DOCS_TERMS) or "update" in normalized_text
+    has_non_mutation_guardrail = any(phrase in normalized_text for phrase in _NON_MUTATION_GUARDRAILS)
+    return has_docs_target and has_docs_intent and has_non_mutation_guardrail
+
+
+def _is_read_only_sensitive_investigation(normalized_text: str) -> bool:
+    has_investigation = any(hint in normalized_text for hint in _INVESTIGATION_READ_ONLY_HINTS)
+    has_negative_sensitive_guardrail = (
+        "do not change cloudflare" in normalized_text
+        or "do not touch cloudflare" in normalized_text
+    )
+    return has_investigation and has_negative_sensitive_guardrail
+
+
+def _ignore_sensitive_surface_classification(normalized_text: str) -> bool:
+    return _is_docs_only_status_update(normalized_text) or _is_read_only_sensitive_investigation(normalized_text)
+
+
 def _is_read_only_investigation(normalized_text: str) -> bool:
     if _is_docs_only_status_update(normalized_text):
         return False
@@ -708,6 +800,14 @@ def _security_critical_approval_reason(normalized_text: str, sensitive_triggers:
     return "security-critical runtime mutation requires explicit operator approval"
 
 
+def _is_git_remote_mutation(normalized_text: str) -> bool:
+    return _has_mutation_intent(normalized_text) and _contains_any(normalized_text, _GIT_REMOTE_MUTATION_TERMS)
+
+
+def _is_repo_mutation(normalized_text: str) -> bool:
+    return _has_mutation_intent(normalized_text) and _contains_any(normalized_text, _REPO_MUTATION_TERMS)
+
+
 def classify_operation_category(task: str, changed_paths: list[str] | None = None) -> str:
     normalized = _task_with_paths(task, changed_paths=changed_paths)
     risk_normalized = _action_text(task, changed_paths=changed_paths)
@@ -716,6 +816,10 @@ def classify_operation_category(task: str, changed_paths: list[str] | None = Non
         if _is_docs_only_status_update(normalized):
             return _OPERATION_CATEGORY_NORMAL
         return _OPERATION_CATEGORY_READ_ONLY
+    if _is_git_remote_mutation(risk_normalized):
+        return _OPERATION_CATEGORY_GIT_REMOTE_MUTATION
+    if _is_repo_mutation(risk_normalized):
+        return _OPERATION_CATEGORY_REPO_MUTATION
     if _contains(risk_normalized, _PUBLIC_EXPOSURE_TERMS):
         return _OPERATION_CATEGORY_SECURITY_CRITICAL
     if _contains(risk_normalized, _SECRET_PROVIDER_MUTATION_TERMS) and _has_mutation_intent(risk_normalized):
@@ -748,30 +852,6 @@ def classify_external_commitment(task: str) -> bool:
             return False
         return True
     return False
-
-
-def _contains_any(normalized_text: str, phrases: tuple[str, ...]) -> bool:
-    return _contains(normalized_text, phrases)
-
-
-def _is_docs_only_status_update(normalized_text: str) -> bool:
-    has_docs_target = any(hint in normalized_text for hint in _DOCS_ONLY_TARGET_HINTS)
-    has_docs_intent = _contains_any(normalized_text, _DOCS_TERMS) or "update" in normalized_text
-    has_non_mutation_guardrail = any(phrase in normalized_text for phrase in _NON_MUTATION_GUARDRAILS)
-    return has_docs_target and has_docs_intent and has_non_mutation_guardrail
-
-
-def _is_read_only_sensitive_investigation(normalized_text: str) -> bool:
-    has_investigation = any(hint in normalized_text for hint in _INVESTIGATION_READ_ONLY_HINTS)
-    has_negative_sensitive_guardrail = (
-        "do not change cloudflare" in normalized_text
-        or "do not touch cloudflare" in normalized_text
-    )
-    return has_investigation and has_negative_sensitive_guardrail
-
-
-def _ignore_sensitive_surface_classification(normalized_text: str) -> bool:
-    return _is_docs_only_status_update(normalized_text) or _is_read_only_sensitive_investigation(normalized_text)
 
 
 def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, bool, str]:
@@ -888,6 +968,7 @@ def _durable_outcome_expected(selected_role: str, external_commitment: bool, tas
 def _post_change_review_policy(
     *,
     selected_role: str,
+    operation_category: str,
     sensitive_triggers: list[str],
     requires_reviewer: bool,
     requires_scribe: bool,
@@ -901,7 +982,7 @@ def _post_change_review_policy(
         "run_relevant_tests": should_run_tests,
         "invoke_security_auditor": requires_reviewer,
         "invoke_scribe": requires_scribe and durable_outcome_expected,
-        "review_gate_candidate": selected_role == "engineer" and not production_runtime_mutation,
+        "review_gate_candidate": selected_role == "engineer" and operation_category in _MATERIAL_OPERATION_CATEGORIES,
         "sensitive_diff_triggers": list(sensitive_triggers),
         "note": (
             "review sensitive surfaces with Security Auditor and record durable outcomes with Scribe"
@@ -951,6 +1032,7 @@ def build_role_execution_plan(
 
     post_change_review_policy = _post_change_review_policy(
         selected_role=selected_role,
+        operation_category=operation_category,
         sensitive_triggers=sensitive_triggers,
         requires_reviewer=requires_reviewer,
         requires_scribe=requires_scribe,
@@ -980,7 +1062,7 @@ def build_role_execution_plan(
         post_change_review_policy=post_change_review_policy,
         durable_outcome_expected=durable_outcome_expected,
         trading_deferred=trading_deferred,
-        review_gate_candidate=selected_role == "engineer" and not production_runtime_mutation,
+        review_gate_candidate=selected_role == "engineer" and operation_category in _MATERIAL_OPERATION_CATEGORIES,
     )
 
 

@@ -44,6 +44,24 @@ def test_route_engineer_for_infra_runtime_change():
     assert decision.route_chain[0].model_resolution_status == "fallback_available_by_policy"
 
 
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Закоммить все незакоммиченные изменения и пушни в ориджин",
+        "Закоммить изменения",
+        "Запушь изменения в origin",
+        "Запуши в ориджин",
+        "Make git commit and git push",
+        "Смерджи origin/local/customizations",
+        "Проверь git status и закоммить",
+    ],
+)
+def test_route_git_repo_prompts_to_engineer(task: str):
+    decision = _route(task)
+
+    assert decision.primary_profile == "engineer"
+    assert _hop_ids(decision) == ["engineer"]
+    assert decision.selected_profiles == ["engineer"]
 def test_route_security_auditor_for_security_sensitive_terms():
     decision = _route("auth secrets exposure cloudflare firewall scheduler tool-boundary")
 

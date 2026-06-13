@@ -161,7 +161,17 @@ def detect_material_engineering_change(
         return False, []
     if plan.operation_category == "read_only_investigation":
         return False, []
+
+    material_categories = {
+        "repo_mutation",
+        "git_remote_mutation",
+        "normal_operational_mutation",
+        "security_critical_mutation",
+    }
     material_paths = list(changed_paths) if changed_paths is not None else collect_changed_paths(messages)
+    if plan.operation_category in material_categories:
+        return True, material_paths
+
     has_material_path = any(
         isinstance(path, str) and path.strip() and path.strip().endswith(_MATERIAL_PATH_HINTS)
         for path in material_paths
