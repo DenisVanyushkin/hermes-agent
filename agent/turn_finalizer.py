@@ -41,8 +41,12 @@ def _is_pure_tool_call_tail(msg: dict) -> bool:
         return False
     return not flatten_message_text(msg.get("content")).strip()
 from hermes_cli.profile_execution import build_role_execution_plan
-from hermes_cli.review_gate import decision_to_dict as review_gate_to_dict
-from hermes_cli.review_gate import evaluate_review_gate, render_review_gate_block_message
+from hermes_cli.review_gate import (
+    build_review_gate_evaluation_log_fields,
+    decision_to_dict as review_gate_to_dict,
+    evaluate_review_gate,
+    render_review_gate_block_message,
+)
 
 
 def finalize_turn(
@@ -286,15 +290,23 @@ def finalize_turn(
                 )
                 review_plan = build_role_execution_plan(review_task)
                 review_gate = evaluate_review_gate(review_plan, messages)
-                if review_gate.review_required and review_gate.mode == "observe":
-                    logger.info(
-                        "review gate observe: session=%s changed_paths=%d reviewer_tier=%s reviewer_model=%s/%s",
-                        agent.session_id or "-",
-                        review_gate.changed_path_count,
-                        review_gate.reviewer_tier,
-                        review_gate.reviewer_provider,
-                        review_gate.reviewer_model,
-                    )
+                review_gate_log = build_review_gate_evaluation_log_fields(review_gate)
+                logger.info(
+                    "review gate evaluation: session=%s review_gate.mode=%s "
+                    "review_gate.reviewer_tier=%s automatic_review_invoked=%s "
+                    "automatic_review_verdict=%s reviewer_provider=%s reviewer_model=%s "
+                    "changed_paths_count=%d blocking=%s status=%s",
+                    agent.session_id or "-",
+                    review_gate_log["review_gate.mode"],
+                    review_gate_log["review_gate.reviewer_tier"],
+                    review_gate_log["automatic_review_invoked"],
+                    review_gate_log["automatic_review_verdict"],
+                    review_gate_log["reviewer_provider"],
+                    review_gate_log["reviewer_model"],
+                    review_gate_log["changed_paths_count"],
+                    review_gate_log["blocking"],
+                    review_gate_log["status"],
+                )
                 if review_gate.blocking:
                     completed = False
                     final_response = render_review_gate_block_message(review_gate)

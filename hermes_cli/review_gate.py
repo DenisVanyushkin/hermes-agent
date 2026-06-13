@@ -629,6 +629,39 @@ def decision_to_dict(decision: ReviewGateDecision | dict[str, Any]) -> dict[str,
     return asdict(decision)
 
 
+def build_review_gate_startup_log_fields(
+    config: dict[str, Any] | None = None,
+    *,
+    config_path: str | Path = "",
+    config_loaded_ok: bool = True,
+    fallback_config_used: bool = False,
+) -> dict[str, Any]:
+    cfg = config if isinstance(config, dict) else load_config_readonly()
+    gate = load_review_gate_config(cfg)
+    return {
+        "config_path": str(config_path),
+        "config_loaded_ok": bool(config_loaded_ok),
+        "fallback_config_used": bool(fallback_config_used),
+        "review_gate.mode": gate["mode"],
+        "review_gate.reviewer_tier": gate["reviewer_tier"],
+        "review_gate.auto_review_in_observe": gate["auto_review_in_observe"],
+    }
+
+
+def build_review_gate_evaluation_log_fields(decision: ReviewGateDecision) -> dict[str, Any]:
+    return {
+        "review_gate.mode": decision.mode,
+        "review_gate.reviewer_tier": decision.reviewer_tier,
+        "automatic_review_invoked": decision.automatic_review_invoked,
+        "automatic_review_verdict": decision.automatic_review_verdict,
+        "reviewer_provider": decision.reviewer_provider,
+        "reviewer_model": decision.reviewer_model,
+        "changed_paths_count": decision.changed_path_count,
+        "blocking": decision.blocking,
+        "status": decision.status,
+    }
+
+
 def _review_gate_task_summary(decision: ReviewGateDecision) -> str:
     packet = decision.packet if isinstance(decision.packet, dict) else {}
     task = str(packet.get("task") or packet.get("task_summary") or "").strip()
