@@ -545,19 +545,21 @@ def test_execution_plan_to_dict_contains_required_fields():
 
 
 def test_repo_code_mutation_is_review_gate_candidate():
-    plan = _plan("Fix the failing pytest suite in the repository")
+    plan = _plan("Закоммить изменения")
+    assert plan.operation_category == "repo_mutation"
     assert plan.review_gate_candidate is True
     assert plan.post_change_review_policy["review_gate_candidate"] is True
 
 
 def test_review_gate_observe_emits_non_blocking_requirement():
-    plan = _plan("Fix the failing pytest suite in the repository")
+    plan = _plan("Сделай git commit и git push")
     decision = evaluate_review_gate(
         plan,
-        _messages_with_successful_patch(),
+        [],
         config={"review_gate": {"mode": "observe", "reviewer_tier": "code_review"}},
     )
     assert decision.review_required is True
+    assert decision.material_change_detected is True
     assert decision.blocking is False
     assert decision.mode == "observe"
     assert decision.status == "pending"
@@ -567,10 +569,10 @@ def test_review_gate_observe_emits_non_blocking_requirement():
 
 
 def test_review_gate_enforce_blocks_pending_material_engineering_change():
-    plan = _plan("Fix the failing pytest suite in the repository")
+    plan = _plan("Сделай git commit и git push")
     decision = evaluate_review_gate(
         plan,
-        _messages_with_successful_patch(),
+        [],
         config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
     )
     assert decision.review_required is True
@@ -579,16 +581,16 @@ def test_review_gate_enforce_blocks_pending_material_engineering_change():
 
 
 def test_review_gate_enforce_allows_approved_or_waived_verdict():
-    plan = _plan("Fix the failing pytest suite in the repository")
+    plan = _plan("Сделай git commit и git push")
     approved = evaluate_review_gate(
         plan,
-        _messages_with_successful_patch(),
+        [],
         config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
         verdict="approved",
     )
     waived = evaluate_review_gate(
         plan,
-        _messages_with_successful_patch(),
+        [],
         config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
         verdict="waived",
     )
@@ -599,12 +601,13 @@ def test_review_gate_enforce_allows_approved_or_waived_verdict():
 
 
 def test_review_gate_not_required_for_read_only_investigation():
-    plan = _plan("Check WebUI status and inspect logs")
+    plan = _plan("Проверь git status")
     decision = evaluate_review_gate(
         plan,
         [],
         config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
     )
+    assert plan.operation_category == "read_only_investigation"
     assert decision.review_required is False
     assert decision.blocking is False
     assert decision.status == "not_required"
@@ -634,6 +637,11 @@ def test_parse_review_verdict_intent():
             "normal_operational_mutation",
         ),
         ("Install a root system-wide systemd timer in /etc/systemd/system for Hermes maintenance", "security_critical_mutation"),
+        ("Закоммить изменения", "repo_mutation"),
+        ("Закоммить все незакоммиченные изменения и пушни в ориджин", "git_remote_mutation"),
+        ("Запушь изменения в origin", "git_remote_mutation"),
+        ("Проверь git status", "read_only_investigation"),
+        ("Проверь git status и закоммить", "repo_mutation"),
     ],
 )
 def test_classify_operation_category(task: str, expected_category: str):

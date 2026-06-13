@@ -130,6 +130,48 @@ SEED_CASES: list[tuple[str, str, str, str, str]] = [
         "infra", "en",
         "Apply the rebase and rebuild the production service",
     ),
+    (
+        "infra_ru_git_commit_push_origin",
+        "Russian: commit + push + origin trigger engineer",
+        "infra", "ru",
+        "Закоммить все незакоммиченные изменения и пушни в ориджин",
+    ),
+    (
+        "infra_ru_git_commit_changes",
+        "Russian: commit changes trigger engineer",
+        "infra", "ru",
+        "Закоммить изменения",
+    ),
+    (
+        "infra_ru_git_push_origin",
+        "Russian: push to origin trigger engineer",
+        "infra", "ru",
+        "Запушь изменения в origin",
+    ),
+    (
+        "infra_ru_git_push_oridzhin",
+        "Russian: push to ориджин trigger engineer",
+        "infra", "ru",
+        "Запуши в ориджин",
+    ),
+    (
+        "infra_en_git_commit_push",
+        "git commit + git push trigger engineer",
+        "infra", "en",
+        "Make git commit and git push",
+    ),
+    (
+        "infra_ru_git_merge_origin_local_customizations",
+        "Russian: merge origin/local/customizations trigger engineer",
+        "infra", "ru",
+        "Смерджи origin/local/customizations",
+    ),
+    (
+        "infra_ru_git_status_and_commit",
+        "Russian: git status + commit trigger engineer",
+        "infra", "ru",
+        "Проверь git status и закоммить",
+    ),
     # ── Career (EN + RU) ─────────────────────────────────────────────────────
     (
         "career_en_vacancy_apply",
