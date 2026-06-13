@@ -356,7 +356,8 @@ The `model_tier_request` field declares the model capability tier the role needs
 ```yaml
 role:
   model_tier_request: standard    # default — low-risk, most roles
-  model_tier_request: reasoning   # high-reasoning; for engineering and analysis roles
+  model_tier_request: reasoning   # high-reasoning; for analysis/synthesis roles
+  model_tier_request: coding      # engineering/code tier; falls back to reasoning, then standard
   model_tier_request: critical    # security-review tier; restricted to security role families
 ```
 
@@ -365,13 +366,15 @@ role:
 | Value | Meaning | Typical role families |
 |---|---|---|
 | `standard` | Default; all general roles | advisor, docs, research, career |
-| `reasoning` | High-reasoning model tier | engineering, analysis |
+| `reasoning` | High-reasoning model tier | analysis, synthesis |
+| `coding` | Engineering/code tier | engineering, repo/debug/runtime work |
 | `critical` | Security-review tier | security, security_audit, security_auditor |
 
 **Important notes:**
 
 - This is a **request / metadata** field in MVP. Package routing is not active, so the agent does not yet act on this value at dispatch time.
 - `critical` is **restricted** to role families `security`, `security_audit`, and `security_auditor`. Declaring `critical` for any other family is a validation error.
+- `coding` is intended for engineering/code/repo/debug tasks and falls back to `reasoning`, then `standard`.
 - Model tier does **not grant tool permissions**. Tool access is controlled by `allowed_categories` and the approval gate at the tool/action boundary, independently of model tier.
 - Omitting `model_tier_request` defaults to `standard`.
 

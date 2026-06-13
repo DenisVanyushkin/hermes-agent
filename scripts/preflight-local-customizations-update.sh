@@ -60,8 +60,7 @@ resolve_python() {
     /usr/local/bin/python3 \
     /usr/bin/python3 \
     /bin/python3 \
-    "$(command -v python3 2>/dev/null || true)" \
-    "$(command -v python 2>/dev/null || true)"; do
+    "$(command -v python3 2>/dev/null || true)"; do
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0

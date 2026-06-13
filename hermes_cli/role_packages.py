@@ -36,10 +36,11 @@ VALID_BOUNDARY_MODES: frozenset[str] = frozenset({"advisory", "observe_warn", "e
 
 # Valid model tier requests for role packages.
 # standard  — default / low-risk model tier (already the MVP default).
-# reasoning — high-reasoning tier; intended for engineer-style roles.
-# critical  — highest-care / security-review tier; restricted to security role families.
+# reasoning — high-reasoning tier; intended for analysis roles.
+# coding   — engineering/code tier; falls back through reasoning to standard.
+# critical — highest-care / security-review tier; restricted to security role families.
 # Unknown values are rejected at manifest validation time.
-VALID_MODEL_TIERS: frozenset[str] = frozenset({"standard", "reasoning", "critical"})
+VALID_MODEL_TIERS: frozenset[str] = frozenset({"standard", "reasoning", "coding", "critical"})
 
 # Role families that are permitted to declare model_tier_request: critical.
 # The guard is narrow: packages outside these families must use standard or reasoning.

@@ -569,7 +569,10 @@ def resolve_profile_model(profile_id: str, policy: dict[str, Any]) -> ResolvedMo
         fallback_status = "stop_and_escalate"
     else:
         fallback_behavior = tier.get("fallback_behavior")
-        if fallback_behavior == "fallback_allowed":
+        if tier_name == "coding" and fallback_behavior == "reasoning_then_standard":
+            model_resolution_status = "fallback_available_by_policy"
+            fallback_status = "reasoning_then_standard"
+        elif fallback_behavior == "fallback_allowed":
             model_resolution_status = "fallback_available_by_policy"
             fallback_status = "fallback_allowed"
         else:

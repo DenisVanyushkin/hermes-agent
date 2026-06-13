@@ -658,6 +658,8 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         _create_kwargs["temperature"] = summary_temperature
                     response = self.client.chat.completions.create(**_create_kwargs)
                 
+                if not getattr(response, "choices", None):
+                    raise ValueError("summarizer returned empty response (no choices)")
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
                 
@@ -727,6 +729,8 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         _create_kwargs["temperature"] = summary_temperature
                     response = await self._get_async_client().chat.completions.create(**_create_kwargs)
                 
+                if not getattr(response, "choices", None):
+                    raise ValueError("summarizer returned empty response (no choices)")
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
                 

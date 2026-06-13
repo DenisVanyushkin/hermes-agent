@@ -607,6 +607,36 @@ class TestGenerateSummaryNoneContent:
         result = c.compress(msgs)
         assert len(result) < len(msgs)
 
+    def test_empty_choices_from_summary_provider_falls_back_cleanly(self):
+        """Regression: an empty LLM response during compression should not IndexError."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=1, protect_last_n=2)
+
+        msgs = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Please compress this conversation"},
+            {"role": "assistant", "content": "ack"},
+            {"role": "user", "content": "More detail"},
+            {"role": "assistant", "content": "Sure"},
+            {"role": "user", "content": "latest protected ask"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "another message"},
+        ]
+
+        empty_response = MagicMock()
+        empty_response.choices = []
+
+        with (
+            patch.object(c, "_find_tail_cut_by_tokens", return_value=5),
+            patch("agent.context_compressor.call_llm", return_value=empty_response),
+        ):
+            result = c.compress(msgs)
+
+        assert len(result) < len(msgs)
+        assert c._last_summary_error is not None
+        assert "empty response" in c._last_summary_error.lower()
+        assert c._last_compress_aborted is False
+
 
 class TestNonStringContent:
     """Regression: content as dict (e.g., llama.cpp tool calls) must not crash."""
