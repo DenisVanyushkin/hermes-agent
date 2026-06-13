@@ -64,6 +64,7 @@ class ProfilePreview:
     ordinary_personal_admin: bool = False
     external_commitment: bool = False
     production_runtime_mutation: bool = False
+    review_gate_candidate: bool = False
     sensitive_diff_triggers: list[str] = field(default_factory=list)
     durable_outcome_expected: bool = False
     route_decision: dict[str, Any] | None = None
@@ -311,6 +312,7 @@ def build_profile_preview(
     ordinary_personal_admin = bool(execution_plan_dict.get("ordinary_personal_admin", False)) if execution_plan_dict else False
     external_commitment = bool(execution_plan_dict.get("external_commitment", False)) if execution_plan_dict else False
     production_runtime_mutation = bool(execution_plan_dict.get("production_runtime_mutation", False)) if execution_plan_dict else False
+    review_gate_candidate = bool(execution_plan_dict.get("review_gate_candidate", False)) if execution_plan_dict else False
     sensitive_diff_triggers = list(execution_plan_dict.get("sensitive_diff_triggers", []) or []) if execution_plan_dict else []
     durable_outcome_expected = bool(execution_plan_dict.get("durable_outcome_expected", False)) if execution_plan_dict else False
 
@@ -362,6 +364,7 @@ def build_profile_preview(
         ordinary_personal_admin=ordinary_personal_admin,
         external_commitment=external_commitment,
         production_runtime_mutation=production_runtime_mutation,
+        review_gate_candidate=review_gate_candidate,
         sensitive_diff_triggers=sensitive_diff_triggers,
         durable_outcome_expected=durable_outcome_expected,
         route_decision=route_decision_dict,

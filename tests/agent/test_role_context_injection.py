@@ -8,6 +8,7 @@ from agent.conversation_loop import (
     _should_preflight_block_for_profile_context,
     run_conversation,
 )
+from agent.turn_finalizer import finalize_turn
 from hermes_cli.profile_context import (
     build_role_context_for_task,
     inject_role_execution_debug_header,
@@ -227,6 +228,154 @@ def test_approval_required_task_stops_before_tool_execution_and_requests_approva
     assert result["final_response"] == "normal path reached"
     assert agent._persisted
     assert "_approval_gate" not in agent._persisted[0][0][-1]
+
+
+class _FinalizeTurnAgent:
+    def __init__(self):
+        self.session_id = "session-review-gate"
+        self.model = "xiaomi/mimo-v2.5-pro"
+        self.provider = "openrouter"
+        self.base_url = "https://openrouter.ai/api/v1"
+        self.platform = "slack"
+        self.max_iterations = 8
+        self.iteration_budget = SimpleNamespace(remaining=8, used=1, max_total=8)
+        self.quiet_mode = True
+        self._persisted = []
+        self.session_input_tokens = 0
+        self.session_output_tokens = 0
+        self.session_cache_read_tokens = 0
+        self.session_cache_write_tokens = 0
+        self.session_reasoning_tokens = 0
+        self.session_prompt_tokens = 0
+        self.session_completion_tokens = 0
+        self.session_total_tokens = 0
+        self.session_estimated_cost_usd = 0.0
+        self.session_cost_status = "not_tracked"
+        self.session_cost_source = "test"
+        self.context_compressor = SimpleNamespace(last_prompt_tokens=0)
+        self._tool_guardrail_halt_decision = None
+        self._response_was_previewed = False
+        self._interrupt_message = None
+        self._stream_callback = None
+        self._skill_nudge_interval = 0
+        self._iters_since_skill = 0
+        self.valid_tool_names = []
+
+    def _emit_status(self, *_args, **_kwargs):
+        return None
+
+    def _safe_print(self, *_args, **_kwargs):
+        return None
+
+    def _handle_max_iterations(self, *_args, **_kwargs):
+        raise AssertionError("max-iterations path not expected")
+
+    def _save_trajectory(self, *_args, **_kwargs):
+        return None
+
+    def _cleanup_task_resources(self, *_args, **_kwargs):
+        return None
+
+    def _drop_trailing_empty_response_scaffolding(self, *_args, **_kwargs):
+        return None
+
+    def _persist_session(self, messages, conversation_history):
+        self._persisted.append((messages, conversation_history))
+
+    def _file_mutation_verifier_enabled(self):
+        return False
+
+    def _format_file_mutation_failure_footer(self, *_args, **_kwargs):
+        return ""
+
+    def _turn_completion_explainer_enabled(self):
+        return False
+
+    def _format_turn_completion_explanation(self, *_args, **_kwargs):
+        return ""
+
+    def _drain_pending_steer(self):
+        return None
+
+    def clear_interrupt(self):
+        return None
+
+    def _sync_external_memory_for_turn(self, *_args, **_kwargs):
+        return None
+
+    def _spawn_background_review(self, *_args, **_kwargs):
+        return None
+
+
+def _patched_messages_for_review_gate():
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_patch_1",
+                    "type": "function",
+                    "function": {
+                        "name": "patch",
+                        "arguments": '{"path":"hermes_cli/profile_execution.py"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_patch_1",
+            "content": '{"success": true}',
+        },
+    ]
+
+
+def test_finalize_turn_blocks_completion_when_review_gate_enforce(monkeypatch):
+    monkeypatch.setattr("hermes_cli.review_gate.load_config_readonly", lambda: {"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}})
+    agent = _FinalizeTurnAgent()
+    result = finalize_turn(
+        agent,
+        final_response="Implemented the fix and tests are green.",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=_patched_messages_for_review_gate(),
+        conversation_history=[],
+        effective_task_id=None,
+        turn_id="turn-1",
+        user_message="Fix the failing pytest suite in the repository",
+        original_user_message="Fix the failing pytest suite in the repository",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(stop)",
+        response_pre_transformed=False,
+    )
+    assert result["completed"] is False
+    assert "blocked pending code review approval" in result["final_response"].lower()
+    assert agent._persisted
+    assert "_review_gate" in agent._persisted[0][0][-1]
+
+
+def test_finalize_turn_observe_keeps_completion(monkeypatch):
+    monkeypatch.setattr("hermes_cli.review_gate.load_config_readonly", lambda: {"review_gate": {"mode": "observe", "reviewer_tier": "code_review"}})
+    agent = _FinalizeTurnAgent()
+    result = finalize_turn(
+        agent,
+        final_response="Implemented the fix and tests are green.",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=_patched_messages_for_review_gate(),
+        conversation_history=[],
+        effective_task_id=None,
+        turn_id="turn-1",
+        user_message="Fix the failing pytest suite in the repository",
+        original_user_message="Fix the failing pytest suite in the repository",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(stop)",
+        response_pre_transformed=False,
+    )
+    assert result["completed"] is True
+    assert result["final_response"] == "Implemented the fix and tests are green."
 
 
 def test_security_critical_text_prompt_reaches_normal_model_path_without_preflight_block(monkeypatch):

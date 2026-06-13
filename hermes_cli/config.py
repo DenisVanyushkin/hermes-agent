@@ -973,6 +973,10 @@ DEFAULT_CONFIG = {
     # sessions (no live client) so accumulated agents don't pile up under memory
     # pressure. Reopening one re-resumes it from disk. 0/null disables.
     "max_live_sessions": 16,
+    "review_gate": {
+        "mode": "observe",
+        "reviewer_tier": "code_review",
+    },
     "agent": {
         "max_turns": 120,
         # Inactivity timeout for gateway agent execution (seconds).
@@ -5207,6 +5211,7 @@ _KNOWN_ROOT_KEYS = {
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "moa", "custom_providers", "context", "memory", "gateway",
+    "review_gate",
     "sessions", "streaming", "updates", "mcp_servers",
 }
 
