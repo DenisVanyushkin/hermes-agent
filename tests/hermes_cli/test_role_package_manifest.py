@@ -427,7 +427,7 @@ class TestModelTierValidation:
         return data
 
     def test_valid_model_tiers_constant(self):
-        assert VALID_MODEL_TIERS == frozenset({"standard", "reasoning", "critical"})
+        assert VALID_MODEL_TIERS == frozenset({"standard", "reasoning", "coding", "critical"})
 
     def test_standard_accepted(self, tmp_path):
         _write_manifest(tmp_path / "p", self._pkg(model_tier="standard"))
@@ -436,6 +436,11 @@ class TestModelTierValidation:
 
     def test_reasoning_accepted(self, tmp_path):
         _write_manifest(tmp_path / "p", self._pkg(model_tier="reasoning"))
+        manifest, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
+        assert errors == []
+
+    def test_coding_accepted(self, tmp_path):
+        _write_manifest(tmp_path / "p", self._pkg(model_tier="coding"))
         manifest, errors, _ = validate_manifest_path(tmp_path / "p", check_builtin_collision=False)
         assert errors == []
 
@@ -473,6 +478,7 @@ class TestModelTierValidation:
         assert "Invalid model_tier_request" in msg
         assert "standard" in msg
         assert "reasoning" in msg
+        assert "coding" in msg
         assert "critical" in msg
 
     def test_omitted_model_tier_defaults_to_standard(self, tmp_path):

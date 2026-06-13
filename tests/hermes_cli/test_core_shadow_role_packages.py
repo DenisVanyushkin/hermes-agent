@@ -459,9 +459,9 @@ class TestShadowModelTierRequests:
         )
         return data.get("role", {}).get("model_tier_request", "standard")
 
-    def test_engineer_requests_reasoning_tier(self) -> None:
-        assert self._tier("hermes-engineer-core") == "reasoning", (
-            "engineer-core must request reasoning tier to match built-in engineer model"
+    def test_engineer_requests_coding_tier(self) -> None:
+        assert self._tier("hermes-engineer-core") == "coding", (
+            "engineer-core must request coding tier to match built-in engineer model"
         )
 
     def test_security_auditor_requests_critical_tier(self) -> None:
@@ -478,11 +478,11 @@ class TestShadowModelTierRequests:
     def test_career_strategist_uses_standard_tier(self) -> None:
         assert self._tier("hermes-career-strategist-core") == "standard"
 
-    def test_engineer_manifest_validates_with_reasoning(self) -> None:
+    def test_engineer_manifest_validates_with_coding(self) -> None:
         _, errors, _ = validate_manifest_path(
             SHADOW_DIR / "hermes-engineer-core", check_builtin_collision=False
         )
-        assert errors == [], f"engineer-core with reasoning tier failed: {errors}"
+        assert errors == [], f"engineer-core with coding tier failed: {errors}"
 
     def test_security_auditor_manifest_validates_with_critical(self) -> None:
         _, errors, _ = validate_manifest_path(

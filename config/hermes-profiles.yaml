@@ -102,7 +102,7 @@ profiles:
     review_policy_summary:
     - invokes reviewers only when needed; does not gate everything by default
 - id: engineer
-  default_model: reasoning
+  default_model: coding
   allowed_tools:
   - read_only_host_inspection
   - shell_after_approval

@@ -1577,8 +1577,8 @@ DEFAULT_CONFIG = {
             "extra_body": {},
         },
         "compression": {
-            "provider": "auto",
-            "model": "",
+            "provider": "openrouter",
+            "model": "openrouter/owl-alpha",
             "base_url": "",
             "api_key": "",
             "timeout": 120,        # seconds — compression summarises large contexts; increase for local models

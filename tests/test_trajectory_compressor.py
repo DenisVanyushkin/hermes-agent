@@ -104,6 +104,27 @@ def test_generate_summary_public_moonshot_cn_kimi_k2_5_omits_temperature():
     assert "temperature" not in compressor.client.chat.completions.create.call_args.kwargs
 
 
+def test_generate_summary_empty_choices_falls_back_cleanly():
+    """Empty summarizer responses should not IndexError and must fall back."""
+    config = CompressionConfig(
+        summarization_model="test-model",
+        summary_target_tokens=100,
+        max_retries=1,
+    )
+    compressor = TrajectoryCompressor.__new__(TrajectoryCompressor)
+    compressor.config = config
+    compressor.logger = MagicMock()
+    compressor._use_call_llm = False
+    compressor.client = MagicMock()
+    compressor.client.chat.completions.create.return_value = SimpleNamespace(choices=[])
+
+    metrics = TrajectoryMetrics()
+    result = compressor._generate_summary("tool output", metrics)
+
+    assert result.startswith("[CONTEXT SUMMARY]: [Summary generation failed")
+    assert metrics.summarization_errors == 1
+
+
 # ---------------------------------------------------------------------------
 # CompressionConfig
 # ---------------------------------------------------------------------------
