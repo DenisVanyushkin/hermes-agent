@@ -15,8 +15,9 @@ from typing import Any
 _DEFAULT_PROVIDER = "openai-codex"
 _CODING_PROVIDER = "openrouter"
 _DEFAULT_MODEL = "gpt-5.4-mini"
+_REASONING_MODEL = "gpt-5.4"
+_CRITICAL_MODEL = "gpt-5.5"
 _CODING_MODEL = "xiaomi/mimo-v2.5-pro"
-_HIGH_REASONING_MODEL = "gpt-5.5"
 
 _TRADING_ROLES = {"trading_observer_trader", "trading_observer_trader_deferred"}
 _SIMPLE_RESEARCH_HINTS = {
@@ -154,7 +155,7 @@ def select_model_policy(
             effective_role=effective_role,
             policy_name="approval_critical",
             policy_class="approval_critical",
-            preferred_model=_HIGH_REASONING_MODEL,
+            preferred_model=_CRITICAL_MODEL,
             fallback_chain_key="stop_and_escalate",
             allow_fallback=False,
             reasoning_level="high",
@@ -188,7 +189,7 @@ def select_model_policy(
             effective_role=effective_role,
             policy_name="research_fast_lookup" if prefers_fast_lookup else "research_reasoning",
             policy_class="research",
-            preferred_model=_DEFAULT_MODEL if prefers_fast_lookup else _HIGH_REASONING_MODEL,
+            preferred_model=_REASONING_MODEL if not prefers_fast_lookup else _DEFAULT_MODEL,
             fallback_chain_key="configured_runtime_fallback_chain",
             allow_fallback=True,
             reasoning_level="balanced" if prefers_fast_lookup else "high",
