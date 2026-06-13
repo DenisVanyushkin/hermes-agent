@@ -219,6 +219,7 @@ def finalize_turn(
                     if isinstance(original_user_message, str) and original_user_message.strip()
                     else str(user_message or "")
                 )
+                runtime_request = getattr(agent, "_turn_runtime_request", None)
                 review_plan = build_role_execution_plan(review_task)
                 review_gate = evaluate_review_gate(review_plan, messages)
                 review_gate_log = build_review_gate_evaluation_log_fields(review_gate)
@@ -226,6 +227,8 @@ def finalize_turn(
                     "review gate evaluation: session=%s review_gate.mode=%s "
                     "review_gate.reviewer_tier=%s automatic_review_invoked=%s "
                     "automatic_review_verdict=%s reviewer_provider=%s reviewer_model=%s "
+                    "selected_role=%s selected_provider=%s selected_model=%s "
+                    "actual_provider=%s actual_model=%s fallback_used=%s fallback_reason=%s "
                     "changed_paths_count=%d blocking=%s status=%s",
                     agent.session_id or "-",
                     review_gate_log["review_gate.mode"],
@@ -234,6 +237,13 @@ def finalize_turn(
                     review_gate_log["automatic_review_verdict"],
                     review_gate_log["reviewer_provider"],
                     review_gate_log["reviewer_model"],
+                    getattr(runtime_request, "get", lambda *_: None)("selected_role") if isinstance(runtime_request, dict) else review_plan.selected_role,
+                    getattr(runtime_request, "get", lambda *_: None)("selected_provider") if isinstance(runtime_request, dict) else "",
+                    getattr(runtime_request, "get", lambda *_: None)("selected_model") if isinstance(runtime_request, dict) else "",
+                    getattr(runtime_request, "get", lambda *_: None)("actual_provider") if isinstance(runtime_request, dict) else "",
+                    getattr(runtime_request, "get", lambda *_: None)("actual_model") if isinstance(runtime_request, dict) else "",
+                    getattr(runtime_request, "get", lambda *_: None)("fallback_used") if isinstance(runtime_request, dict) else False,
+                    getattr(runtime_request, "get", lambda *_: None)("fallback_reason") if isinstance(runtime_request, dict) else "",
                     review_gate_log["changed_paths_count"],
                     review_gate_log["blocking"],
                     review_gate_log["status"],
@@ -254,6 +264,14 @@ def finalize_turn(
                                 "reviewer_tier": review_gate.reviewer_tier,
                                 "reviewer_provider": review_gate.reviewer_provider,
                                 "reviewer_model": review_gate.reviewer_model,
+                                "selected_provider": runtime_request.get("selected_provider") if isinstance(runtime_request, dict) else "",
+                                "selected_model": runtime_request.get("selected_model") if isinstance(runtime_request, dict) else "",
+                                "actual_provider": runtime_request.get("actual_provider") if isinstance(runtime_request, dict) else "",
+                                "actual_model": runtime_request.get("actual_model") if isinstance(runtime_request, dict) else "",
+                                "policy_name": runtime_request.get("policy_name") if isinstance(runtime_request, dict) else "",
+                                "policy_class": runtime_request.get("policy_class") if isinstance(runtime_request, dict) else "",
+                                "fallback_used": runtime_request.get("fallback_used") if isinstance(runtime_request, dict) else False,
+                                "fallback_reason": runtime_request.get("fallback_reason") if isinstance(runtime_request, dict) else "",
                                 "changed_paths": list(review_gate.changed_paths),
                                 "packet": review_gate_to_dict(review_gate),
                                 "packet_hash": review_gate.packet_hash,
@@ -581,4 +599,5 @@ def finalize_turn(
     except Exception as exc:
         logger.warning("on_session_end hook failed: %s", exc)
 
+    agent._turn_runtime_request = None
     return result
