@@ -133,7 +133,7 @@ Escalate when one or more of these conditions are true:
 - user explicitly asks for deep reasoning.
 
 Engineer escalation:
-- Use a specialized coding model, for example `gpt-5.3-codex`, only for:
+- Use a specialized coding model, for example `xiaomi/mimo-v2.5-pro`, only for:
   - complex multi-file changes;
   - difficult bugfixes;
   - failing test diagnosis;
@@ -443,7 +443,7 @@ Each role maps every relevant category as one of:
 
 **model_policy**
 - `base_model`: `gpt-5.4-mini`
-- `escalation_model`: specialized coding model, for example `gpt-5.3-codex`, only when escalation conditions are met
+- `escalation_model`: specialized coding model, for example `xiaomi/mimo-v2.5-pro`, only when escalation conditions are met
 - `free_fallback_policy`: may draft, debug, summarize, and suggest, but not approve production/runtime mutation
 - `escalation_conditions`: complex multi-file changes, difficult bugfixes, failing test diagnosis, high-risk engineering changes, runtime/deploy/gateway/auth/scheduler-related changes, low confidence
 - `stop_and_escalate_conditions`: paid coding/escalation model is unavailable for critical production/runtime engineering

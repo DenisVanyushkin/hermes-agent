@@ -152,6 +152,28 @@ class TestRenderPackageRoleContext:
         assert "reviewer, not a universal blocker" in ctx
 
 
+def test_engineer_package_activation_keeps_builtin_coding_model_resolution():
+    from hermes_cli.profile_routing import route_task
+
+    cfg = RolePackageRoutingConfig(
+        enabled=True,
+        activation_mode="selected_roles",
+        active_roles=["engineer"],
+        package_path=str(SHADOW_DIR),
+        fallback_to_builtin=True,
+    )
+    task = "check docker logs for errors"
+    decision = route_task(task)
+    result = activate_package_for_role("engineer", cfg, prompt_text=task)
+
+    assert result.activated is True
+    assert result.package_name == "hermes-engineer-core"
+    assert decision.primary_profile == "engineer"
+    assert decision.route_chain[0].model_tier == "coding"
+    assert decision.route_chain[0].provider == "openrouter"
+    assert decision.route_chain[0].model == "xiaomi/mimo-v2.5-pro"
+
+
 class TestActivatePackageForRole:
 
     def _cfg(self, **overrides) -> RolePackageRoutingConfig:
