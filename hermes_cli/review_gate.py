@@ -3,12 +3,16 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import subprocess
+import time
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 from agent.tool_result_classification import file_mutation_result_landed
 from hermes_cli.config import load_config_readonly
@@ -421,21 +425,25 @@ def run_code_review(
         rollback_notes=rollback_notes,
         risk_notes=risk_notes,
     )
+    selected_provider = reviewer["provider"]
+    selected_model = reviewer["model"]
+    started_at = time.perf_counter()
     try:
         from agent.auxiliary_client import resolve_provider_client
 
         client, resolved_model = resolve_provider_client(
-            reviewer["provider"],
-            reviewer["model"],
+            selected_provider,
+            selected_model,
             raw_codex=False,
             async_mode=False,
         )
         if client is None:
             raise ReviewInvocationError(
-                f"reviewer_unavailable: unable to resolve client for {reviewer['provider']} / {reviewer['model']}"
+                f"reviewer_unavailable: unable to resolve client for {selected_provider} / {selected_model}"
             )
+        actual_model = resolved_model or selected_model
         response = client.chat.completions.create(
-            model=resolved_model or reviewer["model"],
+            model=actual_model,
             messages=[
                 {"role": "system", "content": "You are a strict code reviewer. Return valid JSON only."},
                 {"role": "user", "content": prompt},
@@ -443,9 +451,38 @@ def run_code_review(
             temperature=0,
             response_format={"type": "json_object"},
         )
-    except ReviewInvocationError:
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "reviewer invocation: purpose=code_review selected_provider=%s selected_model=%s actual_provider=%s actual_model=%s success=true latency_ms=%d",
+            selected_provider,
+            selected_model,
+            selected_provider,
+            actual_model,
+            latency_ms,
+        )
+    except ReviewInvocationError as exc:
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "reviewer invocation: purpose=code_review selected_provider=%s selected_model=%s actual_provider=%s actual_model=%s success=false latency_ms=%d reviewer_error=%s",
+            selected_provider,
+            selected_model,
+            selected_provider,
+            selected_model,
+            latency_ms,
+            exc,
+        )
         raise
     except Exception as exc:
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "reviewer invocation: purpose=code_review selected_provider=%s selected_model=%s actual_provider=%s actual_model=%s success=false latency_ms=%d reviewer_error=%s",
+            selected_provider,
+            selected_model,
+            selected_provider,
+            selected_model,
+            latency_ms,
+            exc,
+        )
         raise ReviewInvocationError(f"reviewer_error: {exc}") from exc
 
     content = ""
@@ -649,6 +686,7 @@ def build_review_gate_startup_log_fields(
 
 
 def build_review_gate_evaluation_log_fields(decision: ReviewGateDecision) -> dict[str, Any]:
+    packet = decision.packet if isinstance(decision.packet, dict) else {}
     return {
         "review_gate.mode": decision.mode,
         "review_gate.reviewer_tier": decision.reviewer_tier,
@@ -656,6 +694,14 @@ def build_review_gate_evaluation_log_fields(decision: ReviewGateDecision) -> dic
         "automatic_review_verdict": decision.automatic_review_verdict,
         "reviewer_provider": decision.reviewer_provider,
         "reviewer_model": decision.reviewer_model,
+        "selected_role": str(packet.get("selected_role") or ""),
+        "selected_provider": str(packet.get("selected_provider") or ""),
+        "selected_model": str(packet.get("selected_model") or ""),
+        "actual_provider": str(packet.get("actual_provider") or ""),
+        "actual_model": str(packet.get("actual_model") or ""),
+        "fallback_used": bool(packet.get("fallback_used", False)),
+        "fallback_reason": str(packet.get("fallback_reason") or ""),
+        "review_error": decision.review_error,
         "changed_paths_count": decision.changed_path_count,
         "blocking": decision.blocking,
         "status": decision.status,
@@ -712,8 +758,27 @@ def render_review_gate_block_message(decision: ReviewGateDecision) -> str:
         title = "Explicit approval is required for this production/security-sensitive change."
     else:
         title = "Final completion is blocked pending code review approval."
-
+    selected_role = str(packet.get("selected_role") or "").strip() or "unknown"
+    selected_provider = str(packet.get("selected_provider") or "").strip()
+    selected_model = str(packet.get("selected_model") or "").strip()
+    actual_provider = str(packet.get("actual_provider") or selected_provider).strip()
+    actual_model = str(packet.get("actual_model") or selected_model).strip()
+    fallback_used = bool(packet.get("fallback_used", False))
+    fallback_reason = str(packet.get("fallback_reason") or "").strip()
+    header_lines = [
+        f"Hermes role: {selected_role}",
+        "Role context: used",
+        f"Implementation: {actual_provider or selected_provider or 'n/a'} / {actual_model or selected_model or 'n/a'}",
+        f"Reviewer: {decision.reviewer_provider} / {decision.reviewer_model} / {decision.automatic_review_verdict}",
+        f"Approval: {'required' if decision.approval_sensitive else 'not_required'}",
+    ]
+    if operation_category:
+        header_lines.append(f"Operation category: {operation_category}")
+    if fallback_used:
+        header_lines.append(f"Fallback reason: {fallback_reason or 'runtime provider resolver adjusted provider/model'}")
     lines = [
+        *header_lines,
+        "",
         title,
         "",
         f"Task summary: {task_summary}",
@@ -724,8 +789,6 @@ def render_review_gate_block_message(decision: ReviewGateDecision) -> str:
         f"Automatic review invoked: {'yes' if decision.automatic_review_invoked else 'no'}",
         f"Automatic review verdict: {decision.automatic_review_verdict}",
     ]
-    if operation_category:
-        lines.append(f"Operation category: {operation_category}")
     if planned_action:
         lines.append(f"Planned action: {planned_action}")
     if decision.reviewer_summary:

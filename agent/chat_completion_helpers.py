@@ -981,8 +981,27 @@ def interruptible_api_call(agent, api_kwargs: dict):
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
     tools_for_api = agent.tools
+    runtime_request = getattr(agent, "_turn_runtime_request", None)
+    if isinstance(runtime_request, dict):
+        runtime_api_mode = runtime_request.get("actual_api_mode") or runtime_request.get("api_mode") or agent.api_mode
+        runtime_provider = runtime_request.get("actual_provider") or runtime_request.get("provider") or agent.provider
+        runtime_model = runtime_request.get("actual_model") or runtime_request.get("model") or agent.model
+        runtime_base_url = runtime_request.get("actual_base_url") or runtime_request.get("base_url") or agent.base_url
+        runtime_reasoning_config = runtime_request.get("reasoning_config") or agent.reasoning_config
+        runtime_request_overrides = runtime_request.get("request_overrides") or agent.request_overrides
+        runtime_session_id = runtime_request.get("session_id") or getattr(agent, "session_id", None)
+        runtime_is_anthropic_oauth = runtime_request.get("is_anthropic_oauth")
+    else:
+        runtime_api_mode = agent.api_mode
+        runtime_provider = agent.provider
+        runtime_model = agent.model
+        runtime_base_url = agent.base_url
+        runtime_reasoning_config = agent.reasoning_config
+        runtime_request_overrides = agent.request_overrides
+        runtime_session_id = getattr(agent, "session_id", None)
+        runtime_is_anthropic_oauth = agent._is_anthropic_oauth
 
-    if agent.api_mode == "anthropic_messages":
+    if runtime_api_mode == "anthropic_messages":
         _transport = agent._get_transport()
         anthropic_messages = agent._prepare_anthropic_messages_for_api(api_messages)
         ctx_len = getattr(agent, "context_compressor", None)
@@ -991,27 +1010,27 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         if ephemeral_out is not None:
             agent._ephemeral_max_output_tokens = None  # consume immediately
         return _transport.build_kwargs(
-            model=agent.model,
+            model=runtime_model,
             messages=anthropic_messages,
             tools=tools_for_api,
             max_tokens=ephemeral_out if ephemeral_out is not None else agent.max_tokens,
-            reasoning_config=agent.reasoning_config,
-            is_oauth=agent._is_anthropic_oauth,
+            reasoning_config=runtime_reasoning_config,
+            is_oauth=bool(runtime_is_anthropic_oauth),
             preserve_dots=agent._anthropic_preserve_dots(),
             context_length=ctx_len,
-            base_url=getattr(agent, "_anthropic_base_url", None),
-            fast_mode=(agent.request_overrides or {}).get("speed") == "fast",
+            base_url=getattr(agent, "_anthropic_base_url", None) if runtime_base_url == agent.base_url else runtime_base_url,
+            fast_mode=(runtime_request_overrides or {}).get("speed") == "fast",
             drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)),
         )
 
     # AWS Bedrock native Converse API — bypasses the OpenAI client entirely.
     # The adapter handles message/tool conversion and boto3 calls directly.
-    if agent.api_mode == "bedrock_converse":
+    if runtime_api_mode == "bedrock_converse":
         _bt = agent._get_transport()
         region = getattr(agent, "_bedrock_region", None) or "us-east-1"
         guardrail = getattr(agent, "_bedrock_guardrail_config", None)
         return _bt.build_kwargs(
-            model=agent.model,
+            model=runtime_model,
             messages=api_messages,
             tools=tools_for_api,
             max_tokens=agent.max_tokens or 4096,
@@ -1019,20 +1038,20 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             guardrail_config=guardrail,
         )
 
-    if agent.api_mode == "codex_responses":
+    if runtime_api_mode == "codex_responses":
         _ct = agent._get_transport()
         is_github_responses = (
-            base_url_host_matches(agent.base_url, "models.github.ai")
-            or base_url_host_matches(agent.base_url, "githubcopilot.com")
+            base_url_host_matches(runtime_base_url, "models.github.ai")
+            or base_url_host_matches(runtime_base_url, "githubcopilot.com")
         )
         is_codex_backend = (
-            agent.provider == "openai-codex"
+            runtime_provider == "openai-codex"
             or (
                 agent._base_url_hostname == "chatgpt.com"
                 and "/backend-api/codex" in agent._base_url_lower
             )
         )
-        is_xai_responses = agent.provider in {"xai", "xai-oauth"} or agent._base_url_hostname == "api.x.ai"
+        is_xai_responses = runtime_provider in {"xai", "xai-oauth"} or agent._base_url_hostname == "api.x.ai"
         _msgs_for_codex = agent._prepare_messages_for_non_vision_model(api_messages)
 
         # xAI's /responses endpoint rejects ``pattern`` and ``format`` keywords
@@ -1068,14 +1087,14 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
                 )
 
         return _ct.build_kwargs(
-            model=agent.model,
+            model=runtime_model,
             messages=_msgs_for_codex,
             tools=tools_for_api,
-            reasoning_config=agent.reasoning_config,
-            session_id=getattr(agent, "session_id", None),
+            reasoning_config=runtime_reasoning_config,
+            session_id=runtime_session_id,
             max_tokens=agent.max_tokens,
             timeout=agent._resolved_api_call_timeout(),
-            request_overrides=agent.request_overrides,
+            request_overrides=runtime_request_overrides,
             is_github_responses=is_github_responses,
             is_codex_backend=is_codex_backend,
             is_xai_responses=is_xai_responses,
@@ -1090,26 +1109,26 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
 
     # Provider detection flags
     _is_qwen = agent._is_qwen_portal()
-    _is_or = agent._is_openrouter_url()
+    _is_or = base_url_host_matches(str(runtime_base_url or ""), "openrouter.ai")
     _is_gh = (
-        base_url_host_matches(agent._base_url_lower, "models.github.ai")
-        or base_url_host_matches(agent._base_url_lower, "githubcopilot.com")
+        base_url_host_matches(runtime_base_url, "models.github.ai")
+        or base_url_host_matches(runtime_base_url, "githubcopilot.com")
     )
-    _is_nous = "nousresearch" in agent._base_url_lower
-    _is_nvidia = "integrate.api.nvidia.com" in agent._base_url_lower
+    _is_nous = "nousresearch" in str(runtime_base_url or "").lower()
+    _is_nvidia = "integrate.api.nvidia.com" in str(runtime_base_url or "").lower()
     _is_kimi = (
-        base_url_host_matches(agent.base_url, "api.kimi.com")
-        or base_url_host_matches(agent.base_url, "moonshot.ai")
-        or base_url_host_matches(agent.base_url, "moonshot.cn")
+        base_url_host_matches(runtime_base_url, "api.kimi.com")
+        or base_url_host_matches(runtime_base_url, "moonshot.ai")
+        or base_url_host_matches(runtime_base_url, "moonshot.cn")
     )
-    _is_tokenhub = base_url_host_matches(agent._base_url_lower, "tokenhub.tencentmaas.com")
-    _is_lmstudio = (agent.provider or "").strip().lower() == "lmstudio"
+    _is_tokenhub = base_url_host_matches(str(runtime_base_url or "").lower(), "tokenhub.tencentmaas.com")
+    _is_lmstudio = (runtime_provider or "").strip().lower() == "lmstudio"
 
     # Temperature: _fixed_temperature_for_model may return OMIT_TEMPERATURE
     # sentinel (temperature omitted entirely), a numeric override, or None.
     try:
         from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE
-        _ft = _fixed_temperature_for_model(agent.model, agent.base_url)
+        _ft = _fixed_temperature_for_model(runtime_model, runtime_base_url)
         _omit_temp = _ft is OMIT_TEMPERATURE
         _fixed_temp = _ft if not _omit_temp else None
     except Exception:
@@ -1134,9 +1153,9 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             _get_anthropic_max_output,
             _ANTHROPIC_OUTPUT_LIMITS,
         )
-        _model_norm = (agent.model or "").lower().replace(".", "-")
+        _model_norm = (runtime_model or "").lower().replace(".", "-")
         if any(key in _model_norm for key in _ANTHROPIC_OUTPUT_LIMITS):
-            _ant_max = _get_anthropic_max_output(agent.model)
+            _ant_max = _get_anthropic_max_output(runtime_model)
     except Exception:
         pass
 
@@ -1144,7 +1163,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     _qwen_meta = None
     if _is_qwen:
         _qwen_meta = {
-            "sessionId": agent.session_id or "hermes",
+            "sessionId": runtime_session_id or "hermes",
             "promptId": str(uuid.uuid4()),
         }
 
@@ -1153,7 +1172,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     # found, delegate fully; otherwise fall through to the legacy flag path.
     try:
         from providers import get_provider_profile
-        _profile = get_provider_profile(agent.provider)
+        _profile = get_provider_profile(runtime_provider)
     except Exception:
         _profile = None
 
@@ -1168,17 +1187,17 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         api_messages = agent._prepare_messages_for_non_vision_model(api_messages)
 
         return _ct.build_kwargs(
-            model=agent.model,
+            model=runtime_model,
             messages=api_messages,
             tools=tools_for_api,
-            base_url=agent.base_url,
+            base_url=runtime_base_url,
             timeout=agent._resolved_api_call_timeout(),
             max_tokens=agent.max_tokens,
             ephemeral_max_output_tokens=_ephemeral_out,
             max_tokens_param_fn=agent._max_tokens_param,
-            reasoning_config=agent.reasoning_config,
-            request_overrides=agent.request_overrides,
-            session_id=getattr(agent, "session_id", None),
+            reasoning_config=runtime_reasoning_config,
+            request_overrides=runtime_request_overrides,
+            session_id=runtime_session_id,
             provider_profile=_profile,
             ollama_num_ctx=agent._ollama_num_ctx,
             # Context forwarded to profile hooks:
@@ -1200,18 +1219,18 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     _msgs_for_chat = agent._prepare_messages_for_non_vision_model(api_messages)
 
     return _ct.build_kwargs(
-        model=agent.model,
+        model=runtime_model,
         messages=_msgs_for_chat,
         tools=tools_for_api,
-        base_url=agent.base_url,
+        base_url=runtime_base_url,
         timeout=agent._resolved_api_call_timeout(),
         max_tokens=agent.max_tokens,
         ephemeral_max_output_tokens=_ephemeral_out,
         max_tokens_param_fn=agent._max_tokens_param,
-        reasoning_config=agent.reasoning_config,
-        request_overrides=agent.request_overrides,
-        session_id=getattr(agent, "session_id", None),
-        model_lower=(agent.model or "").lower(),
+        reasoning_config=runtime_reasoning_config,
+        request_overrides=runtime_request_overrides,
+        session_id=runtime_session_id,
+        model_lower=(runtime_model or "").lower(),
         is_openrouter=_is_or,
         is_nous=_is_nous,
         is_qwen_portal=_is_qwen,
@@ -1220,7 +1239,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         is_kimi=_is_kimi,
         is_tokenhub=_is_tokenhub,
         is_lmstudio=_is_lmstudio,
-        is_custom_provider=agent.provider == "custom",
+        is_custom_provider=runtime_provider == "custom",
         ollama_num_ctx=agent._ollama_num_ctx,
         provider_preferences=_prefs or None,
         openrouter_min_coding_score=agent.openrouter_min_coding_score,
@@ -1233,7 +1252,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         github_reasoning_extra=agent._github_models_reasoning_extra_body() if _is_gh else None,
         lmstudio_reasoning_options=agent._lmstudio_reasoning_options_cached() if _is_lmstudio else None,
         anthropic_max_output=_ant_max,
-        provider_name=agent.provider,
+        provider_name=runtime_provider,
     )
 
 

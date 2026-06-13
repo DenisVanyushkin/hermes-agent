@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
@@ -27,6 +29,7 @@ from hermes_cli.review_gate import (
     evaluate_review_gate,
     parse_review_verdict_intent,
     render_review_gate_block_message,
+    run_code_review,
 )
 from hermes_cli.profile_routing import route_task
 
@@ -621,6 +624,14 @@ def test_review_gate_evaluation_log_fields_include_mode_and_stay_secret_free():
         "automatic_review_verdict": "approved",
         "reviewer_provider": "openai-codex",
         "reviewer_model": "gpt-5.5",
+        "selected_role": "",
+        "selected_provider": "",
+        "selected_model": "",
+        "actual_provider": "",
+        "actual_model": "",
+        "fallback_used": False,
+        "fallback_reason": "",
+        "review_error": "",
         "changed_paths_count": 1,
         "blocking": False,
         "status": "approved",
@@ -739,6 +750,13 @@ def test_render_review_gate_block_message_includes_review_metadata_and_changed_f
             "task": "Set up Cloudflare Tunnel for Hermes WebUI and expose it publicly",
             "operation_category": "security_critical_mutation",
             "planned_action": "Set up Cloudflare Tunnel for Hermes WebUI and expose it publicly",
+            "selected_role": "engineer",
+            "selected_provider": "openrouter",
+            "selected_model": "xiaomi/mimo-v2.5-pro",
+            "actual_provider": "openrouter",
+            "actual_model": "xiaomi/mimo-v2.5-pro",
+            "fallback_used": False,
+            "fallback_reason": "",
         },
         packet_hash="sha256:abc123",
         automatic_review_invoked=False,
@@ -753,7 +771,11 @@ def test_render_review_gate_block_message_includes_review_metadata_and_changed_f
         warning="explicit approval is required before production/security-sensitive completion",
     )
     message = render_review_gate_block_message(decision)
-    assert "Explicit approval is required for this production/security-sensitive change." in message
+    assert "Hermes role: engineer" in message
+    assert "Role context: used" in message
+    assert "Implementation: openrouter / xiaomi/mimo-v2.5-pro" in message
+    assert "Reviewer: openai-codex / gpt-5.5 / none" in message
+    assert "Approval: required" in message
     assert "Task summary: Set up Cloudflare Tunnel for Hermes WebUI and expose it publicly" in message
     assert "Review gate mode: enforce" in message
     assert "Approval scope: production/security approval" in message
@@ -800,6 +822,55 @@ def test_render_review_gate_block_message_reports_reviewer_failure_reason():
     assert "Automatic review verdict: blocked" in message
     assert "Reviewer error: invalid_review_verdict: reviewer did not return valid JSON" in message
     assert "Task summary: Fix automatic review invocation" in message
+
+
+def test_run_code_review_logs_selected_and_actual_provider_model(caplog, monkeypatch):
+    plan = _plan("Сделай git commit и git push")
+    review_packet = {
+        "task": "Fix the review gate plumbing",
+        "changed_paths": ["agent/conversation_loop.py"],
+        "reviewer_tier": "code_review",
+        "reviewer_provider": "openai-codex",
+        "reviewer_model": "gpt-5.5",
+    }
+
+    class DummyMessage:
+        content = '{"verdict":"approved","summary":"looks good","findings":[],"required_changes":[],"tests_required":[],"risk_level":"low","approval_sensitive":false}'
+
+    class DummyChoice:
+        message = DummyMessage()
+
+    class DummyResponse:
+        choices = [DummyChoice()]
+
+    class DummyClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    return DummyResponse()
+
+    fake_auxiliary_client = types.ModuleType("agent.auxiliary_client")
+    fake_auxiliary_client.resolve_provider_client = lambda provider, model, **kwargs: (DummyClient(), model)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", fake_auxiliary_client)
+    caplog.set_level(logging.INFO)
+
+    verdict, reviewed_packet = run_code_review(
+        review_packet,
+        plan=plan,
+        reviewer_tier="code_review",
+        messages=[],
+    )
+
+    assert verdict.verdict == "approved"
+    assert reviewed_packet["reviewer_provider"] == "openai-codex"
+    assert reviewed_packet["reviewer_model"] == "gpt-5.5"
+    assert "reviewer invocation: purpose=code_review" in caplog.text
+    assert "selected_provider=openai-codex" in caplog.text
+    assert "selected_model=gpt-5.5" in caplog.text
+    assert "actual_provider=openai-codex" in caplog.text
+    assert "actual_model=gpt-5.5" in caplog.text
+    assert "success=true" in caplog.text
 
 
 def test_review_gate_manual_waiver_marks_user_override():
