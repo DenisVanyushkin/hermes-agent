@@ -865,24 +865,37 @@ def build_turn_context(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
-                if (
-                    messages is _preflight_input
-                    and compression_skipped_due_to_lock(agent)
-                ):
-                    # #69870 lock-skip: another path holds this session's
-                    # compression lock, so the pass no-oped. That is a
-                    # temporary DEFER, not proof the transcript cannot
-                    # compress — do NOT arm the insufficient-progress
-                    # blocker (the loop's error handlers must keep their
-                    # provider-proven retry budget) and stop preflight
-                    # passes for this turn; the lock winner is shrinking
-                    # the same session concurrently.
-                    logger.info(
-                        "Preflight compression deferred: compression lock "
-                        "held by another path (session %s)",
-                        agent.session_id or "none",
+                if messages is not None:
+                    rebased_idx = next(
+                        (
+                            idx
+                            for idx in range(len(messages) - 1, -1, -1)
+                            if messages[idx] is user_msg
+                        ),
+                        None,
                     )
-                    break
+                    if rebased_idx is None:
+                        rebased_idx = next(
+                            (
+                                idx
+                                for idx in range(len(messages) - 1, -1, -1)
+                                if isinstance(messages[idx], dict)
+                                and messages[idx].get("role") == "user"
+                            ),
+                            None,
+                        )
+                    if rebased_idx is None:
+                        logger.warning(
+                            "Preflight compression dropped current user turn; "
+                            "restoring it at the tail. session=%s before=%d after=%d",
+                            agent.session_id or "none",
+                            _orig_len,
+                            len(messages),
+                        )
+                        messages.append(user_msg)
+                        rebased_idx = len(messages) - 1
+                    current_turn_user_idx = rebased_idx
+                    agent._persist_user_message_idx = rebased_idx
                 # Re-estimate now so size-only compression (same row count,
                 # lower token count — e.g. summarising tool outputs) is
                 # recognised as progress instead of being misread as
