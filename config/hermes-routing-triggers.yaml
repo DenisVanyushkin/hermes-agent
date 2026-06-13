@@ -124,6 +124,24 @@ domains:
         - approval gate regression
         - approval-gate
         - rebase
+        - git commit
+        - git push
+        - git merge
+        - git status
+        - repository
+        - commit
+        - push
+        - merge
+        - origin
+        - закоммить
+        - закоммить изменения
+        - закоммить все
+        - пушни
+        - запушь
+        - смерджи
+        - ориджин
+        - коммит
+        - репо
       ru: []
 
   career:
