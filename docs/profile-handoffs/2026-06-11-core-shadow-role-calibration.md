@@ -178,15 +178,15 @@ model_tier_request: standard   # ← only explicitly tested tier
 
 ### Missing Tiers
 
-#### `reasoning` — needed for engineer
+#### `coding` — needed for engineer
 
 | Field | Detail |
 |---|---|
-| **Built-in setting** | `default_model: reasoning` in `config/hermes-profiles.yaml` |
-| **Effect** | Uses a more capable reasoning model for complex engineering analysis and debugging |
+| **Built-in setting** | `default_model: coding` in `config/hermes-profiles.yaml` |
+| **Effect** | Uses the dedicated engineering/coding tier for complex repo, debugging, and runtime analysis work |
 | **Current package manifest** | `model_tier_request: standard` — silently degrades to a less capable model |
 | **Risk if not resolved before v1** | Engineer package tasks will use the wrong model; complex debugging may produce lower-quality results |
-| **Resolution** | Add `model_tier_request: reasoning` as a valid value in the package schema validator; add routing machinery to respect it |
+| **Resolution** | Add `model_tier_request: coding` as a valid value in the package schema validator; route engineer and hermes-engineer-core through the coding fallback chain |
 
 #### `critical` — needed for security_auditor
 
@@ -205,7 +205,7 @@ model_tier_request: standard   # ← only explicitly tested tier
 |---|---|---|---|
 | scribe | standard | standard | None |
 | researcher | standard | standard | None |
-| engineer | **reasoning** | standard | High |
+| engineer | **coding** | standard | High |
 | security_auditor | **critical** | standard | Critical |
 | career_strategist | standard | standard | None |
 
@@ -348,7 +348,7 @@ Total: 7 new entries recommended. All verified against current routing.
 
 3. ~~**Add `shell_general` to engineer-core manifest**~~ **✓ DONE 2026-06-11** — `shell_general` added to `hermes-engineer-core` allowed_categories.
 
-4. ~~**Add `model_tier_request: reasoning/critical` machinery**~~ **✓ DONE 2026-06-11** — `VALID_MODEL_TIERS` added; `reasoning` and `critical` validated; engineer updated to `reasoning`, security_auditor to `critical`.
+4. ~~**Add `model_tier_request: reasoning/critical` machinery**~~ **✓ DONE 2026-06-11** — `VALID_MODEL_TIERS` added and now include `coding`; engineer updated to `coding`, security_auditor to `critical`.
 
 5. ~~**Extend golden corpus** with the 7 missing entries identified above.~~ **✓ DONE 2026-06-11** — 7 entries added.
 
@@ -360,7 +360,7 @@ Total: 7 new entries recommended. All verified against current routing.
 | 2 | Activate `hermes-researcher-core` routing | Medium | web_search/browser in taxonomy |
 | 3 | Activate `hermes-career-strategist-core` routing | Low-medium | job_intel_read in taxonomy |
 | 4 | Activate `hermes-security-auditor-core` routing | Medium | critical model tier machinery |
-| 5 | Activate `hermes-engineer-core` routing | High | reasoning model tier; shell_general declared; extensive observe_warn calibration |
+| 5 | Activate `hermes-engineer-core` routing | High | coding model tier with fallback `coding -> reasoning -> standard`; shell_general declared; extensive observe_warn calibration |
 | 6 | Enable `enforced_tools` (post-v1) | Varies | ≥1 week observe_warn with <5% false positive rate per role |
 
 **Rationale for sequence:** Scribe and researcher are lowest-mutation-risk roles. Career strategist is safe because its triggers are domain-specific. Security auditor before engineer because security_auditor is read-only. Engineer last because it has the broadest infra trigger surface and mutation capability.

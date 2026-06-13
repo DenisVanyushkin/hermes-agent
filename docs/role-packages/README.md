@@ -420,6 +420,9 @@ These are **not active replacements**. They exist as:
 
 **Boundary mode:** All five use `observe_warn` — the system logs what it would block but does not enforce.
 
+**Model tiers:** `engineer` and `hermes-engineer-core` use `coding`; `security_auditor` uses `critical`; the other built-ins stay on `standard`.
+`coding` falls back to `reasoning`, then `standard`. Model tier does not grant tool permissions, and approval gates remain independent.
+
 **Future v1 migration path:** After observe_warn calibration, promote shadow triggers into the live routing layer. Enable `enforced_tools` after calibration shows near-zero false positives. Retire built-in profiles once package routing is proven stable.
 
 ## Architecture and Security Details

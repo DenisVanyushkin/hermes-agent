@@ -459,11 +459,13 @@ Taxonomy categories are accepted by the manifest validator and produce observe_w
 | Value | Use case | Restriction |
 |---|---|---|
 | `standard` | General roles | None |
-| `reasoning` | Engineering/analysis roles | None |
+| `reasoning` | Analysis/synthesis roles | None |
+| `coding` | Engineering/code/repo/debug roles | Falls back to reasoning, then standard |
 | `critical` | Security-review roles | role_family must be security/security_audit/security_auditor |
 
 This field is validated at install time but is metadata-only until package routing is activated in v1.
-Model tier does not grant tool permissions; tool access is controlled by `allowed_categories`.
+Engineer and `hermes-engineer-core` use `coding`; `coding` falls back to `reasoning`, then `standard`.
+Model tier does not grant tool permissions; tool access is controlled by `allowed_categories`, and approval gates remain independent.
 
 ## Safety Guidelines
 

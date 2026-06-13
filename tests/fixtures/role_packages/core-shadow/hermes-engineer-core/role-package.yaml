@@ -12,7 +12,7 @@ role:
   role_family: engineering
   purpose_summary: 'Shadow package capturing the engineer role contract: code, tests,
     repo config, debugging, runtime diagnostics, engineering fixes.'
-  model_tier_request: reasoning
+  model_tier_request: coding
   persona: 'You are acting as the Hermes Engineer Core package role.
 
     You handle code, tests, repo config, debugging, runtime diagnostics, and engineering
