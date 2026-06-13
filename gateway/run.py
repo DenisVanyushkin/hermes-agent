@@ -56,8 +56,9 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.async_utils import safe_schedule_threadsafe
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.i18n import t
-from hermes_cli.config import cfg_get
+from hermes_cli.config import cfg_get, get_config_path, load_config_readonly, read_raw_config
 from hermes_cli.fallback_config import get_fallback_chain
+from hermes_cli.review_gate import build_review_gate_startup_log_fields
 from gateway.telegram_reactions import strip_telegram_reaction_only_response as _strip_telegram_reaction_only_response
 
 # --- Agent cache tuning ---------------------------------------------------
@@ -6694,6 +6695,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         except Exception:
             pass
+        try:
+            config_path = get_config_path()
+            raw_config = read_raw_config()
+            config_loaded_ok = bool(raw_config)
+            startup_fields = build_review_gate_startup_log_fields(
+                load_config_readonly(),
+                config_path=config_path,
+                config_loaded_ok=config_loaded_ok,
+                fallback_config_used=not config_loaded_ok,
+            )
+            logger.info(
+                "Gateway startup review gate config: config_path=%s config_loaded_ok=%s "
+                "fallback_config_used=%s review_gate.mode=%s review_gate.reviewer_tier=%s "
+                "review_gate.auto_review_in_observe=%s",
+                startup_fields["config_path"],
+                startup_fields["config_loaded_ok"],
+                startup_fields["fallback_config_used"],
+                startup_fields["review_gate.mode"],
+                startup_fields["review_gate.reviewer_tier"],
+                startup_fields["review_gate.auto_review_in_observe"],
+            )
+        except Exception:
+            logger.debug("review gate startup config logging failed", exc_info=True)
         # Redaction status: ON by default (#17691). Surface a prominent
         # warning if an operator has explicitly opted out so they don't
         # forget the downgrade is active — the redactor snapshots its

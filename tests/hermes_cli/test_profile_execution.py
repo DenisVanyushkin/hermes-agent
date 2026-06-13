@@ -22,6 +22,8 @@ from hermes_cli.review_gate import (
     ReviewInvocationError,
     ReviewGateDecision,
     ReviewVerdict,
+    build_review_gate_evaluation_log_fields,
+    build_review_gate_startup_log_fields,
     evaluate_review_gate,
     parse_review_verdict_intent,
     render_review_gate_block_message,
@@ -565,6 +567,66 @@ def test_review_gate_observe_emits_non_blocking_requirement():
     assert decision.reviewer_model == "gpt-5.5"
     assert decision.automatic_review_invoked is False
     assert decision.packet_hash.startswith("sha256:")
+
+
+def test_review_gate_startup_log_fields_include_effective_mode_and_no_prompt_data():
+    fields = build_review_gate_startup_log_fields(
+        {"review_gate": {"mode": "enforce", "reviewer_tier": "code_review", "auto_review_in_observe": False}},
+        config_path="/root/.hermes/config.yaml",
+        config_loaded_ok=True,
+        fallback_config_used=False,
+    )
+
+    assert fields == {
+        "config_path": "/root/.hermes/config.yaml",
+        "config_loaded_ok": True,
+        "fallback_config_used": False,
+        "review_gate.mode": "enforce",
+        "review_gate.reviewer_tier": "code_review",
+        "review_gate.auto_review_in_observe": False,
+    }
+
+
+def test_review_gate_evaluation_log_fields_include_mode_and_stay_secret_free():
+    decision = ReviewGateDecision(
+        mode="enforce",
+        status="approved",
+        review_required=True,
+        blocking=False,
+        material_change_detected=True,
+        reviewer_tier="code_review",
+        reviewer_provider="openai-codex",
+        reviewer_model="gpt-5.5",
+        changed_paths=["hermes_cli/review_gate.py"],
+        changed_path_count=1,
+        packet={"task": "Fix review gate logging", "prompt": "secret prompt", "api_key": "sk-test"},
+        packet_hash="sha256:abc",
+        automatic_review_invoked=True,
+        automatic_review_verdict="approved",
+        reviewer_summary="looks good",
+        reviewer_findings=[],
+        required_changes=[],
+        tests_required=[],
+        approval_sensitive=False,
+        user_override=False,
+        review_error="",
+        warning="",
+    )
+
+    fields = build_review_gate_evaluation_log_fields(decision)
+    assert fields == {
+        "review_gate.mode": "enforce",
+        "review_gate.reviewer_tier": "code_review",
+        "automatic_review_invoked": True,
+        "automatic_review_verdict": "approved",
+        "reviewer_provider": "openai-codex",
+        "reviewer_model": "gpt-5.5",
+        "changed_paths_count": 1,
+        "blocking": False,
+        "status": "approved",
+    }
+    assert "prompt" not in json.dumps(fields).lower()
+    assert "api_key" not in json.dumps(fields).lower()
 
 
 def test_review_gate_enforce_auto_review_invokes_reviewer_and_allows_approved(monkeypatch):

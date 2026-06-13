@@ -126,7 +126,10 @@ def _warn_config_parse_failure(config_path: Path, exc: Exception) -> None:
         f"Failed to parse {config_path}: {exc}. "
         f"Falling back to default config — every user override "
         f"(auxiliary providers, fallback chain, model settings) is being IGNORED. "
-        f"Fix the YAML and restart."
+        f"Fix the YAML and restart. "
+        f"config_loaded_ok=false fallback_config_used=true "
+        f"review_gate.mode={DEFAULT_CONFIG.get('review_gate', {}).get('mode', 'observe')} "
+        f"review_gate.reviewer_tier={DEFAULT_CONFIG.get('review_gate', {}).get('reviewer_tier', 'code_review')}"
     )
     if backup_path is not None:
         msg += f" A copy of the corrupted file was saved to {backup_path}."

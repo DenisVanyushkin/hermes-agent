@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hermes_cli.config import _warn_config_parse_failure
 from hermes_cli.profile_routing import (
     RoutingError,
     decision_to_json,
@@ -42,6 +43,20 @@ def test_route_engineer_for_infra_runtime_change():
     assert decision.route_chain[0].provider == "openrouter"
     assert decision.route_chain[0].model == "xiaomi/mimo-v2.5-pro"
     assert decision.route_chain[0].model_resolution_status == "fallback_available_by_policy"
+
+
+def test_config_parse_failure_logs_structured_fallback_fields(tmp_path, caplog):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("review_gate: [not valid yaml", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        _warn_config_parse_failure(config_path, ValueError("bad yaml"))
+
+    rendered = "\n".join(record.message for record in caplog.records)
+    assert "config_loaded_ok=false" in rendered
+    assert "fallback_config_used=true" in rendered
+    assert "review_gate.mode=observe" in rendered
+    assert "review_gate.reviewer_tier=code_review" in rendered
 
 
 @pytest.mark.parametrize(
