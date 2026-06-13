@@ -438,6 +438,37 @@ def build_turn_context(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
+                if messages is not None:
+                    rebased_idx = next(
+                        (
+                            idx
+                            for idx in range(len(messages) - 1, -1, -1)
+                            if messages[idx] is user_msg
+                        ),
+                        None,
+                    )
+                    if rebased_idx is None:
+                        rebased_idx = next(
+                            (
+                                idx
+                                for idx in range(len(messages) - 1, -1, -1)
+                                if isinstance(messages[idx], dict)
+                                and messages[idx].get("role") == "user"
+                            ),
+                            None,
+                        )
+                    if rebased_idx is None:
+                        logger.warning(
+                            "Preflight compression dropped current user turn; "
+                            "restoring it at the tail. session=%s before=%d after=%d",
+                            agent.session_id or "none",
+                            _orig_len,
+                            len(messages),
+                        )
+                        messages.append(user_msg)
+                        rebased_idx = len(messages) - 1
+                    current_turn_user_idx = rebased_idx
+                    agent._persist_user_message_idx = rebased_idx
                 # Re-estimate now so size-only compression (same row count,
                 # lower token count — e.g. summarising tool outputs) is
                 # recognised as progress instead of being misread as
