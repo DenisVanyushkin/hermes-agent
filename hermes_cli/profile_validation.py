@@ -46,7 +46,7 @@ PROFILE_ID_ALIASES = {
     "trading_observer_trader": "trading_observer_trader_deferred",
 }
 
-MODEL_TIERS = {"standard", "reasoning", "coding", "critical"}
+MODEL_TIERS = {"standard", "reasoning", "coding", "critical", "code_review"}
 DEFAULT_BASE_MODEL = "gpt-5.4-mini"
 CANONICAL_TOOL_CATEGORIES = {
     "repo_read",

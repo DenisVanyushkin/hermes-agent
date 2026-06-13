@@ -19,6 +19,10 @@ tiers:
     unavailable_behavior: stop_and_escalate
     fallback_models: []
     fallback_behavior: stop_and_escalate
+  code_review:
+    provider: openrouter
+    model: anthropic/claude-opus-4.6
+    fallback_behavior: critical_then_reasoning_then_standard
 profile_tiers:
   chief_hermes: reasoning
   engineer: coding

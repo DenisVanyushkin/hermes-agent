@@ -18,6 +18,7 @@ from hermes_cli.profile_execution import (
     execution_plan_to_dict,
     execution_plan_to_json,
 )
+from hermes_cli.review_gate import evaluate_review_gate, parse_review_verdict_intent
 from hermes_cli.profile_routing import route_task
 
 
@@ -26,6 +27,29 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _plan(task: str, **kwargs):
     return build_role_execution_plan(task, **kwargs)
+
+
+def _messages_with_successful_patch(path: str = "hermes_cli/profile_execution.py") -> list[dict]:
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_patch_1",
+                    "type": "function",
+                    "function": {
+                        "name": "patch",
+                        "arguments": json.dumps({"path": path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_patch_1",
+            "content": json.dumps({"success": True}),
+        },
+    ]
 
 
 @pytest.mark.parametrize(
@@ -515,8 +539,83 @@ def test_execution_plan_to_dict_contains_required_fields():
         "post_change_review_policy",
         "durable_outcome_expected",
         "trading_deferred",
+        "review_gate_candidate",
     ]:
         assert field in payload
+
+
+def test_repo_code_mutation_is_review_gate_candidate():
+    plan = _plan("Fix the failing pytest suite in the repository")
+    assert plan.review_gate_candidate is True
+    assert plan.post_change_review_policy["review_gate_candidate"] is True
+
+
+def test_review_gate_observe_emits_non_blocking_requirement():
+    plan = _plan("Fix the failing pytest suite in the repository")
+    decision = evaluate_review_gate(
+        plan,
+        _messages_with_successful_patch(),
+        config={"review_gate": {"mode": "observe", "reviewer_tier": "code_review"}},
+    )
+    assert decision.review_required is True
+    assert decision.blocking is False
+    assert decision.mode == "observe"
+    assert decision.status == "pending"
+    assert "would be required" in decision.warning
+    assert decision.reviewer_provider == "openrouter"
+    assert decision.reviewer_model == "anthropic/claude-opus-4.6"
+
+
+def test_review_gate_enforce_blocks_pending_material_engineering_change():
+    plan = _plan("Fix the failing pytest suite in the repository")
+    decision = evaluate_review_gate(
+        plan,
+        _messages_with_successful_patch(),
+        config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
+    )
+    assert decision.review_required is True
+    assert decision.blocking is True
+    assert decision.status == "pending"
+
+
+def test_review_gate_enforce_allows_approved_or_waived_verdict():
+    plan = _plan("Fix the failing pytest suite in the repository")
+    approved = evaluate_review_gate(
+        plan,
+        _messages_with_successful_patch(),
+        config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
+        verdict="approved",
+    )
+    waived = evaluate_review_gate(
+        plan,
+        _messages_with_successful_patch(),
+        config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
+        verdict="waived",
+    )
+    assert approved.blocking is False
+    assert approved.status == "approved"
+    assert waived.blocking is False
+    assert waived.status == "waived"
+
+
+def test_review_gate_not_required_for_read_only_investigation():
+    plan = _plan("Check WebUI status and inspect logs")
+    decision = evaluate_review_gate(
+        plan,
+        [],
+        config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
+    )
+    assert decision.review_required is False
+    assert decision.blocking is False
+    assert decision.status == "not_required"
+
+
+def test_parse_review_verdict_intent():
+    assert parse_review_verdict_intent("review approved") == "approved"
+    assert parse_review_verdict_intent("review waived") == "waived"
+    assert parse_review_verdict_intent("review changes requested") == "changes_requested"
+    assert parse_review_verdict_intent("review blocked") == "blocked"
+    assert parse_review_verdict_intent("looks fine") is None
 
 
 @pytest.mark.parametrize(
