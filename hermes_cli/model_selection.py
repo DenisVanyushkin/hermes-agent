@@ -13,8 +13,9 @@ from typing import Any
 
 
 _DEFAULT_PROVIDER = "openai-codex"
+_CODING_PROVIDER = "openrouter"
 _DEFAULT_MODEL = "gpt-5.4-mini"
-_CODING_MODEL = "gpt-5.3-codex"
+_CODING_MODEL = "xiaomi/mimo-v2.5-pro"
 _HIGH_REASONING_MODEL = "gpt-5.5"
 
 _TRADING_ROLES = {"trading_observer_trader", "trading_observer_trader_deferred"}
@@ -83,6 +84,7 @@ def _decision(
     policy_name: str,
     policy_class: str,
     preferred_model: str,
+    preferred_provider: str = _DEFAULT_PROVIDER,
     fallback_chain_key: str,
     allow_fallback: bool,
     reasoning_level: str,
@@ -96,7 +98,7 @@ def _decision(
         effective_role=effective_role,
         policy_name=policy_name,
         policy_class=policy_class,
-        preferred_provider=_DEFAULT_PROVIDER,
+        preferred_provider=preferred_provider,
         preferred_model=preferred_model,
         fallback_chain_key=fallback_chain_key,
         allow_fallback=allow_fallback,
@@ -132,7 +134,7 @@ def select_model_policy(
             policy_name="general_default",
             policy_class="general_operator",
             preferred_model=_DEFAULT_MODEL,
-            fallback_chain_key="configured_runtime_fallback_chain",
+            fallback_chain_key="coding_then_reasoning_then_standard",
             allow_fallback=True,
             reasoning_level="default",
             selection_reason="Trading remains deferred/inactive, so Hermes falls back to the general operator policy.",
@@ -169,7 +171,8 @@ def select_model_policy(
             policy_name="coding_high_reasoning",
             policy_class="coding",
             preferred_model=_CODING_MODEL,
-            fallback_chain_key="configured_runtime_fallback_chain",
+            preferred_provider=_CODING_PROVIDER,
+            fallback_chain_key="coding_then_reasoning_then_standard",
             allow_fallback=True,
             reasoning_level="high",
             selection_reason="Engineer tasks use the coding/engineering policy for repo work, debugging, and tests.",

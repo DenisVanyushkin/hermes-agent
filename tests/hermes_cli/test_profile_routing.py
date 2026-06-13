@@ -38,9 +38,9 @@ def test_route_engineer_for_infra_runtime_change():
     assert decision.primary_profile == "engineer"
     assert _hop_ids(decision) == ["engineer"]
     assert decision.selected_profiles == ["engineer"]
-    assert decision.route_chain[0].model_tier == "reasoning"
+    assert decision.route_chain[0].model_tier == "coding"
     assert decision.route_chain[0].provider == "openrouter"
-    assert decision.route_chain[0].model == "anthropic/claude-opus-4.6"
+    assert decision.route_chain[0].model == "xiaomi/mimo-v2.5-pro"
     assert decision.route_chain[0].model_resolution_status == "fallback_available_by_policy"
 
 

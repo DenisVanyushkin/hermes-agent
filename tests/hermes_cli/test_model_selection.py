@@ -11,9 +11,22 @@ def test_engineer_code_task_selects_coding_high_reasoning_policy():
 
     assert selection.policy_class == "coding"
     assert selection.policy_name == "coding_high_reasoning"
-    assert selection.preferred_provider == "openai-codex"
-    assert selection.preferred_model == "gpt-5.3-codex"
+    assert selection.preferred_provider == "openrouter"
+    assert selection.preferred_model == "xiaomi/mimo-v2.5-pro"
     assert selection.allow_fallback is True
+    assert selection.fallback_chain_key == "coding_then_reasoning_then_standard"
+
+
+def test_engineer_coding_policy_declares_expected_fallback_chain():
+    selection = select_model_policy(
+        selected_role="engineer",
+        canonical_role="engineer",
+        task_text="Fix the failing pytest suite",
+        critical_approval_required=False,
+    )
+
+    assert selection.policy_class == "coding"
+    assert selection.fallback_chain_key == "coding_then_reasoning_then_standard"
 
 
 def test_webui_logs_task_selects_engineering_policy():
