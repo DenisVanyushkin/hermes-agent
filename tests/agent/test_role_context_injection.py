@@ -14,6 +14,7 @@ from hermes_cli.profile_context import (
     inject_role_execution_debug_header,
     RoleContextResult,
 )
+from hermes_cli.review_gate import ReviewGateDecision
 from hermes_cli.profile_request_context import (
     approval_constraints_text,
     approval_intent_text,
@@ -350,7 +351,9 @@ def test_finalize_turn_blocks_completion_when_review_gate_enforce(monkeypatch):
         response_pre_transformed=False,
     )
     assert result["completed"] is False
-    assert "blocked pending code review approval" in result["final_response"].lower()
+    assert "final completion is blocked because automatic reviewer failed" in result["final_response"].lower()
+    assert "Task summary: Fix the failing pytest suite in the repository" in result["final_response"]
+    assert "Changed files:" in result["final_response"]
     assert agent._persisted
     assert "_review_gate" in agent._persisted[0][0][-1]
 
@@ -376,6 +379,59 @@ def test_finalize_turn_observe_keeps_completion(monkeypatch):
     )
     assert result["completed"] is True
     assert result["final_response"] == "Implemented the fix and tests are green."
+
+
+def test_finalize_turn_auto_review_approved_allows_completion_without_manual_prompt(monkeypatch):
+    monkeypatch.setattr("hermes_cli.review_gate.load_config_readonly", lambda: {"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}})
+
+    def _fake_evaluate_review_gate(*_args, **_kwargs):
+        return ReviewGateDecision(
+            mode="enforce",
+            status="approved",
+            review_required=True,
+            blocking=False,
+            material_change_detected=True,
+            reviewer_tier="code_review",
+            reviewer_provider="openai-codex",
+            reviewer_model="gpt-5.5",
+            changed_paths=["hermes_cli/review_gate.py"],
+            changed_path_count=1,
+            packet={"task": "Fix automatic reviewer plumbing", "operation_category": "repo_mutation"},
+            packet_hash="sha256:abc",
+            automatic_review_invoked=True,
+            automatic_review_verdict="approved",
+            reviewer_summary="looks good",
+            reviewer_findings=[],
+            required_changes=[],
+            tests_required=[],
+            approval_sensitive=False,
+            user_override=False,
+            review_error="",
+            warning="",
+        )
+
+    monkeypatch.setattr("agent.turn_finalizer.evaluate_review_gate", _fake_evaluate_review_gate)
+    agent = _FinalizeTurnAgent()
+    result = finalize_turn(
+        agent,
+        final_response="Implemented the fix and tests are green.",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=_patched_messages_for_review_gate(),
+        conversation_history=[],
+        effective_task_id=None,
+        turn_id="turn-1",
+        user_message="Fix the failing pytest suite in the repository",
+        original_user_message="Fix the failing pytest suite in the repository",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(stop)",
+        response_pre_transformed=False,
+    )
+    assert result["completed"] is True
+    assert result["final_response"] == "Implemented the fix and tests are green."
+    assert result["messages"][-1]["role"] == "tool"
+    assert all("_review_gate" not in msg for msg in result["messages"] if msg.get("role") == "assistant")
 
 
 def test_security_critical_text_prompt_reaches_normal_model_path_without_preflight_block(monkeypatch):

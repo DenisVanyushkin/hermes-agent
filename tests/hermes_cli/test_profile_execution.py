@@ -20,9 +20,11 @@ from hermes_cli.profile_execution import (
 )
 from hermes_cli.review_gate import (
     ReviewInvocationError,
+    ReviewGateDecision,
     ReviewVerdict,
     evaluate_review_gate,
     parse_review_verdict_intent,
+    render_review_gate_block_message,
 )
 from hermes_cli.profile_routing import route_task
 
@@ -657,6 +659,85 @@ def test_review_gate_enforce_invalid_reviewer_json_blocks_completion(monkeypatch
     assert decision.blocking is True
     assert decision.status == "blocked"
     assert "invalid_review_verdict" in decision.review_error
+
+
+def test_render_review_gate_block_message_includes_review_metadata_and_changed_files():
+    decision = ReviewGateDecision(
+        mode="enforce",
+        status="pending",
+        review_required=True,
+        blocking=True,
+        material_change_detected=True,
+        reviewer_tier="code_review",
+        reviewer_provider="openai-codex",
+        reviewer_model="gpt-5.5",
+        changed_paths=["config/hermes-model-policy.yaml", "agent/conversation_loop.py"],
+        changed_path_count=2,
+        packet={
+            "task": "Set up Cloudflare Tunnel for Hermes WebUI and expose it publicly",
+            "operation_category": "security_critical_mutation",
+            "planned_action": "Set up Cloudflare Tunnel for Hermes WebUI and expose it publicly",
+        },
+        packet_hash="sha256:abc123",
+        automatic_review_invoked=False,
+        automatic_review_verdict="none",
+        reviewer_summary="",
+        reviewer_findings=["explicit approval required"],
+        required_changes=["obtain explicit production approval"],
+        tests_required=[],
+        approval_sensitive=True,
+        user_override=False,
+        review_error="",
+        warning="explicit approval is required before production/security-sensitive completion",
+    )
+    message = render_review_gate_block_message(decision)
+    assert "Explicit approval is required for this production/security-sensitive change." in message
+    assert "Task summary: Set up Cloudflare Tunnel for Hermes WebUI and expose it publicly" in message
+    assert "Review gate mode: enforce" in message
+    assert "Approval scope: production/security approval" in message
+    assert "Automatic review invoked: no" in message
+    assert "Automatic review verdict: none" in message
+    assert "Reviewer findings:" in message
+    assert "explicit approval required" in message
+    assert "Required changes:" in message
+    assert "Changed files:" in message
+    assert "config/hermes-model-policy.yaml" in message
+    assert "agent/conversation_loop.py" in message
+    assert "Diff stat:" in message
+    assert "Exact allowed replies:" in message
+
+
+def test_render_review_gate_block_message_reports_reviewer_failure_reason():
+    decision = ReviewGateDecision(
+        mode="enforce",
+        status="blocked",
+        review_required=True,
+        blocking=True,
+        material_change_detected=True,
+        reviewer_tier="code_review",
+        reviewer_provider="openai-codex",
+        reviewer_model="gpt-5.5",
+        changed_paths=["hermes_cli/review_gate.py"],
+        changed_path_count=1,
+        packet={"task": "Fix automatic review invocation", "operation_category": "repo_mutation"},
+        packet_hash="sha256:def456",
+        automatic_review_invoked=True,
+        automatic_review_verdict="blocked",
+        reviewer_summary="",
+        reviewer_findings=[],
+        required_changes=[],
+        tests_required=[],
+        approval_sensitive=False,
+        user_override=False,
+        review_error="invalid_review_verdict: reviewer did not return valid JSON",
+        warning="reviewer unavailable: invalid review output",
+    )
+    message = render_review_gate_block_message(decision)
+    assert "Final completion is blocked because automatic reviewer failed." in message
+    assert "Automatic review invoked: yes" in message
+    assert "Automatic review verdict: blocked" in message
+    assert "Reviewer error: invalid_review_verdict: reviewer did not return valid JSON" in message
+    assert "Task summary: Fix automatic review invocation" in message
 
 
 def test_review_gate_manual_waiver_marks_user_override():
