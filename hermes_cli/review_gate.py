@@ -629,32 +629,99 @@ def decision_to_dict(decision: ReviewGateDecision | dict[str, Any]) -> dict[str,
     return asdict(decision)
 
 
+def _review_gate_task_summary(decision: ReviewGateDecision) -> str:
+    packet = decision.packet if isinstance(decision.packet, dict) else {}
+    task = str(packet.get("task") or packet.get("task_summary") or "").strip()
+    if task:
+        return task
+    operation = str(packet.get("operation_category") or "").strip()
+    if operation:
+        return operation.replace("_", " ")
+    return "n/a"
+
+
+def _review_gate_diff_stat(changed_paths: list[str]) -> str:
+    if not changed_paths:
+        return "n/a"
+    repo_root = _repo_root()
+    args = ["git", "diff", "HEAD", "--stat", "--", *changed_paths]
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        return f"unavailable ({exc})"
+    output = (completed.stdout or completed.stderr or "").strip()
+    if not output:
+        return "n/a"
+    return _truncate(output, 800)
+
+
 def render_review_gate_block_message(decision: ReviewGateDecision) -> str:
-    changed_paths = decision.changed_paths[:5]
+    changed_paths = decision.changed_paths[:10]
+    packet = decision.packet if isinstance(decision.packet, dict) else {}
+    task_summary = _review_gate_task_summary(decision)
+    operation_category = str(packet.get("operation_category") or "").strip()
+    planned_action = str(packet.get("task") or packet.get("planned_action") or "").strip()
+    approval_scope = "production/security approval" if decision.approval_sensitive else "code review approval"
+    if decision.review_error:
+        title = "Final completion is blocked because automatic reviewer failed."
+    elif decision.automatic_review_invoked:
+        if decision.automatic_review_verdict == "approved":
+            title = "Automatic review approved; final completion should not be blocked."
+        else:
+            title = "Final completion is blocked by automatic review verdict."
+    elif decision.approval_sensitive:
+        title = "Explicit approval is required for this production/security-sensitive change."
+    else:
+        title = "Final completion is blocked pending code review approval."
+
     lines = [
-        "Final completion is blocked pending code review approval.",
+        title,
         "",
+        f"Task summary: {task_summary}",
         f"Review gate mode: {decision.mode}",
+        f"Approval scope: {approval_scope}",
         f"Reviewer tier: {decision.reviewer_tier}",
         f"Reviewer model: {decision.reviewer_provider} / {decision.reviewer_model}",
+        f"Automatic review invoked: {'yes' if decision.automatic_review_invoked else 'no'}",
+        f"Automatic review verdict: {decision.automatic_review_verdict}",
     ]
+    if operation_category:
+        lines.append(f"Operation category: {operation_category}")
+    if planned_action:
+        lines.append(f"Planned action: {planned_action}")
+    if decision.reviewer_summary:
+        lines.append(f"Reviewer summary: {decision.reviewer_summary}")
+    else:
+        lines.append("Reviewer summary: n/a")
+    if decision.reviewer_findings:
+        lines.append("Reviewer findings:")
+        lines.extend(f"- {finding}" for finding in decision.reviewer_findings)
+    else:
+        lines.append("Reviewer findings: none")
+    if decision.required_changes:
+        lines.append("Required changes:")
+        lines.extend(f"- {change}" for change in decision.required_changes)
+    else:
+        lines.append("Required changes: none")
     if decision.review_error:
-        lines.extend(["", f"Reviewer error: {decision.review_error}"])
-    elif decision.automatic_review_invoked:
-        lines.extend(
-            [
-                "",
-                f"Automatic review verdict: {decision.automatic_review_verdict}",
-                f"Reviewer summary: {decision.reviewer_summary or 'n/a'}",
-            ]
-        )
+        lines.append(f"Reviewer error: {decision.review_error}")
+    lines.append(f"Why user action is required: {decision.warning or ('automatic review did not approve this change' if decision.automatic_review_verdict != 'approved' else 'production/security approval is still required')}")
+    lines.append(f"Diff stat: {_review_gate_diff_stat(changed_paths)}")
     if changed_paths:
-        lines.extend(["", "Material changes detected:"])
+        lines.append("Changed files:")
         lines.extend(f"- {path}" for path in changed_paths)
+    else:
+        lines.append("Changed files: none detected")
     lines.extend(
         [
             "",
-            "Reply with one of:",
+            "Exact allowed replies:",
             "- review approved",
             "- review waived",
             "- review changes requested",
