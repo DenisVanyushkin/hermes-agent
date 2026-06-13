@@ -79,16 +79,17 @@ def test_general_operator_haircut_task_selects_default_policy():
     assert selection.preferred_model == "gpt-5.4-mini"
 
 
-def test_research_btc_fee_comparison_selects_research_policy():
+def test_research_complex_synthesis_selects_reasoning_model():
     selection = select_model_policy(
         selected_role="researcher",
         canonical_role="researcher",
-        task_text="Compare Binance Kazakhstan vs Coinbase fees for BTC",
+        task_text="Perform deep research and synthesize conflicting sources into a brief",
         critical_approval_required=False,
     )
 
     assert selection.policy_class == "research"
-    assert selection.policy_name == "research_fast_lookup"
+    assert selection.policy_name == "research_reasoning"
+    assert selection.preferred_model == "gpt-5.4"
 
 
 def test_critical_approval_cloudflare_task_selects_approval_critical_policy():

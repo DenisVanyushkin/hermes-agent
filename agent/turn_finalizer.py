@@ -244,6 +244,16 @@ def finalize_turn(
                                 "reviewer_model": review_gate.reviewer_model,
                                 "changed_paths": list(review_gate.changed_paths),
                                 "packet": review_gate_to_dict(review_gate),
+                                "packet_hash": review_gate.packet_hash,
+                                "automatic_review_invoked": review_gate.automatic_review_invoked,
+                                "automatic_review_verdict": review_gate.automatic_review_verdict,
+                                "reviewer_summary": review_gate.reviewer_summary,
+                                "reviewer_findings": list(review_gate.reviewer_findings),
+                                "required_changes": list(review_gate.required_changes),
+                                "tests_required": list(review_gate.tests_required),
+                                "approval_sensitive": review_gate.approval_sensitive,
+                                "user_override": review_gate.user_override,
+                                "review_error": review_gate.review_error,
                             },
                         }
                     )

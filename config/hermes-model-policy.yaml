@@ -1,28 +1,28 @@
 schema_version: 1
 tiers:
   standard:
-    provider: openrouter
-    model: anthropic/claude-sonnet-4.6
+    provider: openai-codex
+    model: gpt-5.4-mini
     fallback_behavior: fallback_allowed
   reasoning:
-    provider: openrouter
-    model: anthropic/claude-opus-4.6
+    provider: openai-codex
+    model: gpt-5.4
     fallback_behavior: fallback_allowed
-  coding:
-    provider: openrouter
-    model: xiaomi/mimo-v2.5-pro
-    fallback_behavior: reasoning_then_standard
   critical:
-    provider: openrouter
-    model: anthropic/claude-opus-4.6
+    provider: openai-codex
+    model: gpt-5.5
     allow_fallback: false
     unavailable_behavior: stop_and_escalate
     fallback_models: []
     fallback_behavior: stop_and_escalate
   code_review:
-    provider: openrouter
-    model: anthropic/claude-opus-4.6
+    provider: openai-codex
+    model: gpt-5.5
     fallback_behavior: critical_then_reasoning_then_standard
+  coding:
+    provider: openrouter
+    model: xiaomi/mimo-v2.5-pro
+    fallback_behavior: reasoning_then_standard
 profile_tiers:
   chief_hermes: reasoning
   engineer: coding

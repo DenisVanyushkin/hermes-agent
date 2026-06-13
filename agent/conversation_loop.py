@@ -80,6 +80,8 @@ from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from hermes_constants import PARTIAL_STREAM_STUB_ID
 from hermes_logging import set_session_context
+from hermes_cli.model_selection import model_selection_to_dict, select_model_policy
+from hermes_cli.profile_context import build_role_context_for_task
 from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches, env_var_enabled
 
@@ -283,6 +285,33 @@ def _log_approval_debug(
         "[replying to:" in approval_view.lower(),
         short_circuit_taken,
     )
+
+
+def _assistant_turn_has_tool_call_named(assistant_message: Any, tool_name: str) -> bool:
+    tool_calls = getattr(assistant_message, "tool_calls", None)
+    if tool_calls is None and isinstance(assistant_message, dict):
+        tool_calls = assistant_message.get("tool_calls")
+    for tool_call in tool_calls or []:
+        function = getattr(tool_call, "function", None)
+        if function is None and isinstance(tool_call, dict):
+            function = tool_call.get("function")
+        name = getattr(function, "name", None)
+        if name is None and isinstance(function, dict):
+            name = function.get("name")
+        if str(name or "") == tool_name:
+            return True
+    return False
+
+
+def _compose_turn_user_message_content(user_message: str, *, role_context: str = "") -> str:
+    if not role_context:
+        return user_message
+    return f"{user_message}\n\n{role_context}"
+
+
+def _should_preflight_block_for_profile_context(_result: Any) -> bool:
+    return False
+
 
 
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
