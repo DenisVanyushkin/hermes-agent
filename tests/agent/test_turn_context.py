@@ -451,3 +451,43 @@ def test_expired_cooldown_allows_preflight(tmp_path):
     agent._emit_status.assert_called_once()
     agent._compress_context.assert_called()
 
+
+
+def test_preflight_compression_rebases_current_turn_user_idx():
+    agent = _FakeAgent()
+    agent.compression_enabled = True
+    agent.context_compressor = types.SimpleNamespace(
+        protect_first_n=2,
+        protect_last_n=2,
+        threshold_tokens=100,
+        context_length=1000,
+        last_prompt_tokens=0,
+        last_real_prompt_tokens=0,
+        should_defer_preflight_to_real_usage=lambda _tokens: False,
+        should_compress=lambda _tokens: True,
+    )
+
+    history = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+        {"role": "assistant", "content": "a3"},
+    ]
+
+    compressed_messages = [
+        {"role": "user", "content": "[summary]"},
+        {"role": "assistant", "content": "a3"},
+        {"role": "user", "content": "hello"},
+    ]
+
+    agent._compress_context = lambda *a, **k: (compressed_messages, "SYSTEM")
+
+    with patch("agent.turn_context.estimate_request_tokens_rough", side_effect=[150, 50]):
+        ctx = _build(agent, conversation_history=history)
+
+    assert ctx.messages == compressed_messages
+    assert ctx.current_turn_user_idx == 2
+    assert ctx.messages[ctx.current_turn_user_idx]["content"] == "hello"
+    assert agent._persist_user_message_idx == 2
