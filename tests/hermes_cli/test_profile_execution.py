@@ -18,7 +18,12 @@ from hermes_cli.profile_execution import (
     execution_plan_to_dict,
     execution_plan_to_json,
 )
-from hermes_cli.review_gate import evaluate_review_gate, parse_review_verdict_intent
+from hermes_cli.review_gate import (
+    ReviewInvocationError,
+    ReviewVerdict,
+    evaluate_review_gate,
+    parse_review_verdict_intent,
+)
 from hermes_cli.profile_routing import route_task
 
 
@@ -29,27 +34,17 @@ def _plan(task: str, **kwargs):
     return build_role_execution_plan(task, **kwargs)
 
 
-def _messages_with_successful_patch(path: str = "hermes_cli/profile_execution.py") -> list[dict]:
-    return [
-        {
-            "role": "assistant",
-            "tool_calls": [
-                {
-                    "id": "call_patch_1",
-                    "type": "function",
-                    "function": {
-                        "name": "patch",
-                        "arguments": json.dumps({"path": path}),
-                    },
-                }
-            ],
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "call_patch_1",
-            "content": json.dumps({"success": True}),
-        },
-    ]
+def _review_verdict(verdict: str, summary: str = "ok") -> ReviewVerdict:
+    return ReviewVerdict(
+        verdict=verdict,
+        summary=summary,
+        findings=[],
+        required_changes=[],
+        risk_level="low",
+        tests_required=[],
+        approval_sensitive=False,
+        raw={"verdict": verdict, "summary": summary},
+    )
 
 
 @pytest.mark.parametrize(
@@ -564,20 +559,118 @@ def test_review_gate_observe_emits_non_blocking_requirement():
     assert decision.mode == "observe"
     assert decision.status == "pending"
     assert "would be required" in decision.warning
-    assert decision.reviewer_provider == "openrouter"
-    assert decision.reviewer_model == "anthropic/claude-opus-4.6"
+    assert decision.reviewer_provider == "openai-codex"
+    assert decision.reviewer_model == "gpt-5.5"
+    assert decision.automatic_review_invoked is False
+    assert decision.packet_hash.startswith("sha256:")
 
 
-def test_review_gate_enforce_blocks_pending_material_engineering_change():
+def test_review_gate_enforce_auto_review_invokes_reviewer_and_allows_approved(monkeypatch):
     plan = _plan("Сделай git commit и git push")
+
+    def fake_run_code_review(review_packet, *, plan, reviewer_tier="code_review", policy_path=None, messages=None):
+        reviewed = dict(review_packet)
+        reviewed.update(
+            {
+                "packet_hash": "sha256:deadbeefcafe",
+                "automatic_review_invoked": True,
+                "automatic_review_verdict": "approved",
+                "reviewer_summary": "looks good",
+                "reviewer_findings": [],
+                "required_changes": [],
+                "tests_required": [],
+                "approval_sensitive": False,
+                "reviewer_provider": "openai-codex",
+                "reviewer_model": "gpt-5.5",
+                "reviewer_tier": reviewer_tier,
+                "reviewer_risk_level": "low",
+            }
+        )
+        return _review_verdict("approved", "looks good"), reviewed
+
+    monkeypatch.setattr("hermes_cli.review_gate.run_code_review", fake_run_code_review)
     decision = evaluate_review_gate(
         plan,
         [],
         config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
     )
-    assert decision.review_required is True
+    assert decision.automatic_review_invoked is True
+    assert decision.automatic_review_verdict == "approved"
+    assert decision.blocking is False
+    assert decision.status == "approved"
+    assert decision.reviewer_summary == "looks good"
+    assert decision.packet_hash == "sha256:deadbeefcafe"
+
+
+def test_review_gate_enforce_auto_review_blocks_changes_requested(monkeypatch):
+    plan = _plan("Сделай git commit и git push")
+
+    def fake_run_code_review(review_packet, *, plan, reviewer_tier="code_review", policy_path=None, messages=None):
+        reviewed = dict(review_packet)
+        reviewed.update({"packet_hash": "sha256:badbadbadbad", "automatic_review_invoked": True, "automatic_review_verdict": "changes_requested"})
+        return _review_verdict("changes_requested", "needs work"), reviewed
+
+    monkeypatch.setattr("hermes_cli.review_gate.run_code_review", fake_run_code_review)
+    decision = evaluate_review_gate(
+        plan,
+        [],
+        config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
+    )
+    assert decision.automatic_review_invoked is True
+    assert decision.automatic_review_verdict == "changes_requested"
     assert decision.blocking is True
-    assert decision.status == "pending"
+    assert decision.status == "changes_requested"
+    assert decision.reviewer_summary == "needs work"
+
+
+def test_review_gate_enforce_reviewer_failure_blocks_completion(monkeypatch):
+    plan = _plan("Сделай git commit и git push")
+
+    def fake_run_code_review(*_args, **_kwargs):
+        raise ReviewInvocationError("reviewer_unavailable: no client")
+
+    monkeypatch.setattr("hermes_cli.review_gate.run_code_review", fake_run_code_review)
+    decision = evaluate_review_gate(
+        plan,
+        [],
+        config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
+    )
+    assert decision.automatic_review_invoked is True
+    assert decision.automatic_review_verdict == "blocked"
+    assert decision.blocking is True
+    assert decision.status == "blocked"
+    assert "reviewer_unavailable" in decision.review_error
+
+
+def test_review_gate_enforce_invalid_reviewer_json_blocks_completion(monkeypatch):
+    plan = _plan("Сделай git commit и git push")
+
+    def fake_run_code_review(*_args, **_kwargs):
+        raise ReviewInvocationError("invalid_review_verdict: reviewer did not return valid JSON")
+
+    monkeypatch.setattr("hermes_cli.review_gate.run_code_review", fake_run_code_review)
+    decision = evaluate_review_gate(
+        plan,
+        [],
+        config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
+    )
+    assert decision.blocking is True
+    assert decision.status == "blocked"
+    assert "invalid_review_verdict" in decision.review_error
+
+
+def test_review_gate_manual_waiver_marks_user_override():
+    plan = _plan("Сделай git commit и git push")
+    decision = evaluate_review_gate(
+        plan,
+        [],
+        config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
+        verdict="waived",
+    )
+    assert decision.blocking is False
+    assert decision.status == "waived"
+    assert decision.user_override is True
+    assert decision.automatic_review_invoked is False
 
 
 def test_review_gate_enforce_allows_approved_or_waived_verdict():
