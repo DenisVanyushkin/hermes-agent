@@ -46,7 +46,7 @@ PROFILE_ID_ALIASES = {
     "trading_observer_trader": "trading_observer_trader_deferred",
 }
 
-MODEL_TIERS = {"standard", "reasoning", "critical"}
+MODEL_TIERS = {"standard", "reasoning", "coding", "critical"}
 DEFAULT_BASE_MODEL = "gpt-5.4-mini"
 CANONICAL_TOOL_CATEGORIES = {
     "repo_read",
@@ -591,8 +591,8 @@ def _validate_role_policies(data: Any) -> list[ValidationIssue]:
             if role_id == "engineer":
                 if escalation.get("model_family") != "specialized_coding":
                     issues.append(_issue("error", f"{path}.escalation.model_family must be specialized_coding", path))
-                if escalation.get("example_model") != "gpt-5.3-codex":
-                    issues.append(_issue("error", f"{path}.escalation.example_model must be gpt-5.3-codex", path))
+                if escalation.get("example_model") != "xiaomi/mimo-v2.5-pro":
+                    issues.append(_issue("error", f"{path}.escalation.example_model must be xiaomi/mimo-v2.5-pro", path))
             elif role_id in {"chief_coordinator", "security_auditor", "researcher", "career_strategist"}:
                 if escalation.get("model_family") != "strong_reasoning":
                     issues.append(_issue("error", f"{path}.escalation.model_family must be strong_reasoning", path))
