@@ -34,7 +34,9 @@ def observe_pipeline_router_decision(
     actual_provider: str | None = None,
     actual_model: str | None = None,
     repo_root: Path | str | None = None,
+    logger: logging.Logger | None = None,
 ) -> RouterDecision | None:
+    log = logger or globals()["logger"]
     mode = _pipeline_router_mode(config)
     if mode != "observe":
         return None
@@ -56,13 +58,13 @@ def observe_pipeline_router_decision(
                 actual_model=actual_model,
             )
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
-        logger.info(
+        log.info(
             "pipeline_router_observe %s",
             json.dumps(
                 {
                     "event": "pipeline_router_observe_decision",
                     "pipeline_session_id": decision.pipeline_session_id,
-                    "router_status": decision.status,
+                    "status": decision.status,
                     "selected_pipeline_id": decision.selected_pipeline_id,
                     "fallback_pipeline_id": decision.fallback_pipeline_id,
                     "confidence": decision.confidence,
@@ -89,7 +91,8 @@ def observe_pipeline_router_decision(
         return decision
     except Exception as exc:
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
-        logger.warning(
+        exc_summary = _exception_summary(exc)
+        log.warning(
             "pipeline_router_observe %s",
             json.dumps(
                 {
@@ -101,7 +104,8 @@ def observe_pipeline_router_decision(
                     "chat_id": chat_id,
                     "thread_id": thread_id,
                     "user_id": user_id,
-                    "routing_failure_reason": f"{type(exc).__name__}: {exc}",
+                    "exception": exc_summary,
+                    "routing_failure_reason": exc_summary,
                     "elapsed_ms": elapsed_ms,
                 },
                 ensure_ascii=False,
@@ -128,7 +132,7 @@ def _replace_decision(
     *,
     actual_provider: str | None,
     actual_model: str | None,
-) -> RouterDecision:
+    ) -> RouterDecision:
     return RouterDecision(
         pipeline_session_id=decision.pipeline_session_id,
         router_subagent_id=decision.router_subagent_id,
@@ -150,3 +154,10 @@ def _replace_decision(
         token_usage=decision.token_usage,
         cache_usage=decision.cache_usage,
     )
+
+
+def _exception_summary(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        return type(exc).__name__
+    return f"{type(exc).__name__}: {message}"
