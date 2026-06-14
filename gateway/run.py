@@ -19006,6 +19006,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 user_id=str(getattr(source, "user_id", "") or "") or None,
                 selected_provider=str(cfg_get(user_config, "model", "provider", default="") or "").strip() or None,
                 selected_model=_resolve_gateway_model() or None,
+                logger=logger,
             )
         except Exception:
             logger.warning("pipeline observe hook import/invocation failed", exc_info=True)

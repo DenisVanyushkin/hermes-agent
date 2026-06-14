@@ -205,6 +205,7 @@ def test_pipeline_observe_hook_runs_before_run_conversation_without_changing_res
     assert result["final_response"] == "ok"
     assert [event for event, _ in events] == ["observe", "run_conversation"]
     run_payload = events[1][1]
+    assert events[0][1]["logger"] is gateway_run.logger
     assert run_payload["user_message"] == "ping"
     assert run_payload["conversation_history"] == []
     assert run_payload["task_id"] == "session-observe-1"
@@ -257,6 +258,7 @@ async def test_pipeline_observe_hook_runs_before_proxy_return_without_changing_r
     assert result["final_response"] == "proxied"
     assert [event for event, _ in events] == ["observe", "proxy"]
     proxy_payload = events[1][1]
+    assert events[0][1]["logger"] is gateway_run.logger
     assert proxy_payload["message"] == "ping"
     assert proxy_payload["context_prompt"] == "ctx"
     assert proxy_payload["history"] == history

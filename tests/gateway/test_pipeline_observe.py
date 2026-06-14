@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+import tempfile
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
+import hermes_logging
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_specs import PipelineSpecValidationError
 
@@ -104,6 +107,7 @@ def test_observe_mode_routes_and_logs(monkeypatch, caplog):
     assert '"pipeline_session_id": "pipe-1"' in log_message
     assert '"selected_pipeline_id": "engineering_review_pipeline"' in log_message
     assert '"actual_model": "gpt-5.4"' in log_message
+    assert '"status": "selected"' in log_message
 
 
 def test_observe_failure_is_logged_and_swallowed(monkeypatch, caplog):
@@ -130,4 +134,51 @@ def test_observe_failure_is_logged_and_swallowed(monkeypatch, caplog):
     log_message = next(record.message for record in caplog.records if "pipeline_router_observe_failed" in record.message)
     assert '"event": "pipeline_router_observe_failed"' in log_message
     assert '"session_id": "sess-4"' in log_message
+    assert '"exception": "PipelineSpecValidationError"' in log_message
 
+
+def test_observe_helper_logs_to_gateway_sink_with_injected_gateway_logger(monkeypatch):
+    from hermes_cli import pipeline_observe
+
+    decision = RouterDecision(
+        pipeline_session_id="pipe-2",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.91,
+        reasoning_summary="engineering request",
+        requires_clarification=False,
+        fallback_safe=True,
+        selected_provider="openai-codex",
+        selected_model="gpt-5.4-mini",
+        actual_provider="openai-codex",
+        actual_model="gpt-5.4",
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "HeuristicPipelineRouter", lambda **kwargs: _FakeRouter())
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        hermes_home = Path(tmpdir)
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway", force=True)
+        gateway_logger = logging.getLogger("gateway.run")
+
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={"pipelines": {"router": {"mode": "observe"}}},
+            user_message="Implement Slice B2",
+            session_id="sess-5",
+            session_key="agent:main:telegram:dm",
+            platform="telegram",
+            logger=gateway_logger,
+        )
+
+        assert result == decision
+        gateway_log = (hermes_home / "logs" / "gateway.log").read_text(encoding="utf-8")
+        assert "pipeline_router_observe_decision" in gateway_log
+        assert '"status": "selected"' in gateway_log
+        assert "gateway.run" in gateway_log
