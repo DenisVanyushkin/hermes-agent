@@ -1339,6 +1339,24 @@ class SlackAdapter(BasePlatformAdapter):
                 user,
             )
             return
+
+        # Optional idea-capture hook: when a 👍 lands on a bot-authored idea
+        # post in the configured channel(s), append it to the Google Doc
+        # "Идеи и улучшения". This runs independently of job-intel and only
+        # activates when the idea-capture env vars are set.
+        try:
+            await self._handle_slack_idea_reaction_event(event)
+        except Exception as exc:
+            logger.exception(
+                "slack_idea_reaction_capture_failed type=%s channel=%s ts=%s reaction=%s user=%s: %s",
+                event_type,
+                channel,
+                message_ts,
+                reaction,
+                user,
+                exc,
+            )
+
         try:
             from job_intel.cli import run_feedback_event
 
@@ -1354,6 +1372,85 @@ class SlackAdapter(BasePlatformAdapter):
                 user,
                 exc,
             )
+
+    async def _handle_slack_idea_reaction_event(self, event: dict) -> None:
+        """Capture a configured 👍 reaction on a bot-authored idea post."""
+        from job_intel.idea_reaction_capture import process_event
+
+        raw_channels = os.getenv("SLACK_IDEA_REACTION_CHANNELS", "").strip()
+        raw_doc_id = os.getenv("SLACK_IDEA_DOC_ID", "").strip()
+        raw_reactions = os.getenv("SLACK_IDEA_REACTION_EMOJIS", "").strip()
+        if not (raw_channels or raw_doc_id or raw_reactions):
+            return
+
+        event_type = str((event or {}).get("type") or "").strip()
+        if event_type != "reaction_added":
+            return
+
+        reaction = str((event or {}).get("reaction") or "").strip().lower()
+        trigger_reactions = {
+            part.strip().lower()
+            for part in (raw_reactions.split(",") if raw_reactions else ["+1", "thumbsup", "thumbs_up"])
+            if part.strip()
+        }
+        if reaction not in trigger_reactions:
+            return
+
+        item = (event or {}).get("item") or {}
+        channel = str(item.get("channel") or (event or {}).get("item_channel") or "").strip()
+        message_ts = str(item.get("ts") or (event or {}).get("item_ts") or "").strip()
+        if not channel or not message_ts:
+            return
+
+        allowed_channels = {
+            part.strip()
+            for part in (raw_channels.split(",") if raw_channels else ["C0B55FPG5B7"])
+            if part.strip()
+        }
+        if channel not in allowed_channels:
+            return
+
+        # Fetch the original message so we can confirm it was posted by Hermes
+        # and capture the actual idea text, not only the reaction event.
+        client = self._get_client(channel)
+        message = None
+        try:
+            result = await client.conversations_history(channel=channel, latest=message_ts, inclusive=True, limit=1)
+            messages = result.get("messages", []) or []
+            if messages:
+                message = dict(messages[0])
+        except Exception:
+            logger.debug("[Slack] conversations.history failed while capturing idea reaction", exc_info=True)
+            return
+
+        if not message:
+            return
+
+        bot_uid = self._team_bot_user_ids.get((event or {}).get("team") or "", self._bot_user_id)
+        if not (
+            message.get("bot_id")
+            or message.get("subtype") == "bot_message"
+            or (bot_uid and str(message.get("user") or "").strip() == bot_uid)
+        ):
+            return
+
+        # Reuse the already-normalised message text where possible; if the
+        # plain text is empty, the idea-capture module will ignore it.
+        if not message.get("text") and message.get("blocks"):
+            try:
+                blocks_text = _extract_text_from_slack_blocks(message.get("blocks") or [])
+                if blocks_text:
+                    message["text"] = blocks_text
+            except Exception:
+                logger.debug("[Slack] block text extraction failed for idea capture", exc_info=True)
+
+        result = process_event(
+            event,
+            message=message,
+            bot_user_id=bot_uid,
+            dry_run=False,
+        )
+        logger.info("slack_idea_reaction_capture_result %s", result)
 
 
     async def create_handoff_thread(

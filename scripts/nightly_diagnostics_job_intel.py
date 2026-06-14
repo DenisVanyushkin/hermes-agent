@@ -124,6 +124,7 @@ def main() -> int:
     env["JOB_INTEL_DB_PATH"] = str(state_dir / "job_intel.sqlite3")
     env["JOB_INTEL_ENVIRONMENT"] = "production"
     env["JOB_INTEL_SCRIPTS_DIR"] = str(Path(__file__).resolve().parent)
+    env["JOB_INTEL_DOCTOR_SKIP_LIVE_COLLECTION"] = "1"
 
     code, output = run_command([python_bin, "-m", "job_intel", "doctor"], workdir, env=env)
     issues = maybe_issue("job_intel doctor", code, output)
