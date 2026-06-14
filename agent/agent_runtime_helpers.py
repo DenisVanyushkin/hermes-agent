@@ -1627,6 +1627,27 @@ def anthropic_prompt_cache_policy(
 
     return False, False
 
+def sanitize_openai_client_kwargs(client_kwargs: dict) -> dict:
+    """Return a copy with Hermes runtime metadata removed from SDK kwargs."""
+    sanitized = dict(client_kwargs)
+    for key in (
+        "api_mode",
+        "actual_api_mode",
+        "purpose",
+        "policy_name",
+        "policy_class",
+        "selected_provider",
+        "selected_model",
+        "selected_role",
+        "actual_provider",
+        "actual_model",
+        "fallback_used",
+        "fallback_reason",
+        "fallback_chain",
+        "runtime_request",
+    ):
+        sanitized.pop(key, None)
+    return sanitized
 
 
 def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
@@ -1640,7 +1661,7 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # has been closed" on every retry. The revert resolved that specific path; this
     # copy locks the contract so future transport/keepalive work can't reintroduce
     # the same class of bug.
-    client_kwargs = dict(client_kwargs)
+    client_kwargs = sanitize_openai_client_kwargs(dict(client_kwargs))
     ssl_ca_cert = client_kwargs.pop("ssl_ca_cert", None)
     ssl_verify_cfg = client_kwargs.pop("ssl_verify", None)
     httpx_verify = resolve_httpx_verify(ca_bundle=ssl_ca_cert, ssl_verify=ssl_verify_cfg)
