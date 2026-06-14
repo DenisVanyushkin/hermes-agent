@@ -44,6 +44,7 @@ CANONICAL_PROFILE_IDS = CANONICAL_ACTIVE_PROFILE_IDS | CANONICAL_DEFERRED_PROFIL
 PROFILE_ID_ALIASES = {
     "chief_hermes": "chief_coordinator",
     "trading_observer_trader": "trading_observer_trader_deferred",
+    "hermes_engineer_core": "engineer",
 }
 
 MODEL_TIERS = {"standard", "reasoning", "coding", "critical", "code_review"}

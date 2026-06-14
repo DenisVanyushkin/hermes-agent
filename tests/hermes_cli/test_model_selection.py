@@ -284,3 +284,31 @@ def test_trading_role_is_not_used_as_a_model_policy():
         critical_approval_required=False,
     )
     assert selection.policy_class == "general_operator"
+
+def test_engineer_package_role_uses_canonical_engineer_coding_policy():
+    selection = select_model_policy(
+        selected_role="hermes_engineer_core",
+        canonical_role="engineer",
+        task_text="Implement a repo fix and run pytest",
+        critical_approval_required=False,
+    )
+
+    assert selection.effective_role == "engineer"
+    assert selection.policy_class == "coding"
+    assert selection.policy_name == "coding_high_reasoning"
+    assert selection.preferred_provider == "openrouter"
+    assert selection.preferred_model == "xiaomi/mimo-v2.5-pro"
+
+
+def test_security_critical_engineer_task_uses_gpt_5_5_without_fallback():
+    selection = select_model_policy(
+        selected_role="engineer",
+        canonical_role="engineer",
+        task_text="Rotate provider credentials and expose Hermes WebUI publicly",
+        critical_approval_required=True,
+    )
+
+    assert selection.policy_class == "approval_critical"
+    assert selection.preferred_provider == "openai-codex"
+    assert selection.preferred_model == "gpt-5.5"
+    assert selection.allow_fallback is False

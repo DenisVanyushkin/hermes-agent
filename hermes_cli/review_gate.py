@@ -175,7 +175,8 @@ def detect_material_engineering_change(
     *,
     changed_paths: list[str] | None = None,
 ) -> tuple[bool, list[str]]:
-    if not isinstance(plan, RoleExecutionPlan) or plan.selected_role != "engineer":
+    effective_role = str(getattr(plan, "canonical_role", None) or getattr(plan, "selected_role", "")).strip().lower()
+    if not isinstance(plan, RoleExecutionPlan) or effective_role != "engineer":
         return False, []
     if plan.operation_category == "read_only_investigation":
         return False, []
@@ -233,6 +234,7 @@ def build_review_packet(
 ) -> dict[str, Any]:
     return {
         "selected_role": plan.selected_role,
+        "canonical_role": plan.canonical_role,
         "task": plan.task,
         "operation_category": plan.operation_category,
         "reviewer_tier": reviewer_tier,
@@ -759,6 +761,7 @@ def render_review_gate_block_message(decision: ReviewGateDecision) -> str:
     else:
         title = "Final completion is blocked pending code review approval."
     selected_role = str(packet.get("selected_role") or "").strip() or "unknown"
+    canonical_role = str(packet.get("canonical_role") or "").strip()
     selected_provider = str(packet.get("selected_provider") or "").strip()
     selected_model = str(packet.get("selected_model") or "").strip()
     actual_provider = str(packet.get("actual_provider") or selected_provider).strip()
@@ -767,6 +770,7 @@ def render_review_gate_block_message(decision: ReviewGateDecision) -> str:
     fallback_reason = str(packet.get("fallback_reason") or "").strip()
     header_lines = [
         f"Hermes role: {selected_role}",
+        *([f"Canonical role: {canonical_role}"] if canonical_role and canonical_role != selected_role else []),
         "Role context: used",
         f"Implementation: {actual_provider or selected_provider or 'n/a'} / {actual_model or selected_model or 'n/a'}",
         f"Reviewer: {decision.reviewer_provider} / {decision.reviewer_model} / {decision.automatic_review_verdict}",
