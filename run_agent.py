@@ -4071,6 +4071,27 @@ class AIAgent:
 
         return copilot_request_headers(is_agent_turn=True, is_vision=is_vision)
 
+    @staticmethod
+    def _sanitize_request_openai_client_kwargs(client_kwargs: dict) -> dict:
+        """Drop Hermes runtime metadata before constructing an OpenAI client."""
+        sanitized = dict(client_kwargs)
+        for key in (
+            "api_mode",
+            "purpose",
+            "policy_name",
+            "policy_class",
+            "selected_provider",
+            "selected_model",
+            "selected_role",
+            "actual_provider",
+            "actual_model",
+            "actual_api_mode",
+            "fallback_used",
+            "fallback_reason",
+        ):
+            sanitized.pop(key, None)
+        return sanitized
+
     def _create_request_openai_client(self, *, reason: str, api_kwargs: Optional[dict] = None) -> Any:
         from unittest.mock import Mock
 
@@ -4081,6 +4102,21 @@ class AIAgent:
             return primary_client
         with self._openai_client_lock():
             request_kwargs = dict(self._client_kwargs)
+            runtime_request = getattr(self, "_turn_runtime_request", None)
+            if isinstance(runtime_request, dict):
+                runtime_base_url = runtime_request.get("actual_base_url") or runtime_request.get("base_url")
+                runtime_api_key = runtime_request.get("actual_api_key") or runtime_request.get("api_key")
+                runtime_provider = runtime_request.get("actual_provider") or runtime_request.get("provider")
+                if runtime_base_url:
+                    request_kwargs["base_url"] = runtime_base_url
+                    self._apply_client_headers_for_base_url_dict(
+                        request_kwargs,
+                        str(runtime_base_url),
+                        provider=str(runtime_provider or self.provider),
+                    )
+                if runtime_api_key:
+                    request_kwargs["api_key"] = runtime_api_key
+                request_kwargs = self._sanitize_request_openai_client_kwargs(request_kwargs)
         # Per-request OpenAI-wire clients (used by both the non-streaming
         # chat-completions path and the streaming chat-completions path
         # in `_interruptible_api_call`) should not run the SDK's built-in
@@ -4091,6 +4127,7 @@ class AIAgent:
         # the per-call timeout before our stale detector reports it.
         # Shared/primary clients and Anthropic / Bedrock paths are
         # unaffected (they don't go through here).
+        request_kwargs = self._sanitize_request_openai_client_kwargs(request_kwargs)
         request_kwargs["max_retries"] = 0
         if (
             base_url_host_matches(str(request_kwargs.get("base_url", "")), "githubcopilot.com")
