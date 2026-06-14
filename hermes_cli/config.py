@@ -954,6 +954,11 @@ DEFAULT_CONFIG = {
         "mode": "observe",
         "reviewer_tier": "code_review",
     },
+    "pipelines": {
+        "router": {
+            "mode": "disabled",
+        },
+    },
     "agent": {
         "max_turns": 120,
         # Inactivity timeout for gateway agent execution (seconds).
