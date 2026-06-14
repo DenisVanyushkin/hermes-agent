@@ -5277,6 +5277,48 @@ class TestOpenRouterExplicitApiKey:
                 f"Expected env fallback key to be used when explicit_api_key is None, got: {call_kwargs['api_key']}"
             )
 
+    def test_async_openrouter_client_strips_runtime_metadata(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "env-fallback-key")
+        mock_async_openai = MagicMock()
+        mock_async_openai.return_value = MagicMock(name="openrouter-async-client")
+
+        with patch("openai.AsyncOpenAI", mock_async_openai), \
+             patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            sync_client = MagicMock(name="openrouter-sync-client")
+            sync_client.api_key = "env-fallback-key"
+            sync_client.base_url = "https://openrouter.ai/api/v1"
+            sync_client._custom_headers = {}
+            sync_client._default_headers = {}
+            mock_openai.return_value = sync_client
+
+            client, model = resolve_provider_client(
+                provider="openrouter",
+                explicit_api_key="explicit-pool-key",
+                async_mode=True,
+                api_mode="chat_completions",
+            )
+
+        assert client is not None
+        assert model is not None
+        async_kwargs = mock_async_openai.call_args[1]
+        assert str(async_kwargs["base_url"]) == "https://openrouter.ai/api/v1"
+        for forbidden in (
+            "api_mode",
+            "actual_api_mode",
+            "purpose",
+            "policy_name",
+            "policy_class",
+            "selected_provider",
+            "selected_model",
+            "actual_provider",
+            "actual_model",
+            "fallback_used",
+            "fallback_reason",
+            "fallback_chain",
+            "runtime_request",
+        ):
+            assert forbidden not in async_kwargs
+
 
 def test_pool_runtime_base_url_uses_nous_env_override(monkeypatch):
     entry = SimpleNamespace(

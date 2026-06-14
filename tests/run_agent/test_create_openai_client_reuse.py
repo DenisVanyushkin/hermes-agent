@@ -224,3 +224,108 @@ def test_force_close_tcp_sockets_descends_httpcore_1_connection_wrapper():
     # #29507: close() must NOT be called from this helper — the owning
     # httpx worker thread releases the FD, not us.
     assert sock.close_calls == 0
+
+
+def test_shared_openai_client_creation_strips_runtime_metadata():
+    agent = _make_agent()
+    constructed: list = []
+    fake_openai = _make_fake_openai_factory(constructed)
+
+    dirty_kwargs = {
+        "api_key": "test-key-value",
+        "base_url": "https://openrouter.ai/api/v1",
+        "timeout": 30,
+        "api_mode": "chat_completions",
+        "purpose": "main_turn",
+        "policy_name": "coding_high_reasoning",
+        "policy_class": "coding",
+        "selected_provider": "openrouter",
+        "selected_model": "xiaomi/mimo-v2.5-pro",
+        "actual_provider": "openrouter",
+        "actual_model": "xiaomi/mimo-v2.5-pro",
+        "fallback_used": False,
+        "fallback_reason": "",
+    }
+
+    with patch("run_agent.OpenAI", fake_openai):
+        agent._create_openai_client(dirty_kwargs, reason="shared_openrouter", shared=True)
+
+    assert len(constructed) == 1
+    kwargs = constructed[0]._kwargs
+    assert kwargs["api_key"] == "test-key-value"
+    assert kwargs["base_url"] == "https://openrouter.ai/api/v1"
+    assert kwargs["timeout"] == 30
+    for forbidden in (
+        "api_mode",
+        "purpose",
+        "policy_name",
+        "policy_class",
+        "selected_provider",
+        "selected_model",
+        "actual_provider",
+        "actual_model",
+        "fallback_used",
+        "fallback_reason",
+    ):
+        assert forbidden not in kwargs
+
+
+def test_primary_recovery_rebuild_strips_runtime_metadata():
+    agent = _make_agent()
+    constructed: list = []
+    fake_openai = _make_fake_openai_factory(constructed)
+
+    agent._primary_runtime = {
+        "client_kwargs": {
+            "api_key": "test-key-value",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "timeout": 45,
+            "api_mode": "codex_responses",
+            "purpose": "code_review",
+            "selected_provider": "openai-codex",
+            "selected_model": "gpt-5.5",
+            "actual_provider": "openai-codex",
+            "actual_model": "gpt-5.5",
+            "fallback_used": False,
+            "fallback_reason": "",
+        },
+        "model": "gpt-5.5",
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_mode": "codex_responses",
+        "api_key": "test-key-value",
+        "anthropic_api_key": "",
+        "anthropic_base_url": None,
+        "is_anthropic_oauth": False,
+        "use_prompt_caching": False,
+        "compressor_model": "gpt-5.5",
+        "compressor_context_length": 128000,
+        "compressor_base_url": "https://chatgpt.com/backend-api/codex",
+        "compressor_api_key": "test-key-value",
+        "compressor_provider": "openai-codex",
+        "compressor_api_mode": "codex_responses",
+    }
+    agent._fallback_activated = True
+    agent._fallback_index = 1
+    agent._rate_limited_until = 0
+    agent.context_compressor = SimpleNamespace(update_model=lambda **kwargs: None)
+
+    with patch("run_agent.OpenAI", fake_openai):
+        assert agent._restore_primary_runtime() is True
+
+    assert constructed, "expected restore_primary_runtime() to rebuild an OpenAI client"
+    kwargs = constructed[-1]._kwargs
+    assert kwargs["api_key"] == "test-key-value"
+    assert kwargs["base_url"] == "https://chatgpt.com/backend-api/codex"
+    assert kwargs["timeout"] == 45
+    for forbidden in (
+        "api_mode",
+        "purpose",
+        "selected_provider",
+        "selected_model",
+        "actual_provider",
+        "actual_model",
+        "fallback_used",
+        "fallback_reason",
+    ):
+        assert forbidden not in kwargs

@@ -4586,6 +4586,7 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     infrastructure (otherwise vision payloads silently time out).
     """
     from openai import AsyncOpenAI
+    from agent.agent_runtime_helpers import sanitize_openai_client_kwargs
 
     if isinstance(sync_client, CodexAuxiliaryClient):
         return AsyncCodexAuxiliaryClient(sync_client), model
@@ -4648,7 +4649,7 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     # See _create_openai_client: disable SDK-internal retries so Hermes owns
     # the auxiliary retry/timeout budget (issue #54465).
     async_kwargs.setdefault("max_retries", 0)
-    return AsyncOpenAI(**async_kwargs), model
+    return AsyncOpenAI(**sanitize_openai_client_kwargs(async_kwargs)), model
 
 
 def _normalize_resolved_model(model_name: Optional[str], provider: str) -> Optional[str]:
