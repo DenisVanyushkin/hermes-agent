@@ -4521,24 +4521,9 @@ class AIAgent:
 
     @staticmethod
     def _sanitize_request_openai_client_kwargs(client_kwargs: dict) -> dict:
-        """Drop Hermes runtime metadata before constructing an OpenAI client."""
-        sanitized = dict(client_kwargs)
-        for key in (
-            "api_mode",
-            "purpose",
-            "policy_name",
-            "policy_class",
-            "selected_provider",
-            "selected_model",
-            "selected_role",
-            "actual_provider",
-            "actual_model",
-            "actual_api_mode",
-            "fallback_used",
-            "fallback_reason",
-        ):
-            sanitized.pop(key, None)
-        return sanitized
+        """Forwarder — see ``agent.agent_runtime_helpers.sanitize_openai_client_kwargs``."""
+        from agent.agent_runtime_helpers import sanitize_openai_client_kwargs
+        return sanitize_openai_client_kwargs(client_kwargs)
 
     def _create_request_openai_client(self, *, reason: str, api_kwargs: Optional[dict] = None) -> Any:
         from unittest.mock import Mock
