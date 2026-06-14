@@ -1292,6 +1292,23 @@ def load_gateway_config() -> GatewayConfig:
             # ``apply_yaml_config_fn`` hook (see plugins/platforms/slack/
             # adapter.py::_apply_yaml_config), dispatched in the
             # ``apply_yaml_config_fn`` loop above. #41112 / #3823.
+            # Idea-reaction capture bridge (local customization; upstream's
+            # slack plugin hook does not know these keys).
+            slack_cfg = yaml_cfg.get("slack", {})
+            if isinstance(slack_cfg, dict):
+                idea_doc = slack_cfg.get("idea_reaction_doc_id")
+                if idea_doc is not None and not os.getenv("SLACK_IDEA_DOC_ID"):
+                    os.environ["SLACK_IDEA_DOC_ID"] = str(idea_doc)
+                idea_channels = slack_cfg.get("idea_reaction_channels")
+                if idea_channels is not None and not os.getenv("SLACK_IDEA_REACTION_CHANNELS"):
+                    if isinstance(idea_channels, list):
+                        idea_channels = ",".join(str(v) for v in idea_channels)
+                    os.environ["SLACK_IDEA_REACTION_CHANNELS"] = str(idea_channels)
+                idea_emojis = slack_cfg.get("idea_reaction_emojis")
+                if idea_emojis is not None and not os.getenv("SLACK_IDEA_REACTION_EMOJIS"):
+                    if isinstance(idea_emojis, list):
+                        idea_emojis = ",".join(str(v) for v in idea_emojis)
+                    os.environ["SLACK_IDEA_REACTION_EMOJIS"] = str(idea_emojis)
 
             # Bridge top-level require_mention to Telegram when the telegram: section
             # does not already provide one.  Users often write "require_mention: true"

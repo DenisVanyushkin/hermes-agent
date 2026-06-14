@@ -68,6 +68,18 @@ def resolve_hermes(workdir: Path, hermes_home: Path) -> str:
     return ""
 
 
+def build_hermes_command(workdir: Path, hermes_home: Path) -> tuple[list[str], dict[str, str]]:
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(hermes_home)
+    pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(workdir) if not pythonpath else f"{workdir}{os.pathsep}{pythonpath}"
+
+    # Prefer the module invocation because the venv entrypoint can be a stale
+    # wrapper that points at a vanished interpreter path. Fall back to the
+    # executable only when the module cannot be imported in this environment.
+    return [sys.executable, "-m", "hermes_cli.main", "doctor"], env
+
+
 def clean_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
@@ -124,14 +136,20 @@ def main() -> int:
     workdir = resolve_workdir()
     hermes_home = resolve_hermes_home()
     hermes_bin = resolve_hermes(workdir, hermes_home)
-    if not hermes_bin:
-        print("nightly-diagnostics-hermes: hermes binary not found")
-        return 1
+    cmd, env = build_hermes_command(workdir, hermes_home)
 
-    env = os.environ.copy()
-    env["HERMES_HOME"] = str(hermes_home)
+    code, output = run_command(cmd, workdir, env=env)
+    if hermes_bin and code != 0:
+        # Only fall back when the module path itself is missing/broken.
+        # Real `hermes doctor` failures should stay visible as-is.
+        module_missing = (
+            "No module named 'hermes_cli'" in output
+            or 'No module named hermes_cli' in output
+            or "can't find '__main__' module in 'hermes_cli'" in output
+        )
+        if module_missing:
+            code, output = run_command([hermes_bin, "doctor"], workdir, env=env)
 
-    code, output = run_command([hermes_bin, "doctor"], workdir, env=env)
     issues = maybe_issue("hermes doctor", code, output)
     if not issues:
         return 0
