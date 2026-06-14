@@ -22,6 +22,7 @@ keep the exact logger name (``"agent.conversation_loop"``).
 
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
@@ -221,7 +222,25 @@ def finalize_turn(
                 )
                 runtime_request = getattr(agent, "_turn_runtime_request", None)
                 review_plan = build_role_execution_plan(review_task)
-                review_gate = evaluate_review_gate(review_plan, messages)
+                if isinstance(runtime_request, dict):
+                    runtime_selected_role = str(runtime_request.get("selected_role") or "").strip()
+                    runtime_canonical_role = str(runtime_request.get("canonical_role") or "").strip() or None
+                    runtime_operation_category = str(runtime_request.get("operation_category") or "").strip()
+                    if runtime_selected_role or runtime_canonical_role or runtime_operation_category:
+                        effective_role = (runtime_canonical_role or runtime_selected_role or review_plan.selected_role).strip().lower()
+                        effective_operation_category = runtime_operation_category or review_plan.operation_category
+                        review_plan = replace(
+                            review_plan,
+                            selected_role=runtime_selected_role or review_plan.selected_role,
+                            canonical_role=runtime_canonical_role or review_plan.canonical_role,
+                            operation_category=effective_operation_category,
+                            review_gate_candidate=(effective_role == "engineer" and effective_operation_category in {"repo_mutation", "git_remote_mutation", "normal_operational_mutation", "security_critical_mutation"}),
+                        )
+                review_gate = evaluate_review_gate(
+                    review_plan,
+                    messages,
+                    runtime_request=runtime_request if isinstance(runtime_request, dict) else None,
+                )
                 review_gate_log = build_review_gate_evaluation_log_fields(review_gate)
                 logger.info(
                     "review gate evaluation: session=%s review_gate.mode=%s "
