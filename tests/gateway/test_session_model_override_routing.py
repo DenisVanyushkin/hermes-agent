@@ -7,6 +7,7 @@ provider, e.g. Nous instead of OpenAI Codex.
 """
 
 import asyncio
+import importlib
 import sys
 import threading
 import types
@@ -124,6 +125,89 @@ def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
     assert _CapturingAgent.last_init["base_url"] == "https://chatgpt.com/backend-api/codex"
     assert _CapturingAgent.last_init["api_key"] == "***"
     assert _CapturingAgent.last_init["reasoning_config"] == {"enabled": True, "effort": "high"}
+
+
+def test_pipeline_observe_hook_runs_before_run_conversation_without_changing_result(monkeypatch):
+    events: list[tuple[str, object]] = []
+
+    class _OrderingAgent:
+        def __init__(self, *args, **kwargs):
+            self.tools = []
+            self.model = kwargs.get("model")
+            self.provider = kwargs.get("provider")
+
+        def run_conversation(self, user_message: str, conversation_history=None, task_id=None, **kwargs):
+            events.append(
+                (
+                    "run_conversation",
+                    {
+                        "user_message": user_message,
+                        "conversation_history": conversation_history,
+                        "task_id": task_id,
+                        "kwargs": kwargs,
+                    },
+                )
+            )
+            return {
+                "final_response": "ok",
+                "messages": [],
+                "api_calls": 1,
+            }
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _OrderingAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {"pipelines": {"router": {"mode": "observe"}}})
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "api_key": "***",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+            "max_tokens": None,
+        },
+    )
+
+    pipeline_observe = importlib.import_module("hermes_cli.pipeline_observe")
+
+    def _fake_observe(**kwargs):
+        events.append(("observe", kwargs))
+        return None
+
+    monkeypatch.setattr(pipeline_observe, "observe_pipeline_router_decision", _fake_observe)
+
+    runner = _make_runner()
+    source = SessionSource(
+        platform=Platform.LOCAL,
+        chat_id="cli",
+        chat_name="CLI",
+        chat_type="dm",
+        user_id="user-1",
+    )
+
+    result = asyncio.run(
+        runner._run_agent(
+            message="ping",
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id="session-observe-1",
+            session_key="agent:main:local:dm",
+        )
+    )
+
+    assert result["final_response"] == "ok"
+    assert [event for event, _ in events] == ["observe", "run_conversation"]
+    run_payload = events[1][1]
+    assert run_payload["user_message"] == "ping"
+    assert run_payload["conversation_history"] == []
+    assert run_payload["task_id"] == "session-observe-1"
 
 
 @pytest.mark.asyncio
@@ -260,4 +344,3 @@ fallback_providers:
     assert runtime_kwargs["api_key"] == "env-secret"
     assert runtime_kwargs["base_url"] == "https://fallback.example/v1"
     assert runtime_kwargs["model"] == "fallback-model"
-
