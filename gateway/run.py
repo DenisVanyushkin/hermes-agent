@@ -18989,6 +18989,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        user_config = _load_gateway_config()
+        platform_key = _platform_config_key(source.platform)
+
+        try:
+            from hermes_cli.pipeline_observe import observe_pipeline_router_decision
+
+            observe_pipeline_router_decision(
+                config=user_config,
+                user_message=message,
+                session_id=session_id,
+                session_key=session_key,
+                platform=platform_key,
+                chat_id=str(getattr(source, "chat_id", "") or "") or None,
+                thread_id=str(getattr(source, "thread_id", "") or "") or None,
+                user_id=str(getattr(source, "user_id", "") or "") or None,
+                selected_provider=str(cfg_get(user_config, "model", "provider", default="") or "").strip() or None,
+                selected_model=_resolve_gateway_model() or None,
+            )
+        except Exception:
+            logger.warning("pipeline observe hook import/invocation failed", exc_info=True)
+
         # ---- Proxy mode: delegate to remote API server ----
         if self._get_proxy_url():
             return await self._run_agent_via_proxy(
@@ -19009,9 +19030,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if run_generation is None or not session_key:
                 return True
             return self._is_session_run_current(session_key, run_generation)
-        
-        user_config = _load_gateway_config()
-        platform_key = _platform_config_key(source.platform)
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
@@ -20950,26 +20968,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # attachment, wrap the user turn as an OpenAI-style multimodal
                 # content list. Consume-and-clear so subsequent turns on the same
                 # runner instance don't re-attach stale images.
-                try:
-                    from hermes_cli.pipeline_observe import observe_pipeline_router_decision
-
-                    observe_pipeline_router_decision(
-                        config=user_config,
-                        user_message=message,
-                        session_id=session_id,
-                        session_key=session_key,
-                        platform=platform_key,
-                        chat_id=str(getattr(source, "chat_id", "") or "") or None,
-                        thread_id=str(getattr(source, "thread_id", "") or "") or None,
-                        user_id=str(getattr(source, "user_id", "") or "") or None,
-                        selected_provider=turn_route["runtime"].get("provider"),
-                        selected_model=turn_route.get("model"),
-                        actual_provider=getattr(agent, "provider", None) or turn_route["runtime"].get("provider"),
-                        actual_model=getattr(agent, "model", None) or turn_route.get("model"),
-                    )
-                except Exception:
-                    logger.warning("pipeline observe hook import/invocation failed", exc_info=True)
-
                 _native_imgs = self._consume_pending_native_image_paths(session_key)
                 if _native_imgs:
                     try:
