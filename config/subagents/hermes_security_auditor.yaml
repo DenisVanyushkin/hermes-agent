@@ -1,0 +1,98 @@
+schema_version: 1
+id: hermes_security_auditor
+display_name: Hermes Security Auditor
+version: 1
+purpose: Provides read-first review of security-sensitive code, configuration, deployment, and runtime-boundary changes within pipeline-mediated workflows.
+selection:
+  choose_when:
+    - engineering change touches authentication, secrets, permissions, deployment, networking, sandboxing, or review-gate boundaries
+    - pipeline requests a security-sensitive second opinion
+  do_not_choose_when:
+    - task requires direct mutation rather than review
+    - task is ordinary fallback conversation
+models:
+  default:
+    provider: openai-codex
+    model: gpt-5.5
+    class: senior_reasoning
+  allowed:
+    - provider: openai-codex
+      model: gpt-5.5
+      class: senior_reasoning
+  fallback:
+    mode: fail_closed
+    reason: no approved security review model available
+tools:
+  read:
+    - file_read
+    - grep
+    - git_status
+    - git_diff
+    - test_result_read
+  write: []
+  execute: []
+  gated: []
+  forbidden:
+    - file_mutation
+    - service_restart
+    - git_commit
+    - git_push
+permissions:
+  can_mutate_files: false
+  can_restart_services: false
+  can_commit: false
+  can_push: false
+system_prompt:
+  path: prompts/subagents/hermes_security_auditor.md
+prompt_cache_policy:
+  stable_prompt_prefix_required: true
+  preserve_original_prompt_position: true
+  dynamic_additions_append_only: true
+  dynamic_additions:
+    - reviewer_findings
+    - peer_messages
+    - escalation_notes
+input_schema:
+  required:
+    - task
+    - pipeline_session_id
+    - changed_files
+    - baseline_git_snapshot
+    - current_git_snapshot
+  optional:
+    - engineer_output
+    - reviewer_output
+    - peer_messages
+output_schema:
+  status:
+    enum:
+      - approved
+      - concerns_found
+      - blocked
+      - failed
+  required_fields:
+    - summary
+    - findings
+    - confidence
+  optional_fields:
+    - mitigation_requests
+    - questions_for_peer_subagent
+communication:
+  can_send_to:
+    - hermes_engineer_core
+    - hermes_code_reviewer
+  can_receive_from:
+    - hermes_engineer_core
+    - hermes_code_reviewer
+  channel_policy:
+    mode: mediated_by_pipeline
+    direct_uncontrolled_chat: false
+observability:
+  log_selected_provider_model: true
+  log_actual_provider_model: true
+  log_token_usage: true
+  log_cache_usage: true
+  log_peer_messages: true
+failure_policy:
+  invalid_output: pipeline_blocks_or_retries
+  model_unavailable: fail_closed

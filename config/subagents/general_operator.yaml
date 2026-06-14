@@ -1,0 +1,88 @@
+schema_version: 1
+id: general_operator
+display_name: General Operator
+version: 1
+purpose: Handles conversational, explanatory, planning, and low-risk fallback requests when no specialized pipeline is selected.
+selection:
+  choose_when:
+    - default_conversation_pipeline is selected
+    - task is conversational, explanatory, planning, or low-risk coordination work
+  do_not_choose_when:
+    - task requires code, config, script, or test mutation
+    - task requires security-sensitive review beyond low-risk discussion
+    - task requires a specialized pipeline and should be reclassified
+models:
+  default:
+    provider: openai-codex
+    model: gpt-5.4-mini
+    class: general
+  allowed:
+    - provider: openai-codex
+      model: gpt-5.4-mini
+      class: general
+    - provider: openai-codex
+      model: gpt-5.5
+      class: senior_reasoning
+  fallback:
+    mode: fail_closed
+    reason: no approved fallback conversation model available
+tools:
+  read:
+    - file_read
+    - grep
+    - session_context_read
+  write: []
+  execute: []
+  gated: []
+  forbidden:
+    - file_mutation
+    - service_restart
+    - git_commit
+    - git_push
+permissions:
+  can_mutate_files: false
+  can_restart_services: false
+  can_commit: false
+  can_push: false
+  may_ask_for_clarification: true
+  may_request_reclassification: true
+system_prompt:
+  path: prompts/subagents/general_operator.md
+input_schema:
+  required:
+    - task
+    - pipeline_session_id
+    - conversation_context
+    - constraints
+  optional:
+    - clarification_history
+    - routing_context
+output_schema:
+  status:
+    enum:
+      - done
+      - needs_user_input
+      - reclassification_required
+      - blocked
+      - failed
+  required_fields:
+    - summary
+    - confidence
+  optional_fields:
+    - clarification_question
+    - reclassification_reason
+communication:
+  can_send_to: []
+  can_receive_from: []
+  channel_policy:
+    mode: no_peer_communication
+    direct_uncontrolled_chat: false
+observability:
+  log_selected_provider_model: true
+  log_actual_provider_model: true
+  log_token_usage: true
+  log_cache_usage: true
+  log_tool_calls: true
+failure_policy:
+  invalid_output: pipeline_blocks_or_retries
+  model_unavailable: fail_closed
