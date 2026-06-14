@@ -1,0 +1,77 @@
+schema_version: 1
+id: default_conversation_pipeline
+display_name: Default Conversation Pipeline
+version: 1
+purpose: Handles conversational, explanatory, planning, and other low-risk requests that do not match a specialized pipeline.
+entry_conditions:
+  any:
+    - router_status == no_specialized_pipeline and no_policy_block == true
+    - router_status == routing_failed and fallback_safe == true and no_policy_block == true
+subagents:
+  primary: general_operator
+state_machine:
+  states:
+    - task_received
+    - pipeline_selected
+    - clarification_requested
+    - response_generation
+    - reclassification_check
+    - completion_allowed
+    - completion_blocked
+loop_policy:
+  max_iterations: 1
+  max_peer_discussion_rounds: 0
+  max_disagreement_rounds: 0
+  max_invalid_output_retries: 1
+  max_tool_retries: 0
+  max_model_escalations: 0
+  max_clarification_rounds: 1
+  on_limit_exceeded: block_and_escalate_to_user
+model_escalation_policy:
+  enabled: false
+  resets_loop_counters: false
+communication_policy:
+  subagents_may_exchange_messages: false
+  mediated_by_pipeline: true
+  max_rounds: 0
+disagreement_policy:
+  enabled: false
+  decisive_subagent: general_operator
+  arbitrator_subagent: null
+completion_rules:
+  can_say_done:
+    any:
+      - response_generated
+  cannot_say_done:
+    any:
+      - reclassification_required
+      - policy_blocked
+reclassification:
+  return_status: reclassification_required
+  cannot_mutate_files_without_reclassification: true
+reporting:
+  final_execution_report_required: true
+  include:
+    - pipeline_id
+    - pipeline_session_id
+    - router_subagent
+    - router_selected_provider_model
+    - router_actual_provider_model
+    - router_decision
+    - selected_subagent
+    - selected_provider_model_per_invocation
+    - actual_provider_model_per_invocation
+    - token_usage_per_invocation
+    - cache_usage_per_invocation
+    - tool_calls_summary
+    - peer_messages
+    - disagreements
+    - decisive_subagent
+    - model_escalations
+    - completion_allowed
+    - completion_blocked_reason
+    - final_verdict
+  empty_defaults:
+    peer_messages: []
+    disagreements: []
+    model_escalations: []

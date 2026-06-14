@@ -1,0 +1,125 @@
+schema_version: 1
+id: engineering_review_pipeline
+display_name: Engineering Review Pipeline
+version: 1
+purpose: Execute code-changing engineering tasks with mandatory review, bounded rework, disagreement handling, and explicit completion gating.
+entry_conditions:
+  any:
+    - task_classification.domain == engineering
+    - task_intent includes code_mutation
+    - target_paths match engineering_path_patterns
+subagents:
+  engineer: hermes_engineer_core
+  reviewer: hermes_code_reviewer
+  optional:
+    - hermes_security_auditor
+state_machine:
+  states:
+    - task_received
+    - pipeline_selected
+    - baseline_captured
+    - engineer_started
+    - engineer_completed
+    - git_delta_analyzed
+    - review_requested
+    - review_completed
+    - peer_discussion_requested
+    - peer_discussion_completed
+    - disagreement_unresolved
+    - rework_requested
+    - model_escalated
+    - approved
+    - blocked
+    - failed
+    - user_waived
+    - completion_allowed
+    - completion_blocked
+loop_policy:
+  max_review_iterations: 3
+  max_peer_discussion_rounds_per_iteration: 1
+  max_disagreement_rounds_per_iteration: 1
+  max_invalid_output_retries: 1
+  max_tool_retries: 1
+  max_model_escalations: 1
+  max_clarification_rounds: 0
+  on_limit_exceeded: block_and_escalate_to_user
+model_escalation_policy:
+  enabled: true
+  resets_loop_counters: false
+  rules:
+    - condition: reviewer_blockers_persist_after_2_iterations
+      target_subagent: engineer
+      escalate_to_model_class: senior_coding
+    - condition: reviewer_output_invalid_twice
+      target_subagent: reviewer
+      escalate_to_model_class: senior_review
+    - condition: disagreement_unresolved_after_allowed_peer_discussion
+      target_subagent: decisive_subagent_or_arbitrator
+      escalate_to_model_class: senior_review
+  on_escalation_unavailable: block_and_escalate_to_user
+communication_policy:
+  subagents_may_exchange_messages: true
+  mediated_by_pipeline: true
+  max_rounds: 1
+  allowed_cases:
+    - engineer_disagrees_with_reviewer
+    - reviewer_needs_clarification_from_engineer
+    - security_auditor_requests_explanation
+  final_decision_owner: pipeline
+disagreement_policy:
+  enabled: true
+  decisive_subagent: hermes_code_reviewer
+  arbitrator_subagent: null
+  escalation_allowed: true
+  escalation_trigger: disagreement_unresolved_after_allowed_peer_discussion
+  rules:
+    - engineer_may_object_to_reviewer_once_per_iteration
+    - reviewer_must_respond_with_revised_or_maintained_verdict
+    - if_reviewer_maintains_blocker_then_pipeline_treats_blocker_as_authoritative
+    - if_evidence_conflict_remains_then_escalate_or_block
+  on_unresolved_disagreement: block_and_escalate_to_user
+prompt_cache_policy:
+  stable_prompt_prefix_required: true
+  preserve_original_prompt_position: true
+  dynamic_additions_append_only: true
+completion_rules:
+  can_say_done:
+    any:
+      - no_material_changes_detected
+      - reviewer_verdict == approved
+      - explicit_user_waiver_valid == true
+  cannot_say_done:
+    any:
+      - reviewer_unavailable
+      - reviewer_verdict == changes_requested
+      - reviewer_verdict == blocked
+      - disagreement_unresolved
+      - loop_limit_exceeded_without_approval
+      - invalid_structured_output_unresolved
+reporting:
+  final_execution_report_required: true
+  include:
+    - pipeline_id
+    - pipeline_session_id
+    - router_subagent
+    - router_selected_provider_model
+    - router_actual_provider_model
+    - router_decision
+    - subagent_invocations
+    - selected_provider_model_per_invocation
+    - actual_provider_model_per_invocation
+    - token_usage_per_invocation
+    - cache_usage_per_invocation
+    - total_token_usage
+    - tool_calls_summary
+    - changed_files
+    - tests_run
+    - review_iterations
+    - peer_messages
+    - disagreements
+    - decisive_subagent
+    - model_escalations
+    - completion_allowed
+    - completion_blocked_reason
+    - final_verdict
+    - user_waiver_if_any
