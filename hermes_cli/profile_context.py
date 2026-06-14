@@ -343,7 +343,7 @@ def build_role_context_for_task(
         )
 
     selected_role = resolved_plan.selected_role
-    canonical_role = _canonical_role_id(selected_role)
+    canonical_role = resolved_plan.canonical_role or _canonical_role_id(selected_role)
 
     # Package activation: attempt selected-role package context override.
     # Falls back silently to built-in context on any failure.

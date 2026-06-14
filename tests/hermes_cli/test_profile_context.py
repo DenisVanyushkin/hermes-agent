@@ -20,6 +20,7 @@ from hermes_cli.profile_request_context import (
     approval_constraints_text,
     approval_intent_text,
 )
+from hermes_cli.profile_routing import RouteDecision
 
 
 def test_load_profile_contracts_contains_canonical_roles():
@@ -104,6 +105,32 @@ def test_career_vacancy_task_gets_career_strategist_context():
     assert result.selected_role == "career_strategist"
     assert result.profile_context_used is True
     assert "Career Strategist" in result.context_text
+
+
+def test_package_engineer_context_keeps_selected_role_and_canonical_engineer():
+    route = RouteDecision(
+        request_text="Implement a repo fix and run pytest",
+        coordinator_profile="chief_hermes",
+        primary_profile="hermes_engineer_core",
+        selected_profiles=["hermes_engineer_core"],
+        route_chain=[],
+        route_reason="package engineer role",
+        validation_status="valid",
+        confidence="high",
+        ambiguity_reasons=[],
+        max_chain_limit_applied=False,
+    )
+
+    result = build_role_context_for_task(
+        "Implement a repo fix and run pytest",
+        route_decision=route,
+    )
+
+    assert result.selected_role == "hermes_engineer_core"
+    assert result.canonical_role == "engineer"
+    assert result.profile_context_used is True
+    assert result.context_source in {"builtin", "package"}
+    assert "Engineer" in result.context_text
 
 
 def test_engineer_read_only_diagnostics_gets_engineer_context_without_approval_signal():

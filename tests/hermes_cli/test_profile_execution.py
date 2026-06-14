@@ -953,3 +953,109 @@ def test_parse_review_verdict_intent():
 )
 def test_classify_operation_category(task: str, expected_category: str):
     assert classify_operation_category(task) == expected_category
+
+def test_review_gate_package_engineer_invokes_code_review_tier(monkeypatch):
+    plan = RoleExecutionPlan(
+        task="Implement a repo fix and run pytest",
+        selected_role="hermes_engineer_core",
+        canonical_role="engineer",
+        role_intent="engineering",
+        fallback_used=False,
+        fallback_reason="",
+        requires_reviewer=False,
+        reviewer_profile=None,
+        requires_scribe=False,
+        scribe_reason="",
+        requires_explicit_approval=False,
+        critical_approval_required=False,
+        approval_reason="",
+        operation_category="repo_mutation",
+        ordinary_personal_admin=False,
+        external_commitment=False,
+        sensitive_diff_triggers=[],
+        production_runtime_mutation=False,
+        post_change_review_policy={"review_gate_candidate": True},
+        durable_outcome_expected=False,
+        trading_deferred=False,
+        review_gate_candidate=True,
+    )
+
+    def fake_run_code_review(review_packet, *, plan, reviewer_tier="code_review", policy_path=None, messages=None):
+        assert reviewer_tier == "code_review"
+        assert review_packet["selected_role"] == "hermes_engineer_core"
+        assert review_packet["canonical_role"] == "engineer"
+        reviewed = dict(review_packet)
+        reviewed.update(
+            {
+                "packet_hash": "sha256:pkgengreview",
+                "automatic_review_invoked": True,
+                "automatic_review_verdict": "approved",
+                "reviewer_summary": "looks good",
+                "reviewer_findings": [],
+                "required_changes": [],
+                "tests_required": [],
+                "approval_sensitive": False,
+                "reviewer_provider": "openai-codex",
+                "reviewer_model": "gpt-5.5",
+                "reviewer_tier": reviewer_tier,
+                "reviewer_risk_level": "low",
+            }
+        )
+        return _review_verdict("approved", "looks good"), reviewed
+
+    monkeypatch.setattr("hermes_cli.review_gate.run_code_review", fake_run_code_review)
+    decision = evaluate_review_gate(
+        plan,
+        [],
+        config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
+    )
+
+    assert decision.review_required is True
+    assert decision.automatic_review_invoked is True
+    assert decision.automatic_review_verdict == "approved"
+    assert decision.reviewer_provider == "openai-codex"
+    assert decision.reviewer_model == "gpt-5.5"
+    assert decision.blocking is False
+
+
+def test_render_review_gate_block_message_shows_canonical_role_for_package_engineer():
+    decision = ReviewGateDecision(
+        mode="enforce",
+        status="pending",
+        review_required=True,
+        blocking=True,
+        material_change_detected=True,
+        reviewer_tier="code_review",
+        reviewer_provider="openai-codex",
+        reviewer_model="gpt-5.5",
+        changed_paths=["agent/conversation_loop.py"],
+        changed_path_count=1,
+        packet={
+            "task": "Implement a repo fix and run pytest",
+            "operation_category": "repo_mutation",
+            "selected_role": "hermes_engineer_core",
+            "canonical_role": "engineer",
+            "selected_provider": "openrouter",
+            "selected_model": "xiaomi/mimo-v2.5-pro",
+            "actual_provider": "openrouter",
+            "actual_model": "xiaomi/mimo-v2.5-pro",
+            "fallback_used": False,
+            "fallback_reason": "",
+        },
+        packet_hash="sha256:pkgengmsg",
+        automatic_review_invoked=True,
+        automatic_review_verdict="changes_requested",
+        reviewer_summary="needs one change",
+        reviewer_findings=["tighten tests"],
+        required_changes=["add package-role coverage"],
+        tests_required=[],
+        approval_sensitive=False,
+        user_override=False,
+        review_error="",
+        warning="automatic review did not approve this change",
+    )
+
+    message = render_review_gate_block_message(decision)
+    assert "Hermes role: hermes_engineer_core" in message
+    assert "Canonical role: engineer" in message
+    assert "Reviewer: openai-codex / gpt-5.5 / changes_requested" in message
