@@ -49,6 +49,7 @@ _MATERIAL_PATH_HINTS = (
     ".yml",
     ".toml",
     ".json",
+    ".ini",
 )
 
 
@@ -138,6 +139,11 @@ def _parse_tool_args(tool_call: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+_FILE_MUTATION_TOOL_NAMES = frozenset({"write_file", "patch", "edit_file", "apply_patch"})
+_MATERIAL_PATH_PREFIXES = ("agent/", "hermes_cli/", "gateway/", "job_intel/", "tests/", "scripts/", "config/", "cron/")
+_MATERIAL_EXACT_NAMES = {"Dockerfile", "docker-compose.yml", "docker-compose.yaml", ".drone.yml"}
+
+
 def collect_changed_paths(messages: list[dict[str, Any]]) -> list[str]:
     paths: list[str] = []
     for msg in messages or []:
@@ -148,7 +154,7 @@ def collect_changed_paths(messages: list[dict[str, Any]]) -> list[str]:
                 continue
             function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
             name = str(function.get("name") or "")
-            if name not in {"write_file", "patch"}:
+            if name not in _FILE_MUTATION_TOOL_NAMES:
                 continue
             args = _parse_tool_args(tool_call)
             if name == "write_file":
@@ -156,7 +162,7 @@ def collect_changed_paths(messages: list[dict[str, Any]]) -> list[str]:
                 if isinstance(path, str) and path.strip():
                     paths.append(path.strip())
             else:
-                for key in ("path", "file_path"):
+                for key in ("path", "file_path", "target_file", "target_path"):
                     path = args.get(key)
                     if isinstance(path, str) and path.strip():
                         paths.append(path.strip())
@@ -169,34 +175,95 @@ def collect_changed_paths(messages: list[dict[str, Any]]) -> list[str]:
     return deduped
 
 
+def _collect_file_mutation_tool_names(messages: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for msg in messages or []:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tool_call in msg.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+            name = str(function.get("name") or "")
+            if name not in _FILE_MUTATION_TOOL_NAMES or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _is_material_repo_path(path: str) -> bool:
+    candidate = str(path or "").strip().replace("\\", "/")
+    if not candidate or candidate.startswith("/"):
+        return False
+    if candidate in _MATERIAL_EXACT_NAMES:
+        return True
+    if candidate.endswith((".service", ".timer", ".socket", ".mount")):
+        return True
+    if candidate.startswith(_MATERIAL_PATH_PREFIXES):
+        return True
+    if candidate.endswith(_MATERIAL_PATH_HINTS):
+        return True
+    if "/.github/workflows/" in f"/{candidate}":
+        return True
+    return False
+
+
+def _material_repo_paths_from_git(repo_root: Path) -> list[str]:
+    raw = _run_git_diff(["git", "diff", "HEAD", "--name-only"], repo_root)
+    if not raw:
+        return []
+    material: list[str] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        candidate = line.strip()
+        if not candidate or candidate in seen:
+            continue
+        if not _is_material_repo_path(candidate):
+            continue
+        seen.add(candidate)
+        material.append(candidate)
+    return material
+
+
 def detect_material_engineering_change(
     plan: RoleExecutionPlan,
     messages: list[dict[str, Any]],
     *,
     changed_paths: list[str] | None = None,
 ) -> tuple[bool, list[str]]:
-    effective_role = str(getattr(plan, "canonical_role", None) or getattr(plan, "selected_role", "")).strip().lower()
-    if not isinstance(plan, RoleExecutionPlan) or effective_role != "engineer":
+    if not isinstance(plan, RoleExecutionPlan):
         return False, []
     if plan.operation_category == "read_only_investigation":
         return False, []
 
+    repo_root = _repo_root()
     material_categories = {
         "repo_mutation",
         "git_remote_mutation",
         "normal_operational_mutation",
         "security_critical_mutation",
     }
-    material_paths = list(changed_paths) if changed_paths is not None else collect_changed_paths(messages)
-    if plan.operation_category in material_categories:
-        return True, material_paths
+    raw_paths = list(changed_paths) if changed_paths is not None else collect_changed_paths(messages)
+    material_paths = _normalize_repo_paths([path for path in raw_paths if _is_material_repo_path(path)], repo_root)
+    tool_names = _collect_file_mutation_tool_names(messages)
+    has_file_mutation_tool_call = bool(tool_names)
 
-    has_material_path = any(
-        isinstance(path, str) and path.strip() and path.strip().endswith(_MATERIAL_PATH_HINTS)
-        for path in material_paths
-    )
-    if not has_material_path:
+    if not material_paths and has_file_mutation_tool_call:
+        material_paths = _material_repo_paths_from_git(repo_root)
+
+    if plan.operation_category in material_categories:
+        if material_paths:
+            return True, material_paths
+        if not messages and changed_paths is None:
+            return True, material_paths
+
+    if not has_file_mutation_tool_call:
         return False, material_paths
+
+    if material_paths:
+        return True, material_paths
 
     assistant_tool_turns = [
         msg for msg in messages or []
@@ -204,24 +271,27 @@ def detect_material_engineering_change(
     ]
     tool_results = [msg for msg in messages or [] if isinstance(msg, dict) and msg.get("role") == "tool"]
     tool_result_idx = 0
-    landed = False
+    saw_failed_or_unparsed_mutation = False
     for assistant in assistant_tool_turns:
         for tool_call in assistant.get("tool_calls") or []:
             if not isinstance(tool_call, dict):
                 continue
             function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
             name = str(function.get("name") or "")
-            if name not in {"write_file", "patch"}:
+            if name not in _FILE_MUTATION_TOOL_NAMES:
                 continue
+            saw_failed_or_unparsed_mutation = True
             while tool_result_idx < len(tool_results):
                 result_msg = tool_results[tool_result_idx]
                 tool_result_idx += 1
                 if file_mutation_result_landed(name, result_msg.get("content")):
-                    landed = True
+                    saw_failed_or_unparsed_mutation = False
                     break
-        if landed:
+        if not saw_failed_or_unparsed_mutation:
             break
-    return landed, material_paths
+    if saw_failed_or_unparsed_mutation:
+        material_paths = _material_repo_paths_from_git(repo_root)
+    return bool(material_paths), material_paths
 
 
 def build_review_packet(
@@ -231,17 +301,29 @@ def build_review_packet(
     reviewer_tier: str,
     reviewer_provider: str,
     reviewer_model: str,
+    mutation_sources: list[str] | None = None,
+    runtime_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    runtime = runtime_request if isinstance(runtime_request, dict) else {}
     return {
         "selected_role": plan.selected_role,
         "canonical_role": plan.canonical_role,
         "task": plan.task,
         "operation_category": plan.operation_category,
+        "mutation_source": list(mutation_sources or []),
         "reviewer_tier": reviewer_tier,
         "reviewer_provider": reviewer_provider,
         "reviewer_model": reviewer_model,
         "changed_paths": list(changed_paths),
         "changed_path_count": len(changed_paths),
+        "selected_provider": str(runtime.get("selected_provider") or ""),
+        "selected_model": str(runtime.get("selected_model") or ""),
+        "actual_provider": str(runtime.get("actual_provider") or ""),
+        "actual_model": str(runtime.get("actual_model") or ""),
+        "policy_name": str(runtime.get("policy_name") or ""),
+        "policy_class": str(runtime.get("policy_class") or ""),
+        "fallback_used": bool(runtime.get("fallback_used", False)),
+        "fallback_reason": str(runtime.get("fallback_reason") or ""),
         "requires_review": True,
         "status": "pending",
     }
@@ -552,6 +634,7 @@ def evaluate_review_gate(
     changed_paths: list[str] | None = None,
     verdict: str | None = None,
     policy_path: Path | str = DEFAULT_MODEL_POLICY_PATH,
+    runtime_request: dict[str, Any] | None = None,
 ) -> ReviewGateDecision:
     gate_cfg = load_review_gate_config(config)
     mode = gate_cfg["mode"]
@@ -562,6 +645,7 @@ def evaluate_review_gate(
         messages,
         changed_paths=changed_paths,
     )
+    mutation_sources = _collect_file_mutation_tool_names(messages)
     review_required = material_change_detected
     packet = build_review_packet(
         plan,
@@ -569,6 +653,8 @@ def evaluate_review_gate(
         reviewer_tier=reviewer["reviewer_tier"],
         reviewer_provider=reviewer["provider"],
         reviewer_model=reviewer["model"],
+        mutation_sources=mutation_sources,
+        runtime_request=runtime_request,
     ) if review_required else {}
     packet_hash = _sha256_short(packet) if packet else ""
     status = str(verdict or ("pending" if review_required else "not_required")).strip().lower()

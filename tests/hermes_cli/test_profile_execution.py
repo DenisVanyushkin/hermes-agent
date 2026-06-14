@@ -1059,3 +1059,77 @@ def test_render_review_gate_block_message_shows_canonical_role_for_package_engin
     assert "Hermes role: hermes_engineer_core" in message
     assert "Canonical role: engineer" in message
     assert "Reviewer: openai-codex / gpt-5.5 / changes_requested" in message
+
+
+def test_tool_patch_mutation_triggers_review_gate_in_enforce_mode(monkeypatch):
+    plan = _plan("Fix the failing pytest suite in the repository")
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_patch_1",
+                    "type": "function",
+                    "function": {"name": "patch", "arguments": '{"path":"agent/conversation_loop.py"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_patch_1", "content": '{"success": true}'},
+    ]
+
+    def fake_run_code_review(review_packet, *, plan, reviewer_tier="code_review", policy_path=None, messages=None):
+        assert review_packet["changed_paths"] == ["agent/conversation_loop.py"]
+        assert review_packet["mutation_source"] == ["patch"]
+        reviewed = dict(review_packet)
+        reviewed.update({"packet_hash": "sha256:toolpatch", "automatic_review_invoked": True, "automatic_review_verdict": "approved"})
+        return _review_verdict("approved", "looks good"), reviewed
+
+    monkeypatch.setattr("hermes_cli.review_gate.run_code_review", fake_run_code_review)
+    decision = evaluate_review_gate(
+        plan,
+        messages,
+        config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}},
+    )
+
+    assert decision.review_required is True
+    assert decision.material_change_detected is True
+    assert decision.automatic_review_invoked is True
+    assert decision.status == "approved"
+    assert decision.blocking is False
+
+
+def test_dirty_repo_diff_triggers_review_gate_when_tool_metadata_misses_mutation(monkeypatch):
+    plan = _plan("Fix the failing pytest suite in the repository")
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "call_patch_1", "type": "function", "function": {"name": "patch", "arguments": '{}'}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_patch_1", "content": "not-json"},
+    ]
+
+    monkeypatch.setattr("hermes_cli.review_gate._run_git_diff", lambda command, repo_root: "agent/conversation_loop.py\n" if "--name-only" in command else " agent/conversation_loop.py | 2 +-\n")
+    monkeypatch.setattr("hermes_cli.review_gate.run_code_review", lambda review_packet, **kwargs: (_review_verdict("approved", "looks good"), {**review_packet, "packet_hash": "sha256:gitfallback", "automatic_review_invoked": True, "automatic_review_verdict": "approved"}))
+    decision = evaluate_review_gate(plan, messages, config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}})
+    assert decision.review_required is True
+    assert decision.changed_paths == ["agent/conversation_loop.py"]
+    assert decision.automatic_review_invoked is True
+
+
+def test_scratch_tmp_file_does_not_trigger_material_review_gate(monkeypatch):
+    plan = _plan("Fix the failing pytest suite in the repository")
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "call_patch_tmp", "type": "function", "function": {"name": "patch", "arguments": '{"path":"/tmp/scratch.txt"}'}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_patch_tmp", "content": '{"success": true}'},
+    ]
+    monkeypatch.setattr("hermes_cli.review_gate._run_git_diff", lambda command, repo_root: "/tmp/scratch.txt\n" if "--name-only" in command else "")
+    decision = evaluate_review_gate(plan, messages, config={"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}})
+    assert decision.review_required is False
+    assert decision.changed_paths == []
