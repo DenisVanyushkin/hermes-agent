@@ -3726,6 +3726,14 @@ def _source_statuses_for_doctor(store: JobIntelStore) -> dict[str, dict[str, Any
         return {"database": {"source": "database", "status": "error", "errors": [str(exc)]}}
     if latest:
         return latest
+    if os.getenv("JOB_INTEL_DOCTOR_SKIP_LIVE_COLLECTION", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return {
+            "diagnostics": {
+                "source": "diagnostics",
+                "status": "skipped",
+                "errors": ["live source collection disabled for fast doctor mode"],
+            }
+        }
     try:
         return _collect_vacancies_compat(store).source_statuses
     except Exception as exc:
