@@ -211,6 +211,201 @@ def test_pipeline_observe_hook_runs_before_run_conversation_without_changing_res
 
 
 @pytest.mark.asyncio
+async def test_pipeline_observe_hook_runs_before_proxy_return_without_changing_result(monkeypatch):
+    events: list[tuple[str, object]] = []
+
+    pipeline_observe = importlib.import_module("hermes_cli.pipeline_observe")
+
+    def _fake_observe(**kwargs):
+        events.append(("observe", kwargs))
+        return None
+
+    async def _fake_proxy(**kwargs):
+        events.append(("proxy", kwargs))
+        return {
+            "final_response": "proxied",
+            "messages": [],
+            "api_calls": 0,
+        }
+
+    monkeypatch.setattr(pipeline_observe, "observe_pipeline_router_decision", _fake_observe)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {"pipelines": {"router": {"mode": "observe"}}})
+
+    runner = _make_runner()
+    runner._get_proxy_url = lambda: "http://proxy.example"
+    runner._run_agent_via_proxy = _fake_proxy
+
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="67890",
+        chat_name="Alerts",
+        chat_type="group",
+        user_id="user-1",
+        thread_id="42",
+    )
+
+    history = [{"role": "assistant", "content": "prior"}]
+    result = await runner._run_agent(
+        message="ping",
+        context_prompt="ctx",
+        history=history,
+        source=source,
+        session_id="session-proxy-1",
+        session_key="agent:main:telegram:group:67890:42",
+    )
+
+    assert result["final_response"] == "proxied"
+    assert [event for event, _ in events] == ["observe", "proxy"]
+    proxy_payload = events[1][1]
+    assert proxy_payload["message"] == "ping"
+    assert proxy_payload["context_prompt"] == "ctx"
+    assert proxy_payload["history"] == history
+    assert proxy_payload["session_id"] == "session-proxy-1"
+
+
+def test_pipeline_observe_disabled_skips_hook_for_local_and_proxy_paths(monkeypatch):
+    pipeline_observe = importlib.import_module("hermes_cli.pipeline_observe")
+    load_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        pipeline_observe,
+        "load_pipeline_specs",
+        lambda **kwargs: load_calls.append(kwargs),
+    )
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {"pipelines": {"router": {"mode": "disabled"}}})
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "api_key": "***",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+            "max_tokens": None,
+        },
+    )
+
+    class _NoopAgent:
+        def __init__(self, *args, **kwargs):
+            self.tools = []
+
+        def run_conversation(self, user_message: str, conversation_history=None, task_id=None):
+            return {"final_response": "ok", "messages": [], "api_calls": 1}
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _NoopAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    runner_local = _make_runner()
+    source_local = SessionSource(platform=Platform.LOCAL, chat_id="cli", chat_type="dm", user_id="u1")
+    local_result = asyncio.run(
+        runner_local._run_agent(
+            message="local ping",
+            context_prompt="",
+            history=[],
+            source=source_local,
+            session_id="session-local-disabled",
+            session_key="agent:main:local:dm",
+        )
+    )
+
+    runner_proxy = _make_runner()
+    runner_proxy._get_proxy_url = lambda: "http://proxy.example"
+
+    async def _fake_proxy(**kwargs):
+        return {"final_response": "proxied", "messages": [], "api_calls": 0}
+
+    runner_proxy._run_agent_via_proxy = _fake_proxy
+    source_proxy = SessionSource(platform=Platform.TELEGRAM, chat_id="67890", chat_type="group", user_id="u2")
+    proxy_result = asyncio.run(
+        runner_proxy._run_agent(
+            message="proxy ping",
+            context_prompt="",
+            history=[],
+            source=source_proxy,
+            session_id="session-proxy-disabled",
+            session_key="agent:main:telegram:group:67890",
+        )
+    )
+
+    assert local_result["final_response"] == "ok"
+    assert proxy_result["final_response"] == "proxied"
+    assert load_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_observe_failure_is_swallowed_for_proxy_and_local_paths(monkeypatch):
+    pipeline_observe = importlib.import_module("hermes_cli.pipeline_observe")
+
+    def _boom(**kwargs):
+        raise RuntimeError("observe failed")
+
+    monkeypatch.setattr(pipeline_observe, "observe_pipeline_router_decision", _boom)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {"pipelines": {"router": {"mode": "observe"}}})
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "api_key": "***",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+            "max_tokens": None,
+        },
+    )
+
+    class _NoopAgent:
+        def __init__(self, *args, **kwargs):
+            self.tools = []
+
+        def run_conversation(self, user_message: str, conversation_history=None, task_id=None):
+            return {"final_response": "ok", "messages": [], "api_calls": 1}
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _NoopAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    runner_local = _make_runner()
+    source_local = SessionSource(platform=Platform.LOCAL, chat_id="cli", chat_type="dm", user_id="u1")
+    local_result = await runner_local._run_agent(
+        message="local ping",
+        context_prompt="",
+        history=[],
+        source=source_local,
+        session_id="session-local-failure",
+        session_key="agent:main:local:dm",
+    )
+
+    runner_proxy = _make_runner()
+    runner_proxy._get_proxy_url = lambda: "http://proxy.example"
+
+    async def _fake_proxy(**kwargs):
+        return {"final_response": "proxied", "messages": [], "api_calls": 0}
+
+    runner_proxy._run_agent_via_proxy = _fake_proxy
+    source_proxy = SessionSource(platform=Platform.TELEGRAM, chat_id="67890", chat_type="group", user_id="u2")
+    proxy_result = await runner_proxy._run_agent(
+        message="proxy ping",
+        context_prompt="",
+        history=[],
+        source=source_proxy,
+        session_id="session-proxy-failure",
+        session_key="agent:main:telegram:group:67890",
+    )
+
+    assert local_result["final_response"] == "ok"
+    assert proxy_result["final_response"] == "proxied"
+
+
+@pytest.mark.asyncio
 async def test_background_task_prefers_session_override_over_global_runtime(monkeypatch):
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
