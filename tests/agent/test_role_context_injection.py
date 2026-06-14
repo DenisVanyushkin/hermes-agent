@@ -1094,3 +1094,71 @@ def test_conversation_path_invokes_model_selector_without_mutating_runtime_model
     }]
     assert getattr(agent, "_model_selection", None)["policy_name"] == "coding_high_reasoning"
     assert agent.model == "gpt-5.4-mini"
+
+
+def test_finalize_turn_uses_runtime_selected_role_for_review_gate(monkeypatch):
+    monkeypatch.setattr("hermes_cli.review_gate.load_config_readonly", lambda: {"review_gate": {"mode": "enforce", "reviewer_tier": "code_review"}})
+    captured = {}
+
+    def _fake_evaluate_review_gate(plan, messages, **kwargs):
+        captured["selected_role"] = plan.selected_role
+        captured["canonical_role"] = plan.canonical_role
+        captured["operation_category"] = plan.operation_category
+        captured["runtime_request"] = kwargs.get("runtime_request")
+        return ReviewGateDecision(
+            mode="enforce",
+            status="approved",
+            review_required=True,
+            blocking=False,
+            material_change_detected=True,
+            reviewer_tier="code_review",
+            reviewer_provider="openai-codex",
+            reviewer_model="gpt-5.5",
+            changed_paths=["job_intel/cli.py"],
+            changed_path_count=1,
+            packet={"task": "Fix job_intel/cli.py", "operation_category": "repo_mutation"},
+            packet_hash="sha256:runtime-role",
+            automatic_review_invoked=True,
+            automatic_review_verdict="approved",
+            reviewer_summary="looks good",
+            reviewer_findings=[],
+            required_changes=[],
+            tests_required=[],
+            approval_sensitive=False,
+            user_override=False,
+            review_error="",
+            warning="",
+        )
+
+    monkeypatch.setattr("agent.turn_finalizer.evaluate_review_gate", _fake_evaluate_review_gate)
+    agent = _FinalizeTurnAgent()
+    agent._turn_runtime_request = {
+        "selected_role": "engineer",
+        "canonical_role": "engineer",
+        "operation_category": "repo_mutation",
+        "selected_provider": "openrouter",
+        "selected_model": "xiaomi/mimo-v2.5-pro",
+        "actual_provider": "openrouter",
+        "actual_model": "xiaomi/mimo-v2.5-pro",
+    }
+    result = finalize_turn(
+        agent,
+        final_response="patched",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=_patched_messages_for_review_gate(),
+        conversation_history=[],
+        effective_task_id=None,
+        turn_id="turn-1",
+        user_message="Оцени вакансию и поправь job_intel/cli.py",
+        original_user_message="Оцени вакансию и поправь job_intel/cli.py",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(stop)",
+        response_pre_transformed=False,
+    )
+    assert result["completed"] is True
+    assert captured["selected_role"] == "engineer"
+    assert captured["canonical_role"] == "engineer"
+    assert captured["operation_category"] == "repo_mutation"
+    assert captured["runtime_request"]["actual_model"] == "xiaomi/mimo-v2.5-pro"

@@ -434,3 +434,10 @@ def test_profile_context_module_does_not_import_gateway_cron_or_trading():
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.append(node.module)
     assert not any(name.split(".", 1)[0] in forbidden_prefixes for name in imported)
+
+
+def test_job_intel_code_mutation_stays_engineer_not_career_strategist():
+    result = build_role_context_for_task("Fix job_intel/cli.py and run pytest for the repo change")
+    assert result.selected_role == "engineer"
+    assert result.canonical_role == "engineer"
+    assert result.operation_category == "repo_mutation"
