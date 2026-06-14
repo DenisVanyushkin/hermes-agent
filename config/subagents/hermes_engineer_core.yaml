@@ -1,0 +1,131 @@
+schema_version: 1
+id: hermes_engineer_core
+display_name: Hermes Engineer
+version: 1
+purpose: Implements code, config, script, test, and repository changes for Hermes engineering tasks.
+selection:
+  choose_when:
+    - task requires code, config, script, test, or repo mutation
+    - task requires debugging, repair, refactor, or implementation
+    - target paths include agent/**, gateway/**, hermes_cli/**, job_intel/**, scripts/**, tests/**, config/**
+  do_not_choose_when:
+    - task is documentation-only with no repo mutation
+    - task is career-only evaluation
+    - task is security review without implementation request
+models:
+  default:
+    provider: openrouter
+    model: xiaomi/mimo-v2.5-pro
+    class: base_coding
+  allowed:
+    - provider: openrouter
+      model: xiaomi/mimo-v2.5-pro
+      class: base_coding
+    - provider: openai-codex
+      model: gpt-5.5
+      class: senior_coding
+  escalation:
+    allowed: true
+    rules:
+      - condition: reviewer_blockers_persist_after_2_iterations
+        escalate_to:
+          provider: openai-codex
+          model: gpt-5.5
+          class: senior_coding
+      - condition: disagreement_unresolved_after_peer_discussion
+        escalate_to:
+          provider: openai-codex
+          model: gpt-5.5
+          class: senior_coding
+  fallback:
+    mode: fail_closed
+    reason: no approved coding model available
+tools:
+  read:
+    - file_read
+    - grep
+    - git_status
+    - git_diff
+    - test_result_read
+  write:
+    - patch
+    - write_file
+  execute:
+    - terminal
+    - pytest
+  gated:
+    - systemctl_restart
+    - service_restart
+    - git_commit
+    - git_push
+    - destructive_shell_commands
+  forbidden:
+    - credential_exfiltration
+    - unrelated_repo_mutation
+permissions:
+  can_mutate_files: true
+  can_restart_services: requires_explicit_user_approval
+  can_commit: requires_pipeline_approval
+  can_push: requires_pipeline_approval_and_user_request
+system_prompt:
+  path: prompts/subagents/hermes_engineer_core.md
+prompt_cache_policy:
+  stable_prompt_prefix_required: true
+  preserve_original_prompt_position: true
+  dynamic_additions_append_only: true
+  dynamic_additions:
+    - reviewer_findings
+    - peer_messages
+    - escalation_notes
+input_schema:
+  required:
+    - task
+    - repo
+    - pipeline_session_id
+    - constraints
+    - baseline_context
+  optional:
+    - reviewer_findings
+    - peer_messages
+    - previous_attempts
+    - escalation_reason
+output_schema:
+  status:
+    enum:
+      - done
+      - needs_user_input
+      - blocked
+      - failed
+      - disagree_with_reviewer
+  required_fields:
+    - summary
+    - changed_files
+    - tests_run
+    - risks
+    - confidence
+  optional_fields:
+    - reviewer_objections
+    - questions_for_user
+    - questions_for_peer_subagent
+communication:
+  can_send_to:
+    - hermes_code_reviewer
+    - hermes_security_auditor
+  can_receive_from:
+    - hermes_code_reviewer
+    - hermes_security_auditor
+  channel_policy:
+    mode: mediated_by_pipeline
+    direct_uncontrolled_chat: false
+observability:
+  log_selected_provider_model: true
+  log_actual_provider_model: true
+  log_token_usage: true
+  log_cache_usage: true
+  log_tool_calls: true
+  log_mutation_events: true
+  log_peer_messages: true
+failure_policy:
+  invalid_output: pipeline_blocks_or_retries
+  model_unavailable: fail_closed
+  tool_failure: return_failed_with_details

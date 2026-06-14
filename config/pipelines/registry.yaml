@@ -1,0 +1,50 @@
+schema_version: 1
+registry:
+  - id: default_conversation_pipeline
+    display_name: Default Conversation Pipeline
+    description: Handles fallback conversational, explanatory, planning, and low-risk requests when no specialized pipeline is selected.
+    entry_examples:
+      - Explain the current architecture decision in plain language.
+      - Summarize the last run and ask one clarification question.
+      - Draft a plan without changing repository files.
+    exclusion_examples:
+      - Fix the bug in gateway routing.
+      - Modify tests and patch the repo.
+      - Review a security-sensitive deployment change.
+    risk_notes:
+      - no file mutation allowed
+      - safe fallback only
+      - reclassify if specialized workflow is required
+      - routing_failed fallback requires fallback_safe == true
+    allowed_router_statuses:
+      - no_specialized_pipeline
+      - routing_failed
+    fallback_eligible: true
+    mutation_risk: none
+    required_subagents:
+      - general_operator
+    config_path: config/pipelines/default_conversation_pipeline.yaml
+  - id: engineering_review_pipeline
+    display_name: Engineering Review Pipeline
+    description: Handles code, config, script, and test changes with engineer and reviewer subagents plus bounded rework and review gates.
+    entry_examples:
+      - Fix the routing bug and update tests.
+      - Patch the architecture YAML specs.
+      - Make a repo change and run validation.
+    exclusion_examples:
+      - Explain how the pipeline works without changing files.
+      - Ask a general planning question.
+      - Provide a pure security audit with no implementation request.
+    risk_notes:
+      - may mutate repository
+      - requires baseline capture before changes
+      - requires review for material changes
+      - may involve security auditor for security-sensitive deltas
+    allowed_router_statuses:
+      - selected
+    fallback_eligible: false
+    mutation_risk: repository
+    required_subagents:
+      - hermes_engineer_core
+      - hermes_code_reviewer
+    config_path: config/pipelines/engineering_review_pipeline.yaml

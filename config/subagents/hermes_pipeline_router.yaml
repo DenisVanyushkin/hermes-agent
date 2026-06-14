@@ -1,0 +1,89 @@
+schema_version: 1
+id: hermes_pipeline_router
+display_name: Hermes Pipeline Router
+version: 1
+purpose: Selects the most appropriate pipeline for a user request using a schema-constrained routing decision against the machine-readable pipeline registry.
+selection:
+  choose_when:
+    - every incoming top-level Hermes request before specialized execution
+  do_not_choose_when:
+    - never bypassed for specialized execution routing
+models:
+  default:
+    provider: openai-codex
+    model: gpt-5.4-mini
+    class: routing
+  allowed:
+    - provider: openai-codex
+      model: gpt-5.4-mini
+      class: routing
+    - provider: openai-codex
+      model: gpt-5.5
+      class: senior_reasoning
+  escalation:
+    allowed: true
+    rules:
+      - condition: low_confidence_or_ambiguous_pipeline_selection
+        escalate_to:
+          provider: openai-codex
+          model: gpt-5.5
+          class: senior_reasoning
+  fallback:
+    mode: fail_closed
+    reason: no approved routing model available
+tools:
+  read:
+    - pipeline_registry_read
+    - session_context_read
+    - conversation_context_read
+  write: []
+  execute: []
+  gated: []
+  forbidden:
+    - file_mutation
+    - external_side_effects
+permissions:
+  can_mutate_files: false
+  can_call_external_tools: false
+input_schema:
+  required:
+    - user_message
+    - platform_context
+    - session_context
+    - pipeline_registry
+    - safety_constraints
+  optional:
+    - recent_pipeline_state
+output_schema:
+  status:
+    enum:
+      - selected
+      - no_specialized_pipeline
+      - needs_clarification
+      - blocked_by_policy
+      - routing_failed
+  required_fields:
+    - confidence
+    - reasoning_summary
+    - requires_clarification
+  conditional_required:
+    - when: status == selected
+      fields:
+        - selected_pipeline_id
+  optional_fields:
+    - selected_pipeline_id
+    - fallback_pipeline_id
+    - alternatives
+    - clarification_question
+    - policy_block_reason
+    - routing_failure_reason
+    - fallback_used
+observability:
+  log_selected_provider_model: true
+  log_actual_provider_model: true
+  log_token_usage: true
+  log_cache_usage: true
+  log_routing_decision: true
+failure_policy:
+  invalid_output: return_routing_failed
+  model_unavailable: fail_closed
