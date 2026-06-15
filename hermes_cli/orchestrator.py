@@ -42,10 +42,10 @@ def observe_gateway_turn(
     router_decision: RouterDecision | None = None,
     selected_provider: str | None = None,
     selected_model: str | None = None,
-    actual_provider: str | None = None,
-    actual_model: str | None = None,
     logger: logging.Logger | None = None,
 ) -> OrchestratorObserveReport | None:
+    del selected_provider, selected_model
+
     mode = _orchestrator_mode(config)
     if mode != "observe":
         return None
@@ -80,47 +80,16 @@ def observe_gateway_turn(
         user_message=user_message,
         pipeline_session_id=pipeline_session_id,
         router_decision=router_decision,
-        selected_provider=selected_provider,
-        selected_model=selected_model,
+        selected_provider=None,
+        selected_model=None,
     )
-    pipeline_gate = _evaluate_pipeline_gate_safely(
+    pipeline_preflight = _evaluate_pipeline_gate_safely(
         config=config,
         router_decision=router_decision,
         pipeline_plan_payload=pipeline_plan_payload,
         platform=platform,
         user_message=user_message,
     )
-    try:
-        pipeline_handoff_payload = _evaluate_pipeline_handoff_safely(
-            router_decision=router_decision,
-            pipeline_plan_payload=pipeline_plan_payload,
-            pipeline_gate=pipeline_gate,
-        )
-    except Exception as exc:
-        pipeline_handoff_payload = _handoff_failure_payload(
-            router_decision=router_decision,
-            pipeline_gate=pipeline_gate,
-            reason_code="handoff_evaluation_failed",
-            exception_type=type(exc).__name__,
-            elapsed_ms=0.0,
-        )
-    try:
-        pipeline_activation_payload = _evaluate_pipeline_activation_safely(
-            config=config,
-            router_decision=router_decision,
-            pipeline_gate=pipeline_gate,
-            pipeline_handoff_payload=pipeline_handoff_payload,
-            platform=platform,
-        )
-    except Exception as exc:
-        pipeline_activation_payload = _activation_failure_payload(
-            router_decision=router_decision,
-            pipeline_gate=pipeline_gate,
-            pipeline_handoff_payload=pipeline_handoff_payload,
-            reason_code="activation_evaluation_failed",
-            exception_type=type(exc).__name__,
-            elapsed_ms=0.0,
-        )
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
     execution_report = ExecutionReport(
         pipeline_session_id=pipeline_session_id,
@@ -130,10 +99,10 @@ def observe_gateway_turn(
         fallback_pipeline_id=state.fallback_pipeline_id,
         completion_allowed=state.completion_allowed,
         completion_reason="observe_only_default_path",
-        selected_provider=selected_provider or _UNAVAILABLE,
-        selected_model=selected_model or _UNAVAILABLE,
-        actual_provider=actual_provider or _UNAVAILABLE,
-        actual_model=actual_model or _UNAVAILABLE,
+        executed=False,
+        would_execute=False,
+        execution_mode="observe",
+        runtime_status="not_observed",
         token_usage=getattr(router_decision, "token_usage", None) if router_decision is not None else _UNAVAILABLE,
         cache_usage=getattr(router_decision, "cache_usage", None) if router_decision is not None else _UNAVAILABLE,
         tool_call_summary=[],
@@ -150,9 +119,7 @@ def observe_gateway_turn(
         report=report,
         orchestrator_mode=mode,
         pipeline_plan_payload=pipeline_plan_payload,
-        pipeline_gate_payload=pipeline_gate.to_safe_dict(),
-        pipeline_handoff_payload=pipeline_handoff_payload,
-        pipeline_activation_payload=pipeline_activation_payload,
+        pipeline_preflight_payload=pipeline_preflight.to_safe_dict(),
     )
     return report
 
@@ -176,22 +143,26 @@ def _evaluate_pipeline_gate_safely(
             )
         )
     except Exception as exc:
+        selected_pipeline_id = getattr(router_decision, "selected_pipeline_id", None)
+        pipeline_id = selected_pipeline_id or getattr(router_decision, "fallback_pipeline_id", None)
         return PipelineGateDecision(
             allowed=False,
             mode=PipelineGateMode.DISABLED,
-            pipeline_id=getattr(router_decision, "selected_pipeline_id", None)
-            or getattr(router_decision, "fallback_pipeline_id", None),
+            pipeline_id=pipeline_id,
             pipeline_session_id=getattr(router_decision, "pipeline_session_id", None),
+            selected_pipeline_id=selected_pipeline_id,
+            planned_steps_count=int(pipeline_plan_payload.get("planned_steps_count") or 0),
             reason_code="unknown",
-            reason="Pipeline gate evaluation failed; treating execution as denied.",
+            reason="Pipeline preflight evaluation failed; treating execution as denied.",
+            would_execute=False,
+            executed=False,
             requirements_met=[],
-            requirements_failed=["gate_evaluation_failed"],
+            requirements_failed=["preflight_evaluation_failed"],
             risk_level="high",
             safe_to_log_payload={
                 "mode": PipelineGateMode.DISABLED.value,
                 "pipeline_session_id": getattr(router_decision, "pipeline_session_id", None),
-                "pipeline_id": getattr(router_decision, "selected_pipeline_id", None)
-                or getattr(router_decision, "fallback_pipeline_id", None),
+                "pipeline_id": pipeline_id,
                 "platform": platform,
                 "user_message_length": len(user_message or ""),
                 "user_message_hash": _hash_user_message(user_message),
@@ -214,56 +185,6 @@ def _orchestrator_mode(config: dict[str, Any] | None) -> str:
         raw,
     )
     return "disabled"
-
-
-def _evaluate_pipeline_handoff_safely(
-    *,
-    router_decision: RouterDecision | None,
-    pipeline_plan_payload: dict[str, Any],
-    pipeline_gate: PipelineGateDecision,
-) -> dict[str, Any]:
-    if not _should_plan_engineering_pipeline(config={"pipelines": {"enabled": True, "orchestrator": {"mode": "observe"}}}, router_decision=router_decision):
-        pipeline_id = getattr(router_decision, "selected_pipeline_id", None) or getattr(router_decision, "fallback_pipeline_id", None)
-        pipeline_session_id = getattr(router_decision, "pipeline_session_id", None)
-        return {
-            "pipeline_id": pipeline_id,
-            "pipeline_session_id": pipeline_session_id,
-            "gate_allowed": False,
-            "gate_reason_code": "not_applicable",
-            "handoff_status": "not_applicable",
-            "handoff_reason": "not_applicable",
-            "execution_mode": "observe_only",
-            "would_execute": False,
-            "executed": False,
-            "pipeline_executor_status": None,
-            "safe_summary": "Pipeline handoff is not applicable for the current observe route.",
-            "elapsed_ms": 0.0,
-            "error": None,
-            "gate_payload": {},
-            "pipeline_executor_result": None,
-        }
-
-    started = time.perf_counter()
-    try:
-        handoff_request = _build_pipeline_handoff_request(
-            router_decision=router_decision,
-            pipeline_gate=pipeline_gate,
-        )
-        coordinator = _load_pipeline_handoff_coordinator_class()()
-        result = coordinator.run(handoff_request)
-        payload = result.to_safe_dict()
-        payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
-        if payload.get("handoff_status") == "denied":
-            payload["handoff_reason"] = payload.get("gate_reason_code") or payload.get("handoff_reason")
-        return payload
-    except Exception as exc:
-        return _handoff_failure_payload(
-            router_decision=router_decision,
-            pipeline_gate=pipeline_gate,
-            reason_code="handoff_evaluation_failed",
-            exception_type=type(exc).__name__,
-            elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
-        )
 
 
 def _build_pipeline_state(
@@ -315,9 +236,7 @@ def _log_observe_report(
     report: OrchestratorObserveReport,
     orchestrator_mode: str,
     pipeline_plan_payload: dict[str, Any],
-    pipeline_gate_payload: dict[str, Any],
-    pipeline_handoff_payload: dict[str, Any],
-    pipeline_activation_payload: dict[str, Any],
+    pipeline_preflight_payload: dict[str, Any],
 ) -> None:
     payload = {
         "event": "pipeline_orchestrator_observe_report",
@@ -339,9 +258,7 @@ def _log_observe_report(
         "session": asdict(report.session),
         "state": asdict(report.state),
         "execution_report": asdict(report.execution_report),
-        "pipeline_gate": pipeline_gate_payload,
-        "pipeline_handoff": pipeline_handoff_payload,
-        "pipeline_activation": pipeline_activation_payload,
+        "pipeline_preflight": pipeline_preflight_payload,
     }
     payload.update(pipeline_plan_payload)
     gateway_logger.info(
@@ -359,13 +276,18 @@ def _build_pipeline_plan_payload(
     selected_provider: str | None,
     selected_model: str | None,
 ) -> dict[str, Any]:
+    del user_message, selected_provider, selected_model
+
     if not _should_plan_engineering_pipeline(config=config, router_decision=router_decision):
         return {
             "pipeline_plan_status": "not_applicable",
             "pipeline_plan_completion_reason": None,
+            "pipeline_plan_mode": "not_applicable",
             "planned_steps_count": 0,
             "planned_subagent_ids": [],
+            "engineer_step_present": False,
             "reviewer_planned": False,
+            "reviewer_step_present": False,
             "reviewer_condition": None,
             "pipeline_plan_elapsed_ms": 0.0,
             "runtime_plan_failed": False,
@@ -376,49 +298,39 @@ def _build_pipeline_plan_payload(
     started = time.perf_counter()
     try:
         loaded_specs = _load_pipeline_specs(repo_root=None)
-        runtime_factory_cls = _load_runtime_factory_class()
-        executor_cls = _load_pipeline_planning_components()
-        subagent_runner_cls = _load_subagent_runner_class()
-        request_cls = _load_pipeline_execution_request_class()
-        executor = executor_cls(
-            runtime_factory=runtime_factory_cls(repo_root=loaded_specs.repo_root),
-            engineer_runner=subagent_runner_cls(executor=None),
-            reviewer_runner=subagent_runner_cls(executor=None),
-        )
-        result = executor.execute(
-            request_cls(
-                loaded_specs=loaded_specs,
-                pipeline_session_id=pipeline_session_id,
-                task_summary=user_message,
-                repo_path=str(loaded_specs.repo_root),
-                current_session_provider=selected_provider,
-                current_session_model=selected_model,
-                mode="plan_only",
-            )
+        result = _build_lightweight_engineering_plan_summary(
+            loaded_specs=loaded_specs,
+            pipeline_session_id=pipeline_session_id,
         )
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
-        safe_result = result.to_safe_dict()
-        reviewer_step = next((step for step in safe_result["step_records"] if step["step_kind"] == "reviewer"), None)
+        reviewer_step = next((step for step in result["step_records"] if step["step_kind"] == "reviewer"), None)
+        engineer_step = next((step for step in result["step_records"] if step["step_kind"] == "engineer"), None)
         return {
-            "pipeline_plan_status": safe_result["status"],
-            "pipeline_plan_completion_reason": safe_result["completion_reason"],
-            "planned_steps_count": len(safe_result["step_records"]),
-            "planned_subagent_ids": [step["subagent_id"] for step in safe_result["step_records"]],
+            "pipeline_plan_status": result["status"],
+            "pipeline_plan_completion_reason": result["completion_reason"],
+            "pipeline_plan_mode": result["mode"],
+            "planned_steps_count": len(result["step_records"]),
+            "planned_subagent_ids": [step["subagent_id"] for step in result["step_records"]],
+            "engineer_step_present": engineer_step is not None,
             "reviewer_planned": reviewer_step is not None,
+            "reviewer_step_present": reviewer_step is not None,
             "reviewer_condition": reviewer_step["condition"] if reviewer_step else None,
             "pipeline_plan_elapsed_ms": elapsed_ms,
-            "runtime_plan_failed": safe_result["status"] == "failed",
-            "pipeline_plan_error": _result_error_payload(safe_result),
-            "pipeline_plan": safe_result,
+            "runtime_plan_failed": result["status"] == "failed",
+            "pipeline_plan_error": _result_error_payload(result),
+            "pipeline_plan": result,
         }
     except Exception as exc:
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
         return {
             "pipeline_plan_status": "failed",
             "pipeline_plan_completion_reason": "planning_failed",
+            "pipeline_plan_mode": "observe_plan_only",
             "planned_steps_count": 0,
             "planned_subagent_ids": [],
+            "engineer_step_present": False,
             "reviewer_planned": False,
+            "reviewer_step_present": False,
             "reviewer_condition": None,
             "pipeline_plan_elapsed_ms": elapsed_ms,
             "runtime_plan_failed": True,
@@ -447,232 +359,41 @@ def _load_pipeline_specs(*, repo_root: Any):
 
     return load_pipeline_specs(repo_root=repo_root)
 
-
-def _load_runtime_factory_class():
-    from hermes_cli.runtime_factory import RuntimeFactory
-
-    return RuntimeFactory
-
-
-def _load_pipeline_planning_components():
-    from hermes_cli.pipeline_executor import EngineeringReviewPipelineExecutor
-
-    return EngineeringReviewPipelineExecutor
-
-
-def _load_subagent_runner_class():
-    from hermes_cli.subagent_runner import SubagentRunner
-
-    return SubagentRunner
-
-
-def _load_pipeline_execution_request_class():
-    from hermes_cli.pipeline_executor import PipelineExecutionRequest
-
-    return PipelineExecutionRequest
-
-
-def _load_pipeline_handoff_coordinator_class():
-    from hermes_cli.pipeline_handoff import PipelineHandoffCoordinator
-
-    return PipelineHandoffCoordinator
-
-
-def _load_pipeline_activation_coordinator_class():
-    from hermes_cli.pipeline_activation import PipelineActivationCoordinator
-
-    return PipelineActivationCoordinator
-
-
-def _load_pipeline_activation_types():
-    from hermes_cli.pipeline_activation import PipelineActivationRequest, PipelineActivationResult, PipelineActivationStatus
-
-    return PipelineActivationRequest, PipelineActivationResult, PipelineActivationStatus
-
-
-def _load_pipeline_handoff_request_class():
-    from hermes_cli.pipeline_handoff import PipelineHandoffMode, PipelineHandoffRequest
-
-    return PipelineHandoffMode, PipelineHandoffRequest
-
-
-def _build_pipeline_handoff_request(
+def _build_lightweight_engineering_plan_summary(
     *,
-    router_decision: RouterDecision | None,
-    pipeline_gate: PipelineGateDecision,
-):
-    pipeline_id = getattr(router_decision, "selected_pipeline_id", None) or getattr(router_decision, "fallback_pipeline_id", None)
-    pipeline_session_id = getattr(router_decision, "pipeline_session_id", None) or uuid.uuid4().hex
-    execution_request_cls = _load_pipeline_execution_request_class()
-    pipeline_handoff_mode_cls, pipeline_handoff_request_cls = _load_pipeline_handoff_request_class()
-    return pipeline_handoff_request_cls(
-        pipeline_id=pipeline_id or DEFAULT_PIPELINE_ID,
-        pipeline_session_id=pipeline_session_id,
-        router_decision=router_decision,
-        gate_decision=pipeline_gate,
-        execution_request=execution_request_cls(
-            loaded_specs=_load_pipeline_specs(repo_root=None),
-            pipeline_session_id=pipeline_session_id,
-            task_summary="observe_only_redacted",
-            repo_path="observe_only_redacted",
-            pipeline_id=pipeline_id or _ENGINEERING_PIPELINE_ID,
-            mode="plan_only",
-        ),
-        mode=pipeline_handoff_mode_cls.OBSERVE_ONLY,
-        allow_test_execution=False,
-        engineer_executor=None,
-        reviewer_executor=None,
-    )
-
-
-def _safe_gate_payload(gate: PipelineGateDecision) -> dict[str, Any]:
-    try:
-        return gate.to_safe_dict()
-    except Exception:
-        return {}
-
-
-def _evaluate_pipeline_activation_safely(
-    *,
-    config: dict[str, Any] | None,
-    router_decision: RouterDecision | None,
-    pipeline_gate: PipelineGateDecision,
-    pipeline_handoff_payload: dict[str, Any],
-    platform: str | None,
+    loaded_specs: Any,
+    pipeline_session_id: str,
 ) -> dict[str, Any]:
-    pipeline_id = getattr(router_decision, "selected_pipeline_id", None) or getattr(router_decision, "fallback_pipeline_id", None)
-    pipeline_session_id = getattr(router_decision, "pipeline_session_id", None)
-    request_cls, _result_cls, status_cls = _load_pipeline_activation_types()
-    coordinator = _load_pipeline_activation_coordinator_class()()
+    pipeline_spec = loaded_specs.pipeline_specs[_ENGINEERING_PIPELINE_ID]
+    subagents = pipeline_spec.get("subagents") or {}
+    engineer_id = str(subagents.get("engineer") or "")
+    reviewer_id = str(subagents.get("reviewer") or "")
+    if not engineer_id or not reviewer_id:
+        raise ValueError("engineering pipeline spec is missing engineer/reviewer subagent ids")
 
-    if pipeline_handoff_payload.get("handoff_status") == "not_applicable":
-        return {
-            "pipeline_id": pipeline_id,
-            "pipeline_session_id": pipeline_session_id,
-            "activation_status": status_cls.NOT_APPLICABLE.value,
-            "activation_reason": "not_applicable",
-            "would_execute": False,
-            "executed": False,
-            "gate_allowed": False,
-            "handoff_would_execute": False,
-            "handoff_executed": False,
-            "execution_mode": "disabled",
-            "requirements_met": [],
-            "requirements_failed": ["specialized_pipeline_selected"],
-            "error": None,
-            "pipeline_executor_status": None,
-            "pipeline_executor_result": None,
-            "elapsed_ms": 0.0,
-        }
-
-    result = coordinator.run(
-        request_cls(
-            config=config,
-            router_decision=router_decision,
-            pipeline_id=pipeline_id,
-            pipeline_session_id=pipeline_session_id,
-            gate_decision=pipeline_gate,
-            handoff_decision=_handoff_payload_to_decision(pipeline_handoff_payload),
-            executor=None,
-            platform=platform,
-            platform_allowed=True if platform else None,
-            destructive_task=False,
-            explicit_approval=False,
-            allow_test_execution=False,
-        )
-    )
-    return result.to_safe_dict()
-
-
-def _handoff_payload_to_decision(payload: dict[str, Any]):
-    from hermes_cli.pipeline_handoff import PipelineHandoffDecision, PipelineHandoffError, PipelineHandoffMode, PipelineHandoffStatus
-
-    error_payload = payload.get("error")
-    error = None
-    if isinstance(error_payload, dict) and error_payload.get("code"):
-        error = PipelineHandoffError(
-            code=str(error_payload["code"]),
-            exception_type=error_payload.get("exception_type"),
-        )
-    return PipelineHandoffDecision(
-        pipeline_id=payload.get("pipeline_id"),
-        pipeline_session_id=payload.get("pipeline_session_id"),
-        gate_allowed=bool(payload.get("gate_allowed", False)),
-        gate_reason_code=str(payload.get("gate_reason_code", "unknown")),
-        handoff_status=PipelineHandoffStatus(str(payload.get("handoff_status", "failed"))),
-        handoff_reason=str(payload.get("handoff_reason", "unknown")),
-        execution_mode=PipelineHandoffMode(str(payload.get("execution_mode", "disabled"))),
-        would_execute=bool(payload.get("would_execute", False)),
-        executed=bool(payload.get("executed", False)),
-        safe_summary=str(payload.get("safe_summary", "")),
-        elapsed_ms=float(payload.get("elapsed_ms", 0.0) or 0.0),
-        error=error,
-        gate_payload=dict(payload.get("gate_payload") or {}),
-        pipeline_executor_result=None,
-    )
-
-
-def _activation_failure_payload(
-    *,
-    router_decision: RouterDecision | None,
-    pipeline_gate: PipelineGateDecision,
-    pipeline_handoff_payload: dict[str, Any],
-    reason_code: str,
-    exception_type: str,
-    elapsed_ms: float,
-) -> dict[str, Any]:
-    return {
-        "pipeline_id": getattr(router_decision, "selected_pipeline_id", None)
-        or getattr(router_decision, "fallback_pipeline_id", None),
-        "pipeline_session_id": getattr(router_decision, "pipeline_session_id", None),
-        "activation_status": "failed",
-        "activation_reason": reason_code,
-        "would_execute": False,
-        "executed": False,
-        "gate_allowed": bool(getattr(pipeline_gate, "allowed", False)),
-        "handoff_would_execute": bool(pipeline_handoff_payload.get("would_execute", False)),
-        "handoff_executed": bool(pipeline_handoff_payload.get("executed", False)),
-        "execution_mode": "observe_only",
-        "requirements_met": [],
-        "requirements_failed": ["activation_evaluation_failed"],
-        "error": {
-            "code": reason_code,
-            "exception_type": exception_type,
+    step_records = [
+        {
+            "step_kind": "engineer",
+            "subagent_id": engineer_id,
+            "condition": None,
+            "execution_status": "planned",
+            "planning_mode": "metadata_only",
         },
-        "pipeline_executor_status": None,
-        "pipeline_executor_result": None,
-        "elapsed_ms": elapsed_ms,
-    }
-
-
-def _handoff_failure_payload(
-    *,
-    router_decision: RouterDecision | None,
-    pipeline_gate: PipelineGateDecision,
-    reason_code: str,
-    exception_type: str,
-    elapsed_ms: float,
-) -> dict[str, Any]:
-    return {
-        "pipeline_id": getattr(router_decision, "selected_pipeline_id", None)
-        or getattr(router_decision, "fallback_pipeline_id", None),
-        "pipeline_session_id": getattr(router_decision, "pipeline_session_id", None),
-        "gate_allowed": bool(getattr(pipeline_gate, "allowed", False)),
-        "gate_reason_code": getattr(pipeline_gate, "reason_code", "unknown"),
-        "handoff_status": "failed",
-        "handoff_reason": reason_code,
-        "execution_mode": "observe_only",
-        "would_execute": False,
-        "executed": False,
-        "pipeline_executor_status": None,
-        "safe_summary": "Pipeline handoff evaluation failed closed in observe mode.",
-        "elapsed_ms": elapsed_ms,
-        "error": {
-            "code": reason_code,
-            "exception_type": exception_type,
+        {
+            "step_kind": "reviewer",
+            "subagent_id": reviewer_id,
+            "condition": "code_changes_require_review",
+            "execution_status": "planned",
+            "planning_mode": "metadata_only",
         },
-        "gate_payload": _safe_gate_payload(pipeline_gate),
-        "pipeline_executor_result": None,
+    ]
+    return {
+        "pipeline_id": _ENGINEERING_PIPELINE_ID,
+        "pipeline_session_id": pipeline_session_id,
+        "status": "planned",
+        "completion_reason": "plan_only",
+        "mode": "observe_plan_only",
+        "step_records": step_records,
     }
 
 
