@@ -24,6 +24,7 @@ class PipelineExecutorStatus(str, Enum):
     APPROVED = "approved"
     BLOCKED = "blocked"
     FAILED = "failed"
+    PLANNED = "planned"
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class PipelineExecutionRequest:
     max_iterations: int = 2
     current_session_provider: str | None = None
     current_session_model: str | None = None
+    mode: str = "execute"
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,9 @@ class PipelineStepRecord:
     constructor_provider: str | None
     constructor_model: str | None
     selected_model_class: str | None
+    condition: str | None
+    prompt_artifact: dict[str, Any]
+    tool_permission_plan_summary: dict[str, Any]
     elapsed_ms: float
     safe_output_summary: str
     metadata_summary: dict[str, Any] = field(default_factory=dict)
@@ -64,6 +69,9 @@ class PipelineStepRecord:
             "constructor_provider": self.constructor_provider,
             "constructor_model": self.constructor_model,
             "selected_model_class": self.selected_model_class,
+            "condition": self.condition,
+            "prompt_artifact": _sanitize_payload(self.prompt_artifact),
+            "tool_permission_plan_summary": _sanitize_payload(self.tool_permission_plan_summary),
             "elapsed_ms": self.elapsed_ms,
             "safe_output_summary": _sanitize_payload(self.safe_output_summary),
             "metadata_summary": _sanitize_payload(self.metadata_summary),
@@ -78,7 +86,7 @@ class PipelineIterationRecord:
     iteration: int
     engineer: PipelineStepRecord
     reviewer: PipelineStepRecord | None
-    reviewer_required: bool
+    reviewer_required: bool | None
     reviewer_ran: bool
     blocking_findings_count: int
     final_iteration_status: str
@@ -106,7 +114,7 @@ class PipelineExecutionResult:
     completion_reason: str
     iterations: list[PipelineIterationRecord]
     step_records: list[PipelineStepRecord]
-    reviewer_required: bool
+    reviewer_required: bool | None
     reviewer_ran: bool
     blocking_findings_count: int
     final_approval_status: str
@@ -165,6 +173,14 @@ class EngineeringReviewPipelineExecutor:
         engineer_id = str(pipeline_spec.get("subagents", {}).get("engineer"))
         reviewer_id = str(pipeline_spec.get("subagents", {}).get("reviewer"))
         max_iterations = max(1, int(request.max_iterations or 1))
+
+        if request.mode == "plan_only":
+            return self._execute_plan_only(
+                request=request,
+                engineer_id=engineer_id,
+                reviewer_id=reviewer_id,
+                started=started,
+            )
 
         reviewer_required = False
         reviewer_ran = False
@@ -381,6 +397,82 @@ class EngineeringReviewPipelineExecutor:
             elapsed_ms=_elapsed_ms(started),
         )
 
+    def _execute_plan_only(
+        self,
+        *,
+        request: PipelineExecutionRequest,
+        engineer_id: str,
+        reviewer_id: str,
+        started: float,
+    ) -> PipelineExecutionResult:
+        engineer_plan = self._build_runtime_plan(
+            request=request,
+            subagent_id=engineer_id,
+            invocation_id=f"{request.pipeline_session_id}:engineer:plan",
+            elapsed_ms=_elapsed_ms(started),
+        )
+        if isinstance(engineer_plan, PipelineExecutionResult):
+            return engineer_plan
+
+        reviewer_plan = self._build_runtime_plan(
+            request=request,
+            subagent_id=reviewer_id,
+            invocation_id=f"{request.pipeline_session_id}:reviewer:plan",
+            elapsed_ms=_elapsed_ms(started),
+        )
+        if isinstance(reviewer_plan, PipelineExecutionResult):
+            return reviewer_plan
+
+        engineer_step = self._planned_step_record(
+            iteration=1,
+            step_kind="engineer",
+            runtime_plan=engineer_plan,
+            safe_output_summary="Plan only; engineer execution was not started.",
+            condition=None,
+            metadata_summary={
+                "execution_mode": "plan_only",
+                "planned_execution": True,
+                "code_changed": None,
+                "needs_review": None,
+            },
+        )
+        reviewer_step = self._planned_step_record(
+            iteration=1,
+            step_kind="reviewer",
+            runtime_plan=reviewer_plan,
+            safe_output_summary="Plan only; reviewer execution is conditional on code changes.",
+            condition="code_changes_require_review",
+            metadata_summary={
+                "execution_mode": "plan_only",
+                "planned_execution": True,
+                "approved": None,
+                "blocking_findings_count": None,
+            },
+        )
+        step_records = [engineer_step, reviewer_step]
+        iteration_record = PipelineIterationRecord(
+            iteration=1,
+            engineer=engineer_step,
+            reviewer=reviewer_step,
+            reviewer_required=None,
+            reviewer_ran=False,
+            blocking_findings_count=0,
+            final_iteration_status="planned",
+        )
+        return self._success_result(
+            request=request,
+            status=PipelineExecutorStatus.PLANNED,
+            completion_reason="plan_only",
+            iterations=[iteration_record],
+            step_records=step_records,
+            reviewer_required=None,
+            reviewer_ran=False,
+            blocking_findings_count=0,
+            final_approval_status="planned",
+            elapsed_ms=_elapsed_ms(started),
+            safe_summary="Engineering review pipeline plan built without executing engineer or reviewer subagents.",
+        )
+
     def _validate_specs(self, loaded_specs: LoadedPipelineSpecs, pipeline_id: str) -> tuple[str, str] | None:
         pipeline_spec = loaded_specs.pipeline_specs.get(pipeline_id)
         if pipeline_spec is None:
@@ -417,11 +509,14 @@ class EngineeringReviewPipelineExecutor:
             )
         )
         if plan.actual_runtime_status != "ready_to_construct":
+            error_message = f"Runtime plan for {subagent_id} is {plan.actual_runtime_status}"
+            if plan.errors:
+                error_message = f"{error_message}: {plan.errors[0].message}"
             return self._failure_result(
                 request=request,
                 completion_reason="runtime_plan_failed",
                 error_code="runtime_plan_failed",
-                error_message=f"Runtime plan for {subagent_id} is {plan.actual_runtime_status}",
+                error_message=error_message,
                 elapsed_ms=elapsed_ms,
             )
         return plan
@@ -445,8 +540,39 @@ class EngineeringReviewPipelineExecutor:
             constructor_provider=runtime_plan.constructor_provider,
             constructor_model=runtime_plan.constructor_model,
             selected_model_class=runtime_plan.selection.selected_model_class if runtime_plan.selection else None,
+            condition=None,
+            prompt_artifact=runtime_plan.prompt.to_safe_dict() if runtime_plan.prompt else {},
+            tool_permission_plan_summary=runtime_plan.tool_permission_plan.to_safe_dict() if runtime_plan.tool_permission_plan else {},
             elapsed_ms=invocation_result.record.elapsed_ms,
             safe_output_summary=invocation_result.record.safe_output_summary,
+            metadata_summary=metadata_summary,
+        )
+
+    def _planned_step_record(
+        self,
+        *,
+        iteration: int,
+        step_kind: str,
+        runtime_plan: RuntimeBuildResult,
+        safe_output_summary: str,
+        condition: str | None,
+        metadata_summary: dict[str, Any],
+    ) -> PipelineStepRecord:
+        return PipelineStepRecord(
+            iteration=iteration,
+            step_kind=step_kind,
+            subagent_id=runtime_plan.subagent_id,
+            invocation_id=runtime_plan.invocation_id or f"{runtime_plan.pipeline_session_id}:{step_kind}:plan",
+            execution_status="planned",
+            completion_reason="plan_only",
+            constructor_provider=runtime_plan.constructor_provider,
+            constructor_model=runtime_plan.constructor_model,
+            selected_model_class=runtime_plan.selection.selected_model_class if runtime_plan.selection else None,
+            condition=condition,
+            prompt_artifact=runtime_plan.prompt.to_safe_dict() if runtime_plan.prompt else {},
+            tool_permission_plan_summary=runtime_plan.tool_permission_plan.to_safe_dict() if runtime_plan.tool_permission_plan else {},
+            elapsed_ms=0.0,
+            safe_output_summary=safe_output_summary,
             metadata_summary=metadata_summary,
         )
 
@@ -473,7 +599,7 @@ class EngineeringReviewPipelineExecutor:
         completion_reason: str,
         iterations: list[PipelineIterationRecord],
         step_records: list[PipelineStepRecord],
-        reviewer_required: bool,
+        reviewer_required: bool | None,
         reviewer_ran: bool,
         blocking_findings_count: int,
         final_approval_status: str,

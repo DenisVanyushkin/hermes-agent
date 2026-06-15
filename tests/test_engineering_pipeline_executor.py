@@ -26,13 +26,20 @@ def _build_loaded_specs(tmp_path: Path):
     return repo_root, load_pipeline_specs(repo_root=repo_root)
 
 
-def _build_executor(tmp_path: Path, *, engineer_outputs: list[dict], reviewer_outputs: list[dict] | None = None, max_iterations: int = 2):
+def _build_executor(
+    tmp_path: Path,
+    *,
+    engineer_outputs: list[dict] | None = None,
+    reviewer_outputs: list[dict] | None = None,
+    max_iterations: int = 2,
+    mode: str = "execute",
+):
     from hermes_cli.pipeline_executor import EngineeringReviewPipelineExecutor, PipelineExecutionRequest
     from hermes_cli.runtime_factory import RuntimeFactory
     from hermes_cli.subagent_runner import SubagentRunner
 
     repo_root, loaded_specs = _build_loaded_specs(tmp_path)
-    engineer_queue = list(engineer_outputs)
+    engineer_queue = list(engineer_outputs or [])
     reviewer_queue = list(reviewer_outputs or [])
 
     def engineer_executor(_request, _runtime_plan):
@@ -56,6 +63,7 @@ def _build_executor(tmp_path: Path, *, engineer_outputs: list[dict], reviewer_ou
         task_summary="Implement F1",
         repo_path=str(repo_root),
         max_iterations=max_iterations,
+        mode=mode,
     )
     return executor, request
 
@@ -268,6 +276,130 @@ def test_runtime_factory_blocked_result_fails_pipeline_structurally(tmp_path: Pa
     assert result.status.value == "failed"
     assert result.completion_reason == "runtime_plan_failed"
     assert result.error_code == "runtime_plan_failed"
+
+
+def test_plan_only_builds_engineer_and_reviewer_runtime_plans_without_execution(tmp_path: Path) -> None:
+    executed = {"engineer": 0, "reviewer": 0}
+
+    def engineer_executor(_request, _runtime_plan):
+        executed["engineer"] += 1
+        return {"output_text": "unexpected"}
+
+    def reviewer_executor(_request, _runtime_plan):
+        executed["reviewer"] += 1
+        return {"output_text": "unexpected"}
+
+    from hermes_cli.pipeline_executor import EngineeringReviewPipelineExecutor, PipelineExecutionRequest
+    from hermes_cli.runtime_factory import RuntimeFactory
+    from hermes_cli.subagent_runner import SubagentRunner
+
+    repo_root, loaded_specs = _build_loaded_specs(tmp_path)
+    executor = EngineeringReviewPipelineExecutor(
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        engineer_runner=SubagentRunner(executor=engineer_executor),
+        reviewer_runner=SubagentRunner(executor=reviewer_executor),
+    )
+
+    result = executor.execute(
+        PipelineExecutionRequest(
+            loaded_specs=loaded_specs,
+            pipeline_session_id="pipe-plan-only",
+            task_summary="Implement F2 with SECRET_TOKEN=abc123",
+            repo_path=str(repo_root),
+            mode="plan_only",
+        )
+    )
+
+    assert result.status.value == "planned"
+    assert result.completion_reason == "plan_only"
+    assert result.reviewer_required is None
+    assert result.reviewer_ran is False
+    assert result.final_approval_status == "planned"
+    assert [step.step_kind for step in result.step_records] == ["engineer", "reviewer"]
+    assert result.step_records[0].execution_status == "planned"
+    assert result.step_records[1].execution_status == "planned"
+    assert result.step_records[0].constructor_provider == "openrouter"
+    assert result.step_records[0].constructor_model == "xiaomi/mimo-v2.5-pro"
+    assert result.step_records[1].constructor_provider == "openai-codex"
+    assert result.step_records[1].constructor_model == "gpt-5.5"
+    assert result.step_records[0].selected_model_class == "base_coding"
+    assert result.step_records[1].selected_model_class == "senior_review"
+    assert result.step_records[0].condition is None
+    assert result.step_records[1].condition == "code_changes_require_review"
+    assert result.step_records[0].prompt_artifact["path"] == "prompts/subagents/hermes_engineer_core.md"
+    assert result.step_records[1].prompt_artifact["path"] == "prompts/subagents/hermes_code_reviewer.md"
+    assert "patch" in result.step_records[0].tool_permission_plan_summary["write"]
+    assert "git_commit" in result.step_records[0].tool_permission_plan_summary["gated"]
+    assert executed == {"engineer": 0, "reviewer": 0}
+
+
+def test_plan_only_mode_works_without_providing_executors(tmp_path: Path) -> None:
+    executor, request = _build_executor(tmp_path, mode="plan_only")
+
+    result = executor.execute(request)
+
+    assert result.status.value == "planned"
+    assert result.completion_reason == "plan_only"
+    assert [step.step_kind for step in result.step_records] == ["engineer", "reviewer"]
+
+
+def test_plan_only_blocked_runtime_fails_before_any_runner_call(tmp_path: Path) -> None:
+    from hermes_cli.pipeline_executor import EngineeringReviewPipelineExecutor, PipelineExecutionRequest
+    from hermes_cli.runtime_factory import RuntimeBuildRequest, RuntimeBuildResult, RuntimeFactory
+    from hermes_cli.subagent_runner import SubagentRunner
+
+    repo_root, loaded_specs = _build_loaded_specs(tmp_path)
+    executed = {"count": 0}
+
+    class BlockedRuntimeFactory(RuntimeFactory):
+        def build(self, request: RuntimeBuildRequest) -> RuntimeBuildResult:
+            result = super().build(request)
+            if request.subagent_id == "hermes_code_reviewer":
+                return replace(result, actual_runtime_status="blocked")
+            return result
+
+    def fail_if_called(_request, _runtime_plan):
+        executed["count"] += 1
+        return {"output_text": "unexpected"}
+
+    executor = EngineeringReviewPipelineExecutor(
+        runtime_factory=BlockedRuntimeFactory(repo_root=repo_root),
+        engineer_runner=SubagentRunner(executor=fail_if_called),
+        reviewer_runner=SubagentRunner(executor=fail_if_called),
+    )
+
+    result = executor.execute(
+        PipelineExecutionRequest(
+            loaded_specs=loaded_specs,
+            pipeline_session_id="pipe-plan-blocked",
+            task_summary="Implement F2",
+            repo_path=str(repo_root),
+            mode="plan_only",
+        )
+    )
+
+    assert result.status.value == "failed"
+    assert result.completion_reason == "runtime_plan_failed"
+    assert result.error_code == "runtime_plan_failed"
+    assert "hermes_code_reviewer" in (result.error_message or "")
+    assert executed["count"] == 0
+
+
+def test_plan_only_safe_dict_excludes_task_text_prompt_text_secrets_and_raw_output(tmp_path: Path) -> None:
+    executor, request = _build_executor(tmp_path, mode="plan_only")
+    request = replace(request, task_summary="Implement F2 with prompt_text=leak and api_key=secret-value")
+
+    result = executor.execute(request)
+    payload = result.to_safe_dict()
+
+    assert payload["status"] == "planned"
+    assert payload["completion_reason"] == "plan_only"
+    assert "Implement F2" not in str(payload)
+    assert "secret-value" not in str(payload)
+    assert "prompt_text=leak" not in str(payload)
+    assert "full_text_loaded" in str(payload)
+    assert "tool_intents" not in str(payload)
+    assert payload["final_approval_status"] == "planned"
 
 
 def test_subagent_runner_failure_becomes_structured_pipeline_failure(tmp_path: Path) -> None:
