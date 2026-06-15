@@ -339,6 +339,84 @@ def test_pipeline_observe_disabled_skips_hook_for_local_and_proxy_paths(monkeypa
     assert load_calls == []
 
 
+def test_pipeline_orchestrator_disabled_skips_hook_for_local_and_proxy_paths(monkeypatch):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    observe_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "observe_gateway_turn",
+        lambda **kwargs: observe_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {"pipelines": {"enabled": False, "router": {"mode": "observe"}, "orchestrator": {"mode": "disabled"}}},
+    )
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "api_key": "***",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+            "max_tokens": None,
+        },
+    )
+
+    class _NoopAgent:
+        def __init__(self, *args, **kwargs):
+            self.tools = []
+
+        def run_conversation(self, user_message: str, conversation_history=None, task_id=None):
+            return {"final_response": "ok", "messages": [], "api_calls": 1}
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _NoopAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    runner_local = _make_runner()
+    source_local = SessionSource(platform=Platform.LOCAL, chat_id="cli", chat_type="dm", user_id="u1")
+    local_result = asyncio.run(
+        runner_local._run_agent(
+            message="local ping",
+            context_prompt="",
+            history=[],
+            source=source_local,
+            session_id="session-local-orchestrator-disabled",
+            session_key="agent:main:local:dm",
+        )
+    )
+
+    runner_proxy = _make_runner()
+    runner_proxy._get_proxy_url = lambda: "http://proxy.example"
+
+    async def _fake_proxy(**kwargs):
+        return {"final_response": "proxied", "messages": [], "api_calls": 0}
+
+    runner_proxy._run_agent_via_proxy = _fake_proxy
+    source_proxy = SessionSource(platform=Platform.TELEGRAM, chat_id="67890", chat_type="group", user_id="u2")
+    proxy_result = asyncio.run(
+        runner_proxy._run_agent(
+            message="proxy ping",
+            context_prompt="",
+            history=[],
+            source=source_proxy,
+            session_id="session-proxy-orchestrator-disabled",
+            session_key="agent:main:telegram:group:67890",
+        )
+    )
+
+    assert local_result["final_response"] == "ok"
+    assert proxy_result["final_response"] == "proxied"
+    assert observe_calls == []
+
+
 @pytest.mark.asyncio
 async def test_pipeline_observe_failure_is_swallowed_for_proxy_and_local_paths(monkeypatch):
     pipeline_observe = importlib.import_module("hermes_cli.pipeline_observe")
