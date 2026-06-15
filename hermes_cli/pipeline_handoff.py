@@ -1,4 +1,4 @@
-"""Test-only guarded handoff contract between pipeline gate and executor."""
+"""Import-light guarded handoff contract before activation."""
 
 from __future__ import annotations
 
@@ -8,11 +8,10 @@ import hashlib
 import time
 from typing import TYPE_CHECKING, Any
 
-from hermes_cli.pipeline_executor import EngineeringReviewPipelineExecutor
 from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode
 
 if TYPE_CHECKING:
-    from hermes_cli.pipeline_executor import PipelineExecutionRequest, PipelineExecutionResult
+    from hermes_cli.pipeline_executor import PipelineExecutionRequest
     from hermes_cli.pipeline_router import RouterDecision
     from hermes_cli.subagent_runner import SubagentExecutorProtocol
 
@@ -27,7 +26,7 @@ class PipelineHandoffMode(str, Enum):
 class PipelineHandoffStatus(str, Enum):
     DENIED = "denied"
     BLOCKED = "blocked"
-    EXECUTED = "executed"
+    READY = "ready"
     FAILED = "failed"
 
 
@@ -54,7 +53,6 @@ class PipelineHandoffDecision:
     execution_mode: PipelineHandoffMode
     would_execute: bool
     executed: bool
-    pipeline_executor_status: str | None = None
     safe_summary: str = ""
     elapsed_ms: float = 0.0
     error: PipelineHandoffError | None = None
@@ -72,7 +70,6 @@ class PipelineHandoffDecision:
             "execution_mode": self.execution_mode.value,
             "would_execute": self.would_execute,
             "executed": self.executed,
-            "pipeline_executor_status": self.pipeline_executor_status,
             "safe_summary": self.safe_summary,
             "elapsed_ms": self.elapsed_ms,
             "error": self.error.to_safe_dict() if self.error else None,
@@ -196,57 +193,15 @@ class PipelineHandoffCoordinator:
                 gate=gate,
             )
 
-        try:
-            executor_result = self._execute_test_only(request)
-        except Exception as exc:
-            return self._result(
-                request=request,
-                handoff_status=PipelineHandoffStatus.FAILED,
-                handoff_reason="pipeline_executor_failure",
-                gate_allowed=True,
-                gate_reason_code=gate_reason_code,
-                would_execute=True,
-                executed=False,
-                safe_summary="Pipeline handoff failed while invoking the test-only executor.",
-                started=started,
-                gate=gate,
-                error=PipelineHandoffError(
-                    "pipeline_executor_failure",
-                    exception_type=type(exc).__name__,
-                ),
-            )
-
-        from hermes_cli.pipeline_executor import PipelineExecutionResult
-
-        if not isinstance(executor_result, PipelineExecutionResult):
-            return self._result(
-                request=request,
-                handoff_status=PipelineHandoffStatus.FAILED,
-                handoff_reason="malformed_pipeline_execution_result",
-                gate_allowed=True,
-                gate_reason_code=gate_reason_code,
-                would_execute=True,
-                executed=False,
-                safe_summary="Pipeline handoff failed because the executor returned an invalid result type.",
-                started=started,
-                gate=gate,
-                error=PipelineHandoffError(
-                    "malformed_pipeline_execution_result",
-                    exception_type=type(executor_result).__name__,
-                ),
-            )
-
         return self._result(
             request=request,
-            handoff_status=PipelineHandoffStatus.EXECUTED,
-            handoff_reason=executor_result.completion_reason,
+            handoff_status=PipelineHandoffStatus.READY,
+            handoff_reason="activation_required",
             gate_allowed=True,
             gate_reason_code=gate_reason_code,
             would_execute=True,
-            executed=True,
-            pipeline_executor_status=executor_result.status.value,
-            safe_summary=executor_result.safe_summary,
-            pipeline_executor_result=executor_result.to_safe_dict(),
+            executed=False,
+            safe_summary="Pipeline handoff is ready for guarded test-only activation.",
             started=started,
             gate=gate,
         )
@@ -264,17 +219,6 @@ class PipelineHandoffCoordinator:
             return PipelineHandoffError("gate_execute_mode_required")
         return None
 
-    def _execute_test_only(self, request: PipelineHandoffRequest) -> PipelineExecutionResult:
-        from hermes_cli.runtime_factory import RuntimeFactory
-        from hermes_cli.subagent_runner import SubagentRunner
-
-        executor = EngineeringReviewPipelineExecutor(
-            runtime_factory=RuntimeFactory(repo_root=request.execution_request.repo_path),
-            engineer_runner=SubagentRunner(executor=request.engineer_executor),
-            reviewer_runner=SubagentRunner(executor=request.reviewer_executor),
-        )
-        return executor.execute(request.execution_request)
-
     def _result(
         self,
         *,
@@ -289,7 +233,6 @@ class PipelineHandoffCoordinator:
         started: float,
         gate: PipelineGateDecision | None = None,
         error: PipelineHandoffError | None = None,
-        pipeline_executor_status: str | None = None,
         pipeline_executor_result: dict[str, Any] | None = None,
     ) -> PipelineHandoffResult:
         return PipelineHandoffResult(
@@ -302,7 +245,6 @@ class PipelineHandoffCoordinator:
             execution_mode=request.mode,
             would_execute=would_execute,
             executed=executed,
-            pipeline_executor_status=pipeline_executor_status,
             safe_summary=safe_summary,
             elapsed_ms=_elapsed_ms(started),
             error=error,

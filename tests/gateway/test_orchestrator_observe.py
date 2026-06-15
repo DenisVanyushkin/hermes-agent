@@ -96,6 +96,9 @@ def test_gateway_orchestrator_observe_records_selected_pipeline_without_enforcem
     assert payload["pipeline_handoff"]["handoff_status"] == "denied"
     assert payload["pipeline_handoff"]["would_execute"] is False
     assert payload["pipeline_handoff"]["executed"] is False
+    assert payload["pipeline_activation"]["activation_status"] == "disabled"
+    assert payload["pipeline_activation"]["would_execute"] is False
+    assert payload["pipeline_activation"]["executed"] is False
 
 
 def test_gateway_orchestrator_observe_contains_gate_exception(monkeypatch, caplog):
@@ -197,6 +200,15 @@ def test_gateway_orchestrator_observe_engineering_pipeline_adds_plan_only_report
     assert payload["pipeline_handoff"]["execution_mode"] == "observe_only"
     assert payload["pipeline_handoff"]["would_execute"] is False
     assert payload["pipeline_handoff"]["executed"] is False
+    assert payload["pipeline_activation"]["pipeline_id"] == "engineering_review_pipeline"
+    assert payload["pipeline_activation"]["pipeline_session_id"] == "router-eng-plan"
+    assert payload["pipeline_activation"]["activation_status"] == "disabled"
+    assert payload["pipeline_activation"]["activation_reason"] == "disabled_mode_blocks_activation"
+    assert payload["pipeline_activation"]["gate_allowed"] is False
+    assert payload["pipeline_activation"]["handoff_would_execute"] is False
+    assert payload["pipeline_activation"]["handoff_executed"] is False
+    assert payload["pipeline_activation"]["would_execute"] is False
+    assert payload["pipeline_activation"]["executed"] is False
     assert "SECRET_TOKEN=abc123" not in log_message
     assert "prompt text" not in log_message
     assert "output_text" not in log_message
@@ -240,11 +252,14 @@ def test_gateway_orchestrator_observe_non_engineering_routes_skip_pipeline_plan(
     assert payload["pipeline_handoff"]["gate_reason_code"] == "not_applicable"
     assert payload["pipeline_handoff"]["would_execute"] is False
     assert payload["pipeline_handoff"]["executed"] is False
+    assert payload["pipeline_activation"]["activation_status"] == "not_applicable"
+    assert payload["pipeline_activation"]["activation_reason"] == "not_applicable"
+    assert payload["pipeline_activation"]["would_execute"] is False
+    assert payload["pipeline_activation"]["executed"] is False
 
 
 def test_gateway_orchestrator_observe_handoff_does_not_reach_execution_path(monkeypatch, caplog):
     orchestrator = importlib.import_module("hermes_cli.orchestrator")
-    handoff_module = importlib.import_module("hermes_cli.pipeline_handoff")
 
     decision = RouterDecision(
         pipeline_session_id="router-handoff-noexec",
@@ -257,10 +272,10 @@ def test_gateway_orchestrator_observe_handoff_does_not_reach_execution_path(monk
         fallback_safe=False,
     )
 
-    def _boom(self, request):
+    def _boom():
         raise AssertionError("observe integration must not call execution path")
 
-    monkeypatch.setattr(handoff_module.PipelineHandoffCoordinator, "_execute_test_only", _boom)
+    monkeypatch.setattr(orchestrator, "_evaluate_pipeline_activation_safely", lambda **_kwargs: _boom())
 
     with caplog.at_level(logging.INFO, logger="gateway.test"):
         report = orchestrator.observe_gateway_turn(
@@ -280,6 +295,8 @@ def test_gateway_orchestrator_observe_handoff_does_not_reach_execution_path(monk
     assert payload["pipeline_handoff"]["handoff_status"] == "denied"
     assert payload["pipeline_handoff"]["would_execute"] is False
     assert payload["pipeline_handoff"]["executed"] is False
+    assert payload["pipeline_activation"]["activation_status"] == "failed"
+    assert payload["pipeline_activation"]["activation_reason"] == "activation_evaluation_failed"
 
 
 def test_gateway_orchestrator_observe_contains_handoff_exception(monkeypatch, caplog):
