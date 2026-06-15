@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hermes_cli.config import cfg_get
+from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode, PipelineGateRequest, evaluate_pipeline_gate
 from hermes_cli.pipeline_router import DEFAULT_PIPELINE_ID, RouterDecision
 from hermes_cli.pipeline_state import (
     ExecutionReport,
@@ -82,6 +83,13 @@ def observe_gateway_turn(
         selected_provider=selected_provider,
         selected_model=selected_model,
     )
+    pipeline_gate = _evaluate_pipeline_gate_safely(
+        config=config,
+        router_decision=router_decision,
+        pipeline_plan_payload=pipeline_plan_payload,
+        platform=platform,
+        user_message=user_message,
+    )
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
     execution_report = ExecutionReport(
         pipeline_session_id=pipeline_session_id,
@@ -111,8 +119,54 @@ def observe_gateway_turn(
         report=report,
         orchestrator_mode=mode,
         pipeline_plan_payload=pipeline_plan_payload,
+        pipeline_gate_payload=pipeline_gate.to_safe_dict(),
     )
     return report
+
+
+def _evaluate_pipeline_gate_safely(
+    *,
+    config: dict[str, Any] | None,
+    router_decision: RouterDecision | None,
+    pipeline_plan_payload: dict[str, Any],
+    platform: str | None,
+    user_message: str,
+) -> PipelineGateDecision:
+    try:
+        return evaluate_pipeline_gate(
+            PipelineGateRequest(
+                config=config,
+                router_decision=router_decision,
+                pipeline_plan_payload=pipeline_plan_payload,
+                platform=platform,
+                user_message=user_message,
+            )
+        )
+    except Exception as exc:
+        return PipelineGateDecision(
+            allowed=False,
+            mode=PipelineGateMode.DISABLED,
+            pipeline_id=getattr(router_decision, "selected_pipeline_id", None)
+            or getattr(router_decision, "fallback_pipeline_id", None),
+            pipeline_session_id=getattr(router_decision, "pipeline_session_id", None),
+            reason_code="unknown",
+            reason="Pipeline gate evaluation failed; treating execution as denied.",
+            requirements_met=[],
+            requirements_failed=["gate_evaluation_failed"],
+            risk_level="high",
+            safe_to_log_payload={
+                "mode": PipelineGateMode.DISABLED.value,
+                "pipeline_session_id": getattr(router_decision, "pipeline_session_id", None),
+                "pipeline_id": getattr(router_decision, "selected_pipeline_id", None)
+                or getattr(router_decision, "fallback_pipeline_id", None),
+                "platform": platform,
+                "user_message_length": len(user_message or ""),
+                "user_message_hash": _hash_user_message(user_message),
+                "plan_status": pipeline_plan_payload.get("pipeline_plan_status"),
+                "plan_completion_reason": pipeline_plan_payload.get("pipeline_plan_completion_reason"),
+                "exception_type": type(exc).__name__,
+            },
+        )
 
 
 def _orchestrator_mode(config: dict[str, Any] | None) -> str:
@@ -178,6 +232,7 @@ def _log_observe_report(
     report: OrchestratorObserveReport,
     orchestrator_mode: str,
     pipeline_plan_payload: dict[str, Any],
+    pipeline_gate_payload: dict[str, Any],
 ) -> None:
     payload = {
         "event": "pipeline_orchestrator_observe_report",
@@ -199,6 +254,7 @@ def _log_observe_report(
         "session": asdict(report.session),
         "state": asdict(report.state),
         "execution_report": asdict(report.execution_report),
+        "pipeline_gate": pipeline_gate_payload,
     }
     payload.update(pipeline_plan_payload)
     gateway_logger.info(
