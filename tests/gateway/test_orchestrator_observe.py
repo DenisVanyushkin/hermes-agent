@@ -90,6 +90,12 @@ def test_gateway_orchestrator_observe_records_selected_pipeline_without_enforcem
     assert payload["pipeline_gate"]["allowed"] is False
     assert payload["pipeline_gate"]["mode"] == "disabled"
     assert payload["pipeline_gate"]["reason_code"] == "gate_disabled"
+    assert payload["pipeline_handoff"]["pipeline_id"] == "engineering_review_pipeline"
+    assert payload["pipeline_handoff"]["gate_allowed"] is False
+    assert payload["pipeline_handoff"]["gate_reason_code"] == "gate_disabled"
+    assert payload["pipeline_handoff"]["handoff_status"] == "denied"
+    assert payload["pipeline_handoff"]["would_execute"] is False
+    assert payload["pipeline_handoff"]["executed"] is False
 
 
 def test_gateway_orchestrator_observe_contains_gate_exception(monkeypatch, caplog):
@@ -182,6 +188,15 @@ def test_gateway_orchestrator_observe_engineering_pipeline_adds_plan_only_report
     assert payload["pipeline_plan"]["step_records"][1]["constructor_provider"] == "openai-codex"
     assert payload["pipeline_plan"]["step_records"][1]["constructor_model"] == "gpt-5.5"
     assert payload["pipeline_plan"]["step_records"][1]["condition"] == "code_changes_require_review"
+    assert payload["pipeline_handoff"]["pipeline_id"] == "engineering_review_pipeline"
+    assert payload["pipeline_handoff"]["pipeline_session_id"] == "router-eng-plan"
+    assert payload["pipeline_handoff"]["gate_allowed"] is False
+    assert payload["pipeline_handoff"]["gate_reason_code"] == "gate_disabled"
+    assert payload["pipeline_handoff"]["handoff_status"] == "denied"
+    assert payload["pipeline_handoff"]["handoff_reason"] == "gate_disabled"
+    assert payload["pipeline_handoff"]["execution_mode"] == "observe_only"
+    assert payload["pipeline_handoff"]["would_execute"] is False
+    assert payload["pipeline_handoff"]["executed"] is False
     assert "SECRET_TOKEN=abc123" not in log_message
     assert "prompt text" not in log_message
     assert "output_text" not in log_message
@@ -220,6 +235,95 @@ def test_gateway_orchestrator_observe_non_engineering_routes_skip_pipeline_plan(
     assert payload["planned_subagent_ids"] == []
     assert payload["runtime_plan_failed"] is False
     assert payload["pipeline_plan"] is None
+    assert payload["pipeline_handoff"]["handoff_status"] == "not_applicable"
+    assert payload["pipeline_handoff"]["handoff_reason"] == "not_applicable"
+    assert payload["pipeline_handoff"]["gate_reason_code"] == "not_applicable"
+    assert payload["pipeline_handoff"]["would_execute"] is False
+    assert payload["pipeline_handoff"]["executed"] is False
+
+
+def test_gateway_orchestrator_observe_handoff_does_not_reach_execution_path(monkeypatch, caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    handoff_module = importlib.import_module("hermes_cli.pipeline_handoff")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-handoff-noexec",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.95,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    def _boom(self, request):
+        raise AssertionError("observe integration must not call execution path")
+
+    monkeypatch.setattr(handoff_module.PipelineHandoffCoordinator, "_execute_test_only", _boom)
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={"pipelines": {"enabled": True, "orchestrator": {"mode": "observe"}}},
+            user_message="Implement H2 safely",
+            session_id="sess-handoff-noexec",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    log_message = next(
+        record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message
+    )
+    payload = json.loads(log_message.split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_handoff"]["handoff_status"] == "denied"
+    assert payload["pipeline_handoff"]["would_execute"] is False
+    assert payload["pipeline_handoff"]["executed"] is False
+
+
+def test_gateway_orchestrator_observe_contains_handoff_exception(monkeypatch, caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-handoff-fail",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.95,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    def _boom(**_kwargs):
+        raise RuntimeError("SECRET_TOKEN=abc123 raw prompt text tool_args={'danger': true}")
+
+    monkeypatch.setattr(orchestrator, "_evaluate_pipeline_handoff_safely", _boom)
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={"pipelines": {"enabled": True, "orchestrator": {"mode": "observe"}}},
+            user_message="Implement H2 with SECRET_TOKEN=abc123 and raw prompt text",
+            session_id="sess-handoff-fail",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    log_message = next(
+        record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message
+    )
+    payload = json.loads(log_message.split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_handoff"]["handoff_status"] == "failed"
+    assert payload["pipeline_handoff"]["handoff_reason"] == "handoff_evaluation_failed"
+    assert payload["pipeline_handoff"]["would_execute"] is False
+    assert payload["pipeline_handoff"]["executed"] is False
+    assert payload["pipeline_handoff"]["error"]["code"] == "handoff_evaluation_failed"
+    assert payload["pipeline_handoff"]["error"]["exception_type"] == "RuntimeError"
+    assert "SECRET_TOKEN=abc123" not in log_message
+    assert "raw prompt text" not in log_message
 
 
 def test_gateway_orchestrator_observe_reports_plan_failure_without_raising(monkeypatch, caplog):
