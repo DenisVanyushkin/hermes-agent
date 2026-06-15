@@ -116,7 +116,7 @@ def test_pipeline_handoff_missing_gate_denies_without_execution(tmp_path: Path):
     assert result.handoff_status == handoff.PipelineHandoffStatus.DENIED
     assert result.would_execute is False
     assert result.executed is False
-    assert result.pipeline_executor_status is None
+    assert result.pipeline_executor_result is None
     assert result.gate_allowed is False
     assert result.gate_reason_code == "missing_gate_decision"
 
@@ -140,7 +140,7 @@ def test_pipeline_handoff_denied_gate_returns_structured_noop(tmp_path: Path):
     assert result.handoff_reason == "execution denied"
     assert result.would_execute is False
     assert result.executed is False
-    assert result.pipeline_executor_status is None
+    assert result.pipeline_executor_result is None
     assert result.gate_allowed is False
     assert result.gate_reason_code == "observe_only"
 
@@ -292,35 +292,9 @@ def test_pipeline_handoff_non_test_execute_mode_blocks(tmp_path: Path):
     assert result.handoff_reason == "test_execute_mode_required"
 
 
-def test_pipeline_handoff_test_execute_runs_injected_fake_executors_only(tmp_path: Path):
+def test_pipeline_handoff_test_execute_only_returns_ready_for_activation(tmp_path: Path):
     handoff = importlib.import_module("hermes_cli.pipeline_handoff")
     _, execution_request = _execution_request(tmp_path)
-    calls = {"engineer": 0, "reviewer": 0}
-
-    def engineer_executor(_request, _runtime_plan):
-        calls["engineer"] += 1
-        return {
-            "output_text": "Patched pipeline handoff",
-            "completion_reason": "completed",
-            "raw_metadata": {
-                "code_changed": True,
-                "change_summary": "Added handoff module",
-                "files_changed": ["hermes_cli/pipeline_handoff.py"],
-                "needs_review": True,
-            },
-        }
-
-    def reviewer_executor(_request, _runtime_plan):
-        calls["reviewer"] += 1
-        return {
-            "output_text": "Looks good",
-            "completion_reason": "completed",
-            "raw_metadata": {
-                "blocking_findings": [],
-                "nonblocking_findings": [],
-                "approved": True,
-            },
-        }
 
     result = handoff.PipelineHandoffCoordinator().run(
         handoff.PipelineHandoffRequest(
@@ -331,48 +305,22 @@ def test_pipeline_handoff_test_execute_runs_injected_fake_executors_only(tmp_pat
             execution_request=execution_request,
             mode=handoff.PipelineHandoffMode.TEST_EXECUTE,
             allow_test_execution=True,
-            engineer_executor=engineer_executor,
-            reviewer_executor=reviewer_executor,
+            engineer_executor=lambda *_: {"unexpected": True},
+            reviewer_executor=lambda *_: {"unexpected": True},
         )
     )
 
-    assert result.handoff_status == handoff.PipelineHandoffStatus.EXECUTED
+    assert result.handoff_status == handoff.PipelineHandoffStatus.READY
     assert result.would_execute is True
-    assert result.executed is True
-    assert result.pipeline_executor_status == "approved"
+    assert result.executed is False
     assert result.execution_mode == "test_execute"
-    assert result.safe_summary == "Reviewer approved engineering changes."
-    assert calls == {"engineer": 1, "reviewer": 1}
+    assert result.handoff_reason == "activation_required"
+    assert result.safe_summary == "Pipeline handoff is ready for guarded test-only activation."
 
 
-def test_pipeline_handoff_success_payload_redacts_executor_output_and_task_text(tmp_path: Path):
+def test_pipeline_handoff_ready_payload_redacts_task_text(tmp_path: Path):
     handoff = importlib.import_module("hermes_cli.pipeline_handoff")
     _, execution_request = _execution_request(tmp_path)
-
-    def engineer_executor(_request, _runtime_plan):
-        return {
-            "output_text": "raw prompt text SECRET_TOKEN=abc123 tool_args={'danger': true}",
-            "completion_reason": "completed",
-            "raw_metadata": {
-                "code_changed": True,
-                "change_summary": "Updated H1",
-                "files_changed": ["/tmp/SECRET_TOKEN=abc123.txt"],
-                "needs_review": True,
-                "tool_args": {"danger": True},
-            },
-        }
-
-    def reviewer_executor(_request, _runtime_plan):
-        return {
-            "output_text": "raw prompt text SECRET_TOKEN=abc123",
-            "completion_reason": "completed",
-            "raw_metadata": {
-                "blocking_findings": [],
-                "nonblocking_findings": [],
-                "approved": True,
-                "danger": "SECRET_TOKEN=abc123",
-            },
-        }
 
     result = handoff.PipelineHandoffCoordinator().run(
         handoff.PipelineHandoffRequest(
@@ -383,81 +331,13 @@ def test_pipeline_handoff_success_payload_redacts_executor_output_and_task_text(
             execution_request=execution_request,
             mode=handoff.PipelineHandoffMode.TEST_EXECUTE,
             allow_test_execution=True,
-            engineer_executor=engineer_executor,
-            reviewer_executor=reviewer_executor,
+            engineer_executor=lambda *_: {"should_not_run": True},
+            reviewer_executor=lambda *_: {"should_not_run": True},
         )
     )
 
-    assert result.handoff_status == handoff.PipelineHandoffStatus.EXECUTED
-    assert result.pipeline_executor_status == "approved"
+    assert result.handoff_status == handoff.PipelineHandoffStatus.READY
     payload = result.to_safe_dict()
-    _assert_no_secret_text(payload)
-
-
-def test_pipeline_handoff_executor_exception_serializes_safely(tmp_path: Path):
-    handoff = importlib.import_module("hermes_cli.pipeline_handoff")
-    _, execution_request = _execution_request(tmp_path)
-
-    class FailingCoordinator(handoff.PipelineHandoffCoordinator):
-        def _execute_test_only(self, request):
-            raise RuntimeError("SECRET_TOKEN=abc123 raw prompt text tool_args={'danger': true}")
-
-    result = FailingCoordinator().run(
-        handoff.PipelineHandoffRequest(
-            pipeline_id="engineering_review_pipeline",
-            pipeline_session_id="pipe-h1",
-            router_decision=_router_decision(),
-            gate_decision=_gate_decision(allowed=True),
-            execution_request=execution_request,
-            mode=handoff.PipelineHandoffMode.TEST_EXECUTE,
-            allow_test_execution=True,
-            engineer_executor=lambda *_: None,
-            reviewer_executor=lambda *_: None,
-        )
-    )
-
-    assert result.handoff_status == handoff.PipelineHandoffStatus.FAILED
-    assert result.handoff_reason == "pipeline_executor_failure"
-    assert result.pipeline_executor_status is None
-    assert result.error is not None
-    assert result.error.code == "pipeline_executor_failure"
-    assert result.error.exception_type == "RuntimeError"
-    payload = result.to_safe_dict()
-    assert payload["error"] == {
-        "code": "pipeline_executor_failure",
-        "exception_type": "RuntimeError",
-    }
-    _assert_no_secret_text(payload)
-
-
-def test_pipeline_handoff_malformed_executor_result_becomes_structured_failure(tmp_path: Path):
-    handoff = importlib.import_module("hermes_cli.pipeline_handoff")
-    _, execution_request = _execution_request(tmp_path)
-
-    class MalformedCoordinator(handoff.PipelineHandoffCoordinator):
-        def _execute_test_only(self, request):
-            return {"danger": "SECRET_TOKEN=abc123", "task": "raw prompt text"}
-
-    result = MalformedCoordinator().run(
-        handoff.PipelineHandoffRequest(
-            pipeline_id="engineering_review_pipeline",
-            pipeline_session_id="pipe-h1",
-            router_decision=_router_decision(),
-            gate_decision=_gate_decision(allowed=True),
-            execution_request=execution_request,
-            mode=handoff.PipelineHandoffMode.TEST_EXECUTE,
-            allow_test_execution=True,
-            engineer_executor=lambda *_: None,
-            reviewer_executor=lambda *_: None,
-        )
-    )
-
-    assert result.handoff_status == handoff.PipelineHandoffStatus.FAILED
-    assert result.handoff_reason == "malformed_pipeline_execution_result"
-    assert result.error is not None
-    assert result.error.code == "malformed_pipeline_execution_result"
-    assert result.error.exception_type == "dict"
-    payload = result.as_log_payload()
     _assert_no_secret_text(payload)
 
 

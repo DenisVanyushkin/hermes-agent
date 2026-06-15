@@ -104,6 +104,23 @@ def observe_gateway_turn(
             exception_type=type(exc).__name__,
             elapsed_ms=0.0,
         )
+    try:
+        pipeline_activation_payload = _evaluate_pipeline_activation_safely(
+            config=config,
+            router_decision=router_decision,
+            pipeline_gate=pipeline_gate,
+            pipeline_handoff_payload=pipeline_handoff_payload,
+            platform=platform,
+        )
+    except Exception as exc:
+        pipeline_activation_payload = _activation_failure_payload(
+            router_decision=router_decision,
+            pipeline_gate=pipeline_gate,
+            pipeline_handoff_payload=pipeline_handoff_payload,
+            reason_code="activation_evaluation_failed",
+            exception_type=type(exc).__name__,
+            elapsed_ms=0.0,
+        )
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
     execution_report = ExecutionReport(
         pipeline_session_id=pipeline_session_id,
@@ -135,6 +152,7 @@ def observe_gateway_turn(
         pipeline_plan_payload=pipeline_plan_payload,
         pipeline_gate_payload=pipeline_gate.to_safe_dict(),
         pipeline_handoff_payload=pipeline_handoff_payload,
+        pipeline_activation_payload=pipeline_activation_payload,
     )
     return report
 
@@ -299,6 +317,7 @@ def _log_observe_report(
     pipeline_plan_payload: dict[str, Any],
     pipeline_gate_payload: dict[str, Any],
     pipeline_handoff_payload: dict[str, Any],
+    pipeline_activation_payload: dict[str, Any],
 ) -> None:
     payload = {
         "event": "pipeline_orchestrator_observe_report",
@@ -322,6 +341,7 @@ def _log_observe_report(
         "execution_report": asdict(report.execution_report),
         "pipeline_gate": pipeline_gate_payload,
         "pipeline_handoff": pipeline_handoff_payload,
+        "pipeline_activation": pipeline_activation_payload,
     }
     payload.update(pipeline_plan_payload)
     gateway_logger.info(
@@ -458,6 +478,18 @@ def _load_pipeline_handoff_coordinator_class():
     return PipelineHandoffCoordinator
 
 
+def _load_pipeline_activation_coordinator_class():
+    from hermes_cli.pipeline_activation import PipelineActivationCoordinator
+
+    return PipelineActivationCoordinator
+
+
+def _load_pipeline_activation_types():
+    from hermes_cli.pipeline_activation import PipelineActivationRequest, PipelineActivationResult, PipelineActivationStatus
+
+    return PipelineActivationRequest, PipelineActivationResult, PipelineActivationStatus
+
+
 def _load_pipeline_handoff_request_class():
     from hermes_cli.pipeline_handoff import PipelineHandoffMode, PipelineHandoffRequest
 
@@ -498,6 +530,119 @@ def _safe_gate_payload(gate: PipelineGateDecision) -> dict[str, Any]:
         return gate.to_safe_dict()
     except Exception:
         return {}
+
+
+def _evaluate_pipeline_activation_safely(
+    *,
+    config: dict[str, Any] | None,
+    router_decision: RouterDecision | None,
+    pipeline_gate: PipelineGateDecision,
+    pipeline_handoff_payload: dict[str, Any],
+    platform: str | None,
+) -> dict[str, Any]:
+    pipeline_id = getattr(router_decision, "selected_pipeline_id", None) or getattr(router_decision, "fallback_pipeline_id", None)
+    pipeline_session_id = getattr(router_decision, "pipeline_session_id", None)
+    request_cls, _result_cls, status_cls = _load_pipeline_activation_types()
+    coordinator = _load_pipeline_activation_coordinator_class()()
+
+    if pipeline_handoff_payload.get("handoff_status") == "not_applicable":
+        return {
+            "pipeline_id": pipeline_id,
+            "pipeline_session_id": pipeline_session_id,
+            "activation_status": status_cls.NOT_APPLICABLE.value,
+            "activation_reason": "not_applicable",
+            "would_execute": False,
+            "executed": False,
+            "gate_allowed": False,
+            "handoff_would_execute": False,
+            "handoff_executed": False,
+            "execution_mode": "disabled",
+            "requirements_met": [],
+            "requirements_failed": ["specialized_pipeline_selected"],
+            "error": None,
+            "pipeline_executor_status": None,
+            "pipeline_executor_result": None,
+            "elapsed_ms": 0.0,
+        }
+
+    result = coordinator.run(
+        request_cls(
+            config=config,
+            router_decision=router_decision,
+            pipeline_id=pipeline_id,
+            pipeline_session_id=pipeline_session_id,
+            gate_decision=pipeline_gate,
+            handoff_decision=_handoff_payload_to_decision(pipeline_handoff_payload),
+            executor=None,
+            platform=platform,
+            platform_allowed=True if platform else None,
+            destructive_task=False,
+            explicit_approval=False,
+            allow_test_execution=False,
+        )
+    )
+    return result.to_safe_dict()
+
+
+def _handoff_payload_to_decision(payload: dict[str, Any]):
+    from hermes_cli.pipeline_handoff import PipelineHandoffDecision, PipelineHandoffError, PipelineHandoffMode, PipelineHandoffStatus
+
+    error_payload = payload.get("error")
+    error = None
+    if isinstance(error_payload, dict) and error_payload.get("code"):
+        error = PipelineHandoffError(
+            code=str(error_payload["code"]),
+            exception_type=error_payload.get("exception_type"),
+        )
+    return PipelineHandoffDecision(
+        pipeline_id=payload.get("pipeline_id"),
+        pipeline_session_id=payload.get("pipeline_session_id"),
+        gate_allowed=bool(payload.get("gate_allowed", False)),
+        gate_reason_code=str(payload.get("gate_reason_code", "unknown")),
+        handoff_status=PipelineHandoffStatus(str(payload.get("handoff_status", "failed"))),
+        handoff_reason=str(payload.get("handoff_reason", "unknown")),
+        execution_mode=PipelineHandoffMode(str(payload.get("execution_mode", "disabled"))),
+        would_execute=bool(payload.get("would_execute", False)),
+        executed=bool(payload.get("executed", False)),
+        safe_summary=str(payload.get("safe_summary", "")),
+        elapsed_ms=float(payload.get("elapsed_ms", 0.0) or 0.0),
+        error=error,
+        gate_payload=dict(payload.get("gate_payload") or {}),
+        pipeline_executor_result=None,
+    )
+
+
+def _activation_failure_payload(
+    *,
+    router_decision: RouterDecision | None,
+    pipeline_gate: PipelineGateDecision,
+    pipeline_handoff_payload: dict[str, Any],
+    reason_code: str,
+    exception_type: str,
+    elapsed_ms: float,
+) -> dict[str, Any]:
+    return {
+        "pipeline_id": getattr(router_decision, "selected_pipeline_id", None)
+        or getattr(router_decision, "fallback_pipeline_id", None),
+        "pipeline_session_id": getattr(router_decision, "pipeline_session_id", None),
+        "activation_status": "failed",
+        "activation_reason": reason_code,
+        "would_execute": False,
+        "executed": False,
+        "gate_allowed": bool(getattr(pipeline_gate, "allowed", False)),
+        "handoff_would_execute": bool(pipeline_handoff_payload.get("would_execute", False)),
+        "handoff_executed": bool(pipeline_handoff_payload.get("executed", False)),
+        "execution_mode": "observe_only",
+        "requirements_met": [],
+        "requirements_failed": ["activation_evaluation_failed"],
+        "error": {
+            "code": reason_code,
+            "exception_type": exception_type,
+        },
+        "pipeline_executor_status": None,
+        "pipeline_executor_result": None,
+        "elapsed_ms": elapsed_ms,
+    }
 
 
 def _handoff_failure_payload(
