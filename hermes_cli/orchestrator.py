@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _VALID_ORCHESTRATOR_MODES = {"disabled", "observe"}
 _UNAVAILABLE = "unavailable"
+_ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
 
 
 def observe_gateway_turn(
@@ -73,6 +74,14 @@ def observe_gateway_turn(
         mode=mode,
         router_decision=router_decision,
     )
+    pipeline_plan_payload = _build_pipeline_plan_payload(
+        config=config,
+        user_message=user_message,
+        pipeline_session_id=pipeline_session_id,
+        router_decision=router_decision,
+        selected_provider=selected_provider,
+        selected_model=selected_model,
+    )
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
     execution_report = ExecutionReport(
         pipeline_session_id=pipeline_session_id,
@@ -101,6 +110,7 @@ def observe_gateway_turn(
         gateway_logger=gateway_logger,
         report=report,
         orchestrator_mode=mode,
+        pipeline_plan_payload=pipeline_plan_payload,
     )
     return report
 
@@ -167,6 +177,7 @@ def _log_observe_report(
     gateway_logger: logging.Logger,
     report: OrchestratorObserveReport,
     orchestrator_mode: str,
+    pipeline_plan_payload: dict[str, Any],
 ) -> None:
     payload = {
         "event": "pipeline_orchestrator_observe_report",
@@ -189,7 +200,145 @@ def _log_observe_report(
         "state": asdict(report.state),
         "execution_report": asdict(report.execution_report),
     }
+    payload.update(pipeline_plan_payload)
     gateway_logger.info(
         "pipeline_orchestrator_observe %s",
         json.dumps(payload, ensure_ascii=False, sort_keys=True),
     )
+
+
+def _build_pipeline_plan_payload(
+    *,
+    config: dict[str, Any] | None,
+    user_message: str,
+    pipeline_session_id: str,
+    router_decision: RouterDecision | None,
+    selected_provider: str | None,
+    selected_model: str | None,
+) -> dict[str, Any]:
+    if not _should_plan_engineering_pipeline(config=config, router_decision=router_decision):
+        return {
+            "pipeline_plan_status": "not_applicable",
+            "pipeline_plan_completion_reason": None,
+            "planned_steps_count": 0,
+            "planned_subagent_ids": [],
+            "reviewer_planned": False,
+            "reviewer_condition": None,
+            "pipeline_plan_elapsed_ms": 0.0,
+            "runtime_plan_failed": False,
+            "pipeline_plan_error": None,
+            "pipeline_plan": None,
+        }
+
+    started = time.perf_counter()
+    try:
+        loaded_specs = _load_pipeline_specs(repo_root=None)
+        runtime_factory_cls = _load_runtime_factory_class()
+        executor_cls = _load_pipeline_planning_components()
+        subagent_runner_cls = _load_subagent_runner_class()
+        request_cls = _load_pipeline_execution_request_class()
+        executor = executor_cls(
+            runtime_factory=runtime_factory_cls(repo_root=loaded_specs.repo_root),
+            engineer_runner=subagent_runner_cls(executor=None),
+            reviewer_runner=subagent_runner_cls(executor=None),
+        )
+        result = executor.execute(
+            request_cls(
+                loaded_specs=loaded_specs,
+                pipeline_session_id=pipeline_session_id,
+                task_summary=user_message,
+                repo_path=str(loaded_specs.repo_root),
+                current_session_provider=selected_provider,
+                current_session_model=selected_model,
+                mode="plan_only",
+            )
+        )
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        safe_result = result.to_safe_dict()
+        reviewer_step = next((step for step in safe_result["step_records"] if step["step_kind"] == "reviewer"), None)
+        return {
+            "pipeline_plan_status": safe_result["status"],
+            "pipeline_plan_completion_reason": safe_result["completion_reason"],
+            "planned_steps_count": len(safe_result["step_records"]),
+            "planned_subagent_ids": [step["subagent_id"] for step in safe_result["step_records"]],
+            "reviewer_planned": reviewer_step is not None,
+            "reviewer_condition": reviewer_step["condition"] if reviewer_step else None,
+            "pipeline_plan_elapsed_ms": elapsed_ms,
+            "runtime_plan_failed": safe_result["status"] == "failed",
+            "pipeline_plan_error": _result_error_payload(safe_result),
+            "pipeline_plan": safe_result,
+        }
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        return {
+            "pipeline_plan_status": "failed",
+            "pipeline_plan_completion_reason": "planning_failed",
+            "planned_steps_count": 0,
+            "planned_subagent_ids": [],
+            "reviewer_planned": False,
+            "reviewer_condition": None,
+            "pipeline_plan_elapsed_ms": elapsed_ms,
+            "runtime_plan_failed": True,
+            "pipeline_plan_error": {
+                "error_type": type(exc).__name__,
+                "message": _safe_exception_message(exc),
+            },
+            "pipeline_plan": None,
+        }
+
+
+def _should_plan_engineering_pipeline(
+    *,
+    config: dict[str, Any] | None,
+    router_decision: RouterDecision | None,
+) -> bool:
+    if _orchestrator_mode(config) != "observe":
+        return False
+    if router_decision is None:
+        return False
+    return router_decision.selected_pipeline_id == _ENGINEERING_PIPELINE_ID
+
+
+def _load_pipeline_specs(*, repo_root: Any):
+    from hermes_cli.pipeline_specs import load_pipeline_specs
+
+    return load_pipeline_specs(repo_root=repo_root)
+
+
+def _load_runtime_factory_class():
+    from hermes_cli.runtime_factory import RuntimeFactory
+
+    return RuntimeFactory
+
+
+def _load_pipeline_planning_components():
+    from hermes_cli.pipeline_executor import EngineeringReviewPipelineExecutor
+
+    return EngineeringReviewPipelineExecutor
+
+
+def _load_subagent_runner_class():
+    from hermes_cli.subagent_runner import SubagentRunner
+
+    return SubagentRunner
+
+
+def _load_pipeline_execution_request_class():
+    from hermes_cli.pipeline_executor import PipelineExecutionRequest
+
+    return PipelineExecutionRequest
+
+
+def _result_error_payload(result: dict[str, Any]) -> dict[str, Any] | None:
+    if result.get("status") != "failed":
+        return None
+    return {
+        "error_type": "PipelineExecutionResult",
+        "error_code": result.get("error_code"),
+        "message": result.get("error_message"),
+    }
+
+
+def _safe_exception_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    return message[:240] if message else type(exc).__name__
