@@ -52,10 +52,12 @@ def test_builds_planned_runtime_for_general_operator(tmp_path: Path) -> None:
     )
 
     assert result.subagent_id == "general_operator"
-    assert result.actual_runtime_status == "planned_only"
+    assert result.actual_runtime_status == "ready_to_construct"
     assert result.selection.selected_provider == "openai-codex"
     assert result.selection.selected_model == "gpt-5.4-mini"
     assert result.selection.selected_model_class == "general"
+    assert result.constructor_provider == result.selection.selected_provider
+    assert result.constructor_model == result.selection.selected_model
 
 
 @pytest.mark.parametrize(
@@ -82,9 +84,11 @@ def test_builds_planned_runtime_for_specialized_subagents(
         )
     )
 
-    assert result.actual_runtime_status == "planned_only"
+    assert result.actual_runtime_status == "ready_to_construct"
     assert result.selection.selected_provider == provider
     assert result.selection.selected_model == model
+    assert result.constructor_provider == provider
+    assert result.constructor_model == model
 
 
 def test_records_session_default_separately_and_marks_mismatch(tmp_path: Path) -> None:
@@ -105,6 +109,7 @@ def test_records_session_default_separately_and_marks_mismatch(tmp_path: Path) -
     assert result.current_session_model == "gpt-5.4-mini"
     assert result.selection.selected_provider == "openrouter"
     assert result.selected_runtime_differs_from_session_default is True
+    assert result.to_safe_dict()["session_default_mismatch"] is True
 
 
 def test_records_prompt_artifact_without_full_prompt_text(tmp_path: Path) -> None:
@@ -122,8 +127,50 @@ def test_records_prompt_artifact_without_full_prompt_text(tmp_path: Path) -> Non
     assert result.prompt.path == "prompts/subagents/hermes_engineer_core.md"
     assert result.prompt.exists is True
     assert result.prompt.sha256
+    assert result.prompt.artifact_id == result.prompt.sha256
     assert result.prompt.size_bytes > 0
+    assert result.prompt.full_text_loaded is False
     assert not hasattr(result.prompt, "text")
+
+
+def test_safe_dict_omits_full_prompt_text_and_sensitive_runtime_fields(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    RuntimeBuildRequest, factory, loaded_specs = _build_factory(repo_root)
+
+    result = factory.build(
+        RuntimeBuildRequest(
+            loaded_specs=loaded_specs,
+            subagent_id="hermes_engineer_core",
+            pipeline_session_id="pipe-safe",
+        )
+    )
+
+    payload = result.to_safe_dict()
+
+    assert payload["constructor_provider"] == "openrouter"
+    assert payload["constructor_model"] == "xiaomi/mimo-v2.5-pro"
+    assert "prompt_text" not in payload
+    assert payload["prompt"]["full_text_loaded"] is False
+    assert payload["constructor_base_url"] is None
+
+
+def test_to_aiagent_kwargs_returns_selected_runtime_inputs(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    RuntimeBuildRequest, factory, loaded_specs = _build_factory(repo_root)
+
+    result = factory.build(
+        RuntimeBuildRequest(
+            loaded_specs=loaded_specs,
+            subagent_id="hermes_code_reviewer",
+            pipeline_session_id="pipe-kwargs",
+        )
+    )
+
+    kwargs = result.to_aiagent_kwargs()
+
+    assert kwargs["provider"] == result.selection.selected_provider
+    assert kwargs["model"] == result.selection.selected_model
+    assert kwargs["api_mode"] == result.constructor_api_mode
 
 
 def test_builds_tool_permission_plan(tmp_path: Path) -> None:
@@ -242,21 +289,45 @@ def test_requested_escalation_model_class_must_be_allowed(tmp_path: Path) -> Non
         )
     )
 
-    assert allowed.actual_runtime_status == "planned_only"
+    assert allowed.actual_runtime_status == "ready_to_construct"
     assert allowed.selection.selected_model_class == "senior_coding"
     assert allowed.selection.selected_model == "gpt-5.5"
     assert blocked.actual_runtime_status == "blocked"
     assert any("not allowed" in error.message for error in blocked.errors)
+    assert any("general_operator" in error.message for error in blocked.errors)
 
 
 def test_importing_runtime_factory_stays_import_light() -> None:
     before = set(sys.modules)
-    sys.modules.pop("hermes_cli.runtime_factory", None)
+    for name in ("hermes_cli.runtime_factory", "gateway.run", "tools.tool_executor", "agent.conversation_loop", "run_agent"):
+        sys.modules.pop(name, None)
 
     module = importlib.import_module("hermes_cli.runtime_factory")
 
     assert hasattr(module, "RuntimeFactory")
     imported = set(sys.modules) - before
-    assert "agent.conversation_loop" not in imported
     assert "gateway.run" not in imported
     assert "tools.tool_executor" not in imported
+    assert "agent.conversation_loop" not in imported
+    assert "run_agent" not in imported
+
+
+def test_blocked_result_does_not_produce_aiagent_kwargs(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    subagent_path = repo_root / "config/subagents/general_operator.yaml"
+    subagent = _load_yaml(subagent_path)
+    del subagent["models"]["default"]["provider"]
+    _write_yaml(subagent_path, subagent)
+    RuntimeBuildRequest, factory, loaded_specs = _build_factory(repo_root)
+
+    result = factory.build(
+        RuntimeBuildRequest(
+            loaded_specs=loaded_specs,
+            subagent_id="general_operator",
+            pipeline_session_id="pipe-blocked-kwargs",
+        )
+    )
+
+    assert result.actual_runtime_status == "blocked"
+    with pytest.raises(RuntimeError):
+        result.to_aiagent_kwargs()
