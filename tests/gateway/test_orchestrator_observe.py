@@ -83,6 +83,53 @@ def test_gateway_orchestrator_observe_records_selected_pipeline_without_enforcem
     assert report.execution_report.completion_allowed is True
     assert report.execution_report.actual_provider == "unavailable"
     assert report.execution_report.actual_model == "unavailable"
+    log_message = next(
+        record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message
+    )
+    payload = json.loads(log_message.split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_gate"]["allowed"] is False
+    assert payload["pipeline_gate"]["mode"] == "disabled"
+    assert payload["pipeline_gate"]["reason_code"] == "gate_disabled"
+
+
+def test_gateway_orchestrator_observe_contains_gate_exception(monkeypatch, caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-gate-fail",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.93,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    def _boom(_request):
+        raise RuntimeError("gate exploded with config details")
+
+    monkeypatch.setattr(orchestrator, "evaluate_pipeline_gate", _boom)
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={"pipelines": {"enabled": True, "orchestrator": {"mode": "observe"}}},
+            user_message="Implement Slice G1 with SECRET_TOKEN=abc123",
+            session_id="sess-gate-fail",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    log_message = next(
+        record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message
+    )
+    payload = json.loads(log_message.split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_gate"]["allowed"] is False
+    assert payload["pipeline_gate"]["reason_code"] in {"unknown", "missing_required_config"}
+    assert payload["pipeline_gate"]["mode"] == "disabled"
+    assert "SECRET_TOKEN=abc123" not in log_message
 
 
 def test_gateway_orchestrator_observe_engineering_pipeline_adds_plan_only_report(caplog):

@@ -117,6 +117,9 @@ class TestLoadConfigDefaults:
             assert config["pipelines"]["enabled"] is False
             assert config["pipelines"]["router"]["mode"] == "disabled"
             assert config["pipelines"]["orchestrator"]["mode"] == "disabled"
+            assert config["pipelines"]["execution"]["mode"] == "disabled"
+            assert config["pipelines"]["execution"]["allow_pipelines"] == ["engineering_review_pipeline"]
+            assert config["pipelines"]["execution"]["min_router_confidence"] == 0.9
             assert "max_turns" not in config
             assert "terminal" in config
             assert config["terminal"]["backend"] == "local"
