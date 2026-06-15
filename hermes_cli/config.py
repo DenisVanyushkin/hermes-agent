@@ -1020,6 +1020,10 @@ DEFAULT_CONFIG = {
         "reviewer_tier": "code_review",
     },
     "pipelines": {
+        "enabled": False,
+        "orchestrator": {
+            "mode": "disabled",
+        },
         "router": {
             "mode": "disabled",
         },
