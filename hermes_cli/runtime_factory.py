@@ -10,7 +10,16 @@ from typing import Any
 from hermes_cli.pipeline_specs import LoadedPipelineSpecs
 
 
-VALID_RUNTIME_STATUSES = {"planned_only", "ready_to_build", "blocked", "unavailable"}
+VALID_RUNTIME_STATUSES = {"planned_only", "ready_to_construct", "blocked", "unavailable"}
+_PROVIDER_API_MODES = {
+    "openai-codex": "codex_responses",
+    "openai": "codex_responses",
+    "xai-oauth": "codex_responses",
+    "openrouter": "chat_completions",
+    "nous": "chat_completions",
+    "anthropic": "anthropic_messages",
+    "bedrock": "bedrock_converse",
+}
 
 
 @dataclass(frozen=True)
@@ -33,6 +42,18 @@ class PromptArtifactRecord:
     exists: bool
     sha256: str | None
     size_bytes: int
+    artifact_id: str | None
+    full_text_loaded: bool = False
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "exists": self.exists,
+            "sha256": self.sha256,
+            "artifact_id": self.artifact_id,
+            "size_bytes": self.size_bytes,
+            "full_text_loaded": self.full_text_loaded,
+        }
 
 
 @dataclass(frozen=True)
@@ -43,6 +64,16 @@ class ToolPermissionPlan:
     gated: list[str] = field(default_factory=list)
     forbidden: list[str] = field(default_factory=list)
     unknown_permissions: list[str] = field(default_factory=list)
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "read": list(self.read),
+            "write": list(self.write),
+            "execute": list(self.execute),
+            "gated": list(self.gated),
+            "forbidden": list(self.forbidden),
+            "unknown_permissions": list(self.unknown_permissions),
+        }
 
 
 @dataclass(frozen=True)
@@ -56,6 +87,28 @@ class RuntimeSelectionRecord:
     available_model_classes: list[str]
     escalation_allowed: bool
     escalation_targets: list[str]
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "selected_provider": self.selected_provider,
+            "selected_model": self.selected_model,
+            "selected_model_class": self.selected_model_class,
+            "fallback_mode": self.fallback_mode,
+            "fallback_reason": self.fallback_reason,
+            "requested_model_class": self.requested_model_class,
+            "available_model_classes": list(self.available_model_classes),
+            "escalation_allowed": self.escalation_allowed,
+            "escalation_targets": list(self.escalation_targets),
+        }
+
+
+@dataclass(frozen=True)
+class FallbackPolicyRecord:
+    mode: str | None
+    reason: str | None
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {"mode": self.mode, "reason": self.reason}
 
 
 @dataclass(frozen=True)
@@ -80,12 +133,61 @@ class RuntimeBuildResult:
     selection: RuntimeSelectionRecord | None
     prompt: PromptArtifactRecord | None
     tool_permission_plan: ToolPermissionPlan | None
-    actual_provider: str | None
-    actual_model: str | None
+    constructor_provider: str | None
+    constructor_model: str | None
+    constructor_api_mode: str | None
+    constructor_base_url: str | None
     current_session_provider: str | None
     current_session_model: str | None
     selected_runtime_differs_from_session_default: bool
+    fallback_policy: FallbackPolicyRecord | None
     errors: list[RuntimeFactoryErrorDetail] = field(default_factory=list)
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "subagent_id": self.subagent_id,
+            "pipeline_session_id": self.pipeline_session_id,
+            "invocation_id": self.invocation_id,
+            "actual_runtime_status": self.actual_runtime_status,
+            "selected_provider": self.selection.selected_provider if self.selection else None,
+            "selected_model": self.selection.selected_model if self.selection else None,
+            "selected_model_class": self.selection.selected_model_class if self.selection else None,
+            "constructor_provider": self.constructor_provider,
+            "constructor_model": self.constructor_model,
+            "constructor_api_mode": self.constructor_api_mode,
+            "constructor_base_url": self.constructor_base_url,
+            "session_default_provider": self.current_session_provider,
+            "session_default_model": self.current_session_model,
+            "session_default_mismatch": self.selected_runtime_differs_from_session_default,
+            "prompt": self.prompt.to_safe_dict() if self.prompt else None,
+            "tool_permission_plan": self.tool_permission_plan.to_safe_dict() if self.tool_permission_plan else None,
+            "fallback_policy": self.fallback_policy.to_safe_dict() if self.fallback_policy else None,
+            "errors": [
+                {
+                    "code": error.code,
+                    "message": error.message,
+                    "field_path": error.field_path,
+                    "file_path": error.file_path,
+                }
+                for error in self.errors
+            ],
+        }
+
+    def to_aiagent_kwargs(self) -> dict[str, Any]:
+        if self.actual_runtime_status != "ready_to_construct":
+            raise RuntimeError("Runtime construction inputs are not ready")
+        if not self.constructor_provider or not self.constructor_model:
+            raise RuntimeError("Runtime construction inputs are incomplete")
+
+        kwargs = {
+            "provider": self.constructor_provider,
+            "model": self.constructor_model,
+        }
+        if self.constructor_api_mode:
+            kwargs["api_mode"] = self.constructor_api_mode
+        if self.constructor_base_url:
+            kwargs["base_url"] = self.constructor_base_url
+        return kwargs
 
 
 class RuntimeFactory:
@@ -105,6 +207,10 @@ class RuntimeFactory:
         model_choice = self._resolve_model_choice(spec, request, errors)
         prompt = self._build_prompt_record(spec, repo_root, errors)
         tool_permission_plan = self._build_tool_permission_plan(spec, errors)
+        fallback_policy = FallbackPolicyRecord(
+            mode=self._nested_str(spec, ("models", "fallback", "mode")),
+            reason=self._nested_str(spec, ("models", "fallback", "reason")),
+        )
 
         if errors:
             return self._blocked_result(request, errors)
@@ -114,8 +220,8 @@ class RuntimeFactory:
             selected_provider=str(model_choice.get("provider")),
             selected_model=str(model_choice.get("model")),
             selected_model_class=self._string_or_none(model_choice.get("class")),
-            fallback_mode=self._nested_str(spec, ("models", "fallback", "mode")),
-            fallback_reason=self._nested_str(spec, ("models", "fallback", "reason")),
+            fallback_mode=fallback_policy.mode,
+            fallback_reason=fallback_policy.reason,
             requested_model_class=self._string_or_none(request.requested_model_class),
             available_model_classes=self._available_model_classes(spec),
             escalation_allowed=bool(self._nested(spec, ("models", "escalation", "allowed"))),
@@ -129,19 +235,28 @@ class RuntimeFactory:
                 or request.current_session_model != selection.selected_model
             )
         )
+        constructor_provider = selection.selected_provider
+        constructor_model = selection.selected_model
+        constructor_api_mode = self._constructor_api_mode(constructor_provider)
+        constructor_base_url = None
+        status = "ready_to_construct" if constructor_provider and constructor_model else "planned_only"
+
         return RuntimeBuildResult(
             subagent_id=request.subagent_id,
             pipeline_session_id=request.pipeline_session_id,
             invocation_id=request.invocation_id,
-            actual_runtime_status="planned_only",
+            actual_runtime_status=status,
             selection=selection,
             prompt=prompt,
             tool_permission_plan=tool_permission_plan,
-            actual_provider=None,
-            actual_model=None,
+            constructor_provider=constructor_provider,
+            constructor_model=constructor_model,
+            constructor_api_mode=constructor_api_mode,
+            constructor_base_url=constructor_base_url,
             current_session_provider=request.current_session_provider,
             current_session_model=request.current_session_model,
             selected_runtime_differs_from_session_default=differs,
+            fallback_policy=fallback_policy,
             errors=[],
         )
 
@@ -200,14 +315,17 @@ class RuntimeFactory:
                     message="Referenced prompt file does not exist",
                 )
             )
-            return PromptArtifactRecord(path=prompt_path, exists=False, sha256=None, size_bytes=0)
+            return PromptArtifactRecord(path=prompt_path, exists=False, sha256=None, size_bytes=0, artifact_id=None)
 
         payload = prompt_file.read_bytes()
+        prompt_hash = hashlib.sha256(payload).hexdigest()
         return PromptArtifactRecord(
             path=prompt_path,
             exists=True,
-            sha256=hashlib.sha256(payload).hexdigest(),
+            sha256=prompt_hash,
             size_bytes=len(payload),
+            artifact_id=prompt_hash,
+            full_text_loaded=False,
         )
 
     def _build_tool_permission_plan(
@@ -261,11 +379,14 @@ class RuntimeFactory:
             selection=None,
             prompt=None,
             tool_permission_plan=None,
-            actual_provider=None,
-            actual_model=None,
+            constructor_provider=None,
+            constructor_model=None,
+            constructor_api_mode=None,
+            constructor_base_url=None,
             current_session_provider=request.current_session_provider,
             current_session_model=request.current_session_model,
             selected_runtime_differs_from_session_default=False,
+            fallback_policy=None,
             errors=errors,
         )
 
@@ -311,6 +432,11 @@ class RuntimeFactory:
             if isinstance(model_class, str) and model_class not in targets:
                 targets.append(model_class)
         return targets
+
+    @staticmethod
+    def _constructor_api_mode(provider: str | None) -> str | None:
+        normalized = (provider or "").strip().lower()
+        return _PROVIDER_API_MODES.get(normalized)
 
     @staticmethod
     def _nested(container: dict[str, Any], path: tuple[str, ...]) -> Any:
