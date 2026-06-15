@@ -90,6 +90,20 @@ def observe_gateway_turn(
         platform=platform,
         user_message=user_message,
     )
+    try:
+        pipeline_handoff_payload = _evaluate_pipeline_handoff_safely(
+            router_decision=router_decision,
+            pipeline_plan_payload=pipeline_plan_payload,
+            pipeline_gate=pipeline_gate,
+        )
+    except Exception as exc:
+        pipeline_handoff_payload = _handoff_failure_payload(
+            router_decision=router_decision,
+            pipeline_gate=pipeline_gate,
+            reason_code="handoff_evaluation_failed",
+            exception_type=type(exc).__name__,
+            elapsed_ms=0.0,
+        )
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
     execution_report = ExecutionReport(
         pipeline_session_id=pipeline_session_id,
@@ -120,6 +134,7 @@ def observe_gateway_turn(
         orchestrator_mode=mode,
         pipeline_plan_payload=pipeline_plan_payload,
         pipeline_gate_payload=pipeline_gate.to_safe_dict(),
+        pipeline_handoff_payload=pipeline_handoff_payload,
     )
     return report
 
@@ -183,6 +198,56 @@ def _orchestrator_mode(config: dict[str, Any] | None) -> str:
     return "disabled"
 
 
+def _evaluate_pipeline_handoff_safely(
+    *,
+    router_decision: RouterDecision | None,
+    pipeline_plan_payload: dict[str, Any],
+    pipeline_gate: PipelineGateDecision,
+) -> dict[str, Any]:
+    if not _should_plan_engineering_pipeline(config={"pipelines": {"enabled": True, "orchestrator": {"mode": "observe"}}}, router_decision=router_decision):
+        pipeline_id = getattr(router_decision, "selected_pipeline_id", None) or getattr(router_decision, "fallback_pipeline_id", None)
+        pipeline_session_id = getattr(router_decision, "pipeline_session_id", None)
+        return {
+            "pipeline_id": pipeline_id,
+            "pipeline_session_id": pipeline_session_id,
+            "gate_allowed": False,
+            "gate_reason_code": "not_applicable",
+            "handoff_status": "not_applicable",
+            "handoff_reason": "not_applicable",
+            "execution_mode": "observe_only",
+            "would_execute": False,
+            "executed": False,
+            "pipeline_executor_status": None,
+            "safe_summary": "Pipeline handoff is not applicable for the current observe route.",
+            "elapsed_ms": 0.0,
+            "error": None,
+            "gate_payload": {},
+            "pipeline_executor_result": None,
+        }
+
+    started = time.perf_counter()
+    try:
+        handoff_request = _build_pipeline_handoff_request(
+            router_decision=router_decision,
+            pipeline_gate=pipeline_gate,
+        )
+        coordinator = _load_pipeline_handoff_coordinator_class()()
+        result = coordinator.run(handoff_request)
+        payload = result.to_safe_dict()
+        payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+        if payload.get("handoff_status") == "denied":
+            payload["handoff_reason"] = payload.get("gate_reason_code") or payload.get("handoff_reason")
+        return payload
+    except Exception as exc:
+        return _handoff_failure_payload(
+            router_decision=router_decision,
+            pipeline_gate=pipeline_gate,
+            reason_code="handoff_evaluation_failed",
+            exception_type=type(exc).__name__,
+            elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
+        )
+
+
 def _build_pipeline_state(
     *,
     pipeline_session_id: str,
@@ -233,6 +298,7 @@ def _log_observe_report(
     orchestrator_mode: str,
     pipeline_plan_payload: dict[str, Any],
     pipeline_gate_payload: dict[str, Any],
+    pipeline_handoff_payload: dict[str, Any],
 ) -> None:
     payload = {
         "event": "pipeline_orchestrator_observe_report",
@@ -255,6 +321,7 @@ def _log_observe_report(
         "state": asdict(report.state),
         "execution_report": asdict(report.execution_report),
         "pipeline_gate": pipeline_gate_payload,
+        "pipeline_handoff": pipeline_handoff_payload,
     }
     payload.update(pipeline_plan_payload)
     gateway_logger.info(
@@ -383,6 +450,85 @@ def _load_pipeline_execution_request_class():
     from hermes_cli.pipeline_executor import PipelineExecutionRequest
 
     return PipelineExecutionRequest
+
+
+def _load_pipeline_handoff_coordinator_class():
+    from hermes_cli.pipeline_handoff import PipelineHandoffCoordinator
+
+    return PipelineHandoffCoordinator
+
+
+def _load_pipeline_handoff_request_class():
+    from hermes_cli.pipeline_handoff import PipelineHandoffMode, PipelineHandoffRequest
+
+    return PipelineHandoffMode, PipelineHandoffRequest
+
+
+def _build_pipeline_handoff_request(
+    *,
+    router_decision: RouterDecision | None,
+    pipeline_gate: PipelineGateDecision,
+):
+    pipeline_id = getattr(router_decision, "selected_pipeline_id", None) or getattr(router_decision, "fallback_pipeline_id", None)
+    pipeline_session_id = getattr(router_decision, "pipeline_session_id", None) or uuid.uuid4().hex
+    execution_request_cls = _load_pipeline_execution_request_class()
+    pipeline_handoff_mode_cls, pipeline_handoff_request_cls = _load_pipeline_handoff_request_class()
+    return pipeline_handoff_request_cls(
+        pipeline_id=pipeline_id or DEFAULT_PIPELINE_ID,
+        pipeline_session_id=pipeline_session_id,
+        router_decision=router_decision,
+        gate_decision=pipeline_gate,
+        execution_request=execution_request_cls(
+            loaded_specs=_load_pipeline_specs(repo_root=None),
+            pipeline_session_id=pipeline_session_id,
+            task_summary="observe_only_redacted",
+            repo_path="observe_only_redacted",
+            pipeline_id=pipeline_id or _ENGINEERING_PIPELINE_ID,
+            mode="plan_only",
+        ),
+        mode=pipeline_handoff_mode_cls.OBSERVE_ONLY,
+        allow_test_execution=False,
+        engineer_executor=None,
+        reviewer_executor=None,
+    )
+
+
+def _safe_gate_payload(gate: PipelineGateDecision) -> dict[str, Any]:
+    try:
+        return gate.to_safe_dict()
+    except Exception:
+        return {}
+
+
+def _handoff_failure_payload(
+    *,
+    router_decision: RouterDecision | None,
+    pipeline_gate: PipelineGateDecision,
+    reason_code: str,
+    exception_type: str,
+    elapsed_ms: float,
+) -> dict[str, Any]:
+    return {
+        "pipeline_id": getattr(router_decision, "selected_pipeline_id", None)
+        or getattr(router_decision, "fallback_pipeline_id", None),
+        "pipeline_session_id": getattr(router_decision, "pipeline_session_id", None),
+        "gate_allowed": bool(getattr(pipeline_gate, "allowed", False)),
+        "gate_reason_code": getattr(pipeline_gate, "reason_code", "unknown"),
+        "handoff_status": "failed",
+        "handoff_reason": reason_code,
+        "execution_mode": "observe_only",
+        "would_execute": False,
+        "executed": False,
+        "pipeline_executor_status": None,
+        "safe_summary": "Pipeline handoff evaluation failed closed in observe mode.",
+        "elapsed_ms": elapsed_ms,
+        "error": {
+            "code": reason_code,
+            "exception_type": exception_type,
+        },
+        "gate_payload": _safe_gate_payload(pipeline_gate),
+        "pipeline_executor_result": None,
+    }
 
 
 def _result_error_payload(result: dict[str, Any]) -> dict[str, Any] | None:
