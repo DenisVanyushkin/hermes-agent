@@ -43,10 +43,10 @@ class ExecutionReport:
     fallback_pipeline_id: str | None
     completion_allowed: bool
     completion_reason: str
-    selected_provider: str | None
-    selected_model: str | None
-    actual_provider: str | None
-    actual_model: str | None
+    executed: bool
+    would_execute: bool
+    execution_mode: str
+    runtime_status: str
     token_usage: dict[str, Any] | str | None = None
     cache_usage: dict[str, Any] | str | None = None
     tool_call_summary: list[dict[str, Any]] = field(default_factory=list)
