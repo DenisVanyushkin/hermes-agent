@@ -114,7 +114,9 @@ class TestLoadConfigDefaults:
             config = load_config()
             assert config["model"] == DEFAULT_CONFIG["model"]
             assert config["agent"]["max_turns"] == DEFAULT_CONFIG["agent"]["max_turns"]
+            assert config["pipelines"]["enabled"] is False
             assert config["pipelines"]["router"]["mode"] == "disabled"
+            assert config["pipelines"]["orchestrator"]["mode"] == "disabled"
             assert "max_turns" not in config
             assert "terminal" in config
             assert config["terminal"]["backend"] == "local"

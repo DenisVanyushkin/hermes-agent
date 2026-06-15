@@ -20258,11 +20258,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
+        router_decision = None
 
         try:
             from hermes_cli.pipeline_observe import observe_pipeline_router_decision
 
-            observe_pipeline_router_decision(
+            router_decision = observe_pipeline_router_decision(
                 config=user_config,
                 user_message=message,
                 session_id=session_id,
@@ -20277,6 +20278,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         except Exception:
             logger.warning("pipeline observe hook import/invocation failed", exc_info=True)
+
+        if bool(cfg_get(user_config, "pipelines", "enabled", default=False)) and (
+            str(cfg_get(user_config, "pipelines", "orchestrator", "mode", default="disabled") or "disabled").strip().lower()
+            == "observe"
+        ):
+            try:
+                from hermes_cli.orchestrator import observe_gateway_turn
+
+                observe_gateway_turn(
+                    config=user_config,
+                    user_message=message,
+                    session_id=session_id,
+                    session_key=session_key,
+                    platform=platform_key,
+                    chat_id=str(getattr(source, "chat_id", "") or "") or None,
+                    thread_id=str(getattr(source, "thread_id", "") or "") or None,
+                    user_id=str(getattr(source, "user_id", "") or "") or None,
+                    router_decision=router_decision,
+                    selected_provider=str(cfg_get(user_config, "model", "provider", default="") or "").strip() or None,
+                    selected_model=_resolve_gateway_model(user_config) or None,
+                    logger=logger,
+                )
+            except Exception:
+                logger.warning("pipeline orchestrator observe hook import/invocation failed", exc_info=True)
 
         # ---- Proxy mode: delegate to remote API server ----
         if self._get_proxy_url():
