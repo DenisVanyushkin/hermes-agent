@@ -1027,6 +1027,11 @@ DEFAULT_CONFIG = {
         "router": {
             "mode": "disabled",
         },
+        "execution": {
+            "mode": "disabled",
+            "allow_pipelines": ["engineering_review_pipeline"],
+            "min_router_confidence": 0.90,
+        },
     },
     "agent": {
         "max_turns": 120,

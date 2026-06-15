@@ -1,0 +1,285 @@
+"""Import-light execution gate policy for future pipeline enforcement."""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Mapping
+
+from hermes_cli.config import cfg_get
+from hermes_cli.pipeline_router import RouterDecision
+
+
+ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
+EXPECTED_SUBAGENT_IDS = ("hermes_engineer_core", "hermes_code_reviewer")
+REVIEWER_CONDITION = "code_changes_require_review"
+
+
+class PipelineGateMode(str, Enum):
+    DISABLED = "disabled"
+    OBSERVE = "observe"
+    PLAN_ONLY = "plan_only"
+    EXECUTE = "execute"
+
+
+@dataclass(frozen=True)
+class PipelineGatePolicy:
+    enabled: bool
+    mode: PipelineGateMode
+    allow_pipelines: tuple[str, ...]
+    min_router_confidence: float
+    config_valid: bool = True
+
+
+@dataclass(frozen=True)
+class PipelineGateRequest:
+    config: Mapping[str, Any] | None
+    router_decision: RouterDecision | None
+    pipeline_plan_payload: Mapping[str, Any] | None
+    platform: str | None = None
+    platform_allowed: bool | None = None
+    destructive_task: bool | None = None
+    explicit_approval: bool | None = None
+    user_message: str | None = None
+    prompt_text: str | None = None
+    raw_executor_output: Any = None
+    raw_tool_arguments: Any = None
+    secrets: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class PipelineGateReason:
+    code: str
+    message: str
+    risk_level: str
+
+
+@dataclass(frozen=True)
+class PipelineGateDecision:
+    allowed: bool
+    mode: PipelineGateMode
+    pipeline_id: str | None
+    pipeline_session_id: str | None
+    reason_code: str
+    reason: str
+    requirements_met: list[str] = field(default_factory=list)
+    requirements_failed: list[str] = field(default_factory=list)
+    risk_level: str = "high"
+    safe_to_log_payload: dict[str, Any] = field(default_factory=dict)
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "allowed": self.allowed,
+            "mode": self.mode.value,
+            "pipeline_id": self.pipeline_id,
+            "pipeline_session_id": self.pipeline_session_id,
+            "reason_code": self.reason_code,
+            "reason": self.reason,
+            "requirements_met": list(self.requirements_met),
+            "requirements_failed": list(self.requirements_failed),
+            "risk_level": self.risk_level,
+            "safe_to_log_payload": dict(self.safe_to_log_payload),
+        }
+
+
+def evaluate_pipeline_gate(request: PipelineGateRequest) -> PipelineGateDecision:
+    policy = _load_policy(request.config)
+    router = request.router_decision
+    payload = dict(request.pipeline_plan_payload or {})
+    pipeline_id = getattr(router, "selected_pipeline_id", None) or getattr(router, "fallback_pipeline_id", None)
+    pipeline_session_id = getattr(router, "pipeline_session_id", None)
+    requirements_met: list[str] = []
+    requirements_failed: list[str] = []
+
+    def deny(code: str, message: str, *, risk_level: str = "high") -> PipelineGateDecision:
+        return PipelineGateDecision(
+            allowed=False,
+            mode=policy.mode,
+            pipeline_id=pipeline_id,
+            pipeline_session_id=pipeline_session_id,
+            reason_code=code,
+            reason=message,
+            requirements_met=requirements_met,
+            requirements_failed=requirements_failed,
+            risk_level=risk_level,
+            safe_to_log_payload=_safe_payload(request, policy, pipeline_id, pipeline_session_id),
+        )
+
+    if not policy.config_valid:
+        requirements_failed.append("valid_execution_config")
+        return deny("missing_required_config", "Pipeline execution config is missing, malformed, or ambiguous.")
+
+    if not policy.enabled or policy.mode == PipelineGateMode.DISABLED:
+        requirements_failed.append("execution_mode_enabled")
+        return deny("gate_disabled", "Pipeline execution mode is disabled by configuration.")
+    if policy.mode == PipelineGateMode.OBSERVE:
+        requirements_failed.append("execute_mode_required")
+        return deny("observe_only", "Observe mode may report planning data but must deny execution.")
+    if policy.mode == PipelineGateMode.PLAN_ONLY:
+        requirements_failed.append("execute_mode_required")
+        return deny("plan_only", "Plan-only mode may build a dry-run plan but must deny execution.")
+
+    if not policy.allow_pipelines:
+        requirements_failed.append("allow_pipelines_configured")
+        return deny("missing_required_config", "Execution allowlist is missing or empty.")
+    requirements_met.append("execution_mode_enabled")
+
+    if router is None or router.status != "selected":
+        requirements_failed.append("router_selected")
+        return deny("router_not_selected", "Router decision must be selected before execution can be allowed.")
+    requirements_met.append("router_selected")
+
+    if not router.selected_pipeline_id:
+        requirements_failed.append("known_pipeline_selected")
+        return deny("router_not_selected", "Router did not select a pipeline id.")
+    requirements_met.append("known_pipeline_selected")
+
+    if router.selected_pipeline_id != ENGINEERING_PIPELINE_ID or router.selected_pipeline_id not in policy.allow_pipelines:
+        requirements_failed.append("supported_pipeline_selected")
+        return deny("unsupported_pipeline", "Only engineering_review_pipeline is eligible for future execution in G1.")
+    requirements_met.append("supported_pipeline_selected")
+
+    if float(router.confidence) < float(policy.min_router_confidence):
+        requirements_failed.append("router_confidence_threshold")
+        return deny("low_router_confidence", "Router confidence is below the configured execution threshold.")
+    requirements_met.append("router_confidence_threshold")
+
+    if payload.get("runtime_plan_failed"):
+        requirements_failed.append("runtime_plan_succeeded")
+        return deny("runtime_plan_failed", "Runtime planning reported a failure.")
+    requirements_met.append("runtime_plan_succeeded")
+
+    if payload.get("pipeline_plan_error") is not None:
+        requirements_failed.append("plan_error_absent")
+        return deny("plan_error", "Pipeline planning returned an explicit error payload.")
+    requirements_met.append("plan_error_absent")
+
+    if payload.get("pipeline_plan_status") != "planned" or payload.get("pipeline_plan_completion_reason") != "plan_only":
+        requirements_failed.append("plan_ready")
+        return deny("plan_not_ready", "Pipeline plan must be in planned/plan_only state before execution can be allowed.")
+    requirements_met.append("plan_ready")
+
+    planned_subagent_ids = list(payload.get("planned_subagent_ids") or [])
+    step_records = list(((payload.get("pipeline_plan") or {}).get("step_records")) or [])
+    planned_step_subagents = [str(step.get("subagent_id")) for step in step_records if isinstance(step, Mapping)]
+    if not _contains_expected_steps(planned_subagent_ids, planned_step_subagents):
+        requirements_failed.append("expected_steps_present")
+        return deny("missing_expected_steps", "Planned engineer/reviewer steps are missing from the pipeline plan.")
+    requirements_met.append("expected_steps_present")
+
+    reviewer_step = next(
+        (step for step in step_records if isinstance(step, Mapping) and step.get("step_kind") == "reviewer"),
+        None,
+    )
+    if not isinstance(reviewer_step, Mapping) or reviewer_step.get("condition") != REVIEWER_CONDITION:
+        requirements_failed.append("reviewer_conditional")
+        return deny("reviewer_not_conditional", "Reviewer must remain conditional on code changes.")
+    requirements_met.append("reviewer_conditional")
+
+    if request.platform_allowed is False:
+        requirements_failed.append("platform_allowed")
+        return deny("unsafe_platform", "Platform/session policy does not allow pipeline execution here.")
+    if request.platform_allowed is True:
+        requirements_met.append("platform_allowed")
+
+    if request.destructive_task and not request.explicit_approval:
+        requirements_failed.append("destructive_task_approved")
+        return deny("destructive_task_requires_approval", "Destructive tasks require explicit approval before execution.")
+    if request.destructive_task is False or request.explicit_approval:
+        requirements_met.append("destructive_task_approved")
+
+    return PipelineGateDecision(
+        allowed=True,
+        mode=policy.mode,
+        pipeline_id=router.selected_pipeline_id,
+        pipeline_session_id=pipeline_session_id,
+        reason_code="allowed",
+        reason="All configured gate checks passed for future execute mode.",
+        requirements_met=requirements_met,
+        requirements_failed=requirements_failed,
+        risk_level="medium",
+        safe_to_log_payload=_safe_payload(request, policy, router.selected_pipeline_id, pipeline_session_id),
+    )
+
+
+def _load_policy(config: Mapping[str, Any] | None) -> PipelineGatePolicy:
+    enabled = bool(cfg_get(config, "pipelines", "enabled", default=False))
+    execution_cfg = cfg_get(config, "pipelines", "execution", default=None)
+    config_valid = True
+    if execution_cfg is None:
+        execution_cfg = {}
+    elif not isinstance(execution_cfg, Mapping):
+        execution_cfg = {}
+        config_valid = False
+
+    raw_mode_value = execution_cfg.get("mode", "disabled")
+    if raw_mode_value is None:
+        raw_mode_value = "disabled"
+    if not isinstance(raw_mode_value, str):
+        raw_mode = "disabled"
+        config_valid = False
+    else:
+        raw_mode = raw_mode_value.strip().lower() or "disabled"
+    try:
+        mode = PipelineGateMode(raw_mode)
+    except ValueError:
+        mode = PipelineGateMode.DISABLED
+        config_valid = False
+
+    raw_allow_pipelines = execution_cfg.get("allow_pipelines", [])
+    if raw_allow_pipelines is None:
+        raw_allow_pipelines = []
+    if isinstance(raw_allow_pipelines, (str, bytes)) or not isinstance(raw_allow_pipelines, (list, tuple)):
+        allow_pipelines = ()
+        config_valid = False
+    else:
+        allow_pipelines = tuple(str(item) for item in raw_allow_pipelines if str(item).strip())
+
+    raw_confidence = execution_cfg.get("min_router_confidence", 0.90)
+    try:
+        min_router_confidence = float(raw_confidence if raw_confidence is not None else 0.90)
+    except (TypeError, ValueError):
+        min_router_confidence = 0.90
+        config_valid = False
+    return PipelineGatePolicy(
+        enabled=enabled,
+        mode=mode,
+        allow_pipelines=allow_pipelines,
+        min_router_confidence=min_router_confidence,
+        config_valid=config_valid,
+    )
+
+
+def _contains_expected_steps(planned_subagent_ids: list[str], planned_step_subagents: list[str]) -> bool:
+    expected = set(EXPECTED_SUBAGENT_IDS)
+    return expected.issubset(set(planned_subagent_ids)) and expected.issubset(set(planned_step_subagents))
+
+
+def _safe_payload(
+    request: PipelineGateRequest,
+    policy: PipelineGatePolicy,
+    pipeline_id: str | None,
+    pipeline_session_id: str | None,
+) -> dict[str, Any]:
+    user_message = request.user_message or ""
+    return {
+        "pipeline_id": pipeline_id,
+        "pipeline_session_id": pipeline_session_id,
+        "mode": policy.mode.value,
+        "allow_pipelines": list(policy.allow_pipelines),
+        "min_router_confidence": policy.min_router_confidence,
+        "platform": request.platform,
+        "platform_allowed": request.platform_allowed,
+        "destructive_task": request.destructive_task,
+        "explicit_approval": request.explicit_approval,
+        "user_message_length": len(user_message),
+        "user_message_hash": _short_hash(user_message) if user_message else None,
+        "plan_status": (request.pipeline_plan_payload or {}).get("pipeline_plan_status"),
+        "plan_completion_reason": (request.pipeline_plan_payload or {}).get("pipeline_plan_completion_reason"),
+        "planned_subagent_ids": list((request.pipeline_plan_payload or {}).get("planned_subagent_ids") or []),
+    }
+
+
+def _short_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
