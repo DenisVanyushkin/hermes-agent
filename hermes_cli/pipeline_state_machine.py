@@ -142,6 +142,9 @@ def _build_step_contracts(
                 runner_result=runner_result,
                 structured_output=runner_result.structured_output,
                 pipeline_spec=pipeline_spec,
+                runtime_factory_plan=runtime_payload,
+                subagent_spec=subagent_specs.get(step.subagent_id) if isinstance(subagent_specs, dict) else {},
+                all_subagent_specs=subagent_specs if isinstance(subagent_specs, dict) else {},
             )
         )
         enriched_steps.append(
