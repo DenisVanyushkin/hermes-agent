@@ -347,8 +347,9 @@ def _snapshot_to_plan_payload(snapshot: PipelineStateSnapshot) -> dict[str, Any]
             "condition": step.condition,
             "execution_status": step.execution_status,
             "planning_mode": step.planning_mode,
+            "runtime_factory_plan": runtime_factory_plan,
         }
-        for step in snapshot.planned_steps
+        for step, runtime_factory_plan in zip(snapshot.planned_steps, snapshot.runtime_factory_plans)
     ]
     return {
         "pipeline_id": snapshot.pipeline_id,
