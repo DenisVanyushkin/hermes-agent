@@ -90,6 +90,8 @@ def test_not_invoked_runner_result_blocks_completion() -> None:
     assert result.failure_reason == "runner_not_invoked"
     assert result.completion.completion_allowed is False
     assert result.decision_path == ["runner_not_invoked"]
+    assert result.control_channel is not None
+    assert result.control_channel.decisions == []
 
 
 def test_invalid_structured_envelope_fails_closed() -> None:
@@ -109,6 +111,8 @@ def test_invalid_structured_envelope_fails_closed() -> None:
     assert result.failure_reason == "invalid_structured_output"
     assert result.completion.completion_allowed is False
     assert result.validation_errors
+    assert result.control_channel is not None
+    assert result.control_channel.decisions[0].message.message_purpose == "clarification"
 
 
 def test_valid_envelope_with_blockers_blocks_completion() -> None:
@@ -125,6 +129,8 @@ def test_valid_envelope_with_blockers_blocks_completion() -> None:
     assert result.blockers == ["failing test"]
     assert result.next_action == "fix_blocker"
     assert result.completion.completion_allowed is False
+    assert result.control_channel is not None
+    assert result.control_channel.decisions[0].message.target_subagent_id == "hermes_code_reviewer"
 
 
 def test_requires_review_plans_review() -> None:
@@ -141,6 +147,8 @@ def test_requires_review_plans_review() -> None:
     assert result.review.review_required is True
     assert result.review.review_planned is True
     assert result.completion.completion_allowed is False
+    assert result.control_channel is not None
+    assert result.control_channel.decisions[0].allowed is True
 
 
 def test_successful_valid_envelope_becomes_candidate_complete() -> None:
@@ -172,6 +180,27 @@ def test_low_confidence_plans_escalation_and_blocks_completion() -> None:
     assert result.escalation.escalation_required is True
     assert result.escalation.escalation_planned is True
     assert result.completion.completion_allowed is False
+    assert result.control_channel is not None
+    assert result.control_channel.policy.resets_on_model_escalation is False
+
+
+def test_default_pipeline_has_no_engineering_control_channel_metadata() -> None:
+    envelope = _envelope()
+    result = evaluate_pipeline_step(
+        PipelineEvaluationRequest(
+            pipeline_session_id="pipe-1",
+            trace_id="trace-1",
+            pipeline_id="default_conversation_pipeline",
+            step_id="response",
+            subagent_id="general_operator",
+            execution_mode="observe_plan_only",
+            runner_result=_runner_result(status=SubagentRunnerStatus.SUCCEEDED, structured_output=envelope),
+            structured_output=envelope,
+            pipeline_spec={},
+        )
+    )
+
+    assert result.control_channel is None
 
 
 def test_unknown_status_fails_closed() -> None:
