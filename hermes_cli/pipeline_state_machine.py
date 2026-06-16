@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from hermes_cli.pipeline_control_channel import resolve_loop_limit_policy
 from hermes_cli.pipeline_evaluation import PipelineEvaluationRequest, evaluate_pipeline_step
 from hermes_cli.pipeline_session import (
     ENGINEERING_PIPELINE_ID,
@@ -46,7 +47,7 @@ def build_pipeline_state_snapshot(
     pipeline_spec: dict[str, Any],
     loaded_specs: Any | None = None,
 ) -> PipelineStateSnapshot:
-    loop_policy = dict(pipeline_spec.get("loop_policy") or {})
+    loop_policy = resolve_loop_limit_policy(pipeline_spec).to_safe_dict()
     enriched_steps, runtime_factory_plans = _build_step_contracts(
         session=session,
         pipeline_spec=pipeline_spec,

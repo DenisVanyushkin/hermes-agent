@@ -6,6 +6,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
+from hermes_cli.pipeline_control_channel import (
+    ControlledMessageChannelPlan,
+    ControlledSubagentMessage,
+    LoopCounterSnapshot,
+    build_controlled_message_decision,
+    resolve_loop_limit_policy,
+)
 from hermes_cli.subagent_runner import (
     StructuredOutputEnvelope,
     SubagentRunnerResult,
@@ -108,6 +115,7 @@ class PipelineEvaluationResult:
     completion: PipelineCompletionDecision = field(default_factory=PipelineCompletionDecision)
     review: PipelineReviewDecision = field(default_factory=PipelineReviewDecision)
     escalation: PipelineEscalationDecision = field(default_factory=PipelineEscalationDecision)
+    control_channel: ControlledMessageChannelPlan | None = None
     failure_reason: str | None = None
     validation_errors: list[dict[str, str]] = field(default_factory=list)
     decision_path: list[str] = field(default_factory=list)
@@ -138,6 +146,7 @@ class PipelineEvaluationResult:
             ).to_safe_dict(),
             "review": self.review.to_safe_dict(),
             "escalation": self.escalation.to_safe_dict(),
+            "control_channel": self.control_channel.to_safe_dict() if self.control_channel else None,
             "failure_reason": self.failure_reason,
             "validation_errors": list(self.validation_errors),
             "decision_path": list(self.decision_path),
@@ -156,6 +165,7 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
                 candidate_complete=False,
                 blocked_reason="runner_not_invoked",
             ),
+            control_channel=_control_channel_plan(request, outcome="runner_not_invoked"),
             decision_path=["runner_not_invoked"],
         )
 
@@ -183,6 +193,7 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
                 candidate_complete=False,
                 blocked_reason="invalid_structured_output",
             ),
+            control_channel=_control_channel_plan(request, outcome="invalid_structured_output"),
             validation_errors=list(envelope.validation_errors),
             decision_path=["invalid_structured_output"],
         )
@@ -200,6 +211,7 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
                 blocked_reason="blockers_present",
             ),
             review=_review_decision(envelope, "blockers_present"),
+            control_channel=_control_channel_plan(request, envelope=envelope, outcome="blockers_present"),
             decision_path=["valid_structured_output", "blockers_present"],
         )
 
@@ -215,6 +227,7 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
                 blocked_reason="review_required",
             ),
             review=_review_decision(envelope, "review_required"),
+            control_channel=_control_channel_plan(request, envelope=envelope, outcome="review_required"),
             decision_path=["valid_structured_output", "review_required"],
         )
 
@@ -234,6 +247,7 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
                 escalation_planned=True,
                 reason="low_confidence",
             ),
+            control_channel=_control_channel_plan(request, envelope=envelope, outcome="low_confidence"),
             decision_path=["valid_structured_output", "low_confidence"],
         )
 
@@ -247,6 +261,7 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
                 candidate_complete=True,
                 blocked_reason="execution_disabled",
             ),
+            control_channel=_control_channel_plan(request, envelope=envelope, outcome="candidate_complete"),
             decision_path=["valid_structured_output", "candidate_complete"],
         )
 
@@ -259,6 +274,7 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
             candidate_complete=False,
             blocked_reason="unsupported_envelope_status",
         ),
+        control_channel=_control_channel_plan(request, envelope=envelope, outcome="unsupported_envelope_status"),
         failure_reason="unsupported_envelope_status",
         decision_path=["valid_structured_output", "unsupported_envelope_status"],
     )
@@ -273,6 +289,118 @@ def _review_decision(envelope: StructuredOutputEnvelope, reason: str) -> Pipelin
     )
 
 
+def _control_channel_plan(
+    request: PipelineEvaluationRequest,
+    *,
+    envelope: StructuredOutputEnvelope | None = None,
+    outcome: str,
+) -> ControlledMessageChannelPlan | None:
+    if request.pipeline_id != "engineering_review_pipeline":
+        return None
+
+    policy = resolve_loop_limit_policy(request.pipeline_spec)
+    counters = LoopCounterSnapshot()
+    decisions = []
+    runner_invoked = request.runner_result.status not in {
+        SubagentRunnerStatus.NOT_INVOKED,
+        SubagentRunnerStatus.PLAN_ONLY,
+    }
+    evaluation_id = f"{request.pipeline_session_id}:{request.step_id}:{request.subagent_id}"
+
+    if outcome in {"review_required", "blockers_present"} and request.subagent_id == "hermes_engineer_core":
+        decisions.append(
+            build_controlled_message_decision(
+                message=ControlledSubagentMessage(
+                    pipeline_session_id=request.pipeline_session_id,
+                    trace_id=request.trace_id,
+                    pipeline_id=request.pipeline_id,
+                    source_subagent_id="hermes_engineer_core",
+                    target_subagent_id="hermes_code_reviewer",
+                    message_purpose="review_feedback",
+                    payload_summary=(envelope.summary if envelope and envelope.summary else "Structured output requires reviewer inspection."),
+                    related_step_id=request.step_id,
+                    evaluation_id=evaluation_id,
+                ),
+                policy=policy,
+                counters=counters,
+                limit_name="max_review_iterations",
+                runner_invoked=runner_invoked,
+            )
+        )
+
+    if outcome == "blockers_present" and request.subagent_id == "hermes_code_reviewer":
+        decisions.append(
+            build_controlled_message_decision(
+                message=ControlledSubagentMessage(
+                    pipeline_session_id=request.pipeline_session_id,
+                    trace_id=request.trace_id,
+                    pipeline_id=request.pipeline_id,
+                    source_subagent_id="hermes_code_reviewer",
+                    target_subagent_id="hermes_engineer_core",
+                    message_purpose="rework_request",
+                    payload_summary=", ".join(envelope.blockers) if envelope and envelope.blockers else "Reviewer reported blockers.",
+                    related_step_id=request.step_id,
+                    evaluation_id=evaluation_id,
+                ),
+                policy=policy,
+                counters=counters,
+                limit_name="max_review_iterations",
+                runner_invoked=runner_invoked,
+            )
+        )
+
+    if outcome == "invalid_structured_output":
+        decisions.append(
+            build_controlled_message_decision(
+                message=ControlledSubagentMessage(
+                    pipeline_session_id=request.pipeline_session_id,
+                    trace_id=request.trace_id,
+                    pipeline_id=request.pipeline_id,
+                    source_subagent_id=request.subagent_id,
+                    target_subagent_id=request.subagent_id,
+                    message_purpose="clarification",
+                    payload_summary="Retry structured output validation within policy.",
+                    related_step_id=request.step_id,
+                    evaluation_id=evaluation_id,
+                ),
+                policy=policy,
+                counters=counters,
+                limit_name="max_invalid_output_retries",
+                runner_invoked=runner_invoked,
+            )
+        )
+
+    if outcome == "low_confidence":
+        decisions.append(
+            build_controlled_message_decision(
+                message=ControlledSubagentMessage(
+                    pipeline_session_id=request.pipeline_session_id,
+                    trace_id=request.trace_id,
+                    pipeline_id=request.pipeline_id,
+                    source_subagent_id=request.subagent_id,
+                    target_subagent_id=request.subagent_id,
+                    message_purpose="disagreement_resolution",
+                    payload_summary="Low-confidence result may require policy-bound model escalation.",
+                    related_step_id=request.step_id,
+                    evaluation_id=evaluation_id,
+                ),
+                policy=policy,
+                counters=counters,
+                limit_name="max_disagreement_rounds",
+                runner_invoked=runner_invoked,
+            )
+        )
+
+    return ControlledMessageChannelPlan(
+        pipeline_session_id=request.pipeline_session_id,
+        trace_id=request.trace_id,
+        pipeline_id=request.pipeline_id,
+        policy=policy,
+        counters=counters,
+        decisions=decisions,
+    )
+
+
 def _result(
     request: PipelineEvaluationRequest,
     *,
@@ -283,6 +411,7 @@ def _result(
     completion: PipelineCompletionDecision | None = None,
     review: PipelineReviewDecision | None = None,
     escalation: PipelineEscalationDecision | None = None,
+    control_channel: ControlledMessageChannelPlan | None = None,
     failure_reason: str | None = None,
     validation_errors: list[dict[str, str]] | None = None,
     decision_path: list[str] | None = None,
@@ -300,6 +429,7 @@ def _result(
         completion=completion or PipelineCompletionDecision(),
         review=review or PipelineReviewDecision(),
         escalation=escalation or PipelineEscalationDecision(),
+        control_channel=control_channel,
         failure_reason=failure_reason,
         validation_errors=list(validation_errors or []),
         decision_path=list(decision_path or []),
