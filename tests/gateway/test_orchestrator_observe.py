@@ -156,6 +156,14 @@ def test_gateway_orchestrator_observe_engineering_pipeline_adds_plan_only_report
     assert payload["pipeline_preflight"]["executed"] is False
     assert payload["pipeline_plan"]["step_records"][0]["step_kind"] == "engineer"
     assert payload["pipeline_plan"]["step_records"][1]["step_kind"] == "reviewer"
+    assert payload["pipeline_execution_report"]["status"] == "not_executed"
+    assert payload["pipeline_execution_report"]["summary"]["pipeline_id"] == "engineering_review_pipeline"
+    assert payload["pipeline_execution_report"]["summary"]["selected_subagents"] == [
+        "hermes_engineer_core",
+        "hermes_code_reviewer",
+    ]
+    assert payload["pipeline_execution_report"]["final_response"]["text"] is None
+    assert payload["pipeline_execution_report"]["completion"]["blocked_reason"] == "execution_disabled"
     engineer_runtime_plan = payload["pipeline_plan"]["step_records"][0]["runtime_factory_plan"]
     reviewer_runtime_plan = payload["pipeline_plan"]["step_records"][1]["runtime_factory_plan"]
     assert engineer_runtime_plan["status"] == "plan_only"
@@ -176,6 +184,7 @@ def test_gateway_orchestrator_observe_engineering_pipeline_adds_plan_only_report
     assert "runtime_bridge_allowed" not in payload_text
     assert "runtime_bridge_enabled" not in payload_text
     assert "SECRET_TOKEN=abc123" not in json.dumps(payload, sort_keys=True)
+    assert "prompt_input_hash" not in payload_text
 
 
 def test_gateway_orchestrator_observe_does_not_load_runtime_bridge_components(monkeypatch, caplog):
