@@ -51,6 +51,14 @@ def test_state_machine_engineering_plan_includes_engineer_and_reviewer_steps():
     ]
     assert [step.step_kind for step in snapshot.planned_steps] == ["engineer", "reviewer"]
     assert snapshot.reviewer_condition == "code_changes_require_review"
+    assert [plan["subagent_id"] for plan in snapshot.runtime_factory_plans] == [
+        "hermes_engineer_core",
+        "hermes_code_reviewer",
+    ]
+    assert snapshot.runtime_factory_plans[0]["status"] == "plan_only"
+    assert snapshot.runtime_factory_plans[0]["provider"] == "openrouter"
+    assert snapshot.runtime_factory_plans[0]["model"] == "xiaomi/mimo-v2.5-pro"
+    assert snapshot.runtime_factory_plans[0]["dry_run"] is True
     assert snapshot.executed is False
 
 
@@ -70,11 +78,13 @@ def test_state_machine_default_route_plans_response_and_blocks_execution():
         "response_planned",
         "preflight_blocked_execution",
     ]
+    assert snapshot.runtime_factory_plans[0]["subagent_id"] == "general_operator"
+    assert snapshot.runtime_factory_plans[0]["status"] == "plan_only"
     assert snapshot.reviewer_condition is None
     assert snapshot.executed is False
 
 
-def test_state_machine_output_excludes_provider_model_client_runtime_fields():
+def test_state_machine_output_excludes_legacy_runtime_bridge_fields():
     loaded = load_pipeline_specs()
     session = _session_for("engineering_review_pipeline", status="selected")
 
@@ -83,10 +93,15 @@ def test_state_machine_output_excludes_provider_model_client_runtime_fields():
         pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
     )
 
-    payload_text = str(asdict(snapshot))
+    payload = asdict(snapshot)
+    payload_text = str(payload)
+    assert payload["runtime_factory_plans"][0]["provider"] == "openrouter"
+    assert payload["runtime_factory_plans"][0]["model"] == "xiaomi/mimo-v2.5-pro"
     assert "actual_provider" not in payload_text
     assert "actual_model" not in payload_text
     assert "selected_provider" not in payload_text
     assert "selected_model" not in payload_text
-    assert "client" not in payload_text
-    assert "runtime" not in payload_text
+    assert "constructor_provider" not in payload_text
+    assert "constructor_model" not in payload_text
+    assert "runtime_bridge_allowed" not in payload_text
+    assert "runtime_bridge_enabled" not in payload_text

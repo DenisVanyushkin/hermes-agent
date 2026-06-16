@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,313 @@ class RuntimeFactoryError(Exception):
     def __init__(self, errors: list[RuntimeFactoryErrorDetail]):
         self.errors = errors
         super().__init__("; ".join(error.message for error in errors))
+
+
+class RuntimeFactoryStatus(str, Enum):
+    PLAN_ONLY = "plan_only"
+    BLOCKED = "blocked"
+
+
+@dataclass(frozen=True)
+class RuntimeToolPolicy:
+    read: list[str] = field(default_factory=list)
+    write: list[str] = field(default_factory=list)
+    execute: list[str] = field(default_factory=list)
+    gated: list[str] = field(default_factory=list)
+    forbidden: list[str] = field(default_factory=list)
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "read": list(self.read),
+            "write": list(self.write),
+            "execute": list(self.execute),
+            "gated": list(self.gated),
+            "forbidden": list(self.forbidden),
+        }
+
+
+@dataclass(frozen=True)
+class RuntimeEnvironmentPolicy:
+    working_directory_policy: str
+    secrets_env_access: str
+    can_mutate_files: bool
+    can_restart_services: Any
+    can_commit: Any
+    can_push: Any
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "working_directory_policy": self.working_directory_policy,
+            "secrets_env_access": self.secrets_env_access,
+            "can_mutate_files": self.can_mutate_files,
+            "can_restart_services": self.can_restart_services,
+            "can_commit": self.can_commit,
+            "can_push": self.can_push,
+        }
+
+
+@dataclass(frozen=True)
+class RuntimeFactoryRequest:
+    pipeline_session_id: str
+    trace_id: str
+    pipeline_id: str
+    subagent_id: str
+    role_id: str
+    execution_mode: str
+    dry_run: bool = True
+
+
+@dataclass(frozen=True)
+class RuntimeFactoryPlan:
+    pipeline_session_id: str
+    trace_id: str
+    pipeline_id: str
+    subagent_id: str
+    role_id: str
+    status: RuntimeFactoryStatus
+    execution_mode: str
+    dry_run: bool
+    provider: str | None
+    model: str | None
+    model_class: str | None
+    system_prompt_source_id: str | None
+    system_prompt_path: str | None
+    tool_set: list[str]
+    tool_policy: RuntimeToolPolicy
+    environment_policy: RuntimeEnvironmentPolicy
+    context_window_policy: dict[str, Any]
+    prompt_cache_policy: dict[str, Any]
+    logging_hooks_policy: dict[str, Any]
+    token_accounting_policy: dict[str, Any]
+    safety_gates: dict[str, Any]
+    errors: list[RuntimeFactoryErrorDetail] = field(default_factory=list)
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "pipeline_session_id": self.pipeline_session_id,
+            "trace_id": self.trace_id,
+            "pipeline_id": self.pipeline_id,
+            "subagent_id": self.subagent_id,
+            "role_id": self.role_id,
+            "status": self.status.value,
+            "execution_mode": self.execution_mode,
+            "dry_run": self.dry_run,
+            "provider": self.provider,
+            "model": self.model,
+            "model_class": self.model_class,
+            "system_prompt_source_id": self.system_prompt_source_id,
+            "system_prompt_path": self.system_prompt_path,
+            "tool_set": list(self.tool_set),
+            "tool_policy": self.tool_policy.to_safe_dict(),
+            "environment_policy": self.environment_policy.to_safe_dict(),
+            "context_window_policy": dict(self.context_window_policy),
+            "prompt_cache_policy": dict(self.prompt_cache_policy),
+            "logging_hooks_policy": dict(self.logging_hooks_policy),
+            "token_accounting_policy": dict(self.token_accounting_policy),
+            "safety_gates": dict(self.safety_gates),
+            "errors": [
+                {
+                    "code": error.code,
+                    "message": error.message,
+                    "field_path": error.field_path,
+                    "file_path": error.file_path,
+                }
+                for error in self.errors
+            ],
+        }
+
+
+def build_runtime_factory_plan(
+    *,
+    session: Any,
+    planned_step: Any,
+    subagent_spec: dict[str, Any] | None,
+    config: dict[str, Any] | None,
+) -> RuntimeFactoryPlan:
+    """Build a metadata-only runtime contract; never constructs clients or runs tools."""
+
+    errors: list[RuntimeFactoryErrorDetail] = []
+    subagent_id = str(getattr(planned_step, "subagent_id", "") or "")
+    role_id = str(getattr(planned_step, "step_kind", "") or "")
+    pipeline_session_id = str(getattr(session, "pipeline_session_id", "") or "")
+    trace_id = str(getattr(session, "trace_id", "") or pipeline_session_id)
+    pipeline_id = str(getattr(session, "pipeline_id", "") or "")
+
+    if not isinstance(subagent_spec, dict):
+        errors.append(
+            RuntimeFactoryErrorDetail(
+                code="unknown_subagent",
+                message=f"Unknown subagent_id {subagent_id!r}",
+                field_path="subagent_id",
+            )
+        )
+        return _runtime_contract_blocked_plan(
+            pipeline_session_id=pipeline_session_id,
+            trace_id=trace_id,
+            pipeline_id=pipeline_id,
+            subagent_id=subagent_id,
+            role_id=role_id,
+            errors=errors,
+        )
+
+    spec_id = _contract_str(subagent_spec.get("id"))
+    if spec_id != subagent_id:
+        errors.append(
+            RuntimeFactoryErrorDetail(
+                code="subagent_spec_mismatch",
+                message=f"Planned subagent {subagent_id!r} does not match spec id {spec_id!r}",
+                field_path="id",
+            )
+        )
+
+    model_choice = _contract_mapping(_contract_nested(subagent_spec, ("models", "default")))
+    provider = _contract_str(model_choice.get("provider"))
+    model = _contract_str(model_choice.get("model"))
+    model_class = _contract_str(model_choice.get("class"))
+    if not provider:
+        errors.append(RuntimeFactoryErrorDetail(code="missing_model_field", message="Subagent spec must define models.default.provider", field_path="models.default.provider"))
+    if not model:
+        errors.append(RuntimeFactoryErrorDetail(code="missing_model_field", message="Subagent spec must define models.default.model", field_path="models.default.model"))
+
+    prompt_path = _contract_str(_contract_nested(subagent_spec, ("system_prompt", "path")))
+    if not prompt_path:
+        errors.append(RuntimeFactoryErrorDetail(code="missing_prompt_path", message="Subagent spec must define system_prompt.path", field_path="system_prompt.path"))
+
+    tool_policy = _build_runtime_tool_policy(subagent_spec, errors)
+    permissions = _contract_mapping(subagent_spec.get("permissions"))
+    environment_policy = RuntimeEnvironmentPolicy(
+        working_directory_policy="pipeline_session_workspace",
+        secrets_env_access="not_granted",
+        can_mutate_files=bool(permissions.get("can_mutate_files")),
+        can_restart_services=permissions.get("can_restart_services", False),
+        can_commit=permissions.get("can_commit", False),
+        can_push=permissions.get("can_push", False),
+    )
+    observability = _contract_mapping(subagent_spec.get("observability"))
+
+    status = RuntimeFactoryStatus.BLOCKED if errors else RuntimeFactoryStatus.PLAN_ONLY
+    return RuntimeFactoryPlan(
+        pipeline_session_id=pipeline_session_id,
+        trace_id=trace_id,
+        pipeline_id=pipeline_id,
+        subagent_id=subagent_id,
+        role_id=role_id,
+        status=status,
+        execution_mode="observe_plan_only",
+        dry_run=True,
+        provider=provider,
+        model=model,
+        model_class=model_class,
+        system_prompt_source_id=f"prompt:{subagent_id}" if prompt_path else None,
+        system_prompt_path=prompt_path,
+        tool_set=tool_policy.read + tool_policy.write + tool_policy.execute,
+        tool_policy=tool_policy,
+        environment_policy=environment_policy,
+        context_window_policy={"source": "not_wired", "mode": "metadata_only"},
+        prompt_cache_policy=_contract_mapping(subagent_spec.get("prompt_cache_policy")),
+        logging_hooks_policy={
+            "provider_model_selection": bool(observability.get("log_selected_provider_model")),
+            "provider_model_actual": bool(observability.get("log_actual_provider_model")),
+            "tool_calls": bool(observability.get("log_tool_calls")),
+        },
+        token_accounting_policy={"token_usage": bool(observability.get("log_token_usage"))},
+        safety_gates={
+            "failure_policy": _contract_mapping(subagent_spec.get("failure_policy")),
+            "pipeline_loop_policy": _contract_mapping((config or {}).get("loop_policy")),
+            "mode": "fail_closed",
+        },
+        errors=errors,
+    )
+
+
+def _runtime_contract_blocked_plan(
+    *,
+    pipeline_session_id: str,
+    trace_id: str,
+    pipeline_id: str,
+    subagent_id: str,
+    role_id: str,
+    errors: list[RuntimeFactoryErrorDetail],
+) -> RuntimeFactoryPlan:
+    return RuntimeFactoryPlan(
+        pipeline_session_id=pipeline_session_id,
+        trace_id=trace_id,
+        pipeline_id=pipeline_id,
+        subagent_id=subagent_id,
+        role_id=role_id,
+        status=RuntimeFactoryStatus.BLOCKED,
+        execution_mode="observe_plan_only",
+        dry_run=True,
+        provider=None,
+        model=None,
+        model_class=None,
+        system_prompt_source_id=None,
+        system_prompt_path=None,
+        tool_set=[],
+        tool_policy=RuntimeToolPolicy(),
+        environment_policy=RuntimeEnvironmentPolicy(
+            working_directory_policy="pipeline_session_workspace",
+            secrets_env_access="not_granted",
+            can_mutate_files=False,
+            can_restart_services=False,
+            can_commit=False,
+            can_push=False,
+        ),
+        context_window_policy={"source": "not_wired", "mode": "metadata_only"},
+        prompt_cache_policy={},
+        logging_hooks_policy={},
+        token_accounting_policy={},
+        safety_gates={"mode": "fail_closed"},
+        errors=errors,
+    )
+
+
+def _build_runtime_tool_policy(
+    subagent_spec: dict[str, Any],
+    errors: list[RuntimeFactoryErrorDetail],
+) -> RuntimeToolPolicy:
+    tools = _contract_mapping(subagent_spec.get("tools"))
+    buckets: dict[str, list[str]] = {}
+    for key in ("read", "write", "execute", "gated", "forbidden"):
+        value = tools.get(key, [])
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            errors.append(
+                RuntimeFactoryErrorDetail(
+                    code="malformed_tool_permissions",
+                    message=f"tools.{key} must be a list of strings",
+                    field_path=f"tools.{key}",
+                )
+            )
+            buckets[key] = []
+            continue
+        buckets[key] = list(value)
+    return RuntimeToolPolicy(
+        read=buckets["read"],
+        write=buckets["write"],
+        execute=buckets["execute"],
+        gated=buckets["gated"],
+        forbidden=buckets["forbidden"],
+    )
+
+
+def _contract_nested(container: dict[str, Any], path: tuple[str, ...]) -> Any:
+    value: Any = container
+    for part in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
+def _contract_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _contract_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 @dataclass(frozen=True)
