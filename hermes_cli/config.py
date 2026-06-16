@@ -1026,6 +1026,18 @@ DEFAULT_CONFIG = {
         },
         "router": {
             "mode": "disabled",
+            "strategy": "deterministic",
+            "llm": {
+                # Keep deterministic as the default execution path for tests
+                # and local runs. When LLM routing is enabled explicitly,
+                # route with the configured OpenRouter fallback model unless
+                # the operator overrides provider/model in config.
+                "provider": "openrouter",
+                "model": "openrouter/owl-alpha",
+                "timeout_seconds": 10,
+                "fallback_strategy": "deterministic",
+                "min_confidence": 0.70,
+            },
         },
         "execution": {
             "mode": "disabled",
