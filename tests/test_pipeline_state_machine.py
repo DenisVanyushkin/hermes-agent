@@ -64,8 +64,12 @@ def test_state_machine_engineering_plan_includes_engineer_and_reviewer_steps():
     assert snapshot.planned_steps[0].runner_request["actual_provider"] is None
     assert snapshot.planned_steps[0].runner_result["status"] == "not_invoked"
     assert snapshot.planned_steps[0].runner_result["structured_output"] is None
+    assert snapshot.planned_steps[0].evaluation_result["status"] == "not_evaluated"
+    assert snapshot.planned_steps[0].evaluation_result["failure_reason"] == "runner_not_invoked"
+    assert snapshot.planned_steps[0].evaluation_result["completion"]["completion_allowed"] is False
     assert snapshot.planned_steps[1].runner_request["subagent_id"] == "hermes_code_reviewer"
     assert snapshot.planned_steps[1].runner_result["failure_reason"] == "observe_mode_plan_only"
+    assert snapshot.planned_steps[1].evaluation_result["status"] == "not_evaluated"
     assert snapshot.executed is False
 
 
@@ -90,6 +94,7 @@ def test_state_machine_default_route_plans_response_and_blocks_execution():
     assert snapshot.planned_steps[0].runtime_factory_plan is None
     assert snapshot.planned_steps[0].runner_request is None
     assert snapshot.planned_steps[0].runner_result is None
+    assert snapshot.planned_steps[0].evaluation_result is None
     assert snapshot.reviewer_condition is None
     assert snapshot.executed is False
 
@@ -118,6 +123,7 @@ def test_state_machine_output_excludes_legacy_runtime_bridge_fields():
     assert payload["planned_steps"][0]["runner_request"]["actual_model"] is None
     assert payload["planned_steps"][0]["runner_result"]["actual_provider"] is None
     assert payload["planned_steps"][0]["runner_result"]["actual_model"] is None
+    assert payload["planned_steps"][0]["evaluation_result"]["status"] == "not_evaluated"
 
 
 def test_state_machine_observe_payload_keeps_runner_metadata_nested_under_steps_only():
@@ -133,5 +139,7 @@ def test_state_machine_observe_payload_keeps_runner_metadata_nested_under_steps_
 
     assert "runner_request" not in payload
     assert "runner_result" not in payload
+    assert "evaluation_result" not in payload
     assert payload["planned_steps"][0]["runner_request"]["status"] == "plan_only"
     assert payload["planned_steps"][0]["runner_result"]["status"] == "not_invoked"
+    assert payload["planned_steps"][0]["evaluation_result"]["failure_reason"] == "runner_not_invoked"
