@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from hermes_cli.config import cfg_get
-from hermes_cli.pipeline_router import HeuristicPipelineRouter, RouterDecision
+from hermes_cli.pipeline_router import (
+    DEFAULT_LLM_FALLBACK_STRATEGY,
+    DEFAULT_ROUTER_STRATEGY,
+    VALID_ROUTER_STRATEGIES,
+    RouterDecision,
+    build_pipeline_router,
+)
 from hermes_cli.pipeline_specs import load_pipeline_specs
 
 
@@ -46,7 +52,9 @@ def observe_pipeline_router_decision(
 
     try:
         loaded_specs = load_pipeline_specs(repo_root=repo_root)
-        router = HeuristicPipelineRouter(loaded_specs=loaded_specs, repo_root=repo_root)
+        strategy = _pipeline_router_strategy(config)
+        fallback_strategy = _pipeline_router_fallback_strategy(config)
+        router = build_pipeline_router(config=config, loaded_specs=loaded_specs, repo_root=repo_root)
         decision = router.route(
             user_message,
             pipeline_session_id=pipeline_session_id,
@@ -65,13 +73,26 @@ def observe_pipeline_router_decision(
                     "event": "pipeline_router_observe_decision",
                     "pipeline_session_id": decision.pipeline_session_id,
                     "status": decision.status,
+                    "router_strategy": strategy,
+                    "router_fallback_strategy": fallback_strategy,
                     "selected_pipeline_id": decision.selected_pipeline_id,
                     "fallback_pipeline_id": decision.fallback_pipeline_id,
+                    "fallback_reason": decision.routing_failure_reason,
                     "confidence": decision.confidence,
                     "fallback_safe": decision.fallback_safe,
                     "requires_clarification": decision.requires_clarification,
                     "policy_block_reason": decision.policy_block_reason,
                     "routing_failure_reason": decision.routing_failure_reason,
+                    "reasoning_summary": decision.reasoning_summary,
+                    "matched_signals": list(decision.matched_signals),
+                    "alternatives": [
+                        {
+                            "pipeline_id": alternative.pipeline_id,
+                            "confidence": alternative.confidence,
+                            "reasoning_summary": alternative.reasoning_summary,
+                        }
+                        for alternative in decision.alternatives
+                    ],
                     "selected_provider": decision.selected_provider or selected_provider,
                     "selected_model": decision.selected_model or selected_model,
                     "actual_provider": decision.actual_provider or actual_provider,
@@ -127,6 +148,35 @@ def _pipeline_router_mode(config: dict[str, Any] | None) -> str:
     return "disabled"
 
 
+def _pipeline_router_strategy(config: dict[str, Any] | None) -> str:
+    raw = str(cfg_get(config, "pipelines", "router", "strategy", default=DEFAULT_ROUTER_STRATEGY) or DEFAULT_ROUTER_STRATEGY).strip().lower()
+    if raw in VALID_ROUTER_STRATEGIES:
+        return raw
+    logger.warning(
+        "Invalid pipelines.router.strategy=%r; treating pipeline router strategy as %s",
+        raw,
+        DEFAULT_ROUTER_STRATEGY,
+    )
+    return DEFAULT_ROUTER_STRATEGY
+
+
+def _pipeline_router_fallback_strategy(config: dict[str, Any] | None) -> str:
+    raw = str(
+        cfg_get(
+            config,
+            "pipelines",
+            "router",
+            "llm",
+            "fallback_strategy",
+            default=DEFAULT_LLM_FALLBACK_STRATEGY,
+        )
+        or DEFAULT_LLM_FALLBACK_STRATEGY
+    ).strip().lower()
+    if raw:
+        return raw
+    return DEFAULT_LLM_FALLBACK_STRATEGY
+
+
 def _replace_decision(
     decision: RouterDecision,
     *,
@@ -145,6 +195,7 @@ def _replace_decision(
         clarification_question=decision.clarification_question,
         policy_block_reason=decision.policy_block_reason,
         routing_failure_reason=decision.routing_failure_reason,
+        matched_signals=decision.matched_signals,
         alternatives=decision.alternatives,
         fallback_safe=decision.fallback_safe,
         selected_provider=decision.selected_provider,

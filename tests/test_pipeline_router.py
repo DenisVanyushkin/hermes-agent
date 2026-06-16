@@ -10,6 +10,7 @@ from hermes_cli.pipeline_router import (
     DEFAULT_PIPELINE_ID,
     ENGINEERING_PIPELINE_ID,
     HeuristicPipelineRouter,
+    LlmPipelineRouter,
     RouterDecisionValidationError,
     parse_router_decision,
 )
@@ -120,6 +121,202 @@ def test_router_does_not_select_unregistered_engineering_pipeline(tmp_path: Path
 
     assert decision.status == "no_specialized_pipeline"
     assert decision.selected_pipeline_id is None
+
+
+def test_llm_router_selects_engineering_pipeline_for_russian_mutation_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+    captured: dict[str, object] = {}
+
+    def _fake_llm_call(*, provider: str, model: str, timeout_seconds: float, messages: list[dict[str, str]]) -> dict:
+        captured["provider"] = provider
+        captured["model"] = model
+        captured["timeout_seconds"] = timeout_seconds
+        captured["messages"] = messages
+        return {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "confidence": 0.97,
+            "reasoning_summary": "The prompt asks for a code patch and tests in Russian.",
+            "requires_clarification": False,
+            "alternatives": [
+                {
+                    "pipeline_id": DEFAULT_PIPELINE_ID,
+                    "confidence": 0.08,
+                    "reasoning_summary": "Use only if the request is resoped to discussion.",
+                }
+            ],
+        }
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        timeout_seconds=9,
+        llm_call=_fake_llm_call,
+    )
+
+    decision = router.route(
+        "Исправь баг в hermes_cli/pipeline_router.py и добавь pytest на regression.",
+        pipeline_session_id="sess-llm-1",
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.selected_provider == "openrouter"
+    assert decision.selected_model == "openrouter/owl-alpha"
+    assert captured["provider"] == "openrouter"
+    assert captured["model"] == "openrouter/owl-alpha"
+    assert captured["timeout_seconds"] == 9
+
+
+def test_llm_router_falls_back_to_deterministic_strategy_on_failure(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="deterministic",
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("router unavailable")),
+    )
+
+    decision = router.route(
+        "Please modify hermes_cli/pipeline_router.py and tests/test_pipeline_router.py.",
+        pipeline_session_id="sess-llm-2",
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+
+
+def test_llm_router_returns_routing_failed_when_fail_closed(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("bad gateway")),
+    )
+
+    decision = router.route(
+        "Исправь баг в коде и обнови тесты.",
+        pipeline_session_id="sess-llm-3",
+    )
+
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id is None
+    assert "RuntimeError" in (decision.routing_failure_reason or "")
+
+
+@pytest.mark.parametrize(
+    ("confidence", "expect_selected"),
+    [
+        (0.70, True),
+        (0.95, True),
+        (0.69, False),
+        (0.01, False),
+    ],
+)
+def test_llm_router_enforces_min_confidence_threshold(
+    tmp_path: Path,
+    confidence: float,
+    expect_selected: bool,
+) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="deterministic",
+        min_confidence=0.70,
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "confidence": confidence,
+            "reasoning_summary": "classification result",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route(
+        "Исправь баг в hermes_cli/pipeline_router.py и добавь pytest на regression.",
+        pipeline_session_id=f"sess-min-confidence-{confidence}",
+    )
+
+    if expect_selected:
+        assert decision.status == "selected"
+        assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+        assert decision.routing_failure_reason is None
+    else:
+        assert decision.status != "selected"
+        assert decision.selected_pipeline_id != ENGINEERING_PIPELINE_ID
+        assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+        assert decision.routing_failure_reason == "llm_low_confidence"
+
+
+@pytest.mark.parametrize("confidence", [1.01, -0.01, None, "high"])
+def test_llm_router_rejects_invalid_confidence(tmp_path: Path, confidence: object) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="deterministic",
+        min_confidence=0.70,
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "confidence": confidence,
+            "reasoning_summary": "classification result",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route(
+        "Исправь баг в hermes_cli/pipeline_router.py и добавь pytest на regression.",
+        pipeline_session_id="sess-invalid-confidence",
+    )
+
+    assert decision.status != "selected"
+    assert decision.selected_pipeline_id != ENGINEERING_PIPELINE_ID
+    assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+    assert decision.routing_failure_reason == "llm_invalid_confidence"
+
+
+def test_llm_router_treats_ambiguous_as_fail_closed(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="deterministic",
+        llm_call=lambda **kwargs: {
+            "status": "ambiguous",
+            "confidence": 0.83,
+            "reasoning_summary": "The request may be either an audit or a patch request.",
+            "requires_clarification": True,
+            "clarification_question": "Нужен аудит или патч?",
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route(
+        "посмотри это и реши, надо ли чинить",
+        pipeline_session_id="sess-ambiguous",
+    )
+
+    assert decision.status != "selected"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+    assert decision.routing_failure_reason == "llm_ambiguous"
 
 
 def test_parse_rejects_unknown_router_status(tmp_path: Path) -> None:
