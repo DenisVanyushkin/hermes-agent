@@ -27,6 +27,9 @@ class PipelineStepPlan:
     condition: str | None
     execution_status: str = "planned"
     planning_mode: str = "metadata_only"
+    runtime_factory_plan: dict[str, object] | None = None
+    runner_request: dict[str, object] | None = None
+    runner_result: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
