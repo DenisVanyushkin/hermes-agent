@@ -67,6 +67,7 @@ def test_state_machine_engineering_plan_includes_engineer_and_reviewer_steps():
     assert snapshot.planned_steps[0].evaluation_result["status"] == "not_evaluated"
     assert snapshot.planned_steps[0].evaluation_result["failure_reason"] == "runner_not_invoked"
     assert snapshot.planned_steps[0].evaluation_result["control_channel"]["decisions"] == []
+    assert snapshot.planned_steps[0].evaluation_result["model_escalation"]["blocked_reason"] == "runner_not_invoked"
     assert snapshot.planned_steps[0].evaluation_result["completion"]["completion_allowed"] is False
     assert snapshot.planned_steps[1].runner_request["subagent_id"] == "hermes_code_reviewer"
     assert snapshot.planned_steps[1].runner_result["failure_reason"] == "observe_mode_plan_only"

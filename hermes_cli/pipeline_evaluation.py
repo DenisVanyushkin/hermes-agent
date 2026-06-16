@@ -13,6 +13,15 @@ from hermes_cli.pipeline_control_channel import (
     build_controlled_message_decision,
     resolve_loop_limit_policy,
 )
+from hermes_cli.pipeline_escalation import (
+    DisagreementDecision,
+    DisagreementResolutionPlan,
+    EscalationContext,
+    ModelEscalationDecision,
+    ModelEscalationPlan,
+    plan_disagreement_resolution,
+    plan_model_escalation,
+)
 from hermes_cli.subagent_runner import (
     StructuredOutputEnvelope,
     SubagentRunnerResult,
@@ -75,6 +84,20 @@ class PipelineEscalationDecision:
 
 
 @dataclass(frozen=True)
+class PipelineDisagreementDecision:
+    disagreement_present: bool = False
+    resolution_planned: bool = False
+    reason: str | None = None
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "disagreement_present": self.disagreement_present,
+            "resolution_planned": self.resolution_planned,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class PipelineCompletionDecision:
     completion_allowed: bool = False
     candidate_complete: bool = False
@@ -99,6 +122,9 @@ class PipelineEvaluationRequest:
     runner_result: SubagentRunnerResult
     structured_output: StructuredOutputEnvelope | None = None
     pipeline_spec: Mapping[str, Any] = field(default_factory=dict)
+    runtime_factory_plan: Mapping[str, Any] = field(default_factory=dict)
+    subagent_spec: Mapping[str, Any] = field(default_factory=dict)
+    all_subagent_specs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -115,6 +141,9 @@ class PipelineEvaluationResult:
     completion: PipelineCompletionDecision = field(default_factory=PipelineCompletionDecision)
     review: PipelineReviewDecision = field(default_factory=PipelineReviewDecision)
     escalation: PipelineEscalationDecision = field(default_factory=PipelineEscalationDecision)
+    model_escalation: ModelEscalationPlan | None = None
+    disagreement_resolution: DisagreementResolutionPlan | None = None
+    disagreement: PipelineDisagreementDecision = field(default_factory=PipelineDisagreementDecision)
     control_channel: ControlledMessageChannelPlan | None = None
     failure_reason: str | None = None
     validation_errors: list[dict[str, str]] = field(default_factory=list)
@@ -146,6 +175,13 @@ class PipelineEvaluationResult:
             ).to_safe_dict(),
             "review": self.review.to_safe_dict(),
             "escalation": self.escalation.to_safe_dict(),
+            "model_escalation": self.model_escalation.to_safe_dict() if self.model_escalation else None,
+            "disagreement_resolution": (
+                self.disagreement_resolution.to_safe_dict()
+                if self.disagreement_resolution
+                else None
+            ),
+            "disagreement": self.disagreement.to_safe_dict(),
             "control_channel": self.control_channel.to_safe_dict() if self.control_channel else None,
             "failure_reason": self.failure_reason,
             "validation_errors": list(self.validation_errors),
@@ -166,6 +202,7 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
                 blocked_reason="runner_not_invoked",
             ),
             control_channel=_control_channel_plan(request, outcome="runner_not_invoked"),
+            model_escalation=_blocked_runner_model_escalation(request),
             decision_path=["runner_not_invoked"],
         )
 
@@ -194,11 +231,22 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
                 blocked_reason="invalid_structured_output",
             ),
             control_channel=_control_channel_plan(request, outcome="invalid_structured_output"),
+            escalation=_legacy_escalation("invalid_structured_output"),
+            model_escalation=_model_escalation(
+                request,
+                trigger_reason="invalid_structured_output",
+                source="evaluation",
+            ),
             validation_errors=list(envelope.validation_errors),
             decision_path=["invalid_structured_output"],
         )
 
     if envelope.blockers:
+        disagreement_resolution, disagreement = _explicit_disagreement_metadata(
+            request,
+            envelope=envelope,
+            fallback_summary="Explicit disagreement signal accompanies blockers.",
+        )
         return _result(
             request,
             status=PipelineEvaluationStatus.BLOCKED,
@@ -212,10 +260,21 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
             ),
             review=_review_decision(envelope, "blockers_present"),
             control_channel=_control_channel_plan(request, envelope=envelope, outcome="blockers_present"),
-            decision_path=["valid_structured_output", "blockers_present"],
+            disagreement_resolution=disagreement_resolution,
+            disagreement=disagreement,
+            decision_path=_decision_path(
+                "valid_structured_output",
+                "blockers_present",
+                disagreement=disagreement,
+            ),
         )
 
     if envelope.requires_review or envelope.status == "needs_review":
+        disagreement_resolution, disagreement = _explicit_disagreement_metadata(
+            request,
+            envelope=envelope,
+            fallback_summary="Explicit disagreement signal accompanies review metadata.",
+        )
         return _result(
             request,
             status=PipelineEvaluationStatus.NEEDS_REVIEW,
@@ -228,11 +287,22 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
             ),
             review=_review_decision(envelope, "review_required"),
             control_channel=_control_channel_plan(request, envelope=envelope, outcome="review_required"),
-            decision_path=["valid_structured_output", "review_required"],
+            disagreement_resolution=disagreement_resolution,
+            disagreement=disagreement,
+            decision_path=_decision_path(
+                "valid_structured_output",
+                "review_required",
+                disagreement=disagreement,
+            ),
         )
 
     confidence = envelope.confidence if envelope.confidence is not None else 0.0
     if confidence < MIN_CONFIDENCE_FOR_CANDIDATE_COMPLETE:
+        model_escalation = _model_escalation(
+            request,
+            trigger_reason="low_confidence",
+            source="evaluation",
+        )
         return _result(
             request,
             status=PipelineEvaluationStatus.NEEDS_ESCALATION,
@@ -244,9 +314,10 @@ def evaluate_pipeline_step(request: PipelineEvaluationRequest) -> PipelineEvalua
             ),
             escalation=PipelineEscalationDecision(
                 escalation_required=True,
-                escalation_planned=True,
+                escalation_planned=bool(model_escalation and model_escalation.allowed),
                 reason="low_confidence",
             ),
+            model_escalation=model_escalation,
             control_channel=_control_channel_plan(request, envelope=envelope, outcome="low_confidence"),
             decision_path=["valid_structured_output", "low_confidence"],
         )
@@ -379,14 +450,14 @@ def _control_channel_plan(
                     pipeline_id=request.pipeline_id,
                     source_subagent_id=request.subagent_id,
                     target_subagent_id=request.subagent_id,
-                    message_purpose="disagreement_resolution",
-                    payload_summary="Low-confidence result may require policy-bound model escalation.",
+                    message_purpose="clarification",
+                    payload_summary="Low-confidence result may require policy-bound model escalation metadata.",
                     related_step_id=request.step_id,
                     evaluation_id=evaluation_id,
                 ),
                 policy=policy,
                 counters=counters,
-                limit_name="max_disagreement_rounds",
+                limit_name="max_model_escalations",
                 runner_invoked=runner_invoked,
             )
         )
@@ -411,6 +482,9 @@ def _result(
     completion: PipelineCompletionDecision | None = None,
     review: PipelineReviewDecision | None = None,
     escalation: PipelineEscalationDecision | None = None,
+    model_escalation: ModelEscalationPlan | None = None,
+    disagreement_resolution: DisagreementResolutionPlan | None = None,
+    disagreement: PipelineDisagreementDecision | None = None,
     control_channel: ControlledMessageChannelPlan | None = None,
     failure_reason: str | None = None,
     validation_errors: list[dict[str, str]] | None = None,
@@ -429,8 +503,140 @@ def _result(
         completion=completion or PipelineCompletionDecision(),
         review=review or PipelineReviewDecision(),
         escalation=escalation or PipelineEscalationDecision(),
+        model_escalation=model_escalation,
+        disagreement_resolution=disagreement_resolution,
+        disagreement=disagreement or PipelineDisagreementDecision(),
         control_channel=control_channel,
         failure_reason=failure_reason,
         validation_errors=list(validation_errors or []),
         decision_path=list(decision_path or []),
     )
+
+
+def _escalation_context(request: PipelineEvaluationRequest) -> EscalationContext:
+    return EscalationContext(
+        pipeline_session_id=request.pipeline_session_id,
+        trace_id=request.trace_id,
+        pipeline_id=request.pipeline_id,
+        step_id=request.step_id,
+        subagent_id=request.subagent_id,
+        pipeline_spec=request.pipeline_spec,
+        current_runtime=request.runtime_factory_plan,
+        subagent_spec=request.subagent_spec,
+        all_subagent_specs=request.all_subagent_specs,
+    )
+
+
+def _legacy_escalation(reason: str) -> PipelineEscalationDecision:
+    return PipelineEscalationDecision(
+        escalation_required=True,
+        escalation_planned=True,
+        reason=reason,
+    )
+
+
+def _blocked_runner_model_escalation(request: PipelineEvaluationRequest) -> ModelEscalationPlan | None:
+    if request.pipeline_id != "engineering_review_pipeline":
+        return None
+    _, plan = plan_model_escalation(
+        context=_escalation_context(request),
+        trigger_reason="runner_not_invoked",
+        source="runner_not_invoked",
+    )
+    return plan
+
+
+def _model_escalation(
+    request: PipelineEvaluationRequest,
+    *,
+    trigger_reason: str,
+    source: str,
+) -> ModelEscalationPlan | None:
+    if request.pipeline_id != "engineering_review_pipeline":
+        return None
+    _, plan = plan_model_escalation(
+        context=_escalation_context(request),
+        trigger_reason=trigger_reason,
+        source=source,
+    )
+    return plan
+
+
+def _disagreement_resolution(
+    request: PipelineEvaluationRequest,
+    *,
+    source_subagent_id: str,
+    counterparty_subagent_id: str,
+    trigger_reason: str,
+    summary: str,
+) -> DisagreementResolutionPlan | None:
+    if request.pipeline_id != "engineering_review_pipeline":
+        return None
+    _, plan = plan_disagreement_resolution(
+        context=_escalation_context(request),
+        source_subagent_id=source_subagent_id,
+        counterparty_subagent_id=counterparty_subagent_id,
+        trigger_reason=trigger_reason,
+        summary=summary,
+    )
+    return plan
+
+
+def _explicit_disagreement_metadata(
+    request: PipelineEvaluationRequest,
+    *,
+    envelope: StructuredOutputEnvelope,
+    fallback_summary: str,
+) -> tuple[DisagreementResolutionPlan | None, PipelineDisagreementDecision]:
+    if request.pipeline_id != "engineering_review_pipeline":
+        return None, PipelineDisagreementDecision()
+
+    signal_reason = _disagreement_reason(envelope)
+    if signal_reason is None:
+        return None, PipelineDisagreementDecision()
+
+    source_subagent_id, counterparty_subagent_id = _disagreement_participants(request.subagent_id)
+    plan = _disagreement_resolution(
+        request,
+        source_subagent_id=source_subagent_id,
+        counterparty_subagent_id=counterparty_subagent_id,
+        trigger_reason=signal_reason,
+        summary=envelope.summary or fallback_summary,
+    )
+    resolution_planned = bool(plan and plan.status == "planned")
+    return plan, PipelineDisagreementDecision(
+        disagreement_present=True,
+        resolution_planned=resolution_planned,
+        reason=signal_reason,
+    )
+
+
+def _disagreement_reason(envelope: StructuredOutputEnvelope) -> str | None:
+    explicit_next_actions = {
+        "disagreement",
+        "disagree_with_reviewer",
+        "disagreement_resolution",
+        "request_disagreement_resolution",
+    }
+    next_action = (envelope.next_action or "").strip()
+    if next_action in explicit_next_actions:
+        return "engineer_reviewer_disagreement"
+    if (envelope.status or "").strip() in explicit_next_actions:
+        return "engineer_reviewer_disagreement"
+    return None
+
+
+def _disagreement_participants(subagent_id: str) -> tuple[str, str]:
+    if subagent_id == "hermes_code_reviewer":
+        return "hermes_code_reviewer", "hermes_engineer_core"
+    return subagent_id, "hermes_code_reviewer"
+
+
+def _decision_path(
+    *segments: str,
+    disagreement: PipelineDisagreementDecision,
+) -> list[str]:
+    path = list(segments)
+    if disagreement.disagreement_present:
+        path.append("explicit_disagreement_signal")
+    return path
