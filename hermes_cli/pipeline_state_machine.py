@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from hermes_cli.pipeline_evaluation import PipelineEvaluationRequest, evaluate_pipeline_step
 from hermes_cli.pipeline_session import (
     ENGINEERING_PIPELINE_ID,
     PipelineSession,
@@ -129,6 +130,19 @@ def _build_step_contracts(
             request=runner_request,
             runtime_factory_plan=runtime_factory_plan,
         )
+        evaluation_result = evaluate_pipeline_step(
+            PipelineEvaluationRequest(
+                pipeline_session_id=session.pipeline_session_id,
+                trace_id=session.trace_id,
+                pipeline_id=session.pipeline_id,
+                step_id=step.step_kind,
+                subagent_id=step.subagent_id,
+                execution_mode="observe_plan_only",
+                runner_result=runner_result,
+                structured_output=runner_result.structured_output,
+                pipeline_spec=pipeline_spec,
+            )
+        )
         enriched_steps.append(
             PipelineStepPlan(
                 step_kind=step.step_kind,
@@ -139,6 +153,7 @@ def _build_step_contracts(
                 runtime_factory_plan=runtime_payload,
                 runner_request=runner_request.to_safe_dict(),
                 runner_result=runner_result.to_safe_dict(),
+                evaluation_result=evaluation_result.to_safe_dict(),
             )
         )
 

@@ -30,6 +30,7 @@ class PipelineStepPlan:
     runtime_factory_plan: dict[str, object] | None = None
     runner_request: dict[str, object] | None = None
     runner_result: dict[str, object] | None = None
+    evaluation_result: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
