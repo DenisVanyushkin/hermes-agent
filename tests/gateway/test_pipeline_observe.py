@@ -12,6 +12,19 @@ from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_specs import PipelineSpecValidationError
 
 
+def test_router_llm_defaults_are_present():
+    from hermes_cli.config import DEFAULT_CONFIG
+
+    router_cfg = DEFAULT_CONFIG["pipelines"]["router"]
+
+    assert router_cfg["strategy"] == "deterministic"
+    assert router_cfg["llm"]["provider"] == "openrouter"
+    assert router_cfg["llm"]["model"] == "openrouter/owl-alpha"
+    assert router_cfg["llm"]["timeout_seconds"] == 10
+    assert router_cfg["llm"]["fallback_strategy"] == "deterministic"
+    assert router_cfg["llm"]["min_confidence"] == 0.70
+
+
 def test_observe_disabled_skips_router(monkeypatch):
     from hermes_cli import pipeline_observe
 
@@ -24,7 +37,7 @@ def test_observe_disabled_skips_router(monkeypatch):
     )
     monkeypatch.setattr(
         pipeline_observe,
-        "HeuristicPipelineRouter",
+        "build_pipeline_router",
         lambda **kwargs: calls.append("router"),
     )
 
@@ -74,10 +87,13 @@ def test_observe_mode_routes_and_logs(monkeypatch, caplog):
         reasoning_summary="engineering request",
         requires_clarification=False,
         fallback_safe=False,
-        selected_provider="openai-codex",
-        selected_model="gpt-5.4-mini",
-        actual_provider="openai-codex",
-        actual_model="gpt-5.4",
+        policy_block_reason=None,
+        routing_failure_reason=None,
+        selected_provider="openrouter",
+        selected_model="openrouter/owl-alpha",
+        actual_provider="openrouter",
+        actual_model="openrouter/owl-alpha",
+        alternatives=(),
     )
 
     class _FakeRouter:
@@ -88,7 +104,7 @@ def test_observe_mode_routes_and_logs(monkeypatch, caplog):
             return decision
 
     monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
-    monkeypatch.setattr(pipeline_observe, "HeuristicPipelineRouter", lambda **kwargs: _FakeRouter())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
 
     with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
         result = pipeline_observe.observe_pipeline_router_decision(
@@ -97,8 +113,8 @@ def test_observe_mode_routes_and_logs(monkeypatch, caplog):
             session_id="sess-3",
             session_key="agent:main:telegram:dm",
             platform="telegram",
-            actual_provider="openai-codex",
-            actual_model="gpt-5.4",
+            actual_provider="openrouter",
+            actual_model="openrouter/owl-alpha",
         )
 
     assert result == decision
@@ -106,7 +122,11 @@ def test_observe_mode_routes_and_logs(monkeypatch, caplog):
     assert '"event": "pipeline_router_observe_decision"' in log_message
     assert '"pipeline_session_id": "pipe-1"' in log_message
     assert '"selected_pipeline_id": "engineering_review_pipeline"' in log_message
-    assert '"actual_model": "gpt-5.4"' in log_message
+    assert '"actual_model": "openrouter/owl-alpha"' in log_message
+    assert '"router_strategy": "deterministic"' in log_message
+    assert '"router_fallback_strategy": "deterministic"' in log_message
+    assert '"reasoning_summary": "engineering request"' in log_message
+    assert '"alternatives": []' in log_message
     assert '"status": "selected"' in log_message
 
 
@@ -150,10 +170,10 @@ def test_observe_helper_logs_to_gateway_sink_with_injected_gateway_logger(monkey
         reasoning_summary="engineering request",
         requires_clarification=False,
         fallback_safe=True,
-        selected_provider="openai-codex",
-        selected_model="gpt-5.4-mini",
-        actual_provider="openai-codex",
-        actual_model="gpt-5.4",
+        selected_provider="openrouter",
+        selected_model="openrouter/owl-alpha",
+        actual_provider="openrouter",
+        actual_model="openrouter/owl-alpha",
     )
 
     class _FakeRouter:
@@ -161,7 +181,7 @@ def test_observe_helper_logs_to_gateway_sink_with_injected_gateway_logger(monkey
             return decision
 
     monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
-    monkeypatch.setattr(pipeline_observe, "HeuristicPipelineRouter", lambda **kwargs: _FakeRouter())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
 
     with tempfile.TemporaryDirectory() as tmpdir:
         hermes_home = Path(tmpdir)
@@ -182,3 +202,213 @@ def test_observe_helper_logs_to_gateway_sink_with_injected_gateway_logger(monkey
         assert "pipeline_router_observe_decision" in gateway_log
         assert '"status": "selected"' in gateway_log
         assert "gateway.run" in gateway_log
+
+
+def test_observe_llm_strategy_builds_llm_router(monkeypatch):
+    from hermes_cli import pipeline_observe
+
+    captured: dict[str, object] = {}
+    decision = RouterDecision(
+        pipeline_session_id="pipe-llm",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.95,
+        reasoning_summary="llm route",
+        requires_clarification=False,
+        fallback_safe=False,
+        selected_provider="openrouter",
+        selected_model="openrouter/owl-alpha",
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+
+    def _fake_build_router(*, config, loaded_specs, repo_root):
+        captured["config"] = config
+        captured["loaded_specs"] = loaded_specs
+        captured["repo_root"] = repo_root
+        return _FakeRouter()
+
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", _fake_build_router)
+
+    result = pipeline_observe.observe_pipeline_router_decision(
+        config={
+            "pipelines": {
+                "router": {
+                    "mode": "observe",
+                    "strategy": "llm",
+                    "llm": {
+                        "provider": "openrouter",
+                        "model": "openrouter/owl-alpha",
+                        "timeout_seconds": 7,
+                        "fallback_strategy": "deterministic",
+                        "min_confidence": 0.70,
+                    },
+                }
+            }
+        },
+        user_message="Исправь код и тесты",
+        session_id="sess-llm-observe",
+        repo_root=Path("/tmp/fake-repo"),
+    )
+
+    assert result == decision
+    assert captured["repo_root"] == Path("/tmp/fake-repo")
+
+
+def test_observe_invalid_strategy_falls_back_to_deterministic(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    captured: list[str] = []
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return RouterDecision(
+                pipeline_session_id="pipe-det",
+                router_subagent_id=router_subagent_id,
+                status="no_specialized_pipeline",
+                fallback_pipeline_id="default_conversation_pipeline",
+                confidence=0.7,
+                reasoning_summary="deterministic fallback",
+                requires_clarification=False,
+                fallback_safe=True,
+            )
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+
+    def _fake_build_router(*, config, loaded_specs, repo_root):
+        captured.append("built")
+        return _FakeRouter()
+
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", _fake_build_router)
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={"pipelines": {"router": {"mode": "observe", "strategy": "mystery"}}},
+            user_message="Explain architecture",
+            session_id="sess-det-observe",
+        )
+
+    assert result is not None
+    assert captured == ["built"]
+    assert any("Invalid pipelines.router.strategy" in record.message for record in caplog.records)
+
+
+def test_observe_llm_strategy_logs_diagnostics(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    decision = RouterDecision(
+        pipeline_session_id="pipe-llm-observe",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.88,
+        reasoning_summary="User explicitly asked for code and test changes.",
+        requires_clarification=False,
+        fallback_safe=False,
+        policy_block_reason=None,
+        routing_failure_reason=None,
+        alternatives=(),
+        selected_provider="openrouter",
+        selected_model="openrouter/owl-alpha",
+        actual_provider="openrouter",
+        actual_model="openrouter/owl-alpha",
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={
+                "pipelines": {
+                    "router": {
+                        "mode": "observe",
+                        "strategy": "llm",
+                        "llm": {
+                            "provider": "openrouter",
+                            "model": "openrouter/owl-alpha",
+                            "timeout_seconds": 7,
+                            "fallback_strategy": "deterministic",
+                            "min_confidence": 0.70,
+                        },
+                    }
+                }
+            },
+            user_message="Исправь код и тесты",
+            session_id="sess-llm-diag",
+        )
+
+    assert result == decision
+    log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
+    assert '"router_strategy": "llm"' in log_message
+    assert '"router_fallback_strategy": "deterministic"' in log_message
+    assert '"reasoning_summary": "User explicitly asked for code and test changes."' in log_message
+    assert '"matched_signals": []' in log_message
+    assert '"alternatives": []' in log_message
+
+
+def test_observe_low_confidence_fallback_logs_failure_reason(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    decision = RouterDecision(
+        pipeline_session_id="pipe-low-confidence",
+        router_subagent_id="hermes_pipeline_router",
+        status="no_specialized_pipeline",
+        selected_pipeline_id=None,
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.75,
+        reasoning_summary="LLM confidence was below the configured threshold.",
+        requires_clarification=False,
+        fallback_safe=True,
+        policy_block_reason=None,
+        routing_failure_reason="llm_low_confidence",
+        alternatives=(),
+        selected_provider="openrouter",
+        selected_model="openrouter/owl-alpha",
+        actual_provider="openrouter",
+        actual_model="openrouter/owl-alpha",
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={
+                "pipelines": {
+                    "router": {
+                        "mode": "observe",
+                        "strategy": "llm",
+                        "llm": {
+                            "provider": "openrouter",
+                            "model": "openrouter/owl-alpha",
+                            "timeout_seconds": 7,
+                            "fallback_strategy": "deterministic",
+                            "min_confidence": 0.70,
+                        },
+                    }
+                }
+            },
+            user_message="Исправь код и тесты",
+            session_id="sess-low-confidence",
+        )
+
+    assert result == decision
+    log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
+    assert '"fallback_reason": "llm_low_confidence"' in log_message
+    assert '"routing_failure_reason": "llm_low_confidence"' in log_message
