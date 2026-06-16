@@ -48,7 +48,7 @@ class LoopLimitPolicy:
     max_clarification_rounds: int
     on_limit_exceeded: str
     resets_on_model_escalation: bool = False
-    policy_source: str = "safe_default"
+    policy_source: str = "default"
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -195,7 +195,7 @@ def resolve_loop_limit_policy(pipeline_spec: Mapping[str, Any] | None) -> LoopLi
     policy_payload = dict(spec.get("loop_policy") or {})
     escalation_payload = dict(spec.get("model_escalation_policy") or {})
     values: dict[str, Any] = {}
-    policy_source = "safe_default"
+    policy_source = "default"
 
     for key, default_value in SAFE_LOOP_POLICY_DEFAULTS.items():
         aliases = LOOP_POLICY_ALIASES.get(key, (key,))

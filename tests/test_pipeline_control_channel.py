@@ -46,7 +46,7 @@ def test_safe_default_policy_fails_closed_when_missing() -> None:
     assert policy.max_review_iterations == 1
     assert policy.max_peer_discussion_rounds == 0
     assert policy.max_invalid_output_retries == 0
-    assert policy.policy_source == "safe_default"
+    assert policy.policy_source == "default"
 
 
 def test_within_limit_reviewer_feedback_message_is_allowed_as_metadata() -> None:
