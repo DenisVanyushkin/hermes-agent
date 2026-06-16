@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -9,6 +10,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hermes_cli.pipeline_router import RouterDecision
+from hermes_cli.pipeline_session import PipelineSessionRequest, PipelineStepPlan, create_pipeline_session
 from hermes_cli.pipeline_specs import load_pipeline_specs
 
 
@@ -38,6 +41,29 @@ def _build_factory(repo_root: Path):
     return RuntimeBuildRequest, factory, loaded_specs
 
 
+def _engineering_session():
+    decision = RouterDecision(
+        pipeline_session_id="pipe-runtime-contract",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.95,
+        reasoning_summary="engineering",
+        fallback_safe=False,
+    )
+    return create_pipeline_session(
+        request=PipelineSessionRequest(
+            router_decision=decision,
+            execution_mode="observe",
+            platform="telegram",
+            session_id="sess-runtime-contract",
+            user_message="implement code",
+            created_at="2026-06-16T00:00:00+00:00",
+        )
+    )
+
+
 def test_builds_planned_runtime_for_general_operator(tmp_path: Path) -> None:
     repo_root = _copy_spec_tree(tmp_path)
     RuntimeBuildRequest, factory, loaded_specs = _build_factory(repo_root)
@@ -58,6 +84,121 @@ def test_builds_planned_runtime_for_general_operator(tmp_path: Path) -> None:
     assert result.selection.selected_model_class == "general"
     assert result.constructor_provider == result.selection.selected_provider
     assert result.constructor_model == result.selection.selected_model
+
+
+@pytest.mark.parametrize(
+    ("step_kind", "subagent_id", "provider", "model", "can_mutate"),
+    [
+        ("engineer", "hermes_engineer_core", "openrouter", "xiaomi/mimo-v2.5-pro", True),
+        ("reviewer", "hermes_code_reviewer", "openai-codex", "gpt-5.5", False),
+    ],
+)
+def test_build_runtime_factory_plan_is_metadata_only_contract(
+    tmp_path: Path,
+    step_kind: str,
+    subagent_id: str,
+    provider: str,
+    model: str,
+    can_mutate: bool,
+) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+    step = next(item for item in session.planned_steps if item.step_kind == step_kind)
+
+    from hermes_cli.runtime_factory import RuntimeFactoryStatus, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=step,
+        subagent_spec=loaded_specs.subagent_specs[subagent_id],
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    assert plan.status == RuntimeFactoryStatus.PLAN_ONLY
+    assert plan.pipeline_session_id == session.pipeline_session_id
+    assert plan.trace_id == session.trace_id
+    assert plan.pipeline_id == "engineering_review_pipeline"
+    assert plan.subagent_id == subagent_id
+    assert plan.role_id == step_kind
+    assert plan.provider == provider
+    assert plan.model == model
+    assert plan.execution_mode == "observe_plan_only"
+    assert plan.dry_run is True
+    assert plan.system_prompt_source_id == f"prompt:{subagent_id}"
+    assert plan.tool_policy.forbidden
+    assert plan.environment_policy.can_mutate_files is can_mutate
+    assert plan.environment_policy.secrets_env_access == "not_granted"
+
+    payload = plan.to_safe_dict()
+    assert payload["status"] == "plan_only"
+    assert payload["provider"] == provider
+    assert payload["model"] == model
+    assert payload["tool_policy"]["forbidden"]
+    assert payload["environment_policy"]["can_mutate_files"] is can_mutate
+    assert payload["logging_hooks_policy"]["provider_model_selection"] is True
+    assert payload["token_accounting_policy"]["token_usage"] is True
+    assert "client" not in json.dumps(payload, sort_keys=True)
+    for forbidden_key in (
+        "selected_provider",
+        "selected_model",
+        "constructor_provider",
+        "constructor_model",
+        "runtime_bridge_allowed",
+        "runtime_bridge_enabled",
+    ):
+        assert forbidden_key not in json.dumps(payload, sort_keys=True)
+
+
+def test_runtime_factory_plan_unknown_subagent_fails_closed(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+
+    from hermes_cli.runtime_factory import RuntimeFactoryStatus, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=PipelineStepPlan(step_kind="engineer", subagent_id="missing_subagent", condition=None),
+        subagent_spec=None,
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    assert plan.status == RuntimeFactoryStatus.BLOCKED
+    assert plan.errors
+    assert plan.errors[0].code == "unknown_subagent"
+    assert plan.to_safe_dict()["errors"][0]["field_path"] == "subagent_id"
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "field_path"),
+    [
+        ("provider", "models.default.provider"),
+        ("model", "models.default.model"),
+    ],
+)
+def test_runtime_factory_plan_missing_provider_or_model_fails_closed(
+    tmp_path: Path,
+    missing_field: str,
+    field_path: str,
+) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+    spec = copy.deepcopy(loaded_specs.subagent_specs["hermes_engineer_core"])
+    del spec["models"]["default"][missing_field]
+
+    from hermes_cli.runtime_factory import RuntimeFactoryStatus, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=session.planned_steps[0],
+        subagent_spec=spec,
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    assert plan.status == RuntimeFactoryStatus.BLOCKED
+    assert any(error.field_path == field_path for error in plan.errors)
 
 
 @pytest.mark.parametrize(
