@@ -1,22 +1,411 @@
-"""Import-light subagent execution skeleton for pipeline runtime plans."""
+"""Import-light subagent runner contracts for observe-mode pipeline plans."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 import time
 from typing import Any, Mapping, Protocol
 
-from hermes_cli.runtime_factory import RuntimeBuildResult
+from hermes_cli.runtime_factory import RuntimeBuildResult, RuntimeFactoryPlan
 
 
 _READY_RUNTIME_STATUS = "ready_to_construct"
 _PROMPT_METADATA_KEYS = ("path", "artifact_id", "sha256")
 _SENSITIVE_KEY_PARTS = ("secret", "token", "password", "credential", "api_key", "client", "prompt", "env")
 _VALID_EXECUTION_STATUSES = {"completed", "failed", "rejected"}
+_VALID_ENVELOPE_STATUSES = {"succeeded", "failed", "blocked", "needs_review", "not_invoked"}
 
 
 class SubagentRunnerError(Exception):
     """Controlled subagent runner failure."""
+
+
+class SubagentRunnerStatus(str, Enum):
+    PLAN_ONLY = "plan_only"
+    NOT_INVOKED = "not_invoked"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    NEEDS_REVIEW = "needs_review"
+
+
+@dataclass(frozen=True)
+class SubagentArtifactRef:
+    artifact_id: str
+    kind: str
+    path: str | None = None
+    sha256: str | None = None
+    redacted: bool = True
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "artifact_id": self.artifact_id,
+            "kind": self.kind,
+            "path": self.path,
+            "sha256": self.sha256,
+            "redacted": self.redacted,
+        }
+
+
+@dataclass(frozen=True)
+class SubagentToolCallSummary:
+    tool_name: str
+    call_count: int = 0
+    status: str = "not_invoked"
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "tool_name": self.tool_name,
+            "call_count": self.call_count,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
+class SubagentUsageSummary:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    total_tokens: int | None = None
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
+@dataclass(frozen=True)
+class SubagentCacheSummary:
+    cache_hit: bool | None = None
+    cache_write: bool | None = None
+    cache_key: str | None = None
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "cache_hit": self.cache_hit,
+            "cache_write": self.cache_write,
+            "cache_key": self.cache_key,
+        }
+
+
+@dataclass(frozen=True)
+class StructuredOutputEnvelope:
+    schema_version: str | None
+    subagent_id: str | None
+    role: str | None
+    status: str | None
+    summary: str | None
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    changes: list[dict[str, Any]] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    artifacts: list[SubagentArtifactRef] = field(default_factory=list)
+    confidence: float | None = None
+    requires_review: bool | None = None
+    next_action: str | None = None
+    validation_status: str = "not_applicable"
+    validation_errors: list[dict[str, str]] = field(default_factory=list)
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "subagent_id": self.subagent_id,
+            "role": self.role,
+            "status": self.status,
+            "summary": self.summary,
+            "findings": list(self.findings),
+            "changes": list(self.changes),
+            "blockers": list(self.blockers),
+            "artifacts": [artifact.to_safe_dict() for artifact in self.artifacts],
+            "confidence": self.confidence,
+            "requires_review": self.requires_review,
+            "next_action": self.next_action,
+            "validation_status": self.validation_status,
+            "validation_errors": list(self.validation_errors),
+        }
+
+
+@dataclass(frozen=True)
+class SubagentRunnerRequest:
+    pipeline_session_id: str
+    trace_id: str
+    pipeline_id: str
+    step_id: str
+    subagent_id: str
+    role_id: str
+    runtime_factory_plan_id: str
+    runtime_factory_status: str
+    execution_mode: str
+    prompt_input_hash: str | None
+    actual_provider: str | None = None
+    actual_model: str | None = None
+    actual_model_class: str | None = None
+    request_metadata: dict[str, Any] = field(default_factory=dict)
+    status: str = SubagentRunnerStatus.PLAN_ONLY.value
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "pipeline_session_id": self.pipeline_session_id,
+            "trace_id": self.trace_id,
+            "pipeline_id": self.pipeline_id,
+            "step_id": self.step_id,
+            "subagent_id": self.subagent_id,
+            "role_id": self.role_id,
+            "runtime_factory_plan_id": self.runtime_factory_plan_id,
+            "runtime_factory_status": self.runtime_factory_status,
+            "execution_mode": self.execution_mode,
+            "prompt_input_hash": self.prompt_input_hash,
+            "actual_provider": self.actual_provider,
+            "actual_model": self.actual_model,
+            "actual_model_class": self.actual_model_class,
+            "request_metadata": dict(self.request_metadata),
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
+class SubagentRunnerResult:
+    pipeline_session_id: str
+    trace_id: str
+    pipeline_id: str
+    step_id: str
+    subagent_id: str
+    role_id: str
+    runtime_factory_plan_id: str
+    runtime_factory_status: str
+    status: SubagentRunnerStatus
+    failure_reason: str | None = None
+    actual_provider: str | None = None
+    actual_model: str | None = None
+    actual_model_class: str | None = None
+    response_output_hash: str | None = None
+    usage_summary: SubagentUsageSummary = field(default_factory=SubagentUsageSummary)
+    cache_summary: SubagentCacheSummary = field(default_factory=SubagentCacheSummary)
+    tool_call_summaries: list[SubagentToolCallSummary] = field(default_factory=list)
+    elapsed_ms: float | None = None
+    artifacts_created: list[SubagentArtifactRef] = field(default_factory=list)
+    structured_output: StructuredOutputEnvelope | None = None
+    schema_validation_status: str = "not_applicable"
+    raw_output_redacted: bool = True
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "pipeline_session_id": self.pipeline_session_id,
+            "trace_id": self.trace_id,
+            "pipeline_id": self.pipeline_id,
+            "step_id": self.step_id,
+            "subagent_id": self.subagent_id,
+            "role_id": self.role_id,
+            "runtime_factory_plan_id": self.runtime_factory_plan_id,
+            "runtime_factory_status": self.runtime_factory_status,
+            "status": self.status.value,
+            "failure_reason": self.failure_reason,
+            "actual_provider": self.actual_provider,
+            "actual_model": self.actual_model,
+            "actual_model_class": self.actual_model_class,
+            "response_output_hash": self.response_output_hash,
+            "usage_summary": self.usage_summary.to_safe_dict(),
+            "cache_summary": self.cache_summary.to_safe_dict(),
+            "tool_call_summaries": [item.to_safe_dict() for item in self.tool_call_summaries],
+            "elapsed_ms": self.elapsed_ms,
+            "artifacts_created": [artifact.to_safe_dict() for artifact in self.artifacts_created],
+            "structured_output": self.structured_output.to_safe_dict() if self.structured_output else None,
+            "schema_validation_status": self.schema_validation_status,
+            "raw_output_redacted": self.raw_output_redacted,
+        }
+
+
+def build_subagent_runner_request(
+    *,
+    session: Any,
+    planned_step: Any,
+    runtime_factory_plan: RuntimeFactoryPlan,
+) -> SubagentRunnerRequest:
+    return SubagentRunnerRequest(
+        pipeline_session_id=str(getattr(session, "pipeline_session_id", "") or ""),
+        trace_id=str(getattr(session, "trace_id", "") or ""),
+        pipeline_id=str(getattr(session, "pipeline_id", "") or ""),
+        step_id=str(getattr(planned_step, "step_kind", "") or ""),
+        subagent_id=runtime_factory_plan.subagent_id,
+        role_id=runtime_factory_plan.role_id,
+        runtime_factory_plan_id=_runtime_factory_plan_id(runtime_factory_plan),
+        runtime_factory_status=runtime_factory_plan.status.value,
+        execution_mode=runtime_factory_plan.execution_mode,
+        prompt_input_hash=str(getattr(session, "user_message_hash", "") or "") or None,
+    )
+
+
+def build_not_invoked_runner_result(
+    *,
+    request: SubagentRunnerRequest,
+    runtime_factory_plan: RuntimeFactoryPlan,
+    reason: str = "observe_mode_plan_only",
+) -> SubagentRunnerResult:
+    return SubagentRunnerResult(
+        pipeline_session_id=request.pipeline_session_id,
+        trace_id=request.trace_id,
+        pipeline_id=request.pipeline_id,
+        step_id=request.step_id,
+        subagent_id=request.subagent_id,
+        role_id=request.role_id,
+        runtime_factory_plan_id=request.runtime_factory_plan_id,
+        runtime_factory_status=runtime_factory_plan.status.value,
+        status=SubagentRunnerStatus.NOT_INVOKED,
+        failure_reason=reason,
+        schema_validation_status="not_applicable",
+        raw_output_redacted=True,
+    )
+
+
+def validate_structured_output_envelope(payload: Any) -> StructuredOutputEnvelope:
+    if not isinstance(payload, Mapping):
+        return _invalid_envelope("payload", "Structured output payload must be a mapping")
+
+    required_fields = (
+        "schema_version",
+        "subagent_id",
+        "role",
+        "status",
+        "summary",
+        "blockers",
+        "artifacts",
+        "confidence",
+        "requires_review",
+        "next_action",
+    )
+    errors: list[dict[str, str]] = []
+    for field_name in required_fields:
+        if field_name not in payload:
+            errors.append({"field": field_name, "message": "Missing required field"})
+
+    required_strings = (
+        "schema_version",
+        "subagent_id",
+        "role",
+        "status",
+        "summary",
+        "next_action",
+    )
+    normalized_strings: dict[str, str | None] = {}
+    for field_name in required_strings:
+        normalized_value, error = _required_string_field(payload, field_name)
+        normalized_strings[field_name] = normalized_value
+        if error is not None:
+            errors.append(error)
+
+    status = normalized_strings["status"]
+    if status is not None and status not in _VALID_ENVELOPE_STATUSES:
+        errors.append({"field": "status", "message": "Unknown structured output status"})
+    if "findings" not in payload and "changes" not in payload:
+        errors.append({"field": "findings|changes", "message": "Structured output requires findings or changes"})
+
+    blockers = payload.get("blockers")
+    if blockers is not None and not isinstance(blockers, list):
+        errors.append({"field": "blockers", "message": "Expected a list"})
+    artifacts = payload.get("artifacts")
+    if artifacts is not None and not isinstance(artifacts, list):
+        errors.append({"field": "artifacts", "message": "Expected a list"})
+    confidence = payload.get("confidence")
+    if confidence is not None:
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            errors.append({"field": "confidence", "message": "Expected a number between 0 and 1"})
+        elif not 0.0 <= float(confidence) <= 1.0:
+            errors.append({"field": "confidence", "message": "Expected a number between 0 and 1"})
+    requires_review = payload.get("requires_review")
+    if requires_review is not None and not isinstance(requires_review, bool):
+        errors.append({"field": "requires_review", "message": "Expected a boolean"})
+
+    if errors:
+        return StructuredOutputEnvelope(
+            schema_version=normalized_strings["schema_version"],
+            subagent_id=normalized_strings["subagent_id"],
+            role=normalized_strings["role"],
+            status=status,
+            summary=normalized_strings["summary"],
+            validation_status="invalid_structured_output",
+            validation_errors=errors,
+        )
+
+    findings = _mapping_list(payload.get("findings"))
+    changes = _mapping_list(payload.get("changes"))
+    return StructuredOutputEnvelope(
+        schema_version=normalized_strings["schema_version"],
+        subagent_id=normalized_strings["subagent_id"],
+        role=normalized_strings["role"],
+        status=status,
+        summary=normalized_strings["summary"],
+        findings=findings,
+        changes=changes,
+        blockers=[str(item) for item in payload.get("blockers", []) if item is not None],
+        artifacts=_artifact_refs(payload.get("artifacts")),
+        confidence=float(confidence) if confidence is not None else None,
+        requires_review=requires_review,
+        next_action=normalized_strings["next_action"],
+        validation_status="valid",
+    )
+
+
+def _invalid_envelope(field_name: str, message: str) -> StructuredOutputEnvelope:
+    return StructuredOutputEnvelope(
+        schema_version=None,
+        subagent_id=None,
+        role=None,
+        status=None,
+        summary=None,
+        validation_status="invalid_structured_output",
+        validation_errors=[{"field": field_name, "message": message}],
+    )
+
+
+def _required_string_field(payload: Mapping[str, Any], field_name: str) -> tuple[str | None, dict[str, str] | None]:
+    if field_name not in payload:
+        return None, None
+    value = payload.get(field_name)
+    if not isinstance(value, str):
+        return None, {"field": field_name, "message": "Expected a non-empty string"}
+    normalized = value.strip()
+    if not normalized:
+        return None, {"field": field_name, "message": "Expected a non-empty string"}
+    return normalized, None
+
+
+def _mapping_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            items.append({str(key): item[key] for key in item})
+    return items
+
+
+def _artifact_refs(value: Any) -> list[SubagentArtifactRef]:
+    if not isinstance(value, list):
+        return []
+    artifacts: list[SubagentArtifactRef] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        artifact_id = _string_or_none(item.get("artifact_id"))
+        kind = _string_or_none(item.get("kind"))
+        if artifact_id and kind:
+            artifacts.append(
+                SubagentArtifactRef(
+                    artifact_id=artifact_id,
+                    kind=kind,
+                    path=_string_or_none(item.get("path")),
+                    sha256=_string_or_none(item.get("sha256")),
+                    redacted=bool(item.get("redacted", True)),
+                )
+            )
+    return artifacts
+
+
+def _runtime_factory_plan_id(plan: RuntimeFactoryPlan) -> str:
+    return f"{plan.pipeline_session_id}:{plan.role_id}:{plan.subagent_id}"
 
 
 class SubagentExecutorProtocol(Protocol):

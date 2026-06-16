@@ -6,6 +6,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from hermes_cli.pipeline_router import RouterDecision
+from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_specs import load_pipeline_specs
 
 
@@ -34,6 +36,64 @@ def _build_runtime_result(tmp_path: Path, subagent_id: str):
         )
     )
     return repo_root, result
+
+
+def _engineering_session():
+    decision = RouterDecision(
+        pipeline_session_id="pipe-runner-contract",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.95,
+        reasoning_summary="engineering",
+        fallback_safe=False,
+    )
+    return create_pipeline_session(
+        request=PipelineSessionRequest(
+            router_decision=decision,
+            execution_mode="observe",
+            platform="telegram",
+            session_id="sess-runner-contract",
+            user_message="implement code",
+            created_at="2026-06-16T00:00:00+00:00",
+        )
+    )
+
+
+def _runtime_factory_plan(tmp_path: Path, *, step_kind: str, subagent_id: str):
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+    step = next(item for item in session.planned_steps if item.step_kind == step_kind)
+
+    from hermes_cli.runtime_factory import build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=step,
+        subagent_spec=loaded_specs.subagent_specs[subagent_id],
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+    return session, step, plan
+
+
+def _valid_envelope_payload(**overrides):
+    payload = {
+        "schema_version": "v1",
+        "subagent_id": "hermes_code_reviewer",
+        "role": "reviewer",
+        "status": "needs_review",
+        "summary": "Review completed with one blocker.",
+        "findings": [{"code": "bug", "summary": "Edge case broken"}],
+        "blockers": ["Edge case broken"],
+        "artifacts": [{"artifact_id": "patch-1", "kind": "diff"}],
+        "confidence": 0.78,
+        "requires_review": True,
+        "next_action": "engineer_fix_blockers",
+    }
+    payload.update(overrides)
+    return payload
 
 
 def test_runs_general_operator_with_fake_executor(tmp_path: Path) -> None:
@@ -413,3 +473,163 @@ def test_importing_subagent_runner_stays_import_light() -> None:
     assert "agent.conversation_loop" not in imported
     assert "run_agent" not in imported
     assert "slack_sdk" not in imported
+
+
+def test_build_runner_request_from_runtime_factory_plan(tmp_path: Path) -> None:
+    session, step, plan = _runtime_factory_plan(
+        tmp_path,
+        step_kind="engineer",
+        subagent_id="hermes_engineer_core",
+    )
+
+    from hermes_cli.subagent_runner import build_subagent_runner_request
+
+    request = build_subagent_runner_request(
+        session=session,
+        planned_step=step,
+        runtime_factory_plan=plan,
+    )
+
+    assert request.pipeline_session_id == session.pipeline_session_id
+    assert request.trace_id == session.trace_id
+    assert request.pipeline_id == "engineering_review_pipeline"
+    assert request.step_id == "engineer"
+    assert request.subagent_id == "hermes_engineer_core"
+    assert request.role_id == "engineer"
+    assert request.runtime_factory_plan_id == "pipe-runner-contract:engineer:hermes_engineer_core"
+    assert request.runtime_factory_status == "plan_only"
+    assert request.actual_provider is None
+    assert request.actual_model is None
+    assert request.prompt_input_hash == session.user_message_hash
+
+
+def test_not_invoked_runner_result_for_observe_mode(tmp_path: Path) -> None:
+    session, step, plan = _runtime_factory_plan(
+        tmp_path,
+        step_kind="reviewer",
+        subagent_id="hermes_code_reviewer",
+    )
+
+    from hermes_cli.subagent_runner import (
+        SubagentRunnerStatus,
+        build_not_invoked_runner_result,
+        build_subagent_runner_request,
+    )
+
+    request = build_subagent_runner_request(
+        session=session,
+        planned_step=step,
+        runtime_factory_plan=plan,
+    )
+    result = build_not_invoked_runner_result(
+        request=request,
+        runtime_factory_plan=plan,
+        reason="observe_mode_plan_only",
+    )
+
+    assert result.status == SubagentRunnerStatus.NOT_INVOKED
+    assert result.failure_reason == "observe_mode_plan_only"
+    assert result.schema_validation_status == "not_applicable"
+    assert result.structured_output is None
+    assert result.raw_output_redacted is True
+    assert result.actual_provider is None
+    assert result.actual_model is None
+    assert result.tool_call_summaries == []
+
+
+def test_structured_output_envelope_validates_known_good_payload() -> None:
+    from hermes_cli.subagent_runner import validate_structured_output_envelope
+
+    envelope = validate_structured_output_envelope(_valid_envelope_payload())
+
+    assert envelope.validation_status == "valid"
+    assert envelope.status == "needs_review"
+    assert envelope.findings[0]["code"] == "bug"
+
+
+def test_structured_output_envelope_fails_closed_on_missing_required_fields() -> None:
+    from hermes_cli.subagent_runner import validate_structured_output_envelope
+
+    envelope = validate_structured_output_envelope(
+        {
+            "schema_version": "v1",
+            "subagent_id": "hermes_engineer_core",
+            "role": "engineer",
+            "summary": "missing status",
+            "blockers": [],
+            "artifacts": [],
+            "confidence": 0.5,
+            "requires_review": False,
+            "next_action": "none",
+        }
+    )
+
+    assert envelope.validation_status == "invalid_structured_output"
+    assert envelope.validation_errors
+    assert any(error["field"] == "status" for error in envelope.validation_errors)
+
+
+def test_invalid_output_returns_invalid_structured_output() -> None:
+    from hermes_cli.subagent_runner import (
+        StructuredOutputEnvelope,
+        validate_structured_output_envelope,
+    )
+
+    envelope = validate_structured_output_envelope("not-a-dict")
+
+    assert isinstance(envelope, StructuredOutputEnvelope)
+    assert envelope.validation_status == "invalid_structured_output"
+    assert envelope.validation_errors[0]["field"] == "payload"
+
+
+def test_structured_output_envelope_rejects_invalid_status_type() -> None:
+    from hermes_cli.subagent_runner import validate_structured_output_envelope
+
+    for invalid_status in ([], 123):
+        envelope = validate_structured_output_envelope(_valid_envelope_payload(status=invalid_status))
+        assert envelope.validation_status == "invalid_structured_output"
+        assert any(error["field"] == "status" for error in envelope.validation_errors)
+
+
+def test_structured_output_envelope_rejects_invalid_required_string_types() -> None:
+    from hermes_cli.subagent_runner import validate_structured_output_envelope
+
+    invalid_cases = {
+        "schema_version": 1,
+        "subagent_id": {"id": "hermes_code_reviewer"},
+        "role": ["reviewer"],
+        "summary": {"text": "Review completed"},
+        "next_action": False,
+    }
+
+    for field_name, invalid_value in invalid_cases.items():
+        envelope = validate_structured_output_envelope(_valid_envelope_payload(**{field_name: invalid_value}))
+        assert envelope.validation_status == "invalid_structured_output"
+        assert any(error["field"] == field_name for error in envelope.validation_errors)
+
+
+def test_structured_output_envelope_rejects_blank_required_strings() -> None:
+    from hermes_cli.subagent_runner import validate_structured_output_envelope
+
+    for field_name in ("schema_version", "subagent_id", "role", "status", "summary", "next_action"):
+        envelope = validate_structured_output_envelope(_valid_envelope_payload(**{field_name: "   "}))
+        assert envelope.validation_status == "invalid_structured_output"
+        assert any(error["field"] == field_name for error in envelope.validation_errors)
+
+
+def test_structured_output_envelope_rejects_bool_confidence() -> None:
+    from hermes_cli.subagent_runner import validate_structured_output_envelope
+
+    envelope = validate_structured_output_envelope(_valid_envelope_payload(confidence=True))
+
+    assert envelope.validation_status == "invalid_structured_output"
+    assert any(error["field"] == "confidence" for error in envelope.validation_errors)
+
+
+def test_structured_output_envelope_rejects_out_of_range_confidence() -> None:
+    from hermes_cli.subagent_runner import validate_structured_output_envelope
+
+    for confidence in (-0.01, 1.01):
+        envelope = validate_structured_output_envelope(_valid_envelope_payload(confidence=confidence))
+        assert envelope.validation_status == "invalid_structured_output"
+        assert any(error["field"] == "confidence" for error in envelope.validation_errors)
