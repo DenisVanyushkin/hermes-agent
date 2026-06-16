@@ -1,23 +1,11 @@
-"""Shared pipeline session/state/report dataclasses for the orchestrator."""
+"""Shared pipeline state/report dataclasses for the orchestrator."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
-
-@dataclass(frozen=True)
-class PipelineSession:
-    pipeline_session_id: str
-    platform: str | None
-    session_key: str | None
-    session_id: str | None
-    chat_id: str | None
-    thread_id: str | None
-    user_id: str | None
-    created_at: str
-    user_message_hash: str
-    mode: str
+from hermes_cli.pipeline_session import PipelineSession
 
 
 @dataclass(frozen=True)

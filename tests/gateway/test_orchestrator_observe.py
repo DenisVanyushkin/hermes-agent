@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+from dataclasses import asdict
 
 from hermes_cli.pipeline_router import RouterDecision
 
@@ -205,6 +206,63 @@ def test_gateway_orchestrator_observe_does_not_load_runtime_bridge_components(mo
     assert payload["runtime_plan_failed"] is False
     assert payload["pipeline_preflight"]["executed"] is False
     assert payload["completion_allowed"] is True
+
+
+def test_gateway_orchestrator_observe_uses_pipeline_session_and_state_machine_boundary(monkeypatch, caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    session_module = importlib.import_module("hermes_cli.pipeline_session")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-boundary",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    captured: dict[str, object] = {}
+    original_create = orchestrator.create_pipeline_session
+    original_build = orchestrator.build_pipeline_state_snapshot
+
+    def _capturing_create(**kwargs):
+        session = original_create(**kwargs)
+        captured["session"] = session
+        return session
+
+    def _capturing_build(*, session, pipeline_spec):
+        snapshot = original_build(session=session, pipeline_spec=pipeline_spec)
+        captured["snapshot"] = snapshot
+        return snapshot
+
+    monkeypatch.setattr(orchestrator, "create_pipeline_session", _capturing_create)
+    monkeypatch.setattr(orchestrator, "build_pipeline_state_snapshot", _capturing_build)
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={"pipelines": {"enabled": True, "orchestrator": {"mode": "observe"}}},
+            user_message="Implement pipeline boundary",
+            session_id="sess-boundary",
+            session_key="agent:main:telegram:dm",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    session = captured["session"]
+    snapshot = captured["snapshot"]
+    assert isinstance(session, session_module.PipelineSession)
+    assert session.pipeline_id == "engineering_review_pipeline"
+    assert session.selected_subagent_ids == ["hermes_engineer_core", "hermes_code_reviewer"]
+    assert snapshot.state == "preflight_blocked_execution"
+    assert snapshot.reviewer_condition == "code_changes_require_review"
+    assert [step.step_kind for step in snapshot.planned_steps] == ["engineer", "reviewer"]
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_plan"]["transition_path"][-1] == "preflight_blocked_execution"
+    assert "actual_provider" not in json.dumps(asdict(session), sort_keys=True)
 
 
 def test_gateway_orchestrator_observe_reports_preflight_as_dev_fuse(caplog):
