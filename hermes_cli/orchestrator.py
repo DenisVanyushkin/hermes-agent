@@ -2,24 +2,23 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import time
-import uuid
 from dataclasses import asdict
-from datetime import datetime, timezone
 from typing import Any
 
 from hermes_cli.config import cfg_get
 from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode, PipelineGateRequest, evaluate_pipeline_gate
 from hermes_cli.pipeline_router import DEFAULT_PIPELINE_ID, RouterDecision
+from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_state import (
     ExecutionReport,
     OrchestratorObserveReport,
     PipelineSession,
     PipelineState,
 )
+from hermes_cli.pipeline_state_machine import PipelineStateSnapshot, build_pipeline_state_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -52,36 +51,27 @@ def observe_gateway_turn(
 
     started = time.perf_counter()
     gateway_logger = logger or globals()["logger"]
-    pipeline_session_id = (
-        router_decision.pipeline_session_id
-        if router_decision is not None and router_decision.pipeline_session_id
-        else uuid.uuid4().hex
+    session = create_pipeline_session(
+        request=PipelineSessionRequest(
+            router_decision=router_decision,
+            execution_mode=mode,
+            user_message=user_message,
+            session_id=session_id,
+            session_key=session_key,
+            platform=platform,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
     )
-
-    session = PipelineSession(
-        pipeline_session_id=pipeline_session_id,
-        platform=platform,
-        session_key=session_key,
-        session_id=session_id,
-        chat_id=chat_id,
-        thread_id=thread_id,
-        user_id=user_id,
-        created_at=datetime.now(timezone.utc).isoformat(),
-        user_message_hash=_hash_user_message(user_message),
-        mode=mode,
-    )
+    pipeline_session_id = session.pipeline_session_id
     state = _build_pipeline_state(
-        pipeline_session_id=pipeline_session_id,
-        mode=mode,
-        router_decision=router_decision,
+        session=session,
+        config=config,
     )
     pipeline_plan_payload = _build_pipeline_plan_payload(
         config=config,
-        user_message=user_message,
-        pipeline_session_id=pipeline_session_id,
-        router_decision=router_decision,
-        selected_provider=None,
-        selected_model=None,
+        session=session,
     )
     pipeline_preflight = _evaluate_pipeline_gate_safely(
         config=config,
@@ -189,45 +179,28 @@ def _orchestrator_mode(config: dict[str, Any] | None) -> str:
 
 def _build_pipeline_state(
     *,
-    pipeline_session_id: str,
-    mode: str,
-    router_decision: RouterDecision | None,
+    session: PipelineSession,
+    config: dict[str, Any] | None,
 ) -> PipelineState:
-    if router_decision is None:
-        return PipelineState(
-            pipeline_session_id=pipeline_session_id,
-            pipeline_id=DEFAULT_PIPELINE_ID,
-            state="response_generation",
-            mode=mode,
-            router_status=_UNAVAILABLE,
-            selected_pipeline_id=DEFAULT_PIPELINE_ID,
-            fallback_pipeline_id=DEFAULT_PIPELINE_ID,
-            completion_allowed=True,
-            completion_blocked_reason=None,
-            final_verdict="observe_default_allowed",
-        )
-
-    effective_pipeline_id = (
-        router_decision.selected_pipeline_id
-        or router_decision.fallback_pipeline_id
-        or DEFAULT_PIPELINE_ID
-    )
+    snapshot = _build_state_snapshot_for_observe(config=config, session=session)
     return PipelineState(
-        pipeline_session_id=pipeline_session_id,
-        pipeline_id=effective_pipeline_id,
-        state="response_generation",
-        mode=mode,
-        router_status=router_decision.status or _UNAVAILABLE,
-        selected_pipeline_id=router_decision.selected_pipeline_id,
-        fallback_pipeline_id=router_decision.fallback_pipeline_id,
-        completion_allowed=True,
-        completion_blocked_reason=None,
-        final_verdict="observe_only_non_authoritative",
+        pipeline_session_id=session.pipeline_session_id,
+        pipeline_id=session.pipeline_id,
+        state=snapshot.state,
+        mode=session.mode,
+        router_status=session.router_status or _UNAVAILABLE,
+        selected_pipeline_id=session.pipeline_id if session.pipeline_id != DEFAULT_PIPELINE_ID else None,
+        fallback_pipeline_id=DEFAULT_PIPELINE_ID,
+        completion_allowed=snapshot.completion_allowed,
+        completion_blocked_reason=snapshot.completion_blocked_reason,
+        final_verdict=snapshot.final_verdict,
     )
 
 
 def _hash_user_message(user_message: str) -> str:
-    return hashlib.sha256((user_message or "").encode("utf-8")).hexdigest()[:16]
+    from hermes_cli.pipeline_session import _hash_user_message as _session_hash_user_message
+
+    return _session_hash_user_message(user_message)
 
 
 def _log_observe_report(
@@ -270,15 +243,9 @@ def _log_observe_report(
 def _build_pipeline_plan_payload(
     *,
     config: dict[str, Any] | None,
-    user_message: str,
-    pipeline_session_id: str,
-    router_decision: RouterDecision | None,
-    selected_provider: str | None,
-    selected_model: str | None,
+    session: PipelineSession,
 ) -> dict[str, Any]:
-    del user_message, selected_provider, selected_model
-
-    if not _should_plan_engineering_pipeline(config=config, router_decision=router_decision):
+    if not _should_plan_pipeline(config=config, session=session):
         return {
             "pipeline_plan_status": "not_applicable",
             "pipeline_plan_completion_reason": None,
@@ -298,11 +265,13 @@ def _build_pipeline_plan_payload(
     started = time.perf_counter()
     try:
         loaded_specs = _load_pipeline_specs(repo_root=None)
-        result = _build_lightweight_engineering_plan_summary(
-            loaded_specs=loaded_specs,
-            pipeline_session_id=pipeline_session_id,
+        pipeline_spec = loaded_specs.pipeline_specs[session.pipeline_id]
+        snapshot = build_pipeline_state_snapshot(
+            session=session,
+            pipeline_spec=pipeline_spec,
         )
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        result = _snapshot_to_plan_payload(snapshot)
         reviewer_step = next((step for step in result["step_records"] if step["step_kind"] == "reviewer"), None)
         engineer_step = next((step for step in result["step_records"] if step["step_kind"] == "engineer"), None)
         return {
@@ -342,16 +311,14 @@ def _build_pipeline_plan_payload(
         }
 
 
-def _should_plan_engineering_pipeline(
+def _should_plan_pipeline(
     *,
     config: dict[str, Any] | None,
-    router_decision: RouterDecision | None,
+    session: PipelineSession,
 ) -> bool:
     if _orchestrator_mode(config) != "observe":
         return False
-    if router_decision is None:
-        return False
-    return router_decision.selected_pipeline_id == _ENGINEERING_PIPELINE_ID
+    return session.pipeline_id in {_ENGINEERING_PIPELINE_ID, DEFAULT_PIPELINE_ID}
 
 
 def _load_pipeline_specs(*, repo_root: Any):
@@ -359,41 +326,39 @@ def _load_pipeline_specs(*, repo_root: Any):
 
     return load_pipeline_specs(repo_root=repo_root)
 
-def _build_lightweight_engineering_plan_summary(
+def _build_state_snapshot_for_observe(
     *,
-    loaded_specs: Any,
-    pipeline_session_id: str,
-) -> dict[str, Any]:
-    pipeline_spec = loaded_specs.pipeline_specs[_ENGINEERING_PIPELINE_ID]
-    subagents = pipeline_spec.get("subagents") or {}
-    engineer_id = str(subagents.get("engineer") or "")
-    reviewer_id = str(subagents.get("reviewer") or "")
-    if not engineer_id or not reviewer_id:
-        raise ValueError("engineering pipeline spec is missing engineer/reviewer subagent ids")
+    config: dict[str, Any] | None,
+    session: PipelineSession,
+) -> PipelineStateSnapshot:
+    if _orchestrator_mode(config) != "observe":
+        raise ValueError("observe state snapshot requested while orchestrator is not in observe mode")
 
+    loaded_specs = _load_pipeline_specs(repo_root=None)
+    pipeline_spec = loaded_specs.pipeline_specs[session.pipeline_id]
+    return build_pipeline_state_snapshot(session=session, pipeline_spec=pipeline_spec)
+
+
+def _snapshot_to_plan_payload(snapshot: PipelineStateSnapshot) -> dict[str, Any]:
     step_records = [
         {
-            "step_kind": "engineer",
-            "subagent_id": engineer_id,
-            "condition": None,
-            "execution_status": "planned",
-            "planning_mode": "metadata_only",
-        },
-        {
-            "step_kind": "reviewer",
-            "subagent_id": reviewer_id,
-            "condition": "code_changes_require_review",
-            "execution_status": "planned",
-            "planning_mode": "metadata_only",
-        },
+            "step_kind": step.step_kind,
+            "subagent_id": step.subagent_id,
+            "condition": step.condition,
+            "execution_status": step.execution_status,
+            "planning_mode": step.planning_mode,
+        }
+        for step in snapshot.planned_steps
     ]
     return {
-        "pipeline_id": _ENGINEERING_PIPELINE_ID,
-        "pipeline_session_id": pipeline_session_id,
-        "status": "planned",
-        "completion_reason": "plan_only",
-        "mode": "observe_plan_only",
+        "pipeline_id": snapshot.pipeline_id,
+        "pipeline_session_id": snapshot.pipeline_session_id,
+        "status": snapshot.status,
+        "completion_reason": snapshot.completion_reason,
+        "mode": snapshot.execution_mode,
+        "transition_path": list(snapshot.transition_path),
         "step_records": step_records,
+        "loop_policy": dict(snapshot.loop_policy),
     }
 
 
