@@ -11,6 +11,7 @@ from typing import Any
 from hermes_cli.config import cfg_get
 from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode, PipelineGateRequest, evaluate_pipeline_gate
 from hermes_cli.pipeline_router import DEFAULT_PIPELINE_ID, RouterDecision
+from hermes_cli.pipeline_report import build_pipeline_execution_report
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_state import (
     ExecutionReport,
@@ -110,6 +111,11 @@ def observe_gateway_turn(
         orchestrator_mode=mode,
         pipeline_plan_payload=pipeline_plan_payload,
         pipeline_preflight_payload=pipeline_preflight.to_safe_dict(),
+        pipeline_execution_report_payload=build_pipeline_execution_report(
+            session=session,
+            state_snapshot=_build_state_snapshot_for_observe(config=config, session=session),
+            preflight_result=pipeline_preflight.to_safe_dict(),
+        ).to_safe_dict(),
     )
     return report
 
@@ -210,6 +216,7 @@ def _log_observe_report(
     orchestrator_mode: str,
     pipeline_plan_payload: dict[str, Any],
     pipeline_preflight_payload: dict[str, Any],
+    pipeline_execution_report_payload: dict[str, Any],
 ) -> None:
     payload = {
         "event": "pipeline_orchestrator_observe_report",
@@ -231,6 +238,7 @@ def _log_observe_report(
         "session": asdict(report.session),
         "state": asdict(report.state),
         "execution_report": asdict(report.execution_report),
+        "pipeline_execution_report": pipeline_execution_report_payload,
         "pipeline_preflight": pipeline_preflight_payload,
     }
     payload.update(pipeline_plan_payload)
