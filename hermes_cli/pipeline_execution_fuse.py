@@ -30,6 +30,8 @@ class PipelineExecutionFuseResult:
     loop_allowed: bool = False
     model_escalation_allowed: bool = False
     live_gateway_allowed: bool = False
+    max_review_iterations: int | None = None
+    loop_policy_source: str | None = None
     requirements_met: list[str] = field(default_factory=list)
     requirements_failed: list[str] = field(default_factory=list)
 
@@ -48,6 +50,8 @@ class PipelineExecutionFuseResult:
             "loop_allowed": self.loop_allowed,
             "model_escalation_allowed": self.model_escalation_allowed,
             "live_gateway_allowed": self.live_gateway_allowed,
+            "max_review_iterations": self.max_review_iterations,
+            "loop_policy_source": self.loop_policy_source,
             "requirements_met": list(self.requirements_met),
             "requirements_failed": list(self.requirements_failed),
         }
