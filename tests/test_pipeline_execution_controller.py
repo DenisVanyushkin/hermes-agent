@@ -613,6 +613,8 @@ def test_registered_helper_controlled_context_no_material_change_uses_engineer_o
     assert result.helper_result["subagent_runs"][0]["status"] == "succeeded"
     assert result.helper_result["subagent_runs"][1]["status"] == "not_invoked"
     assert result.helper_result["subagent_runs"][1]["failure_reason"] == "observe_mode_plan_only"
+    assert result.helper_result["usage_summary"]["planned_subagent_count"] == 2
+    assert result.helper_result["usage_summary"]["executed_subagent_count"] == 1
     assert result.helper_result["usage_summary"]["subagent_count"] == 2
     assert result.helper_result["usage_summary"]["total_tokens"] == 15
     assert result.helper_result["usage_summary"]["providers_used"] == ["openrouter"]
