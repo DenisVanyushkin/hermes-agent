@@ -142,6 +142,46 @@ def test_allowed_one_step_mode_calls_runner_exactly_once(tmp_path: Path) -> None
     assert result.state_snapshot.planned_steps[1].runner_result["status"] == "not_invoked"
 
 
+def test_runner_request_uses_same_runtime_plan_as_runner_invocation(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    seen: dict[str, object] = {}
+    base_factory = _runtime_factory(repo_root)
+
+    class DriftedRuntimeFactory:
+        def build(self, request):
+            plan = base_factory.build(request)
+            return replace(
+                plan,
+                constructor_provider="canonical-test-provider",
+                constructor_model="canonical-test-model",
+            )
+
+    def _executor(request, runtime_plan):
+        seen["runtime_plan_provider"] = runtime_plan.constructor_provider
+        seen["runtime_plan_model"] = runtime_plan.constructor_model
+        return {
+            "output_text": "Prepared one controlled patch.",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _valid_structured_output()},
+        }
+
+    result = module.execute_controlled_one_step(
+        config=_config(mode="controlled_one_step", allow_actual_subagent_invocation=True),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=DriftedRuntimeFactory(),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement one step",
+    )
+
+    assert seen["runtime_plan_provider"] == "canonical-test-provider"
+    assert seen["runtime_plan_model"] == "canonical-test-model"
+    assert result.state_snapshot.planned_steps[0].runner_request["actual_provider"] == "canonical-test-provider"
+    assert result.state_snapshot.planned_steps[0].runner_request["actual_model"] == "canonical-test-model"
+
+
 def test_allowed_one_step_result_is_validated_evaluated_and_reported(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
     repo_root, loaded_specs = _loaded_specs(tmp_path)
