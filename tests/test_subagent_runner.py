@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import importlib
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -633,3 +634,126 @@ def test_structured_output_envelope_rejects_out_of_range_confidence() -> None:
         envelope = validate_structured_output_envelope(_valid_envelope_payload(confidence=confidence))
         assert envelope.validation_status == "invalid_structured_output"
         assert any(error["field"] == "confidence" for error in envelope.validation_errors)
+
+
+def test_controlled_runtime_runner_returns_structured_telemetry(tmp_path: Path) -> None:
+    session, step, plan = _runtime_factory_plan(
+        tmp_path,
+        step_kind="engineer",
+        subagent_id="hermes_engineer_core",
+    )
+
+    from hermes_cli.runtime_factory import build_controlled_runtime
+    from hermes_cli.subagent_runner import ControlledRuntimeRunner
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda runtime, payload: {
+            "provider": runtime.provider,
+            "model": runtime.model,
+            "structured_output": {"summary": "patch prepared", "status": "succeeded"},
+            "output_text": "patch prepared",
+            "token_usage": {"input_tokens": 10, "output_tokens": 6, "total_tokens": 16},
+            "cache": {"read_hit": True, "write": False},
+            "tool_calls": [{"tool_name": "patch", "status": "not_invoked"}],
+        },
+    )
+    result = ControlledRuntimeRunner().run(
+        runtime,
+        input_messages=[{"role": "user", "content": "Implement change"}],
+        request_metadata={"pipeline_session_id": session.pipeline_session_id, "step_id": step.step_kind},
+    )
+
+    assert result.status.value == "succeeded"
+    assert result.actual_provider == "openrouter"
+    assert result.actual_model == "xiaomi/mimo-v2.5-pro"
+    assert result.input_hash
+    assert result.prompt_hash
+    assert result.response_output_hash
+    assert result.usage_summary.input_tokens == 10
+    assert result.usage_summary.total_tokens == 16
+    assert result.usage_summary.source == "reported"
+    assert result.cache_summary.read_hit is True
+    assert result.cache_summary.write is False
+    assert result.cache_summary.source == "reported"
+    assert result.tool_call_summaries[0].tool_name == "patch"
+    assert result.structured_output == {"summary": "patch prepared", "status": "succeeded"}
+
+
+def test_controlled_runtime_runner_uses_safe_placeholders_when_usage_missing(tmp_path: Path) -> None:
+    _, _, plan = _runtime_factory_plan(
+        tmp_path,
+        step_kind="reviewer",
+        subagent_id="hermes_code_reviewer",
+    )
+
+    from hermes_cli.runtime_factory import build_controlled_runtime
+    from hermes_cli.subagent_runner import ControlledRuntimeRunner
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda runtime, payload: {
+            "provider": runtime.provider,
+            "model": runtime.model,
+            "structured_output": {"summary": "review done", "status": "succeeded"},
+        },
+    )
+    result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Review"}])
+
+    assert result.status.value == "succeeded"
+    assert result.usage_summary.input_tokens == 0
+    assert result.usage_summary.output_tokens == 0
+    assert result.usage_summary.total_tokens == 0
+    assert result.usage_summary.source == "unavailable"
+    assert result.cache_summary.read_hit is None
+    assert result.cache_summary.write is None
+    assert result.cache_summary.source == "unavailable"
+    assert result.tool_call_summaries == []
+
+
+def test_controlled_runtime_runner_fails_closed_on_provider_model_mismatch(tmp_path: Path) -> None:
+    _, _, plan = _runtime_factory_plan(
+        tmp_path,
+        step_kind="engineer",
+        subagent_id="hermes_engineer_core",
+    )
+
+    from hermes_cli.runtime_factory import build_controlled_runtime
+    from hermes_cli.subagent_runner import ControlledRuntimeRunner
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda _runtime, _payload: {
+            "provider": "openai-codex",
+            "model": "gpt-5.4-mini",
+            "structured_output": {"summary": "wrong runtime", "status": "succeeded"},
+        },
+    )
+    result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Implement"}])
+
+    assert result.status.value == "blocked"
+    assert result.failure_reason == "runtime_contract_mismatch"
+    assert result.error_type == "runtime_contract_mismatch"
+
+
+def test_controlled_runtime_runner_redacts_failures_and_stays_json_serializable(tmp_path: Path) -> None:
+    _, _, plan = _runtime_factory_plan(
+        tmp_path,
+        step_kind="reviewer",
+        subagent_id="hermes_code_reviewer",
+    )
+
+    from hermes_cli.runtime_factory import build_controlled_runtime
+    from hermes_cli.subagent_runner import ControlledRuntimeRunner
+
+    def boom(_runtime, _payload):
+        raise RuntimeError("token=super-secret")
+
+    runtime = build_controlled_runtime(plan=plan, invocation_client=boom)
+    result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Review"}])
+    payload = result.to_safe_dict()
+
+    assert result.status.value == "failed"
+    assert result.error_type == "RuntimeError"
+    assert "super-secret" not in json.dumps(payload, sort_keys=True)
+    json.dumps(payload, sort_keys=True)
