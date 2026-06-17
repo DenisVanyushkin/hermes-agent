@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 from typing import Any
 
 from hermes_cli.pipeline_control_channel import resolve_loop_limit_policy
@@ -24,12 +25,23 @@ from hermes_cli.pipeline_report import build_pipeline_execution_report
 from hermes_cli.pipeline_reviewer_packet import build_reviewer_packet
 from hermes_cli.pipeline_session import PipelineSession
 from hermes_cli.pipeline_state_machine import build_pipeline_state_snapshot
-from hermes_cli.runtime_factory import RuntimeBuildRequest
-from hermes_cli.subagent_runner import SubagentInvocationRequest, SubagentRunner
+from hermes_cli.runtime_factory import RuntimeBuildRequest, build_controlled_runtime, build_runtime_factory_plan
+from hermes_cli.subagent_runner import (
+    ControlledRuntimeRunner,
+    SubagentInvocationRequest,
+    SubagentRunner,
+    validate_structured_output_envelope,
+)
 
 
 SAFE_FALLBACK_MAX_REVIEW_ITERATIONS = 1
 REVIEWER_APPROVAL_STATUS = "candidate_complete"
+
+
+@dataclass(frozen=True)
+class ControlledRuntimeContext:
+    invocation_client: Any
+    controlled_runner: ControlledRuntimeRunner
 
 
 @dataclass(frozen=True)
@@ -47,8 +59,8 @@ class ReworkLoopIterationRecord:
     def to_safe_dict(self) -> dict[str, Any]:
         return {
             "iteration_index": self.iteration_index,
-            "engineer_message": self.engineer_message,
-            "reviewer_message": self.reviewer_message,
+            "engineer_message_hash": _stable_text_hash(self.engineer_message),
+            "reviewer_message_hash": _stable_text_hash(self.reviewer_message),
             "engineer_runner_status": self.engineer_runner_status,
             "reviewer_runner_status": self.reviewer_runner_status,
             "engineer_evaluation_status": self.engineer_evaluation_status,
@@ -75,6 +87,8 @@ class PipelineReworkLoopResult:
     blocked_reason: str | None
     git_gate: dict[str, Any]
     reviewer_packet: dict[str, Any]
+    subagent_runs: list[dict[str, Any]]
+    usage_summary: dict[str, Any]
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -83,14 +97,18 @@ class PipelineReworkLoopResult:
             "review_iterations_completed": self.review_iterations_completed,
             "max_review_iterations": self.max_review_iterations,
             "policy_source": self.policy_source,
-            "original_task": self.original_task,
-            "appended_rework_context": list(self.appended_rework_context),
+            "original_task": "[redacted]",
+            "original_task_hash": _stable_text_hash(self.original_task),
+            "appended_rework_context": ["[redacted]" for _ in self.appended_rework_context],
+            "appended_rework_context_hashes": [_stable_text_hash(item) for item in self.appended_rework_context],
             "completion_allowed": self.completion_allowed,
             "candidate_complete": self.candidate_complete,
             "user_action_required": self.user_action_required,
             "blocked_reason": self.blocked_reason,
             "git_gate": dict(self.git_gate),
             "reviewer_packet": dict(self.reviewer_packet),
+            "subagent_runs": [dict(item) for item in self.subagent_runs],
+            "usage_summary": dict(self.usage_summary),
         }
 
 
@@ -105,7 +123,9 @@ def execute_bounded_rework_loop(
     repo_path: str | None = None,
     test_summary: Any = None,
     allow_completion_after_review: bool = False,
+    controlled_runtime_context: ControlledRuntimeContext | dict[str, Any] | None = None,
 ) -> PipelineReworkLoopResult:
+    runtime_context = _normalize_controlled_runtime_context(controlled_runtime_context)
     pipeline_spec = loaded_specs.pipeline_specs[session.pipeline_id]
     initial_snapshot = build_pipeline_state_snapshot(
         session=session,
@@ -133,6 +153,8 @@ def execute_bounded_rework_loop(
             user_action_required=False,
             git_gate=_disabled_git_gate(),
             reviewer_packet=_disabled_reviewer_packet(),
+            subagent_runs=[],
+            usage_summary=_usage_summary_from_subagent_runs([]),
         )
 
     appended_rework_context: list[str] = []
@@ -160,16 +182,19 @@ def execute_bounded_rework_loop(
             appended_rework_context=appended_rework_context,
         )
         engineer_result = _execute_step(
+            config=config,
             session=session,
             loaded_specs=loaded_specs,
             runtime_factory=runtime_factory,
             runner=runner,
+            controlled_runtime_context=runtime_context,
             pipeline_spec=pipeline_spec,
             current_snapshot=current_snapshot,
             step_index=0,
             step_kind="engineer",
             user_message=engineer_message,
             metadata={
+                "execution_backend": "controlled_runtime_runner" if runtime_context is not None else "legacy_runner",
                 "execution_scope": fuse.execution_scope,
                 "loop_allowed": True,
                 "review_iterations_completed": review_iterations_completed,
@@ -215,6 +240,8 @@ def execute_bounded_rework_loop(
                 user_action_required=True,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
+                subagent_runs=_collect_subagent_runs(current_snapshot),
+                usage_summary=_usage_summary_from_snapshot(current_snapshot),
             )
         if git_result is not None and _git_result_blocks_completion(git_result):
             return _blocked_loop_result(
@@ -231,6 +258,8 @@ def execute_bounded_rework_loop(
                 user_action_required=True,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
+                subagent_runs=_collect_subagent_runs(current_snapshot),
+                usage_summary=_usage_summary_from_snapshot(current_snapshot),
             )
         if git_result is not None and not git_result.review_required and not git_result.material_changes_present:
             final_snapshot = replace(
@@ -262,6 +291,8 @@ def execute_bounded_rework_loop(
                 blocked_reason=None,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
+                subagent_runs=_collect_subagent_runs(final_snapshot),
+                usage_summary=_usage_summary_from_snapshot(final_snapshot),
             )
 
         reviewer_fuse = evaluate_pipeline_reviewer_execution_fuse(
@@ -284,6 +315,8 @@ def execute_bounded_rework_loop(
                 user_action_required=False,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
+                subagent_runs=_collect_subagent_runs(current_snapshot),
+                usage_summary=_usage_summary_from_snapshot(current_snapshot),
             )
 
         reviewer_message = _compose_reviewer_message(
@@ -292,16 +325,19 @@ def execute_bounded_rework_loop(
             appended_rework_context=appended_rework_context,
         )
         reviewer_result = _execute_step(
+            config=config,
             session=session,
             loaded_specs=loaded_specs,
             runtime_factory=runtime_factory,
             runner=runner,
+            controlled_runtime_context=runtime_context,
             pipeline_spec=pipeline_spec,
             current_snapshot=current_snapshot,
             step_index=1,
             step_kind="reviewer",
             user_message=reviewer_message,
             metadata={
+                "execution_backend": "controlled_runtime_runner" if runtime_context is not None else "legacy_runner",
                 "execution_scope": reviewer_fuse.execution_scope,
                 "engineer_result_present": True,
                 "loop_allowed": True,
@@ -364,6 +400,8 @@ def execute_bounded_rework_loop(
                 blocked_reason=reviewer_fail_closed_reason,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
+                subagent_runs=_collect_subagent_runs(final_snapshot),
+                usage_summary=_usage_summary_from_snapshot(final_snapshot),
             )
 
         # Approval requires positive reviewer candidate_complete verdict; absence of blockers is not sufficient.
@@ -399,6 +437,8 @@ def execute_bounded_rework_loop(
                 blocked_reason=blocked_reason,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
+                subagent_runs=_collect_subagent_runs(final_snapshot),
+                usage_summary=_usage_summary_from_snapshot(final_snapshot),
             )
 
         if review_iterations_completed >= max_review_iterations:
@@ -431,6 +471,8 @@ def execute_bounded_rework_loop(
                 blocked_reason="review_loop_limit_exceeded",
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
+                subagent_runs=_collect_subagent_runs(final_snapshot),
+                usage_summary=_usage_summary_from_snapshot(final_snapshot),
             )
 
         appended_rework_context.append(_format_blocker_context(review_iterations_completed, reviewer_blockers))
@@ -502,10 +544,12 @@ def evaluate_pipeline_rework_loop_fuse(
 
 def _execute_step(
     *,
+    config: dict[str, Any] | None,
     session: PipelineSession,
     loaded_specs: Any,
     runtime_factory: Any,
     runner: SubagentRunner,
+    controlled_runtime_context: ControlledRuntimeContext | None,
     pipeline_spec: dict[str, Any],
     current_snapshot: Any,
     step_index: int,
@@ -514,33 +558,75 @@ def _execute_step(
     metadata: dict[str, Any],
 ) -> ControlledOneStepExecutionResult:
     step = current_snapshot.planned_steps[step_index]
-    runtime_plan = runtime_factory.build(
-        RuntimeBuildRequest(
-            loaded_specs=loaded_specs,
+    if controlled_runtime_context is not None:
+        runtime_plan = build_runtime_factory_plan(
+            session=session,
+            planned_step=step,
+            subagent_spec=loaded_specs.subagent_specs.get(step.subagent_id),
+            config=config,
+        )
+        runtime = build_controlled_runtime(
+            plan=runtime_plan,
+            invocation_client=controlled_runtime_context.invocation_client,
+        )
+        controlled_result = controlled_runtime_context.controlled_runner.run(
+            runtime,
+            input_messages=[{"role": "user", "content": user_message}],
+            request_metadata=metadata,
+        )
+        structured_output = validate_structured_output_envelope(controlled_result.structured_output)
+        adapted_runner_result = replace(
+            controlled_result,
+            structured_output=structured_output,
+            schema_validation_status=structured_output.validation_status,
+        )
+        runner_request_payload = {
+            "pipeline_session_id": runtime.pipeline_session_id,
+            "trace_id": runtime.trace_id,
+            "pipeline_id": runtime.pipeline_id,
+            "step_id": step.step_kind,
+            "subagent_id": runtime.subagent_id,
+            "role_id": runtime.role_id,
+            "runtime_factory_plan_id": f"{runtime.pipeline_session_id}:{runtime.role_id}:{runtime.subagent_id}",
+            "runtime_factory_status": runtime.runtime_status,
+            "execution_mode": "controlled_runtime_loop",
+            "prompt_input_hash": session.user_message_hash,
+            "actual_provider": runtime.provider,
+            "actual_model": runtime.model,
+            "actual_model_class": runtime.model_class,
+            "status": adapted_runner_result.status.value,
+        }
+        execution_mode = "controlled_runtime_loop"
+    else:
+        runtime_plan = runtime_factory.build(
+            RuntimeBuildRequest(
+                loaded_specs=loaded_specs,
+                subagent_id=step.subagent_id,
+                pipeline_session_id=session.pipeline_session_id,
+                invocation_id=f"{session.pipeline_session_id}:{step_kind}:loop:{step_index}",
+            )
+        )
+        runner_request = _build_runner_request_from_runtime_plan(
+            session=session,
+            planned_step=step,
+            runtime_plan=runtime_plan,
+            execution_mode="controlled_one_step",
+        )
+        invocation_request = SubagentInvocationRequest(
             subagent_id=step.subagent_id,
             pipeline_session_id=session.pipeline_session_id,
             invocation_id=f"{session.pipeline_session_id}:{step_kind}:loop:{step_index}",
+            input_messages=[{"role": "user", "content": user_message}],
+            metadata=metadata,
         )
-    )
-    runner_request = _build_runner_request_from_runtime_plan(
-        session=session,
-        planned_step=step,
-        runtime_plan=runtime_plan,
-        execution_mode="controlled_one_step",
-    )
-    invocation_request = SubagentInvocationRequest(
-        subagent_id=step.subagent_id,
-        pipeline_session_id=session.pipeline_session_id,
-        invocation_id=f"{session.pipeline_session_id}:{step_kind}:loop:{step_index}",
-        input_messages=[{"role": "user", "content": user_message}],
-        metadata=metadata,
-    )
-    invocation_result = runner.run(runtime_plan, invocation_request)
-    adapted_runner_result = _adapt_runner_result(
-        invocation_result=invocation_result,
-        runner_request=runner_request,
-        runtime_plan=runtime_plan,
-    )
+        invocation_result = runner.run(runtime_plan, invocation_request)
+        adapted_runner_result = _adapt_runner_result(
+            invocation_result=invocation_result,
+            runner_request=runner_request,
+            runtime_plan=runtime_plan,
+        )
+        runner_request_payload = runner_request.to_safe_dict()
+        execution_mode = "controlled_one_step"
     evaluation = evaluate_pipeline_step(
         PipelineEvaluationRequest(
             pipeline_session_id=session.pipeline_session_id,
@@ -548,7 +634,7 @@ def _execute_step(
             pipeline_id=session.pipeline_id,
             step_id=step.step_kind,
             subagent_id=step.subagent_id,
-            execution_mode="controlled_one_step",
+            execution_mode=execution_mode,
             runner_result=adapted_runner_result,
             structured_output=adapted_runner_result.structured_output,
             pipeline_spec=pipeline_spec,
@@ -560,9 +646,9 @@ def _execute_step(
     updated_step = replace(
         step,
         execution_status="executed_one_step",
-        planning_mode="controlled_one_step",
+        planning_mode=execution_mode,
         runtime_factory_plan=runtime_plan.to_safe_dict(),
-        runner_request=runner_request.to_safe_dict(),
+        runner_request=runner_request_payload,
         runner_result=adapted_runner_result.to_safe_dict(),
         evaluation_result=evaluation.to_safe_dict(),
     )
@@ -574,7 +660,7 @@ def _execute_step(
     next_snapshot = replace(
         current_snapshot,
         executed=True,
-        execution_mode="controlled_one_step",
+        execution_mode=execution_mode,
         state=f"{step_kind}_loop_step_complete",
         completion_reason=f"{step_kind}_loop_step_executed",
         completion_allowed=False,
@@ -585,7 +671,7 @@ def _execute_step(
     )
     return ControlledOneStepExecutionResult(
         fuse=PipelineExecutionFuseResult(
-            execution_mode="controlled_one_step",
+            execution_mode=execution_mode,
             actual_invocation_allowed=True,
             blocked_reason=None,
             selected_pipeline_id=session.pipeline_id,
@@ -650,6 +736,8 @@ def _blocked_loop_result(
     user_action_required: bool,
     git_gate: dict[str, Any],
     reviewer_packet: dict[str, Any],
+    subagent_runs: list[dict[str, Any]],
+    usage_summary: dict[str, Any],
 ) -> PipelineReworkLoopResult:
     return PipelineReworkLoopResult(
         fuse=fuse,
@@ -671,7 +759,98 @@ def _blocked_loop_result(
         blocked_reason=blocked_reason,
         git_gate=git_gate,
         reviewer_packet=reviewer_packet,
+        subagent_runs=subagent_runs,
+        usage_summary=usage_summary,
     )
+
+
+def _normalize_controlled_runtime_context(
+    value: ControlledRuntimeContext | dict[str, Any] | None,
+) -> ControlledRuntimeContext | None:
+    if value is None:
+        return None
+    if isinstance(value, ControlledRuntimeContext):
+        return value
+    if not isinstance(value, dict) or value.get("invocation_client") is None:
+        raise ValueError("controlled_runtime_context requires invocation_client")
+    controlled_runner = value.get("controlled_runner")
+    if not isinstance(controlled_runner, ControlledRuntimeRunner):
+        controlled_runner = ControlledRuntimeRunner()
+    return ControlledRuntimeContext(
+        invocation_client=value["invocation_client"],
+        controlled_runner=controlled_runner,
+    )
+
+
+def _collect_subagent_runs(snapshot: Any) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    for step in list(getattr(snapshot, "planned_steps", []) or []):
+        runner_result = getattr(step, "runner_result", None)
+        if not isinstance(runner_result, dict) or not runner_result:
+            continue
+        runs.append(
+            {
+                "step_id": step.step_kind,
+                "subagent_id": step.subagent_id,
+                "role_id": step.step_kind,
+                "status": runner_result.get("status"),
+                "actual_provider": runner_result.get("actual_provider"),
+                "actual_model": runner_result.get("actual_model"),
+                "input_hash": runner_result.get("input_hash"),
+                "prompt_hash": runner_result.get("prompt_hash"),
+                "response_output_hash": runner_result.get("response_output_hash"),
+                "token_usage": dict(runner_result.get("usage_summary") or {}),
+                "cache": dict(runner_result.get("cache_summary") or {}),
+                "tool_call_summaries": list(runner_result.get("tool_call_summaries") or []),
+                "elapsed_ms": runner_result.get("elapsed_ms"),
+                "failure_reason": runner_result.get("failure_reason"),
+                "error_type": runner_result.get("error_type"),
+                "raw_output_redacted": bool(runner_result.get("raw_output_redacted", True)),
+            }
+        )
+    return runs
+
+
+def _usage_summary_from_snapshot(snapshot: Any) -> dict[str, Any]:
+    return _usage_summary_from_subagent_runs(_collect_subagent_runs(snapshot))
+
+
+def _usage_summary_from_subagent_runs(subagent_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_tokens = 0
+    token_sources: list[str] = []
+    cache_sources: list[str] = []
+    models_used: list[str] = []
+    providers_used: list[str] = []
+    for run in subagent_runs:
+        usage = dict(run.get("token_usage") or {})
+        cache = dict(run.get("cache") or {})
+        total_input_tokens += int(usage.get("input_tokens") or 0)
+        total_output_tokens += int(usage.get("output_tokens") or 0)
+        total_tokens += int(usage.get("total_tokens") or 0)
+        token_source = usage.get("source")
+        cache_source = cache.get("source")
+        model = run.get("actual_model")
+        provider = run.get("actual_provider")
+        if token_source and token_source not in token_sources:
+            token_sources.append(str(token_source))
+        if cache_source and cache_source not in cache_sources:
+            cache_sources.append(str(cache_source))
+        if model and model not in models_used:
+            models_used.append(str(model))
+        if provider and provider not in providers_used:
+            providers_used.append(str(provider))
+    return {
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_tokens": total_tokens,
+        "token_sources": token_sources,
+        "cache_sources": cache_sources,
+        "subagent_count": len(subagent_runs),
+        "models_used": models_used,
+        "providers_used": providers_used,
+    }
 
 
 def _disabled_git_gate() -> dict[str, Any]:
@@ -832,3 +1011,9 @@ def _reviewer_fail_closed_reason(*, reviewer_status: str, reviewer_blockers: lis
     if reviewer_status in {"not_evaluated", "", "None"}:
         return "reviewer_unavailable"
     return "reviewer_result_invalid"
+
+
+def _stable_text_hash(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
