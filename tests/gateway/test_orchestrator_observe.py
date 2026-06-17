@@ -40,6 +40,8 @@ def test_gateway_orchestrator_observe_logs_default_pipeline_report(caplog):
     assert report.execution_report.pipeline_session_id == report.session.pipeline_session_id
     log_message = next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message)
     assert '"effective_pipeline_id": "default_conversation_pipeline"' in log_message
+    assert '"pipeline_execution_controller":' in log_message
+    assert '"status": "disabled"' in log_message
 
 
 def test_gateway_orchestrator_observe_emits_one_canonical_preflight_payload(caplog):
@@ -260,6 +262,77 @@ def test_gateway_orchestrator_observe_does_not_wire_controlled_one_step_executio
     assert report is not None
     payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
     assert payload["pipeline_execution_report"]["status"] == "not_executed"
+    assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is False
+
+
+def test_gateway_orchestrator_observe_reports_execution_controller_disabled_by_default(caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-controller-default",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={"pipelines": {"enabled": True, "orchestrator": {"mode": "observe"}}},
+            user_message="Implement controller default behavior",
+            session_id="sess-controller-default",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_execution_controller"]["status"] == "disabled"
+    assert payload["pipeline_execution_controller"]["execution_allowed"] is False
+    assert payload["pipeline_execution_controller"]["blocked_reason"] == "execution_mode_disabled"
+    assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is False
+
+
+def test_gateway_orchestrator_observe_reports_enabled_like_execution_as_would_execute(caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-controller-enabled-like",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={
+                "pipelines": {
+                    "enabled": True,
+                    "orchestrator": {"mode": "observe"},
+                    "execution": {"mode": "controlled_one_step"},
+                }
+            },
+            user_message="Implement controller enabled-like behavior",
+            session_id="sess-controller-enabled-like",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_execution_controller"]["status"] == "would_execute"
+    assert payload["pipeline_execution_controller"]["execution_allowed"] is False
+    assert payload["pipeline_execution_controller"]["blocked_reason"] == "gateway_execution_not_enabled"
+    assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is False
 
 
 def test_gateway_orchestrator_observe_uses_pipeline_session_and_state_machine_boundary(monkeypatch, caplog):
