@@ -192,6 +192,8 @@ def test_report_builder_serializes_disagreement_metadata_sections() -> None:
     assert payload["changed_files"] == ["new.txt"]
     assert payload["tests"]["status"] == "passed"
     assert payload["review"]["status"] == "blocked_after_disagreement"
+    assert payload["review"]["escalation_invoked"] is False
+    assert payload["review"]["final_review_decision"] == "blocker_maintained"
     assert payload["decisive_subagent"] == "hermes_code_reviewer"
 
 

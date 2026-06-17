@@ -43,6 +43,16 @@ from hermes_cli.subagent_runner import (
 
 SAFE_FALLBACK_MAX_REVIEW_ITERATIONS = 1
 REVIEWER_APPROVAL_STATUS = "candidate_complete"
+ESCALATED_REVIEWER_SUBAGENT_ID = "hermes_code_reviewer_escalated"
+ESCALATED_REVIEWER_ROLE_ID = "reviewer"
+ESCALATED_REVIEWER_DECISION_APPROVED = "approved"
+ESCALATED_REVIEWER_DECISION_BLOCKER_MAINTAINED = "blocker_maintained"
+ESCALATED_REVIEWER_DECISION_UNABLE = "unable_to_arbitrate"
+ESCALATED_REVIEWER_ALLOWED_DECISIONS = {
+    ESCALATED_REVIEWER_DECISION_APPROVED,
+    ESCALATED_REVIEWER_DECISION_BLOCKER_MAINTAINED,
+    ESCALATED_REVIEWER_DECISION_UNABLE,
+}
 MAX_SAFE_EVIDENCE_ITEMS = 5
 MAX_SAFE_EVIDENCE_LABEL_CHARS = 64
 
@@ -51,6 +61,7 @@ MAX_SAFE_EVIDENCE_LABEL_CHARS = 64
 class ControlledRuntimeContext:
     invocation_client: Any
     controlled_runner: ControlledRuntimeRunner
+    allow_model_escalation: bool = False
 
 
 @dataclass(frozen=True)
@@ -293,8 +304,63 @@ def execute_bounded_rework_loop(
                     decisive_subagent=decisive_subagent,
                 )
                 disagreements.append(disagreement)
+                escalation_result = _execute_model_escalation_if_allowed(
+                    config=config,
+                    session=session,
+                    loaded_specs=loaded_specs,
+                    runtime_context=runtime_context,
+                    accumulated_subagent_runs=accumulated_subagent_runs,
+                    current_snapshot=current_snapshot,
+                    original_task=user_message,
+                    active_reviewer_blockers=active_reviewer_blockers,
+                    trigger="reviewer_maintains_blocker_after_max_peer_round",
+                    reason="reviewer maintained blocker after allowed peer disagreement round",
+                )
+                if escalation_result is not None:
+                    escalation_result = _apply_completion_gate_to_escalation_result(
+                        escalation_result=escalation_result,
+                        allow_completion_after_review=allow_completion_after_review,
+                    )
+                    disagreements[-1]["status"] = escalation_result["disagreement_status"]
+                    disagreements[-1]["resolution"] = escalation_result["disagreement_resolution"]
+                    disagreements[-1]["decisive_subagent"] = escalation_result["decisive_subagent"]
+                    model_escalations.append(dict(escalation_result["model_escalation"]))
+                    review_overrides = dict(escalation_result["review_overrides"])
+                    decisive_subagent = escalation_result["decisive_subagent"]
+                    return _finalize_loop_result(
+                        fuse=fuse,
+                        session=session,
+                        snapshot=escalation_result["snapshot"],
+                        preflight_allowed=True,
+                        preflight_reason_code="rework_loop_fuse_allowed",
+                        iteration_history=iteration_history,
+                        review_iterations_completed=review_iterations_completed,
+                        max_review_iterations=max_review_iterations,
+                        policy_source=policy_source,
+                        original_task=user_message,
+                        appended_rework_context=appended_rework_context,
+                        completion_allowed=allow_completion_after_review and bool(escalation_result["completion_allowed"]),
+                        candidate_complete=bool(escalation_result["candidate_complete"]),
+                        user_action_required=bool(escalation_result["user_action_required"]),
+                        blocked_reason=escalation_result["blocked_reason"],
+                        git_gate=current_git_gate,
+                        reviewer_packet=current_reviewer_packet,
+                        subagent_runs=accumulated_subagent_runs,
+                        peer_messages=peer_messages,
+                        disagreements=disagreements,
+                        decisive_subagent=decisive_subagent,
+                        model_escalations=model_escalations,
+                        tests=_tests_payload(test_summary),
+                        review_overrides=review_overrides,
+                    )
+
                 model_escalations.append(
-                    _build_model_escalation_record(status="block_and_escalate_to_user")
+                    _build_model_escalation_record(
+                        status="block_and_escalate_to_user",
+                        trigger="reviewer_maintains_blocker_after_max_peer_round",
+                        reason="reviewer maintained blocker after allowed peer disagreement round",
+                        from_subagent=REVIEWER_SUBAGENT_ID,
+                    )
                 )
                 final_snapshot = replace(
                     current_snapshot,
@@ -305,7 +371,13 @@ def execute_bounded_rework_loop(
                     completion_blocked_reason="reviewer_decisive_after_disagreement",
                     final_verdict="reviewer_decisive_after_disagreement",
                 )
-                review_overrides = {"reviewer_approved": False, "status": "blocked_after_disagreement"}
+                review_overrides = {
+                    "reviewer_approved": False,
+                    "escalation_invoked": False,
+                    "escalation_approved": False,
+                    "final_review_decision": "blocker_maintained",
+                    "status": "blocked_after_disagreement",
+                }
                 return _finalize_loop_result(
                     fuse=fuse,
                     session=session,
@@ -405,7 +477,14 @@ def execute_bounded_rework_loop(
             if reviewer_status == REVIEWER_APPROVAL_STATUS and not reviewer_blockers:
                 disagreements[-1]["status"] = "resolved"
                 disagreements[-1]["resolution"] = "reviewer_revised_to_approved"
-                model_escalations.append(_build_model_escalation_record(status="not_required"))
+                model_escalations.append(
+                    _build_model_escalation_record(
+                        status="not_required",
+                        trigger="disagreement_resolved_by_reviewer",
+                        reason="reviewer revised to approved after peer disagreement round",
+                        from_subagent=REVIEWER_SUBAGENT_ID,
+                    )
+                )
                 final_snapshot = replace(
                     current_snapshot,
                     state="peer_discussion_completed",
@@ -415,7 +494,13 @@ def execute_bounded_rework_loop(
                     completion_blocked_reason=None if allow_completion_after_review else "loop_harness_not_live_final",
                     final_verdict="controlled_rework_loop_candidate_complete",
                 )
-                review_overrides = {"reviewer_approved": True, "status": "approved_after_disagreement"}
+                review_overrides = {
+                    "reviewer_approved": True,
+                    "escalation_invoked": False,
+                    "escalation_approved": False,
+                    "final_review_decision": "approved",
+                    "status": "approved_after_disagreement",
+                }
                 return _finalize_loop_result(
                     fuse=fuse,
                     session=session,
@@ -446,7 +531,64 @@ def execute_bounded_rework_loop(
             disagreements[-1]["status"] = "reviewer_maintained_blocker"
             disagreements[-1]["resolution"] = "reviewer_blocker_authoritative"
             disagreements[-1]["peer_round_limit_status"] = "max_peer_discussion_rounds_reached"
-            model_escalations.append(_build_model_escalation_record(status="block_and_escalate_to_user"))
+            escalation_result = _execute_model_escalation_if_allowed(
+                config=config,
+                session=session,
+                loaded_specs=loaded_specs,
+                runtime_context=runtime_context,
+                accumulated_subagent_runs=accumulated_subagent_runs,
+                current_snapshot=current_snapshot,
+                original_task=user_message,
+                active_reviewer_blockers=reviewer_blockers,
+                trigger="reviewer_maintains_blocker_after_peer_round",
+                reason="reviewer maintained blocker after allowed peer disagreement round",
+            )
+            if escalation_result is not None:
+                escalation_result = _apply_completion_gate_to_escalation_result(
+                    escalation_result=escalation_result,
+                    allow_completion_after_review=allow_completion_after_review,
+                )
+                disagreements[-1]["status"] = escalation_result["disagreement_status"]
+                disagreements[-1]["resolution"] = escalation_result["disagreement_resolution"]
+                disagreements[-1]["decisive_subagent"] = escalation_result["decisive_subagent"]
+                model_escalations.append(dict(escalation_result["model_escalation"]))
+                review_overrides = dict(escalation_result["review_overrides"])
+                decisive_subagent = escalation_result["decisive_subagent"]
+                return _finalize_loop_result(
+                    fuse=fuse,
+                    session=session,
+                    snapshot=escalation_result["snapshot"],
+                    preflight_allowed=True,
+                    preflight_reason_code="rework_loop_fuse_allowed",
+                    iteration_history=iteration_history,
+                    review_iterations_completed=review_iterations_completed,
+                    max_review_iterations=max_review_iterations,
+                    policy_source=policy_source,
+                    original_task=user_message,
+                    appended_rework_context=appended_rework_context,
+                    completion_allowed=allow_completion_after_review and bool(escalation_result["completion_allowed"]),
+                    candidate_complete=bool(escalation_result["candidate_complete"]),
+                    user_action_required=bool(escalation_result["user_action_required"]),
+                    blocked_reason=escalation_result["blocked_reason"],
+                    git_gate=current_git_gate,
+                    reviewer_packet=current_reviewer_packet,
+                    subagent_runs=accumulated_subagent_runs,
+                    peer_messages=peer_messages,
+                    disagreements=disagreements,
+                    decisive_subagent=decisive_subagent,
+                    model_escalations=model_escalations,
+                    tests=_tests_payload(test_summary),
+                    review_overrides=review_overrides,
+                )
+
+            model_escalations.append(
+                _build_model_escalation_record(
+                    status="block_and_escalate_to_user",
+                    trigger="reviewer_maintains_blocker_after_peer_round",
+                    reason="reviewer maintained blocker after allowed peer disagreement round",
+                    from_subagent=REVIEWER_SUBAGENT_ID,
+                )
+            )
             final_snapshot = replace(
                 current_snapshot,
                 state="disagreement_unresolved",
@@ -456,7 +598,13 @@ def execute_bounded_rework_loop(
                 completion_blocked_reason="reviewer_decisive_after_disagreement",
                 final_verdict="reviewer_decisive_after_disagreement",
             )
-            review_overrides = {"reviewer_approved": False, "status": "blocked_after_disagreement"}
+            review_overrides = {
+                "reviewer_approved": False,
+                "escalation_invoked": False,
+                "escalation_approved": False,
+                "final_review_decision": "blocker_maintained",
+                "status": "blocked_after_disagreement",
+            }
             return _finalize_loop_result(
                 fuse=fuse,
                 session=session,
@@ -920,6 +1068,248 @@ def _execute_step(
     )
 
 
+def _execute_model_escalation_if_allowed(
+    *,
+    config: dict[str, Any] | None,
+    session: PipelineSession,
+    loaded_specs: Any,
+    runtime_context: ControlledRuntimeContext | None,
+    accumulated_subagent_runs: list[dict[str, Any]],
+    current_snapshot: Any,
+    original_task: str,
+    active_reviewer_blockers: list[str],
+    trigger: str,
+    reason: str,
+) -> dict[str, Any] | None:
+    if runtime_context is None or not runtime_context.allow_model_escalation:
+        return None
+
+    escalation_run = _run_escalated_reviewer(
+        config=config,
+        session=session,
+        loaded_specs=loaded_specs,
+        runtime_context=runtime_context,
+        current_snapshot=current_snapshot,
+        original_task=original_task,
+        active_reviewer_blockers=active_reviewer_blockers,
+        trigger=trigger,
+        reason=reason,
+    )
+    accumulated_subagent_runs.append(dict(escalation_run["subagent_run"]))
+
+    model_escalation = _build_model_escalation_record(
+        status="executed",
+        trigger=trigger,
+        reason=reason,
+        from_subagent=REVIEWER_SUBAGENT_ID,
+        to_subagent=ESCALATED_REVIEWER_SUBAGENT_ID,
+        decisive_subagent=ESCALATED_REVIEWER_SUBAGENT_ID,
+        verdict=escalation_run["verdict"],
+        run=escalation_run["subagent_run"],
+        blocked_reason=escalation_run["blocked_reason"],
+    )
+    return {
+        "snapshot": escalation_run["snapshot"],
+        "completion_allowed": escalation_run["completion_allowed"],
+        "candidate_complete": escalation_run["candidate_complete"],
+        "user_action_required": escalation_run["user_action_required"],
+        "blocked_reason": escalation_run["blocked_reason"],
+        "model_escalation": model_escalation,
+        "decisive_subagent": ESCALATED_REVIEWER_SUBAGENT_ID,
+        "disagreement_status": escalation_run["disagreement_status"],
+        "disagreement_resolution": escalation_run["disagreement_resolution"],
+        "review_overrides": escalation_run["review_overrides"],
+    }
+
+
+def _run_escalated_reviewer(
+    *,
+    config: dict[str, Any] | None,
+    session: PipelineSession,
+    loaded_specs: Any,
+    runtime_context: ControlledRuntimeContext,
+    current_snapshot: Any,
+    original_task: str,
+    active_reviewer_blockers: list[str],
+    trigger: str,
+    reason: str,
+) -> dict[str, Any]:
+    reviewer_step = list(current_snapshot.planned_steps)[1]
+    reviewer_spec = dict(loaded_specs.subagent_specs.get(REVIEWER_SUBAGENT_ID) or {})
+    escalated_spec = _build_escalated_reviewer_spec(reviewer_spec)
+    runtime_plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=replace(reviewer_step, subagent_id=ESCALATED_REVIEWER_SUBAGENT_ID),
+        subagent_spec=escalated_spec,
+        config=config,
+    )
+    runtime = build_controlled_runtime(
+        plan=runtime_plan,
+        invocation_client=runtime_context.invocation_client,
+    )
+    controlled_result = runtime_context.controlled_runner.run(
+        runtime,
+        input_messages=[{"role": "user", "content": _compose_escalation_message(original_task=original_task, reviewer_blockers=active_reviewer_blockers, reason=reason)}],
+        request_metadata={
+            "execution_backend": "controlled_runtime_runner",
+            "execution_scope": "controlled_model_escalation_only",
+            "loop_allowed": True,
+            "model_escalation_allowed": True,
+            "model_escalation_trigger": trigger,
+            "model_escalation_reason": reason,
+        },
+    )
+    raw_structured_output = controlled_result.structured_output
+    structured_output = validate_structured_output_envelope(raw_structured_output)
+    verdict = _validate_escalation_verdict(raw_structured_output, structured_output)
+    subagent_run = _subagent_run_from_result(
+        step_id="reviewer_escalation",
+        subagent_id=ESCALATED_REVIEWER_SUBAGENT_ID,
+        role_id=ESCALATED_REVIEWER_ROLE_ID,
+        runner_result=replace(
+            controlled_result,
+            structured_output=structured_output,
+            schema_validation_status=structured_output.validation_status,
+        ).to_safe_dict(),
+    )
+    if verdict["status"] == "invalid":
+        snapshot = replace(
+            current_snapshot,
+            state="model_escalation_invalid",
+            completion_reason="invalid_escalation_output",
+            executed=True,
+            completion_allowed=False,
+            completion_blocked_reason="invalid_escalation_output",
+            final_verdict="controlled_model_escalation_invalid",
+        )
+        return {
+            "snapshot": snapshot,
+            "completion_allowed": False,
+            "candidate_complete": False,
+            "user_action_required": True,
+            "blocked_reason": "invalid_escalation_output",
+            "verdict": "unable",
+            "disagreement_status": "escalation_failed_closed",
+            "disagreement_resolution": "invalid_escalation_output",
+            "review_overrides": {
+                "reviewer_approved": False,
+                "escalation_invoked": True,
+                "escalation_approved": False,
+                "final_review_decision": "unable_to_arbitrate",
+                "status": "blocked_after_escalation",
+            },
+            "subagent_run": subagent_run,
+        }
+
+    if verdict["decision"] == ESCALATED_REVIEWER_DECISION_APPROVED:
+        snapshot = replace(
+            current_snapshot,
+            state="model_escalation_approved",
+            completion_reason="rework_loop_candidate_complete",
+            executed=True,
+            completion_allowed=True,
+            completion_blocked_reason=None,
+            final_verdict="controlled_model_escalation_approved",
+        )
+        return {
+            "snapshot": snapshot,
+            "completion_allowed": True,
+            "candidate_complete": True,
+            "user_action_required": False,
+            "blocked_reason": None,
+            "verdict": ESCALATED_REVIEWER_DECISION_APPROVED,
+            "disagreement_status": "resolved_by_escalation",
+            "disagreement_resolution": "escalated_reviewer_approved",
+            "review_overrides": {
+                "reviewer_approved": False,
+                "escalation_invoked": True,
+                "escalation_approved": True,
+                "final_review_decision": "approved",
+                "status": "approved_after_escalation",
+            },
+            "subagent_run": subagent_run,
+        }
+
+    if verdict["decision"] == ESCALATED_REVIEWER_DECISION_BLOCKER_MAINTAINED:
+        snapshot = replace(
+            current_snapshot,
+            state="model_escalation_blocked",
+            completion_reason="escalation_maintained_blocker",
+            executed=True,
+            completion_allowed=False,
+            completion_blocked_reason="escalation_maintained_blocker",
+            final_verdict="controlled_model_escalation_blocked",
+        )
+        return {
+            "snapshot": snapshot,
+            "completion_allowed": False,
+            "candidate_complete": False,
+            "user_action_required": True,
+            "blocked_reason": "escalation_maintained_blocker",
+            "verdict": ESCALATED_REVIEWER_DECISION_BLOCKER_MAINTAINED,
+            "disagreement_status": "resolved_by_escalation",
+            "disagreement_resolution": "escalated_reviewer_maintained_blocker",
+            "review_overrides": {
+                "reviewer_approved": False,
+                "escalation_invoked": True,
+                "escalation_approved": False,
+                "final_review_decision": "blocker_maintained",
+                "status": "blocked_after_escalation",
+            },
+            "subagent_run": subagent_run,
+        }
+
+    snapshot = replace(
+        current_snapshot,
+        state="model_escalation_unable",
+        completion_reason="escalation_unable_to_arbitrate",
+        executed=True,
+        completion_allowed=False,
+        completion_blocked_reason="escalation_unable_to_arbitrate",
+        final_verdict="controlled_model_escalation_unable",
+    )
+    return {
+        "snapshot": snapshot,
+        "completion_allowed": False,
+        "candidate_complete": False,
+        "user_action_required": True,
+        "blocked_reason": "escalation_unable_to_arbitrate",
+        "verdict": "unable",
+        "disagreement_status": "escalation_failed_closed",
+        "disagreement_resolution": "escalated_reviewer_unable_to_arbitrate",
+        "review_overrides": {
+            "reviewer_approved": False,
+            "escalation_invoked": True,
+            "escalation_approved": False,
+            "final_review_decision": "unable_to_arbitrate",
+            "status": "blocked_after_escalation",
+        },
+        "subagent_run": subagent_run,
+    }
+
+
+def _apply_completion_gate_to_escalation_result(
+    *,
+    escalation_result: dict[str, Any],
+    allow_completion_after_review: bool,
+) -> dict[str, Any]:
+    if not escalation_result.get("completion_allowed"):
+        return escalation_result
+    if allow_completion_after_review:
+        return escalation_result
+    gated_snapshot = replace(
+        escalation_result["snapshot"],
+        completion_allowed=False,
+        completion_blocked_reason="loop_harness_not_live_final",
+    )
+    gated_result = dict(escalation_result)
+    gated_result["snapshot"] = gated_snapshot
+    gated_result["completion_allowed"] = False
+    gated_result["blocked_reason"] = "loop_harness_not_live_final"
+    gated_result["user_action_required"] = False
+    return gated_result
+
+
 def _loop_blocked_result(
     *,
     base: PipelineExecutionFuseResult,
@@ -1074,6 +1464,7 @@ def _normalize_controlled_runtime_context(
     return ControlledRuntimeContext(
         invocation_client=value["invocation_client"],
         controlled_runner=controlled_runner,
+        allow_model_escalation=bool(value.get("allow_model_escalation", False)),
     )
 
 
@@ -1311,6 +1702,17 @@ def _compose_peer_reviewer_message(*, original_task: str, peer_message: dict[str
     return "\n\n".join(parts)
 
 
+def _compose_escalation_message(*, original_task: str, reviewer_blockers: list[str], reason: str) -> str:
+    return "\n\n".join(
+        [
+            original_task,
+            "Escalated reviewer arbitration requested.",
+            f"Escalation reason: {reason}",
+            "Reviewer blockers: " + "; ".join(reviewer_blockers or ["none"]),
+        ]
+    )
+
+
 def _format_blocker_context(iteration_index: int, blockers: list[str]) -> str:
     return f"Reviewer blockers after iteration {iteration_index}: " + "; ".join(blockers)
 
@@ -1366,13 +1768,106 @@ def _build_disagreement_record(
     }
 
 
-def _build_model_escalation_record(*, status: str) -> dict[str, Any]:
-    return {
+def _build_model_escalation_record(
+    *,
+    status: str,
+    trigger: str,
+    reason: str,
+    from_subagent: str,
+    to_subagent: str = ESCALATED_REVIEWER_SUBAGENT_ID,
+    decisive_subagent: str | None = None,
+    verdict: str | None = None,
+    run: dict[str, Any] | None = None,
+    blocked_reason: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "escalation_id": f"escalation:{_stable_text_hash('|'.join([trigger, status, from_subagent]))[:12]}",
         "condition": "disagreement_unresolved_after_allowed_peer_discussion",
+        "trigger": trigger,
         "status": status,
-        "target_subagent": "decisive_subagent_or_arbitrator",
+        "from_subagent": from_subagent,
+        "to_subagent": to_subagent,
+        "decisive_subagent": decisive_subagent or REVIEWER_SUBAGENT_ID,
+        "target_subagent": to_subagent,
         "escalation_model_class": "senior_reasoning",
-        "reason": "redacted_disagreement_summary",
+        "reason": reason,
+        "verdict": verdict,
+        "blocked_reason": blocked_reason,
+        "redaction_markers": {
+            "reason_redacted": False,
+            "raw_output_redacted": True,
+        },
+    }
+    if run is not None:
+        payload["run_id"] = f"{run.get('step_id')}:{run.get('subagent_id')}"
+        payload["actual_provider"] = run.get("actual_provider")
+        payload["actual_model"] = run.get("actual_model")
+        payload["usage"] = dict(run.get("token_usage") or {})
+    return payload
+
+
+def _build_escalated_reviewer_spec(reviewer_spec: dict[str, Any]) -> dict[str, Any]:
+    if not reviewer_spec:
+        return {}
+    escalated_spec = dict(reviewer_spec)
+    escalated_spec["id"] = ESCALATED_REVIEWER_SUBAGENT_ID
+    escalated_spec["display_name"] = "Hermes Code Reviewer Escalated"
+    escalated_spec["purpose"] = "Controlled escalated reviewer/arbitrator for disagreement resolution."
+    models = dict(reviewer_spec.get("models") or {})
+    default_model = dict(models.get("default") or {})
+    default_model["class"] = "senior_reasoning"
+    allowed_models = [dict(item) for item in list(models.get("allowed") or [])]
+    if not allowed_models and default_model:
+        allowed_models = [dict(default_model)]
+    for item in allowed_models:
+        item["class"] = "senior_reasoning"
+    models["default"] = default_model
+    models["allowed"] = allowed_models
+    models["escalation"] = {"allowed": False, "rules": []}
+    escalated_spec["models"] = models
+    return escalated_spec
+
+
+def _validate_escalation_verdict(raw_payload: Any, envelope: Any) -> dict[str, Any]:
+    if not isinstance(raw_payload, dict):
+        return {"status": "invalid", "decision": None}
+    if getattr(envelope, "validation_status", None) != "valid":
+        return {"status": "invalid", "decision": None}
+    decision = str(raw_payload.get("decision") or "")
+    if decision not in ESCALATED_REVIEWER_ALLOWED_DECISIONS:
+        return {"status": "invalid", "decision": None}
+    status = str(raw_payload.get("status") or "")
+    blockers = list(raw_payload.get("blockers") or [])
+    if decision == ESCALATED_REVIEWER_DECISION_APPROVED:
+        if status != "succeeded" or blockers:
+            return {"status": "invalid", "decision": None}
+    elif decision == ESCALATED_REVIEWER_DECISION_BLOCKER_MAINTAINED:
+        if status not in {"blocked", "needs_review"} or not blockers:
+            return {"status": "invalid", "decision": None}
+    else:
+        if status not in {"blocked", "needs_review"} or not blockers:
+            return {"status": "invalid", "decision": None}
+    return {"status": "valid", "decision": decision}
+
+
+def _subagent_run_from_result(*, step_id: str, subagent_id: str, role_id: str, runner_result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "step_id": step_id,
+        "subagent_id": subagent_id,
+        "role_id": role_id,
+        "status": runner_result.get("status"),
+        "actual_provider": runner_result.get("actual_provider"),
+        "actual_model": runner_result.get("actual_model"),
+        "input_hash": runner_result.get("input_hash"),
+        "prompt_hash": runner_result.get("prompt_hash"),
+        "response_output_hash": runner_result.get("response_output_hash"),
+        "token_usage": _normalized_usage_payload(runner_result.get("usage_summary")),
+        "cache": _normalized_cache_payload(runner_result.get("cache_summary")),
+        "tool_call_summaries": _mapping_list(runner_result.get("tool_call_summaries")),
+        "elapsed_ms": runner_result.get("elapsed_ms"),
+        "failure_reason": runner_result.get("failure_reason"),
+        "error_type": runner_result.get("error_type"),
+        "raw_output_redacted": bool(runner_result.get("raw_output_redacted", True)),
     }
 
 
