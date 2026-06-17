@@ -102,6 +102,25 @@ def _reviewer_output(*, blockers: list[str]) -> dict[str, object]:
     }
 
 
+def _escalated_reviewer_output(*, decision: str, blockers: list[str] | None = None, confidence: float = 0.91) -> dict[str, object]:
+    blockers = list(blockers or [])
+    return {
+        "schema_version": "v1",
+        "subagent_id": "hermes_code_reviewer_escalated",
+        "role": "reviewer",
+        "status": "succeeded" if decision == "approved" else "blocked",
+        "decision": decision,
+        "summary": "escalated approved" if decision == "approved" else "escalated blocked",
+        "findings": [],
+        "changes": [],
+        "blockers": blockers,
+        "artifacts": [],
+        "confidence": confidence,
+        "requires_review": False,
+        "next_action": "none",
+    }
+
+
 def _invalid_output() -> dict[str, object]:
     return {
         "status": "approved",
@@ -584,7 +603,12 @@ def test_git_gate_invalid_repo_path_fails_closed_without_exception(tmp_path: Pat
 
 
 
-def _controlled_runtime_context(*, mutate_repo: Path | None = None, responses: list[dict[str, object]] | None = None):
+def _controlled_runtime_context(
+    *,
+    mutate_repo: Path | None = None,
+    responses: list[dict[str, object]] | None = None,
+    allow_model_escalation: bool = False,
+):
     from hermes_cli.subagent_runner import ControlledRuntimeRunner
 
     queued = list(responses or [])
@@ -627,6 +651,7 @@ def _controlled_runtime_context(*, mutate_repo: Path | None = None, responses: l
     return {
         "invocation_client": _client,
         "controlled_runner": ControlledRuntimeRunner(),
+        "allow_model_escalation": allow_model_escalation,
     }
 
 
@@ -865,6 +890,216 @@ def test_disagreement_unresolved_blocks_with_reviewer_decisive_semantics(tmp_pat
     assert payload["disagreements"][0]["decisive_subagent"] == "hermes_code_reviewer"
     assert payload["model_escalations"][0]["status"] == "block_and_escalate_to_user"
     assert payload["completion"]["blocked_reason"] == "reviewer_decisive_after_disagreement"
+
+
+def test_disagreement_escalation_enabled_approves_and_updates_decisive_subagent(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    responses = [
+        {"structured_output": _engineer_output(summary="Created new.txt"), "output_text": "engineer ok"},
+        {"structured_output": _reviewer_output(blockers=["missing regression test"]), "output_text": "review blocked"},
+        {
+            "structured_output": _engineer_output(
+                status="disagree_with_reviewer",
+                summary="Engineer disagrees with reviewer blocker.",
+                findings=[],
+                blockers=[],
+                artifacts=[],
+                requires_review=True,
+                next_action="disagreement",
+                reviewer_objections=["missing regression test"],
+                evidence=["tests/test_pipeline_rework_loop.py"],
+                risks=[],
+                confidence=0.8,
+            ),
+            "output_text": "engineer disagreement",
+        },
+        {"structured_output": _reviewer_output(blockers=["maintained blocker"]), "output_text": "review still blocked"},
+        {"structured_output": _escalated_reviewer_output(decision="approved"), "output_text": "escalated approved", "token_usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}},
+    ]
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context=_controlled_runtime_context(mutate_repo=git_repo, responses=responses, allow_model_escalation=True),
+    )
+
+    payload = result.execution_report.to_safe_dict()
+
+    assert result.completion_allowed is True
+    assert result.candidate_complete is True
+    assert payload["review"]["escalation_invoked"] is True
+    assert payload["review"]["escalation_approved"] is True
+    assert payload["review"]["final_review_decision"] == "approved"
+    assert payload["decisive_subagent"] == "hermes_code_reviewer_escalated"
+    assert payload["disagreements"][0]["status"] == "resolved_by_escalation"
+    assert payload["model_escalations"][0]["status"] == "executed"
+    assert payload["model_escalations"][0]["verdict"] == "approved"
+    assert payload["model_escalations"][0]["actual_model"] == "gpt-5.5"
+    assert payload["subagent_runs"][-1]["subagent_id"] == "hermes_code_reviewer_escalated"
+    assert payload["usage_summary"]["subagent_run_instance_count"] == 5
+    assert payload["usage_summary"]["total_tokens"] >= 10
+
+
+def test_disagreement_escalation_approved_still_respects_allow_completion_after_review_false(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    responses = [
+        {"structured_output": _engineer_output(summary="Created new.txt"), "output_text": "engineer ok"},
+        {"structured_output": _reviewer_output(blockers=["missing regression test"]), "output_text": "review blocked"},
+        {
+            "structured_output": _engineer_output(
+                status="disagree_with_reviewer",
+                summary="Engineer disagrees with reviewer blocker.",
+                findings=[],
+                blockers=[],
+                artifacts=[],
+                requires_review=True,
+                next_action="disagreement",
+                reviewer_objections=["missing regression test"],
+                evidence=["tests/test_pipeline_rework_loop.py"],
+                risks=[],
+                confidence=0.8,
+            ),
+            "output_text": "engineer disagreement",
+        },
+        {"structured_output": _reviewer_output(blockers=["maintained blocker"]), "output_text": "review still blocked"},
+        {"structured_output": _escalated_reviewer_output(decision="approved"), "output_text": "escalated approved", "token_usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}},
+    ]
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        allow_completion_after_review=False,
+        controlled_runtime_context=_controlled_runtime_context(mutate_repo=git_repo, responses=responses, allow_model_escalation=True),
+    )
+
+    payload = result.execution_report.to_safe_dict()
+    encoded = __import__("json").dumps(payload, sort_keys=True)
+
+    assert payload["subagent_runs"][-1]["subagent_id"] == "hermes_code_reviewer_escalated"
+    assert payload["model_escalations"][0]["status"] == "executed"
+    assert payload["model_escalations"][0]["verdict"] == "approved"
+    assert result.completion_allowed is False
+    assert payload["completion"]["completion_allowed"] is False
+    assert "escalated approved" not in encoded
+    assert "Implement bounded rework loop" not in encoded
+
+
+def test_disagreement_escalation_enabled_maintains_blocker(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    responses = [
+        {"structured_output": _engineer_output(summary="Created new.txt"), "output_text": "engineer ok"},
+        {"structured_output": _reviewer_output(blockers=["missing regression test"]), "output_text": "review blocked"},
+        {
+            "structured_output": _engineer_output(
+                status="disagree_with_reviewer",
+                summary="Engineer disagrees with reviewer blocker.",
+                findings=[],
+                blockers=[],
+                artifacts=[],
+                requires_review=True,
+                next_action="disagreement",
+                reviewer_objections=["missing regression test"],
+                evidence=["tests/test_pipeline_rework_loop.py"],
+                risks=[],
+                confidence=0.8,
+            ),
+            "output_text": "engineer disagreement",
+        },
+        {"structured_output": _reviewer_output(blockers=["maintained blocker"]), "output_text": "review still blocked"},
+        {"structured_output": _escalated_reviewer_output(decision="blocker_maintained", blockers=["maintained blocker"]), "output_text": "escalated blocked"},
+    ]
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        controlled_runtime_context=_controlled_runtime_context(mutate_repo=git_repo, responses=responses, allow_model_escalation=True),
+    )
+
+    payload = result.execution_report.to_safe_dict()
+
+    assert result.completion_allowed is False
+    assert result.user_action_required is True
+    assert result.blocked_reason == "escalation_maintained_blocker"
+    assert payload["review"]["final_review_decision"] == "blocker_maintained"
+    assert payload["model_escalations"][0]["status"] == "executed"
+    assert payload["model_escalations"][0]["verdict"] == "blocker_maintained"
+    assert payload["completion"]["blocked_reason"] == "escalation_maintained_blocker"
+
+
+def test_disagreement_escalation_invalid_output_fails_closed(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    responses = [
+        {"structured_output": _engineer_output(summary="Created new.txt"), "output_text": "engineer ok"},
+        {"structured_output": _reviewer_output(blockers=["missing regression test"]), "output_text": "review blocked"},
+        {
+            "structured_output": _engineer_output(
+                status="disagree_with_reviewer",
+                summary="Engineer disagrees with reviewer blocker.",
+                findings=[],
+                blockers=[],
+                artifacts=[],
+                requires_review=True,
+                next_action="disagreement",
+                reviewer_objections=["missing regression test"],
+                evidence=["tests/test_pipeline_rework_loop.py"],
+                risks=[],
+                confidence=0.8,
+            ),
+            "output_text": "engineer disagreement",
+        },
+        {"structured_output": _reviewer_output(blockers=["maintained blocker"]), "output_text": "review still blocked"},
+        {"structured_output": _reviewer_output(blockers=[]), "output_text": "invalid escalation"},
+    ]
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        controlled_runtime_context=_controlled_runtime_context(mutate_repo=git_repo, responses=responses, allow_model_escalation=True),
+    )
+
+    payload = result.execution_report.to_safe_dict()
+
+    assert result.completion_allowed is False
+    assert result.user_action_required is True
+    assert result.blocked_reason == "invalid_escalation_output"
+    assert payload["review"]["escalation_invoked"] is True
+    assert payload["review"]["escalation_approved"] is False
+    assert payload["review"]["final_review_decision"] == "unable_to_arbitrate"
+    assert payload["model_escalations"][0]["blocked_reason"] == "invalid_escalation_output"
+    assert payload["model_escalations"][0]["status"] == "executed"
 
 
 def test_disagreement_peer_round_is_bounded_to_one_follow_up(tmp_path: Path) -> None:
