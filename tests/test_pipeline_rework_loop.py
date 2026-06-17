@@ -583,6 +583,143 @@ def test_git_gate_invalid_repo_path_fails_closed_without_exception(tmp_path: Pat
     assert result.blocked_reason == "baseline_invalid"
 
 
+
+def _controlled_runtime_context():
+    from hermes_cli.subagent_runner import ControlledRuntimeRunner
+
+    def _client(runtime, _payload):
+        if runtime.role_id == "engineer":
+            return {
+                "provider": runtime.provider,
+                "model": runtime.model,
+                "structured_output": _engineer_output(summary="Controlled engineer patch prepared"),
+                "output_text": "engineer ok",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                "cache": {"read_hit": True, "write": False},
+                "tool_calls": [{"tool_name": "apply_patch", "call_count": 1, "status": "not_invoked"}],
+            }
+        return {
+            "provider": runtime.provider,
+            "model": runtime.model,
+            "structured_output": _reviewer_output(blockers=[]),
+            "output_text": "review ok",
+            "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+            "cache": {"read_hit": False, "write": False},
+            "tool_calls": [{"tool_name": "pytest", "call_count": 1, "status": "not_invoked"}],
+        }
+
+    return {
+        "invocation_client": _client,
+        "controlled_runner": ControlledRuntimeRunner(),
+    }
+
+
+def test_controlled_runtime_context_invokes_engineer_backend_and_exposes_safe_telemetry(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        controlled_runtime_context=_controlled_runtime_context(),
+    )
+
+    payload = result.to_safe_dict()
+    assert result.iteration_history[0].engineer_runner_status == "succeeded"
+    assert payload["subagent_runs"][0]["role_id"] == "engineer"
+    assert payload["subagent_runs"][0]["actual_provider"] == "openrouter"
+    assert payload["subagent_runs"][0]["actual_model"] == "xiaomi/mimo-v2.5-pro"
+    assert payload["subagent_runs"][0]["input_hash"]
+    assert payload["subagent_runs"][0]["prompt_hash"]
+    assert payload["subagent_runs"][0]["response_output_hash"]
+    assert payload["subagent_runs"][0]["raw_output_redacted"] is True
+    assert payload["usage_summary"]["total_tokens"] == 21
+    assert payload["usage_summary"]["subagent_count"] == 2
+    assert payload["usage_summary"]["providers_used"] == ["openrouter", "openai-codex"]
+    assert set(payload["usage_summary"]["models_used"]) == {"xiaomi/mimo-v2.5-pro", "gpt-5.5"}
+    assert payload["original_task"] == "[redacted]"
+    assert payload["appended_rework_context"] == []
+    assert payload["original_task_hash"]
+    assert payload["appended_rework_context_hashes"] == []
+    encoded = __import__("json").dumps(payload, sort_keys=True)
+    assert "engineer ok" not in encoded
+    assert "Implement bounded rework loop" not in encoded
+
+
+def test_controlled_runtime_context_preserves_distinct_engineer_and_reviewer_models(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    def _client(runtime, _payload):
+        if runtime.role_id == "engineer":
+            _write(git_repo, "new.txt", "created by engineer\n")
+            return {
+                "provider": runtime.provider,
+                "model": runtime.model,
+                "structured_output": _engineer_output(summary="Created new.txt"),
+                "output_text": "engineer ok",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            }
+        return {
+            "provider": runtime.provider,
+            "model": runtime.model,
+            "structured_output": _reviewer_output(blockers=[]),
+            "output_text": "review ok",
+            "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        controlled_runtime_context={"invocation_client": _client},
+    )
+
+    payload = result.to_safe_dict()
+    assert [item["role_id"] for item in payload["subagent_runs"]] == ["engineer", "reviewer"]
+    assert payload["subagent_runs"][0]["actual_provider"] == "openrouter"
+    assert payload["subagent_runs"][1]["actual_provider"] == "openai-codex"
+    assert payload["subagent_runs"][0]["actual_model"] == "xiaomi/mimo-v2.5-pro"
+    assert payload["subagent_runs"][1]["actual_model"] == "gpt-5.5"
+    assert result.execution_report.to_safe_dict()["usage"]["total_tokens"] == 21
+
+
+def test_controlled_runtime_context_fails_closed_on_provider_model_mismatch(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        controlled_runtime_context={
+            "invocation_client": lambda _runtime, _payload: {
+                "provider": "openai-codex",
+                "model": "gpt-5.4-mini",
+                "structured_output": _engineer_output(summary="wrong runtime"),
+            }
+        },
+    )
+
+    payload = result.to_safe_dict()
+    assert result.blocked_reason == "engineer_result_failed"
+    assert payload["subagent_runs"][0]["status"] == "blocked"
+    assert payload["subagent_runs"][0]["failure_reason"] == "runtime_contract_mismatch"
+    assert payload["subagent_runs"][0]["error_type"] == "runtime_contract_mismatch"
+    assert result.candidate_complete is False
+
+
 def test_git_gate_report_omits_diff_and_file_contents(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     repo_root, loaded_specs = _loaded_specs(tmp_path)
