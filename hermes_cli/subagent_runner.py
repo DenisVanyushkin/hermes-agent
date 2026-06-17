@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
+import json
 import time
 from typing import Any, Mapping, Protocol
 
-from hermes_cli.runtime_factory import RuntimeBuildResult, RuntimeFactoryPlan
+from hermes_cli.runtime_factory import ControlledRuntime, RuntimeBuildResult, RuntimeFactoryPlan
 
 
 _READY_RUNTIME_STATUS = "ready_to_construct"
@@ -27,6 +29,7 @@ class SubagentRunnerStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     BLOCKED = "blocked"
+    INVALID_OUTPUT = "invalid_output"
     NEEDS_REVIEW = "needs_review"
 
 
@@ -68,6 +71,7 @@ class SubagentUsageSummary:
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
     total_tokens: int | None = None
+    source: str = "unavailable"
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +79,7 @@ class SubagentUsageSummary:
             "output_tokens": self.output_tokens,
             "reasoning_tokens": self.reasoning_tokens,
             "total_tokens": self.total_tokens,
+            "source": self.source,
         }
 
 
@@ -83,12 +88,18 @@ class SubagentCacheSummary:
     cache_hit: bool | None = None
     cache_write: bool | None = None
     cache_key: str | None = None
+    read_hit: bool | None = None
+    write: bool | None = None
+    source: str = "unavailable"
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
             "cache_hit": self.cache_hit,
             "cache_write": self.cache_write,
             "cache_key": self.cache_key,
+            "read_hit": self.read_hit if self.read_hit is not None else self.cache_hit,
+            "write": self.write if self.write is not None else self.cache_write,
+            "source": self.source,
         }
 
 
@@ -181,6 +192,8 @@ class SubagentRunnerResult:
     actual_provider: str | None = None
     actual_model: str | None = None
     actual_model_class: str | None = None
+    input_hash: str | None = None
+    prompt_hash: str | None = None
     response_output_hash: str | None = None
     usage_summary: SubagentUsageSummary = field(default_factory=SubagentUsageSummary)
     cache_summary: SubagentCacheSummary = field(default_factory=SubagentCacheSummary)
@@ -188,6 +201,7 @@ class SubagentRunnerResult:
     elapsed_ms: float | None = None
     artifacts_created: list[SubagentArtifactRef] = field(default_factory=list)
     structured_output: StructuredOutputEnvelope | None = None
+    error_type: str | None = None
     schema_validation_status: str = "not_applicable"
     raw_output_redacted: bool = True
 
@@ -206,16 +220,171 @@ class SubagentRunnerResult:
             "actual_provider": self.actual_provider,
             "actual_model": self.actual_model,
             "actual_model_class": self.actual_model_class,
+            "input_hash": self.input_hash,
+            "prompt_hash": self.prompt_hash,
             "response_output_hash": self.response_output_hash,
             "usage_summary": self.usage_summary.to_safe_dict(),
             "cache_summary": self.cache_summary.to_safe_dict(),
             "tool_call_summaries": [item.to_safe_dict() for item in self.tool_call_summaries],
             "elapsed_ms": self.elapsed_ms,
             "artifacts_created": [artifact.to_safe_dict() for artifact in self.artifacts_created],
-            "structured_output": self.structured_output.to_safe_dict() if self.structured_output else None,
+            "structured_output": self.structured_output.to_safe_dict() if isinstance(self.structured_output, StructuredOutputEnvelope) else self.structured_output,
+            "error_type": self.error_type,
             "schema_validation_status": self.schema_validation_status,
             "raw_output_redacted": self.raw_output_redacted,
         }
+
+
+class ControlledRuntimeRunner:
+    def run(
+        self,
+        runtime: ControlledRuntime,
+        *,
+        input_messages: list[dict[str, Any]] | None = None,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> SubagentRunnerResult:
+        start = time.perf_counter()
+        payload = {
+            "input_messages": list(input_messages or []),
+            "request_metadata": dict(request_metadata or {}),
+        }
+        input_hash = _stable_hash(payload)
+        prompt_hash = _stable_hash(
+            {
+                "system_prompt_source_id": runtime.system_prompt_source_id,
+                "system_prompt_path": runtime.system_prompt_path,
+            }
+        )
+
+        if runtime.runtime_status != "ready" or runtime.invocation_client is None:
+            return self._result(
+                runtime=runtime,
+                status=SubagentRunnerStatus.BLOCKED,
+                input_hash=input_hash,
+                prompt_hash=prompt_hash,
+                failure_reason="runtime_not_ready",
+                error_type="runtime_not_ready",
+                elapsed_ms=_elapsed_ms(start),
+            )
+
+        try:
+            raw_result = runtime.invocation_client(runtime, payload)
+        except Exception as exc:
+            return self._result(
+                runtime=runtime,
+                status=SubagentRunnerStatus.FAILED,
+                input_hash=input_hash,
+                prompt_hash=prompt_hash,
+                failure_reason="runtime_invocation_failed",
+                error_type=type(exc).__name__,
+                elapsed_ms=_elapsed_ms(start),
+            )
+
+        if not isinstance(raw_result, Mapping):
+            return self._result(
+                runtime=runtime,
+                status=SubagentRunnerStatus.INVALID_OUTPUT,
+                input_hash=input_hash,
+                prompt_hash=prompt_hash,
+                failure_reason="invalid_output",
+                error_type="invalid_output",
+                elapsed_ms=_elapsed_ms(start),
+            )
+
+        reported_provider = _string_or_none(raw_result.get("provider")) or runtime.provider
+        reported_model = _string_or_none(raw_result.get("model")) or runtime.model
+        if reported_provider != runtime.provider or reported_model != runtime.model:
+            return self._result(
+                runtime=runtime,
+                status=SubagentRunnerStatus.BLOCKED,
+                input_hash=input_hash,
+                prompt_hash=prompt_hash,
+                failure_reason="runtime_contract_mismatch",
+                error_type="runtime_contract_mismatch",
+                elapsed_ms=_elapsed_ms(start),
+            )
+
+        structured_output = raw_result.get("structured_output")
+        if structured_output is not None and not isinstance(structured_output, Mapping):
+            return self._result(
+                runtime=runtime,
+                status=SubagentRunnerStatus.INVALID_OUTPUT,
+                input_hash=input_hash,
+                prompt_hash=prompt_hash,
+                failure_reason="invalid_output",
+                error_type="invalid_output",
+                elapsed_ms=_elapsed_ms(start),
+            )
+
+        output_hash = _stable_hash(
+            {
+                "output_text": _string_or_none(raw_result.get("output_text")),
+                "structured_output": dict(structured_output) if isinstance(structured_output, Mapping) else None,
+            }
+        )
+        usage_summary = _usage_summary(raw_result.get("token_usage"))
+        cache_summary = _cache_summary(raw_result.get("cache"))
+        tool_call_summaries = _tool_call_summaries(raw_result.get("tool_calls"))
+        return self._result(
+            runtime=runtime,
+            status=SubagentRunnerStatus.SUCCEEDED,
+            input_hash=input_hash,
+            prompt_hash=prompt_hash,
+            response_output_hash=output_hash,
+            actual_provider=reported_provider,
+            actual_model=reported_model,
+            usage_summary=usage_summary,
+            cache_summary=cache_summary,
+            tool_call_summaries=tool_call_summaries,
+            structured_output=dict(structured_output) if isinstance(structured_output, Mapping) else {},
+            elapsed_ms=_elapsed_ms(start),
+        )
+
+    def _result(
+        self,
+        *,
+        runtime: ControlledRuntime,
+        status: SubagentRunnerStatus,
+        input_hash: str,
+        prompt_hash: str,
+        elapsed_ms: float,
+        failure_reason: str | None = None,
+        error_type: str | None = None,
+        response_output_hash: str | None = None,
+        actual_provider: str | None = None,
+        actual_model: str | None = None,
+        usage_summary: SubagentUsageSummary | None = None,
+        cache_summary: SubagentCacheSummary | None = None,
+        tool_call_summaries: list[SubagentToolCallSummary] | None = None,
+        structured_output: Any = None,
+    ) -> SubagentRunnerResult:
+        return SubagentRunnerResult(
+            pipeline_session_id=runtime.pipeline_session_id,
+            trace_id=runtime.trace_id,
+            pipeline_id=runtime.pipeline_id,
+            step_id=runtime.role_id,
+            subagent_id=runtime.subagent_id,
+            role_id=runtime.role_id,
+            runtime_factory_plan_id=f"{runtime.pipeline_session_id}:{runtime.role_id}:{runtime.subagent_id}",
+            runtime_factory_status=runtime.runtime_status,
+            status=status,
+            failure_reason=failure_reason,
+            actual_provider=actual_provider or runtime.provider,
+            actual_model=actual_model or runtime.model,
+            actual_model_class=runtime.model_class,
+            input_hash=input_hash,
+            prompt_hash=prompt_hash,
+            response_output_hash=response_output_hash,
+            usage_summary=usage_summary or SubagentUsageSummary(input_tokens=0, output_tokens=0, total_tokens=0, source="unavailable"),
+            cache_summary=cache_summary or SubagentCacheSummary(source="unavailable"),
+            tool_call_summaries=list(tool_call_summaries or []),
+            elapsed_ms=elapsed_ms,
+            artifacts_created=[],
+            structured_output=structured_output,
+            error_type=error_type,
+            schema_validation_status="not_applicable",
+            raw_output_redacted=True,
+        )
 
 
 def build_subagent_runner_request(
@@ -833,3 +1002,56 @@ def _sanitize_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_value(item) for item in value[:20]]
     return None
+
+
+def _stable_hash(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _usage_summary(value: Any) -> SubagentUsageSummary:
+    if not isinstance(value, Mapping):
+        return SubagentUsageSummary(input_tokens=0, output_tokens=0, total_tokens=0, source="unavailable")
+    input_tokens = int(value.get("input_tokens") or 0)
+    output_tokens = int(value.get("output_tokens") or 0)
+    reasoning_tokens = int(value.get("reasoning_tokens") or 0) if value.get("reasoning_tokens") is not None else None
+    total_tokens = int(value.get("total_tokens") or (input_tokens + output_tokens + (reasoning_tokens or 0)))
+    return SubagentUsageSummary(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
+        total_tokens=total_tokens,
+        source="reported",
+    )
+
+
+def _cache_summary(value: Any) -> SubagentCacheSummary:
+    if not isinstance(value, Mapping):
+        return SubagentCacheSummary(source="unavailable")
+    read_hit = value.get("read_hit")
+    write = value.get("write")
+    return SubagentCacheSummary(
+        cache_hit=read_hit if isinstance(read_hit, bool) else None,
+        cache_write=write if isinstance(write, bool) else None,
+        read_hit=read_hit if isinstance(read_hit, bool) else None,
+        write=write if isinstance(write, bool) else None,
+        source="reported",
+    )
+
+
+def _tool_call_summaries(value: Any) -> list[SubagentToolCallSummary]:
+    if not isinstance(value, list):
+        return []
+    summaries: list[SubagentToolCallSummary] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        name = _string_or_none(item.get("tool_name")) or _string_or_none(item.get("name")) or "unknown"
+        summaries.append(
+            SubagentToolCallSummary(
+                tool_name=name,
+                call_count=int(item.get("call_count") or 1),
+                status=_string_or_none(item.get("status")) or "reported",
+            )
+        )
+    return summaries

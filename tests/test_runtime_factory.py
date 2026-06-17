@@ -472,3 +472,72 @@ def test_blocked_result_does_not_produce_aiagent_kwargs(tmp_path: Path) -> None:
     assert result.actual_runtime_status == "blocked"
     with pytest.raises(RuntimeError):
         result.to_aiagent_kwargs()
+
+
+def test_build_controlled_runtime_preserves_runtime_contract_metadata(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+    step = next(item for item in session.planned_steps if item.step_kind == "engineer")
+
+    from hermes_cli.runtime_factory import build_controlled_runtime, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=step,
+        subagent_spec=loaded_specs.subagent_specs["hermes_engineer_core"],
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "ok"}},
+        working_directory=str(repo_root),
+    )
+
+    assert runtime.runtime_status == "ready"
+    assert runtime.subagent_id == "hermes_engineer_core"
+    assert runtime.role_id == "engineer"
+    assert runtime.provider == "openrouter"
+    assert runtime.model == "xiaomi/mimo-v2.5-pro"
+    assert runtime.system_prompt_path == "prompts/subagents/hermes_engineer_core.md"
+    assert runtime.tool_policy.write == ["patch", "write_file"]
+    assert runtime.environment_policy.can_mutate_files is True
+    assert runtime.environment_policy.secrets_env_access == "not_granted"
+    assert runtime.working_directory == str(repo_root)
+    assert runtime.invocation_client is not None
+
+    payload = runtime.to_safe_dict()
+    assert payload["provider"] == "openrouter"
+    assert payload["model"] == "xiaomi/mimo-v2.5-pro"
+    assert payload["working_directory"] == str(repo_root)
+    assert "invocation_client" not in json.dumps(payload, sort_keys=True)
+    assert payload["environment_policy"]["secrets_env_access"] == "not_granted"
+
+
+def test_build_controlled_runtime_from_blocked_plan_fails_closed(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+    step = next(item for item in session.planned_steps if item.step_kind == "engineer")
+    spec = copy.deepcopy(loaded_specs.subagent_specs["hermes_engineer_core"])
+    del spec["models"]["default"]["provider"]
+
+    from hermes_cli.runtime_factory import build_controlled_runtime, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=step,
+        subagent_spec=spec,
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "unexpected"}},
+        working_directory=str(repo_root),
+    )
+
+    assert plan.status.value == "blocked"
+    assert runtime.runtime_status == "blocked"
+    assert runtime.provider is None
+    assert runtime.model is None

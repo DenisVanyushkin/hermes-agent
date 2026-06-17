@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Protocol
 
 from hermes_cli.pipeline_specs import LoadedPipelineSpecs
 
@@ -40,6 +40,11 @@ class RuntimeFactoryError(Exception):
 class RuntimeFactoryStatus(str, Enum):
     PLAN_ONLY = "plan_only"
     BLOCKED = "blocked"
+
+
+class ControlledRuntimeClientProtocol(Protocol):
+    def __call__(self, runtime: "ControlledRuntime", payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        ...
 
 
 @dataclass(frozen=True)
@@ -139,6 +144,69 @@ class RuntimeFactoryPlan:
             "logging_hooks_policy": dict(self.logging_hooks_policy),
             "token_accounting_policy": dict(self.token_accounting_policy),
             "safety_gates": dict(self.safety_gates),
+            "errors": [
+                {
+                    "code": error.code,
+                    "message": error.message,
+                    "field_path": error.field_path,
+                    "file_path": error.file_path,
+                }
+                for error in self.errors
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class ControlledRuntime:
+    pipeline_session_id: str
+    trace_id: str
+    pipeline_id: str
+    subagent_id: str
+    role_id: str
+    runtime_status: str
+    execution_mode: str
+    dry_run: bool
+    provider: str | None
+    model: str | None
+    model_class: str | None
+    system_prompt_source_id: str | None
+    system_prompt_path: str | None
+    tool_set: list[str]
+    tool_policy: RuntimeToolPolicy
+    environment_policy: RuntimeEnvironmentPolicy
+    context_window_policy: dict[str, Any]
+    prompt_cache_policy: dict[str, Any]
+    logging_hooks_policy: dict[str, Any]
+    token_accounting_policy: dict[str, Any]
+    safety_gates: dict[str, Any]
+    working_directory: str | None = None
+    invocation_client: ControlledRuntimeClientProtocol | None = field(default=None, repr=False, compare=False)
+    errors: list[RuntimeFactoryErrorDetail] = field(default_factory=list)
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "pipeline_session_id": self.pipeline_session_id,
+            "trace_id": self.trace_id,
+            "pipeline_id": self.pipeline_id,
+            "subagent_id": self.subagent_id,
+            "role_id": self.role_id,
+            "runtime_status": self.runtime_status,
+            "execution_mode": self.execution_mode,
+            "dry_run": self.dry_run,
+            "provider": self.provider,
+            "model": self.model,
+            "model_class": self.model_class,
+            "system_prompt_source_id": self.system_prompt_source_id,
+            "system_prompt_path": self.system_prompt_path,
+            "tool_set": list(self.tool_set),
+            "tool_policy": self.tool_policy.to_safe_dict(),
+            "environment_policy": self.environment_policy.to_safe_dict(),
+            "context_window_policy": dict(self.context_window_policy),
+            "prompt_cache_policy": dict(self.prompt_cache_policy),
+            "logging_hooks_policy": dict(self.logging_hooks_policy),
+            "token_accounting_policy": dict(self.token_accounting_policy),
+            "safety_gates": dict(self.safety_gates),
+            "working_directory": self.working_directory,
             "errors": [
                 {
                     "code": error.code,
@@ -251,6 +319,49 @@ def build_runtime_factory_plan(
             "mode": "fail_closed",
         },
         errors=errors,
+    )
+
+
+def build_controlled_runtime(
+    *,
+    plan: RuntimeFactoryPlan,
+    invocation_client: ControlledRuntimeClientProtocol | None,
+    working_directory: str | None = None,
+) -> ControlledRuntime:
+    ready = (
+        plan.status == RuntimeFactoryStatus.PLAN_ONLY
+        and bool(plan.provider)
+        and bool(plan.model)
+        and invocation_client is not None
+    )
+    provider = plan.provider if ready else None
+    model = plan.model if ready else None
+    model_class = plan.model_class if ready else None
+    return ControlledRuntime(
+        pipeline_session_id=plan.pipeline_session_id,
+        trace_id=plan.trace_id,
+        pipeline_id=plan.pipeline_id,
+        subagent_id=plan.subagent_id,
+        role_id=plan.role_id,
+        runtime_status="ready" if ready else "blocked",
+        execution_mode=plan.execution_mode,
+        dry_run=plan.dry_run,
+        provider=provider,
+        model=model,
+        model_class=model_class,
+        system_prompt_source_id=plan.system_prompt_source_id,
+        system_prompt_path=plan.system_prompt_path,
+        tool_set=list(plan.tool_set),
+        tool_policy=plan.tool_policy,
+        environment_policy=plan.environment_policy,
+        context_window_policy=dict(plan.context_window_policy),
+        prompt_cache_policy=dict(plan.prompt_cache_policy),
+        logging_hooks_policy=dict(plan.logging_hooks_policy),
+        token_accounting_policy=dict(plan.token_accounting_policy),
+        safety_gates=dict(plan.safety_gates),
+        working_directory=working_directory,
+        invocation_client=invocation_client,
+        errors=list(plan.errors),
     )
 
 
