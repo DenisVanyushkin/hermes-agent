@@ -11,7 +11,7 @@ from hermes_cli.pipeline_execution_fuse import (
     evaluate_pipeline_execution_fuse,
 )
 from hermes_cli.pipeline_report import build_pipeline_execution_report
-from hermes_cli.pipeline_session import PipelineSession, PipelineStepPlan
+from hermes_cli.pipeline_session import PipelineSession
 from hermes_cli.pipeline_state_machine import PipelineStateSnapshot, build_pipeline_state_snapshot
 from hermes_cli.runtime_factory import RuntimeBuildRequest
 from hermes_cli.subagent_runner import (
@@ -24,8 +24,6 @@ from hermes_cli.subagent_runner import (
     SubagentToolCallSummary,
     SubagentUsageSummary,
     SubagentCacheSummary,
-    build_not_invoked_runner_result,
-    build_subagent_runner_request,
     validate_structured_output_envelope,
 )
 
@@ -77,13 +75,11 @@ def execute_controlled_one_step(
             invocation_id=f"{session.pipeline_session_id}:{step.step_kind}:one_step",
         )
     )
-    runner_request = build_subagent_runner_request(
+    runner_request = _build_runner_request_from_runtime_plan(
         session=session,
         planned_step=step,
-        runtime_factory_plan=replace(
-            _metadata_runtime_plan(initial_snapshot, 0),
-            execution_mode=fuse.execution_mode,
-        ),
+        runtime_plan=runtime_plan,
+        execution_mode=fuse.execution_mode,
     )
     invocation_request = SubagentInvocationRequest(
         subagent_id=step.subagent_id,
@@ -109,7 +105,7 @@ def execute_controlled_one_step(
             runner_result=adapted_runner_result,
             structured_output=adapted_runner_result.structured_output,
             pipeline_spec=pipeline_spec,
-            runtime_factory_plan=initial_snapshot.runtime_factory_plans[0],
+            runtime_factory_plan=runtime_plan.to_safe_dict(),
             subagent_spec=loaded_specs.subagent_specs.get(step.subagent_id, {}),
             all_subagent_specs=getattr(loaded_specs, "subagent_specs", {}),
         )
@@ -143,36 +139,6 @@ def execute_controlled_one_step(
             state_snapshot=final_snapshot,
             preflight_result={"allowed": True, "reason_code": "fuse_allowed"},
         ),
-    )
-
-
-def _metadata_runtime_plan(snapshot: PipelineStateSnapshot, index: int):
-    from hermes_cli.runtime_factory import RuntimeFactoryPlan, RuntimeFactoryStatus, RuntimeToolPolicy, RuntimeEnvironmentPolicy
-
-    payload = snapshot.runtime_factory_plans[index]
-    return RuntimeFactoryPlan(
-        pipeline_session_id=payload["pipeline_session_id"],
-        trace_id=payload["trace_id"],
-        pipeline_id=payload["pipeline_id"],
-        subagent_id=payload["subagent_id"],
-        role_id=payload["role_id"],
-        status=RuntimeFactoryStatus(payload["status"]),
-        execution_mode=payload["execution_mode"],
-        dry_run=bool(payload["dry_run"]),
-        provider=payload["provider"],
-        model=payload["model"],
-        model_class=payload["model_class"],
-        system_prompt_source_id=payload["system_prompt_source_id"],
-        system_prompt_path=payload["system_prompt_path"],
-        tool_set=list(payload["tool_set"]),
-        tool_policy=RuntimeToolPolicy(**payload["tool_policy"]),
-        environment_policy=RuntimeEnvironmentPolicy(**payload["environment_policy"]),
-        context_window_policy=dict(payload["context_window_policy"]),
-        prompt_cache_policy=dict(payload["prompt_cache_policy"]),
-        logging_hooks_policy=dict(payload["logging_hooks_policy"]),
-        token_accounting_policy=dict(payload["token_accounting_policy"]),
-        safety_gates=dict(payload["safety_gates"]),
-        errors=[],
     )
 
 
@@ -244,3 +210,27 @@ def _runner_request_payload(request: SubagentRunnerRequest, runtime_plan: Any) -
     payload["actual_model"] = runtime_plan.constructor_model
     payload["actual_model_class"] = runtime_plan.selection.selected_model_class if runtime_plan.selection else None
     return payload
+
+
+def _build_runner_request_from_runtime_plan(
+    *,
+    session: PipelineSession,
+    planned_step: Any,
+    runtime_plan: Any,
+    execution_mode: str,
+) -> SubagentRunnerRequest:
+    return SubagentRunnerRequest(
+        pipeline_session_id=session.pipeline_session_id,
+        trace_id=session.trace_id,
+        pipeline_id=session.pipeline_id,
+        step_id=planned_step.step_kind,
+        subagent_id=runtime_plan.subagent_id,
+        role_id=planned_step.step_kind,
+        runtime_factory_plan_id=f"{runtime_plan.pipeline_session_id}:{planned_step.step_kind}:{runtime_plan.subagent_id}",
+        runtime_factory_status=runtime_plan.actual_runtime_status,
+        execution_mode=execution_mode,
+        prompt_input_hash=session.user_message_hash,
+        actual_provider=runtime_plan.constructor_provider,
+        actual_model=runtime_plan.constructor_model,
+        actual_model_class=runtime_plan.selection.selected_model_class if runtime_plan.selection else None,
+    )
