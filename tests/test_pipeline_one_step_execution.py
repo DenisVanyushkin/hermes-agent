@@ -50,15 +50,22 @@ def _session():
     )
 
 
-def _config(*, mode: str = "disabled", allow_actual_subagent_invocation: bool = False) -> dict[str, object]:
+def _config(
+    *,
+    mode: str = "disabled",
+    allow_actual_subagent_invocation: bool = False,
+    allow_actual_reviewer_invocation: bool = False,
+    allowed_subagents: list[str] | None = None,
+) -> dict[str, object]:
     return {
         "pipelines": {
             "enabled": True,
             "execution": {
                 "mode": mode,
                 "allow_pipelines": ["engineering_review_pipeline"],
-                "allowed_subagents": ["hermes_engineer_core"],
+                "allowed_subagents": ["hermes_engineer_core"] if allowed_subagents is None else allowed_subagents,
                 "allow_actual_subagent_invocation": allow_actual_subagent_invocation,
+                "allow_actual_reviewer_invocation": allow_actual_reviewer_invocation,
                 "min_router_confidence": 0.90,
             }
         }

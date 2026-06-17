@@ -9,6 +9,7 @@ from hermes_cli.pipeline_evaluation import PipelineEvaluationRequest, evaluate_p
 from hermes_cli.pipeline_execution_fuse import (
     PipelineExecutionFuseResult,
     evaluate_pipeline_execution_fuse,
+    evaluate_pipeline_reviewer_execution_fuse,
 )
 from hermes_cli.pipeline_report import build_pipeline_execution_report
 from hermes_cli.pipeline_session import PipelineSession
@@ -142,6 +143,122 @@ def execute_controlled_one_step(
     )
 
 
+def execute_controlled_reviewer_one_step(
+    *,
+    config: dict[str, Any] | None,
+    session: PipelineSession,
+    loaded_specs: Any,
+    runtime_factory: Any,
+    runner: SubagentRunner,
+    prior_result: ControlledOneStepExecutionResult,
+    user_message: str,
+) -> ControlledOneStepExecutionResult:
+    pipeline_spec = loaded_specs.pipeline_specs[session.pipeline_id]
+    prior_snapshot = prior_result.state_snapshot
+    fuse = evaluate_pipeline_reviewer_execution_fuse(
+        config=config,
+        session=session,
+        state_snapshot=prior_snapshot,
+    )
+    if not fuse.actual_invocation_allowed:
+        return ControlledOneStepExecutionResult(
+            fuse=fuse,
+            state_snapshot=prior_snapshot,
+            execution_report=build_pipeline_execution_report(
+                session=session,
+                state_snapshot=prior_snapshot,
+                preflight_result={"allowed": False, "reason_code": fuse.blocked_reason},
+            ),
+        )
+
+    step = prior_snapshot.planned_steps[1]
+    runtime_plan = runtime_factory.build(
+        RuntimeBuildRequest(
+            loaded_specs=loaded_specs,
+            subagent_id=step.subagent_id,
+            pipeline_session_id=session.pipeline_session_id,
+            invocation_id=f"{session.pipeline_session_id}:{step.step_kind}:one_step",
+        )
+    )
+    runner_request = _build_runner_request_from_runtime_plan(
+        session=session,
+        planned_step=step,
+        runtime_plan=runtime_plan,
+        execution_mode=fuse.execution_mode,
+    )
+    invocation_request = SubagentInvocationRequest(
+        subagent_id=step.subagent_id,
+        pipeline_session_id=session.pipeline_session_id,
+        invocation_id=f"{session.pipeline_session_id}:{step.step_kind}:one_step",
+        input_messages=[{"role": "user", "content": user_message}],
+        metadata={"execution_scope": fuse.execution_scope, "engineer_result_present": True},
+    )
+    invocation_result = runner.run(runtime_plan, invocation_request)
+    adapted_runner_result = _adapt_runner_result(
+        invocation_result=invocation_result,
+        runner_request=runner_request,
+        runtime_plan=runtime_plan,
+    )
+    evaluation = evaluate_pipeline_step(
+        PipelineEvaluationRequest(
+            pipeline_session_id=session.pipeline_session_id,
+            trace_id=session.trace_id,
+            pipeline_id=session.pipeline_id,
+            step_id=step.step_kind,
+            subagent_id=step.subagent_id,
+            execution_mode=fuse.execution_mode,
+            runner_result=adapted_runner_result,
+            structured_output=adapted_runner_result.structured_output,
+            pipeline_spec=pipeline_spec,
+            runtime_factory_plan=runtime_plan.to_safe_dict(),
+            subagent_spec=loaded_specs.subagent_specs.get(step.subagent_id, {}),
+            all_subagent_specs=getattr(loaded_specs, "subagent_specs", {}),
+        )
+    )
+    updated_step = replace(
+        step,
+        execution_status="executed_one_step",
+        planning_mode=fuse.execution_mode,
+        runtime_factory_plan=runtime_plan.to_safe_dict(),
+        runner_request=_runner_request_payload(runner_request, runtime_plan),
+        runner_result=adapted_runner_result.to_safe_dict(),
+        evaluation_result=evaluation.to_safe_dict(),
+    )
+    updated_steps = list(prior_snapshot.planned_steps)
+    updated_steps[1] = updated_step
+    updated_runtime_plans = list(prior_snapshot.runtime_factory_plans)
+    if len(updated_runtime_plans) > 1:
+        updated_runtime_plans[1] = runtime_plan.to_safe_dict()
+
+    reviewer_complete = evaluation.status.value == "candidate_complete"
+    completion_allowed = reviewer_complete and not evaluation.blockers
+    final_snapshot = replace(
+        prior_snapshot,
+        state="reviewer_one_step_execution_complete",
+        completion_reason="reviewer_one_step_executed",
+        execution_mode=fuse.execution_mode,
+        executed=True,
+        completion_allowed=completion_allowed,
+        completion_blocked_reason=None if completion_allowed else _reviewer_completion_blocked_reason(evaluation),
+        final_verdict=(
+            "controlled_reviewer_one_step_candidate_complete"
+            if completion_allowed
+            else "controlled_reviewer_one_step_blocked"
+        ),
+        planned_steps=updated_steps,
+        runtime_factory_plans=updated_runtime_plans,
+    )
+    return ControlledOneStepExecutionResult(
+        fuse=fuse,
+        state_snapshot=final_snapshot,
+        execution_report=build_pipeline_execution_report(
+            session=session,
+            state_snapshot=final_snapshot,
+            preflight_result={"allowed": True, "reason_code": "reviewer_fuse_allowed"},
+        ),
+    )
+
+
 def _adapt_runner_result(
     *,
     invocation_result: Any,
@@ -234,3 +351,15 @@ def _build_runner_request_from_runtime_plan(
         actual_model=runtime_plan.constructor_model,
         actual_model_class=runtime_plan.selection.selected_model_class if runtime_plan.selection else None,
     )
+
+
+def _reviewer_completion_blocked_reason(evaluation: Any) -> str:
+    if getattr(evaluation, "status", None) is not None and evaluation.status.value == "invalid_structured_output":
+        return "reviewer_invalid_structured_output"
+    if getattr(evaluation, "blockers", None):
+        return "review_blockers_present"
+    completion = getattr(evaluation, "completion", None)
+    blocked_reason = getattr(completion, "blocked_reason", None)
+    if blocked_reason:
+        return str(blocked_reason)
+    return "reviewer_not_complete"
