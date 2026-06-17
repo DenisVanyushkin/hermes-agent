@@ -311,6 +311,51 @@ def test_gateway_orchestrator_observe_with_controller_enabled_still_does_not_exe
     assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is False
 
 
+def test_gateway_orchestrator_observe_does_not_resolve_registered_helper(monkeypatch, caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+
+    def _boom(**_kwargs):
+        raise AssertionError("observe path must not resolve registered helpers")
+
+    monkeypatch.setattr(helpers, "resolve_pipeline_execution_helper", _boom)
+
+    decision = RouterDecision(
+        pipeline_session_id="router-controller-no-resolve",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={
+                "pipelines": {
+                    "enabled": True,
+                    "orchestrator": {"mode": "observe"},
+                    "execution": {
+                        "mode": "controlled_one_step",
+                        "enable_gateway_execution_controller": True,
+                    },
+                }
+            },
+            user_message="Observe path must not resolve helpers",
+            session_id="sess-controller-no-resolve",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_execution_controller"]["status"] == "not_wired"
+    assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is False
+
+
 def test_gateway_orchestrator_observe_reports_execution_controller_disabled_by_default(caplog):
     orchestrator = importlib.import_module("hermes_cli.orchestrator")
 
