@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 import shutil
+import subprocess
 
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
@@ -65,8 +66,8 @@ def _config() -> dict[str, object]:
     }
 
 
-def _engineer_output() -> dict[str, object]:
-    return {
+def _engineer_output(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
         "schema_version": "v1",
         "subagent_id": "hermes_engineer_core",
         "role": "engineer",
@@ -80,6 +81,8 @@ def _engineer_output() -> dict[str, object]:
         "requires_review": False,
         "next_action": "none",
     }
+    payload.update(overrides)
+    return payload
 
 
 def _reviewer_output(*, blockers: list[str]) -> dict[str, object]:
@@ -103,6 +106,35 @@ def _invalid_output() -> dict[str, object]:
     return {
         "status": "approved",
     }
+
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
+def _write(repo: Path, relative_path: str, content: str) -> Path:
+    path = repo / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _init_git_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "loop-git-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Test User")
+    _git(repo, "config", "user.email", "test@example.com")
+    _write(repo, "tracked.txt", "baseline\n")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    return repo
 
 
 def test_first_review_approval_stops_without_rework(tmp_path: Path) -> None:
@@ -342,3 +374,247 @@ def test_missing_reviewer_status_fails_closed_without_keyerror(tmp_path: Path) -
     assert result.candidate_complete is False
     assert result.user_action_required is True
     assert result.blocked_reason == "reviewer_result_invalid"
+
+
+
+def test_git_gate_disabled_preserves_existing_behavior(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+
+    def _executor(request, _runtime_plan):
+        payload = _engineer_output() if request.subagent_id == "hermes_engineer_core" else _reviewer_output(blockers=[])
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": payload},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+    )
+
+    assert result.git_gate["status"] == "disabled"
+    assert result.reviewer_packet["present"] is False
+    assert result.blocked_reason == "loop_harness_not_live_final"
+
+
+def test_git_gate_no_material_changes_can_skip_reviewer_and_allow_completion(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _engineer_output()},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+    )
+
+    assert calls == ["hermes_engineer_core"]
+    assert result.git_gate["status"] == "enabled"
+    assert result.git_gate["material_change_status"] == "no_material_changes"
+    assert result.git_gate["material_changes_present"] is False
+    assert result.reviewer_packet["packet_status"] == "review_not_required"
+    assert result.completion_allowed is True
+    assert result.candidate_complete is True
+    assert result.user_action_required is False
+    assert result.blocked_reason is None
+
+
+def test_git_gate_material_changes_require_reviewer_before_completion(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        if request.subagent_id == "hermes_engineer_core":
+            _write(git_repo, "new.txt", "created by engineer\n")
+            payload = _engineer_output(summary="Created new.txt")
+        else:
+            payload = _reviewer_output(blockers=[])
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": payload},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+    )
+
+    assert calls == ["hermes_engineer_core", "hermes_code_reviewer"]
+    assert result.git_gate["material_change_status"] == "material_changes_detected"
+    assert result.git_gate["review_required"] is True
+    assert result.git_gate["changed_files"] == ["new.txt"]
+    assert result.reviewer_packet["present"] is True
+    assert result.reviewer_packet["packet_status"] == "ready_for_review"
+    assert result.completion_allowed is False
+    assert result.candidate_complete is True
+    assert result.blocked_reason == "loop_harness_not_live_final"
+
+
+def test_git_gate_material_changes_with_reviewer_approval_allows_completion(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    def _executor(request, _runtime_plan):
+        if request.subagent_id == "hermes_engineer_core":
+            _write(git_repo, "new.txt", "created by engineer\n")
+            payload = _engineer_output(summary="Created new.txt")
+        else:
+            payload = _reviewer_output(blockers=[])
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": payload},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        allow_completion_after_review=True,
+        test_summary={"status": "passed", "command": "pytest -q", "summary": "3 passed"},
+    )
+
+    assert result.completion_allowed is True
+    assert result.candidate_complete is True
+    assert result.blocked_reason is None
+    assert result.reviewer_packet["present"] is True
+    assert result.reviewer_packet["safe_packet"]["tests"]["status"] == "passed"
+
+
+def test_git_gate_dirty_baseline_fails_closed_without_attributing_existing_changes(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    _write(git_repo, "tracked.txt", "dirty before engineer\n")
+    calls: list[str] = []
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _engineer_output()},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+    )
+
+    assert calls == ["hermes_engineer_core"]
+    assert result.git_gate["baseline_capture_status"] == "captured"
+    assert result.git_gate["material_change_status"] == "baseline_invalid"
+    assert result.git_gate["baseline_dirty"] is True
+    assert result.git_gate["changed_files"] == []
+    assert result.completion_allowed is False
+    assert result.user_action_required is True
+    assert result.blocked_reason == "baseline_dirty"
+
+
+def test_git_gate_invalid_repo_path_fails_closed_without_exception(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+
+    def _executor(request, _runtime_plan):
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _engineer_output()},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(tmp_path / "missing-repo"),
+    )
+
+    assert result.git_gate["baseline_capture_status"] == "invalid_repo"
+    assert result.git_gate["material_change_status"] == "baseline_invalid"
+    assert result.completion_allowed is False
+    assert result.user_action_required is True
+    assert result.blocked_reason == "baseline_invalid"
+
+
+def test_git_gate_report_omits_diff_and_file_contents(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    def _executor(request, _runtime_plan):
+        if request.subagent_id == "hermes_engineer_core":
+            _write(git_repo, "secret.env", "API_KEY=123\n")
+            payload = _engineer_output(summary="Applied patch\n@@\n+++ secret.env")
+        else:
+            payload = _reviewer_output(blockers=[])
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": payload},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        test_summary={"status": "failed", "summary": "+++ secret.env\npassword=123"},
+    )
+
+    payload = result.to_safe_dict()
+    encoded = __import__("json").dumps(payload, sort_keys=True)
+
+    assert "API_KEY=123" not in encoded
+    assert "password=123" not in encoded
+    assert "+++ secret.env" not in encoded

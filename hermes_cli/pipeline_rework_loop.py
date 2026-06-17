@@ -19,7 +19,9 @@ from hermes_cli.pipeline_one_step_execution import (
     _adapt_runner_result,
     _build_runner_request_from_runtime_plan,
 )
+from hermes_cli.pipeline_git_delta import GitMaterialChangeResult, GitSnapshot, capture_git_snapshot, compare_git_snapshots
 from hermes_cli.pipeline_report import build_pipeline_execution_report
+from hermes_cli.pipeline_reviewer_packet import build_reviewer_packet
 from hermes_cli.pipeline_session import PipelineSession
 from hermes_cli.pipeline_state_machine import build_pipeline_state_snapshot
 from hermes_cli.runtime_factory import RuntimeBuildRequest
@@ -71,6 +73,8 @@ class PipelineReworkLoopResult:
     candidate_complete: bool
     user_action_required: bool
     blocked_reason: str | None
+    git_gate: dict[str, Any]
+    reviewer_packet: dict[str, Any]
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +89,8 @@ class PipelineReworkLoopResult:
             "candidate_complete": self.candidate_complete,
             "user_action_required": self.user_action_required,
             "blocked_reason": self.blocked_reason,
+            "git_gate": dict(self.git_gate),
+            "reviewer_packet": dict(self.reviewer_packet),
         }
 
 
@@ -96,6 +102,9 @@ def execute_bounded_rework_loop(
     runtime_factory: Any,
     runner: SubagentRunner,
     user_message: str,
+    repo_path: str | None = None,
+    test_summary: Any = None,
+    allow_completion_after_review: bool = False,
 ) -> PipelineReworkLoopResult:
     pipeline_spec = loaded_specs.pipeline_specs[session.pipeline_id]
     initial_snapshot = build_pipeline_state_snapshot(
@@ -122,6 +131,8 @@ def execute_bounded_rework_loop(
             policy_source=getattr(fuse, "loop_policy_source", "default"),
             blocked_reason=fuse.blocked_reason,
             user_action_required=False,
+            git_gate=_disabled_git_gate(),
+            reviewer_packet=_disabled_reviewer_packet(),
         )
 
     appended_rework_context: list[str] = []
@@ -130,6 +141,13 @@ def execute_bounded_rework_loop(
     review_iterations_completed = 0
     max_review_iterations = _coerce_positive_int(getattr(fuse, "max_review_iterations", None), SAFE_FALLBACK_MAX_REVIEW_ITERATIONS)
     policy_source = getattr(fuse, "loop_policy_source", "default")
+    baseline_snapshot = capture_git_snapshot(repo_path) if repo_path else None
+    current_git_gate = _disabled_git_gate() if not repo_path else _git_gate_from_snapshots(
+        baseline_snapshot=baseline_snapshot,
+        post_snapshot=None,
+        git_result=None,
+    )
+    current_reviewer_packet = _disabled_reviewer_packet() if not repo_path else _absent_reviewer_packet()
 
     while True:
         loop_snapshot = {
@@ -158,6 +176,29 @@ def execute_bounded_rework_loop(
             },
         )
         current_snapshot = engineer_result.state_snapshot
+        engineer_output = _step_structured_output(current_snapshot, 0)
+        post_snapshot: GitSnapshot | None = None
+        git_result: GitMaterialChangeResult | None = None
+        if baseline_snapshot is not None:
+            post_snapshot = capture_git_snapshot(repo_path)
+            git_result = compare_git_snapshots(baseline_snapshot, post_snapshot)
+            current_git_gate = _git_gate_from_snapshots(
+                baseline_snapshot=baseline_snapshot,
+                post_snapshot=post_snapshot,
+                git_result=git_result,
+            )
+            current_reviewer_packet = _reviewer_packet_metadata(
+                packet=build_reviewer_packet(
+                    pipeline_id=session.pipeline_id,
+                    session_id=session.session_id,
+                    task_summary=user_message,
+                    engineer_output=engineer_output,
+                    baseline_snapshot=baseline_snapshot,
+                    post_snapshot=post_snapshot,
+                    git_result=git_result,
+                    test_summary=test_summary,
+                )
+            )
         engineer_fail_closed_reason = _engineer_fail_closed_reason(current_snapshot)
         if engineer_fail_closed_reason is not None:
             return _blocked_loop_result(
@@ -172,6 +213,55 @@ def execute_bounded_rework_loop(
                 policy_source=policy_source,
                 blocked_reason=engineer_fail_closed_reason,
                 user_action_required=True,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
+            )
+        if git_result is not None and _git_result_blocks_completion(git_result):
+            return _blocked_loop_result(
+                fuse=fuse,
+                session=session,
+                snapshot=current_snapshot,
+                original_task=user_message,
+                appended_rework_context=appended_rework_context,
+                iteration_history=iteration_history,
+                review_iterations_completed=review_iterations_completed,
+                max_review_iterations=max_review_iterations,
+                policy_source=policy_source,
+                blocked_reason=git_result.blocked_reason or git_result.status,
+                user_action_required=True,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
+            )
+        if git_result is not None and not git_result.review_required and not git_result.material_changes_present:
+            final_snapshot = replace(
+                current_snapshot,
+                state="rework_loop_candidate_complete",
+                completion_reason="rework_loop_candidate_complete",
+                executed=True,
+                completion_allowed=True,
+                completion_blocked_reason=None,
+                final_verdict="controlled_rework_loop_candidate_complete",
+            )
+            return PipelineReworkLoopResult(
+                fuse=fuse,
+                state_snapshot=final_snapshot,
+                execution_report=build_pipeline_execution_report(
+                    session=session,
+                    state_snapshot=final_snapshot,
+                    preflight_result={"allowed": True, "reason_code": "rework_loop_fuse_allowed"},
+                ),
+                iteration_history=iteration_history,
+                review_iterations_completed=review_iterations_completed,
+                max_review_iterations=max_review_iterations,
+                policy_source=policy_source,
+                original_task=user_message,
+                appended_rework_context=appended_rework_context,
+                completion_allowed=True,
+                candidate_complete=True,
+                user_action_required=False,
+                blocked_reason=None,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
             )
 
         reviewer_fuse = evaluate_pipeline_reviewer_execution_fuse(
@@ -192,6 +282,8 @@ def execute_bounded_rework_loop(
                 policy_source=policy_source,
                 blocked_reason=reviewer_fuse.blocked_reason,
                 user_action_required=False,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
             )
 
         reviewer_message = _compose_reviewer_message(
@@ -270,12 +362,14 @@ def execute_bounded_rework_loop(
                 candidate_complete=False,
                 user_action_required=True,
                 blocked_reason=reviewer_fail_closed_reason,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
             )
 
         # Approval requires positive reviewer candidate_complete verdict; absence of blockers is not sufficient.
         if reviewer_status == REVIEWER_APPROVAL_STATUS and not reviewer_blockers:
-            completion_allowed = False
-            blocked_reason = "loop_harness_not_live_final"
+            completion_allowed = allow_completion_after_review and not (git_result and _git_result_blocks_completion(git_result))
+            blocked_reason = None if completion_allowed else "loop_harness_not_live_final"
             final_snapshot = replace(
                 current_snapshot,
                 state="rework_loop_candidate_complete",
@@ -303,6 +397,8 @@ def execute_bounded_rework_loop(
                 candidate_complete=True,
                 user_action_required=False,
                 blocked_reason=blocked_reason,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
             )
 
         if review_iterations_completed >= max_review_iterations:
@@ -333,6 +429,8 @@ def execute_bounded_rework_loop(
                 candidate_complete=False,
                 user_action_required=True,
                 blocked_reason="review_loop_limit_exceeded",
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
             )
 
         appended_rework_context.append(_format_blocker_context(review_iterations_completed, reviewer_blockers))
@@ -550,6 +648,8 @@ def _blocked_loop_result(
     policy_source: str,
     blocked_reason: str | None,
     user_action_required: bool,
+    git_gate: dict[str, Any],
+    reviewer_packet: dict[str, Any],
 ) -> PipelineReworkLoopResult:
     return PipelineReworkLoopResult(
         fuse=fuse,
@@ -569,7 +669,82 @@ def _blocked_loop_result(
         candidate_complete=False,
         user_action_required=user_action_required,
         blocked_reason=blocked_reason,
+        git_gate=git_gate,
+        reviewer_packet=reviewer_packet,
     )
+
+
+def _disabled_git_gate() -> dict[str, Any]:
+    return {
+        "status": "disabled",
+        "enabled": False,
+        "baseline_capture_status": "not_configured",
+        "post_capture_status": "not_configured",
+        "material_change_status": "not_configured",
+        "material_changes_present": False,
+        "review_required": False,
+        "completion_blocked_reason": None,
+        "changed_files": [],
+        "head_changed": False,
+        "baseline_dirty": False,
+    }
+
+
+def _git_gate_from_snapshots(
+    *,
+    baseline_snapshot: GitSnapshot | None,
+    post_snapshot: GitSnapshot | None,
+    git_result: GitMaterialChangeResult | None,
+) -> dict[str, Any]:
+    if baseline_snapshot is None:
+        return _disabled_git_gate()
+    return {
+        "status": "enabled",
+        "enabled": True,
+        "baseline_capture_status": baseline_snapshot.capture_status,
+        "post_capture_status": post_snapshot.capture_status if post_snapshot is not None else "not_captured",
+        "material_change_status": git_result.status if git_result is not None else "not_evaluated",
+        "material_changes_present": bool(git_result.material_changes_present) if git_result is not None else False,
+        "review_required": bool(git_result.review_required) if git_result is not None else False,
+        "completion_blocked_reason": git_result.blocked_reason if git_result is not None else None,
+        "changed_files": list(git_result.changed_files) if git_result is not None else [],
+        "head_changed": bool(git_result.head_changed) if git_result is not None else False,
+        "baseline_dirty": bool(git_result.baseline_dirty if git_result is not None else baseline_snapshot.is_dirty),
+    }
+
+
+def _disabled_reviewer_packet() -> dict[str, Any]:
+    return {
+        "present": False,
+        "packet_status": "disabled",
+        "review_required": False,
+        "user_action_required": False,
+        "blocked_reason": None,
+        "safe_packet": None,
+    }
+
+
+def _absent_reviewer_packet() -> dict[str, Any]:
+    return {
+        "present": False,
+        "packet_status": "not_built",
+        "review_required": False,
+        "user_action_required": False,
+        "blocked_reason": None,
+        "safe_packet": None,
+    }
+
+
+def _reviewer_packet_metadata(*, packet: Any) -> dict[str, Any]:
+    safe_packet = packet.to_safe_dict()
+    return {
+        "present": True,
+        "packet_status": safe_packet.get("packet_status"),
+        "review_required": bool(safe_packet.get("review_required")),
+        "user_action_required": bool(safe_packet.get("user_action_required")),
+        "blocked_reason": safe_packet.get("blocked_reason"),
+        "safe_packet": safe_packet,
+    }
 
 
 def _compose_engineer_message(*, original_task: str, appended_rework_context: list[str]) -> str:
@@ -610,6 +785,23 @@ def _step_runner_status(step: Any) -> str:
 def _step_evaluation_status(step: Any) -> str:
     evaluation_result = getattr(step, "evaluation_result", None) or {}
     return str(evaluation_result.get("status") or "not_evaluated")
+
+
+def _step_structured_output(state_snapshot: Any, step_index: int) -> dict[str, Any]:
+    planned_steps = list(getattr(state_snapshot, "planned_steps", []) or [])
+    if len(planned_steps) <= step_index:
+        return {}
+    runner_result = getattr(planned_steps[step_index], "runner_result", None) or {}
+    structured_output = runner_result.get("structured_output")
+    return structured_output if isinstance(structured_output, dict) else {}
+
+
+def _git_result_blocks_completion(git_result: GitMaterialChangeResult) -> bool:
+    return git_result.status in {
+        "baseline_invalid",
+        "post_snapshot_invalid",
+        "git_unavailable",
+    } or bool(git_result.baseline_dirty)
 
 
 def _engineer_fail_closed_reason(state_snapshot: Any) -> str | None:
