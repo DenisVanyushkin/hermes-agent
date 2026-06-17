@@ -228,6 +228,40 @@ def test_gateway_orchestrator_observe_does_not_load_runtime_bridge_components(mo
     assert payload["completion_allowed"] is True
 
 
+def test_gateway_orchestrator_observe_does_not_wire_controlled_one_step_execution(monkeypatch, caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("observe path must remain metadata-only")
+
+    monkeypatch.setattr(orchestrator, "execute_controlled_one_step", _boom, raising=False)
+
+    decision = RouterDecision(
+        pipeline_session_id="router-plan-only",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={"pipelines": {"enabled": True, "orchestrator": {"mode": "observe"}}},
+            user_message="Implement metadata only observe check",
+            session_id="sess-plan-only",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_execution_report"]["status"] == "not_executed"
+
+
 def test_gateway_orchestrator_observe_uses_pipeline_session_and_state_machine_boundary(monkeypatch, caplog):
     orchestrator = importlib.import_module("hermes_cli.orchestrator")
     session_module = importlib.import_module("hermes_cli.pipeline_session")
