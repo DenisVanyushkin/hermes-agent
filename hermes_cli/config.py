@@ -1045,6 +1045,7 @@ DEFAULT_CONFIG = {
             "allowed_subagents": ["hermes_engineer_core"],
             "allow_actual_subagent_invocation": False,
             "allow_actual_reviewer_invocation": False,
+            "allow_actual_rework_loop": False,
             "min_router_confidence": 0.90,
         },
     },

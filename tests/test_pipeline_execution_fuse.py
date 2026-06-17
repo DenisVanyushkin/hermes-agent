@@ -45,6 +45,7 @@ def _config(
     mode: str = "disabled",
     allow_actual_subagent_invocation: bool = False,
     allow_actual_reviewer_invocation: bool = False,
+    allow_actual_rework_loop: bool = False,
     allow_pipelines: list[str] | None = None,
     allowed_subagents: list[str] | None = None,
 ) -> dict[str, object]:
@@ -57,10 +58,56 @@ def _config(
                 "allowed_subagents": ["hermes_engineer_core"] if allowed_subagents is None else allowed_subagents,
                 "allow_actual_subagent_invocation": allow_actual_subagent_invocation,
                 "allow_actual_reviewer_invocation": allow_actual_reviewer_invocation,
+                "allow_actual_rework_loop": allow_actual_rework_loop,
                 "min_router_confidence": 0.90,
             }
         }
     }
+
+
+def test_default_config_blocks_rework_loop_invocation() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    loaded = load_pipeline_specs()
+    session = _session_for()
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs[session.pipeline_id],
+    )
+
+    result = module.evaluate_pipeline_rework_loop_fuse(
+        config=None,
+        session=session,
+        state_snapshot=snapshot,
+        pipeline_spec=loaded.pipeline_specs[session.pipeline_id],
+    )
+
+    assert result.actual_invocation_allowed is False
+    assert result.blocked_reason == "execution_mode_disabled"
+
+
+def test_missing_explicit_loop_fuse_blocks_rework_loop() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    loaded = load_pipeline_specs()
+    session = _session_for()
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs[session.pipeline_id],
+    )
+
+    result = module.evaluate_pipeline_rework_loop_fuse(
+        config=_config(
+            mode="controlled_one_step",
+            allow_actual_subagent_invocation=True,
+            allow_actual_reviewer_invocation=True,
+            allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
+        ),
+        session=session,
+        state_snapshot=snapshot,
+        pipeline_spec=loaded.pipeline_specs[session.pipeline_id],
+    )
+
+    assert result.actual_invocation_allowed is False
+    assert result.blocked_reason == "rework_loop_fuse_disabled"
 
 
 def test_default_config_blocks_actual_invocation() -> None:
