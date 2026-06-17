@@ -118,6 +118,8 @@ class TestLoadConfigDefaults:
             assert config["pipelines"]["orchestrator"]["mode"] == "disabled"
             assert config["pipelines"]["execution"]["mode"] == "disabled"
             assert config["pipelines"]["execution"]["allow_pipelines"] == ["engineering_review_pipeline"]
+            assert config["pipelines"]["execution"]["allowed_subagents"] == ["hermes_engineer_core"]
+            assert config["pipelines"]["execution"]["allow_actual_subagent_invocation"] is False
             assert config["pipelines"]["execution"]["min_router_confidence"] == 0.9
             assert "max_turns" not in config
             assert "terminal" in config
