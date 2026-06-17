@@ -16,7 +16,7 @@ _READY_RUNTIME_STATUS = "ready_to_construct"
 _PROMPT_METADATA_KEYS = ("path", "artifact_id", "sha256")
 _SENSITIVE_KEY_PARTS = ("secret", "token", "password", "credential", "api_key", "client", "prompt", "env")
 _VALID_EXECUTION_STATUSES = {"completed", "failed", "rejected"}
-_VALID_ENVELOPE_STATUSES = {"succeeded", "failed", "blocked", "needs_review", "not_invoked"}
+_VALID_ENVELOPE_STATUSES = {"succeeded", "failed", "blocked", "needs_review", "not_invoked", "disagree_with_reviewer"}
 
 
 class SubagentRunnerError(Exception):
