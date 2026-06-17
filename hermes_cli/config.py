@@ -977,6 +977,8 @@ DEFAULT_CONFIG = {
         "execution": {
             "mode": "disabled",
             "allow_pipelines": ["engineering_review_pipeline"],
+            "allowed_subagents": ["hermes_engineer_core"],
+            "allow_actual_subagent_invocation": False,
             "min_router_confidence": 0.90,
         },
     },
