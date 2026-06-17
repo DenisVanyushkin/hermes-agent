@@ -9,6 +9,7 @@ from dataclasses import asdict
 from typing import Any
 
 from hermes_cli.config import cfg_get
+from hermes_cli.pipeline_execution_controller import evaluate_pipeline_execution_controller
 from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode, PipelineGateRequest, evaluate_pipeline_gate
 from hermes_cli.pipeline_router import DEFAULT_PIPELINE_ID, RouterDecision
 from hermes_cli.pipeline_report import build_pipeline_execution_report
@@ -81,6 +82,12 @@ def observe_gateway_turn(
         platform=platform,
         user_message=user_message,
     )
+    state_snapshot = _build_state_snapshot_for_observe(config=config, session=session)
+    pipeline_execution_controller = evaluate_pipeline_execution_controller(
+        config=config,
+        session=session,
+        state_snapshot=state_snapshot,
+    )
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
     execution_report = ExecutionReport(
         pipeline_session_id=pipeline_session_id,
@@ -111,9 +118,10 @@ def observe_gateway_turn(
         orchestrator_mode=mode,
         pipeline_plan_payload=pipeline_plan_payload,
         pipeline_preflight_payload=pipeline_preflight.to_safe_dict(),
+        pipeline_execution_controller_payload=pipeline_execution_controller.to_safe_dict(),
         pipeline_execution_report_payload=build_pipeline_execution_report(
             session=session,
-            state_snapshot=_build_state_snapshot_for_observe(config=config, session=session),
+            state_snapshot=state_snapshot,
             preflight_result=pipeline_preflight.to_safe_dict(),
         ).to_safe_dict(),
     )
@@ -216,6 +224,7 @@ def _log_observe_report(
     orchestrator_mode: str,
     pipeline_plan_payload: dict[str, Any],
     pipeline_preflight_payload: dict[str, Any],
+    pipeline_execution_controller_payload: dict[str, Any],
     pipeline_execution_report_payload: dict[str, Any],
 ) -> None:
     payload = {
@@ -240,6 +249,7 @@ def _log_observe_report(
         "execution_report": asdict(report.execution_report),
         "pipeline_execution_report": pipeline_execution_report_payload,
         "pipeline_preflight": pipeline_preflight_payload,
+        "pipeline_execution_controller": pipeline_execution_controller_payload,
     }
     payload.update(pipeline_plan_payload)
     gateway_logger.info(
