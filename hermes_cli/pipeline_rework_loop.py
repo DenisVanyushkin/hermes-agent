@@ -43,6 +43,8 @@ from hermes_cli.subagent_runner import (
 
 SAFE_FALLBACK_MAX_REVIEW_ITERATIONS = 1
 REVIEWER_APPROVAL_STATUS = "candidate_complete"
+MAX_SAFE_EVIDENCE_ITEMS = 5
+MAX_SAFE_EVIDENCE_LABEL_CHARS = 64
 
 
 @dataclass(frozen=True)
@@ -970,7 +972,6 @@ def _blocked_loop_result(
     subagent_runs: list[dict[str, Any]],
     usage_summary: dict[str, Any],
 ) -> PipelineReworkLoopResult:
-    helper_subagent_runs = _collect_subagent_runs(snapshot)
     return PipelineReworkLoopResult(
         fuse=fuse,
         state_snapshot=snapshot,
@@ -1023,7 +1024,6 @@ def _finalize_loop_result(
     tests: dict[str, Any],
     review_overrides: dict[str, Any] | None = None,
 ) -> PipelineReworkLoopResult:
-    helper_subagent_runs = _collect_subagent_runs(snapshot)
     return PipelineReworkLoopResult(
         fuse=fuse,
         state_snapshot=snapshot,
@@ -1054,7 +1054,7 @@ def _finalize_loop_result(
         blocked_reason=blocked_reason,
         git_gate=git_gate,
         reviewer_packet=reviewer_packet,
-        subagent_runs=helper_subagent_runs,
+        subagent_runs=_collect_subagent_runs(snapshot),
         usage_summary=_usage_summary_from_snapshot(snapshot),
     )
 
@@ -1139,10 +1139,16 @@ def _append_step_run(accumulator: list[dict[str, Any]], snapshot: Any, step_inde
 
 
 def _usage_summary_from_snapshot(snapshot: Any) -> dict[str, Any]:
-    return _usage_summary_from_subagent_runs(_collect_subagent_runs(snapshot))
+    return _usage_summary_from_subagent_runs(
+        _collect_subagent_runs(snapshot),
+        planned_subagent_count=len(list(getattr(snapshot, "planned_steps", []) or [])),
+    )
 
 
-def _usage_summary_from_subagent_runs(subagent_runs: list[dict[str, Any]]) -> dict[str, Any]:
+def _usage_summary_from_subagent_runs(
+    subagent_runs: list[dict[str, Any]],
+    planned_subagent_count: int | None = None,
+) -> dict[str, Any]:
     total_input_tokens = 0
     total_output_tokens = 0
     total_tokens = 0
@@ -1150,9 +1156,11 @@ def _usage_summary_from_subagent_runs(subagent_runs: list[dict[str, Any]]) -> di
     cache_sources: list[str] = []
     models_used: list[str] = []
     providers_used: list[str] = []
-    planned_subagent_count = len(subagent_runs)
+    planned_count = max(int(planned_subagent_count if planned_subagent_count is not None else len(subagent_runs)), 0)
     executed_subagent_count = 0
+    subagent_run_instance_count = 0
     for run in subagent_runs:
+        subagent_run_instance_count += 1
         if not _runner_result_is_reportable(run):
             continue
         executed_subagent_count += 1
@@ -1179,9 +1187,14 @@ def _usage_summary_from_subagent_runs(subagent_runs: list[dict[str, Any]]) -> di
         "total_tokens": total_tokens,
         "token_sources": token_sources,
         "cache_sources": cache_sources,
-        "planned_subagent_count": planned_subagent_count,
+        "planned_subagent_count": planned_count,
         "executed_subagent_count": executed_subagent_count,
-        "subagent_count": planned_subagent_count,
+        "subagent_run_instance_count": subagent_run_instance_count,
+        "execution_round_count": _execution_round_count(
+            planned_subagent_count=planned_count,
+            subagent_run_instance_count=subagent_run_instance_count,
+        ),
+        "subagent_count": subagent_run_instance_count,
         "models_used": models_used,
         "providers_used": providers_used,
     }
@@ -1315,7 +1328,13 @@ def _build_peer_message(
     reviewer_blockers: list[str],
     related_verdict_id: str,
 ) -> dict[str, Any]:
-    evidence = [_safe_path_evidence(item) for item in list(engineer_output.get("evidence") or []) if item]
+    evidence: list[str] = []
+    for item in list(engineer_output.get("evidence") or [])[:MAX_SAFE_EVIDENCE_ITEMS]:
+        if not item:
+            continue
+        safe_item = _safe_path_evidence(item)
+        if safe_item:
+            evidence.append(safe_item)
     return {
         "message_id": f"peer-{session.pipeline_session_id}-{len(evidence)}-{len(reviewer_blockers)}",
         "pipeline_session_id": session.pipeline_session_id,
@@ -1372,8 +1391,47 @@ def _tests_payload(test_summary: Any) -> dict[str, Any]:
 
 
 def _safe_path_evidence(value: Any) -> str:
-    text = str(value)
-    return text if "/" not in text else text.split("/")[-1]
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if _looks_like_path(text):
+        return _sanitize_path_like_evidence(text)
+    return _redacted_evidence_label(text)
+
+
+def _looks_like_path(text: str) -> bool:
+    return "/" in text or "\\" in text or text.startswith(".")
+
+
+def _sanitize_path_like_evidence(text: str) -> str:
+    normalized = text.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part and part != "."]
+    if not parts:
+        return _redacted_evidence_label(text)
+    if any(part == ".." for part in parts):
+        return _redacted_evidence_label(text)
+    leaf = parts[-1]
+    if not _is_safe_filename(leaf):
+        return _redacted_evidence_label(text)
+    return leaf[:MAX_SAFE_EVIDENCE_LABEL_CHARS]
+
+
+def _is_safe_filename(value: str) -> bool:
+    if not value or value in {".", ".."}:
+        return False
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    return all(ch in allowed for ch in value)
+
+
+def _redacted_evidence_label(text: str) -> str:
+    return f"[redacted:{_stable_text_hash(text)[:12]}]"
+
+
+def _execution_round_count(*, planned_subagent_count: int, subagent_run_instance_count: int) -> int:
+    if planned_subagent_count <= 0 or subagent_run_instance_count <= 0:
+        return 0
+    quotient, remainder = divmod(subagent_run_instance_count, planned_subagent_count)
+    return quotient + (1 if remainder else 0)
 
 
 def _active_reviewer_blockers(*, current_snapshot: Any, pending_reviewer_blockers: list[str]) -> list[str]:

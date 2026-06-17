@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from math import ceil
 from typing import Any, Mapping
 
 from hermes_cli.pipeline_session import PipelineSession, PipelineStepPlan
@@ -160,6 +161,8 @@ class PipelineUsageReport:
     cache_sources: list[str] = field(default_factory=list)
     planned_subagent_count: int = 0
     executed_subagent_count: int = 0
+    subagent_run_instance_count: int = 0
+    execution_round_count: int = 0
     subagent_count: int = 0
     models_used: list[str] = field(default_factory=list)
     providers_used: list[str] = field(default_factory=list)
@@ -178,6 +181,8 @@ class PipelineUsageReport:
             "cache_sources": list(self.cache_sources),
             "planned_subagent_count": self.planned_subagent_count,
             "executed_subagent_count": self.executed_subagent_count,
+            "subagent_run_instance_count": self.subagent_run_instance_count,
+            "execution_round_count": self.execution_round_count,
             "subagent_count": self.subagent_count,
             "models_used": list(self.models_used),
             "providers_used": list(self.providers_used),
@@ -302,7 +307,7 @@ class PipelineExecutionReport:
         subagent_runs = [item.to_safe_dict() for item in self.subagent_runs]
         review = {
             "review_required": completion["review_required"],
-            "reviewer_invoked": usage["executed_subagent_count"] > 1,
+            "reviewer_invoked": _reviewer_invoked(self.subagent_runs),
             "reviewer_approved": self.executed and not completion["review_required"] and completion["completion_allowed"],
             "user_action_required": completion["user_action_required"],
             "blocked_reason": completion["blocked_reason"],
@@ -352,6 +357,8 @@ class PipelineExecutionReport:
                 "tool_mutation_enabled": False,
             },
             "usage": usage,
+            # `usage_summary` is the canonical safe section; `usage` stays as a
+            # backward-compatible alias for existing consumers.
             "usage_summary": usage,
             "subagent_runs": subagent_runs,
             "completion": completion,
@@ -376,6 +383,8 @@ class PipelineExecutionReport:
             "helper": {
                 "planned_subagent_count": usage["planned_subagent_count"],
                 "executed_subagent_count": usage["executed_subagent_count"],
+                "subagent_run_instance_count": usage["subagent_run_instance_count"],
+                "execution_round_count": usage["execution_round_count"],
                 "subagent_count": usage["subagent_count"],
                 "status": self.status.value,
             },
@@ -650,7 +659,15 @@ def _build_usage_report(
     cache_sources: list[str] = []
     models_used: list[str] = []
     providers_used: list[str] = []
+    planned_subagent_count = len(steps)
+    executed_subagent_count = 0
+    subagent_run_instance_count = 0
     for run in subagent_runs:
+        subagent_run_instance_count += 1
+        if _subagent_run_is_executed(run):
+            executed_subagent_count += 1
+        # Intentionally idempotent: some callers pass raw payloads, others pass
+        # already-normalized usage dicts.
         usage = _normalized_usage_payload(run.token_usage)
         cache = _normalized_cache_payload(run.cache)
         if any(usage.get(key) is not None for key in ("input_tokens", "output_tokens", "reasoning_tokens", "total_tokens")):
@@ -685,9 +702,14 @@ def _build_usage_report(
         usage_known=usage_known,
         token_sources=token_sources,
         cache_sources=cache_sources,
-        planned_subagent_count=len(steps),
-        executed_subagent_count=len(subagent_runs),
-        subagent_count=len(subagent_runs),
+        planned_subagent_count=planned_subagent_count,
+        executed_subagent_count=executed_subagent_count,
+        subagent_run_instance_count=subagent_run_instance_count,
+        execution_round_count=_execution_round_count(
+            planned_subagent_count=planned_subagent_count,
+            subagent_run_instance_count=subagent_run_instance_count,
+        ),
+        subagent_count=subagent_run_instance_count,
         models_used=models_used,
         providers_used=providers_used,
     )
@@ -717,6 +739,29 @@ def _runner_result_is_reportable(runner_result: Mapping[str, Any] | dict[str, An
 
 def _mapping_list(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in list(value or []) if isinstance(item, Mapping)]
+
+
+def _subagent_run_is_executed(run: PipelineSubagentRunReport) -> bool:
+    return run.status not in {"not_invoked", "planned", "plan_only"}
+
+
+def _execution_round_count(*, planned_subagent_count: int, subagent_run_instance_count: int) -> int:
+    if planned_subagent_count <= 0 or subagent_run_instance_count <= 0:
+        return 0
+    return int(ceil(subagent_run_instance_count / planned_subagent_count))
+
+
+def _reviewer_invoked(subagent_runs: list[PipelineSubagentRunReport]) -> bool:
+    for run in subagent_runs:
+        if not _subagent_run_is_executed(run):
+            continue
+        if run.subagent_id == "hermes_code_reviewer":
+            return True
+        if run.role_id == "reviewer":
+            return True
+        if run.step_id == "reviewer":
+            return True
+    return False
 
 
 def _normalized_usage_payload(value: Any) -> dict[str, Any]:
