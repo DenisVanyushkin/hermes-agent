@@ -297,3 +297,131 @@ def test_report_builder_exposes_stable_contract_sections_and_usage_fallback() ->
     assert payload["safety"]["live_execution_enabled"] is False
     assert payload["subagent_runs"][0]["tool_call_summaries"] == [{"tool_name": "apply_patch", "call_count": 2}]
     assert payload["subagent_runs"][0]["actual_provider"] == "openrouter"
+
+
+
+def test_report_usage_alias_and_multi_iteration_accounting_are_explicit() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "execution_mode": "controlled_runtime_loop",
+        "completion_allowed": False,
+        "completion_blocked_reason": "reviewer_decisive_after_disagreement",
+        "final_verdict": "reviewer_decisive_after_disagreement",
+    })
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        preflight_result={"allowed": True, "reason_code": "rework_loop_fuse_allowed"},
+        subagent_runs_override=[
+            {
+                "step_id": "engineer",
+                "subagent_id": "hermes_engineer_core",
+                "role_id": "engineer",
+                "status": "succeeded",
+                "actual_provider": "openrouter",
+                "actual_model": "xiaomi/mimo-v2.5-pro",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                "cache": {"cache_hit": True, "cache_write": False},
+            },
+            {
+                "step_id": "reviewer",
+                "subagent_id": "hermes_code_reviewer",
+                "role_id": "reviewer",
+                "status": "succeeded",
+                "actual_provider": "openai-codex",
+                "actual_model": "gpt-5.5",
+                "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                "cache": {"cache_hit": False, "cache_write": False},
+            },
+            {
+                "step_id": "engineer",
+                "subagent_id": "hermes_engineer_core",
+                "role_id": "engineer",
+                "status": "succeeded",
+                "actual_provider": "openrouter",
+                "actual_model": "xiaomi/mimo-v2.5-pro",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                "cache": {"cache_hit": True, "cache_write": False},
+            },
+            {
+                "step_id": "reviewer",
+                "subagent_id": "hermes_code_reviewer",
+                "role_id": "reviewer",
+                "status": "succeeded",
+                "actual_provider": "openai-codex",
+                "actual_model": "gpt-5.5",
+                "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                "cache": {"cache_hit": False, "cache_write": False},
+            },
+        ],
+    )
+
+    payload = report.to_safe_dict()
+
+    assert payload["usage_summary"] == payload["usage"]
+    assert payload["usage_summary"]["planned_subagent_count"] == 2
+    assert payload["usage_summary"]["executed_subagent_count"] == 4
+    assert payload["usage_summary"]["subagent_run_instance_count"] == 4
+    assert payload["usage_summary"]["execution_round_count"] == 2
+    assert payload["usage_summary"]["subagent_count"] == 4
+    assert payload["helper"]["subagent_run_instance_count"] == 4
+    assert payload["helper"]["execution_round_count"] == 2
+    assert payload["review"]["reviewer_invoked"] is True
+
+
+def test_report_reviewer_invoked_stays_false_for_multiple_non_reviewer_runs() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "execution_mode": "controlled_runtime_loop",
+        "completion_allowed": False,
+        "completion_blocked_reason": "loop_harness_not_live_final",
+        "final_verdict": "controlled_rework_loop_candidate_complete",
+    })
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        preflight_result={"allowed": True, "reason_code": "rework_loop_fuse_allowed"},
+        subagent_runs_override=[
+            {
+                "step_id": "engineer",
+                "subagent_id": "hermes_engineer_core",
+                "role_id": "engineer",
+                "status": "succeeded",
+                "actual_provider": "openrouter",
+                "actual_model": "xiaomi/mimo-v2.5-pro",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                "cache": {"cache_hit": True, "cache_write": False},
+            },
+            {
+                "step_id": "qa",
+                "subagent_id": "hermes_test_runner",
+                "role_id": "qa",
+                "status": "succeeded",
+                "actual_provider": "openrouter",
+                "actual_model": "qwen/qwen3-coder",
+                "token_usage": {"input_tokens": 6, "output_tokens": 3, "total_tokens": 9},
+                "cache": {"cache_hit": False, "cache_write": False},
+            },
+        ],
+    )
+
+    payload = report.to_safe_dict()
+
+    assert payload["usage_summary"]["executed_subagent_count"] == 2
+    assert payload["review"]["reviewer_invoked"] is False
