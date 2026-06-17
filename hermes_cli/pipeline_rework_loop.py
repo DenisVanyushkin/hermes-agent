@@ -916,6 +916,10 @@ def _absent_reviewer_packet() -> dict[str, Any]:
 
 def _reviewer_packet_metadata(*, packet: Any) -> dict[str, Any]:
     safe_packet = packet.to_safe_dict()
+    task_summary = safe_packet.get("task_summary")
+    if task_summary:
+        safe_packet["task_summary"] = "[redacted]"
+        safe_packet["task_summary_hash"] = _stable_text_hash(str(task_summary))
     return {
         "present": True,
         "packet_status": safe_packet.get("packet_status"),

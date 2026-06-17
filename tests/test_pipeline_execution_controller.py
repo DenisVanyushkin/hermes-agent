@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 import shutil
+import subprocess
 
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
@@ -82,6 +83,104 @@ def _runtime_context(tmp_path: Path) -> dict[str, object]:
             }
         ),
         "user_message": "Implement controller helper selection",
+    }
+
+
+def _engineer_output(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": "v1",
+        "subagent_id": "hermes_engineer_core",
+        "role": "engineer",
+        "status": "succeeded",
+        "summary": "Prepared patch.",
+        "findings": [{"code": "patch", "summary": "Prepared patch"}],
+        "changes": [{"path": "hermes_cli/pipeline_execution_controller.py", "kind": "modify"}],
+        "blockers": [],
+        "artifacts": [{"artifact_id": "patch-1", "kind": "diff"}],
+        "confidence": 0.91,
+        "requires_review": False,
+        "next_action": "none",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _reviewer_output(*, blockers: list[str]) -> dict[str, object]:
+    return {
+        "schema_version": "v1",
+        "subagent_id": "hermes_code_reviewer",
+        "role": "reviewer",
+        "status": "blocked" if blockers else "succeeded",
+        "summary": "needs changes" if blockers else "approved",
+        "findings": [],
+        "changes": [],
+        "blockers": blockers,
+        "artifacts": [],
+        "confidence": 0.88,
+        "requires_review": bool(blockers),
+        "next_action": "rework" if blockers else "none",
+    }
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
+def _write(repo: Path, relative_path: str, content: str) -> Path:
+    path = repo / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _init_git_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "controller-git-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Test User")
+    _git(repo, "config", "user.email", "test@example.com")
+    _write(repo, "tracked.txt", "baseline\n")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    return repo
+
+
+def _controlled_runtime_context(*, mutate_repo: Path | None = None) -> dict[str, object]:
+    from hermes_cli.subagent_runner import ControlledRuntimeRunner
+
+    def _client(runtime, _payload):
+        if runtime.role_id == "engineer":
+            if mutate_repo is not None:
+                _write(mutate_repo, "new.txt", "created by engineer\n")
+            return {
+                "provider": runtime.provider,
+                "model": runtime.model,
+                "structured_output": _engineer_output(
+                    summary="Created new.txt" if mutate_repo is not None else "Controlled engineer patch prepared"
+                ),
+                "output_text": "engineer ok",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                "cache": {"read_hit": True, "write": False},
+                "tool_calls": [{"tool_name": "apply_patch", "call_count": 1, "status": "not_invoked"}],
+            }
+        return {
+            "provider": runtime.provider,
+            "model": runtime.model,
+            "structured_output": _reviewer_output(blockers=[]),
+            "output_text": "review ok",
+            "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+            "cache": {"read_hit": False, "write": False},
+            "tool_calls": [{"tool_name": "pytest", "call_count": 1, "status": "not_invoked"}],
+        }
+
+    return {
+        "invocation_client": _client,
+        "controlled_runner": ControlledRuntimeRunner(),
     }
 
 
@@ -476,6 +575,140 @@ def test_registered_helper_exception_is_fail_closed(monkeypatch, tmp_path: Path)
     assert result.helper_error == "RuntimeError"
     assert result.resolved_helper_name == "bounded_rework_loop"
     assert helper_calls == ["called"]
+
+
+def test_registered_helper_controlled_context_no_material_change_uses_engineer_only_and_redacts_task(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    repo_root = _copy_spec_tree(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(),
+        session=session,
+        state_snapshot=snapshot,
+        allow_test_execution=True,
+        allow_registered_helper_selection=True,
+        helper_execution_context={
+            "runtime_factory": RuntimeFactory(repo_root=repo_root),
+            "runner": SubagentRunner(
+                executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))
+            ),
+            "user_message": "Implement controller helper selection with controlled runtime",
+            "repo_path": str(git_repo),
+            "controlled_runtime_context": _controlled_runtime_context(),
+        },
+    )
+
+    assert result.status == "executed"
+    assert result.execution_allowed is True
+    assert result.blocked_reason is None
+    assert result.actual_execution_invoked is True
+    assert result.resolved_helper_name == "bounded_rework_loop"
+    assert result.helper_result_status == "executed"
+    assert result.helper_result is not None
+    assert result.helper_result["completion_allowed"] is True
+    assert result.helper_result["git_gate"]["material_change_status"] == "no_material_changes"
+    assert [item["role_id"] for item in result.helper_result["subagent_runs"]] == ["engineer", "reviewer"]
+    assert result.helper_result["subagent_runs"][0]["status"] == "succeeded"
+    assert result.helper_result["subagent_runs"][1]["status"] == "not_invoked"
+    assert result.helper_result["subagent_runs"][1]["failure_reason"] == "observe_mode_plan_only"
+    assert result.helper_result["usage_summary"]["subagent_count"] == 2
+    assert result.helper_result["usage_summary"]["total_tokens"] == 15
+    assert result.helper_result["usage_summary"]["providers_used"] == ["openrouter"]
+    encoded = __import__("json").dumps(result.helper_result, sort_keys=True)
+    assert "Implement controller helper selection with controlled runtime" not in encoded
+    assert "engineer ok" not in encoded
+
+
+def test_registered_helper_controlled_context_material_change_requires_reviewer_approval(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    repo_root = _copy_spec_tree(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(),
+        session=session,
+        state_snapshot=snapshot,
+        allow_test_execution=True,
+        allow_registered_helper_selection=True,
+        helper_execution_context={
+            "runtime_factory": RuntimeFactory(repo_root=repo_root),
+            "runner": SubagentRunner(
+                executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))
+            ),
+            "user_message": "Implement controller helper selection with reviewer approval",
+            "repo_path": str(git_repo),
+            "allow_completion_after_review": True,
+            "controlled_runtime_context": _controlled_runtime_context(mutate_repo=git_repo),
+        },
+    )
+
+    assert result.status == "executed"
+    assert result.execution_allowed is True
+    assert result.helper_result is not None
+    assert result.helper_result["completion_allowed"] is True
+    assert result.helper_result["candidate_complete"] is True
+    assert result.helper_result["blocked_reason"] is None
+    assert result.helper_result["git_gate"]["material_change_status"] == "material_changes_detected"
+    assert result.helper_result["reviewer_packet"]["present"] is True
+    assert result.helper_result["reviewer_packet"]["packet_status"] == "ready_for_review"
+    assert [item["role_id"] for item in result.helper_result["subagent_runs"]] == ["engineer", "reviewer"]
+    assert result.helper_result["subagent_runs"][0]["actual_provider"] == "openrouter"
+    assert result.helper_result["subagent_runs"][1]["actual_provider"] == "openai-codex"
+    assert result.helper_result["subagent_runs"][0]["actual_model"] == "xiaomi/mimo-v2.5-pro"
+    assert result.helper_result["subagent_runs"][1]["actual_model"] == "gpt-5.5"
+    assert result.helper_result["usage_summary"]["subagent_count"] == 2
+    assert result.helper_result["usage_summary"]["total_tokens"] == 21
+    encoded = __import__("json").dumps(result.helper_result, sort_keys=True)
+    assert "Implement controller helper selection with reviewer approval" not in encoded
+    assert "created by engineer" not in encoded
+
+
+def test_registered_helper_invalid_controlled_context_fails_closed_with_structured_reason(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    repo_root = _copy_spec_tree(tmp_path)
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(),
+        session=session,
+        state_snapshot=snapshot,
+        allow_test_execution=True,
+        allow_registered_helper_selection=True,
+        helper_execution_context={
+            "runtime_factory": RuntimeFactory(repo_root=repo_root),
+            "runner": SubagentRunner(executor=lambda *_args, **_kwargs: {}),
+            "user_message": "Implement controller helper selection with malformed runtime context",
+            "controlled_runtime_context": {},
+        },
+    )
+
+    assert result.status == "blocked"
+    assert result.execution_allowed is True
+    assert result.blocked_reason is None
+    assert result.actual_execution_invoked is True
+    assert result.helper_result_status == "blocked"
+    assert result.helper_error is None
+    assert result.helper_result == {
+        "status": "blocked",
+        "blocked_reason": "invalid_controlled_runtime_context",
+        "completion_allowed": False,
+        "candidate_complete": False,
+        "user_action_required": True,
+        "subagent_runs": [],
+        "usage_summary": {
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_tokens": 0,
+            "token_sources": [],
+            "cache_sources": [],
+            "subagent_count": 0,
+            "models_used": [],
+            "providers_used": [],
+        },
+    }
 
 
 def test_missing_pipeline_context_is_fail_closed() -> None:
