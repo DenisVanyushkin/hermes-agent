@@ -71,16 +71,46 @@ def execute_engineering_review_helper(
     runtime_factory: Any,
     runner: Any,
     user_message: str,
+    repo_path: str | None = None,
+    test_summary: Any = None,
+    allow_completion_after_review: bool = False,
+    controlled_runtime_context: Any = None,
     **_kwargs: Any,
 ) -> Any:
-    return execute_bounded_rework_loop(
-        config=config,
-        session=session,
-        loaded_specs=loaded_specs,
-        runtime_factory=runtime_factory,
-        runner=runner,
-        user_message=user_message,
-    )
+    try:
+        return execute_bounded_rework_loop(
+            config=config,
+            session=session,
+            loaded_specs=loaded_specs,
+            runtime_factory=runtime_factory,
+            runner=runner,
+            user_message=user_message,
+            repo_path=repo_path,
+            test_summary=test_summary,
+            allow_completion_after_review=allow_completion_after_review,
+            controlled_runtime_context=controlled_runtime_context,
+        )
+    except ValueError:
+        if controlled_runtime_context is None:
+            raise
+        return {
+            "status": "blocked",
+            "blocked_reason": "invalid_controlled_runtime_context",
+            "completion_allowed": False,
+            "candidate_complete": False,
+            "user_action_required": True,
+            "subagent_runs": [],
+            "usage_summary": {
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_tokens": 0,
+                "token_sources": [],
+                "cache_sources": [],
+                "subagent_count": 0,
+                "models_used": [],
+                "providers_used": [],
+            },
+        }
 
 
 def _helper_name_for_pipeline(pipeline_id: str | None) -> str | None:
