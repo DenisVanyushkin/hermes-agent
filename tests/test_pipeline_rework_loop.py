@@ -584,15 +584,21 @@ def test_git_gate_invalid_repo_path_fails_closed_without_exception(tmp_path: Pat
 
 
 
-def _controlled_runtime_context():
+def _controlled_runtime_context(*, mutate_repo: Path | None = None, responses: list[dict[str, object]] | None = None):
     from hermes_cli.subagent_runner import ControlledRuntimeRunner
 
-    def _client(runtime, _payload):
+    queued = list(responses or [])
+
+    def _default_response(runtime):
         if runtime.role_id == "engineer":
+            if mutate_repo is not None:
+                _write(mutate_repo, "new.txt", "created by engineer\n")
             return {
                 "provider": runtime.provider,
                 "model": runtime.model,
-                "structured_output": _engineer_output(summary="Controlled engineer patch prepared"),
+                "structured_output": _engineer_output(
+                    summary="Created new.txt" if mutate_repo is not None else "Controlled engineer patch prepared"
+                ),
                 "output_text": "engineer ok",
                 "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
                 "cache": {"read_hit": True, "write": False},
@@ -607,6 +613,16 @@ def _controlled_runtime_context():
             "cache": {"read_hit": False, "write": False},
             "tool_calls": [{"tool_name": "pytest", "call_count": 1, "status": "not_invoked"}],
         }
+
+    def _client(runtime, _payload):
+        if queued:
+            response = dict(queued.pop(0))
+            if runtime.role_id == "engineer" and mutate_repo is not None:
+                _write(mutate_repo, "new.txt", "created by engineer\n")
+            response.setdefault("provider", runtime.provider)
+            response.setdefault("model", runtime.model)
+            return response
+        return _default_response(runtime)
 
     return {
         "invocation_client": _client,
@@ -718,6 +734,196 @@ def test_controlled_runtime_context_fails_closed_on_provider_model_mismatch(tmp_
     assert payload["subagent_runs"][0]["failure_reason"] == "runtime_contract_mismatch"
     assert payload["subagent_runs"][0]["error_type"] == "runtime_contract_mismatch"
     assert result.candidate_complete is False
+
+
+def test_disagreement_resolved_by_reviewer_approval_updates_safe_report(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    responses = [
+        {
+            "structured_output": _engineer_output(summary="Created new.txt"),
+            "output_text": "engineer ok",
+            "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        },
+        {
+            "structured_output": _reviewer_output(blockers=["missing regression test"]),
+            "output_text": "review blocked",
+            "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+        },
+        {
+            "structured_output": _engineer_output(
+                status="disagree_with_reviewer",
+                summary="Engineer disagrees with reviewer blocker.",
+                findings=[],
+                blockers=[],
+                artifacts=[],
+                requires_review=True,
+                next_action="disagreement",
+                reviewer_objections=["missing regression test"],
+                evidence=["tests/test_pipeline_rework_loop.py"],
+                risks=[],
+                confidence=0.8,
+            ),
+            "output_text": "engineer disagreement",
+            "token_usage": {"input_tokens": 6, "output_tokens": 3, "total_tokens": 9},
+        },
+        {
+            "structured_output": _reviewer_output(blockers=[]),
+            "output_text": "review approved",
+            "token_usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+        },
+    ]
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context=_controlled_runtime_context(mutate_repo=git_repo, responses=responses),
+    )
+
+    payload = result.execution_report.to_safe_dict()
+
+    assert result.completion_allowed is True
+    assert result.candidate_complete is True
+    assert payload["peer_messages"] and len(payload["peer_messages"]) == 1
+    assert payload["disagreements"][0]["status"] == "resolved"
+    assert payload["disagreements"][0]["decisive_subagent"] == "hermes_code_reviewer"
+    assert payload["model_escalations"][0]["status"] == "not_required"
+    assert [item["role_id"] for item in payload["subagent_runs"]] == ["engineer", "reviewer", "engineer", "reviewer"]
+    assert payload["review"]["reviewer_approved"] is True
+    encoded = __import__("json").dumps(payload, sort_keys=True)
+    assert "Implement bounded rework loop" not in encoded
+    assert "Engineer candidate follows" not in encoded
+
+
+def test_disagreement_unresolved_blocks_with_reviewer_decisive_semantics(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    responses = [
+        {
+            "structured_output": _engineer_output(summary="Created new.txt"),
+            "output_text": "engineer ok",
+        },
+        {
+            "structured_output": _reviewer_output(blockers=["missing regression test"]),
+            "output_text": "review blocked",
+        },
+        {
+            "structured_output": _engineer_output(
+                status="disagree_with_reviewer",
+                summary="Engineer disagrees with reviewer blocker.",
+                findings=[],
+                blockers=[],
+                artifacts=[],
+                requires_review=True,
+                next_action="disagreement",
+                reviewer_objections=["missing regression test"],
+                evidence=["tests/test_pipeline_rework_loop.py"],
+                risks=[],
+                confidence=0.8,
+            ),
+            "output_text": "engineer disagreement",
+        },
+        {
+            "structured_output": _reviewer_output(blockers=["maintained blocker"]),
+            "output_text": "review still blocked",
+        },
+    ]
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        controlled_runtime_context=_controlled_runtime_context(mutate_repo=git_repo, responses=responses),
+    )
+
+    payload = result.execution_report.to_safe_dict()
+
+    assert result.completion_allowed is False
+    assert result.candidate_complete is False
+    assert result.user_action_required is True
+    assert result.blocked_reason == "reviewer_decisive_after_disagreement"
+    assert len(payload["peer_messages"]) == 1
+    assert payload["disagreements"][0]["status"] == "reviewer_maintained_blocker"
+    assert payload["disagreements"][0]["decisive_subagent"] == "hermes_code_reviewer"
+    assert payload["model_escalations"][0]["status"] == "block_and_escalate_to_user"
+    assert payload["completion"]["blocked_reason"] == "reviewer_decisive_after_disagreement"
+
+
+def test_disagreement_peer_round_is_bounded_to_one_follow_up(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    responses = [
+        {"structured_output": _engineer_output(summary="Created new.txt"), "output_text": "engineer ok"},
+        {"structured_output": _reviewer_output(blockers=["missing regression test"]), "output_text": "review blocked"},
+        {
+            "structured_output": _engineer_output(
+                status="disagree_with_reviewer",
+                summary="Engineer disagrees with reviewer blocker.",
+                findings=[],
+                blockers=[],
+                artifacts=[],
+                requires_review=True,
+                next_action="disagreement",
+                reviewer_objections=["missing regression test"],
+                evidence=["tests/test_pipeline_rework_loop.py"],
+                risks=[],
+                confidence=0.8,
+            ),
+            "output_text": "engineer disagreement",
+        },
+        {"structured_output": _reviewer_output(blockers=["still blocked"]), "output_text": "review still blocked"},
+        {
+            "structured_output": _engineer_output(
+                status="disagree_with_reviewer",
+                summary="Engineer attempts second disagreement.",
+                findings=[],
+                blockers=[],
+                artifacts=[],
+                requires_review=True,
+                next_action="disagreement",
+                reviewer_objections=["still blocked"],
+                evidence=["tests/test_pipeline_rework_loop.py"],
+                risks=[],
+                confidence=0.7,
+            ),
+            "output_text": "engineer disagreement again",
+        },
+    ]
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        controlled_runtime_context=_controlled_runtime_context(mutate_repo=git_repo, responses=responses),
+    )
+
+    payload = result.execution_report.to_safe_dict()
+
+    assert len(payload["peer_messages"]) == 1
+    assert len(payload["subagent_runs"]) == 4
+    assert payload["disagreements"][0]["peer_round_limit_status"] == "max_peer_discussion_rounds_reached"
+    assert payload["disagreements"][0]["status"] == "reviewer_maintained_blocker"
+    assert result.blocked_reason == "reviewer_decisive_after_disagreement"
 
 
 def test_git_gate_report_omits_diff_and_file_contents(tmp_path: Path) -> None:

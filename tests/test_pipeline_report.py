@@ -151,6 +151,50 @@ def test_report_serialization_is_safe_and_deterministic() -> None:
     assert "system_prompt_path" not in first
 
 
+def test_report_builder_serializes_disagreement_metadata_sections() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "completion_allowed": False,
+        "completion_blocked_reason": "reviewer_decisive_after_disagreement",
+        "final_verdict": "reviewer_decisive_after_disagreement",
+    })
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        preflight_result={"allowed": True, "reason_code": None},
+        final_response_text=None,
+        peer_messages=[{"message_id": "peer-1", "type": "disagreement", "content": {"summary": "summarized"}}],
+        disagreements=[{"status": "reviewer_maintained_blocker", "decisive_subagent": "hermes_code_reviewer"}],
+        model_escalations=[{"status": "block_and_escalate_to_user", "target_subagent": "decisive_subagent_or_arbitrator"}],
+        reviewer_packet={"status": "available", "present": True},
+        git_gate={"status": "enabled", "enabled": True, "changed_files": ["new.txt"]},
+        changed_files=["new.txt"],
+        tests={"status": "passed", "source": "pytest", "summary": "focused"},
+        review_overrides={"reviewer_approved": False, "status": "blocked_after_disagreement"},
+        decisive_subagent="hermes_code_reviewer",
+    )
+
+    payload = report.to_safe_dict()
+
+    assert payload["peer_messages"][0]["message_id"] == "peer-1"
+    assert payload["disagreements"][0]["decisive_subagent"] == "hermes_code_reviewer"
+    assert payload["model_escalations"][0]["status"] == "block_and_escalate_to_user"
+    assert payload["reviewer_packet"]["status"] == "available"
+    assert payload["git_gate"]["status"] == "enabled"
+    assert payload["changed_files"] == ["new.txt"]
+    assert payload["tests"]["status"] == "passed"
+    assert payload["review"]["status"] == "blocked_after_disagreement"
+    assert payload["decisive_subagent"] == "hermes_code_reviewer"
+
+
 def test_report_builder_fails_closed_on_missing_required_metadata() -> None:
     loaded = load_pipeline_specs()
     session = _session_for("engineering_review_pipeline", status="selected")
