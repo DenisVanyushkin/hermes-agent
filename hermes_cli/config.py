@@ -1044,6 +1044,7 @@ DEFAULT_CONFIG = {
             "allow_pipelines": ["engineering_review_pipeline"],
             "allowed_subagents": ["hermes_engineer_core"],
             "allow_actual_subagent_invocation": False,
+            "allow_actual_reviewer_invocation": False,
             "min_router_confidence": 0.90,
         },
     },
