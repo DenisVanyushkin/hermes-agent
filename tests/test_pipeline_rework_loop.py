@@ -653,6 +653,10 @@ def test_controlled_runtime_context_invokes_engineer_backend_and_exposes_safe_te
     assert payload["subagent_runs"][0]["response_output_hash"]
     assert payload["subagent_runs"][0]["raw_output_redacted"] is True
     assert payload["usage_summary"]["total_tokens"] == 21
+    assert payload["usage_summary"]["planned_subagent_count"] == 2
+    assert payload["usage_summary"]["executed_subagent_count"] == 2
+    assert payload["usage_summary"]["subagent_run_instance_count"] == 2
+    assert payload["usage_summary"]["execution_round_count"] == 1
     assert payload["usage_summary"]["subagent_count"] == 2
     assert payload["usage_summary"]["providers_used"] == ["openrouter", "openai-codex"]
     assert set(payload["usage_summary"]["models_used"]) == {"xiaomi/mimo-v2.5-pro", "gpt-5.5"}
@@ -1003,3 +1007,139 @@ def test_usage_summary_from_subagent_runs_computes_totals_and_executed_counts() 
     assert payload["subagent_count"] == 2
     assert payload["providers_used"] == ["openrouter"]
     assert payload["models_used"] == ["qwen/qwen3-coder"]
+
+
+
+def test_disagreement_result_preserves_accumulated_runs_and_blocks_unchanged(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    reviewer_round = {"count": 0}
+
+    def _executor(request, _runtime_plan):
+        if request.subagent_id == "hermes_engineer_core":
+            payload = _engineer_output(
+                status="disagree_with_reviewer" if reviewer_round["count"] > 0 else "succeeded",
+                next_action="disagreement" if reviewer_round["count"] > 0 else "none",
+                reviewer_objections=["missing regression test"],
+                evidence=["/tmp/repo/hermes_cli/foo.py", "../../secret.env", "the raw task was SECRET_TOKEN=abc123"],
+            )
+        else:
+            reviewer_round["count"] += 1
+            payload = _reviewer_output(blockers=["missing regression test"])
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": payload},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        allow_completion_after_review=True,
+    )
+
+    payload = result.execution_report.to_safe_dict()
+
+    assert result.blocked_reason == "reviewer_decisive_after_disagreement"
+    assert payload["loop"]["final_verdict"] == "reviewer_decisive_after_disagreement"
+    assert payload["disagreements"][-1]["status"] == "reviewer_maintained_blocker"
+    assert payload["model_escalations"][-1]["status"] == "block_and_escalate_to_user"
+    assert payload["usage_summary"]["planned_subagent_count"] == 2
+    assert payload["usage_summary"]["executed_subagent_count"] == 4
+    assert payload["usage_summary"]["subagent_run_instance_count"] == 4
+    assert payload["usage_summary"]["execution_round_count"] == 2
+    assert len(result.subagent_runs) == 2
+    assert [item["role_id"] for item in result.subagent_runs] == ["engineer", "reviewer"]
+    assert result.usage_summary["planned_subagent_count"] == 2
+    assert result.usage_summary["executed_subagent_count"] == 2
+
+
+def test_safe_path_evidence_redacts_traversal_and_free_text() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    assert module._safe_path_evidence("/tmp/repo/hermes_cli/foo.py") == "foo.py"
+    traversal = module._safe_path_evidence("../../secret.env")
+    assert traversal.startswith("[redacted:")
+    assert "secret.env" not in traversal
+
+    free_text = module._safe_path_evidence("the raw task was SECRET_TOKEN=abc123")
+    assert free_text.startswith("[redacted:")
+    assert "SECRET_TOKEN=abc123" not in free_text
+
+
+def test_peer_message_evidence_is_sanitized_and_bounded() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    message = module._build_peer_message(
+        session=_session(),
+        engineer_output={
+            "summary": "Need to challenge reviewer blocker.",
+            "reviewer_objections": ["missing regression test"],
+            "evidence": [
+                "/tmp/repo/hermes_cli/foo.py",
+                "../../secret.env",
+                "the raw task was SECRET_TOKEN=abc123",
+                "sk-live-1234567890",
+                "/tmp/repo/hermes_cli/bar.py",
+                "/tmp/repo/hermes_cli/baz.py",
+            ],
+        },
+        reviewer_blockers=["missing regression test"],
+        related_verdict_id="review-1",
+    )
+
+    encoded = __import__("json").dumps(message, sort_keys=True)
+
+    assert message["content"]["evidence"][0] == "foo.py"
+    assert len(message["content"]["evidence"]) == 5
+    assert "../../secret.env" not in encoded
+    assert "SECRET_TOKEN=abc123" not in encoded
+    assert "sk-live-1234567890" not in encoded
+
+
+def test_usage_summary_from_subagent_runs_keeps_plan_size_separate_from_instances() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    payload = module._usage_summary_from_subagent_runs(
+        [
+            {
+                "status": "succeeded",
+                "actual_provider": "openrouter",
+                "actual_model": "xiaomi/mimo-v2.5-pro",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                "cache": {"source": "reported"},
+            },
+            {
+                "status": "succeeded",
+                "actual_provider": "openai-codex",
+                "actual_model": "gpt-5.5",
+                "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                "cache": {"source": "reported"},
+            },
+            {
+                "status": "succeeded",
+                "actual_provider": "openrouter",
+                "actual_model": "xiaomi/mimo-v2.5-pro",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                "cache": {"source": "reported"},
+            },
+            {
+                "status": "succeeded",
+                "actual_provider": "openai-codex",
+                "actual_model": "gpt-5.5",
+                "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                "cache": {"source": "reported"},
+            },
+        ],
+        planned_subagent_count=2,
+    )
+
+    assert payload["planned_subagent_count"] == 2
+    assert payload["executed_subagent_count"] == 4
+    assert payload["subagent_run_instance_count"] == 4
+    assert payload["execution_round_count"] == 2
+    assert payload["subagent_count"] == 4
