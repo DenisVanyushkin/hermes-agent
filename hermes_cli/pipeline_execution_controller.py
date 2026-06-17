@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping
 
 from hermes_cli.config import cfg_get
+from hermes_cli import pipeline_execution_helpers
 from hermes_cli.pipeline_execution_fuse import (
     ENGINEER_SUBAGENT_ID,
     REVIEWER_SUBAGENT_ID,
@@ -25,6 +26,7 @@ class PipelineExecutionControllerResult:
     would_call: str | None
     actual_execution_invoked: bool
     execution_mode: str
+    resolved_helper_name: str | None = None
     helper_result_status: str | None = None
     helper_result: dict[str, Any] | None = None
     helper_error: str | None = None
@@ -38,6 +40,7 @@ class PipelineExecutionControllerResult:
             "would_call": self.would_call,
             "actual_execution_invoked": self.actual_execution_invoked,
             "execution_mode": self.execution_mode,
+            "resolved_helper_name": self.resolved_helper_name,
             "helper_result_status": self.helper_result_status,
             "helper_result": dict(self.helper_result) if isinstance(self.helper_result, dict) else self.helper_result,
             "helper_error": self.helper_error,
@@ -51,6 +54,8 @@ def evaluate_pipeline_execution_controller(
     state_snapshot: Any,
     execution_helper: Callable[..., Any] | None = None,
     allow_test_execution: bool = False,
+    allow_registered_helper_selection: bool = False,
+    helper_execution_context: Mapping[str, Any] | None = None,
 ) -> PipelineExecutionControllerResult:
     pipeline_id = getattr(state_snapshot, "pipeline_id", None)
     execution_mode = _execution_mode(config)
@@ -63,6 +68,7 @@ def evaluate_pipeline_execution_controller(
         would_call=would_call,
         actual_execution_invoked=False,
         execution_mode=execution_mode,
+        resolved_helper_name=None,
     )
 
     if pipeline_id is None:
@@ -103,12 +109,6 @@ def evaluate_pipeline_execution_controller(
     if not reviewer_fuse.actual_invocation_allowed:
         return replace(base, blocked_reason=reviewer_fuse.blocked_reason)
 
-    if not _required_loop_subagents_allowed(config):
-        return replace(base, blocked_reason="required_subagents_not_allowed")
-
-    if execution_helper is None:
-        return replace(base, status="not_wired", blocked_reason="live_execution_not_wired")
-
     rework_fuse = evaluate_pipeline_rework_loop_fuse(
         config=dict(config or {}),
         session=session,
@@ -118,13 +118,41 @@ def evaluate_pipeline_execution_controller(
     if not rework_fuse.actual_invocation_allowed:
         return replace(base, blocked_reason=rework_fuse.blocked_reason)
 
+    if not _required_loop_subagents_allowed(config):
+        return replace(base, blocked_reason="required_subagents_not_allowed")
+
+    helper_resolution = pipeline_execution_helpers.resolve_pipeline_execution_helper(
+        pipeline_id=pipeline_id,
+        execution_helper=execution_helper,
+        allow_registered_helper_selection=allow_registered_helper_selection,
+    )
+    if not helper_resolution.resolved:
+        return replace(
+            base,
+            status=helper_resolution.status,
+            blocked_reason=helper_resolution.blocked_reason,
+            resolved_helper_name=helper_resolution.helper_name,
+        )
+
+    if helper_execution_context is None:
+        helper_execution_context = {}
+
+    if execution_helper is None and allow_registered_helper_selection and not _helper_execution_context_ready(helper_execution_context):
+        return replace(
+            base,
+            status="not_wired",
+            blocked_reason="helper_execution_context_missing",
+            resolved_helper_name=helper_resolution.helper_name,
+        )
+
     try:
-        helper_result = execution_helper(
+        helper_result = helper_resolution.helper(
             config=config,
             session=session,
             state_snapshot=state_snapshot,
             loaded_specs=loaded_specs,
             pipeline_spec=pipeline_spec,
+            **dict(helper_execution_context),
         )
     except Exception as exc:
         return replace(
@@ -132,6 +160,7 @@ def evaluate_pipeline_execution_controller(
             status="execution_failed",
             blocked_reason="controller_helper_failed",
             actual_execution_invoked=True,
+            resolved_helper_name=helper_resolution.helper_name,
             helper_result_status="controller_helper_failed",
             helper_error=type(exc).__name__,
         )
@@ -143,6 +172,7 @@ def evaluate_pipeline_execution_controller(
         execution_allowed=True,
         blocked_reason=None,
         actual_execution_invoked=True,
+        resolved_helper_name=helper_resolution.helper_name,
         helper_result_status=_helper_result_status(helper_result),
         helper_result=safe_helper_result,
     )
@@ -200,6 +230,13 @@ def _context_block_reason(*, session: Any, state_snapshot: Any, pipeline_id: str
 def _required_loop_subagents_allowed(config: Mapping[str, Any] | None) -> bool:
     allowed = _string_list(cfg_get(config, "pipelines", "execution", "allowed_subagents", default=[]))
     return ENGINEER_SUBAGENT_ID in allowed and REVIEWER_SUBAGENT_ID in allowed
+
+
+def _helper_execution_context_ready(helper_execution_context: Mapping[str, Any]) -> bool:
+    return all(
+        key in helper_execution_context and helper_execution_context[key] is not None
+        for key in ("runtime_factory", "runner", "user_message")
+    )
 
 
 def _string_list(value: Any) -> list[str]:
