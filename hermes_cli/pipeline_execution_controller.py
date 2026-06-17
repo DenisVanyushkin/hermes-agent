@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping
 
 from hermes_cli.config import cfg_get
+from hermes_cli.pipeline_execution_fuse import (
+    ENGINEER_SUBAGENT_ID,
+    REVIEWER_SUBAGENT_ID,
+    evaluate_pipeline_execution_fuse,
+    evaluate_pipeline_reviewer_execution_fuse,
+)
+from hermes_cli.pipeline_rework_loop import evaluate_pipeline_rework_loop_fuse
+from hermes_cli.pipeline_specs import load_pipeline_specs
 
 
 @dataclass(frozen=True)
@@ -17,6 +25,9 @@ class PipelineExecutionControllerResult:
     would_call: str | None
     actual_execution_invoked: bool
     execution_mode: str
+    helper_result_status: str | None = None
+    helper_result: dict[str, Any] | None = None
+    helper_error: str | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -27,6 +38,9 @@ class PipelineExecutionControllerResult:
             "would_call": self.would_call,
             "actual_execution_invoked": self.actual_execution_invoked,
             "execution_mode": self.execution_mode,
+            "helper_result_status": self.helper_result_status,
+            "helper_result": dict(self.helper_result) if isinstance(self.helper_result, dict) else self.helper_result,
+            "helper_error": self.helper_error,
         }
 
 
@@ -38,68 +52,99 @@ def evaluate_pipeline_execution_controller(
     execution_helper: Callable[..., Any] | None = None,
     allow_test_execution: bool = False,
 ) -> PipelineExecutionControllerResult:
-    del session
-
     pipeline_id = getattr(state_snapshot, "pipeline_id", None)
     execution_mode = _execution_mode(config)
     would_call = _would_call_for_pipeline(pipeline_id)
-
-    if pipeline_id is None:
-        return PipelineExecutionControllerResult(
-            status="not_wired",
-            execution_allowed=False,
-            blocked_reason="missing_pipeline_selection",
-            selected_pipeline_id=None,
-            would_call=None,
-            actual_execution_invoked=False,
-            execution_mode=execution_mode,
-        )
-
-    if execution_mode == "disabled":
-        return PipelineExecutionControllerResult(
-            status="disabled",
-            execution_allowed=False,
-            blocked_reason="execution_mode_disabled",
-            selected_pipeline_id=pipeline_id,
-            would_call=would_call,
-            actual_execution_invoked=False,
-            execution_mode=execution_mode,
-        )
-
-    if not _actual_gateway_execution_enabled(config):
-        return PipelineExecutionControllerResult(
-            status="would_execute",
-            execution_allowed=False,
-            blocked_reason="gateway_execution_not_enabled",
-            selected_pipeline_id=pipeline_id,
-            would_call=would_call,
-            actual_execution_invoked=False,
-            execution_mode=execution_mode,
-        )
-
-    if execution_helper is None or not allow_test_execution:
-        return PipelineExecutionControllerResult(
-            status="not_wired",
-            execution_allowed=False,
-            blocked_reason="live_execution_not_wired",
-            selected_pipeline_id=pipeline_id,
-            would_call=would_call,
-            actual_execution_invoked=False,
-            execution_mode=execution_mode,
-        )
-
-    execution_helper(
-        config=config,
-        state_snapshot=state_snapshot,
-    )
-    return PipelineExecutionControllerResult(
-        status="would_execute",
-        execution_allowed=True,
+    base = PipelineExecutionControllerResult(
+        status="blocked",
+        execution_allowed=False,
         blocked_reason=None,
         selected_pipeline_id=pipeline_id,
         would_call=would_call,
-        actual_execution_invoked=True,
+        actual_execution_invoked=False,
         execution_mode=execution_mode,
+    )
+
+    if pipeline_id is None:
+        return replace(base, blocked_reason="missing_pipeline_selection")
+
+    if execution_mode == "disabled":
+        return replace(base, status="disabled", blocked_reason="execution_mode_disabled")
+
+    if not _actual_gateway_execution_enabled(config):
+        return replace(base, status="would_execute", blocked_reason="gateway_execution_not_enabled")
+
+    if not allow_test_execution:
+        return replace(base, status="not_wired", blocked_reason="live_execution_not_wired")
+
+    loaded_specs = load_pipeline_specs()
+    pipeline_spec = loaded_specs.pipeline_specs.get(pipeline_id)
+    if not _eligible_pipeline_execution_context(
+        session=session,
+        state_snapshot=state_snapshot,
+        pipeline_id=pipeline_id,
+        pipeline_spec=pipeline_spec,
+    ):
+        return replace(base, blocked_reason=_context_block_reason(session=session, state_snapshot=state_snapshot, pipeline_id=pipeline_id))
+
+    engineer_fuse = evaluate_pipeline_execution_fuse(
+        config=config,
+        session=session,
+        state_snapshot=state_snapshot,
+    )
+    if not engineer_fuse.actual_invocation_allowed:
+        return replace(base, blocked_reason=engineer_fuse.blocked_reason)
+
+    reviewer_fuse = evaluate_pipeline_reviewer_execution_fuse(
+        config=config,
+        session=session,
+        state_snapshot=_reviewer_ready_snapshot(state_snapshot),
+    )
+    if not reviewer_fuse.actual_invocation_allowed:
+        return replace(base, blocked_reason=reviewer_fuse.blocked_reason)
+
+    if not _required_loop_subagents_allowed(config):
+        return replace(base, blocked_reason="required_subagents_not_allowed")
+
+    if execution_helper is None:
+        return replace(base, status="not_wired", blocked_reason="live_execution_not_wired")
+
+    rework_fuse = evaluate_pipeline_rework_loop_fuse(
+        config=dict(config or {}),
+        session=session,
+        state_snapshot=state_snapshot,
+        pipeline_spec=pipeline_spec,
+    )
+    if not rework_fuse.actual_invocation_allowed:
+        return replace(base, blocked_reason=rework_fuse.blocked_reason)
+
+    try:
+        helper_result = execution_helper(
+            config=config,
+            session=session,
+            state_snapshot=state_snapshot,
+            loaded_specs=loaded_specs,
+            pipeline_spec=pipeline_spec,
+        )
+    except Exception as exc:
+        return replace(
+            base,
+            status="execution_failed",
+            blocked_reason="controller_helper_failed",
+            actual_execution_invoked=True,
+            helper_result_status="controller_helper_failed",
+            helper_error=type(exc).__name__,
+        )
+
+    safe_helper_result = _safe_helper_result(helper_result)
+    return replace(
+        base,
+        status=_helper_result_status(helper_result),
+        execution_allowed=True,
+        blocked_reason=None,
+        actual_execution_invoked=True,
+        helper_result_status=_helper_result_status(helper_result),
+        helper_result=safe_helper_result,
     )
 
 
@@ -114,4 +159,83 @@ def _actual_gateway_execution_enabled(config: Mapping[str, Any] | None) -> bool:
 def _would_call_for_pipeline(pipeline_id: str | None) -> str | None:
     if pipeline_id == "engineering_review_pipeline":
         return "bounded_rework_loop"
+    return None
+
+
+def _eligible_pipeline_execution_context(
+    *,
+    session: Any,
+    state_snapshot: Any,
+    pipeline_id: str | None,
+    pipeline_spec: Mapping[str, Any] | None,
+) -> bool:
+    if pipeline_id is None or pipeline_spec is None or _would_call_for_pipeline(pipeline_id) is None:
+        return False
+    if getattr(session, "pipeline_id", None) != pipeline_id:
+        return False
+    if getattr(session, "pipeline_session_id", None) != getattr(state_snapshot, "pipeline_session_id", None):
+        return False
+    if getattr(session, "router_status", None) != "selected":
+        return False
+    planned_steps = list(getattr(state_snapshot, "planned_steps", []) or [])
+    if len(planned_steps) < 2:
+        return False
+    if getattr(planned_steps[0], "step_kind", None) != "engineer" or getattr(planned_steps[0], "subagent_id", None) != ENGINEER_SUBAGENT_ID:
+        return False
+    if getattr(planned_steps[1], "step_kind", None) != "reviewer" or getattr(planned_steps[1], "subagent_id", None) != REVIEWER_SUBAGENT_ID:
+        return False
+    return True
+
+
+def _context_block_reason(*, session: Any, state_snapshot: Any, pipeline_id: str | None) -> str:
+    if pipeline_id is None:
+        return "missing_pipeline_selection"
+    if getattr(session, "pipeline_id", None) != pipeline_id:
+        return "pipeline_session_mismatch"
+    if getattr(session, "pipeline_session_id", None) != getattr(state_snapshot, "pipeline_session_id", None):
+        return "pipeline_session_mismatch"
+    return "ineligible_pipeline_execution_context"
+
+
+def _required_loop_subagents_allowed(config: Mapping[str, Any] | None) -> bool:
+    allowed = _string_list(cfg_get(config, "pipelines", "execution", "allowed_subagents", default=[]))
+    return ENGINEER_SUBAGENT_ID in allowed and REVIEWER_SUBAGENT_ID in allowed
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def _reviewer_ready_snapshot(state_snapshot: Any) -> Any:
+    planned_steps = list(getattr(state_snapshot, "planned_steps", []) or [])
+    if not planned_steps:
+        return state_snapshot
+    engineer_step = planned_steps[0]
+    planned_steps[0] = replace(
+        engineer_step,
+        runner_result={
+            "status": "succeeded",
+            "structured_output": {"validation_status": "valid"},
+        },
+        evaluation_result={"status": "candidate_complete", "completion": {"candidate_complete": True}},
+    )
+    return replace(state_snapshot, planned_steps=planned_steps)
+
+
+def _helper_result_status(helper_result: Any) -> str:
+    if isinstance(helper_result, Mapping):
+        value = helper_result.get("status")
+        if isinstance(value, str) and value.strip():
+            return value
+    return "executed"
+
+
+def _safe_helper_result(helper_result: Any) -> dict[str, Any] | None:
+    if hasattr(helper_result, "to_safe_dict"):
+        safe = helper_result.to_safe_dict()
+        return safe if isinstance(safe, dict) else {"value": safe}
+    if isinstance(helper_result, Mapping):
+        return dict(helper_result)
     return None
