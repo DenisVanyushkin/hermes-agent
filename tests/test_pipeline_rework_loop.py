@@ -755,3 +755,45 @@ def test_git_gate_report_omits_diff_and_file_contents(tmp_path: Path) -> None:
     assert "API_KEY=123" not in encoded
     assert "password=123" not in encoded
     assert "+++ secret.env" not in encoded
+
+
+
+def test_usage_summary_from_subagent_runs_computes_totals_and_executed_counts() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    payload = module._usage_summary_from_subagent_runs([
+        {
+            "status": "succeeded",
+            "actual_provider": "openrouter",
+            "actual_model": "qwen/qwen3-coder",
+            "token_usage": {
+                "input_tokens": 11,
+                "output_tokens": 4,
+                "source": "reported",
+            },
+            "cache": {
+                "source": "reported",
+            },
+        },
+        {
+            "status": "not_invoked",
+            "failure_reason": "observe_mode_plan_only",
+            "actual_provider": "openai-codex",
+            "actual_model": "gpt-5.5",
+            "token_usage": {
+                "input_tokens": 99,
+                "output_tokens": 1,
+                "source": "reported",
+            },
+            "cache": {},
+        },
+    ])
+
+    assert payload["total_input_tokens"] == 11
+    assert payload["total_output_tokens"] == 4
+    assert payload["total_tokens"] == 15
+    assert payload["planned_subagent_count"] == 2
+    assert payload["executed_subagent_count"] == 1
+    assert payload["subagent_count"] == 2
+    assert payload["providers_used"] == ["openrouter"]
+    assert payload["models_used"] == ["qwen/qwen3-coder"]
