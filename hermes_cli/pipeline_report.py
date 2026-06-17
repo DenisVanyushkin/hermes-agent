@@ -280,6 +280,15 @@ class PipelineExecutionReport:
     subagent_runs: list[PipelineSubagentRunReport]
     completion: PipelineCompletionReport
     final_response: PipelineFinalResponse
+    peer_messages: list[dict[str, Any]] = field(default_factory=list)
+    disagreements: list[dict[str, Any]] = field(default_factory=list)
+    model_escalations: list[dict[str, Any]] = field(default_factory=list)
+    reviewer_packet: dict[str, Any] = field(default_factory=dict)
+    git_gate: dict[str, Any] = field(default_factory=dict)
+    changed_files: list[str] = field(default_factory=list)
+    tests: dict[str, Any] = field(default_factory=dict)
+    review_overrides: dict[str, Any] = field(default_factory=dict)
+    decisive_subagent: str | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
         summary = self.summary.to_safe_dict()
@@ -299,6 +308,30 @@ class PipelineExecutionReport:
             "blocked_reason": completion["blocked_reason"],
             "status": _review_status(completion=completion, executed=self.executed),
         }
+        review.update({key: value for key, value in self.review_overrides.items() if value is not None})
+        git_gate = {
+            "status": "unavailable",
+            "enabled": False,
+            "changed_files": [],
+            "review_required": review["review_required"],
+            "completion_blocked_reason": completion["blocked_reason"],
+        }
+        git_gate.update(self.git_gate)
+        reviewer_packet = {
+            "status": "unavailable",
+            "present": False,
+            "review_required": review["review_required"],
+            "user_action_required": review["user_action_required"],
+            "blocked_reason": completion["blocked_reason"],
+            "safe_packet": None,
+        }
+        reviewer_packet.update(self.reviewer_packet)
+        tests = {
+            "status": "unavailable",
+            "source": "unavailable",
+            "summary": None,
+        }
+        tests.update(self.tests)
         return {
             "schema_version": PIPELINE_EXECUTION_REPORT_SCHEMA_VERSION,
             "status": self.status.value,
@@ -357,31 +390,15 @@ class PipelineExecutionReport:
                 "candidate_complete": completion["candidate_complete"],
                 "final_verdict": completion["final_verdict"],
             },
-            "git_gate": {
-                "status": "unavailable",
-                "enabled": False,
-                "changed_files": [],
-                "review_required": review["review_required"],
-                "completion_blocked_reason": completion["blocked_reason"],
-            },
+            "git_gate": git_gate,
             "review": review,
-            "reviewer_packet": {
-                "status": "unavailable",
-                "present": False,
-                "review_required": review["review_required"],
-                "user_action_required": review["user_action_required"],
-                "blocked_reason": completion["blocked_reason"],
-                "safe_packet": None,
-            },
-            "peer_messages": [],
-            "disagreements": [],
-            "model_escalations": [],
-            "changed_files": [],
-            "tests": {
-                "status": "unavailable",
-                "source": "unavailable",
-                "summary": None,
-            },
+            "reviewer_packet": reviewer_packet,
+            "peer_messages": [dict(item) for item in self.peer_messages],
+            "disagreements": [dict(item) for item in self.disagreements],
+            "decisive_subagent": self.decisive_subagent,
+            "model_escalations": [dict(item) for item in self.model_escalations],
+            "changed_files": list(self.changed_files),
+            "tests": tests,
         }
 
 
@@ -391,6 +408,16 @@ def build_pipeline_execution_report(
     state_snapshot: PipelineStateSnapshot,
     preflight_result: Mapping[str, Any] | None = None,
     final_response_text: str | None = None,
+    peer_messages: list[dict[str, Any]] | None = None,
+    disagreements: list[dict[str, Any]] | None = None,
+    model_escalations: list[dict[str, Any]] | None = None,
+    reviewer_packet: Mapping[str, Any] | None = None,
+    git_gate: Mapping[str, Any] | None = None,
+    changed_files: list[str] | None = None,
+    tests: Mapping[str, Any] | None = None,
+    review_overrides: Mapping[str, Any] | None = None,
+    decisive_subagent: str | None = None,
+    subagent_runs_override: list[Mapping[str, Any]] | None = None,
 ) -> PipelineExecutionReport:
     _validate_required_metadata(session=session, state_snapshot=state_snapshot)
 
@@ -424,7 +451,11 @@ def build_pipeline_execution_report(
         disagreement_present=disagreement_present,
     )
 
-    subagent_runs = _build_subagent_run_reports(state_snapshot.planned_steps)
+    subagent_runs = (
+        _coerce_subagent_run_reports(subagent_runs_override)
+        if subagent_runs_override is not None
+        else _build_subagent_run_reports(state_snapshot.planned_steps)
+    )
     usage = _build_usage_report(state_snapshot.planned_steps, subagent_runs)
     final_response = PipelineFinalResponse(
         status=status,
@@ -483,6 +514,15 @@ def build_pipeline_execution_report(
         subagent_runs=subagent_runs,
         completion=completion,
         final_response=final_response,
+        peer_messages=[dict(item) for item in (peer_messages or [])],
+        disagreements=[dict(item) for item in (disagreements or [])],
+        model_escalations=[dict(item) for item in (model_escalations or [])],
+        reviewer_packet=dict(reviewer_packet or {}),
+        git_gate=dict(git_gate or {}),
+        changed_files=list(changed_files or []),
+        tests=dict(tests or {}),
+        review_overrides=dict(review_overrides or {}),
+        decisive_subagent=decisive_subagent,
     )
 
 
@@ -563,6 +603,32 @@ def _build_subagent_run_reports(steps: list[PipelineStepPlan]) -> list[PipelineS
                 failure_reason=_mapping_value(runner_result, "failure_reason"),
                 error_type=_mapping_value(runner_result, "error_type"),
                 raw_output_redacted=bool(runner_result.get("raw_output_redacted", True)),
+            )
+        )
+    return runs
+
+
+def _coerce_subagent_run_reports(payloads: list[Mapping[str, Any]] | None) -> list[PipelineSubagentRunReport]:
+    runs: list[PipelineSubagentRunReport] = []
+    for item in list(payloads or []):
+        runs.append(
+            PipelineSubagentRunReport(
+                step_id=str(item.get("step_id") or "unknown"),
+                subagent_id=str(item.get("subagent_id") or "unknown"),
+                role_id=str(item.get("role_id") or "unknown"),
+                status=str(item.get("status") or "unknown"),
+                actual_provider=_mapping_value(item, "actual_provider"),
+                actual_model=_mapping_value(item, "actual_model"),
+                input_hash=_mapping_value(item, "input_hash"),
+                prompt_hash=_mapping_value(item, "prompt_hash"),
+                response_output_hash=_mapping_value(item, "response_output_hash"),
+                token_usage=_normalized_usage_payload(item.get("token_usage")),
+                cache=_normalized_cache_payload(item.get("cache")),
+                tool_call_summaries=_mapping_list(item.get("tool_call_summaries")),
+                elapsed_ms=item.get("elapsed_ms"),
+                failure_reason=_mapping_value(item, "failure_reason"),
+                error_type=_mapping_value(item, "error_type"),
+                raw_output_redacted=bool(item.get("raw_output_redacted", True)),
             )
         )
     return runs

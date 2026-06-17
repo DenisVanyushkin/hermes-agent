@@ -23,6 +23,7 @@ from hermes_cli.pipeline_one_step_execution import (
 from hermes_cli.pipeline_git_delta import GitMaterialChangeResult, GitSnapshot, capture_git_snapshot, compare_git_snapshots
 from hermes_cli.pipeline_report import (
     _mapping_list,
+    _mapping_value,
     _normalized_cache_payload,
     _normalized_usage_payload,
     _runner_result_is_reportable,
@@ -176,6 +177,15 @@ def execute_bounded_rework_loop(
         git_result=None,
     )
     current_reviewer_packet = _disabled_reviewer_packet() if not repo_path else _absent_reviewer_packet()
+    accumulated_subagent_runs: list[dict[str, Any]] = []
+    peer_messages: list[dict[str, Any]] = []
+    disagreements: list[dict[str, Any]] = []
+    model_escalations: list[dict[str, Any]] = []
+    pending_reviewer_blockers: list[str] = []
+    peer_round_used = False
+    decisive_subagent = REVIEWER_SUBAGENT_ID
+    review_overrides: dict[str, Any] = {}
+    loop_policy = resolve_loop_limit_policy(pipeline_spec)
 
     while True:
         loop_snapshot = {
@@ -207,6 +217,7 @@ def execute_bounded_rework_loop(
             },
         )
         current_snapshot = engineer_result.state_snapshot
+        _append_step_run(accumulated_subagent_runs, current_snapshot, 0)
         engineer_output = _step_structured_output(current_snapshot, 0)
         post_snapshot: GitSnapshot | None = None
         git_result: GitMaterialChangeResult | None = None
@@ -246,8 +257,8 @@ def execute_bounded_rework_loop(
                 user_action_required=True,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
-                subagent_runs=_collect_subagent_runs(current_snapshot),
-                usage_summary=_usage_summary_from_snapshot(current_snapshot),
+                subagent_runs=accumulated_subagent_runs,
+                usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
             )
         if git_result is not None and _git_result_blocks_completion(git_result):
             return _blocked_loop_result(
@@ -264,9 +275,213 @@ def execute_bounded_rework_loop(
                 user_action_required=True,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
-                subagent_runs=_collect_subagent_runs(current_snapshot),
-                usage_summary=_usage_summary_from_snapshot(current_snapshot),
+                subagent_runs=accumulated_subagent_runs,
+                usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
             )
+        active_reviewer_blockers = _active_reviewer_blockers(
+            current_snapshot=current_snapshot,
+            pending_reviewer_blockers=pending_reviewer_blockers,
+        )
+        if active_reviewer_blockers and _engineer_requests_disagreement(engineer_output):
+            if peer_round_used or loop_policy.max_peer_discussion_rounds <= 0:
+                disagreement = _build_disagreement_record(
+                    status="reviewer_maintained_blocker",
+                    reviewer_blockers=active_reviewer_blockers,
+                    peer_round_limit_status="max_peer_discussion_rounds_reached",
+                    decisive_subagent=decisive_subagent,
+                )
+                disagreements.append(disagreement)
+                model_escalations.append(
+                    _build_model_escalation_record(status="block_and_escalate_to_user")
+                )
+                final_snapshot = replace(
+                    current_snapshot,
+                    state="rework_loop_disagreement_blocked",
+                    completion_reason="reviewer_decisive_after_disagreement",
+                    executed=True,
+                    completion_allowed=False,
+                    completion_blocked_reason="reviewer_decisive_after_disagreement",
+                    final_verdict="reviewer_decisive_after_disagreement",
+                )
+                review_overrides = {"reviewer_approved": False, "status": "blocked_after_disagreement"}
+                return _finalize_loop_result(
+                    fuse=fuse,
+                    session=session,
+                    snapshot=final_snapshot,
+                    preflight_allowed=True,
+                    preflight_reason_code="rework_loop_fuse_allowed",
+                    iteration_history=iteration_history,
+                    review_iterations_completed=review_iterations_completed,
+                    max_review_iterations=max_review_iterations,
+                    policy_source=policy_source,
+                    original_task=user_message,
+                    appended_rework_context=appended_rework_context,
+                    completion_allowed=False,
+                    candidate_complete=False,
+                    user_action_required=True,
+                    blocked_reason="reviewer_decisive_after_disagreement",
+                    git_gate=current_git_gate,
+                    reviewer_packet=current_reviewer_packet,
+                    subagent_runs=accumulated_subagent_runs,
+                    peer_messages=peer_messages,
+                    disagreements=disagreements,
+                    decisive_subagent=decisive_subagent,
+                    model_escalations=model_escalations,
+                    tests=_tests_payload(test_summary),
+                    review_overrides=review_overrides,
+                )
+
+            peer_round_used = True
+            disagreement = _build_disagreement_record(
+                status="peer_discussion_requested",
+                reviewer_blockers=active_reviewer_blockers,
+                peer_round_limit_status=None,
+                decisive_subagent=decisive_subagent,
+            )
+            peer_message = _build_peer_message(
+                session=session,
+                engineer_output=engineer_output,
+                reviewer_blockers=active_reviewer_blockers,
+                related_verdict_id=f"review-{review_iterations_completed}",
+            )
+            disagreements.append(disagreement)
+            peer_messages.append(peer_message)
+            reviewer_fuse = evaluate_pipeline_reviewer_execution_fuse(
+                config=config,
+                session=session,
+                state_snapshot=_reviewer_prereq_satisfied_snapshot(current_snapshot),
+            )
+            if not reviewer_fuse.actual_invocation_allowed:
+                return _blocked_loop_result(
+                    fuse=fuse,
+                    session=session,
+                    snapshot=current_snapshot,
+                    original_task=user_message,
+                    appended_rework_context=appended_rework_context,
+                    iteration_history=iteration_history,
+                    review_iterations_completed=review_iterations_completed,
+                    max_review_iterations=max_review_iterations,
+                    policy_source=policy_source,
+                    blocked_reason=reviewer_fuse.blocked_reason,
+                    user_action_required=False,
+                    git_gate=current_git_gate,
+                    reviewer_packet=current_reviewer_packet,
+                    subagent_runs=accumulated_subagent_runs,
+                    usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                )
+            reviewer_message = _compose_peer_reviewer_message(
+                original_task=user_message,
+                peer_message=peer_message,
+            )
+            reviewer_result = _execute_step(
+                config=config,
+                session=session,
+                loaded_specs=loaded_specs,
+                runtime_factory=runtime_factory,
+                runner=runner,
+                controlled_runtime_context=runtime_context,
+                pipeline_spec=pipeline_spec,
+                current_snapshot=current_snapshot,
+                step_index=1,
+                step_kind="reviewer",
+                user_message=reviewer_message,
+                metadata={
+                    "execution_backend": "controlled_runtime_runner" if runtime_context is not None else "legacy_runner",
+                    "execution_scope": reviewer_fuse.execution_scope,
+                    "engineer_result_present": True,
+                    "loop_allowed": True,
+                    "review_iterations_completed": review_iterations_completed,
+                    "peer_discussion": True,
+                },
+            )
+            current_snapshot = reviewer_result.state_snapshot
+            _append_step_run(accumulated_subagent_runs, current_snapshot, 1)
+            reviewer_step = reviewer_result.state_snapshot.planned_steps[1]
+            reviewer_eval = getattr(reviewer_step, "evaluation_result", None) or {}
+            reviewer_blockers = list(reviewer_eval.get("blockers") or [])
+            reviewer_status = str(reviewer_eval.get("status") or "not_evaluated")
+            if reviewer_status == REVIEWER_APPROVAL_STATUS and not reviewer_blockers:
+                disagreements[-1]["status"] = "resolved"
+                disagreements[-1]["resolution"] = "reviewer_revised_to_approved"
+                model_escalations.append(_build_model_escalation_record(status="not_required"))
+                final_snapshot = replace(
+                    current_snapshot,
+                    state="peer_discussion_completed",
+                    completion_reason="rework_loop_candidate_complete",
+                    executed=True,
+                    completion_allowed=allow_completion_after_review,
+                    completion_blocked_reason=None if allow_completion_after_review else "loop_harness_not_live_final",
+                    final_verdict="controlled_rework_loop_candidate_complete",
+                )
+                review_overrides = {"reviewer_approved": True, "status": "approved_after_disagreement"}
+                return _finalize_loop_result(
+                    fuse=fuse,
+                    session=session,
+                    snapshot=final_snapshot,
+                    preflight_allowed=True,
+                    preflight_reason_code="rework_loop_fuse_allowed",
+                    iteration_history=iteration_history,
+                    review_iterations_completed=review_iterations_completed,
+                    max_review_iterations=max_review_iterations,
+                    policy_source=policy_source,
+                    original_task=user_message,
+                    appended_rework_context=appended_rework_context,
+                    completion_allowed=allow_completion_after_review,
+                    candidate_complete=True,
+                    user_action_required=False,
+                    blocked_reason=None if allow_completion_after_review else "loop_harness_not_live_final",
+                    git_gate=current_git_gate,
+                    reviewer_packet=current_reviewer_packet,
+                    subagent_runs=accumulated_subagent_runs,
+                    peer_messages=peer_messages,
+                    disagreements=disagreements,
+                    decisive_subagent=decisive_subagent,
+                    model_escalations=model_escalations,
+                    tests=_tests_payload(test_summary),
+                    review_overrides=review_overrides,
+                )
+
+            disagreements[-1]["status"] = "reviewer_maintained_blocker"
+            disagreements[-1]["resolution"] = "reviewer_blocker_authoritative"
+            disagreements[-1]["peer_round_limit_status"] = "max_peer_discussion_rounds_reached"
+            model_escalations.append(_build_model_escalation_record(status="block_and_escalate_to_user"))
+            final_snapshot = replace(
+                current_snapshot,
+                state="disagreement_unresolved",
+                completion_reason="reviewer_decisive_after_disagreement",
+                executed=True,
+                completion_allowed=False,
+                completion_blocked_reason="reviewer_decisive_after_disagreement",
+                final_verdict="reviewer_decisive_after_disagreement",
+            )
+            review_overrides = {"reviewer_approved": False, "status": "blocked_after_disagreement"}
+            return _finalize_loop_result(
+                fuse=fuse,
+                session=session,
+                snapshot=final_snapshot,
+                preflight_allowed=True,
+                preflight_reason_code="rework_loop_fuse_allowed",
+                iteration_history=iteration_history,
+                review_iterations_completed=review_iterations_completed,
+                max_review_iterations=max_review_iterations,
+                policy_source=policy_source,
+                original_task=user_message,
+                appended_rework_context=appended_rework_context,
+                completion_allowed=False,
+                candidate_complete=False,
+                user_action_required=True,
+                blocked_reason="reviewer_decisive_after_disagreement",
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
+                subagent_runs=accumulated_subagent_runs,
+                peer_messages=peer_messages,
+                disagreements=disagreements,
+                decisive_subagent=decisive_subagent,
+                model_escalations=model_escalations,
+                tests=_tests_payload(test_summary),
+                review_overrides=review_overrides,
+            )
+
         if git_result is not None and not git_result.review_required and not git_result.material_changes_present:
             final_snapshot = replace(
                 current_snapshot,
@@ -277,14 +492,12 @@ def execute_bounded_rework_loop(
                 completion_blocked_reason=None,
                 final_verdict="controlled_rework_loop_candidate_complete",
             )
-            return PipelineReworkLoopResult(
+            return _finalize_loop_result(
                 fuse=fuse,
-                state_snapshot=final_snapshot,
-                execution_report=build_pipeline_execution_report(
-                    session=session,
-                    state_snapshot=final_snapshot,
-                    preflight_result={"allowed": True, "reason_code": "rework_loop_fuse_allowed"},
-                ),
+                session=session,
+                snapshot=final_snapshot,
+                preflight_allowed=True,
+                preflight_reason_code="rework_loop_fuse_allowed",
                 iteration_history=iteration_history,
                 review_iterations_completed=review_iterations_completed,
                 max_review_iterations=max_review_iterations,
@@ -297,8 +510,12 @@ def execute_bounded_rework_loop(
                 blocked_reason=None,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
-                subagent_runs=_collect_subagent_runs(final_snapshot),
-                usage_summary=_usage_summary_from_snapshot(final_snapshot),
+                subagent_runs=accumulated_subagent_runs,
+                peer_messages=peer_messages,
+                disagreements=disagreements,
+                decisive_subagent=decisive_subagent,
+                model_escalations=model_escalations,
+                tests=_tests_payload(test_summary),
             )
 
         reviewer_fuse = evaluate_pipeline_reviewer_execution_fuse(
@@ -321,8 +538,8 @@ def execute_bounded_rework_loop(
                 user_action_required=False,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
-                subagent_runs=_collect_subagent_runs(current_snapshot),
-                usage_summary=_usage_summary_from_snapshot(current_snapshot),
+                subagent_runs=accumulated_subagent_runs,
+                usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
             )
 
         reviewer_message = _compose_reviewer_message(
@@ -351,6 +568,7 @@ def execute_bounded_rework_loop(
             },
         )
         current_snapshot = reviewer_result.state_snapshot
+        _append_step_run(accumulated_subagent_runs, current_snapshot, 1)
         reviewer_step = reviewer_result.state_snapshot.planned_steps[1]
         reviewer_eval = getattr(reviewer_step, "evaluation_result", None) or {}
         reviewer_blockers = list(reviewer_eval.get("blockers") or [])
@@ -386,14 +604,12 @@ def execute_bounded_rework_loop(
                 completion_blocked_reason=reviewer_fail_closed_reason,
                 final_verdict="controlled_rework_loop_reviewer_fail_closed",
             )
-            return PipelineReworkLoopResult(
+            return _finalize_loop_result(
                 fuse=fuse,
-                state_snapshot=final_snapshot,
-                execution_report=build_pipeline_execution_report(
-                    session=session,
-                    state_snapshot=final_snapshot,
-                    preflight_result={"allowed": True, "reason_code": "rework_loop_fuse_allowed"},
-                ),
+                session=session,
+                snapshot=final_snapshot,
+                preflight_allowed=True,
+                preflight_reason_code="rework_loop_fuse_allowed",
                 iteration_history=iteration_history,
                 review_iterations_completed=review_iterations_completed,
                 max_review_iterations=max_review_iterations,
@@ -406,8 +622,12 @@ def execute_bounded_rework_loop(
                 blocked_reason=reviewer_fail_closed_reason,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
-                subagent_runs=_collect_subagent_runs(final_snapshot),
-                usage_summary=_usage_summary_from_snapshot(final_snapshot),
+                subagent_runs=accumulated_subagent_runs,
+                peer_messages=peer_messages,
+                disagreements=disagreements,
+                decisive_subagent=decisive_subagent,
+                model_escalations=model_escalations,
+                tests=_tests_payload(test_summary),
             )
 
         # Approval requires positive reviewer candidate_complete verdict; absence of blockers is not sufficient.
@@ -423,14 +643,12 @@ def execute_bounded_rework_loop(
                 completion_blocked_reason=blocked_reason,
                 final_verdict="controlled_rework_loop_candidate_complete",
             )
-            return PipelineReworkLoopResult(
+            return _finalize_loop_result(
                 fuse=fuse,
-                state_snapshot=final_snapshot,
-                execution_report=build_pipeline_execution_report(
-                    session=session,
-                    state_snapshot=final_snapshot,
-                    preflight_result={"allowed": True, "reason_code": "rework_loop_fuse_allowed"},
-                ),
+                session=session,
+                snapshot=final_snapshot,
+                preflight_allowed=True,
+                preflight_reason_code="rework_loop_fuse_allowed",
                 iteration_history=iteration_history,
                 review_iterations_completed=review_iterations_completed,
                 max_review_iterations=max_review_iterations,
@@ -443,8 +661,12 @@ def execute_bounded_rework_loop(
                 blocked_reason=blocked_reason,
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
-                subagent_runs=_collect_subagent_runs(final_snapshot),
-                usage_summary=_usage_summary_from_snapshot(final_snapshot),
+                subagent_runs=accumulated_subagent_runs,
+                peer_messages=peer_messages,
+                disagreements=disagreements,
+                decisive_subagent=decisive_subagent,
+                model_escalations=model_escalations,
+                tests=_tests_payload(test_summary),
             )
 
         if review_iterations_completed >= max_review_iterations:
@@ -457,14 +679,12 @@ def execute_bounded_rework_loop(
                 completion_blocked_reason="review_loop_limit_exceeded",
                 final_verdict="controlled_rework_loop_limit_blocked",
             )
-            return PipelineReworkLoopResult(
+            return _finalize_loop_result(
                 fuse=fuse,
-                state_snapshot=final_snapshot,
-                execution_report=build_pipeline_execution_report(
-                    session=session,
-                    state_snapshot=final_snapshot,
-                    preflight_result={"allowed": True, "reason_code": "rework_loop_fuse_allowed"},
-                ),
+                session=session,
+                snapshot=final_snapshot,
+                preflight_allowed=True,
+                preflight_reason_code="rework_loop_fuse_allowed",
                 iteration_history=iteration_history,
                 review_iterations_completed=review_iterations_completed,
                 max_review_iterations=max_review_iterations,
@@ -477,10 +697,15 @@ def execute_bounded_rework_loop(
                 blocked_reason="review_loop_limit_exceeded",
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
-                subagent_runs=_collect_subagent_runs(final_snapshot),
-                usage_summary=_usage_summary_from_snapshot(final_snapshot),
+                subagent_runs=accumulated_subagent_runs,
+                peer_messages=peer_messages,
+                disagreements=disagreements,
+                decisive_subagent=decisive_subagent,
+                model_escalations=model_escalations,
+                tests=_tests_payload(test_summary),
             )
 
+        pending_reviewer_blockers = list(reviewer_blockers)
         appended_rework_context.append(_format_blocker_context(review_iterations_completed, reviewer_blockers))
 
 
@@ -745,6 +970,7 @@ def _blocked_loop_result(
     subagent_runs: list[dict[str, Any]],
     usage_summary: dict[str, Any],
 ) -> PipelineReworkLoopResult:
+    helper_subagent_runs = _collect_subagent_runs(snapshot)
     return PipelineReworkLoopResult(
         fuse=fuse,
         state_snapshot=snapshot,
@@ -767,6 +993,69 @@ def _blocked_loop_result(
         reviewer_packet=reviewer_packet,
         subagent_runs=subagent_runs,
         usage_summary=usage_summary,
+    )
+
+
+def _finalize_loop_result(
+    *,
+    fuse: PipelineExecutionFuseResult,
+    session: PipelineSession,
+    snapshot: Any,
+    preflight_allowed: bool,
+    preflight_reason_code: str | None,
+    iteration_history: list[ReworkLoopIterationRecord],
+    review_iterations_completed: int,
+    max_review_iterations: int,
+    policy_source: str,
+    original_task: str,
+    appended_rework_context: list[str],
+    completion_allowed: bool,
+    candidate_complete: bool,
+    user_action_required: bool,
+    blocked_reason: str | None,
+    git_gate: dict[str, Any],
+    reviewer_packet: dict[str, Any],
+    subagent_runs: list[dict[str, Any]],
+    peer_messages: list[dict[str, Any]],
+    disagreements: list[dict[str, Any]],
+    decisive_subagent: str | None,
+    model_escalations: list[dict[str, Any]],
+    tests: dict[str, Any],
+    review_overrides: dict[str, Any] | None = None,
+) -> PipelineReworkLoopResult:
+    helper_subagent_runs = _collect_subagent_runs(snapshot)
+    return PipelineReworkLoopResult(
+        fuse=fuse,
+        state_snapshot=snapshot,
+        execution_report=build_pipeline_execution_report(
+            session=session,
+            state_snapshot=snapshot,
+            preflight_result={"allowed": preflight_allowed, "reason_code": preflight_reason_code},
+            peer_messages=peer_messages,
+            disagreements=disagreements,
+            decisive_subagent=decisive_subagent,
+            model_escalations=model_escalations,
+            reviewer_packet=reviewer_packet,
+            git_gate=git_gate,
+            changed_files=list(git_gate.get("changed_files") or []),
+            tests=tests,
+            review_overrides=review_overrides or {},
+            subagent_runs_override=subagent_runs,
+        ),
+        iteration_history=iteration_history,
+        review_iterations_completed=review_iterations_completed,
+        max_review_iterations=max_review_iterations,
+        policy_source=policy_source,
+        original_task=original_task,
+        appended_rework_context=appended_rework_context,
+        completion_allowed=completion_allowed,
+        candidate_complete=candidate_complete,
+        user_action_required=user_action_required,
+        blocked_reason=blocked_reason,
+        git_gate=git_gate,
+        reviewer_packet=reviewer_packet,
+        subagent_runs=helper_subagent_runs,
+        usage_summary=_usage_summary_from_snapshot(snapshot),
     )
 
 
@@ -816,6 +1105,37 @@ def _collect_subagent_runs(snapshot: Any) -> list[dict[str, Any]]:
             }
         )
     return runs
+
+
+def _append_step_run(accumulator: list[dict[str, Any]], snapshot: Any, step_index: int) -> None:
+    planned_steps = list(getattr(snapshot, "planned_steps", []) or [])
+    if len(planned_steps) <= step_index:
+        return
+    step = planned_steps[step_index]
+    runner_result = getattr(step, "runner_result", None)
+    if not isinstance(runner_result, dict) or not runner_result:
+        return
+    runner_payload = dict(runner_result or {})
+    accumulator.append(
+        {
+            "step_id": step.step_kind,
+            "subagent_id": step.subagent_id,
+            "role_id": step.step_kind,
+            "status": runner_payload.get("status"),
+            "actual_provider": runner_payload.get("actual_provider"),
+            "actual_model": runner_payload.get("actual_model"),
+            "input_hash": runner_payload.get("input_hash"),
+            "prompt_hash": runner_payload.get("prompt_hash"),
+            "response_output_hash": runner_payload.get("response_output_hash"),
+            "token_usage": _normalized_usage_payload(runner_payload.get("usage_summary")),
+            "cache": _normalized_cache_payload(runner_payload.get("cache_summary")),
+            "tool_call_summaries": _mapping_list(runner_payload.get("tool_call_summaries")),
+            "elapsed_ms": runner_payload.get("elapsed_ms"),
+            "failure_reason": runner_payload.get("failure_reason"),
+            "error_type": runner_payload.get("error_type"),
+            "raw_output_redacted": bool(runner_payload.get("raw_output_redacted", True)),
+        }
+    )
 
 
 def _usage_summary_from_snapshot(snapshot: Any) -> dict[str, Any]:
@@ -962,8 +1282,108 @@ def _compose_reviewer_message(
     return "\n\n".join(parts)
 
 
+def _compose_peer_reviewer_message(*, original_task: str, peer_message: dict[str, Any]) -> str:
+    summary = _mapping_value((peer_message.get("content") or {}), "summary") or "Engineer submitted a disagreement summary."
+    arguments = list((peer_message.get("content") or {}).get("arguments") or [])
+    evidence = list((peer_message.get("content") or {}).get("evidence") or [])
+    parts = [
+        original_task,
+        "Peer discussion follow-up.",
+        f"Summary: {summary}",
+    ]
+    if arguments:
+        parts.append("Arguments: " + "; ".join(str(item) for item in arguments))
+    if evidence:
+        parts.append("Evidence: " + "; ".join(str(item) for item in evidence))
+    return "\n\n".join(parts)
+
+
 def _format_blocker_context(iteration_index: int, blockers: list[str]) -> str:
     return f"Reviewer blockers after iteration {iteration_index}: " + "; ".join(blockers)
+
+
+def _engineer_requests_disagreement(engineer_output: dict[str, Any]) -> bool:
+    return str(engineer_output.get("status") or "") == "disagree_with_reviewer" and str(
+        engineer_output.get("next_action") or ""
+    ) == "disagreement"
+
+
+def _build_peer_message(
+    *,
+    session: PipelineSession,
+    engineer_output: dict[str, Any],
+    reviewer_blockers: list[str],
+    related_verdict_id: str,
+) -> dict[str, Any]:
+    evidence = [_safe_path_evidence(item) for item in list(engineer_output.get("evidence") or []) if item]
+    return {
+        "message_id": f"peer-{session.pipeline_session_id}-{len(evidence)}-{len(reviewer_blockers)}",
+        "pipeline_session_id": session.pipeline_session_id,
+        "from_subagent": ENGINEER_SUBAGENT_ID,
+        "to_subagent": REVIEWER_SUBAGENT_ID,
+        "type": "disagreement",
+        "related_verdict_id": related_verdict_id,
+        "content": {
+            "summary": str(engineer_output.get("summary") or "Engineer disagrees with reviewer blocker."),
+            "arguments": [str(item) for item in list(engineer_output.get("reviewer_objections") or reviewer_blockers)],
+            "evidence": evidence,
+        },
+        "requires_response": True,
+    }
+
+
+def _build_disagreement_record(
+    *,
+    status: str,
+    reviewer_blockers: list[str],
+    peer_round_limit_status: str | None,
+    decisive_subagent: str,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "reviewer_blockers": list(reviewer_blockers),
+        "peer_round_limit_status": peer_round_limit_status,
+        "decisive_subagent": decisive_subagent,
+    }
+
+
+def _build_model_escalation_record(*, status: str) -> dict[str, Any]:
+    return {
+        "condition": "disagreement_unresolved_after_allowed_peer_discussion",
+        "status": status,
+        "target_subagent": "decisive_subagent_or_arbitrator",
+        "escalation_model_class": "senior_reasoning",
+        "reason": "redacted_disagreement_summary",
+    }
+
+
+def _tests_payload(test_summary: Any) -> dict[str, Any]:
+    if isinstance(test_summary, dict):
+        return {
+            "status": str(test_summary.get("status") or "available"),
+            "source": str(test_summary.get("source") or "provided"),
+            "summary": test_summary.get("summary"),
+        }
+    return {
+        "status": "unavailable",
+        "source": "unavailable",
+        "summary": None,
+    }
+
+
+def _safe_path_evidence(value: Any) -> str:
+    text = str(value)
+    return text if "/" not in text else text.split("/")[-1]
+
+
+def _active_reviewer_blockers(*, current_snapshot: Any, pending_reviewer_blockers: list[str]) -> list[str]:
+    if pending_reviewer_blockers:
+        return list(pending_reviewer_blockers)
+    planned_steps = list(getattr(current_snapshot, "planned_steps", []) or [])
+    if len(planned_steps) <= 1:
+        return []
+    evaluation_result = getattr(planned_steps[1], "evaluation_result", None) or {}
+    return [str(item) for item in list(evaluation_result.get("blockers") or []) if item]
 
 
 def _coerce_positive_int(value: Any, default: int) -> int:
@@ -1012,6 +1432,8 @@ def _engineer_fail_closed_reason(state_snapshot: Any) -> str | None:
         return "engineer_result_missing"
     if runner_status != "succeeded":
         return "engineer_result_failed"
+    if _engineer_requests_disagreement(_step_structured_output(state_snapshot, 0)):
+        return None
     if evaluation_status != REVIEWER_APPROVAL_STATUS:
         return "engineer_result_invalid"
     return None
