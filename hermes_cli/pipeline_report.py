@@ -10,6 +10,9 @@ from hermes_cli.pipeline_session import PipelineSession, PipelineStepPlan
 from hermes_cli.pipeline_state_machine import PipelineStateSnapshot
 
 
+PIPELINE_EXECUTION_REPORT_SCHEMA_VERSION = "pipeline_execution_report.v1"
+
+
 class PipelineReportStatus(str, Enum):
     NOT_EXECUTED = "not_executed"
     BLOCKED = "blocked"
@@ -155,6 +158,8 @@ class PipelineUsageReport:
     usage_known: bool = False
     token_sources: list[str] = field(default_factory=list)
     cache_sources: list[str] = field(default_factory=list)
+    planned_subagent_count: int = 0
+    executed_subagent_count: int = 0
     subagent_count: int = 0
     models_used: list[str] = field(default_factory=list)
     providers_used: list[str] = field(default_factory=list)
@@ -171,6 +176,8 @@ class PipelineUsageReport:
             "usage_known": self.usage_known,
             "token_sources": list(self.token_sources),
             "cache_sources": list(self.cache_sources),
+            "planned_subagent_count": self.planned_subagent_count,
+            "executed_subagent_count": self.executed_subagent_count,
             "subagent_count": self.subagent_count,
             "models_used": list(self.models_used),
             "providers_used": list(self.providers_used),
@@ -275,19 +282,106 @@ class PipelineExecutionReport:
     final_response: PipelineFinalResponse
 
     def to_safe_dict(self) -> dict[str, Any]:
+        summary = self.summary.to_safe_dict()
+        gate = self.gate.to_safe_dict()
+        usage = self.usage.to_safe_dict()
+        completion = self.completion.to_safe_dict()
+        safety = self.safety.to_safe_dict()
+        final_response = self.final_response.to_safe_dict()
+        subagents = [item.to_safe_dict() for item in self.subagents]
+        models = [item.to_safe_dict() for item in self.models]
+        subagent_runs = [item.to_safe_dict() for item in self.subagent_runs]
+        review = {
+            "review_required": completion["review_required"],
+            "reviewer_invoked": usage["executed_subagent_count"] > 1,
+            "reviewer_approved": self.executed and not completion["review_required"] and completion["completion_allowed"],
+            "user_action_required": completion["user_action_required"],
+            "blocked_reason": completion["blocked_reason"],
+            "status": _review_status(completion=completion, executed=self.executed),
+        }
         return {
+            "schema_version": PIPELINE_EXECUTION_REPORT_SCHEMA_VERSION,
             "status": self.status.value,
             "executed": self.executed,
             "execution_mode": self.execution_mode,
-            "summary": self.summary.to_safe_dict(),
-            "subagents": [item.to_safe_dict() for item in self.subagents],
-            "models": [item.to_safe_dict() for item in self.models],
-            "gate": self.gate.to_safe_dict(),
-            "safety": self.safety.to_safe_dict(),
-            "usage": self.usage.to_safe_dict(),
-            "subagent_runs": [item.to_safe_dict() for item in self.subagent_runs],
-            "completion": self.completion.to_safe_dict(),
-            "final_response": self.final_response.to_safe_dict(),
+            "summary": summary,
+            "subagents": subagents,
+            "models": models,
+            "gate": gate,
+            "safety": {
+                **safety,
+                "raw_task_redacted": True,
+                "raw_prompts_redacted": bool(safety.get("prompts_redacted", True)),
+                "raw_outputs_redacted": True,
+                "secrets_redacted": bool(safety.get("secrets_redacted", True)),
+                "live_execution_enabled": False,
+                "controlled_execution": self.executed,
+                "tool_mutation_enabled": False,
+            },
+            "usage": usage,
+            "usage_summary": usage,
+            "subagent_runs": subagent_runs,
+            "completion": completion,
+            "final_response": final_response,
+            "pipeline": {
+                "pipeline_id": summary["pipeline_id"],
+                "pipeline_session_id": summary["pipeline_session_id"],
+                "trace_id": summary["trace_id"],
+            },
+            "routing": {
+                "router_status": summary["router_status"],
+                "router_confidence": summary["router_confidence"],
+                "selected_pipeline_id": summary["pipeline_id"],
+                "route_status": summary["route_status"],
+            },
+            "controller": {
+                "execution_mode": self.execution_mode,
+                "executed": self.executed,
+                "status": self.status.value,
+                "user_action_required": summary["user_action_required"],
+            },
+            "helper": {
+                "planned_subagent_count": usage["planned_subagent_count"],
+                "executed_subagent_count": usage["executed_subagent_count"],
+                "subagent_count": usage["subagent_count"],
+                "status": self.status.value,
+            },
+            "session": {
+                "pipeline_session_id": summary["pipeline_session_id"],
+                "trace_id": summary["trace_id"],
+                "execution_mode": self.execution_mode,
+            },
+            "loop": {
+                "status": completion["blocked_reason"] or completion["final_verdict"],
+                "completion_allowed": completion["completion_allowed"],
+                "candidate_complete": completion["candidate_complete"],
+                "final_verdict": completion["final_verdict"],
+            },
+            "git_gate": {
+                "status": "unavailable",
+                "enabled": False,
+                "changed_files": [],
+                "review_required": review["review_required"],
+                "completion_blocked_reason": completion["blocked_reason"],
+            },
+            "review": review,
+            "reviewer_packet": {
+                "status": "unavailable",
+                "present": False,
+                "review_required": review["review_required"],
+                "user_action_required": review["user_action_required"],
+                "blocked_reason": completion["blocked_reason"],
+                "safe_packet": None,
+            },
+            "peer_messages": [],
+            "disagreements": [],
+            "model_escalations": [],
+            "changed_files": [],
+            "tests": {
+                "status": "unavailable",
+                "source": "unavailable",
+                "summary": None,
+            },
         }
 
 
@@ -449,27 +543,22 @@ def _build_subagent_run_reports(steps: list[PipelineStepPlan]) -> list[PipelineS
     runs: list[PipelineSubagentRunReport] = []
     for step in steps:
         runner_result = dict(step.runner_result or {})
-        if not runner_result:
-            continue
-        runner_status = str(runner_result.get("status") or "not_invoked")
-        if runner_status == "not_invoked" or runner_result.get("failure_reason") == "observe_mode_plan_only":
+        if not _runner_result_is_reportable(runner_result):
             continue
         runs.append(
             PipelineSubagentRunReport(
                 step_id=step.step_kind,
                 subagent_id=step.subagent_id,
                 role_id=step.step_kind,
-                status=runner_status,
+                status=str(runner_result.get("status") or "not_invoked"),
                 actual_provider=_mapping_value(runner_result, "actual_provider"),
                 actual_model=_mapping_value(runner_result, "actual_model"),
                 input_hash=_mapping_value(runner_result, "input_hash"),
                 prompt_hash=_mapping_value(runner_result, "prompt_hash"),
                 response_output_hash=_mapping_value(runner_result, "response_output_hash"),
-                token_usage=dict(runner_result.get("usage_summary") or {}),
-                cache=dict(runner_result.get("cache_summary") or {}),
-                tool_call_summaries=[
-                    dict(item) for item in list(runner_result.get("tool_call_summaries") or []) if isinstance(item, Mapping)
-                ],
+                token_usage=_normalized_usage_payload(runner_result.get("usage_summary")),
+                cache=_normalized_cache_payload(runner_result.get("cache_summary")),
+                tool_call_summaries=_mapping_list(runner_result.get("tool_call_summaries")),
                 elapsed_ms=runner_result.get("elapsed_ms"),
                 failure_reason=_mapping_value(runner_result, "failure_reason"),
                 error_type=_mapping_value(runner_result, "error_type"),
@@ -495,18 +584,16 @@ def _build_usage_report(
     cache_sources: list[str] = []
     models_used: list[str] = []
     providers_used: list[str] = []
-    for step in steps:
-        runner_result = dict(step.runner_result or {})
-        usage = dict(runner_result.get("usage_summary") or {})
-        cache = dict(runner_result.get("cache_summary") or {})
-        tool_summaries = list(runner_result.get("tool_call_summaries") or [])
+    for run in subagent_runs:
+        usage = _normalized_usage_payload(run.token_usage)
+        cache = _normalized_cache_payload(run.cache)
         if any(usage.get(key) is not None for key in ("input_tokens", "output_tokens", "reasoning_tokens", "total_tokens")):
             usage_known = True
             input_tokens += int(usage.get("input_tokens") or 0)
             output_tokens += int(usage.get("output_tokens") or 0)
             reasoning_tokens += int(usage.get("reasoning_tokens") or 0)
             total_tokens += int(usage.get("total_tokens") or 0)
-        tool_calls += sum(int(item.get("call_count") or 0) for item in tool_summaries if isinstance(item, Mapping))
+        tool_calls += sum(int(item.get("call_count") or 0) for item in run.tool_call_summaries if isinstance(item, Mapping))
         if cache_hit is None and cache.get("cache_hit") is not None:
             cache_hit = bool(cache.get("cache_hit"))
         if cache_write is None and cache.get("cache_write") is not None:
@@ -517,7 +604,6 @@ def _build_usage_report(
             token_sources.append(str(token_source))
         if cache_source and cache_source not in cache_sources:
             cache_sources.append(str(cache_source))
-    for run in subagent_runs:
         if run.actual_model and run.actual_model not in models_used:
             models_used.append(run.actual_model)
         if run.actual_provider and run.actual_provider not in providers_used:
@@ -533,6 +619,8 @@ def _build_usage_report(
         usage_known=usage_known,
         token_sources=token_sources,
         cache_sources=cache_sources,
+        planned_subagent_count=len(steps),
+        executed_subagent_count=len(subagent_runs),
         subagent_count=len(subagent_runs),
         models_used=models_used,
         providers_used=providers_used,
@@ -547,6 +635,65 @@ def _collect_blockers(steps: list[PipelineStepPlan]) -> list[str]:
                 blockers.append(str(blocker))
     return blockers
 
+
+
+
+def _runner_result_is_reportable(runner_result: Mapping[str, Any] | dict[str, Any] | None) -> bool:
+    if not isinstance(runner_result, Mapping) or not runner_result:
+        return False
+    runner_status = str(runner_result.get("status") or "not_invoked")
+    if runner_status == "not_invoked":
+        return False
+    if runner_status in {"planned", "plan_only"}:
+        return runner_result.get("failure_reason") != "observe_mode_plan_only"
+    return True
+
+
+def _mapping_list(value: Any) -> list[dict[str, Any]]:
+    return [dict(item) for item in list(value or []) if isinstance(item, Mapping)]
+
+
+def _normalized_usage_payload(value: Any) -> dict[str, Any]:
+    usage = dict(value or {})
+    input_tokens = _coerce_int(usage.get("input_tokens"))
+    output_tokens = _coerce_int(usage.get("output_tokens"))
+    reasoning_tokens = _coerce_int(usage.get("reasoning_tokens"))
+    reported_total = usage.get("total_tokens")
+    total_tokens = _coerce_int(reported_total)
+    if reported_total is None and (input_tokens is not None or output_tokens is not None):
+        total_tokens = int(input_tokens or 0) + int(output_tokens or 0)
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "total_tokens": total_tokens,
+        "source": usage.get("source") or ("unavailable" if total_tokens is None else "reported"),
+    }
+
+
+def _normalized_cache_payload(value: Any) -> dict[str, Any]:
+    cache = dict(value or {})
+    return {
+        "cache_hit": cache.get("cache_hit"),
+        "cache_write": cache.get("cache_write"),
+        "source": cache.get("source") or "unavailable",
+    }
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _review_status(*, completion: Mapping[str, Any], executed: bool) -> str:
+    if completion.get("review_required"):
+        return "review_required"
+    if completion.get("blocked_reason"):
+        return "user_action_required" if completion.get("user_action_required") else "blocked"
+    if not executed:
+        return "not_invoked"
+    return "not_required"
 
 def _policy_notes(
     *,

@@ -21,7 +21,13 @@ from hermes_cli.pipeline_one_step_execution import (
     _build_runner_request_from_runtime_plan,
 )
 from hermes_cli.pipeline_git_delta import GitMaterialChangeResult, GitSnapshot, capture_git_snapshot, compare_git_snapshots
-from hermes_cli.pipeline_report import build_pipeline_execution_report
+from hermes_cli.pipeline_report import (
+    _mapping_list,
+    _normalized_cache_payload,
+    _normalized_usage_payload,
+    _runner_result_is_reportable,
+    build_pipeline_execution_report,
+)
 from hermes_cli.pipeline_reviewer_packet import build_reviewer_packet
 from hermes_cli.pipeline_session import PipelineSession
 from hermes_cli.pipeline_state_machine import build_pipeline_state_snapshot
@@ -788,24 +794,25 @@ def _collect_subagent_runs(snapshot: Any) -> list[dict[str, Any]]:
         runner_result = getattr(step, "runner_result", None)
         if not isinstance(runner_result, dict) or not runner_result:
             continue
+        runner_payload = dict(runner_result or {})
         runs.append(
             {
                 "step_id": step.step_kind,
                 "subagent_id": step.subagent_id,
                 "role_id": step.step_kind,
-                "status": runner_result.get("status"),
-                "actual_provider": runner_result.get("actual_provider"),
-                "actual_model": runner_result.get("actual_model"),
-                "input_hash": runner_result.get("input_hash"),
-                "prompt_hash": runner_result.get("prompt_hash"),
-                "response_output_hash": runner_result.get("response_output_hash"),
-                "token_usage": dict(runner_result.get("usage_summary") or {}),
-                "cache": dict(runner_result.get("cache_summary") or {}),
-                "tool_call_summaries": list(runner_result.get("tool_call_summaries") or []),
-                "elapsed_ms": runner_result.get("elapsed_ms"),
-                "failure_reason": runner_result.get("failure_reason"),
-                "error_type": runner_result.get("error_type"),
-                "raw_output_redacted": bool(runner_result.get("raw_output_redacted", True)),
+                "status": runner_payload.get("status"),
+                "actual_provider": runner_payload.get("actual_provider"),
+                "actual_model": runner_payload.get("actual_model"),
+                "input_hash": runner_payload.get("input_hash"),
+                "prompt_hash": runner_payload.get("prompt_hash"),
+                "response_output_hash": runner_payload.get("response_output_hash"),
+                "token_usage": _normalized_usage_payload(runner_payload.get("usage_summary")),
+                "cache": _normalized_cache_payload(runner_payload.get("cache_summary")),
+                "tool_call_summaries": _mapping_list(runner_payload.get("tool_call_summaries")),
+                "elapsed_ms": runner_payload.get("elapsed_ms"),
+                "failure_reason": runner_payload.get("failure_reason"),
+                "error_type": runner_payload.get("error_type"),
+                "raw_output_redacted": bool(runner_payload.get("raw_output_redacted", True)),
             }
         )
     return runs
@@ -823,9 +830,14 @@ def _usage_summary_from_subagent_runs(subagent_runs: list[dict[str, Any]]) -> di
     cache_sources: list[str] = []
     models_used: list[str] = []
     providers_used: list[str] = []
+    planned_subagent_count = len(subagent_runs)
+    executed_subagent_count = 0
     for run in subagent_runs:
-        usage = dict(run.get("token_usage") or {})
-        cache = dict(run.get("cache") or {})
+        if not _runner_result_is_reportable(run):
+            continue
+        executed_subagent_count += 1
+        usage = _normalized_usage_payload(run.get("token_usage"))
+        cache = _normalized_cache_payload(run.get("cache"))
         total_input_tokens += int(usage.get("input_tokens") or 0)
         total_output_tokens += int(usage.get("output_tokens") or 0)
         total_tokens += int(usage.get("total_tokens") or 0)
@@ -847,7 +859,9 @@ def _usage_summary_from_subagent_runs(subagent_runs: list[dict[str, Any]]) -> di
         "total_tokens": total_tokens,
         "token_sources": token_sources,
         "cache_sources": cache_sources,
-        "subagent_count": len(subagent_runs),
+        "planned_subagent_count": planned_subagent_count,
+        "executed_subagent_count": executed_subagent_count,
+        "subagent_count": planned_subagent_count,
         "models_used": models_used,
         "providers_used": providers_used,
     }

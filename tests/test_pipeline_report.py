@@ -163,3 +163,93 @@ def test_report_builder_fails_closed_on_missing_required_metadata() -> None:
 
     with pytest.raises(ValueError, match="missing required pipeline session metadata"):
         build_pipeline_execution_report(session=broken_session, state_snapshot=snapshot)
+
+
+
+def test_report_builder_exposes_stable_contract_sections_and_usage_fallback() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    engineer_step = snapshot.planned_steps[0]
+    snapshot.planned_steps[0] = engineer_step.__class__(**{
+        **engineer_step.__dict__,
+        "runner_result": {
+            **dict(engineer_step.runner_result or {}),
+            "status": "succeeded",
+            "actual_provider": "openrouter",
+            "actual_model": "qwen/qwen3-coder",
+            "usage_summary": {
+                "input_tokens": 11,
+                "output_tokens": 4,
+                "source": "reported",
+            },
+            "cache_summary": {
+                "cache_hit": True,
+                "cache_write": False,
+                "source": "reported",
+            },
+            "tool_call_summaries": [
+                {"tool_name": "apply_patch", "call_count": 2},
+                "not-a-mapping",
+            ],
+        },
+    })
+    reviewer_step = snapshot.planned_steps[1]
+    snapshot.planned_steps[1] = reviewer_step.__class__(**{
+        **reviewer_step.__dict__,
+        "runner_result": {
+            **dict(reviewer_step.runner_result or {}),
+            "status": "not_invoked",
+            "failure_reason": "observe_mode_plan_only",
+            "actual_provider": "openai-codex",
+            "actual_model": "gpt-5.5",
+        },
+    })
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "execution_mode": "controlled_runtime",
+        "completion_allowed": False,
+        "completion_blocked_reason": "review_required",
+        "final_verdict": "review_required",
+    })
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        preflight_result={"allowed": True, "reason_code": None},
+        final_response_text="done",
+    )
+
+    payload = report.to_safe_dict()
+
+    assert payload["schema_version"] == "pipeline_execution_report.v1"
+    assert payload["pipeline"]["pipeline_id"] == "engineering_review_pipeline"
+    assert payload["routing"]["selected_pipeline_id"] == "engineering_review_pipeline"
+    assert payload["controller"]["execution_mode"] == "controlled_runtime"
+    assert payload["helper"]["executed_subagent_count"] == 1
+    assert payload["session"]["pipeline_session_id"] == session.pipeline_session_id
+    assert payload["loop"]["status"] == "review_required"
+    assert payload["usage_summary"]["total_tokens"] == 15
+    assert payload["usage_summary"]["planned_subagent_count"] == 2
+    assert payload["usage_summary"]["executed_subagent_count"] == 1
+    assert payload["usage_summary"]["subagent_count"] == 1
+    assert payload["usage_summary"]["providers_used"] == ["openrouter"]
+    assert payload["git_gate"]["status"] == "unavailable"
+    assert payload["review"]["blocked_reason"] == "review_required"
+    assert payload["reviewer_packet"]["status"] == "unavailable"
+    assert payload["peer_messages"] == []
+    assert payload["disagreements"] == []
+    assert payload["model_escalations"] == []
+    assert payload["changed_files"] == []
+    assert payload["tests"]["status"] == "unavailable"
+    assert payload["completion"]["blocked_reason"] == "review_required"
+    assert payload["safety"]["raw_task_redacted"] is True
+    assert payload["safety"]["raw_outputs_redacted"] is True
+    assert payload["safety"]["live_execution_enabled"] is False
+    assert payload["subagent_runs"][0]["tool_call_summaries"] == [{"tool_name": "apply_patch", "call_count": 2}]
+    assert payload["subagent_runs"][0]["actual_provider"] == "openrouter"
