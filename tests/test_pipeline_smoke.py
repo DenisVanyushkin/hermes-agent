@@ -5,6 +5,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from hermes_cli import pipeline_smoke
+
 
 REPO_ROOT = Path("/home/hermes/.hermes/hermes-agent")
 PYTHON = REPO_ROOT / "venv/bin/python"
@@ -111,3 +115,71 @@ def test_output_does_not_echo_secret_like_task_text() -> None:
     assert "topsecret" not in result.stdout
     payload = _json_output(result)
     assert payload["scenario"] == "approval"
+
+
+def test_controlled_engineering_e2e_manual_dry_run_writes_safe_report(tmp_path: Path) -> None:
+    workspace = tmp_path / "manual-controlled-e2e"
+    report_out = tmp_path / "report.json"
+
+    result = _run_smoke(
+        "--scenario",
+        "controlled-engineering-e2e",
+        "--workspace",
+        str(workspace),
+        "--report-out",
+        str(report_out),
+    )
+
+    assert result.returncode == 0
+    payload = _json_output(result)
+    written_payload = json.loads(report_out.read_text(encoding="utf-8"))
+
+    assert payload == written_payload
+    assert payload["scenario"] == "controlled-engineering-e2e"
+    assert payload["status"] == "completed"
+    assert payload["completion_allowed"] is True
+    assert payload["blocked_reason"] is None
+    assert payload["reviewer_approved"] is True
+    assert payload["mutation_summary"]["applied_count"] == 1
+    assert payload["test_summary"]["status"] == "passed"
+    assert payload["git_gate"]["changed_files"] == ["tests/test_generated_example.py"]
+    assert payload["report"]["completion"]["blocked_reason"] is None
+    assert payload["report"]["review"]["blocked_reason"] is None
+    assert payload["report"]["final_response"]["placeholder_reason"] is None
+    assert payload["report"]["git_gate"]["completion_blocked_reason"] is None
+    assert workspace.joinpath("tests/test_generated_example.py").exists()
+    encoded = json.dumps(payload, sort_keys=True)
+    assert str(workspace) not in encoded
+    assert "engineer runtime completed" not in encoded
+    assert "reviewer runtime approved" not in encoded
+    assert "def test_generated_example" not in encoded
+
+
+def test_controlled_engineering_e2e_unknown_scenario_fails_safely() -> None:
+    result = _run_smoke("--scenario", "unknown-scenario")
+
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
+
+
+def test_controlled_engineering_e2e_requires_explicit_workspace() -> None:
+    result = _run_smoke("--scenario", "controlled-engineering-e2e")
+
+    assert result.returncode == 0
+    payload = _json_output(result)
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "workspace_required"
+    assert payload["runner_call_order"] == []
+
+
+def test_controlled_engineering_e2e_run_smoke_scenario_uses_fake_provider_factory_only(tmp_path: Path) -> None:
+    workspace = tmp_path / "manual-controlled-e2e"
+    payload = pipeline_smoke.run_smoke_scenario(
+        scenario="controlled-engineering-e2e",
+        runner_mode="fake",
+        workspace=workspace,
+    )
+
+    assert payload["provider_execution_mode"] == "fake_real_provider_client"
+    assert payload["network_access"] == "disabled"
+    assert payload["sdk_import_mode"] == "not_used"

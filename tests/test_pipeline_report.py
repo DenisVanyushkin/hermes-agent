@@ -222,6 +222,90 @@ def test_report_builder_fails_closed_on_missing_required_metadata() -> None:
 
 
 
+def test_report_builder_successful_completion_clears_all_blocked_and_placeholder_reasons() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "completion_allowed": True,
+        "completion_blocked_reason": "stale_blocked_reason",
+        "final_verdict": "completed",
+    })
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        git_gate={
+            "status": "enabled",
+            "enabled": True,
+            "changed_files": ["new.txt"],
+            "completion_blocked_reason": "stale_git_gate_reason",
+        },
+    )
+    payload = report.to_safe_dict()
+
+    assert report.completion.completion_allowed is True
+    assert report.completion.blocked_reason is None
+    assert payload["completion"]["blocked_reason"] is None
+    assert payload["review"]["blocked_reason"] is None
+    assert payload["final_response"]["placeholder_reason"] is None
+    assert payload["git_gate"]["completion_blocked_reason"] is None
+
+
+def test_report_builder_blocked_completion_preserves_blocked_reason() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "completion_allowed": False,
+        "completion_blocked_reason": "review_blocked",
+        "final_verdict": "review_blocked",
+    })
+
+    report = build_pipeline_execution_report(session=session, state_snapshot=snapshot)
+    payload = report.to_safe_dict()
+
+    assert report.completion.completion_allowed is False
+    assert report.completion.blocked_reason == "review_blocked"
+    assert payload["review"]["blocked_reason"] == "review_blocked"
+    assert payload["final_response"]["placeholder_reason"] == "review_blocked"
+    assert payload["git_gate"]["completion_blocked_reason"] == "review_blocked"
+
+
+def test_report_builder_execution_disabled_preserves_disabled_placeholder_semantics() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        preflight_result={"allowed": False, "reason_code": "gate_disabled"},
+    )
+    payload = report.to_safe_dict()
+
+    assert report.executed is False
+    assert report.completion.completion_allowed is False
+    assert report.completion.blocked_reason == "execution_disabled"
+    assert payload["final_response"]["placeholder_reason"] == "execution_disabled"
+    assert payload["git_gate"]["completion_blocked_reason"] == "execution_disabled"
+    assert payload["safety"]["execution_enabled"] is False
+    assert payload["safety"]["controlled_execution"] is False
+
+
 def test_report_builder_exposes_stable_contract_sections_and_usage_fallback() -> None:
     loaded = load_pipeline_specs()
     session = _session_for("engineering_review_pipeline", status="selected")

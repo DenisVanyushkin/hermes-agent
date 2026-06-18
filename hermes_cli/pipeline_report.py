@@ -200,6 +200,10 @@ class PipelineCompletionReport:
     disagreement_present: bool
     user_action_required: bool
 
+    def __post_init__(self) -> None:
+        if self.completion_allowed:
+            object.__setattr__(self, "blocked_reason", None)
+
     def to_safe_dict(self) -> dict[str, Any]:
         return {
             "completion_allowed": self.completion_allowed,
@@ -332,6 +336,8 @@ class PipelineExecutionReport:
             "completion_blocked_reason": completion["blocked_reason"],
         }
         git_gate.update(self.git_gate)
+        if completion["completion_allowed"]:
+            git_gate["completion_blocked_reason"] = None
         reviewer_packet = {
             "status": "unavailable",
             "present": False,
