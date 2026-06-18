@@ -18809,6 +18809,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "response_previewed": _stream_consumer is not None and bool(full_response),
         }
 
+    def _pipeline_controlled_final_response(self, report: Any, *, orchestrator_mode: str) -> str | None:
+        if str(orchestrator_mode or "").strip().lower() != "controlled_manual":
+            return None
+
+        controller = getattr(report, "pipeline_execution_controller", None)
+        if controller is None:
+            return None
+
+        execution_mode = str(getattr(controller, "execution_mode", "") or "").strip().lower()
+        if execution_mode != "controlled_manual":
+            return None
+
+        if not bool(getattr(controller, "actual_execution_invoked", False)):
+            return None
+
+        final_response_text = getattr(controller, "final_response_text", None)
+        if not isinstance(final_response_text, str):
+            return None
+
+        final_response_text = final_response_text.strip()
+        return final_response_text or None
+
     # ------------------------------------------------------------------
 
     async def _run_agent(
@@ -19012,14 +19034,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             logger.warning("pipeline observe hook import/invocation failed", exc_info=True)
 
-        if bool(cfg_get(user_config, "pipelines", "enabled", default=False)) and (
-            str(cfg_get(user_config, "pipelines", "orchestrator", "mode", default="disabled") or "disabled").strip().lower()
-            == "observe"
-        ):
+        pipeline_orchestrator_report = None
+        _orchestrator_mode = str(cfg_get(user_config, "pipelines", "orchestrator", "mode", default="disabled") or "disabled").strip().lower()
+        if bool(cfg_get(user_config, "pipelines", "enabled", default=False)) and _orchestrator_mode in {"observe", "controlled_manual"}:
             try:
                 from hermes_cli.orchestrator import observe_gateway_turn
 
-                observe_gateway_turn(
+                pipeline_orchestrator_report = observe_gateway_turn(
                     config=user_config,
                     user_message=message,
                     session_id=session_id,
@@ -19035,6 +19056,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             except Exception:
                 logger.warning("pipeline orchestrator observe hook import/invocation failed", exc_info=True)
+
+        controlled_final_response = self._pipeline_controlled_final_response(
+            pipeline_orchestrator_report,
+            orchestrator_mode=_orchestrator_mode,
+        )
+        if controlled_final_response is not None:
+            logger.info(
+                "pipeline controlled_manual intercept returning safe validation response: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": controlled_final_response,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": controlled_final_response},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
 
         # ---- Proxy mode: delegate to remote API server ----
         if self._get_proxy_url():

@@ -126,6 +126,7 @@ def observe_gateway_turn(
         session=session,
         state=state,
         execution_report=execution_report,
+        pipeline_execution_controller=pipeline_execution_controller,
     )
     _log_observe_report(
         gateway_logger=gateway_logger,
