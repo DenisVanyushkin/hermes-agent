@@ -47,3 +47,4 @@ class OrchestratorObserveReport:
     session: PipelineSession
     state: PipelineState
     execution_report: ExecutionReport
+    pipeline_execution_controller: Any | None = None
