@@ -179,6 +179,12 @@ def format_controlled_manual_summary(helper_result: dict[str, Any] | None, *, wo
     mutation_summary = dict(helper_result.get('mutation_summary') or {})
     test_summary = dict(helper_result.get('test_summary') or {})
     workspace_name = Path(workspace_path).name if workspace_path else None
+    
+    # Extract test counts from results list
+    test_results = list(test_summary.get('results') or [])
+    total_tests = len(test_results)
+    passed_tests = sum(1 for r in test_results if isinstance(r, dict) and r.get('status') == 'passed')
+    
     lines = [
         'Controlled pipeline validation completed.',
         f"status: {helper_result.get('status', 'unknown')}",
@@ -186,7 +192,7 @@ def format_controlled_manual_summary(helper_result: dict[str, Any] | None, *, wo
         f"pipeline: {ENGINEERING_PIPELINE_ID}",
         'runtime: fake_real_provider_client',
         f"mutation: applied_count={int(mutation_summary.get('applied_count') or 0)} denied_count={int(mutation_summary.get('denied_count') or 0)}",
-        f"tests: {test_summary.get('status', 'unknown')} {int(test_summary.get('passed_count') or 0)}/{int(test_summary.get('total_count') or 0)}",
+        f"tests: {test_summary.get('status', 'unknown')} {passed_tests}/{total_tests}",
     ]
     if workspace_name:
         lines.append(f'workspace: {workspace_name}')
