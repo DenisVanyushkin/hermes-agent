@@ -64,6 +64,15 @@ class ControlledRuntimeContext:
     invocation_client: Any
     controlled_runner: ControlledRuntimeRunner
     allow_model_escalation: bool = False
+    allow_real_provider_execution: bool = False
+    request_real_provider_execution: bool = False
+    allowed_real_providers: tuple[str, ...] = ()
+    allowed_real_models: tuple[str, ...] = ()
+    allowed_real_providers_by_role: dict[str, tuple[str, ...]] | None = None
+    allowed_real_models_by_role: dict[str, tuple[str, ...]] | None = None
+    allowed_real_providers_by_subagent: dict[str, tuple[str, ...]] | None = None
+    allowed_real_models_by_subagent: dict[str, tuple[str, ...]] | None = None
+    real_provider_client_factory: Any = None
     allow_mutations: bool = False
     mutation_workspace: str | None = None
 
@@ -1053,6 +1062,15 @@ def _execute_step(
         runtime = build_controlled_runtime(
             plan=runtime_plan,
             invocation_client=controlled_runtime_context.invocation_client,
+            request_real_provider_execution=controlled_runtime_context.request_real_provider_execution,
+            allow_real_provider_execution=controlled_runtime_context.allow_real_provider_execution,
+            allowed_real_providers=controlled_runtime_context.allowed_real_providers,
+            allowed_real_models=controlled_runtime_context.allowed_real_models,
+            allowed_real_providers_by_role=controlled_runtime_context.allowed_real_providers_by_role,
+            allowed_real_models_by_role=controlled_runtime_context.allowed_real_models_by_role,
+            allowed_real_providers_by_subagent=controlled_runtime_context.allowed_real_providers_by_subagent,
+            allowed_real_models_by_subagent=controlled_runtime_context.allowed_real_models_by_subagent,
+            real_provider_client_factory=controlled_runtime_context.real_provider_client_factory,
         )
         controlled_result = controlled_runtime_context.controlled_runner.run(
             runtime,
@@ -1250,6 +1268,15 @@ def _run_escalated_reviewer(
     runtime = build_controlled_runtime(
         plan=runtime_plan,
         invocation_client=runtime_context.invocation_client,
+        request_real_provider_execution=runtime_context.request_real_provider_execution,
+        allow_real_provider_execution=runtime_context.allow_real_provider_execution,
+        allowed_real_providers=runtime_context.allowed_real_providers,
+        allowed_real_models=runtime_context.allowed_real_models,
+        allowed_real_providers_by_role=runtime_context.allowed_real_providers_by_role,
+        allowed_real_models_by_role=runtime_context.allowed_real_models_by_role,
+        allowed_real_providers_by_subagent=runtime_context.allowed_real_providers_by_subagent,
+        allowed_real_models_by_subagent=runtime_context.allowed_real_models_by_subagent,
+        real_provider_client_factory=runtime_context.real_provider_client_factory,
     )
     controlled_result = runtime_context.controlled_runner.run(
         runtime,
@@ -1575,9 +1602,29 @@ def _normalize_controlled_runtime_context(
         invocation_client=value["invocation_client"],
         controlled_runner=controlled_runner,
         allow_model_escalation=bool(value.get("allow_model_escalation", False)),
+        allow_real_provider_execution=bool(value.get("allow_real_provider_execution", False)),
+        request_real_provider_execution=bool(value.get("request_real_provider_execution", False)),
+        allowed_real_providers=tuple(str(item) for item in list(value.get("allowed_real_providers") or ()) if item is not None),
+        allowed_real_models=tuple(str(item) for item in list(value.get("allowed_real_models") or ()) if item is not None),
+        allowed_real_providers_by_role=_normalize_identity_policy(value.get("allowed_real_providers_by_role")),
+        allowed_real_models_by_role=_normalize_identity_policy(value.get("allowed_real_models_by_role")),
+        allowed_real_providers_by_subagent=_normalize_identity_policy(value.get("allowed_real_providers_by_subagent")),
+        allowed_real_models_by_subagent=_normalize_identity_policy(value.get("allowed_real_models_by_subagent")),
+        real_provider_client_factory=value.get("real_provider_client_factory"),
         allow_mutations=bool(value.get("allow_mutations", False)),
         mutation_workspace=str(value.get("mutation_workspace")) if value.get("mutation_workspace") is not None else None,
     )
+
+
+def _normalize_identity_policy(value: Any) -> dict[str, tuple[str, ...]] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, tuple[str, ...]] = {}
+    for key, items in value.items():
+        normalized[str(key)] = tuple(str(item) for item in list(items or ()) if item is not None)
+    return normalized
 
 
 def _apply_step_mutations(
@@ -1658,6 +1705,9 @@ def _collect_subagent_runs(snapshot: Any) -> list[dict[str, Any]]:
                 "subagent_id": step.subagent_id,
                 "role_id": step.step_kind,
                 "status": runner_payload.get("status"),
+                "runtime_mode": runner_payload.get("runtime_mode"),
+                "real_provider_allowed": bool(runner_payload.get("real_provider_allowed", False)),
+                "provider_policy_status": runner_payload.get("provider_policy_status"),
                 "actual_provider": runner_payload.get("actual_provider"),
                 "actual_model": runner_payload.get("actual_model"),
                 "input_hash": runner_payload.get("input_hash"),
@@ -1690,6 +1740,9 @@ def _append_step_run(accumulator: list[dict[str, Any]], snapshot: Any, step_inde
             "subagent_id": step.subagent_id,
             "role_id": step.step_kind,
             "status": runner_payload.get("status"),
+            "runtime_mode": runner_payload.get("runtime_mode"),
+            "real_provider_allowed": bool(runner_payload.get("real_provider_allowed", False)),
+            "provider_policy_status": runner_payload.get("provider_policy_status"),
             "actual_provider": runner_payload.get("actual_provider"),
             "actual_model": runner_payload.get("actual_model"),
             "input_hash": runner_payload.get("input_hash"),
@@ -2033,6 +2086,9 @@ def _subagent_run_from_result(*, step_id: str, subagent_id: str, role_id: str, r
         "subagent_id": subagent_id,
         "role_id": role_id,
         "status": runner_result.get("status"),
+        "runtime_mode": runner_result.get("runtime_mode"),
+        "real_provider_allowed": bool(runner_result.get("real_provider_allowed", False)),
+        "provider_policy_status": runner_result.get("provider_policy_status"),
         "actual_provider": runner_result.get("actual_provider"),
         "actual_model": runner_result.get("actual_model"),
         "input_hash": runner_result.get("input_hash"),

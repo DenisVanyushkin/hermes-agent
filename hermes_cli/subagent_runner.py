@@ -196,6 +196,9 @@ class SubagentRunnerResult:
     actual_provider: str | None = None
     actual_model: str | None = None
     actual_model_class: str | None = None
+    runtime_mode: str = "fake"
+    real_provider_allowed: bool = False
+    provider_policy_status: str = "not_requested"
     input_hash: str | None = None
     prompt_hash: str | None = None
     response_output_hash: str | None = None
@@ -224,6 +227,9 @@ class SubagentRunnerResult:
             "actual_provider": self.actual_provider,
             "actual_model": self.actual_model,
             "actual_model_class": self.actual_model_class,
+            "runtime_mode": self.runtime_mode,
+            "real_provider_allowed": self.real_provider_allowed,
+            "provider_policy_status": self.provider_policy_status,
             "input_hash": self.input_hash,
             "prompt_hash": self.prompt_hash,
             "response_output_hash": self.response_output_hash,
@@ -376,6 +382,9 @@ class ControlledRuntimeRunner:
             actual_provider=actual_provider or runtime.provider,
             actual_model=actual_model or runtime.model,
             actual_model_class=runtime.model_class,
+            runtime_mode=runtime.runtime_mode,
+            real_provider_allowed=runtime.real_provider_allowed,
+            provider_policy_status=runtime.provider_policy_status,
             input_hash=input_hash,
             prompt_hash=prompt_hash,
             response_output_hash=response_output_hash,

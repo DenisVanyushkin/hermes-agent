@@ -389,6 +389,50 @@ def test_report_usage_alias_and_multi_iteration_accounting_are_explicit() -> Non
     assert payload["review"]["reviewer_invoked"] is True
 
 
+def test_report_subagent_runs_include_runtime_mode_and_real_provider_policy_metadata() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "execution_mode": "controlled_runtime_loop",
+        "completion_allowed": False,
+        "completion_blocked_reason": "loop_harness_not_live_final",
+        "final_verdict": "controlled_rework_loop_candidate_complete",
+    })
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        preflight_result={"allowed": True, "reason_code": "rework_loop_fuse_allowed"},
+        subagent_runs_override=[
+            {
+                "step_id": "engineer",
+                "subagent_id": "hermes_engineer_core",
+                "role_id": "engineer",
+                "status": "succeeded",
+                "runtime_mode": "real_provider",
+                "real_provider_allowed": True,
+                "provider_policy_status": "allowed",
+                "actual_provider": "openrouter",
+                "actual_model": "xiaomi/mimo-v2.5-pro",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                "cache": {"cache_hit": False, "cache_write": False},
+            }
+        ],
+    )
+
+    payload = report.to_safe_dict()
+
+    assert payload["subagent_runs"][0]["runtime_mode"] == "real_provider"
+    assert payload["subagent_runs"][0]["real_provider_allowed"] is True
+    assert payload["subagent_runs"][0]["provider_policy_status"] == "allowed"
+
+
 def test_report_reviewer_invoked_stays_false_for_multiple_non_reviewer_runs() -> None:
     loaded = load_pipeline_specs()
     session = _session_for("engineering_review_pipeline", status="selected")
