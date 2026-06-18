@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+from pathlib import Path
 from typing import Any
 
 from hermes_cli.pipeline_control_channel import resolve_loop_limit_policy
@@ -21,6 +22,7 @@ from hermes_cli.pipeline_one_step_execution import (
     _build_runner_request_from_runtime_plan,
 )
 from hermes_cli.pipeline_git_delta import GitMaterialChangeResult, GitSnapshot, capture_git_snapshot, compare_git_snapshots
+from hermes_cli.pipeline_mutations import MutationDenied, apply_controlled_mutations
 from hermes_cli.pipeline_report import (
     _mapping_list,
     _mapping_value,
@@ -62,6 +64,8 @@ class ControlledRuntimeContext:
     invocation_client: Any
     controlled_runner: ControlledRuntimeRunner
     allow_model_escalation: bool = False
+    allow_mutations: bool = False
+    mutation_workspace: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,7 @@ class PipelineReworkLoopResult:
     reviewer_packet: dict[str, Any]
     subagent_runs: list[dict[str, Any]]
     usage_summary: dict[str, Any]
+    mutation_summary: dict[str, Any] | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -129,6 +134,7 @@ class PipelineReworkLoopResult:
             "reviewer_packet": dict(self.reviewer_packet),
             "subagent_runs": [dict(item) for item in self.subagent_runs],
             "usage_summary": dict(self.usage_summary),
+            "mutation_summary": dict(self.mutation_summary or {}),
         }
 
 
@@ -191,6 +197,7 @@ def execute_bounded_rework_loop(
     )
     current_reviewer_packet = _disabled_reviewer_packet() if not repo_path else _absent_reviewer_packet()
     accumulated_subagent_runs: list[dict[str, Any]] = []
+    current_mutation_summary = _mutation_summary_disabled(runtime_context)
     peer_messages: list[dict[str, Any]] = []
     disagreements: list[dict[str, Any]] = []
     model_escalations: list[dict[str, Any]] = []
@@ -232,6 +239,32 @@ def execute_bounded_rework_loop(
         current_snapshot = engineer_result.state_snapshot
         _append_step_run(accumulated_subagent_runs, current_snapshot, 0)
         engineer_output = _step_structured_output(current_snapshot, 0)
+        try:
+            current_mutation_summary = _apply_step_mutations(
+                step_kind="engineer",
+                step_subagent_id=ENGINEER_SUBAGENT_ID,
+                structured_output=engineer_output,
+                runtime_context=runtime_context,
+            )
+        except MutationDenied as exc:
+            return _blocked_loop_result(
+                fuse=fuse,
+                session=session,
+                snapshot=current_snapshot,
+                original_task=user_message,
+                appended_rework_context=appended_rework_context,
+                iteration_history=iteration_history,
+                review_iterations_completed=review_iterations_completed,
+                max_review_iterations=max_review_iterations,
+                policy_source=policy_source,
+                blocked_reason="mutation_denied",
+                user_action_required=True,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
+                subagent_runs=accumulated_subagent_runs,
+                usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                mutation_summary=_mutation_summary_from_denied_exception(exc, runtime_context),
+            )
         post_snapshot: GitSnapshot | None = None
         git_result: GitMaterialChangeResult | None = None
         if baseline_snapshot is not None:
@@ -272,6 +305,7 @@ def execute_bounded_rework_loop(
                 reviewer_packet=current_reviewer_packet,
                 subagent_runs=accumulated_subagent_runs,
                 usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                mutation_summary=current_mutation_summary,
             )
         if git_result is not None and _git_result_blocks_completion(git_result):
             return _blocked_loop_result(
@@ -290,6 +324,7 @@ def execute_bounded_rework_loop(
                 reviewer_packet=current_reviewer_packet,
                 subagent_runs=accumulated_subagent_runs,
                 usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                mutation_summary=current_mutation_summary,
             )
         active_reviewer_blockers = _active_reviewer_blockers(
             current_snapshot=current_snapshot,
@@ -351,6 +386,7 @@ def execute_bounded_rework_loop(
                         decisive_subagent=decisive_subagent,
                         model_escalations=model_escalations,
                         tests=_tests_payload(test_summary),
+                        mutation_summary=current_mutation_summary,
                         review_overrides=review_overrides,
                     )
 
@@ -402,6 +438,7 @@ def execute_bounded_rework_loop(
                     decisive_subagent=decisive_subagent,
                     model_escalations=model_escalations,
                     tests=_tests_payload(test_summary),
+                    mutation_summary=current_mutation_summary,
                     review_overrides=review_overrides,
                 )
 
@@ -442,6 +479,7 @@ def execute_bounded_rework_loop(
                     reviewer_packet=current_reviewer_packet,
                     subagent_runs=accumulated_subagent_runs,
                     usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                    mutation_summary=current_mutation_summary,
                 )
             reviewer_message = _compose_peer_reviewer_message(
                 original_task=user_message,
@@ -470,6 +508,35 @@ def execute_bounded_rework_loop(
             )
             current_snapshot = reviewer_result.state_snapshot
             _append_step_run(accumulated_subagent_runs, current_snapshot, 1)
+            try:
+                current_mutation_summary = _merge_mutation_summaries(
+                    current_mutation_summary,
+                    _apply_step_mutations(
+                        step_kind="reviewer",
+                        step_subagent_id=REVIEWER_SUBAGENT_ID,
+                        structured_output=_step_structured_output(current_snapshot, 1),
+                        runtime_context=runtime_context,
+                    ),
+                )
+            except MutationDenied as exc:
+                return _blocked_loop_result(
+                    fuse=fuse,
+                    session=session,
+                    snapshot=current_snapshot,
+                    original_task=user_message,
+                    appended_rework_context=appended_rework_context,
+                    iteration_history=iteration_history,
+                    review_iterations_completed=review_iterations_completed,
+                    max_review_iterations=max_review_iterations,
+                    policy_source=policy_source,
+                    blocked_reason="mutation_denied",
+                    user_action_required=True,
+                    git_gate=current_git_gate,
+                    reviewer_packet=current_reviewer_packet,
+                    subagent_runs=accumulated_subagent_runs,
+                    usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                    mutation_summary=_mutation_summary_from_denied_exception(exc, runtime_context),
+                )
             reviewer_step = reviewer_result.state_snapshot.planned_steps[1]
             reviewer_eval = getattr(reviewer_step, "evaluation_result", None) or {}
             reviewer_blockers = list(reviewer_eval.get("blockers") or [])
@@ -525,6 +592,7 @@ def execute_bounded_rework_loop(
                     decisive_subagent=decisive_subagent,
                     model_escalations=model_escalations,
                     tests=_tests_payload(test_summary),
+                    mutation_summary=current_mutation_summary,
                     review_overrides=review_overrides,
                 )
 
@@ -578,6 +646,7 @@ def execute_bounded_rework_loop(
                     decisive_subagent=decisive_subagent,
                     model_escalations=model_escalations,
                     tests=_tests_payload(test_summary),
+                    mutation_summary=current_mutation_summary,
                     review_overrides=review_overrides,
                 )
 
@@ -629,6 +698,7 @@ def execute_bounded_rework_loop(
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
                 tests=_tests_payload(test_summary),
+                mutation_summary=current_mutation_summary,
                 review_overrides=review_overrides,
             )
 
@@ -666,6 +736,7 @@ def execute_bounded_rework_loop(
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
                 tests=_tests_payload(test_summary),
+                mutation_summary=current_mutation_summary,
             )
 
         reviewer_fuse = evaluate_pipeline_reviewer_execution_fuse(
@@ -690,6 +761,7 @@ def execute_bounded_rework_loop(
                 reviewer_packet=current_reviewer_packet,
                 subagent_runs=accumulated_subagent_runs,
                 usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                mutation_summary=current_mutation_summary,
             )
 
         reviewer_message = _compose_reviewer_message(
@@ -719,6 +791,35 @@ def execute_bounded_rework_loop(
         )
         current_snapshot = reviewer_result.state_snapshot
         _append_step_run(accumulated_subagent_runs, current_snapshot, 1)
+        try:
+            current_mutation_summary = _merge_mutation_summaries(
+                current_mutation_summary,
+                _apply_step_mutations(
+                    step_kind="reviewer",
+                    step_subagent_id=REVIEWER_SUBAGENT_ID,
+                    structured_output=_step_structured_output(current_snapshot, 1),
+                    runtime_context=runtime_context,
+                ),
+            )
+        except MutationDenied as exc:
+            return _blocked_loop_result(
+                fuse=fuse,
+                session=session,
+                snapshot=current_snapshot,
+                original_task=user_message,
+                appended_rework_context=appended_rework_context,
+                iteration_history=iteration_history,
+                review_iterations_completed=review_iterations_completed,
+                max_review_iterations=max_review_iterations,
+                policy_source=policy_source,
+                blocked_reason="mutation_denied",
+                user_action_required=True,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
+                subagent_runs=accumulated_subagent_runs,
+                usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                mutation_summary=_mutation_summary_from_denied_exception(exc, runtime_context),
+            )
         reviewer_step = reviewer_result.state_snapshot.planned_steps[1]
         reviewer_eval = getattr(reviewer_step, "evaluation_result", None) or {}
         reviewer_blockers = list(reviewer_eval.get("blockers") or [])
@@ -778,6 +879,7 @@ def execute_bounded_rework_loop(
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
                 tests=_tests_payload(test_summary),
+                mutation_summary=current_mutation_summary,
             )
 
         # Approval requires positive reviewer candidate_complete verdict; absence of blockers is not sufficient.
@@ -817,6 +919,7 @@ def execute_bounded_rework_loop(
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
                 tests=_tests_payload(test_summary),
+                mutation_summary=current_mutation_summary,
             )
 
         if review_iterations_completed >= max_review_iterations:
@@ -853,6 +956,7 @@ def execute_bounded_rework_loop(
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
                 tests=_tests_payload(test_summary),
+                mutation_summary=current_mutation_summary,
             )
 
         pending_reviewer_blockers = list(reviewer_blockers)
@@ -1361,6 +1465,7 @@ def _blocked_loop_result(
     reviewer_packet: dict[str, Any],
     subagent_runs: list[dict[str, Any]],
     usage_summary: dict[str, Any],
+    mutation_summary: dict[str, Any] | None = None,
 ) -> PipelineReworkLoopResult:
     return PipelineReworkLoopResult(
         fuse=fuse,
@@ -1369,6 +1474,7 @@ def _blocked_loop_result(
             session=session,
             state_snapshot=snapshot,
             preflight_result={"allowed": False, "reason_code": blocked_reason},
+            mutation_summary=mutation_summary or {},
         ),
         iteration_history=iteration_history,
         review_iterations_completed=review_iterations_completed,
@@ -1384,6 +1490,7 @@ def _blocked_loop_result(
         reviewer_packet=reviewer_packet,
         subagent_runs=subagent_runs,
         usage_summary=usage_summary,
+        mutation_summary=mutation_summary or {},
     )
 
 
@@ -1412,6 +1519,7 @@ def _finalize_loop_result(
     decisive_subagent: str | None,
     model_escalations: list[dict[str, Any]],
     tests: dict[str, Any],
+    mutation_summary: dict[str, Any] | None = None,
     review_overrides: dict[str, Any] | None = None,
 ) -> PipelineReworkLoopResult:
     return PipelineReworkLoopResult(
@@ -1431,6 +1539,7 @@ def _finalize_loop_result(
             tests=tests,
             review_overrides=review_overrides or {},
             subagent_runs_override=subagent_runs,
+            mutation_summary=mutation_summary or {},
         ),
         iteration_history=iteration_history,
         review_iterations_completed=review_iterations_completed,
@@ -1446,6 +1555,7 @@ def _finalize_loop_result(
         reviewer_packet=reviewer_packet,
         subagent_runs=_collect_subagent_runs(snapshot),
         usage_summary=_usage_summary_from_snapshot(snapshot),
+        mutation_summary=mutation_summary or {},
     )
 
 
@@ -1465,7 +1575,74 @@ def _normalize_controlled_runtime_context(
         invocation_client=value["invocation_client"],
         controlled_runner=controlled_runner,
         allow_model_escalation=bool(value.get("allow_model_escalation", False)),
+        allow_mutations=bool(value.get("allow_mutations", False)),
+        mutation_workspace=str(value.get("mutation_workspace")) if value.get("mutation_workspace") is not None else None,
     )
+
+
+def _apply_step_mutations(
+    *,
+    step_kind: str,
+    step_subagent_id: str,
+    structured_output: dict[str, Any],
+    runtime_context: ControlledRuntimeContext | None,
+) -> dict[str, Any]:
+    mutations = list(structured_output.get("mutations") or [])
+    if not mutations:
+        return _mutation_summary_disabled(runtime_context)
+    first = dict(mutations[0] or {})
+    path = str(first.get("path") or "<unknown>")
+    operation = str(first.get("operation") or "write_text")
+    if step_kind != "engineer" or step_subagent_id != ENGINEER_SUBAGENT_ID:
+        raise MutationDenied("role_not_permitted", operation, path)
+    if runtime_context is None:
+        raise MutationDenied("mutation_gate_disabled", operation, path)
+    summary = apply_controlled_mutations(
+        allow_mutations=runtime_context.allow_mutations,
+        mutation_workspace=runtime_context.mutation_workspace,
+        mutations_payload=mutations,
+    ).to_safe_dict()
+    if int(summary.get("denied_count") or 0) > 0:
+        first_denied = next((item for item in summary.get("results") or [] if item.get("status") == "denied"), None)
+        if isinstance(first_denied, dict):
+            raise MutationDenied(
+                str(first_denied.get("reason") or "mutation_denied"),
+                str(first_denied.get("operation") or operation),
+                str(first_denied.get("path") or path),
+            )
+    return summary
+
+
+def _mutation_summary_disabled(runtime_context: ControlledRuntimeContext | None) -> dict[str, Any]:
+    workspace = Path(runtime_context.mutation_workspace).name if runtime_context and runtime_context.mutation_workspace else None
+    enabled = bool(runtime_context.allow_mutations) if runtime_context is not None else False
+    return {
+        "enabled": enabled,
+        "workspace": workspace,
+        "attempted_count": 0,
+        "applied_count": 0,
+        "denied_count": 0,
+        "results": [],
+    }
+
+
+def _mutation_summary_from_denied_exception(exc: MutationDenied, runtime_context: ControlledRuntimeContext | None) -> dict[str, Any]:
+    summary = _mutation_summary_disabled(runtime_context)
+    summary["attempted_count"] = 1
+    summary["denied_count"] = 1
+    summary["results"] = [exc.to_result().to_safe_dict()]
+    return summary
+
+
+def _merge_mutation_summaries(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": bool(left.get("enabled") or right.get("enabled")),
+        "workspace": left.get("workspace") or right.get("workspace"),
+        "attempted_count": int(left.get("attempted_count") or 0) + int(right.get("attempted_count") or 0),
+        "applied_count": int(left.get("applied_count") or 0) + int(right.get("applied_count") or 0),
+        "denied_count": int(left.get("denied_count") or 0) + int(right.get("denied_count") or 0),
+        "results": list(left.get("results") or []) + list(right.get("results") or []),
+    }
 
 
 def _collect_subagent_runs(snapshot: Any) -> list[dict[str, Any]]:
