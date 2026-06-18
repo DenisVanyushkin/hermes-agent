@@ -1,0 +1,209 @@
+from __future__ import annotations
+
+import importlib
+from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
+
+
+REPO_ROOT = Path("/home/hermes/.hermes/hermes-agent")
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
+def _init_git_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "test-runner-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Test User")
+    _git(repo, "config", "user.email", "test@example.com")
+    (repo / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    return repo
+
+
+def test_gate_disabled_denies_without_spawning_subprocess(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    calls: list[list[str]] = []
+
+    def _unexpected_runner(argv, **kwargs):
+        calls.append(list(argv))
+        raise AssertionError("subprocess runner must not be called when gate is disabled")
+
+    repo = _init_git_repo(tmp_path)
+    summary = module.run_controlled_tests(
+        allow_test_commands=False,
+        test_workspace=repo,
+        tests_payload=["venv/bin/pytest -q tests/test_example.py"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_unexpected_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["enabled"] is False
+    assert payload["blocked_reason"] == "test_command_gate_disabled"
+    assert payload["denied_count"] == 1
+    assert payload["executed_count"] == 0
+    assert calls == []
+
+
+def test_safe_pytest_command_executes_in_workspace(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_example.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    (repo / "venv").symlink_to(REPO_ROOT / "venv")
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["venv/bin/pytest -q tests/test_example.py"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "passed"
+    assert payload["executed_count"] == 1
+    assert payload["passed_count"] == 1
+    assert payload["blocked_reason"] is None
+    assert payload["results"][0]["command"] == ["venv/bin/pytest", "-q", "tests/test_example.py"]
+    assert payload["results"][0]["cwd"] == repo.name
+
+
+def test_unsafe_command_is_denied_without_spawning_subprocess(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    calls: list[list[str]] = []
+
+    def _unexpected_runner(argv, **kwargs):
+        calls.append(list(argv))
+        raise AssertionError("unsafe command must not reach subprocess runner")
+
+    repo = _init_git_repo(tmp_path)
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["venv/bin/pytest -q tests/test_example.py && cat .env"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_unexpected_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "test_command_denied"
+    assert payload["denied_count"] == 1
+    assert calls == []
+
+
+def test_failed_pytest_blocks_completion(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_example.py").write_text("def test_fail():\n    assert False\n", encoding="utf-8")
+    (repo / "venv").symlink_to(REPO_ROOT / "venv")
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["venv/bin/pytest -q tests/test_example.py"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "failed"
+    assert payload["blocked_reason"] == "test_command_failed"
+    assert payload["failed_count"] == 1
+    assert payload["results"][0]["status"] == "failed"
+
+
+def test_timeout_is_fail_closed(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+
+    def _timeout_runner(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=list(argv), timeout=kwargs.get("timeout", 30))
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["python3 -m pytest -q tests/test_example.py"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_timeout_runner,
+        timeout_seconds=1,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "test_command_timeout"
+    assert payload["timeout_count"] == 1
+    assert payload["results"][0]["status"] == "timeout"
+
+
+def test_reviewer_role_cannot_execute_tests(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["venv/bin/pytest -q tests/test_example.py"],
+        step_kind="reviewer",
+        step_subagent_id="hermes_code_reviewer",
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "test_command_role_not_permitted"
+    assert payload["denied_count"] == 1
+
+
+def test_too_many_test_commands_fail_closed_without_spawning_subprocess(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    calls: list[list[str]] = []
+
+    def _unexpected_runner(argv, **kwargs):
+        calls.append(list(argv))
+        raise AssertionError("runner must not be called when request coercion is denied")
+
+    repo = _init_git_repo(tmp_path)
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=[
+            "venv/bin/pytest -q tests/test_one.py",
+            "venv/bin/pytest -q tests/test_two.py",
+            "venv/bin/pytest -q tests/test_three.py",
+            "venv/bin/pytest -q tests/test_four.py",
+        ],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_unexpected_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "test_command_denied"
+    assert payload["denied_count"] > 0
+    assert payload["executed_count"] == 0
+    assert calls == []

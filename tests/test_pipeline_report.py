@@ -481,3 +481,34 @@ def test_report_reviewer_invoked_stays_false_for_multiple_non_reviewer_runs() ->
 
     assert payload["usage_summary"]["executed_subagent_count"] == 2
     assert payload["review"]["reviewer_invoked"] is False
+
+
+def test_report_preserves_structured_test_summary() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        tests={
+            "status": "failed",
+            "blocked_reason": "test_command_failed",
+            "results": [
+                {
+                    "command": ["venv/bin/pytest", "-q", "tests/test_example.py"],
+                    "status": "failed",
+                    "cwd": "repo",
+                }
+            ],
+        },
+    )
+
+    payload = report.to_safe_dict()
+
+    assert payload["tests"]["status"] == "failed"
+    assert payload["tests"]["blocked_reason"] == "test_command_failed"
+    assert payload["tests"]["results"][0]["cwd"] == "repo"

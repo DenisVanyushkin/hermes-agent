@@ -34,6 +34,7 @@ from hermes_cli.pipeline_report import (
 from hermes_cli.pipeline_reviewer_packet import build_reviewer_packet
 from hermes_cli.pipeline_session import PipelineSession
 from hermes_cli.pipeline_state_machine import build_pipeline_state_snapshot
+from hermes_cli.pipeline_test_runner import run_controlled_tests
 from hermes_cli.runtime_factory import RuntimeBuildRequest, build_controlled_runtime, build_runtime_factory_plan
 from hermes_cli.subagent_runner import (
     ControlledRuntimeRunner,
@@ -57,6 +58,8 @@ ESCALATED_REVIEWER_ALLOWED_DECISIONS = {
 }
 MAX_SAFE_EVIDENCE_ITEMS = 5
 MAX_SAFE_EVIDENCE_LABEL_CHARS = 64
+_DIFF_MARKERS = ("diff --git", "@@", "+++", "---")
+_SENSITIVE_PARTS = ("api_key", "token", "password", "secret", "credential")
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,8 @@ class ControlledRuntimeContext:
     real_provider_client_factory: Any = None
     allow_mutations: bool = False
     mutation_workspace: str | None = None
+    allow_test_commands: bool = False
+    test_workspace: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +128,7 @@ class PipelineReworkLoopResult:
     subagent_runs: list[dict[str, Any]]
     usage_summary: dict[str, Any]
     mutation_summary: dict[str, Any] | None = None
+    test_summary: dict[str, Any] | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +150,7 @@ class PipelineReworkLoopResult:
             "subagent_runs": [dict(item) for item in self.subagent_runs],
             "usage_summary": dict(self.usage_summary),
             "mutation_summary": dict(self.mutation_summary or {}),
+            "test_summary": _tests_payload(self.test_summary),
         }
 
 
@@ -207,6 +214,7 @@ def execute_bounded_rework_loop(
     current_reviewer_packet = _disabled_reviewer_packet() if not repo_path else _absent_reviewer_packet()
     accumulated_subagent_runs: list[dict[str, Any]] = []
     current_mutation_summary = _mutation_summary_disabled(runtime_context)
+    current_test_summary = dict(test_summary) if isinstance(test_summary, dict) else _test_summary_disabled(runtime_context)
     peer_messages: list[dict[str, Any]] = []
     disagreements: list[dict[str, Any]] = []
     model_escalations: list[dict[str, Any]] = []
@@ -273,7 +281,16 @@ def execute_bounded_rework_loop(
                 subagent_runs=accumulated_subagent_runs,
                 usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
                 mutation_summary=_mutation_summary_from_denied_exception(exc, runtime_context),
+                test_summary=current_test_summary,
             )
+        engineer_test_summary = _apply_step_tests(
+            step_kind="engineer",
+            step_subagent_id=ENGINEER_SUBAGENT_ID,
+            structured_output=engineer_output,
+            runtime_context=runtime_context,
+        )
+        if int(engineer_test_summary.get("requested_count") or 0) > 0 or engineer_test_summary.get("blocked_reason") is not None:
+            current_test_summary = engineer_test_summary
         post_snapshot: GitSnapshot | None = None
         git_result: GitMaterialChangeResult | None = None
         if baseline_snapshot is not None:
@@ -293,8 +310,28 @@ def execute_bounded_rework_loop(
                     baseline_snapshot=baseline_snapshot,
                     post_snapshot=post_snapshot,
                     git_result=git_result,
-                    test_summary=test_summary,
+                    test_summary=current_test_summary,
                 )
+            )
+        if current_test_summary.get("blocked_reason") is not None:
+            return _blocked_loop_result(
+                fuse=fuse,
+                session=session,
+                snapshot=current_snapshot,
+                original_task=user_message,
+                appended_rework_context=appended_rework_context,
+                iteration_history=iteration_history,
+                review_iterations_completed=review_iterations_completed,
+                max_review_iterations=max_review_iterations,
+                policy_source=policy_source,
+                blocked_reason=str(current_test_summary.get("blocked_reason")),
+                user_action_required=True,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
+                subagent_runs=accumulated_subagent_runs,
+                usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
             )
         engineer_fail_closed_reason = _engineer_fail_closed_reason(current_snapshot)
         if engineer_fail_closed_reason is not None:
@@ -315,6 +352,7 @@ def execute_bounded_rework_loop(
                 subagent_runs=accumulated_subagent_runs,
                 usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
                 mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
             )
         if git_result is not None and _git_result_blocks_completion(git_result):
             return _blocked_loop_result(
@@ -334,6 +372,7 @@ def execute_bounded_rework_loop(
                 subagent_runs=accumulated_subagent_runs,
                 usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
                 mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
             )
         active_reviewer_blockers = _active_reviewer_blockers(
             current_snapshot=current_snapshot,
@@ -394,9 +433,10 @@ def execute_bounded_rework_loop(
                         disagreements=disagreements,
                         decisive_subagent=decisive_subagent,
                         model_escalations=model_escalations,
-                        tests=_tests_payload(test_summary),
+                        tests=_tests_payload(current_test_summary),
                         mutation_summary=current_mutation_summary,
                         review_overrides=review_overrides,
+                        test_summary=current_test_summary,
                     )
 
                 model_escalations.append(
@@ -446,9 +486,10 @@ def execute_bounded_rework_loop(
                     disagreements=disagreements,
                     decisive_subagent=decisive_subagent,
                     model_escalations=model_escalations,
-                    tests=_tests_payload(test_summary),
+                    tests=_tests_payload(current_test_summary),
                     mutation_summary=current_mutation_summary,
                     review_overrides=review_overrides,
+                    test_summary=current_test_summary,
                 )
 
             peer_round_used = True
@@ -489,6 +530,7 @@ def execute_bounded_rework_loop(
                     subagent_runs=accumulated_subagent_runs,
                     usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
                     mutation_summary=current_mutation_summary,
+                    test_summary=current_test_summary,
                 )
             reviewer_message = _compose_peer_reviewer_message(
                 original_task=user_message,
@@ -545,6 +587,35 @@ def execute_bounded_rework_loop(
                     subagent_runs=accumulated_subagent_runs,
                     usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
                     mutation_summary=_mutation_summary_from_denied_exception(exc, runtime_context),
+                    test_summary=current_test_summary,
+                )
+            reviewer_test_summary = _apply_step_tests(
+                step_kind="reviewer",
+                step_subagent_id=REVIEWER_SUBAGENT_ID,
+                structured_output=_step_structured_output(current_snapshot, 1),
+                runtime_context=runtime_context,
+            )
+            if int(reviewer_test_summary.get("requested_count") or 0) > 0 or reviewer_test_summary.get("blocked_reason") is not None:
+                current_test_summary = reviewer_test_summary
+            if current_test_summary.get("blocked_reason") is not None:
+                return _blocked_loop_result(
+                    fuse=fuse,
+                    session=session,
+                    snapshot=current_snapshot,
+                    original_task=user_message,
+                    appended_rework_context=appended_rework_context,
+                    iteration_history=iteration_history,
+                    review_iterations_completed=review_iterations_completed,
+                    max_review_iterations=max_review_iterations,
+                    policy_source=policy_source,
+                    blocked_reason=str(current_test_summary.get("blocked_reason")),
+                    user_action_required=True,
+                    git_gate=current_git_gate,
+                    reviewer_packet=current_reviewer_packet,
+                    subagent_runs=accumulated_subagent_runs,
+                    usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                    mutation_summary=current_mutation_summary,
+                    test_summary=current_test_summary,
                 )
             reviewer_step = reviewer_result.state_snapshot.planned_steps[1]
             reviewer_eval = getattr(reviewer_step, "evaluation_result", None) or {}
@@ -600,9 +671,10 @@ def execute_bounded_rework_loop(
                     disagreements=disagreements,
                     decisive_subagent=decisive_subagent,
                     model_escalations=model_escalations,
-                    tests=_tests_payload(test_summary),
+                    tests=_tests_payload(current_test_summary),
                     mutation_summary=current_mutation_summary,
                     review_overrides=review_overrides,
+                    test_summary=current_test_summary,
                 )
 
             disagreements[-1]["status"] = "reviewer_maintained_blocker"
@@ -654,9 +726,10 @@ def execute_bounded_rework_loop(
                     disagreements=disagreements,
                     decisive_subagent=decisive_subagent,
                     model_escalations=model_escalations,
-                    tests=_tests_payload(test_summary),
+                    tests=_tests_payload(current_test_summary),
                     mutation_summary=current_mutation_summary,
                     review_overrides=review_overrides,
+                    test_summary=current_test_summary,
                 )
 
             model_escalations.append(
@@ -706,9 +779,10 @@ def execute_bounded_rework_loop(
                 disagreements=disagreements,
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
-                tests=_tests_payload(test_summary),
+                tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
                 review_overrides=review_overrides,
+                test_summary=current_test_summary,
             )
 
         if git_result is not None and not git_result.review_required and not git_result.material_changes_present:
@@ -744,8 +818,9 @@ def execute_bounded_rework_loop(
                 disagreements=disagreements,
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
-                tests=_tests_payload(test_summary),
+                tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
             )
 
         reviewer_fuse = evaluate_pipeline_reviewer_execution_fuse(
@@ -771,6 +846,7 @@ def execute_bounded_rework_loop(
                 subagent_runs=accumulated_subagent_runs,
                 usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
                 mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
             )
 
         reviewer_message = _compose_reviewer_message(
@@ -828,6 +904,35 @@ def execute_bounded_rework_loop(
                 subagent_runs=accumulated_subagent_runs,
                 usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
                 mutation_summary=_mutation_summary_from_denied_exception(exc, runtime_context),
+                test_summary=current_test_summary,
+            )
+        reviewer_test_summary = _apply_step_tests(
+            step_kind="reviewer",
+            step_subagent_id=REVIEWER_SUBAGENT_ID,
+            structured_output=_step_structured_output(current_snapshot, 1),
+            runtime_context=runtime_context,
+        )
+        if int(reviewer_test_summary.get("requested_count") or 0) > 0 or reviewer_test_summary.get("blocked_reason") is not None:
+            current_test_summary = reviewer_test_summary
+        if current_test_summary.get("blocked_reason") is not None:
+            return _blocked_loop_result(
+                fuse=fuse,
+                session=session,
+                snapshot=current_snapshot,
+                original_task=user_message,
+                appended_rework_context=appended_rework_context,
+                iteration_history=iteration_history,
+                review_iterations_completed=review_iterations_completed,
+                max_review_iterations=max_review_iterations,
+                policy_source=policy_source,
+                blocked_reason=str(current_test_summary.get("blocked_reason")),
+                user_action_required=True,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
+                subagent_runs=accumulated_subagent_runs,
+                usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
             )
         reviewer_step = reviewer_result.state_snapshot.planned_steps[1]
         reviewer_eval = getattr(reviewer_step, "evaluation_result", None) or {}
@@ -887,8 +992,9 @@ def execute_bounded_rework_loop(
                 disagreements=disagreements,
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
-                tests=_tests_payload(test_summary),
+                tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
             )
 
         # Approval requires positive reviewer candidate_complete verdict; absence of blockers is not sufficient.
@@ -927,8 +1033,9 @@ def execute_bounded_rework_loop(
                 disagreements=disagreements,
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
-                tests=_tests_payload(test_summary),
+                tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
             )
 
         if review_iterations_completed >= max_review_iterations:
@@ -964,8 +1071,9 @@ def execute_bounded_rework_loop(
                 disagreements=disagreements,
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
-                tests=_tests_payload(test_summary),
+                tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
             )
 
         pending_reviewer_blockers = list(reviewer_blockers)
@@ -1493,6 +1601,7 @@ def _blocked_loop_result(
     subagent_runs: list[dict[str, Any]],
     usage_summary: dict[str, Any],
     mutation_summary: dict[str, Any] | None = None,
+    test_summary: dict[str, Any] | None = None,
 ) -> PipelineReworkLoopResult:
     return PipelineReworkLoopResult(
         fuse=fuse,
@@ -1501,6 +1610,9 @@ def _blocked_loop_result(
             session=session,
             state_snapshot=snapshot,
             preflight_result={"allowed": False, "reason_code": blocked_reason},
+            reviewer_packet=reviewer_packet,
+            git_gate=git_gate,
+            tests=_tests_payload(test_summary),
             mutation_summary=mutation_summary or {},
         ),
         iteration_history=iteration_history,
@@ -1518,6 +1630,7 @@ def _blocked_loop_result(
         subagent_runs=subagent_runs,
         usage_summary=usage_summary,
         mutation_summary=mutation_summary or {},
+        test_summary=test_summary,
     )
 
 
@@ -1548,6 +1661,7 @@ def _finalize_loop_result(
     tests: dict[str, Any],
     mutation_summary: dict[str, Any] | None = None,
     review_overrides: dict[str, Any] | None = None,
+    test_summary: dict[str, Any] | None = None,
 ) -> PipelineReworkLoopResult:
     return PipelineReworkLoopResult(
         fuse=fuse,
@@ -1583,6 +1697,7 @@ def _finalize_loop_result(
         subagent_runs=_collect_subagent_runs(snapshot),
         usage_summary=_usage_summary_from_snapshot(snapshot),
         mutation_summary=mutation_summary or {},
+        test_summary=test_summary,
     )
 
 
@@ -1613,6 +1728,8 @@ def _normalize_controlled_runtime_context(
         real_provider_client_factory=value.get("real_provider_client_factory"),
         allow_mutations=bool(value.get("allow_mutations", False)),
         mutation_workspace=str(value.get("mutation_workspace")) if value.get("mutation_workspace") is not None else None,
+        allow_test_commands=bool(value.get("allow_test_commands", False)),
+        test_workspace=str(value.get("test_workspace")) if value.get("test_workspace") is not None else None,
     )
 
 
@@ -1689,6 +1806,44 @@ def _merge_mutation_summaries(left: dict[str, Any], right: dict[str, Any]) -> di
         "applied_count": int(left.get("applied_count") or 0) + int(right.get("applied_count") or 0),
         "denied_count": int(left.get("denied_count") or 0) + int(right.get("denied_count") or 0),
         "results": list(left.get("results") or []) + list(right.get("results") or []),
+    }
+
+
+def _apply_step_tests(
+    *,
+    step_kind: str,
+    step_subagent_id: str,
+    structured_output: dict[str, Any],
+    runtime_context: ControlledRuntimeContext | None,
+) -> dict[str, Any]:
+    tests = list(structured_output.get("tests") or [])
+    if not tests:
+        return _test_summary_disabled(runtime_context)
+    return run_controlled_tests(
+        allow_test_commands=bool(runtime_context.allow_test_commands) if runtime_context is not None else False,
+        test_workspace=runtime_context.test_workspace if runtime_context is not None else None,
+        tests_payload=tests,
+        step_kind=step_kind,
+        step_subagent_id=step_subagent_id,
+    ).to_safe_dict()
+
+
+def _test_summary_disabled(runtime_context: ControlledRuntimeContext | None) -> dict[str, Any]:
+    workspace = Path(runtime_context.test_workspace).name if runtime_context and runtime_context.test_workspace else None
+    enabled = bool(runtime_context.allow_test_commands) if runtime_context is not None else False
+    return {
+        "enabled": enabled,
+        "workspace": workspace,
+        "status": "not_requested",
+        "requested_count": 0,
+        "executed_count": 0,
+        "passed_count": 0,
+        "failed_count": 0,
+        "denied_count": 0,
+        "timeout_count": 0,
+        "blocked_reason": None,
+        "summary": None,
+        "results": [],
     }
 
 
@@ -2106,16 +2261,46 @@ def _subagent_run_from_result(*, step_id: str, subagent_id: str, role_id: str, r
 
 def _tests_payload(test_summary: Any) -> dict[str, Any]:
     if isinstance(test_summary, dict):
-        return {
+        payload = {
             "status": str(test_summary.get("status") or "available"),
             "source": str(test_summary.get("source") or "provided"),
-            "summary": test_summary.get("summary"),
+            "summary": _safe_test_text(test_summary.get("summary")),
         }
+        if test_summary.get("blocked_reason") is not None:
+            payload["blocked_reason"] = _safe_test_text(test_summary.get("blocked_reason"))
+        if isinstance(test_summary.get("results"), list):
+            payload["results"] = [
+                {
+                    **({key: value for key, value in dict(item).items() if key not in {"stdout_excerpt", "stderr_excerpt"}}),
+                    **({"stdout_excerpt": _safe_test_text(item.get("stdout_excerpt"))} if isinstance(item, dict) and item.get("stdout_excerpt") is not None else {}),
+                    **({"stderr_excerpt": _safe_test_text(item.get("stderr_excerpt"))} if isinstance(item, dict) and item.get("stderr_excerpt") is not None else {}),
+                }
+                for item in list(test_summary.get("results") or [])
+                if isinstance(item, dict)
+            ]
+        return payload
     return {
         "status": "unavailable",
         "source": "unavailable",
         "summary": None,
     }
+
+
+def _safe_test_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    lines: list[str] = []
+    for raw_line in str(value).splitlines():
+        line = raw_line.strip()
+        lower = line.lower()
+        if any(marker in line for marker in _DIFF_MARKERS):
+            continue
+        if any(part in lower for part in _SENSITIVE_PARTS):
+            continue
+        if line:
+            lines.append(line)
+    cleaned = " ".join(lines).strip()
+    return cleaned or None
 
 
 def _safe_path_evidence(value: Any) -> str:
