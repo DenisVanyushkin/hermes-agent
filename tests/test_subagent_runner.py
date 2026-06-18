@@ -757,3 +757,196 @@ def test_controlled_runtime_runner_redacts_failures_and_stays_json_serializable(
     assert result.error_type == "RuntimeError"
     assert "super-secret" not in json.dumps(payload, sort_keys=True)
     json.dumps(payload, sort_keys=True)
+
+
+def test_controlled_runtime_runner_executes_real_provider_only_when_explicitly_allowed(tmp_path: Path) -> None:
+    _, _, plan = _runtime_factory_plan(
+        tmp_path,
+        step_kind="engineer",
+        subagent_id="hermes_engineer_core",
+    )
+
+    from hermes_cli.runtime_factory import build_controlled_runtime
+    from hermes_cli.subagent_runner import ControlledRuntimeRunner
+
+    factory_calls = {"count": 0}
+    client_calls = {"count": 0}
+
+    def _factory(runtime):
+        factory_calls["count"] += 1
+
+        def _client(request):
+            client_calls["count"] += 1
+            assert request.runtime.subagent_id == runtime.subagent_id
+            assert request.provider == "openrouter"
+            assert request.model == "xiaomi/mimo-v2.5-pro"
+            return {
+                "provider": request.provider,
+                "model": request.model,
+                "structured_output": {
+                    "schema_version": "v1",
+                    "subagent_id": "hermes_engineer_core",
+                    "role": "engineer",
+                    "status": "succeeded",
+                    "summary": "real provider patch prepared",
+                    "findings": [{"code": "patch", "summary": "Prepared patch"}],
+                    "changes": [{"path": "foo.py", "kind": "modify"}],
+                    "blockers": [],
+                    "artifacts": [],
+                    "confidence": 0.9,
+                    "requires_review": False,
+                    "next_action": "none",
+                },
+                "output_text": "real provider patch prepared",
+                "token_usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20},
+            }
+
+        return _client
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake"}},
+        request_real_provider_execution=True,
+        allow_real_provider_execution=True,
+        allowed_real_providers=("openrouter",),
+        allowed_real_models=("xiaomi/mimo-v2.5-pro",),
+        real_provider_client_factory=_factory,
+    )
+    result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Implement change"}])
+
+    assert factory_calls["count"] == 1
+    assert client_calls["count"] == 1
+    assert result.status.value == "succeeded"
+    assert result.runtime_mode == "real_provider"
+    assert result.real_provider_allowed is True
+    assert result.provider_policy_status == "allowed"
+    assert result.actual_provider == "openrouter"
+    assert result.actual_model == "xiaomi/mimo-v2.5-pro"
+    assert result.usage_summary.total_tokens == 20
+
+
+def test_controlled_runtime_runner_real_provider_allowlist_mismatch_fails_closed_without_call(tmp_path: Path) -> None:
+    _, _, plan = _runtime_factory_plan(
+        tmp_path,
+        step_kind="reviewer",
+        subagent_id="hermes_code_reviewer",
+    )
+
+    from hermes_cli.runtime_factory import build_controlled_runtime
+    from hermes_cli.subagent_runner import ControlledRuntimeRunner
+
+    factory_calls = {"count": 0}
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake"}},
+        request_real_provider_execution=True,
+        allow_real_provider_execution=True,
+        allowed_real_providers=("openrouter",),
+        allowed_real_models=("xiaomi/mimo-v2.5-pro",),
+        real_provider_client_factory=lambda _runtime: factory_calls.__setitem__("count", factory_calls["count"] + 1),
+    )
+    result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Review"}])
+
+    assert result.status.value == "blocked"
+    assert result.failure_reason == "runtime_not_ready"
+    assert result.runtime_mode == "blocked"
+    assert result.real_provider_allowed is False
+    assert result.provider_policy_status == "blocked"
+    assert factory_calls["count"] == 0
+
+
+def test_controlled_runtime_runner_real_provider_invalid_input_messages_fail_closed_without_client_call(tmp_path: Path) -> None:
+    _, _, plan = _runtime_factory_plan(
+        tmp_path,
+        step_kind="engineer",
+        subagent_id="hermes_engineer_core",
+    )
+
+    from hermes_cli.runtime_factory import build_controlled_runtime
+    from hermes_cli.subagent_runner import ControlledRuntimeRunner
+
+    factory_calls = {"count": 0}
+    client_calls = {"count": 0}
+
+    def _factory(_runtime):
+        factory_calls["count"] += 1
+
+        def _client(_request):
+            client_calls["count"] += 1
+            return {"provider": "openrouter", "model": "xiaomi/mimo-v2.5-pro"}
+
+        return _client
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake"}},
+        request_real_provider_execution=True,
+        allow_real_provider_execution=True,
+        allowed_real_providers=("openrouter",),
+        allowed_real_models=("xiaomi/mimo-v2.5-pro",),
+        allowed_real_providers_by_role={"engineer": ("openrouter",)},
+        allowed_real_models_by_role={"engineer": ("xiaomi/mimo-v2.5-pro",)},
+        real_provider_client_factory=_factory,
+    )
+    result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "ok"}, "bad-message"])
+    payload = result.to_safe_dict()
+
+    assert factory_calls["count"] == 0
+    assert client_calls["count"] == 0
+    assert result.status.value == "failed"
+    assert result.failure_reason == "runtime_invocation_failed"
+    assert result.error_type == "ValueError"
+    assert "bad-message" not in json.dumps(payload, sort_keys=True)
+
+
+def test_controlled_runtime_runner_real_provider_reviewer_allowed_separately(tmp_path: Path) -> None:
+    _, _, plan = _runtime_factory_plan(
+        tmp_path,
+        step_kind="reviewer",
+        subagent_id="hermes_code_reviewer",
+    )
+
+    from hermes_cli.runtime_factory import build_controlled_runtime
+    from hermes_cli.subagent_runner import ControlledRuntimeRunner
+
+    client_calls = {"count": 0}
+
+    def _factory(_runtime):
+        def _client(request):
+            client_calls["count"] += 1
+            return {
+                "provider": request.provider,
+                "model": request.model,
+                "structured_output": _valid_envelope_payload(
+                    subagent_id="hermes_code_reviewer",
+                    role="reviewer",
+                    status="succeeded",
+                    summary="review ok",
+                    blockers=[],
+                    requires_review=False,
+                    next_action="none",
+                    findings=[{"code": "review", "summary": "ok"}],
+                ),
+                "output_text": "review ok",
+            }
+
+        return _client
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake"}},
+        request_real_provider_execution=True,
+        allow_real_provider_execution=True,
+        allowed_real_providers=("openrouter", "openai-codex"),
+        allowed_real_models=("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
+        allowed_real_providers_by_role={"reviewer": ("openai-codex",)},
+        allowed_real_models_by_role={"reviewer": ("gpt-5.5",)},
+        real_provider_client_factory=_factory,
+    )
+    result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Review"}])
+
+    assert client_calls["count"] == 1
+    assert result.status.value == "succeeded"
+    assert result.actual_provider == "openai-codex"
+    assert result.actual_model == "gpt-5.5"

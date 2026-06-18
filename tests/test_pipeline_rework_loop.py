@@ -943,6 +943,113 @@ def test_controlled_runtime_context_fails_closed_on_provider_model_mismatch(tmp_
     assert result.candidate_complete is False
 
 
+def test_controlled_runtime_context_real_provider_path_respects_mutation_gate(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+
+    factory_calls: list[str] = []
+
+    def _real_provider_factory(runtime):
+        factory_calls.append(runtime.subagent_id)
+
+        def _client(_request):
+            if runtime.subagent_id == "hermes_engineer_core":
+                return {
+                    "provider": runtime.provider,
+                    "model": runtime.model,
+                    "structured_output": _engineer_output(
+                        mutations=[{"operation": "write_text", "path": "safe.txt", "content": "hello\n"}]
+                    ),
+                    "output_text": "engineer real provider ok",
+                    "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                }
+            return {
+                "provider": runtime.provider,
+                "model": runtime.model,
+                "structured_output": _reviewer_output(blockers=[]),
+                "output_text": "reviewer real provider ok",
+                "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+            }
+
+        return _client
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "invocation_client": lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fake runtime must not be used")),
+            "controlled_runner": module.ControlledRuntimeRunner(),
+            "allow_real_provider_execution": True,
+            "request_real_provider_execution": True,
+            "allowed_real_providers": ("openrouter", "openai-codex"),
+            "allowed_real_models": ("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
+            "real_provider_client_factory": _real_provider_factory,
+            "allow_mutations": True,
+            "mutation_workspace": str(repo),
+        },
+    )
+
+    payload = result.to_safe_dict()
+    assert result.completion_allowed is True
+    assert result.mutation_summary["applied_count"] == 1
+    assert factory_calls == ["hermes_engineer_core", "hermes_code_reviewer"]
+    assert payload["subagent_runs"][0]["runtime_mode"] == "real_provider"
+    assert payload["subagent_runs"][0]["provider_policy_status"] == "allowed"
+    assert payload["subagent_runs"][0]["real_provider_allowed"] is True
+    assert (repo / "safe.txt").exists()
+
+
+def test_escalated_reviewer_subagent_policy_can_be_distinct_from_engineer(tmp_path: Path) -> None:
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    session = _session()
+    reviewer_step = next(item for item in session.planned_steps if item.step_kind == "reviewer")
+    reviewer_spec = dict(loaded_specs.subagent_specs["hermes_code_reviewer"])
+
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    escalated_spec = module._build_escalated_reviewer_spec(reviewer_spec)
+
+    from hermes_cli.runtime_factory import build_controlled_runtime, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=reviewer_step.__class__(
+            step_kind=reviewer_step.step_kind,
+            subagent_id="hermes_code_reviewer_escalated",
+            condition=reviewer_step.condition,
+        ),
+        subagent_spec=escalated_spec,
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    factory_calls = {"count": 0}
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake"}},
+        request_real_provider_execution=True,
+        allow_real_provider_execution=True,
+        allowed_real_providers=("openrouter", "openai-codex"),
+        allowed_real_models=("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
+        allowed_real_providers_by_role={"engineer": ("openrouter",), "reviewer": ("openai-codex",)},
+        allowed_real_models_by_role={"engineer": ("xiaomi/mimo-v2.5-pro",), "reviewer": ("gpt-5.5",)},
+        allowed_real_providers_by_subagent={"hermes_code_reviewer": ("openai-codex",)},
+        allowed_real_models_by_subagent={"hermes_code_reviewer": ("gpt-5.5",)},
+        real_provider_client_factory=lambda _runtime: factory_calls.__setitem__("count", factory_calls["count"] + 1),
+    )
+
+    assert runtime.runtime_status == "blocked"
+    assert runtime.real_provider_allowed is False
+    assert runtime.provider_policy_status == "blocked"
+    assert factory_calls["count"] == 0
+    assert any(error.code == "real_provider_subagent_policy_missing" for error in runtime.errors)
+
+
 def test_disagreement_resolved_by_reviewer_approval_updates_safe_report(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     repo_root, loaded_specs = _loaded_specs(tmp_path)

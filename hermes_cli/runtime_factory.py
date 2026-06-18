@@ -48,6 +48,25 @@ class ControlledRuntimeClientProtocol(Protocol):
 
 
 @dataclass(frozen=True)
+class RealProviderRequest:
+    runtime: "ControlledRuntime"
+    provider: str
+    model: str
+    input_messages: list[dict[str, Any]]
+    request_metadata: dict[str, Any]
+
+
+class RealProviderClientProtocol(Protocol):
+    def __call__(self, request: RealProviderRequest) -> Mapping[str, Any]:
+        ...
+
+
+class RealProviderClientFactory(Protocol):
+    def __call__(self, runtime: "ControlledRuntime") -> RealProviderClientProtocol:
+        ...
+
+
+@dataclass(frozen=True)
 class RuntimeToolPolicy:
     read: list[str] = field(default_factory=list)
     write: list[str] = field(default_factory=list)
@@ -179,6 +198,9 @@ class ControlledRuntime:
     logging_hooks_policy: dict[str, Any]
     token_accounting_policy: dict[str, Any]
     safety_gates: dict[str, Any]
+    runtime_mode: str = "fake"
+    real_provider_allowed: bool = False
+    provider_policy_status: str = "not_requested"
     working_directory: str | None = None
     invocation_client: ControlledRuntimeClientProtocol | None = field(default=None, repr=False, compare=False)
     errors: list[RuntimeFactoryErrorDetail] = field(default_factory=list)
@@ -206,6 +228,9 @@ class ControlledRuntime:
             "logging_hooks_policy": dict(self.logging_hooks_policy),
             "token_accounting_policy": dict(self.token_accounting_policy),
             "safety_gates": dict(self.safety_gates),
+            "runtime_mode": self.runtime_mode,
+            "real_provider_allowed": self.real_provider_allowed,
+            "provider_policy_status": self.provider_policy_status,
             "working_directory": self.working_directory,
             "errors": [
                 {
@@ -326,18 +351,137 @@ def build_controlled_runtime(
     *,
     plan: RuntimeFactoryPlan,
     invocation_client: ControlledRuntimeClientProtocol | None,
+    request_real_provider_execution: bool = False,
+    allow_real_provider_execution: bool = False,
+    allowed_real_providers: tuple[str, ...] = (),
+    allowed_real_models: tuple[str, ...] = (),
+    allowed_real_providers_by_role: dict[str, tuple[str, ...]] | None = None,
+    allowed_real_models_by_role: dict[str, tuple[str, ...]] | None = None,
+    allowed_real_providers_by_subagent: dict[str, tuple[str, ...]] | None = None,
+    allowed_real_models_by_subagent: dict[str, tuple[str, ...]] | None = None,
+    real_provider_client_factory: RealProviderClientFactory | None = None,
     working_directory: str | None = None,
 ) -> ControlledRuntime:
-    ready = (
-        plan.status == RuntimeFactoryStatus.PLAN_ONLY
-        and bool(plan.provider)
-        and bool(plan.model)
-        and invocation_client is not None
-    )
-    provider = plan.provider if ready else None
-    model = plan.model if ready else None
-    model_class = plan.model_class if ready else None
-    return ControlledRuntime(
+    errors = list(plan.errors)
+    provider = plan.provider
+    model = plan.model
+    model_class = plan.model_class
+    provider_policy_status = "not_requested"
+    real_provider_allowed = False
+    runtime_mode = "fake"
+    selected_invocation_client = invocation_client
+
+    ready = plan.status == RuntimeFactoryStatus.PLAN_ONLY and bool(provider) and bool(model)
+    if request_real_provider_execution:
+        runtime_mode = "blocked"
+        provider_policy_status = "blocked"
+        selected_invocation_client = None
+        if not allow_real_provider_execution:
+            errors.append(
+                RuntimeFactoryErrorDetail(
+                    code="real_provider_execution_disabled",
+                    message="Real provider execution requires an explicit allow_real_provider_execution gate",
+                    field_path="allow_real_provider_execution",
+                )
+            )
+            ready = False
+        elif provider not in allowed_real_providers:
+            errors.append(
+                RuntimeFactoryErrorDetail(
+                    code="real_provider_provider_not_allowed",
+                    message=f"Provider {provider!r} is not allowlisted for real provider execution",
+                    field_path="allowed_real_providers",
+                )
+            )
+            ready = False
+        elif model not in allowed_real_models:
+            errors.append(
+                RuntimeFactoryErrorDetail(
+                    code="real_provider_model_not_allowed",
+                    message=f"Model {model!r} is not allowlisted for real provider execution",
+                    field_path="allowed_real_models",
+                )
+            )
+            ready = False
+        elif not _policy_allows_identity(
+            policy_by_identity=allowed_real_providers_by_role,
+            identity=plan.role_id,
+            candidate=provider,
+            missing_code="real_provider_role_policy_missing",
+            mismatch_code="real_provider_role_provider_not_allowed",
+            field_path="allowed_real_providers_by_role",
+            errors=errors,
+        ):
+            ready = False
+        elif not _policy_allows_identity(
+            policy_by_identity=allowed_real_models_by_role,
+            identity=plan.role_id,
+            candidate=model,
+            missing_code="real_provider_role_policy_missing",
+            mismatch_code="real_provider_role_model_not_allowed",
+            field_path="allowed_real_models_by_role",
+            errors=errors,
+        ):
+            ready = False
+        elif not _policy_allows_identity(
+            policy_by_identity=allowed_real_providers_by_subagent,
+            identity=plan.subagent_id,
+            candidate=provider,
+            missing_code="real_provider_subagent_policy_missing",
+            mismatch_code="real_provider_subagent_provider_not_allowed",
+            field_path="allowed_real_providers_by_subagent",
+            errors=errors,
+        ):
+            ready = False
+        elif not _policy_allows_identity(
+            policy_by_identity=allowed_real_models_by_subagent,
+            identity=plan.subagent_id,
+            candidate=model,
+            missing_code="real_provider_subagent_policy_missing",
+            mismatch_code="real_provider_subagent_model_not_allowed",
+            field_path="allowed_real_models_by_subagent",
+            errors=errors,
+        ):
+            ready = False
+        elif real_provider_client_factory is None:
+            errors.append(
+                RuntimeFactoryErrorDetail(
+                    code="real_provider_client_factory_missing",
+                    message="Real provider execution requires an injected client factory",
+                    field_path="real_provider_client_factory",
+                )
+            )
+            ready = False
+        elif not callable(real_provider_client_factory):
+            errors.append(
+                RuntimeFactoryErrorDetail(
+                    code="real_provider_client_factory_invalid",
+                    message="Real provider execution requires a callable injected client factory",
+                    field_path="real_provider_client_factory",
+                )
+            )
+            ready = False
+        else:
+            real_provider_allowed = True
+            provider_policy_status = "allowed"
+            runtime_mode = "real_provider"
+    elif invocation_client is None:
+        runtime_mode = "blocked"
+        ready = False
+        errors.append(
+            RuntimeFactoryErrorDetail(
+                code="controlled_runtime_invocation_client_missing",
+                message="Controlled runtime requires an injected invocation client",
+                field_path="invocation_client",
+            )
+        )
+
+    real_provider_allowed = bool(ready and provider_policy_status == "allowed")
+
+    provider = provider if ready else None
+    model = model if ready else None
+    model_class = model_class if ready else None
+    runtime = ControlledRuntime(
         pipeline_session_id=plan.pipeline_session_id,
         trace_id=plan.trace_id,
         pipeline_id=plan.pipeline_id,
@@ -359,10 +503,86 @@ def build_controlled_runtime(
         logging_hooks_policy=dict(plan.logging_hooks_policy),
         token_accounting_policy=dict(plan.token_accounting_policy),
         safety_gates=dict(plan.safety_gates),
+        runtime_mode=runtime_mode if ready else "blocked",
+        real_provider_allowed=real_provider_allowed,
+        provider_policy_status=provider_policy_status,
         working_directory=working_directory,
-        invocation_client=invocation_client,
-        errors=list(plan.errors),
+        invocation_client=None,
+        errors=errors,
     )
+    if ready and real_provider_allowed and real_provider_client_factory is not None:
+        selected_invocation_client = _build_real_provider_invocation_client(runtime, real_provider_client_factory)
+    runtime = ControlledRuntime(
+        **{
+            **runtime.__dict__,
+            "invocation_client": selected_invocation_client,
+        }
+    )
+    return runtime
+
+
+def _build_real_provider_invocation_client(
+    runtime: ControlledRuntime,
+    real_provider_client_factory: RealProviderClientFactory,
+) -> ControlledRuntimeClientProtocol:
+    def _invoke(_runtime: ControlledRuntime, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        input_messages = payload.get("input_messages")
+        normalized_messages = _validated_input_messages(input_messages)
+        client = real_provider_client_factory(runtime)
+        request = RealProviderRequest(
+            runtime=runtime,
+            provider=str(runtime.provider or ""),
+            model=str(runtime.model or ""),
+            input_messages=normalized_messages,
+            request_metadata=dict(payload.get("request_metadata") or {}),
+        )
+        return client(request)
+
+    return _invoke
+
+
+def _validated_input_messages(value: Any) -> list[dict[str, Any]]:
+    messages = list(value or [])
+    normalized: list[dict[str, Any]] = []
+    for item in messages:
+        if not isinstance(item, Mapping):
+            raise ValueError("real_provider_invalid_input_messages")
+        normalized.append(dict(item))
+    return normalized
+
+
+def _policy_allows_identity(
+    *,
+    policy_by_identity: dict[str, tuple[str, ...]] | None,
+    identity: str,
+    candidate: str | None,
+    missing_code: str,
+    mismatch_code: str,
+    field_path: str,
+    errors: list[RuntimeFactoryErrorDetail],
+) -> bool:
+    if policy_by_identity is None:
+        return True
+    allowed = tuple(policy_by_identity.get(identity) or ())
+    if not allowed:
+        errors.append(
+            RuntimeFactoryErrorDetail(
+                code=missing_code,
+                message=f"Real provider execution requires explicit policy for {identity!r}",
+                field_path=field_path,
+            )
+        )
+        return False
+    if candidate not in allowed:
+        errors.append(
+            RuntimeFactoryErrorDetail(
+                code=mismatch_code,
+                message=f"Requested runtime value is not allowed for {identity!r}",
+                field_path=field_path,
+            )
+        )
+        return False
+    return True
 
 
 def _runtime_contract_blocked_plan(

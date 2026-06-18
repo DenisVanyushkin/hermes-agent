@@ -219,11 +219,14 @@ class PipelineSubagentRunReport:
     subagent_id: str
     role_id: str
     status: str
-    actual_provider: str | None
-    actual_model: str | None
-    input_hash: str | None
-    prompt_hash: str | None
-    response_output_hash: str | None
+    actual_provider: str | None = None
+    actual_model: str | None = None
+    runtime_mode: str = "fake"
+    real_provider_allowed: bool = False
+    provider_policy_status: str = "not_requested"
+    input_hash: str | None = None
+    prompt_hash: str | None = None
+    response_output_hash: str | None = None
     token_usage: dict[str, Any] = field(default_factory=dict)
     cache: dict[str, Any] = field(default_factory=dict)
     tool_call_summaries: list[dict[str, Any]] = field(default_factory=list)
@@ -238,6 +241,9 @@ class PipelineSubagentRunReport:
             "subagent_id": self.subagent_id,
             "role_id": self.role_id,
             "status": self.status,
+            "runtime_mode": self.runtime_mode,
+            "real_provider_allowed": self.real_provider_allowed,
+            "provider_policy_status": self.provider_policy_status,
             "actual_provider": self.actual_provider,
             "actual_model": self.actual_model,
             "input_hash": self.input_hash,
@@ -607,6 +613,9 @@ def _build_subagent_run_reports(steps: list[PipelineStepPlan]) -> list[PipelineS
                 subagent_id=step.subagent_id,
                 role_id=step.step_kind,
                 status=str(runner_result.get("status") or "not_invoked"),
+                runtime_mode=str(runner_result.get("runtime_mode") or "fake"),
+                real_provider_allowed=bool(runner_result.get("real_provider_allowed", False)),
+                provider_policy_status=str(runner_result.get("provider_policy_status") or "not_requested"),
                 actual_provider=_mapping_value(runner_result, "actual_provider"),
                 actual_model=_mapping_value(runner_result, "actual_model"),
                 input_hash=_mapping_value(runner_result, "input_hash"),
@@ -633,6 +642,9 @@ def _coerce_subagent_run_reports(payloads: list[Mapping[str, Any]] | None) -> li
                 subagent_id=str(item.get("subagent_id") or "unknown"),
                 role_id=str(item.get("role_id") or "unknown"),
                 status=str(item.get("status") or "unknown"),
+                runtime_mode=str(item.get("runtime_mode") or "fake"),
+                real_provider_allowed=bool(item.get("real_provider_allowed", False)),
+                provider_policy_status=str(item.get("provider_policy_status") or "not_requested"),
                 actual_provider=_mapping_value(item, "actual_provider"),
                 actual_model=_mapping_value(item, "actual_model"),
                 input_hash=_mapping_value(item, "input_hash"),
