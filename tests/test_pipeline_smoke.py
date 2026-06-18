@@ -183,3 +183,14 @@ def test_controlled_engineering_e2e_run_smoke_scenario_uses_fake_provider_factor
     assert payload["provider_execution_mode"] == "fake_real_provider_client"
     assert payload["network_access"] == "disabled"
     assert payload["sdk_import_mode"] == "not_used"
+
+
+def test_controlled_engineering_e2e_rejects_repo_root_workspace() -> None:
+    payload = pipeline_smoke.run_smoke_scenario(
+        scenario="controlled-engineering-e2e",
+        runner_mode="fake",
+        workspace=REPO_ROOT,
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "workspace_matches_repo_root"
