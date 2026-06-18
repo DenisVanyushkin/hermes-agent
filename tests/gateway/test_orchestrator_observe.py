@@ -527,6 +527,70 @@ def test_gateway_orchestrator_disabled_mode_skips_logging(caplog):
     assert not [record for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message]
 
 
+def test_controlled_manual_router_mode_reaches_orchestrator_execution_gate(monkeypatch, caplog):
+    pipeline_observe = importlib.import_module("hermes_cli.pipeline_observe")
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-controlled-manual-gateway",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        router_decision = pipeline_observe.observe_pipeline_router_decision(
+            config={"pipelines": {"enabled": True, "router": {"mode": "controlled_manual"}}},
+            user_message="HERMES CONTROLLED PIPELINE VALIDATION - run controlled engineering e2e dry-run and return only the safe execution report summary.",
+            session_id="sess-controlled-manual-router-gate",
+            platform="telegram",
+            logger=logging.getLogger("gateway.test"),
+        )
+        report = orchestrator.observe_gateway_turn(
+            config={
+                "pipelines": {
+                    "enabled": True,
+                    "router": {"mode": "controlled_manual"},
+                    "orchestrator": {"mode": "controlled_manual"},
+                    "execution": {
+                        "mode": "controlled_manual",
+                        "enable_gateway_execution_controller": True,
+                        "allow_actual_subagent_invocation": True,
+                        "allow_actual_reviewer_invocation": True,
+                        "allow_actual_rework_loop": True,
+                        "allow_pipelines": ["engineering_review_pipeline"],
+                        "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                    },
+                }
+            },
+            user_message="HERMES CONTROLLED PIPELINE VALIDATION - run controlled engineering e2e dry-run and return only the safe execution report summary.",
+            session_id="sess-controlled-manual-router-gate",
+            platform="telegram",
+            router_decision=router_decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert router_decision == decision
+    assert report is not None
+    observe_payload = json.loads(next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message).split("pipeline_router_observe ", 1)[1])
+    assert observe_payload["selected_pipeline_id"] == "engineering_review_pipeline"
+    orchestrator_payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert orchestrator_payload["pipeline_execution_controller"]["actual_execution_invoked"] is True
+    assert orchestrator_payload["pipeline_execution_controller"]["helper_result"]["provider_execution_mode"] == "fake_real_provider_client"
+    assert not any("Invalid pipelines.router.mode" in record.message for record in caplog.records)
+
+
 def test_gateway_orchestrator_controlled_manual_requires_explicit_trigger(caplog):
     orchestrator = importlib.import_module("hermes_cli.orchestrator")
 
