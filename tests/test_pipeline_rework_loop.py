@@ -226,6 +226,184 @@ def test_blockers_trigger_one_rework_then_approval(tmp_path: Path) -> None:
     assert result.appended_rework_context == ["Reviewer blockers after iteration 1: missing regression test"]
 
 
+def test_engineer_allowed_mutation_flows_through_git_gate_and_report(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+
+    class _InvocationClient:
+        def __call__(self, runtime, payload):
+            if runtime.subagent_id == "hermes_engineer_core":
+                return {
+                    "structured_output": _engineer_output(
+                        mutations=[
+                            {
+                                "operation": "write_text",
+                                "path": "tests/test_example.py",
+                                "content": "def test_ok():\n    assert True\n",
+                            }
+                        ]
+                    ),
+                    "output_text": "ok",
+                }
+            return {
+                "structured_output": _reviewer_output(blockers=[]),
+                "output_text": "ok",
+            }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "invocation_client": _InvocationClient(),
+            "controlled_runner": module.ControlledRuntimeRunner(),
+            "allow_mutations": True,
+            "mutation_workspace": str(repo),
+        },
+    )
+
+    assert result.completion_allowed is True
+    assert result.mutation_summary["applied_count"] == 1
+    assert "tests/test_example.py" in result.git_gate["changed_files"]
+    assert result.execution_report.to_safe_dict()["mutation_summary"]["applied_count"] == 1
+
+
+def test_engineer_mutation_denied_when_gate_disabled(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+
+    class _InvocationClient:
+        def __call__(self, _runtime, _payload):
+            return {
+                "structured_output": _engineer_output(
+                    mutations=[{"operation": "write_text", "path": "safe.txt", "content": "hello\n"}]
+                ),
+                "output_text": "ok",
+            }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        controlled_runtime_context={
+            "invocation_client": _InvocationClient(),
+            "controlled_runner": module.ControlledRuntimeRunner(),
+            "allow_mutations": False,
+            "mutation_workspace": str(repo),
+        },
+    )
+
+    assert result.completion_allowed is False
+    assert result.blocked_reason == "mutation_denied"
+    assert result.mutation_summary["denied_count"] == 1
+    assert not (repo / "safe.txt").exists()
+
+
+def test_reviewer_mutation_request_is_denied(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+
+    class _InvocationClient:
+        def __call__(self, runtime, _payload):
+            if runtime.subagent_id == "hermes_engineer_core":
+                return {
+                    "structured_output": _engineer_output(
+                        mutations=[
+                            {
+                                "operation": "write_text",
+                                "path": "safe.txt",
+                                "content": "engineer-change\n",
+                            }
+                        ]
+                    ),
+                    "output_text": "ok",
+                }
+            return {
+                "structured_output": _reviewer_output(blockers=[])
+                | {"mutations": [{"operation": "write_text", "path": "reviewer.txt", "content": "nope\n"}]},
+                "output_text": "ok",
+            }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        controlled_runtime_context={
+            "invocation_client": _InvocationClient(),
+            "controlled_runner": module.ControlledRuntimeRunner(),
+            "allow_mutations": True,
+            "mutation_workspace": str(repo),
+        },
+    )
+
+    assert result.blocked_reason == "mutation_denied"
+    assert result.mutation_summary["denied_count"] == 1
+    assert not (repo / "reviewer.txt").exists()
+
+
+def test_engineer_mixed_mutation_batch_fails_closed_without_partial_writes(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+
+    class _InvocationClient:
+        def __call__(self, _runtime, _payload):
+            return {
+                "structured_output": _engineer_output(
+                    mutations=[
+                        {
+                            "operation": "write_text",
+                            "path": "safe.txt",
+                            "content": "safe\n",
+                        },
+                        {
+                            "operation": "write_text",
+                            "path": "../secret.env",
+                            "content": "unsafe\n",
+                        },
+                    ]
+                ),
+                "output_text": "ok",
+            }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        controlled_runtime_context={
+            "invocation_client": _InvocationClient(),
+            "controlled_runner": module.ControlledRuntimeRunner(),
+            "allow_mutations": True,
+            "mutation_workspace": str(repo),
+        },
+    )
+
+    assert result.blocked_reason == "mutation_denied"
+    assert result.mutation_summary["applied_count"] == 0
+    assert result.mutation_summary["denied_count"] >= 1
+    assert not (repo / "safe.txt").exists()
+
+
 def test_loop_limit_exceeded_blocks_before_extra_rework(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     repo_root, loaded_specs = _loaded_specs(tmp_path)

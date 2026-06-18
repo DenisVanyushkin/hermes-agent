@@ -180,6 +180,14 @@ def test_report_builder_serializes_disagreement_metadata_sections() -> None:
         tests={"status": "passed", "source": "pytest", "summary": "focused"},
         review_overrides={"reviewer_approved": False, "status": "blocked_after_disagreement"},
         decisive_subagent="hermes_code_reviewer",
+        mutation_summary={
+            "enabled": True,
+            "workspace": "repo",
+            "attempted_count": 1,
+            "applied_count": 1,
+            "denied_count": 0,
+            "results": [{"operation": "write_text", "path": "new.txt", "status": "applied", "content_sha256": "abc", "bytes_written": 3}],
+        },
     )
 
     payload = report.to_safe_dict()
@@ -195,6 +203,8 @@ def test_report_builder_serializes_disagreement_metadata_sections() -> None:
     assert payload["review"]["escalation_invoked"] is False
     assert payload["review"]["final_review_decision"] == "blocker_maintained"
     assert payload["decisive_subagent"] == "hermes_code_reviewer"
+    assert payload["mutation_summary"]["applied_count"] == 1
+    assert "Added unit test" not in json.dumps(payload["mutation_summary"], sort_keys=True)
 
 
 def test_report_builder_fails_closed_on_missing_required_metadata() -> None:

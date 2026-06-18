@@ -117,6 +117,8 @@ class StructuredOutputEnvelope:
     confidence: float | None = None
     requires_review: bool | None = None
     next_action: str | None = None
+    mutations: list[dict[str, Any]] = field(default_factory=list)
+    tests: list[str] = field(default_factory=list)
     validation_status: str = "not_applicable"
     validation_errors: list[dict[str, str]] = field(default_factory=list)
 
@@ -134,6 +136,8 @@ class StructuredOutputEnvelope:
             "confidence": self.confidence,
             "requires_review": self.requires_review,
             "next_action": self.next_action,
+            "mutations": [dict(item) for item in self.mutations],
+            "tests": list(self.tests),
             "validation_status": self.validation_status,
             "validation_errors": list(self.validation_errors),
         }
@@ -486,6 +490,12 @@ def validate_structured_output_envelope(payload: Any) -> StructuredOutputEnvelop
     requires_review = payload.get("requires_review")
     if requires_review is not None and not isinstance(requires_review, bool):
         errors.append({"field": "requires_review", "message": "Expected a boolean"})
+    mutations = payload.get("mutations")
+    if mutations is not None and not isinstance(mutations, list):
+        errors.append({"field": "mutations", "message": "Expected a list"})
+    tests = payload.get("tests")
+    if tests is not None and not isinstance(tests, list):
+        errors.append({"field": "tests", "message": "Expected a list"})
 
     if errors:
         return StructuredOutputEnvelope(
@@ -513,6 +523,8 @@ def validate_structured_output_envelope(payload: Any) -> StructuredOutputEnvelop
         confidence=float(confidence) if confidence is not None else None,
         requires_review=requires_review,
         next_action=normalized_strings["next_action"],
+        mutations=_mapping_list(mutations),
+        tests=[str(item) for item in (tests or []) if item is not None],
         validation_status="valid",
     )
 

@@ -294,6 +294,7 @@ class PipelineExecutionReport:
     tests: dict[str, Any] = field(default_factory=dict)
     review_overrides: dict[str, Any] = field(default_factory=dict)
     decisive_subagent: str | None = None
+    mutation_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_safe_dict(self) -> dict[str, Any]:
         summary = self.summary.to_safe_dict()
@@ -405,6 +406,7 @@ class PipelineExecutionReport:
             "git_gate": git_gate,
             "review": review,
             "reviewer_packet": reviewer_packet,
+            "mutation_summary": dict(self.mutation_summary),
             "peer_messages": [dict(item) for item in self.peer_messages],
             "disagreements": [dict(item) for item in self.disagreements],
             "decisive_subagent": self.decisive_subagent,
@@ -430,6 +432,7 @@ def build_pipeline_execution_report(
     review_overrides: Mapping[str, Any] | None = None,
     decisive_subagent: str | None = None,
     subagent_runs_override: list[Mapping[str, Any]] | None = None,
+    mutation_summary: Mapping[str, Any] | None = None,
 ) -> PipelineExecutionReport:
     _validate_required_metadata(session=session, state_snapshot=state_snapshot)
 
@@ -535,6 +538,7 @@ def build_pipeline_execution_report(
         tests=dict(tests or {}),
         review_overrides=dict(review_overrides or {}),
         decisive_subagent=decisive_subagent,
+        mutation_summary=dict(mutation_summary or {}),
     )
 
 
