@@ -7,6 +7,7 @@ import copy
 import json
 from dataclasses import replace
 from pathlib import Path
+import subprocess
 from typing import Any
 
 from hermes_cli.config import load_config
@@ -15,13 +16,14 @@ from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_specs import load_pipeline_specs
 from hermes_cli.runtime_factory import RuntimeFactory
-from hermes_cli.subagent_runner import SubagentRunner
+from hermes_cli.subagent_runner import ControlledRuntimeRunner, SubagentRunner
 
 
 ENGINEER_SUBAGENT_ID = "hermes_engineer_core"
 REVIEWER_SUBAGENT_ID = "hermes_code_reviewer"
 ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
 DEFAULT_TASK = "Implement a narrow engineering slice with tests."
+CONTROLLED_E2E_SCENARIO = "controlled-engineering-e2e"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
             "loop_limit_exceeded",
             "invalid_reviewer",
             "reviewer_failure",
+            CONTROLLED_E2E_SCENARIO,
         ),
         default="approval",
         help="Which fake runner scenario to execute.",
@@ -57,6 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Pretty-print JSON output.",
     )
+    parser.add_argument(
+        "--workspace",
+        help="Explicit workspace for the controlled manual dry-run scenario.",
+    )
+    parser.add_argument(
+        "--report-out",
+        help="Optional path to write the safe JSON payload.",
+    )
     return parser
 
 
@@ -66,7 +77,12 @@ def main(argv: list[str] | None = None) -> int:
         scenario=args.scenario,
         runner_mode=args.runner_mode,
         task=args.task,
+        workspace=Path(args.workspace).expanduser() if args.workspace else None,
     )
+    if args.report_out:
+        report_path = Path(args.report_out).expanduser()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     print(json.dumps(payload, indent=2 if args.pretty else None, sort_keys=True))
     return 0
 
@@ -76,6 +92,7 @@ def run_smoke_scenario(
     scenario: str,
     runner_mode: str = "fake",
     task: str = DEFAULT_TASK,
+    workspace: Path | None = None,
 ) -> dict[str, Any]:
     if runner_mode != "fake":
         return {
@@ -99,6 +116,8 @@ def run_smoke_scenario(
             },
             "report": None,
         }
+    if scenario == CONTROLLED_E2E_SCENARIO:
+        return _run_controlled_engineering_e2e_dry_run(task=task, workspace=workspace)
 
     repo_root = Path(__file__).resolve().parent.parent
     loaded_specs = load_pipeline_specs(repo_root=repo_root)
@@ -128,6 +147,135 @@ def run_smoke_scenario(
         "appended_rework_context": list(result.appended_rework_context),
         "iteration_history": [_sanitize_iteration(item.to_safe_dict()) for item in result.iteration_history],
         "fuse": result.fuse.to_safe_dict(),
+        "report": report,
+    }
+
+
+def _run_controlled_engineering_e2e_dry_run(*, task: str, workspace: Path | None) -> dict[str, Any]:
+    if workspace is None:
+        return {
+            "scenario": CONTROLLED_E2E_SCENARIO,
+            "runner_mode": "fake",
+            "status": "blocked",
+            "candidate_complete": False,
+            "completion_allowed": False,
+            "user_action_required": True,
+            "blocked_reason": "workspace_required",
+            "review_iterations_completed": 0,
+            "max_review_iterations": 0,
+            "runner_call_order": [],
+            "appended_rework_context": [],
+            "iteration_history": [],
+            "fuse": {
+                "tools_allowed": False,
+                "file_mutation_allowed": False,
+                "model_escalation_allowed": False,
+                "live_gateway_allowed": False,
+            },
+            "provider_execution_mode": "fake_real_provider_client",
+            "network_access": "disabled",
+            "sdk_import_mode": "not_used",
+            "reviewer_approved": False,
+            "git_gate": {},
+            "mutation_summary": {},
+            "test_summary": {},
+            "report": None,
+        }
+
+    repo_root = Path(__file__).resolve().parent.parent
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    try:
+        dry_run_workspace = _prepare_controlled_e2e_workspace(repo_root=repo_root, workspace=workspace)
+    except ValueError as exc:
+        return {
+            "scenario": CONTROLLED_E2E_SCENARIO,
+            "runner_mode": "fake",
+            "status": "blocked",
+            "candidate_complete": False,
+            "completion_allowed": False,
+            "user_action_required": True,
+            "blocked_reason": str(exc),
+            "review_iterations_completed": 0,
+            "max_review_iterations": 0,
+            "runner_call_order": [],
+            "appended_rework_context": [],
+            "iteration_history": [],
+            "fuse": {
+                "tools_allowed": False,
+                "file_mutation_allowed": False,
+                "model_escalation_allowed": False,
+                "live_gateway_allowed": False,
+            },
+            "provider_execution_mode": "fake_real_provider_client",
+            "network_access": "disabled",
+            "sdk_import_mode": "not_used",
+            "reviewer_approved": False,
+            "git_gate": {},
+            "mutation_summary": {},
+            "test_summary": {},
+            "report": None,
+        }
+    result = execute_bounded_rework_loop(
+        config=_smoke_config(),
+        session=_session(task),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=task,
+        repo_path=str(dry_run_workspace),
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "invocation_client": lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fake runtime must not be used")),
+            "controlled_runner": ControlledRuntimeRunner(),
+            "allow_real_provider_execution": True,
+            "request_real_provider_execution": True,
+            "allowed_real_providers": ("openrouter", "openai-codex"),
+            "allowed_real_models": ("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
+            "allowed_real_providers_by_role": {
+                "engineer": ("openrouter",),
+                "reviewer": ("openai-codex",),
+            },
+            "allowed_real_models_by_role": {
+                "engineer": ("xiaomi/mimo-v2.5-pro",),
+                "reviewer": ("gpt-5.5",),
+            },
+            "allowed_real_providers_by_subagent": {
+                ENGINEER_SUBAGENT_ID: ("openrouter",),
+                REVIEWER_SUBAGENT_ID: ("openai-codex",),
+            },
+            "allowed_real_models_by_subagent": {
+                ENGINEER_SUBAGENT_ID: ("xiaomi/mimo-v2.5-pro",),
+                REVIEWER_SUBAGENT_ID: ("gpt-5.5",),
+            },
+            "real_provider_client_factory": _manual_dry_run_provider_factory,
+            "allow_mutations": True,
+            "mutation_workspace": str(dry_run_workspace),
+            "allow_test_commands": True,
+            "test_workspace": str(dry_run_workspace),
+        },
+    )
+    report = result.execution_report.to_safe_dict() if result.execution_report is not None else None
+    return {
+        "scenario": CONTROLLED_E2E_SCENARIO,
+        "runner_mode": "fake",
+        "status": _result_status(result),
+        "candidate_complete": result.candidate_complete,
+        "completion_allowed": result.completion_allowed,
+        "user_action_required": result.user_action_required,
+        "blocked_reason": result.blocked_reason,
+        "review_iterations_completed": result.review_iterations_completed,
+        "max_review_iterations": result.max_review_iterations,
+        "runner_call_order": _runner_call_order(result),
+        "appended_rework_context": list(result.appended_rework_context),
+        "iteration_history": [_sanitize_iteration(item.to_safe_dict()) for item in result.iteration_history],
+        "fuse": result.fuse.to_safe_dict(),
+        "provider_execution_mode": "fake_real_provider_client",
+        "network_access": "disabled",
+        "sdk_import_mode": "not_used",
+        "reviewer_approved": bool(report and report.get("review", {}).get("reviewer_approved")),
+        "git_gate": dict(result.git_gate),
+        "mutation_summary": dict(result.mutation_summary or {}),
+        "test_summary": dict(result.test_summary or {}),
         "report": report,
     }
 
@@ -254,6 +402,80 @@ def _reviewer_output(*, blockers: list[str]) -> dict[str, Any]:
         "requires_review": bool(blockers),
         "next_action": "rework" if blockers else "none",
     }
+
+
+def _manual_dry_run_provider_factory(runtime):
+    def _client(_request):
+        if runtime.subagent_id == ENGINEER_SUBAGENT_ID:
+            return {
+                "provider": runtime.provider,
+                "model": runtime.model,
+                "structured_output": _manual_dry_run_engineer_output(),
+                "output_text": "engineer runtime completed",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                "tool_calls": [{"tool_name": "apply_patch", "call_count": 1, "status": "not_invoked"}],
+            }
+        return {
+            "provider": runtime.provider,
+            "model": runtime.model,
+            "structured_output": _reviewer_output(blockers=[]),
+            "output_text": "reviewer runtime approved",
+            "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+            "tool_calls": [{"tool_name": "pytest", "call_count": 1, "status": "not_invoked"}],
+        }
+
+    return _client
+
+
+def _manual_dry_run_engineer_output() -> dict[str, Any]:
+    payload = _engineer_output()
+    payload.update(
+        {
+            "summary": "Added generated example test.",
+            "findings": [{"code": "test_added", "summary": "Added generated example test"}],
+            "changes": [{"path": "tests/test_generated_example.py", "kind": "modify"}],
+            "confidence": 0.93,
+            "mutations": [
+                {
+                    "operation": "write_text",
+                    "path": "tests/test_generated_example.py",
+                    "content": "def test_generated_example():\n    assert 1 + 1 == 2\n",
+                }
+            ],
+            "tests": ["venv/bin/pytest -q tests/test_generated_example.py"],
+        }
+    )
+    return payload
+
+
+def _prepare_controlled_e2e_workspace(*, repo_root: Path, workspace: Path) -> Path:
+    workspace = workspace.expanduser()
+    if workspace.exists() and not workspace.is_dir():
+        raise ValueError("workspace_invalid")
+    if workspace.exists():
+        if not (workspace / ".git").exists():
+            raise ValueError("workspace_not_git_repo")
+        return workspace.resolve()
+
+    workspace.mkdir(parents=True, exist_ok=False)
+    _git(workspace, "init", "-b", "main")
+    _git(workspace, "config", "user.name", "Hermes Dry Run")
+    _git(workspace, "config", "user.email", "hermes-dry-run@example.com")
+    (workspace / ".gitignore").write_text("tests/__pycache__/\nvenv\n", encoding="utf-8")
+    (workspace / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    _git(workspace, "add", ".gitignore", "tracked.txt")
+    _git(workspace, "commit", "-m", "initial")
+    (workspace / "venv").symlink_to(repo_root / "venv")
+    return workspace.resolve()
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
 
 
 def _result_status(result: Any) -> str:
