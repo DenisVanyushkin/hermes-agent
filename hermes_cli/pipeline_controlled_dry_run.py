@@ -159,6 +159,7 @@ def prepare_controlled_e2e_workspace(*, repo_root: Path, workspace: Path) -> Pat
     if workspace.exists():
         if not (workspace / '.git').exists():
             raise ValueError('workspace_not_git_repo')
+        _ensure_controlled_e2e_workspace_layout(workspace=workspace, repo_root=repo_root)
         return workspace.resolve()
 
     workspace.mkdir(parents=True, exist_ok=False)
@@ -169,9 +170,20 @@ def prepare_controlled_e2e_workspace(*, repo_root: Path, workspace: Path) -> Pat
     (workspace / 'tracked.txt').write_text('baseline\n', encoding='utf-8')
     _git(workspace, 'add', '.gitignore', 'tracked.txt')
     _git(workspace, 'commit', '-m', 'initial')
-    (workspace / 'venv').symlink_to(repo_root / 'venv')
+    _ensure_controlled_e2e_workspace_layout(workspace=workspace, repo_root=repo_root)
     return workspace.resolve()
 
+
+def _ensure_controlled_e2e_workspace_layout(*, workspace: Path, repo_root: Path) -> None:
+    expected_venv = (repo_root / 'venv').resolve(strict=False)
+    workspace_venv = workspace / 'venv'
+    if workspace_venv.is_symlink():
+        if workspace_venv.resolve(strict=False) == expected_venv:
+            return
+        workspace_venv.unlink()
+    elif workspace_venv.exists():
+        raise ValueError('workspace_venv_conflict')
+    workspace_venv.symlink_to(repo_root / 'venv')
 
 def format_controlled_manual_summary(helper_result: dict[str, Any] | None, *, workspace_path: str | None = None) -> str | None:
     if not isinstance(helper_result, dict):

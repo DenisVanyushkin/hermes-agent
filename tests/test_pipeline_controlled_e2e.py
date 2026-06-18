@@ -134,6 +134,24 @@ def _init_git_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def test_controlled_engineering_pipeline_e2e_repairs_existing_workspace_without_venv(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_controlled_dry_run")
+    repo = _init_git_repo(tmp_path)
+    repo.joinpath("venv").unlink()
+
+    payload = module.run_controlled_engineering_e2e_dry_run(
+        task="Add controlled engineering e2e acceptance coverage",
+        workspace=repo,
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["completion_allowed"] is True
+    assert payload["blocked_reason"] is None
+    assert payload["test_summary"]["status"] == "passed"
+    assert repo.joinpath("venv").is_symlink()
+    assert repo.joinpath("venv").resolve() == REPO_ROOT.joinpath("venv").resolve()
+
+
 def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     repo_root, loaded_specs = _loaded_specs(tmp_path)
