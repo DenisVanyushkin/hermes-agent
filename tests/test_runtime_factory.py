@@ -541,3 +541,169 @@ def test_build_controlled_runtime_from_blocked_plan_fails_closed(tmp_path: Path)
     assert runtime.runtime_status == "blocked"
     assert runtime.provider is None
     assert runtime.model is None
+
+
+def test_build_controlled_runtime_real_provider_requires_explicit_gate(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+    step = next(item for item in session.planned_steps if item.step_kind == "engineer")
+
+    from hermes_cli.runtime_factory import build_controlled_runtime, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=step,
+        subagent_spec=loaded_specs.subagent_specs["hermes_engineer_core"],
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    factory_calls = {"count": 0}
+
+    def _factory(_runtime):
+        factory_calls["count"] += 1
+        return lambda _request: {"structured_output": {"summary": "unexpected"}}
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake ok"}},
+        request_real_provider_execution=True,
+        allow_real_provider_execution=False,
+        allowed_real_providers=("openrouter",),
+        allowed_real_models=("xiaomi/mimo-v2.5-pro",),
+        real_provider_client_factory=_factory,
+    )
+
+    assert runtime.runtime_status == "blocked"
+    assert runtime.runtime_mode == "blocked"
+    assert runtime.real_provider_allowed is False
+    assert runtime.provider_policy_status == "blocked"
+    assert factory_calls["count"] == 0
+    assert any(error.code == "real_provider_execution_disabled" for error in runtime.errors)
+
+
+def test_build_controlled_runtime_real_provider_ready_when_gate_and_allowlist_match(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+    step = next(item for item in session.planned_steps if item.step_kind == "reviewer")
+
+    from hermes_cli.runtime_factory import build_controlled_runtime, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=step,
+        subagent_spec=loaded_specs.subagent_specs["hermes_code_reviewer"],
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake ok"}},
+        request_real_provider_execution=True,
+        allow_real_provider_execution=True,
+        allowed_real_providers=("openai-codex",),
+        allowed_real_models=("gpt-5.5",),
+        real_provider_client_factory=lambda _runtime: (
+            lambda _request: {
+                "provider": "openai-codex",
+                "model": "gpt-5.5",
+                "structured_output": {"summary": "review ok", "status": "succeeded"},
+            }
+        ),
+    )
+
+    assert runtime.runtime_status == "ready"
+    assert runtime.runtime_mode == "real_provider"
+    assert runtime.real_provider_allowed is True
+    assert runtime.provider_policy_status == "allowed"
+    assert runtime.provider == "openai-codex"
+    assert runtime.model == "gpt-5.5"
+
+
+def test_build_controlled_runtime_missing_fake_invocation_client_has_diagnostic_error(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+    step = next(item for item in session.planned_steps if item.step_kind == "engineer")
+
+    from hermes_cli.runtime_factory import build_controlled_runtime, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=step,
+        subagent_spec=loaded_specs.subagent_specs["hermes_engineer_core"],
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+    runtime = build_controlled_runtime(plan=plan, invocation_client=None)
+
+    assert runtime.runtime_status == "blocked"
+    assert runtime.runtime_mode == "blocked"
+    assert any(error.code == "controlled_runtime_invocation_client_missing" for error in runtime.errors)
+
+
+def test_build_controlled_runtime_real_provider_role_policy_blocks_reviewer_without_client_call(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+    step = next(item for item in session.planned_steps if item.step_kind == "reviewer")
+
+    from hermes_cli.runtime_factory import build_controlled_runtime, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=step,
+        subagent_spec=loaded_specs.subagent_specs["hermes_code_reviewer"],
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    factory_calls = {"count": 0}
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake ok"}},
+        request_real_provider_execution=True,
+        allow_real_provider_execution=True,
+        allowed_real_providers=("openrouter", "openai-codex"),
+        allowed_real_models=("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
+        allowed_real_providers_by_role={"engineer": ("openrouter",)},
+        allowed_real_models_by_role={"engineer": ("xiaomi/mimo-v2.5-pro",)},
+        real_provider_client_factory=lambda _runtime: factory_calls.__setitem__("count", factory_calls["count"] + 1),
+    )
+
+    assert runtime.runtime_status == "blocked"
+    assert runtime.real_provider_allowed is False
+    assert runtime.provider_policy_status == "blocked"
+    assert factory_calls["count"] == 0
+    assert any(error.code == "real_provider_role_policy_missing" for error in runtime.errors)
+
+
+def test_build_controlled_runtime_real_provider_rejects_non_callable_factory(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _engineering_session()
+    step = next(item for item in session.planned_steps if item.step_kind == "engineer")
+
+    from hermes_cli.runtime_factory import build_controlled_runtime, build_runtime_factory_plan
+
+    plan = build_runtime_factory_plan(
+        session=session,
+        planned_step=step,
+        subagent_spec=loaded_specs.subagent_specs["hermes_engineer_core"],
+        config=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    runtime = build_controlled_runtime(
+        plan=plan,
+        invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake ok"}},
+        request_real_provider_execution=True,
+        allow_real_provider_execution=True,
+        allowed_real_providers=("openrouter",),
+        allowed_real_models=("xiaomi/mimo-v2.5-pro",),
+        allowed_real_providers_by_role={"engineer": ("openrouter",)},
+        allowed_real_models_by_role={"engineer": ("xiaomi/mimo-v2.5-pro",)},
+        real_provider_client_factory="not-callable",
+    )
+
+    assert runtime.runtime_status == "blocked"
+    assert any(error.code == "real_provider_client_factory_invalid" for error in runtime.errors)
