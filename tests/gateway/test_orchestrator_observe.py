@@ -525,3 +525,94 @@ def test_gateway_orchestrator_disabled_mode_skips_logging(caplog):
 
     assert report is None
     assert not [record for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message]
+
+
+def test_gateway_orchestrator_controlled_manual_requires_explicit_trigger(caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-controlled-manual-missing-trigger",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={
+                "pipelines": {
+                    "enabled": True,
+                    "orchestrator": {"mode": "controlled_manual"},
+                    "execution": {
+                        "mode": "controlled_manual",
+                        "enable_gateway_execution_controller": True,
+                        "allow_actual_subagent_invocation": True,
+                        "allow_actual_reviewer_invocation": True,
+                        "allow_actual_rework_loop": True,
+                        "allow_pipelines": ["engineering_review_pipeline"],
+                        "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                    },
+                }
+            },
+            user_message="ordinary engineering request",
+            session_id="sess-controlled-manual-missing-trigger",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_execution_controller"]["blocked_reason"] == "controlled_manual_trigger_missing"
+    assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is False
+
+
+def test_gateway_orchestrator_controlled_manual_executes_fake_only_dry_run(caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-controlled-manual-exec",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={
+                "pipelines": {
+                    "enabled": True,
+                    "orchestrator": {"mode": "controlled_manual"},
+                    "execution": {
+                        "mode": "controlled_manual",
+                        "enable_gateway_execution_controller": True,
+                        "allow_actual_subagent_invocation": True,
+                        "allow_actual_reviewer_invocation": True,
+                        "allow_actual_rework_loop": True,
+                        "allow_pipelines": ["engineering_review_pipeline"],
+                        "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                    },
+                }
+            },
+            user_message="HERMES CONTROLLED PIPELINE VALIDATION - run controlled engineering e2e dry-run and return only the safe execution report summary.",
+            session_id="sess-controlled-manual-exec",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["execution_report"]["executed"] is True
+    assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is True
+    assert payload["pipeline_execution_controller"]["helper_result"]["provider_execution_mode"] == "fake_real_provider_client"
+    assert payload["pipeline_execution_controller"]["final_response_text"].startswith("Controlled pipeline validation completed.")
+    assert "/tmp/hermes-gateway-controlled-runs" not in json.dumps(payload, sort_keys=True)

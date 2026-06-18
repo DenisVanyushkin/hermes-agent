@@ -298,6 +298,53 @@ def test_execution_mode_disabled_does_not_call_helper() -> None:
     assert helper_calls == []
 
 
+def test_controlled_manual_requires_explicit_trigger(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="controlled_manual"),
+        session=session,
+        state_snapshot=snapshot,
+        allow_test_execution=True,
+        allow_registered_helper_selection=True,
+        helper_execution_context=_runtime_context(tmp_path),
+    )
+
+    assert result.status == "blocked"
+    assert result.blocked_reason == "controlled_manual_trigger_missing"
+    assert result.actual_execution_invoked is False
+
+
+def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    repo_root = _copy_spec_tree(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="controlled_manual"),
+        session=session,
+        state_snapshot=snapshot,
+        helper_execution_context={
+            "runtime_factory": RuntimeFactory(repo_root=repo_root),
+            "runner": SubagentRunner(
+                executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))
+            ),
+            "user_message": "HERMES CONTROLLED PIPELINE VALIDATION - run controlled engineering e2e dry-run",
+            "repo_path": str(git_repo),
+            "allow_completion_after_review": True,
+            "controlled_runtime_context": _controlled_runtime_context(mutate_repo=git_repo),
+        },
+    )
+
+    assert result.actual_execution_invoked is True
+    assert result.helper_result is not None
+    assert result.final_response_text is not None
+    assert "Controlled pipeline validation completed." in result.final_response_text
+    assert result.workspace_basename == git_repo.name
+
+
 def test_enabled_like_config_without_helper_is_not_wired() -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()

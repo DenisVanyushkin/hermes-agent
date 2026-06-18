@@ -14,6 +14,7 @@ from hermes_cli.pipeline_execution_fuse import (
     evaluate_pipeline_reviewer_execution_fuse,
 )
 from hermes_cli.pipeline_rework_loop import evaluate_pipeline_rework_loop_fuse
+from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE, CONTROLLED_VALIDATION_TRIGGER
 from hermes_cli.pipeline_specs import load_pipeline_specs
 
 
@@ -30,6 +31,8 @@ class PipelineExecutionControllerResult:
     helper_result_status: str | None = None
     helper_result: dict[str, Any] | None = None
     helper_error: str | None = None
+    final_response_text: str | None = None
+    workspace_basename: str | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +47,8 @@ class PipelineExecutionControllerResult:
             "helper_result_status": self.helper_result_status,
             "helper_result": dict(self.helper_result) if isinstance(self.helper_result, dict) else self.helper_result,
             "helper_error": self.helper_error,
+            "final_response_text": self.final_response_text,
+            "workspace_basename": self.workspace_basename,
         }
 
 
@@ -79,6 +84,12 @@ def evaluate_pipeline_execution_controller(
 
     if not _actual_gateway_execution_enabled(config):
         return replace(base, status="would_execute", blocked_reason="gateway_execution_not_enabled")
+
+    if execution_mode == CONTROLLED_MANUAL_MODE:
+        if not _controlled_manual_trigger_present(helper_execution_context):
+            return replace(base, status="blocked", blocked_reason="controlled_manual_trigger_missing")
+        allow_test_execution = True
+        allow_registered_helper_selection = True
 
     if not allow_test_execution:
         return replace(base, status="not_wired", blocked_reason="live_execution_not_wired")
@@ -175,6 +186,8 @@ def evaluate_pipeline_execution_controller(
         resolved_helper_name=helper_resolution.helper_name,
         helper_result_status=_helper_result_status(helper_result),
         helper_result=safe_helper_result,
+        final_response_text=_final_response_text(safe_helper_result, helper_execution_context),
+        workspace_basename=_workspace_basename(helper_execution_context),
     )
 
 
@@ -276,3 +289,29 @@ def _safe_helper_result(helper_result: Any) -> dict[str, Any] | None:
     if isinstance(helper_result, Mapping):
         return dict(helper_result)
     return None
+
+
+def _controlled_manual_trigger_present(helper_execution_context: Mapping[str, Any] | None) -> bool:
+    if not isinstance(helper_execution_context, Mapping):
+        return False
+    user_message = str(helper_execution_context.get("user_message") or "")
+    return CONTROLLED_VALIDATION_TRIGGER in user_message
+
+
+def _workspace_basename(helper_execution_context: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(helper_execution_context, Mapping):
+        return None
+    repo_path = helper_execution_context.get("repo_path")
+    if repo_path is None:
+        return None
+    from pathlib import Path
+
+    return Path(str(repo_path)).name
+
+
+def _final_response_text(helper_result: Any, helper_execution_context: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(helper_result, dict):
+        return None
+    from hermes_cli.pipeline_controlled_dry_run import format_controlled_manual_summary
+
+    return format_controlled_manual_summary(helper_result, workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, Mapping) else None)

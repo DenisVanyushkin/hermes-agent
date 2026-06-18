@@ -12,7 +12,7 @@ from hermes_cli.pipeline_state_machine import PipelineStateSnapshot
 ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
 ENGINEER_SUBAGENT_ID = "hermes_engineer_core"
 REVIEWER_SUBAGENT_ID = "hermes_code_reviewer"
-ALLOWED_ONE_STEP_MODES = {"one_step", "controlled_one_step"}
+ALLOWED_ONE_STEP_MODES = {"one_step", "controlled_one_step", "controlled_manual"}
 
 
 @dataclass(frozen=True)
