@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
+from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE, run_controlled_engineering_e2e_dry_run
 from hermes_cli.pipeline_rework_loop import execute_bounded_rework_loop
 
 
@@ -77,6 +79,10 @@ def execute_engineering_review_helper(
     controlled_runtime_context: Any = None,
     **_kwargs: Any,
 ) -> Any:
+    execution_mode = str((((config or {}).get('pipelines') or {}).get('execution') or {}).get('mode') or '').strip().lower()
+    if execution_mode == CONTROLLED_MANUAL_MODE:
+        workspace = Path(repo_path).expanduser() if repo_path else None
+        return run_controlled_engineering_e2e_dry_run(task=user_message, workspace=workspace)
     try:
         return execute_bounded_rework_loop(
             config=config,

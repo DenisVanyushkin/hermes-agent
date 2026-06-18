@@ -13,6 +13,7 @@ from hermes_cli.pipeline_execution_controller import evaluate_pipeline_execution
 from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode, PipelineGateRequest, evaluate_pipeline_gate
 from hermes_cli.pipeline_router import DEFAULT_PIPELINE_ID, RouterDecision
 from hermes_cli.pipeline_report import build_pipeline_execution_report
+from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE, build_controlled_manual_helper_context
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_state import (
     ExecutionReport,
@@ -25,7 +26,7 @@ from hermes_cli.pipeline_state_machine import PipelineStateSnapshot, build_pipel
 
 logger = logging.getLogger(__name__)
 
-_VALID_ORCHESTRATOR_MODES = {"disabled", "observe"}
+_VALID_ORCHESTRATOR_MODES = {"disabled", "observe", CONTROLLED_MANUAL_MODE}
 _UNAVAILABLE = "unavailable"
 _ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
 
@@ -48,7 +49,7 @@ def observe_gateway_turn(
     del selected_provider, selected_model
 
     mode = _orchestrator_mode(config)
-    if mode != "observe":
+    if mode == "disabled":
         return None
 
     started = time.perf_counter()
@@ -83,10 +84,24 @@ def observe_gateway_turn(
         user_message=user_message,
     )
     state_snapshot = _build_state_snapshot_for_observe(config=config, session=session)
+    helper_execution_context = None
+    allow_test_execution = False
+    allow_registered_helper_selection = False
+    if mode == CONTROLLED_MANUAL_MODE:
+        helper_execution_context = build_controlled_manual_helper_context(
+            user_message=user_message,
+            session_id=session_id,
+            pipeline_session_id=pipeline_session_id,
+        )
+        allow_test_execution = True
+        allow_registered_helper_selection = True
     pipeline_execution_controller = evaluate_pipeline_execution_controller(
         config=config,
         session=session,
         state_snapshot=state_snapshot,
+        allow_test_execution=allow_test_execution,
+        allow_registered_helper_selection=allow_registered_helper_selection,
+        helper_execution_context=helper_execution_context,
     )
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
     execution_report = ExecutionReport(
@@ -97,10 +112,10 @@ def observe_gateway_turn(
         fallback_pipeline_id=state.fallback_pipeline_id,
         completion_allowed=state.completion_allowed,
         completion_reason="observe_only_default_path",
-        executed=False,
-        would_execute=False,
-        execution_mode="observe",
-        runtime_status="not_observed",
+        executed=pipeline_execution_controller.actual_execution_invoked,
+        would_execute=(pipeline_execution_controller.status == "would_execute"),
+        execution_mode=mode,
+        runtime_status="executed" if pipeline_execution_controller.actual_execution_invoked else "not_observed",
         token_usage=getattr(router_decision, "token_usage", None) if router_decision is not None else _UNAVAILABLE,
         cache_usage=getattr(router_decision, "cache_usage", None) if router_decision is not None else _UNAVAILABLE,
         tool_call_summary=[],
@@ -349,8 +364,8 @@ def _build_state_snapshot_for_observe(
     config: dict[str, Any] | None,
     session: PipelineSession,
 ) -> PipelineStateSnapshot:
-    if _orchestrator_mode(config) != "observe":
-        raise ValueError("observe state snapshot requested while orchestrator is not in observe mode")
+    if _orchestrator_mode(config) not in {"observe", CONTROLLED_MANUAL_MODE}:
+        raise ValueError("observe state snapshot requested while orchestrator is not in observe or controlled_manual mode")
 
     loaded_specs = _load_pipeline_specs(repo_root=None)
     pipeline_spec = loaded_specs.pipeline_specs[session.pipeline_id]
