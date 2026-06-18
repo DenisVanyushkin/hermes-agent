@@ -74,6 +74,53 @@ def test_observe_invalid_mode_is_treated_as_disabled(monkeypatch, caplog):
     assert any("Invalid pipelines.router.mode" in record.message for record in caplog.records)
 
 
+def test_controlled_manual_router_mode_routes_without_invalid_mode_warning(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    decision = RouterDecision(
+        pipeline_session_id="pipe-controlled-manual",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.93,
+        reasoning_summary="controlled manual engineering request",
+        requires_clarification=False,
+        fallback_safe=False,
+        policy_block_reason=None,
+        routing_failure_reason=None,
+        selected_provider="openrouter",
+        selected_model="openrouter/owl-alpha",
+        actual_provider="openrouter",
+        actual_model="openrouter/owl-alpha",
+        alternatives=(),
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            assert user_message == "HERMES CONTROLLED PIPELINE VALIDATION - run controlled engineering e2e dry-run"
+            assert pipeline_session_id
+            assert router_subagent_id == "hermes_pipeline_router"
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={"pipelines": {"router": {"mode": "controlled_manual"}}},
+            user_message="HERMES CONTROLLED PIPELINE VALIDATION - run controlled engineering e2e dry-run",
+            session_id="sess-controlled-router",
+            platform="telegram",
+        )
+
+    assert result == decision
+    log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
+    assert '"event": "pipeline_router_observe_decision"' in log_message
+    assert '"selected_pipeline_id": "engineering_review_pipeline"' in log_message
+    assert not any("Invalid pipelines.router.mode" in record.message for record in caplog.records)
+
+
 def test_observe_mode_routes_and_logs(monkeypatch, caplog):
     from hermes_cli import pipeline_observe
 

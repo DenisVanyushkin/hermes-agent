@@ -22,7 +22,9 @@ from hermes_cli.pipeline_specs import load_pipeline_specs
 
 logger = logging.getLogger(__name__)
 
-_VALID_ROUTER_MODES = {"disabled", "observe"}
+# `controlled_manual` remains observe-only at the router layer; execution stays gated downstream.
+CONTROLLED_MANUAL_ROUTER_MODE = "controlled_manual"
+_VALID_ROUTER_MODES = {"disabled", "observe", CONTROLLED_MANUAL_ROUTER_MODE}
 
 
 def observe_pipeline_router_decision(
@@ -44,7 +46,7 @@ def observe_pipeline_router_decision(
 ) -> RouterDecision | None:
     log = logger or globals()["logger"]
     mode = _pipeline_router_mode(config)
-    if mode != "observe":
+    if mode == "disabled":
         return None
 
     started = time.perf_counter()
