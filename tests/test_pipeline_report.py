@@ -433,6 +433,71 @@ def test_report_subagent_runs_include_runtime_mode_and_real_provider_policy_meta
     assert payload["subagent_runs"][0]["provider_policy_status"] == "allowed"
 
 
+def test_report_completion_allowed_clears_blocked_reason_and_placeholder() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    engineer_step = snapshot.planned_steps[0]
+    engineer_eval = dict(engineer_step.evaluation_result or {})
+    engineer_eval["completion"] = {
+        "candidate_complete": True,
+        "blocked_reason": "execution_disabled",
+    }
+    snapshot.planned_steps[0] = engineer_step.__class__(**{**engineer_step.__dict__, "evaluation_result": engineer_eval})
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "execution_mode": "controlled_runtime_loop",
+        "completion_allowed": True,
+        "completion_blocked_reason": None,
+        "final_verdict": "controlled_rework_loop_candidate_complete",
+    })
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        preflight_result={"allowed": True, "reason_code": "rework_loop_fuse_allowed"},
+        subagent_runs_override=[
+            {
+                "step_id": "engineer",
+                "subagent_id": "hermes_engineer_core",
+                "role_id": "engineer",
+                "status": "succeeded",
+                "runtime_mode": "real_provider",
+                "real_provider_allowed": True,
+                "provider_policy_status": "allowed",
+                "actual_provider": "openrouter",
+                "actual_model": "xiaomi/mimo-v2.5-pro",
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            },
+            {
+                "step_id": "reviewer",
+                "subagent_id": "hermes_code_reviewer",
+                "role_id": "reviewer",
+                "status": "succeeded",
+                "runtime_mode": "real_provider",
+                "real_provider_allowed": True,
+                "provider_policy_status": "allowed",
+                "actual_provider": "openai-codex",
+                "actual_model": "gpt-5.5",
+                "token_usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+            },
+        ],
+    )
+
+    payload = report.to_safe_dict()
+
+    assert payload["completion"]["completion_allowed"] is True
+    assert payload["completion"]["blocked_reason"] is None
+    assert payload["final_response"]["status"] == "completion_allowed"
+    assert payload["final_response"]["placeholder_reason"] is None
+    assert payload["review"]["blocked_reason"] is None
+    assert payload["review"]["status"] == "not_required"
+
+
 def test_report_reviewer_invoked_stays_false_for_multiple_non_reviewer_runs() -> None:
     loaded = load_pipeline_specs()
     session = _session_for("engineering_review_pipeline", status="selected")

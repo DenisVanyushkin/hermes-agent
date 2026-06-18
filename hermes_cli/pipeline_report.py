@@ -459,6 +459,8 @@ def build_pipeline_execution_report(
         )
         or ("execution_disabled" if not state_snapshot.executed else None)
     )
+    if completion_allowed:
+        blocked_reason = None
     status = _report_status(
         executed=state_snapshot.executed,
         completion_allowed=completion_allowed,
