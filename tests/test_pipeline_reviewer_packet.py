@@ -321,3 +321,36 @@ def test_module_does_not_run_git_commands(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert packet.review_required is True
     assert seen == []
+
+
+def test_test_summary_results_are_sanitized_and_path_safe() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+
+    packet = module.build_reviewer_packet(
+        pipeline_id="engineering_review_pipeline",
+        task_summary="Include safe test evidence",
+        engineer_output=_engineer_output(),
+        baseline_snapshot=_snapshot(head_sha="abc123"),
+        post_snapshot=_snapshot(head_sha="def456", staged_files=("b.py",)),
+        git_result=_git_result(changed_files=["b.py"], staged_files=["b.py"]),
+        test_summary={
+            "status": "failed",
+            "summary": "1 failed",
+            "results": [
+                {
+                    "command": ["venv/bin/pytest", "-q", "tests/test_example.py"],
+                    "status": "failed",
+                    "stdout_excerpt": "password=123\nFAILED tests/test_example.py",
+                    "stderr_excerpt": "",
+                    "cwd": "tmp-worktree",
+                }
+            ],
+        },
+    )
+
+    payload = packet.to_safe_dict()
+
+    assert payload["tests"]["status"] == "failed"
+    assert payload["tests"]["results"][0]["command"] == ["venv/bin/pytest", "-q", "tests/test_example.py"]
+    assert payload["tests"]["results"][0]["cwd"] == "tmp-worktree"
+    assert "password=123" not in json.dumps(payload["tests"], sort_keys=True)

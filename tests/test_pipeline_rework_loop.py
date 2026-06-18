@@ -1663,3 +1663,180 @@ def test_usage_summary_from_subagent_runs_keeps_plan_size_separate_from_instance
     assert payload["subagent_run_instance_count"] == 4
     assert payload["execution_round_count"] == 2
     assert payload["subagent_count"] == 4
+
+
+def test_engineer_tests_flow_into_report_and_reviewer_packet(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+    _write(repo, "tests/test_example.py", "def test_ok():\n    assert True\n")
+    (repo / "venv").symlink_to(REPO_ROOT / "venv")
+
+    class _InvocationClient:
+        def __call__(self, runtime, payload):
+            if runtime.subagent_id == "hermes_engineer_core":
+                return {
+                    "structured_output": _engineer_output(
+                        mutations=[
+                            {
+                                "operation": "write_text",
+                                "path": "package/module.py",
+                                "content": "VALUE = 1\n",
+                            }
+                        ],
+                        tests=["venv/bin/pytest -q tests/test_example.py"],
+                    ),
+                    "output_text": "ok",
+                }
+            return {
+                "structured_output": _reviewer_output(blockers=[]),
+                "output_text": "ok",
+            }
+
+    runtime_context = module.ControlledRuntimeContext(
+        invocation_client=_InvocationClient(),
+        controlled_runner=module.ControlledRuntimeRunner(),
+        allow_mutations=True,
+        mutation_workspace=str(repo),
+        allow_test_commands=True,
+        test_workspace=str(repo),
+    )
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        controlled_runtime_context=runtime_context,
+    )
+
+    payload = result.execution_report.to_safe_dict()
+
+    assert result.test_summary["status"] == "passed"
+    assert payload["tests"]["status"] == "passed"
+    assert payload["reviewer_packet"]["safe_packet"]["tests"]["status"] == "passed"
+    assert payload["reviewer_packet"]["safe_packet"]["tests"]["results"][0]["command"] == [
+        "venv/bin/pytest",
+        "-q",
+        "tests/test_example.py",
+    ]
+
+
+def test_reviewer_test_request_fails_closed(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+
+    class _InvocationClient:
+        def __call__(self, runtime, payload):
+            if runtime.subagent_id == "hermes_engineer_core":
+                return {
+                    "structured_output": _engineer_output(),
+                    "output_text": "ok",
+                }
+            return {
+                "structured_output": _reviewer_output(blockers=["missing regression test"]) | {
+                    "tests": ["venv/bin/pytest -q tests/test_example.py"]
+                },
+                "output_text": "ok",
+            }
+
+    runtime_context = module.ControlledRuntimeContext(
+        invocation_client=_InvocationClient(),
+        controlled_runner=module.ControlledRuntimeRunner(),
+        allow_test_commands=True,
+        test_workspace=str(repo),
+    )
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        controlled_runtime_context=runtime_context,
+    )
+
+    assert result.blocked_reason == "test_command_role_not_permitted"
+    assert result.user_action_required is True
+    assert result.test_summary["blocked_reason"] == "test_command_role_not_permitted"
+
+
+def test_engineer_too_many_test_commands_fail_closed_without_crashing(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+
+    class _InvocationClient:
+        def __call__(self, runtime, payload):
+            if runtime.subagent_id == "hermes_engineer_core":
+                return {
+                    "structured_output": _engineer_output(
+                        tests=[
+                            "venv/bin/pytest -q tests/test_one.py",
+                            "venv/bin/pytest -q tests/test_two.py",
+                            "venv/bin/pytest -q tests/test_three.py",
+                            "venv/bin/pytest -q tests/test_four.py",
+                        ]
+                    ),
+                    "output_text": "ok",
+                }
+            return {
+                "structured_output": _reviewer_output(blockers=[]),
+                "output_text": "ok",
+            }
+
+    runtime_context = module.ControlledRuntimeContext(
+        invocation_client=_InvocationClient(),
+        controlled_runner=module.ControlledRuntimeRunner(),
+        allow_test_commands=True,
+        test_workspace=str(repo),
+    )
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        controlled_runtime_context=runtime_context,
+    )
+
+    assert result.completion_allowed is False
+    assert result.blocked_reason == "test_command_denied"
+    assert result.test_summary["blocked_reason"] == "test_command_denied"
+    assert result.test_summary["executed_count"] == 0
+
+
+def test_blocked_result_without_test_summary_keeps_safe_and_report_payloads_consistent(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    result = module.execute_bounded_rework_loop(
+        config={"pipelines": {"enabled": True, "execution": {"mode": "controlled_one_step"}}},
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+    )
+
+    safe_payload = result.to_safe_dict()
+    report_payload = result.execution_report.to_safe_dict()
+
+    assert result.test_summary is None
+    assert safe_payload["test_summary"]["status"] == "unavailable"
+    assert report_payload["tests"]["status"] == "unavailable"
+    assert safe_payload["test_summary"] == report_payload["tests"]
+
+
+def test_safe_test_text_keeps_venv_and_environment_diagnostics() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    assert module._safe_test_text("venv/bin/pytest not found") == "venv/bin/pytest not found"
+    assert module._safe_test_text("environment marker failed") == "environment marker failed"
+    assert module._safe_test_text("password=abc123") is None

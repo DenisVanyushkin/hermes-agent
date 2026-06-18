@@ -19,7 +19,7 @@ _BLOCKING_GIT_STATUSES = {
 _BLOCKING_ENGINEER_STATUSES = {"failed", "blocked"}
 _DIFF_MARKERS = ("diff --git", "@@", "+++", "---")
 _SENSITIVE_PARTS = ("api_key", "token", "password", "secret", "credential", "env")
-_VALID_TEST_STATUSES = {"not_run", "passed", "failed", "unknown"}
+_VALID_TEST_STATUSES = {"not_run", "passed", "failed", "blocked", "unknown"}
 
 
 @dataclass(frozen=True)
@@ -138,11 +138,16 @@ def normalize_test_summary(test_summary: Any) -> dict[str, Any]:
     status = str(payload.get("status") or "unknown")
     if status not in _VALID_TEST_STATUSES:
         status = "unknown"
-    return {
+    normalized = {
         "status": status,
         "command": _clean_optional_text(payload.get("command"), max_length=512),
         "summary": _clean_optional_text(payload.get("summary")),
+        "blocked_reason": _clean_optional_text(payload.get("blocked_reason"), max_length=128),
     }
+    results = payload.get("results")
+    if isinstance(results, list):
+        normalized["results"] = _sanitize_test_results(results)
+    return normalized
 
 
 def packet_from_git_delta(
@@ -196,6 +201,24 @@ def _sanitize_artifacts(value: Any) -> list[dict[str, Any]]:
                 }
             )
     sanitized.sort(key=lambda item: (item["kind"], item["artifact_id"]))
+    return sanitized
+
+
+def _sanitize_test_results(value: list[Any]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for item in value[:3]:
+        if not isinstance(item, Mapping):
+            continue
+        command = item.get("command")
+        safe_command = [str(token) for token in command[:12]] if isinstance(command, list) else None
+        safe_item = {
+            "command": safe_command,
+            "status": _clean_optional_text(item.get("status"), max_length=64),
+            "cwd": _clean_optional_text(item.get("cwd"), max_length=128),
+            "stdout_excerpt": _clean_optional_text(item.get("stdout_excerpt")),
+            "stderr_excerpt": _clean_optional_text(item.get("stderr_excerpt")),
+        }
+        sanitized.append({key: value for key, value in safe_item.items() if value is not None})
     return sanitized
 
 
