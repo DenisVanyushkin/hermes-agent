@@ -111,6 +111,8 @@ def observe_pipeline_router_decision(
                     "requires_clarification": decision.requires_clarification,
                     "policy_block_reason": decision.policy_block_reason,
                     "routing_failure_reason": decision.routing_failure_reason,
+                    "invalid_confidence_kind": decision.invalid_confidence_kind,
+                    "invalid_confidence_summary": decision.invalid_confidence_summary,
                     "reasoning_summary": decision.reasoning_summary,
                     "matched_signals": list(decision.matched_signals),
                     "alternatives": [
