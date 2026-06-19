@@ -459,3 +459,61 @@ def test_observe_low_confidence_fallback_logs_failure_reason(monkeypatch, caplog
     log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
     assert '"fallback_reason": "llm_low_confidence"' in log_message
     assert '"routing_failure_reason": "llm_low_confidence"' in log_message
+
+
+def test_observe_logs_invalid_confidence_diagnostics(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    decision = RouterDecision(
+        pipeline_session_id="pipe-invalid-confidence",
+        router_subagent_id="hermes_pipeline_router",
+        status="routing_failed",
+        selected_pipeline_id=None,
+        fallback_pipeline_id=None,
+        confidence=0.2,
+        reasoning_summary="Router returned invalid confidence.",
+        requires_clarification=False,
+        fallback_safe=False,
+        policy_block_reason=None,
+        routing_failure_reason="llm_invalid_confidence",
+        invalid_confidence_kind="non_numeric",
+        invalid_confidence_summary="str(len=12, category=redacted)",
+        alternatives=(),
+        selected_provider="openrouter",
+        selected_model="openrouter/owl-alpha",
+        actual_provider="openrouter",
+        actual_model="openrouter/owl-alpha",
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={
+                "pipelines": {
+                    "router": {
+                        "mode": "observe",
+                        "strategy": "llm",
+                        "llm": {
+                            "provider": "openrouter",
+                            "model": "openrouter/owl-alpha",
+                            "timeout_seconds": 7,
+                            "fallback_strategy": "fail_closed",
+                            "min_confidence": 0.70,
+                        },
+                    }
+                }
+            },
+            user_message="Исправь код и тесты",
+            session_id="sess-invalid-confidence",
+        )
+
+    assert result == decision
+    log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
+    assert '"invalid_confidence_kind": "non_numeric"' in log_message
+    assert '"invalid_confidence_summary": "str(len=12, category=redacted)"' in log_message

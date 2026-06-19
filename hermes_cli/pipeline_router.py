@@ -239,6 +239,8 @@ class RouterDecision:
     actual_model: str | None = None
     token_usage: dict[str, Any] | None = None
     cache_usage: dict[str, Any] | None = None
+    invalid_confidence_kind: str | None = None
+    invalid_confidence_summary: str | None = None
 
 
 class PipelineRouter:
@@ -527,8 +529,8 @@ class LlmPipelineRouter(PipelineRouter):
                     reasoning_summary=_optional_str(payload.get("reasoning_summary"))
                     or "The LLM router marked the request as ambiguous, so Hermes failed closed.",
                 )
-            confidence_error = _confidence_error(payload.get("confidence"))
-            if confidence_error:
+            invalid_confidence = _invalid_confidence_diagnostic(payload)
+            if invalid_confidence is not None:
                 return self._fallback_decision(
                     user_message,
                     pipeline_session_id=pipeline_session_id,
@@ -536,6 +538,8 @@ class LlmPipelineRouter(PipelineRouter):
                     reason="llm_invalid_confidence",
                     reasoning_summary=_optional_str(payload.get("reasoning_summary"))
                     or "The LLM router returned an invalid confidence value, so Hermes failed closed.",
+                    invalid_confidence_kind=invalid_confidence["kind"],
+                    invalid_confidence_summary=invalid_confidence["summary"],
                 )
             confidence_value = float(payload["confidence"])
             if payload.get("status") == "selected" and confidence_value < self._min_confidence:
@@ -584,6 +588,8 @@ class LlmPipelineRouter(PipelineRouter):
         router_subagent_id: str,
         reason: str,
         reasoning_summary: str,
+        invalid_confidence_kind: str | None = None,
+        invalid_confidence_summary: str | None = None,
     ) -> RouterDecision:
         if self._fallback_strategy == "deterministic":
             base = self._deterministic_router.route(
@@ -611,6 +617,8 @@ class LlmPipelineRouter(PipelineRouter):
                         "selected_model": self._model,
                         "actual_provider": self._provider,
                         "actual_model": self._model,
+                        "invalid_confidence_kind": invalid_confidence_kind,
+                        "invalid_confidence_summary": invalid_confidence_summary,
                     },
                     loaded_specs=self._loaded_specs,
                 )
@@ -634,6 +642,8 @@ class LlmPipelineRouter(PipelineRouter):
                     "selected_model": self._model,
                     "actual_provider": self._provider,
                     "actual_model": self._model,
+                    "invalid_confidence_kind": invalid_confidence_kind,
+                    "invalid_confidence_summary": invalid_confidence_summary,
                 },
                 loaded_specs=self._loaded_specs,
             )
@@ -677,6 +687,8 @@ class LlmPipelineRouter(PipelineRouter):
                 "selected_model": self._model,
                 "actual_provider": self._provider,
                 "actual_model": self._model,
+                "invalid_confidence_kind": invalid_confidence_kind,
+                "invalid_confidence_summary": invalid_confidence_summary,
             },
             loaded_specs=self._loaded_specs,
         )
@@ -743,6 +755,8 @@ def parse_router_decision(
         actual_model=_optional_str(data.get("actual_model")),
         token_usage=data.get("token_usage"),
         cache_usage=data.get("cache_usage"),
+        invalid_confidence_kind=_optional_str(data.get("invalid_confidence_kind")),
+        invalid_confidence_summary=_optional_str(data.get("invalid_confidence_summary")),
     )
 
 
@@ -905,7 +919,9 @@ def _build_router_messages(
                 "Deterministic keywords are incomplete; rely on the registry semantics instead. "
                 "Never invent pipeline ids or statuses. If the request is ambiguous between read-only audit and mutation, "
                 "return needs_clarification. If the request asks for unsafe bypass, secret exfiltration, or destructive misuse, "
-                "return blocked_by_policy. Return JSON only."
+                "return blocked_by_policy. Return JSON only. confidence must be a JSON number between 0 and 1 inclusive. "
+                "Do not return confidence as a string, percentage, labels, null, missing field, or 0..100 scale. "
+                "Every alternatives confidence entry must follow the same numeric 0..1 contract."
             ),
         },
         {
@@ -957,7 +973,7 @@ def _default_router_llm_call(
         model=resolved_model or model,
         messages=messages,
         timeout=timeout_seconds,
-        extra_body=_ROUTER_RESPONSE_FORMAT,
+        extra_body=_router_response_format_payload(),
     )
     raw_text = extract_content_or_reasoning(response).strip()
     if not raw_text:
@@ -970,6 +986,10 @@ def _default_router_llm_call(
     usage = getattr(response, "usage", None)
     parsed.setdefault("token_usage", _coerce_usage_dict(usage))
     return parsed
+
+
+def _router_response_format_payload() -> dict[str, Any]:
+    return json.loads(json.dumps(_ROUTER_RESPONSE_FORMAT))
 
 
 def _coerce_llm_router_payload(raw: dict[str, Any] | str) -> dict[str, Any]:
@@ -1001,14 +1021,43 @@ def _coerce_min_confidence(raw: Any) -> float:
     return DEFAULT_ROUTER_LLM_MIN_CONFIDENCE
 
 
-def _confidence_error(raw: Any) -> str | None:
+def _invalid_confidence_diagnostic(payload: dict[str, Any]) -> dict[str, str] | None:
+    if "confidence" not in payload:
+        return {"kind": "missing", "summary": "missing"}
+    raw = payload.get("confidence")
+    if raw is None:
+        return {"kind": "null", "summary": _summarize_confidence_value(raw)}
+    if isinstance(raw, bool):
+        return {"kind": "non_numeric", "summary": _summarize_confidence_value(raw)}
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return "non_numeric"
-    if not 0.0 <= value <= 1.0:
-        return "out_of_range"
+        return {"kind": "non_numeric", "summary": _summarize_confidence_value(raw)}
+    if value < 0.0:
+        return {"kind": "out_of_range_low", "summary": _summarize_confidence_value(raw)}
+    if value > 1.0:
+        return {"kind": "out_of_range_high", "summary": _summarize_confidence_value(raw)}
     return None
+
+
+def _summarize_confidence_value(raw: Any) -> str:
+    if raw is None:
+        return "NoneType(null)"
+    if isinstance(raw, bool):
+        return f"bool({raw})"
+    if isinstance(raw, (int, float)):
+        return f"{type(raw).__name__}({raw})"
+    if isinstance(raw, str):
+        category = "redacted" if _looks_sensitive_string(raw) else "text"
+        return f"str(len={len(raw)}, category={category})"
+    return type(raw).__name__
+
+
+def _looks_sensitive_string(raw: str) -> bool:
+    normalized = raw.strip().lower()
+    if any(marker in normalized for marker in ("sk-", "token", "secret", "bearer", "apikey", "api_key")):
+        return True
+    return len(normalized) >= 12 and any(ch.isdigit() for ch in normalized) and any(ch.isalpha() for ch in normalized)
 
 
 def _coerce_usage_dict(usage: Any) -> dict[str, Any] | None:
