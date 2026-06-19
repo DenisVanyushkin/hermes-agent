@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shlex
 import subprocess
+import sys
 import time
 from typing import Any, Callable, Sequence
 
@@ -99,9 +100,10 @@ class ControlledTestRunner:
         results: list[TestCommandResult] = []
         for command in commands:
             start = time.perf_counter()
+            execution_command = _resolve_execution_command(command)
             try:
                 completed = self.subprocess_runner(
-                    command,
+                    execution_command,
                     cwd=str(self.workspace),
                     shell=False,
                     timeout=self.timeout_seconds,
@@ -125,6 +127,15 @@ class ControlledTestRunner:
                     reason="test_command_timeout",
                 )
                 return _summary_from_results(self.workspace, commands, results + [result], "test_command_timeout")
+            except FileNotFoundError:
+                result = TestCommandResult(
+                    command=list(command),
+                    cwd=self.workspace.name,
+                    status="blocked",
+                    duration_ms=_duration_ms(start),
+                    reason="test_command_start_failed",
+                )
+                return _summary_from_results(self.workspace, commands, results + [result], "test_command_start_failed")
             except Exception:
                 result = TestCommandResult(
                     command=list(command),
@@ -288,6 +299,12 @@ def _denied_summary(workspace_name: str | None, requests: Sequence[str], reason:
             for request in requests
         ],
     )
+
+
+def _resolve_execution_command(command: Sequence[str]) -> list[str]:
+    if tuple(command[:3]) == ("python", "-m", "pytest"):
+        return [sys.executable, *command[1:]]
+    return list(command)
 
 
 def _summary_from_results(workspace: Path, commands: Sequence[list[str]], results: list[TestCommandResult], blocked_reason: str | None) -> TestRunSummary:
