@@ -18,10 +18,10 @@ DEFAULT_PIPELINE_ID = "default_conversation_pipeline"
 ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
 DEFAULT_ROUTER_SUBAGENT_ID = "hermes_pipeline_router"
 DEFAULT_CONFIDENCE = 0.2
-DEFAULT_ROUTER_STRATEGY = "deterministic"
-DEFAULT_LLM_FALLBACK_STRATEGY = "deterministic"
-DEFAULT_ROUTER_LLM_PROVIDER = "openrouter"
-DEFAULT_ROUTER_LLM_MODEL = "openrouter/owl-alpha"
+DEFAULT_ROUTER_STRATEGY = "llm"
+DEFAULT_LLM_FALLBACK_STRATEGY = "fail_closed"
+DEFAULT_ROUTER_LLM_PROVIDER = "openai-codex"
+DEFAULT_ROUTER_LLM_MODEL = "gpt-5.4-mini"
 DEFAULT_ROUTER_LLM_TIMEOUT_SECONDS = 10.0
 DEFAULT_ROUTER_LLM_MIN_CONFIDENCE = 0.70
 VALID_ROUTER_STRATEGIES = {"deterministic", "llm"}
@@ -88,7 +88,7 @@ _ROUTER_RESPONSE_FORMAT = {
 
 RouterLlmCall = Callable[..., dict[str, Any]]
 
-_ENGINEERING_KEYWORDS = (
+_ENGINEERING_MUTATION_KEYWORDS = (
     "implement slice",
     "patch",
     "write file",
@@ -103,6 +103,73 @@ _ENGINEERING_KEYWORDS = (
     "run pytest",
     "run ruff",
     "run bandit",
+    "исправь",
+    "исправить",
+    "почини",
+    "починить",
+    "поправь",
+    "измени",
+    "изменить",
+    "обнови",
+    "обновить",
+    "добавь",
+    "добавить",
+    "сделай ревью",
+    "сделать ревью",
+    "ревью изменений",
+    "regression test",
+)
+_ENGINEERING_DEBUG_KEYWORDS = (
+    "bug",
+    "failing",
+    "failure",
+    "debug",
+    "fix",
+    "pytest",
+    "ruff",
+    "bandit",
+    "test",
+    "tests",
+    "код",
+    "тест",
+    "тесты",
+    "баг",
+    "ошиб",
+    "падает",
+    "регресс",
+    "regression",
+    "gateway",
+    "router",
+    "pipeline",
+    "config",
+    "конфиг",
+    "ревью",
+)
+_ENGINEERING_DOMAIN_KEYWORDS = (
+    "hermes",
+    "repo",
+    "repository",
+    "code",
+    "config",
+    "test",
+    "tests",
+    "pytest",
+    "ruff",
+    "bandit",
+    "gateway",
+    "router",
+    "pipeline",
+    "orchestrator",
+    "review",
+    "reviewer",
+    "код",
+    "конфиг",
+    "тест",
+    "тесты",
+    "репо",
+    "пайтест",
+    "ревью",
+    "баг",
 )
 _ARCHITECTURE_ONLY_KEYWORDS = (
     "обсудим архитектуру",
@@ -133,7 +200,8 @@ _POLICY_BLOCK_PATTERNS = (
 _ENGINEERING_PATH_PATTERN = re.compile(
     r"(?i)\b("
     r"agent/|gateway/|hermes_cli/|job_intel/|scripts/|tests/|config/|cron/|"
-    r"[\w./-]+\.py|pyproject\.toml|uv\.lock"
+    r"[\w./-]+\.py|pyproject\.toml|uv\.lock|"
+    r"pipeline_[\w-]+|gateway/run\.py|hermes_cli/[\w./-]+|config/pipelines/[\w./-]+"
     r")\b"
 )
 
@@ -182,6 +250,7 @@ class PipelineRouter:
         *,
         pipeline_session_id: str,
         router_subagent_id: str = DEFAULT_ROUTER_SUBAGENT_ID,
+        routing_context: dict[str, Any] | None = None,
     ) -> RouterDecision:
         raise NotImplementedError
 
@@ -205,6 +274,7 @@ class HeuristicPipelineRouter(PipelineRouter):
         *,
         pipeline_session_id: str,
         router_subagent_id: str = DEFAULT_ROUTER_SUBAGENT_ID,
+        routing_context: dict[str, Any] | None = None,
     ) -> RouterDecision:
         message = user_message.strip()
         normalized = _normalize_text(message)
@@ -234,13 +304,15 @@ class HeuristicPipelineRouter(PipelineRouter):
 
         if self._should_route_to_engineering(normalized):
             if ENGINEERING_PIPELINE_ID in self._registered_pipeline_ids:
+                matched_signals = self._engineering_matched_signals(normalized)
                 return self._decision(
                     pipeline_session_id=pipeline_session_id,
                     router_subagent_id=router_subagent_id,
                     status="selected",
                     selected_pipeline_id=ENGINEERING_PIPELINE_ID,
                     confidence=0.93,
-                    reasoning_summary="The request explicitly asks for code/config/test/script changes or references engineering paths.",
+                    reasoning_summary="The request matches engineering domain, mutation/debug intent, or engineering target paths declared by the pipeline registry.",
+                    matched_signals=matched_signals,
                     alternatives=(
                         RouterAlternative(
                             pipeline_id=DEFAULT_PIPELINE_ID,
@@ -257,6 +329,7 @@ class HeuristicPipelineRouter(PipelineRouter):
                 reasoning_summary="The request looks engineering-related, but no registered engineering pipeline is available.",
                 fallback_pipeline_id=DEFAULT_PIPELINE_ID,
                 fallback_safe=True,
+                matched_signals=self._engineering_matched_signals(normalized),
             )
 
         return self._decision(
@@ -284,6 +357,7 @@ class HeuristicPipelineRouter(PipelineRouter):
         clarification_question: str | None = None,
         policy_block_reason: str | None = None,
         routing_failure_reason: str | None = None,
+        matched_signals: tuple[str, ...] = (),
         alternatives: tuple[RouterAlternative, ...] = (),
         fallback_safe: bool = False,
     ) -> RouterDecision:
@@ -302,6 +376,7 @@ class HeuristicPipelineRouter(PipelineRouter):
                 "clarification_question": clarification_question,
                 "policy_block_reason": policy_block_reason,
                 "routing_failure_reason": routing_failure_reason,
+                "matched_signals": list(matched_signals),
                 "alternatives": [alternative.__dict__ for alternative in alternatives],
                 "fallback_safe": fallback_safe,
                 "selected_provider": provider,
@@ -326,11 +401,37 @@ class HeuristicPipelineRouter(PipelineRouter):
         )
 
     def _should_route_to_engineering(self, normalized: str) -> bool:
+        return bool(self._engineering_matched_signals(normalized))
+
+    def _engineering_matched_signals(self, normalized: str) -> tuple[str, ...]:
         if _matches_any(normalized, _ARCHITECTURE_ONLY_KEYWORDS):
-            return False
-        if _matches_any(normalized, _ENGINEERING_KEYWORDS):
-            return True
-        return bool(_ENGINEERING_PATH_PATTERN.search(normalized))
+            return ()
+
+        matched_signals: list[str] = []
+        has_path_signal = bool(_ENGINEERING_PATH_PATTERN.search(normalized))
+        has_mutation_signal = _matches_any(normalized, _ENGINEERING_MUTATION_KEYWORDS)
+        has_domain_signal = _matches_any(normalized, _ENGINEERING_DOMAIN_KEYWORDS)
+        has_debug_signal = _matches_any(normalized, _ENGINEERING_DEBUG_KEYWORDS)
+
+        if has_domain_signal and (has_mutation_signal or has_debug_signal):
+            matched_signals.append("task_classification.domain == engineering")
+        if has_mutation_signal:
+            matched_signals.append("task_intent includes code_mutation")
+        if has_path_signal:
+            matched_signals.append("target_paths match engineering_path_patterns")
+
+        return tuple(matched_signals)
+
+    def candidate_hints(self, user_message: str) -> dict[str, Any]:
+        normalized = _normalize_text(user_message.strip())
+        matched_signals = self._engineering_matched_signals(normalized)
+        return {
+            "matched_signals": list(matched_signals),
+            "engineering_candidate_pipeline_id": ENGINEERING_PIPELINE_ID if matched_signals else None,
+            "default_fallback_pipeline_id": DEFAULT_PIPELINE_ID,
+            "architecture_only": _matches_any(normalized, _ARCHITECTURE_ONLY_KEYWORDS),
+            "ambiguous_mutation_request": _looks_ambiguous(normalized),
+        }
 
 
 class LlmPipelineRouter(PipelineRouter):
@@ -367,13 +468,46 @@ class LlmPipelineRouter(PipelineRouter):
         *,
         pipeline_session_id: str,
         router_subagent_id: str = DEFAULT_ROUTER_SUBAGENT_ID,
+        routing_context: dict[str, Any] | None = None,
     ) -> RouterDecision:
+        guardrail_decision = self._deterministic_router.route(
+            user_message,
+            pipeline_session_id=pipeline_session_id,
+            router_subagent_id=router_subagent_id,
+        )
+        if guardrail_decision.status == "blocked_by_policy":
+            return parse_router_decision(
+                {
+                    "pipeline_session_id": guardrail_decision.pipeline_session_id,
+                    "router_subagent_id": guardrail_decision.router_subagent_id,
+                    "status": guardrail_decision.status,
+                    "confidence": guardrail_decision.confidence,
+                    "reasoning_summary": guardrail_decision.reasoning_summary,
+                    "requires_clarification": False,
+                    "policy_block_reason": guardrail_decision.policy_block_reason,
+                    "routing_failure_reason": guardrail_decision.routing_failure_reason,
+                    "matched_signals": list(guardrail_decision.matched_signals),
+                    "alternatives": [alternative.__dict__ for alternative in guardrail_decision.alternatives],
+                    "fallback_safe": False,
+                    "selected_provider": self._provider,
+                    "selected_model": self._model,
+                    "actual_provider": None,
+                    "actual_model": None,
+                },
+                loaded_specs=self._loaded_specs,
+            )
+
         try:
             raw = self._llm_call(
                 provider=self._provider,
                 model=self._model,
                 timeout_seconds=self._timeout_seconds,
-                messages=_build_router_messages(self._loaded_specs, user_message),
+                messages=_build_router_messages(
+                    self._loaded_specs,
+                    user_message,
+                    routing_context=routing_context,
+                    candidate_hints=self._deterministic_router.candidate_hints(user_message),
+                ),
             )
             payload = _coerce_llm_router_payload(raw)
             payload["pipeline_session_id"] = pipeline_session_id
@@ -504,6 +638,29 @@ class LlmPipelineRouter(PipelineRouter):
                 loaded_specs=self._loaded_specs,
             )
 
+        if reason in {"llm_low_confidence", "llm_ambiguous"}:
+            return parse_router_decision(
+                {
+                    "pipeline_session_id": pipeline_session_id,
+                    "router_subagent_id": router_subagent_id,
+                    "status": "needs_clarification",
+                    "confidence": DEFAULT_CONFIDENCE,
+                    "reasoning_summary": reasoning_summary,
+                    "requires_clarification": True,
+                    "clarification_question": "Should Hermes treat this as a code-changing engineering request, or keep it conversational/read-only?",
+                    "fallback_pipeline_id": DEFAULT_PIPELINE_ID,
+                    "routing_failure_reason": reason,
+                    "matched_signals": [],
+                    "alternatives": [],
+                    "fallback_safe": False,
+                    "selected_provider": self._provider,
+                    "selected_model": self._model,
+                    "actual_provider": self._provider,
+                    "actual_model": self._model,
+                },
+                loaded_specs=self._loaded_specs,
+            )
+
         return parse_router_decision(
             {
                 "pipeline_session_id": pipeline_session_id,
@@ -534,7 +691,7 @@ def build_pipeline_router(
     specs = loaded_specs or load_pipeline_specs(repo_root=repo_root)
     strategy = _pipeline_router_strategy(config)
     if strategy == "llm":
-        llm_cfg = _router_llm_config(config)
+        llm_cfg = _router_llm_config(config, loaded_specs=specs)
         return LlmPipelineRouter(
             loaded_specs=specs,
             repo_root=repo_root,
@@ -659,14 +816,17 @@ def _pipeline_router_strategy(config: dict[str, Any] | None) -> str:
     return DEFAULT_ROUTER_STRATEGY
 
 
-def _router_llm_config(config: dict[str, Any] | None) -> dict[str, Any]:
+def _router_llm_config(config: dict[str, Any] | None, loaded_specs: LoadedPipelineSpecs | None = None) -> dict[str, Any]:
+    router_model = _router_default_model(loaded_specs) if loaded_specs is not None else {}
+    default_provider = str(router_model.get("provider") or DEFAULT_ROUTER_LLM_PROVIDER).strip()
+    default_model = str(router_model.get("model") or DEFAULT_ROUTER_LLM_MODEL).strip()
     provider = str(
-        _nested_config_value(config, "pipelines", "router", "llm", "provider", default=DEFAULT_ROUTER_LLM_PROVIDER)
-        or DEFAULT_ROUTER_LLM_PROVIDER
+        _nested_config_value(config, "pipelines", "router", "llm", "provider", default=default_provider)
+        or default_provider
     ).strip()
     model = str(
-        _nested_config_value(config, "pipelines", "router", "llm", "model", default=DEFAULT_ROUTER_LLM_MODEL)
-        or DEFAULT_ROUTER_LLM_MODEL
+        _nested_config_value(config, "pipelines", "router", "llm", "model", default=default_model)
+        or default_model
     ).strip()
     timeout_raw = _nested_config_value(
         config,
@@ -690,9 +850,9 @@ def _router_llm_config(config: dict[str, Any] | None) -> dict[str, Any]:
             "router",
             "llm",
             "fallback_strategy",
-            default=DEFAULT_LLM_FALLBACK_STRATEGY,
+            default=str((loaded_specs.subagent_specs.get(DEFAULT_ROUTER_SUBAGENT_ID, {}) or {}).get("failure_policy", {}).get("model_unavailable", "fail_closed")).replace("fail closed", "fail_closed") if loaded_specs is not None else DEFAULT_LLM_FALLBACK_STRATEGY,
         )
-        or DEFAULT_LLM_FALLBACK_STRATEGY
+        or (str((loaded_specs.subagent_specs.get(DEFAULT_ROUTER_SUBAGENT_ID, {}) or {}).get("failure_policy", {}).get("model_unavailable", "fail_closed")).replace("fail closed", "fail_closed") if loaded_specs is not None else DEFAULT_LLM_FALLBACK_STRATEGY)
     ).strip().lower()
     if fallback_strategy not in VALID_LLM_FALLBACK_STRATEGIES:
         fallback_strategy = DEFAULT_LLM_FALLBACK_STRATEGY
@@ -715,8 +875,27 @@ def _router_llm_config(config: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _build_router_messages(loaded_specs: LoadedPipelineSpecs, user_message: str) -> list[dict[str, str]]:
+def _build_router_messages(
+    loaded_specs: LoadedPipelineSpecs,
+    user_message: str,
+    *,
+    routing_context: dict[str, Any] | None = None,
+    candidate_hints: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     registry_blob = json.dumps(_router_registry_prompt_context(loaded_specs), ensure_ascii=False, indent=2, sort_keys=True)
+    request_context_blob = json.dumps(
+        {
+            "user_message_safe_summary": _safe_router_message_summary(user_message),
+            "platform_context": (routing_context or {}).get("platform_context", {}),
+            "session_context": (routing_context or {}).get("session_context", {}),
+            "recent_pipeline_state": (routing_context or {}).get("recent_pipeline_state", {}),
+            "safety_constraints": (routing_context or {}).get("safety_constraints", {}),
+            "candidate_hints": candidate_hints or {},
+        },
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
     return [
         {
             "role": "system",
@@ -733,6 +912,7 @@ def _build_router_messages(loaded_specs: LoadedPipelineSpecs, user_message: str)
             "role": "user",
             "content": (
                 f"Pipeline registry and schema:\n{registry_blob}\n\n"
+                f"Structured routing request context:\n{request_context_blob}\n\n"
                 f"User message:\n{user_message.strip()}\n"
             ),
         },
@@ -875,6 +1055,13 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _safe_router_message_summary(user_message: str, limit: int = 240) -> str:
+    normalized = _normalize_text(user_message.strip())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit].rstrip() + "..."
 
 
 def _exception_summary(exc: Exception) -> str:

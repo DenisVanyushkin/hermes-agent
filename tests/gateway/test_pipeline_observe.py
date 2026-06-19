@@ -17,11 +17,11 @@ def test_router_llm_defaults_are_present():
 
     router_cfg = DEFAULT_CONFIG["pipelines"]["router"]
 
-    assert router_cfg["strategy"] == "deterministic"
-    assert router_cfg["llm"]["provider"] == "openrouter"
-    assert router_cfg["llm"]["model"] == "openrouter/owl-alpha"
+    assert router_cfg["strategy"] == "llm"
+    assert router_cfg["llm"]["provider"] == "openai-codex"
+    assert router_cfg["llm"]["model"] == "gpt-5.4-mini"
     assert router_cfg["llm"]["timeout_seconds"] == 10
-    assert router_cfg["llm"]["fallback_strategy"] == "deterministic"
+    assert router_cfg["llm"]["fallback_strategy"] == "fail_closed"
     assert router_cfg["llm"]["min_confidence"] == 0.70
 
 
@@ -170,8 +170,8 @@ def test_observe_mode_routes_and_logs(monkeypatch, caplog):
     assert '"pipeline_session_id": "pipe-1"' in log_message
     assert '"selected_pipeline_id": "engineering_review_pipeline"' in log_message
     assert '"actual_model": "openrouter/owl-alpha"' in log_message
-    assert '"router_strategy": "deterministic"' in log_message
-    assert '"router_fallback_strategy": "deterministic"' in log_message
+    assert '"router_strategy": "llm"' in log_message
+    assert '"router_fallback_strategy": "fail_closed"' in log_message
     assert '"reasoning_summary": "engineering request"' in log_message
     assert '"alternatives": []' in log_message
     assert '"status": "selected"' in log_message
