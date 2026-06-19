@@ -1295,3 +1295,15 @@ Create the architecture docs and machine-readable draft specs for:
 ```
 
 After that, use these documents as the source of truth for implementation planning.
+
+
+---
+
+## CTLV8 Milestone — 2026-06-19
+
+- Status: GREEN
+- controlled_manual live validation passed
+- gateway intercept confirmed (normal AIAgent fallback skipped)
+- effective_pipeline_id=engineering_review_pipeline via controlled_manual_trigger_override
+- rollback confirmed: config.yaml all-disabled post-validation
+- production/autonomous execution: STILL DISABLED
