@@ -325,7 +325,7 @@ def _manual_dry_run_engineer_output() -> dict[str, Any]:
                 'content': 'def test_generated_example():\n    assert 1 + 1 == 2\n',
             }
         ],
-        'tests': ['venv/bin/pytest -q tests/test_generated_example.py'],
+        'tests': ['python -m pytest -q tests/test_generated_example.py'],
     }
     return payload
 
