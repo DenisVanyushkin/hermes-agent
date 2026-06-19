@@ -13,6 +13,9 @@ from hermes_cli.pipeline_router import (
     HeuristicPipelineRouter,
     LlmPipelineRouter,
     RouterDecisionValidationError,
+    _ROUTER_RESPONSE_FORMAT,
+    _build_router_messages,
+    _summarize_confidence_value,
     build_pipeline_router,
     parse_router_decision,
 )
@@ -440,15 +443,42 @@ def test_llm_router_enforces_min_confidence_threshold(
         assert decision.routing_failure_reason == "llm_low_confidence"
 
 
-@pytest.mark.parametrize("confidence", [1.01, -0.01, None, "high"])
-def test_llm_router_rejects_invalid_confidence(tmp_path: Path, confidence: object) -> None:
+def test_router_prompt_explicitly_requires_numeric_confidence_contract(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    messages = _build_router_messages(loaded_specs, "Fix the router bug.")
+
+    system_prompt = messages[0]["content"]
+    assert "confidence must be a JSON number between 0 and 1 inclusive" in system_prompt
+    assert "Do not return confidence as a string" in system_prompt
+    assert "0..100 scale" in system_prompt
+    assert "labels" in system_prompt
+    assert "alternatives" in system_prompt
+
+
+@pytest.mark.parametrize(
+    ("confidence", "expected_kind"),
+    [
+        pytest.param(1.01, "out_of_range_high", id="high"),
+        pytest.param(-0.01, "out_of_range_low", id="low"),
+        pytest.param(None, "null", id="null"),
+        pytest.param("high", "non_numeric", id="string"),
+        pytest.param(True, "non_numeric", id="bool-true"),
+        pytest.param(False, "non_numeric", id="bool-false"),
+    ],
+)
+def test_llm_router_rejects_invalid_confidence_with_diagnostics(
+    tmp_path: Path,
+    confidence: object,
+    expected_kind: str,
+) -> None:
     loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
 
     router = LlmPipelineRouter(
         loaded_specs=loaded_specs,
         provider="openrouter",
         model="openrouter/owl-alpha",
-        fallback_strategy="deterministic",
+        fallback_strategy="fail_closed",
         min_confidence=0.70,
         llm_call=lambda **kwargs: {
             "status": "selected",
@@ -465,10 +495,142 @@ def test_llm_router_rejects_invalid_confidence(tmp_path: Path, confidence: objec
         pipeline_session_id="sess-invalid-confidence",
     )
 
-    assert decision.status != "selected"
-    assert decision.selected_pipeline_id != ENGINEERING_PIPELINE_ID
-    assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id is None
     assert decision.routing_failure_reason == "llm_invalid_confidence"
+    assert decision.invalid_confidence_kind == expected_kind
+
+
+def test_llm_router_rejects_missing_confidence_with_diagnostics(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        min_confidence=0.70,
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "reasoning_summary": "classification result",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route(
+        "Исправь баг в hermes_cli/pipeline_router.py и добавь pytest на regression.",
+        pipeline_session_id="sess-missing-confidence",
+    )
+
+    assert decision.status == "routing_failed"
+    assert decision.routing_failure_reason == "llm_invalid_confidence"
+    assert decision.invalid_confidence_kind == "missing"
+
+
+def test_llm_router_redacts_sensitive_string_confidence_summary(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+    sensitive = "sk-live-super-secret-token-value"
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        min_confidence=0.70,
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "confidence": sensitive,
+            "reasoning_summary": "classification result",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route(
+        "Исправь баг в hermes_cli/pipeline_router.py и добавь pytest на regression.",
+        pipeline_session_id="sess-sensitive-confidence",
+    )
+
+    assert decision.invalid_confidence_kind == "non_numeric"
+    assert decision.invalid_confidence_summary is not None
+    assert sensitive not in decision.invalid_confidence_summary
+    assert "redacted" in decision.invalid_confidence_summary
+
+
+def test_llm_router_low_numeric_confidence_needs_clarification_not_invalid(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        min_confidence=0.70,
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "confidence": 0.2,
+            "reasoning_summary": "classification result",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route(
+        "Исправь баг в hermes_cli/pipeline_router.py и добавь pytest на regression.",
+        pipeline_session_id="sess-low-valid-confidence",
+    )
+
+    assert decision.status == "needs_clarification"
+    assert decision.routing_failure_reason == "llm_low_confidence"
+    assert decision.invalid_confidence_kind is None
+
+
+def test_default_router_llm_call_passes_response_format_payload(monkeypatch):
+    from hermes_cli import pipeline_router as module
+    from agent import auxiliary_client
+
+    captured = {}
+
+    class _FakeResponse:
+        usage = {"input_tokens": 12, "output_tokens": 7}
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeResponse()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr(auxiliary_client, "resolve_provider_client", lambda provider, model: (_FakeClient(), "resolved-model"))
+    monkeypatch.setattr(auxiliary_client, "extract_content_or_reasoning", lambda response: '{"status": "no_specialized_pipeline", "confidence": 0.8, "reasoning_summary": "ok", "requires_clarification": false, "fallback_safe": true, "fallback_pipeline_id": "default_conversation_pipeline", "alternatives": []}')
+
+    result = module._default_router_llm_call(
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        timeout_seconds=5,
+        messages=[{"role": "user", "content": "route"}],
+    )
+
+    assert captured["extra_body"] == _ROUTER_RESPONSE_FORMAT
+    assert captured["model"] == "resolved-model"
+    assert result["token_usage"] == {"input_tokens": 12, "output_tokens": 7}
+
+
+def test_summarize_confidence_value_redacts_strings() -> None:
+    assert _summarize_confidence_value(0.2) == "float(0.2)"
+    assert _summarize_confidence_value(None) == "NoneType(null)"
+    summary = _summarize_confidence_value("0.2")
+    assert summary.startswith("str(len=3")
+    assert "0.2" not in summary
 
 
 def test_llm_router_treats_ambiguous_as_fail_closed(tmp_path: Path) -> None:
