@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import time
@@ -57,10 +58,35 @@ def observe_pipeline_router_decision(
         strategy = _pipeline_router_strategy(config)
         fallback_strategy = _pipeline_router_fallback_strategy(config)
         router = build_pipeline_router(config=config, loaded_specs=loaded_specs, repo_root=repo_root)
-        decision = router.route(
-            user_message,
-            pipeline_session_id=pipeline_session_id,
-        )
+        # Keep routing_context limited to safe metadata; it is sent to the
+        # router LLM in observe/LLM mode and must not carry secrets or raw
+        # provider payloads.
+        routing_context = {
+            "platform_context": {
+                "platform": platform,
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+                "user_id": user_id,
+            },
+            "session_context": {
+                "session_id": session_id,
+                "session_key": session_key,
+                "pipeline_session_id": pipeline_session_id,
+            },
+            "safety_constraints": {
+                "execution_mode": cfg_get(config, "pipelines", "execution", "mode", default="disabled"),
+                "pipelines_enabled": bool(cfg_get(config, "pipelines", "enabled", default=False)),
+                "router_mode": mode,
+            },
+        }
+        route_kwargs = {
+            "pipeline_session_id": pipeline_session_id,
+            "routing_context": routing_context,
+        }
+        if _router_accepts_routing_context(router):
+            decision = router.route(user_message, **route_kwargs)
+        else:
+            decision = router.route(user_message, pipeline_session_id=pipeline_session_id)
         if actual_provider is not None:
             decision = _replace_decision(
                 decision,
@@ -177,6 +203,14 @@ def _pipeline_router_fallback_strategy(config: dict[str, Any] | None) -> str:
     if raw:
         return raw
     return DEFAULT_LLM_FALLBACK_STRATEGY
+
+
+def _router_accepts_routing_context(router: object) -> bool:
+    try:
+        signature = inspect.signature(router.route)
+    except (TypeError, ValueError):
+        return False
+    return "routing_context" in signature.parameters
 
 
 def _replace_decision(

@@ -987,16 +987,15 @@ DEFAULT_CONFIG = {
         },
         "router": {
             "mode": "disabled",
-            "strategy": "deterministic",
+            "strategy": "llm",
             "llm": {
-                # Keep deterministic as the default execution path for tests
-                # and local runs. When LLM routing is enabled explicitly,
-                # route with the configured OpenRouter fallback model unless
-                # the operator overrides provider/model in config.
-                "provider": "openrouter",
-                "model": "openrouter/owl-alpha",
+                # Source-of-truth default: route through the dedicated router
+                # model and fail closed unless an operator explicitly chooses
+                # a deterministic fallback policy.
+                "provider": "openai-codex",
+                "model": "gpt-5.4-mini",
                 "timeout_seconds": 10,
-                "fallback_strategy": "deterministic",
+                "fallback_strategy": "fail_closed",
                 "min_confidence": 0.70,
             },
         },

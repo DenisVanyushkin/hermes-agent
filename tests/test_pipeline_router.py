@@ -9,9 +9,11 @@ import yaml
 from hermes_cli.pipeline_router import (
     DEFAULT_PIPELINE_ID,
     ENGINEERING_PIPELINE_ID,
+    DEFAULT_ROUTER_SUBAGENT_ID,
     HeuristicPipelineRouter,
     LlmPipelineRouter,
     RouterDecisionValidationError,
+    build_pipeline_router,
     parse_router_decision,
 )
 from hermes_cli.pipeline_specs import load_pipeline_specs
@@ -84,6 +86,49 @@ def test_slice_implementation_request_selects_engineering_pipeline(tmp_path: Pat
 
     assert decision.status == "selected"
     assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "поправь тесты в Hermes",
+        "измени код и добавь regression test",
+        "нужно исправить баг в gateway/run.py",
+        "добавь проверку в pipeline_execution_controller",
+        "сделай ревью изменений в hermes_cli/orchestrator.py",
+        "почему pytest падает и как починить",
+        "обнови config/pipelines/engineering_review_pipeline.yaml",
+        "исправь баг в Hermes router и обнови тесты",
+    ],
+)
+def test_russian_engineering_requests_select_engineering_pipeline(tmp_path: Path, prompt: str) -> None:
+    router = _build_router(_copy_spec_tree(tmp_path))
+
+    decision = router.route(prompt, pipeline_session_id="sess-russian-engineering")
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "обычный вопрос: что дальше?",
+        "подготовь письмо рекрутеру",
+        "оцени вакансию",
+        "что такое nootropics?",
+        "расскажи про рынок труда",
+    ],
+)
+def test_non_engineering_requests_stay_on_default_fallback(tmp_path: Path, prompt: str) -> None:
+    router = _build_router(_copy_spec_tree(tmp_path))
+
+    decision = router.route(prompt, pipeline_session_id="sess-non-engineering")
+
+    assert decision.status == "no_specialized_pipeline"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+    assert decision.fallback_safe is True
 
 
 def test_ambiguous_mutation_request_requires_clarification(tmp_path: Path) -> None:
@@ -167,6 +212,142 @@ def test_llm_router_selects_engineering_pipeline_for_russian_mutation_prompt(tmp
     assert captured["provider"] == "openrouter"
     assert captured["model"] == "openrouter/owl-alpha"
     assert captured["timeout_seconds"] == 9
+
+
+def test_build_pipeline_router_defaults_to_llm_strategy(tmp_path: Path) -> None:
+    router = build_pipeline_router(
+        config={"pipelines": {"router": {}}},
+        loaded_specs=load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path)),
+    )
+
+    assert isinstance(router, LlmPipelineRouter)
+
+
+def test_llm_router_uses_router_spec_defaults_and_context(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+    captured: dict[str, object] = {}
+
+    def _fake_llm_call(*, provider: str, model: str, timeout_seconds: float, messages: list[dict[str, str]]) -> dict:
+        captured["provider"] = provider
+        captured["model"] = model
+        captured["timeout_seconds"] = timeout_seconds
+        captured["messages"] = messages
+        return {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "confidence": 0.97,
+            "reasoning_summary": "semantic llm route",
+            "requires_clarification": False,
+            "matched_signals": ["llm:semantic_engineering_request"],
+            "alternatives": [],
+        }
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        timeout_seconds=10,
+        fallback_strategy="fail_closed",
+        llm_call=_fake_llm_call,
+    )
+
+    decision = router.route(
+        "поправь тесты в Hermes",
+        pipeline_session_id="sess-llm-defaults",
+        router_subagent_id=DEFAULT_ROUTER_SUBAGENT_ID,
+        routing_context={
+            "platform_context": {"platform": "telegram"},
+            "session_context": {"session_id": "sess-llm-defaults", "session_key": "agent:main:telegram:dm"},
+            "safety_constraints": {"execution_mode": "disabled"},
+        },
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.reasoning_summary == "semantic llm route"
+    assert decision.matched_signals == ("llm:semantic_engineering_request",)
+    assert decision.selected_provider == "openai-codex"
+    assert decision.selected_model == "gpt-5.4-mini"
+    assert captured["provider"] == "openai-codex"
+    assert captured["model"] == "gpt-5.4-mini"
+    joined = "\n".join(message["content"] for message in captured["messages"])
+    assert "platform_context" in joined
+    assert "session_context" in joined
+    assert "safety_constraints" in joined
+    assert "candidate_hints" in joined
+
+
+def test_llm_router_unknown_pipeline_id_is_rejected_safely_when_fail_closed(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": "missing_pipeline",
+            "confidence": 0.97,
+            "reasoning_summary": "bad llm output",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route("исправь баг в Hermes", pipeline_session_id="sess-llm-unknown")
+
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id is None
+    assert "Unknown selected pipeline id" in (decision.routing_failure_reason or "")
+
+
+def test_llm_router_malformed_output_is_rejected_safely_when_fail_closed(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: "not json at all",
+    )
+
+    decision = router.route("исправь баг в Hermes", pipeline_session_id="sess-llm-malformed")
+
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id is None
+    assert "JSONDecodeError" in (decision.routing_failure_reason or "")
+
+
+def test_llm_router_low_confidence_needs_clarification_when_fail_closed(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        min_confidence=0.70,
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "confidence": 0.42,
+            "reasoning_summary": "low confidence semantic route",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route("исправь баг в Hermes", pipeline_session_id="sess-llm-low-confidence")
+
+    assert decision.status == "needs_clarification"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+    assert decision.routing_failure_reason == "llm_low_confidence"
+    assert decision.requires_clarification is True
 
 
 def test_llm_router_falls_back_to_deterministic_strategy_on_failure(tmp_path: Path) -> None:
