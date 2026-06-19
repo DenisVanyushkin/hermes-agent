@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from hermes_cli.config import cfg_get
@@ -13,7 +13,11 @@ from hermes_cli.pipeline_execution_controller import evaluate_pipeline_execution
 from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode, PipelineGateRequest, evaluate_pipeline_gate
 from hermes_cli.pipeline_router import DEFAULT_PIPELINE_ID, RouterDecision
 from hermes_cli.pipeline_report import build_pipeline_execution_report
-from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE, build_controlled_manual_helper_context
+from hermes_cli.pipeline_controlled_dry_run import (
+    CONTROLLED_MANUAL_MODE,
+    CONTROLLED_VALIDATION_TRIGGER,
+    build_controlled_manual_helper_context,
+)
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_state import (
     ExecutionReport,
@@ -29,6 +33,8 @@ logger = logging.getLogger(__name__)
 _VALID_ORCHESTRATOR_MODES = {"disabled", "observe", CONTROLLED_MANUAL_MODE}
 _UNAVAILABLE = "unavailable"
 _ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
+_CONTROLLED_MANUAL_OVERRIDE_CONFIDENCE = 0.99
+_CONTROLLED_MANUAL_OVERRIDE_REASON = "controlled_manual_trigger_override"
 
 
 def observe_gateway_turn(
@@ -54,6 +60,12 @@ def observe_gateway_turn(
 
     started = time.perf_counter()
     gateway_logger = logger or globals()["logger"]
+    router_decision = _effective_router_decision_for_execution(
+        config=config,
+        user_message=user_message,
+        router_decision=router_decision,
+        orchestrator_mode=mode,
+    )
     session = create_pipeline_session(
         request=PipelineSessionRequest(
             router_decision=router_decision,
@@ -131,6 +143,7 @@ def observe_gateway_turn(
     _log_observe_report(
         gateway_logger=gateway_logger,
         report=report,
+        router_decision=router_decision,
         orchestrator_mode=mode,
         pipeline_plan_payload=pipeline_plan_payload,
         pipeline_preflight_payload=pipeline_preflight.to_safe_dict(),
@@ -142,6 +155,49 @@ def observe_gateway_turn(
         ).to_safe_dict(),
     )
     return report
+
+
+def _effective_router_decision_for_execution(
+    *,
+    config: dict[str, Any] | None,
+    user_message: str,
+    router_decision: RouterDecision | None,
+    orchestrator_mode: str,
+) -> RouterDecision | None:
+    override_pipeline_id = _controlled_manual_pipeline_override(
+        orchestrator_mode=orchestrator_mode,
+        execution_mode=_execution_mode(config),
+        user_message=user_message,
+        selected_pipeline_id=getattr(router_decision, "selected_pipeline_id", None),
+    )
+    if override_pipeline_id is None or router_decision is None:
+        return router_decision
+    return replace(
+        router_decision,
+        status="selected",
+        selected_pipeline_id=override_pipeline_id,
+        confidence=_CONTROLLED_MANUAL_OVERRIDE_CONFIDENCE,
+        reasoning_summary=_CONTROLLED_MANUAL_OVERRIDE_REASON,
+        fallback_safe=False,
+    )
+
+
+def _controlled_manual_pipeline_override(
+    *,
+    orchestrator_mode: str,
+    execution_mode: str,
+    user_message: str,
+    selected_pipeline_id: str | None,
+) -> str | None:
+    if orchestrator_mode != CONTROLLED_MANUAL_MODE:
+        return None
+    if execution_mode != CONTROLLED_MANUAL_MODE:
+        return None
+    if CONTROLLED_VALIDATION_TRIGGER not in (user_message or ""):
+        return None
+    if selected_pipeline_id == _ENGINEERING_PIPELINE_ID:
+        return None
+    return _ENGINEERING_PIPELINE_ID
 
 
 def _evaluate_pipeline_gate_safely(
@@ -207,6 +263,10 @@ def _orchestrator_mode(config: dict[str, Any] | None) -> str:
     return "disabled"
 
 
+def _execution_mode(config: dict[str, Any] | None) -> str:
+    return str(cfg_get(config, "pipelines", "execution", "mode", default="disabled") or "disabled").strip().lower()
+
+
 def _build_pipeline_state(
     *,
     session: PipelineSession,
@@ -237,6 +297,7 @@ def _log_observe_report(
     *,
     gateway_logger: logging.Logger,
     report: OrchestratorObserveReport,
+    router_decision: RouterDecision | None,
     orchestrator_mode: str,
     pipeline_plan_payload: dict[str, Any],
     pipeline_preflight_payload: dict[str, Any],
@@ -253,6 +314,8 @@ def _log_observe_report(
         "thread_id": report.session.thread_id,
         "user_id": report.session.user_id,
         "router_status": report.state.router_status,
+        "router_confidence": getattr(router_decision, "confidence", report.session.router_confidence),
+        "router_reasoning_summary": getattr(router_decision, "reasoning_summary", "") or "",
         "selected_pipeline_id": report.state.selected_pipeline_id,
         "fallback_pipeline_id": report.state.fallback_pipeline_id,
         "effective_pipeline_id": report.state.pipeline_id,
