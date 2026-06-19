@@ -88,7 +88,7 @@ def _engineer_output(**overrides: object) -> dict[str, object]:
                 "content": "def test_generated_example():\n    assert 1 + 1 == 2\n",
             }
         ],
-        "tests": ["venv/bin/pytest -q tests/test_generated_example.py"],
+        "tests": ["python -m pytest -q tests/test_generated_example.py"],
     }
     payload.update(overrides)
     return payload
@@ -263,11 +263,11 @@ def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(t
     assert safe_result["test_summary"]["status"] == "passed"
     assert len(safe_result["test_summary"]["results"]) == 1
     assert safe_result["test_summary"]["results"][0]["status"] == "passed"
-    assert safe_result["test_summary"]["results"][0]["command"] == ["venv/bin/pytest", "-q", "tests/test_generated_example.py"]
+    assert safe_result["test_summary"]["results"][0]["command"] == ["python", "-m", "pytest", "-q", "tests/test_generated_example.py"]
     assert safe_result["test_summary"]["results"][0]["cwd"] == repo.name
     assert report_payload["tests"]["status"] == "passed"
     assert len(report_payload["tests"]["results"]) == 1
-    assert report_payload["tests"]["results"][0]["command"] == ["venv/bin/pytest", "-q", "tests/test_generated_example.py"]
+    assert report_payload["tests"]["results"][0]["command"] == ["python", "-m", "pytest", "-q", "tests/test_generated_example.py"]
 
     assert safe_result["git_gate"]["material_change_status"] == "material_changes_detected"
     assert safe_result["git_gate"]["material_changes_present"] is True

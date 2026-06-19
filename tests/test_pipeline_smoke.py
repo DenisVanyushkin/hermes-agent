@@ -142,6 +142,13 @@ def test_controlled_engineering_e2e_manual_dry_run_writes_safe_report(tmp_path: 
     assert payload["reviewer_approved"] is True
     assert payload["mutation_summary"]["applied_count"] == 1
     assert payload["test_summary"]["status"] == "passed"
+    assert payload["test_summary"]["results"][0]["command"] == [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_generated_example.py",
+    ]
     assert payload["git_gate"]["changed_files"] == ["tests/test_generated_example.py"]
     assert payload["report"]["completion"]["blocked_reason"] is None
     assert payload["report"]["review"]["blocked_reason"] is None
@@ -194,3 +201,9 @@ def test_controlled_engineering_e2e_rejects_repo_root_workspace() -> None:
 
     assert payload["status"] == "blocked"
     assert payload["blocked_reason"] == "workspace_matches_repo_root"
+
+
+def test_manual_dry_run_engineer_output_uses_python_module_pytest() -> None:
+    payload = pipeline_smoke._manual_dry_run_engineer_output()
+
+    assert payload["tests"] == ["python -m pytest -q tests/test_generated_example.py"]

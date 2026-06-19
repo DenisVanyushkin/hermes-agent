@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -84,6 +85,34 @@ def test_safe_pytest_command_executes_in_workspace(tmp_path: Path) -> None:
     assert payload["results"][0]["cwd"] == repo.name
 
 
+def test_python_module_pytest_executes_via_active_interpreter(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_example.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def _runner(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout=".\n1 passed\n", stderr="")
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["python -m pytest -q tests/test_example.py"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "passed"
+    assert payload["results"][0]["command"] == ["python", "-m", "pytest", "-q", "tests/test_example.py"]
+    assert calls == [[sys.executable, "-m", "pytest", "-q", "tests/test_example.py"]]
+
+
 def test_unsafe_command_is_denied_without_spawning_subprocess(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_test_runner")
     calls: list[list[str]] = []
@@ -131,6 +160,36 @@ def test_failed_pytest_blocks_completion(tmp_path: Path) -> None:
     assert payload["blocked_reason"] == "test_command_failed"
     assert payload["failed_count"] == 1
     assert payload["results"][0]["status"] == "failed"
+
+
+def test_missing_executable_blocks_with_distinct_safe_reason(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+
+    def _missing_runner(argv, **kwargs):
+        raise FileNotFoundError("/very/secret/location/python3")
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["python3 -m pytest -q tests/test_example.py"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_missing_runner,
+    )
+
+    payload = summary.to_safe_dict()
+    encoded = str(payload)
+
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "test_command_start_failed"
+    assert payload["failed_count"] == 0
+    assert payload["results"][0]["status"] == "blocked"
+    assert payload["results"][0]["reason"] == "test_command_start_failed"
+    assert payload["results"][0]["stdout_excerpt"] is None
+    assert payload["results"][0]["stderr_excerpt"] is None
+    assert "/very/secret/location/python3" not in encoded
+    assert "secret" not in encoded.lower()
 
 
 def test_timeout_is_fail_closed(tmp_path: Path) -> None:
