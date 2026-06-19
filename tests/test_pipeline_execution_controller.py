@@ -816,3 +816,27 @@ def test_ineligible_pipeline_context_is_fail_closed() -> None:
     assert result.blocked_reason == "ineligible_pipeline_execution_context"
     assert result.actual_execution_invoked is False
     assert helper_calls == []
+
+
+def test_controlled_manual_trigger_does_not_make_default_pipeline_eligible() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for(pipeline_id="default_conversation_pipeline", router_status="no_specialized_pipeline")
+    helper_calls: list[str] = []
+
+    def _helper(**_kwargs):
+        helper_calls.append("called")
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="controlled_manual", allow_pipelines=["engineering_review_pipeline", "default_conversation_pipeline"]),
+        session=session,
+        state_snapshot=snapshot,
+        execution_helper=_helper,
+        allow_test_execution=True,
+        helper_execution_context={"user_message": "HERMES CONTROLLED PIPELINE VALIDATION - dry-run"},
+    )
+
+    assert result.status == "blocked"
+    assert result.execution_allowed is False
+    assert result.blocked_reason == "ineligible_pipeline_execution_context"
+    assert result.actual_execution_invoked is False
+    assert helper_calls == []
