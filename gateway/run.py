@@ -16775,25 +16775,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not isinstance(report_artifacts, dict) or not report_artifacts:
             return final_response_text
 
-        reference_lines = []
-        existing_lines = {line.strip() for line in final_response_text.splitlines() if line.strip()}
+        rewritten_lines = []
+        report_path_line_seen = False
         run_id = str(report_artifacts.get("run_id") or "").strip()
         report_path = str(
             report_artifacts.get("durable_report_path")
             or report_artifacts.get("workspace_report_path")
-            or ""
-        ).strip()
+            or "unavailable"
+        ).strip() or "unavailable"
         workspace_path = str(report_artifacts.get("workspace_report_path") or "").strip()
         workspace_root = workspace_path.rsplit("/", 1)[0] if workspace_path else ""
-        if run_id and f"report_run_id: {run_id}" not in existing_lines:
-            reference_lines.append(f"report_run_id: {run_id}")
-        if report_path and f"report_path: {report_path}" not in existing_lines:
-            reference_lines.append(f"report_path: {report_path}")
-        if workspace_root and f"workspace: {workspace_root}" not in existing_lines:
-            reference_lines.append(f"workspace: {workspace_root}")
-        if not reference_lines:
-            return final_response_text
-        return f"{final_response_text}\n" + "\n".join(reference_lines)
+        expected_report_run_id_line = f"report_run_id: {run_id}" if run_id else None
+        expected_report_path_line = f"report_path: {report_path}"
+        expected_workspace_line = f"workspace: {workspace_root}" if workspace_root else None
+
+        for raw_line in final_response_text.splitlines():
+            stripped_line = raw_line.strip()
+            if stripped_line.startswith("report_path:"):
+                rewritten_lines.append(expected_report_path_line)
+                report_path_line_seen = True
+                continue
+            rewritten_lines.append(raw_line)
+
+        existing_lines = {line.strip() for line in rewritten_lines if line.strip()}
+        if expected_report_run_id_line and expected_report_run_id_line not in existing_lines:
+            rewritten_lines.append(expected_report_run_id_line)
+        if not report_path_line_seen and expected_report_path_line not in existing_lines:
+            rewritten_lines.append(expected_report_path_line)
+        if expected_workspace_line and expected_workspace_line not in existing_lines:
+            rewritten_lines.append(expected_workspace_line)
+        return "\n".join(rewritten_lines)
 
     def _pipeline_engineering_plan_only_response(self, report: Any) -> str | None:
         """Block normal-agent mutation when observe selected engineering but execution is disabled."""
