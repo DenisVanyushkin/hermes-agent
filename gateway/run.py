@@ -16969,6 +16969,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_id,
                 platform_key,
             )
+            controlled_model = (
+                str(getattr(router_decision, "actual_model", "") or "").strip()
+                or str(getattr(router_decision, "selected_model", "") or "").strip()
+                or str(_resolve_gateway_model(user_config) or "").strip()
+            )
+            requested_model = str(_resolve_gateway_model(user_config) or "").strip() or controlled_model
             return {
                 "final_response": controlled_final_response,
                 "messages": [
@@ -16976,6 +16982,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     {"role": "assistant", "content": controlled_final_response},
                 ],
                 "api_calls": 0,
+                "model": controlled_model,
+                "requested_model": requested_model,
+                "last_prompt_tokens": 0,
+                "context_length": 0,
                 "tools": [],
                 "history_offset": len(history),
                 "completed": True,
