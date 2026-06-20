@@ -309,8 +309,7 @@ def _format_controlled_manual_summary_from_report(
 
     if report_run_id:
         lines.append(f"report_run_id: {report_run_id}")
-    if selected_report_path:
-        lines.append(f"report_path: {selected_report_path}")
+    lines.append(f"report_path: {selected_report_path or 'unavailable'}")
     if selected_workspace_path:
         lines.append(f"workspace: {selected_workspace_path}")
 
