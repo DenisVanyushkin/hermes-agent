@@ -98,10 +98,15 @@ def _controlled_report(
     actual_execution_invoked: bool,
     final_response_text: str | None,
     execution_mode: str = "controlled_manual",
+    pipeline_id: str = "engineering_review_pipeline",
     completion_allowed: bool = True,
     blocked_reason: str | None = None,
 ):
     return SimpleNamespace(
+        state=SimpleNamespace(
+            pipeline_id=pipeline_id,
+            selected_pipeline_id=pipeline_id if pipeline_id == "engineering_review_pipeline" else None,
+        ),
         execution_report=SimpleNamespace(executed=actual_execution_invoked, execution_mode=execution_mode),
         pipeline_execution_controller=SimpleNamespace(
             actual_execution_invoked=actual_execution_invoked,
@@ -225,6 +230,63 @@ async def test_controlled_manual_without_actual_invocation_falls_back(monkeypatc
         tmp_path,
         config=config,
         report=_controlled_report(actual_execution_invoked=False, final_response_text="safe controlled reply"),
+    )
+
+    assert len(observe_calls) == 1
+    assert result["final_response"] == "normal agent reply"
+    assert len(_CapturingAgent.run_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_engineering_observe_with_disabled_execution_returns_plan_only_without_agent(monkeypatch, tmp_path):
+    config = {
+        "pipelines": {
+            "enabled": True,
+            "orchestrator": {"mode": "observe"},
+            "execution": {"mode": "disabled"},
+        }
+    }
+
+    result, observe_calls = await _run_once(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        report=_controlled_report(
+            actual_execution_invoked=False,
+            final_response_text=None,
+            execution_mode="disabled",
+            pipeline_id="engineering_review_pipeline",
+        ),
+    )
+
+    assert len(observe_calls) == 1
+    assert "Engineering pipeline was selected" in result["final_response"]
+    assert "I did not run terminal commands" in result["final_response"]
+    assert result["api_calls"] == 0
+    assert result["tools"] == []
+    assert _CapturingAgent.run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_default_observe_with_disabled_execution_still_uses_normal_agent(monkeypatch, tmp_path):
+    config = {
+        "pipelines": {
+            "enabled": True,
+            "orchestrator": {"mode": "observe"},
+            "execution": {"mode": "disabled"},
+        }
+    }
+
+    result, observe_calls = await _run_once(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        report=_controlled_report(
+            actual_execution_invoked=False,
+            final_response_text=None,
+            execution_mode="disabled",
+            pipeline_id="default_conversation_pipeline",
+        ),
     )
 
     assert len(observe_calls) == 1
