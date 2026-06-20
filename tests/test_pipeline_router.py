@@ -618,6 +618,188 @@ def test_llm_router_rejects_pipeline_id_shaped_status_with_diagnostics(tmp_path:
     assert "pipeline_id_like" in decision.invalid_router_contract_summary
 
 
+def test_llm_router_drops_null_alternative_when_default_primary_is_valid(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: {
+            "status": "no_specialized_pipeline",
+            "selected_pipeline_id": None,
+            "fallback_pipeline_id": DEFAULT_PIPELINE_ID,
+            "confidence": 0.8,
+            "reasoning_summary": "ordinary prompt",
+            "requires_clarification": False,
+            "fallback_safe": True,
+            "alternatives": [
+                {
+                    "pipeline_id": None,
+                    "confidence": 0.2,
+                    "reasoning_summary": "invalid alt should be dropped",
+                }
+            ],
+        },
+    )
+
+    decision = router.route("что дальше?", pipeline_session_id="sess-null-alt-default")
+
+    assert decision.status == "no_specialized_pipeline"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+    assert decision.alternatives == ()
+    assert decision.dropped_alternatives_count == 1
+    assert decision.dropped_alternatives_reasons == ("null_pipeline_id",)
+
+
+def test_llm_router_drops_null_alternative_when_selected_primary_is_valid(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "fallback_pipeline_id": None,
+            "confidence": 0.95,
+            "reasoning_summary": "engineering mutation request",
+            "requires_clarification": False,
+            "fallback_safe": False,
+            "alternatives": [
+                {
+                    "pipeline_id": None,
+                    "confidence": 0.1,
+                    "reasoning_summary": "invalid alt should be dropped",
+                }
+            ],
+        },
+    )
+
+    decision = router.route("исправь баг в Hermes", pipeline_session_id="sess-null-alt-selected")
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.alternatives == ()
+    assert decision.dropped_alternatives_count == 1
+    assert decision.dropped_alternatives_reasons == ("null_pipeline_id",)
+
+
+def test_llm_router_drops_unknown_and_non_string_alternatives_but_keeps_valid_ones(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "fallback_pipeline_id": None,
+            "confidence": 0.93,
+            "reasoning_summary": "engineering request",
+            "requires_clarification": False,
+            "fallback_safe": False,
+            "alternatives": [
+                {
+                    "pipeline_id": DEFAULT_PIPELINE_ID,
+                    "confidence": 0.2,
+                    "reasoning_summary": "valid fallback if scope changes",
+                },
+                {
+                    "pipeline_id": "missing_pipeline",
+                    "confidence": 0.15,
+                    "reasoning_summary": "unknown alt should be dropped",
+                },
+                {
+                    "pipeline_id": 42,
+                    "confidence": 0.11,
+                    "reasoning_summary": "non-string alt should be dropped",
+                },
+            ],
+        },
+    )
+
+    decision = router.route("исправь баг в Hermes", pipeline_session_id="sess-bad-alternatives")
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.alternatives == (
+        decision.alternatives[0].__class__(
+            pipeline_id=DEFAULT_PIPELINE_ID,
+            confidence=0.2,
+            reasoning_summary="valid fallback if scope changes",
+        ),
+    )
+    assert decision.dropped_alternatives_count == 2
+    assert decision.dropped_alternatives_reasons == ("unknown_pipeline_id", "non_string_pipeline_id")
+
+
+def test_llm_router_drops_missing_alternative_pipeline_id_without_logging_raw_value(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+    sensitive = "sk-live-router-secret"
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "fallback_pipeline_id": None,
+            "confidence": 0.91,
+            "reasoning_summary": "engineering request",
+            "requires_clarification": False,
+            "fallback_safe": False,
+            "alternatives": [
+                {
+                    "confidence": 0.05,
+                    "reasoning_summary": sensitive,
+                }
+            ],
+        },
+    )
+
+    decision = router.route("исправь баг в Hermes", pipeline_session_id="sess-missing-alt-pipeline-id")
+
+    assert decision.status == "selected"
+    assert decision.dropped_alternatives_count == 1
+    assert decision.dropped_alternatives_reasons == ("missing_pipeline_id",)
+    assert sensitive not in " ".join(decision.dropped_alternatives_reasons)
+
+
+def test_llm_router_invalid_primary_selected_pipeline_id_still_fails_closed(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": "missing_pipeline",
+            "confidence": 0.94,
+            "reasoning_summary": "bad primary selection",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route("исправь баг в Hermes", pipeline_session_id="sess-invalid-primary-selected")
+
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.routing_failure_reason is not None
+    assert "Unknown selected pipeline id: 'missing_pipeline'" in decision.routing_failure_reason
+
+
 @pytest.mark.parametrize(
     ("selected_pipeline_id", "expected_summary"),
     [
