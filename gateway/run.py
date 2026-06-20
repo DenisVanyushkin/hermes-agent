@@ -20104,16 +20104,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return final_response_text
 
         reference_lines = []
+        existing_lines = {line.strip() for line in final_response_text.splitlines() if line.strip()}
         run_id = str(report_artifacts.get("run_id") or "").strip()
         report_path = str(
             report_artifacts.get("durable_report_path")
             or report_artifacts.get("workspace_report_path")
             or ""
         ).strip()
-        if run_id:
+        workspace_path = str(report_artifacts.get("workspace_report_path") or "").strip()
+        workspace_root = workspace_path.rsplit("/", 1)[0] if workspace_path else ""
+        if run_id and f"report_run_id: {run_id}" not in existing_lines:
             reference_lines.append(f"report_run_id: {run_id}")
-        if report_path:
+        if report_path and f"report_path: {report_path}" not in existing_lines:
             reference_lines.append(f"report_path: {report_path}")
+        if workspace_root and f"workspace: {workspace_root}" not in existing_lines:
+            reference_lines.append(f"workspace: {workspace_root}")
         if not reference_lines:
             return final_response_text
         return f"{final_response_text}\n" + "\n".join(reference_lines)

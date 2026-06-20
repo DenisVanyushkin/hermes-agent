@@ -341,8 +341,15 @@ def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_
     assert result.actual_execution_invoked is True
     assert result.helper_result is not None
     assert result.final_response_text is not None
-    assert "Controlled pipeline validation completed." in result.final_response_text
+    assert "Controlled pipeline validation report." in result.final_response_text
+    assert "pipeline: engineering_review_pipeline" in result.final_response_text
+    assert "workspace:" in result.final_response_text
     assert result.workspace_basename == git_repo.name
+    safe_payload = result.to_safe_dict()
+    assert safe_payload["final_response_text"] is not None
+    assert "/tmp/hermes-gateway-controlled-runs" not in safe_payload["final_response_text"]
+    assert "/home/hermes/.hermes/controlled-runs" not in safe_payload["final_response_text"]
+    assert "workspace: <redacted_absolute_path>/" in safe_payload["final_response_text"]
 
 
 def test_enabled_like_config_without_helper_is_not_wired() -> None:
