@@ -16770,6 +16770,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         final_response_text = final_response_text.strip()
         return final_response_text or None
 
+    def _pipeline_engineering_plan_only_response(self, report: Any) -> str | None:
+        """Block normal-agent mutation when observe selected engineering but execution is disabled."""
+        if report is None:
+            return None
+
+        state = getattr(report, "state", None)
+        pipeline_id = str(
+            getattr(state, "pipeline_id", None)
+            or getattr(state, "selected_pipeline_id", None)
+            or ""
+        ).strip()
+        if pipeline_id != "engineering_review_pipeline":
+            return None
+
+        controller = getattr(report, "pipeline_execution_controller", None)
+        execution_mode = str(getattr(controller, "execution_mode", "") or "").strip().lower()
+        actual_execution_invoked = bool(getattr(controller, "actual_execution_invoked", False))
+        if execution_mode != "disabled" or actual_execution_invoked:
+            return None
+
+        return (
+            "Engineering pipeline was selected, but pipeline execution is disabled. "
+            "I did not run terminal commands, run tests, or modify files. "
+            "Until controlled engineering execution is explicitly enabled and approved, "
+            "I can only provide a read-only plan for this request."
+        )
+
     # ------------------------------------------------------------------
 
     async def _run_agent(
@@ -16922,6 +16949,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": controlled_final_response},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
+        engineering_plan_only_response = self._pipeline_engineering_plan_only_response(
+            pipeline_orchestrator_report,
+        )
+        if engineering_plan_only_response is not None:
+            logger.info(
+                "pipeline engineering observe guard blocked normal agent mutation path: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": engineering_plan_only_response,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": engineering_plan_only_response},
                 ],
                 "api_calls": 0,
                 "tools": [],
