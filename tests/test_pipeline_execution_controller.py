@@ -349,6 +349,7 @@ def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_
     assert safe_payload["final_response_text"] is not None
     assert "/tmp/hermes-gateway-controlled-runs" not in safe_payload["final_response_text"]
     assert "/home/hermes/.hermes/controlled-runs" not in safe_payload["final_response_text"]
+    assert "report_path: <redacted_absolute_path>" in safe_payload["final_response_text"]
     assert "workspace: <redacted_absolute_path>/" in safe_payload["final_response_text"]
 
 

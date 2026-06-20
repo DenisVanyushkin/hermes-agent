@@ -227,6 +227,115 @@ async def test_controlled_manual_intercepts_safe_final_response_with_report_refe
     assert _CapturingAgent.run_calls == []
 
 
+@pytest.mark.asyncio
+async def test_controlled_manual_rewrites_blank_report_path_to_durable_path(monkeypatch, tmp_path):
+    config = {
+        "pipelines": {
+            "enabled": True,
+            "orchestrator": {"mode": "controlled_manual"},
+            "execution": {"mode": "controlled_manual"},
+        }
+    }
+
+    result, observe_calls = await _run_once(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        report=_controlled_report(
+            actual_execution_invoked=True,
+            final_response_text=(
+                "status: completion_allowed\n"
+                "report_run_id: pipe-report-4\n"
+                "report_path:\n"
+                "workspace: /tmp/hermes-gateway-controlled-runs/pipe-report-4"
+            ),
+            report_artifacts={
+                "run_id": "pipe-report-4",
+                "workspace_report_path": "/tmp/hermes-gateway-controlled-runs/pipe-report-4/controlled_execution_report.json",
+                "durable_report_path": "/home/hermes/.hermes/controlled-runs/pipe-report-4/controlled_execution_report.json",
+            },
+        ),
+    )
+
+    assert len(observe_calls) == 1
+    assert "report_path: /home/hermes/.hermes/controlled-runs/pipe-report-4/controlled_execution_report.json" in result["final_response"]
+    assert "report_path:\n" not in result["final_response"]
+    assert _CapturingAgent.run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_controlled_manual_rewrites_placeholder_report_path_values_when_real_artifact_exists(monkeypatch, tmp_path):
+    config = {
+        "pipelines": {
+            "enabled": True,
+            "orchestrator": {"mode": "controlled_manual"},
+            "execution": {"mode": "controlled_manual"},
+        }
+    }
+
+    for placeholder in ("~", "unavailable"):
+        result, observe_calls = await _run_once(
+            monkeypatch,
+            tmp_path,
+            config=config,
+            report=_controlled_report(
+                actual_execution_invoked=True,
+                final_response_text=(
+                    "status: completion_allowed\n"
+                    "report_run_id: pipe-report-5\n"
+                    f"report_path: {placeholder}\n"
+                    "workspace: /tmp/hermes-gateway-controlled-runs/pipe-report-5"
+                ),
+                report_artifacts={
+                    "run_id": "pipe-report-5",
+                    "workspace_report_path": "/tmp/hermes-gateway-controlled-runs/pipe-report-5/controlled_execution_report.json",
+                    "durable_report_path": "/home/hermes/.hermes/controlled-runs/pipe-report-5/controlled_execution_report.json",
+                },
+            ),
+        )
+
+        assert len(observe_calls) == 1
+        assert "report_path: /home/hermes/.hermes/controlled-runs/pipe-report-5/controlled_execution_report.json" in result["final_response"]
+        assert f"report_path: {placeholder}" not in result["final_response"]
+        assert _CapturingAgent.run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_controlled_manual_preserves_single_correct_report_path_without_duplication(monkeypatch, tmp_path):
+    config = {
+        "pipelines": {
+            "enabled": True,
+            "orchestrator": {"mode": "controlled_manual"},
+            "execution": {"mode": "controlled_manual"},
+        }
+    }
+
+    durable_report_path = "/home/hermes/.hermes/controlled-runs/pipe-report-6/controlled_execution_report.json"
+    result, observe_calls = await _run_once(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        report=_controlled_report(
+            actual_execution_invoked=True,
+            final_response_text=(
+                "status: completion_allowed\n"
+                "report_run_id: pipe-report-6\n"
+                f"report_path: {durable_report_path}\n"
+                "workspace: /tmp/hermes-gateway-controlled-runs/pipe-report-6"
+            ),
+            report_artifacts={
+                "run_id": "pipe-report-6",
+                "workspace_report_path": "/tmp/hermes-gateway-controlled-runs/pipe-report-6/controlled_execution_report.json",
+                "durable_report_path": durable_report_path,
+            },
+        ),
+    )
+
+    assert len(observe_calls) == 1
+    assert result["final_response"].count(f"report_path: {durable_report_path}") == 1
+    assert _CapturingAgent.run_calls == []
+
+
 def test_controlled_manual_summary_uses_report_as_source_of_truth_for_not_executed_case() -> None:
     summary = format_controlled_manual_summary(
         {
@@ -353,8 +462,60 @@ def test_controlled_manual_summary_drops_placeholder_values_without_dropping_til
     assert summary is not None
     assert "blocked_reason: awaiting_user_input ~ keep note" in summary
     assert "report_run_id:" not in summary
-    assert "report_path:" not in summary
+    assert "report_path: unavailable" in summary
     assert "workspace:" not in summary
+
+
+def test_controlled_manual_summary_uses_workspace_report_path_when_durable_missing() -> None:
+    summary = format_controlled_manual_summary(
+        {
+            "status": "completed",
+            "report_artifacts": {
+                "run_id": "pipe-report-2",
+                "durable_report_path": "",
+                "workspace_report_path": "/tmp/hermes-gateway-controlled-runs/pipe-report-2/controlled_execution_report.json",
+            },
+            "report": {
+                "status": "completed",
+                "routing": {"selected_pipeline_id": "engineering_review_pipeline"},
+                "controller": {"executed": True, "execution_mode": "controlled_manual"},
+                "completion": {"final_verdict": "completed", "blocked_reason": None},
+                "tests": {"status": "passed", "summary": "focused"},
+                "usage_summary": {"providers_used": [], "models_used": []},
+                "review": {"reviewer_invoked": True},
+                "changed_files": ["tests/test_generated_example.py"],
+            },
+        }
+    )
+
+    assert summary is not None
+    assert "report_path: /tmp/hermes-gateway-controlled-runs/pipe-report-2/controlled_execution_report.json" in summary
+
+
+def test_controlled_manual_summary_renders_unavailable_when_artifact_paths_missing() -> None:
+    summary = format_controlled_manual_summary(
+        {
+            "status": "completed",
+            "report_artifacts": {
+                "run_id": "pipe-report-3",
+                "durable_report_path": "",
+                "workspace_report_path": "",
+            },
+            "report": {
+                "status": "completed",
+                "routing": {"selected_pipeline_id": "engineering_review_pipeline"},
+                "controller": {"executed": True, "execution_mode": "controlled_manual"},
+                "completion": {"final_verdict": "completed", "blocked_reason": None},
+                "tests": {"status": "passed", "summary": "focused"},
+                "usage_summary": {"providers_used": [], "models_used": []},
+                "review": {"reviewer_invoked": True},
+                "changed_files": ["tests/test_generated_example.py"],
+            },
+        }
+    )
+
+    assert summary is not None
+    assert "report_path: unavailable" in summary
 
 
 def test_controlled_manual_summary_renders_unknown_for_provider_model_length_mismatch() -> None:
