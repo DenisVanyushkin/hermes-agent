@@ -680,7 +680,15 @@ def test_gateway_orchestrator_controlled_manual_trigger_overrides_default_fallba
     assert payload["router_confidence"] == 0.99
     assert payload.get("router_reasoning_summary") == "controlled_manual_trigger_override"
     assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is True
-    assert payload["pipeline_execution_controller"]["final_response_text"].startswith("Controlled pipeline validation completed.")
+    final_response_text = payload["pipeline_execution_controller"]["final_response_text"]
+    assert final_response_text.startswith("Controlled pipeline validation report.")
+    assert "status: not_executed" in final_response_text
+    assert "report_execution_invoked: False" in final_response_text
+    assert "mutation: none" in final_response_text
+    assert "tests: not_run" in final_response_text
+    dumped = json.dumps(payload, sort_keys=True)
+    assert "/tmp/hermes-gateway-controlled-runs" not in dumped
+    assert "/home/hermes/.hermes/controlled-runs" not in dumped
 
 
 def test_gateway_orchestrator_observe_trigger_does_not_override_default_fallback(caplog):
@@ -804,5 +812,12 @@ def test_gateway_orchestrator_controlled_manual_executes_fake_only_dry_run(caplo
     assert payload["execution_report"]["executed"] is True
     assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is True
     assert payload["pipeline_execution_controller"]["helper_result"]["provider_execution_mode"] == "fake_real_provider_client"
-    assert payload["pipeline_execution_controller"]["final_response_text"].startswith("Controlled pipeline validation completed.")
-    assert "/tmp/hermes-gateway-controlled-runs" not in json.dumps(payload, sort_keys=True)
+    final_response_text = payload["pipeline_execution_controller"]["final_response_text"]
+    assert final_response_text.startswith("Controlled pipeline validation report.")
+    assert "status: not_executed" in final_response_text
+    assert "report_execution_invoked: False" in final_response_text
+    assert "tests: not_run" in final_response_text
+    assert "workspace: <redacted_absolute_path>/router-controlled-manual-exec" in final_response_text
+    dumped = json.dumps(payload, sort_keys=True)
+    assert "/tmp/hermes-gateway-controlled-runs" not in dumped
+    assert "/home/hermes/.hermes/controlled-runs" not in dumped

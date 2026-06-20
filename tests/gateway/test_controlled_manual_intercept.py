@@ -12,6 +12,7 @@ import pytest
 import gateway.run as gateway_run
 from gateway.config import Platform
 from gateway.session import SessionSource
+from hermes_cli.pipeline_controlled_dry_run import format_controlled_manual_summary
 
 
 class _CapturingAgent:
@@ -220,6 +221,160 @@ async def test_controlled_manual_intercepts_safe_final_response_with_report_refe
     assert "report_run_id: pipe-report-1" in result["final_response"]
     assert "controlled_execution_report.json" in result["final_response"]
     assert _CapturingAgent.run_calls == []
+
+
+def test_controlled_manual_summary_uses_report_as_source_of_truth_for_not_executed_case() -> None:
+    summary = format_controlled_manual_summary(
+        {
+            "status": "completed",
+            "completion_allowed": True,
+            "mutation_summary": {"applied_count": 1, "denied_count": 0},
+            "test_summary": {"status": "passed", "results": [{"status": "passed"}]},
+            "report_artifacts": {
+                "run_id": "357f97b7884143c488d05f4f1f0d40ae",
+                "durable_report_path": "/home/hermes/.hermes/controlled-runs/357f97b7884143c488d05f4f1f0d40ae/controlled_execution_report.json",
+                "workspace_report_path": "/tmp/hermes-gateway-controlled-runs/357f97b7884143c488d05f4f1f0d40ae/controlled_execution_report.json",
+            },
+            "report": {
+                "status": "not_executed",
+                "routing": {
+                    "selected_pipeline_id": "engineering_review_pipeline",
+                    "router_status": "selected",
+                },
+                "controller": {
+                    "executed": False,
+                    "execution_mode": "observe_plan_only",
+                },
+                "completion": {
+                    "final_verdict": "observe_engineering_preflight_blocked",
+                    "blocked_reason": "execution_disabled",
+                },
+                "tests": {"status": "unavailable", "summary": None},
+                "usage_summary": {"providers_used": [], "models_used": []},
+                "models": [
+                    {
+                        "role_id": "engineer",
+                        "provider": "openrouter",
+                        "model": "xiaomi/mimo-v2.5-pro",
+                        "runtime_status": "plan_only",
+                    },
+                    {
+                        "role_id": "reviewer",
+                        "provider": "openai-codex",
+                        "model": "gpt-5.5",
+                        "runtime_status": "plan_only",
+                    },
+                ],
+                "changed_files": [],
+            },
+        }
+    )
+
+    assert summary is not None
+    assert "status: not_executed" in summary
+    assert "execution_mode: observe_plan_only" in summary
+    assert "final_verdict: observe_engineering_preflight_blocked" in summary
+    assert "blocked_reason: execution_disabled" in summary
+    assert "report_execution_invoked: False" in summary
+    assert "mutation: none" in summary
+    assert "tests: not_run" in summary
+    assert "models_used: none" in summary
+    assert "planned_model: engineer: openrouter / xiaomi/mimo-v2.5-pro, plan_only" in summary
+    assert "report_run_id: 357f97b7884143c488d05f4f1f0d40ae" in summary
+    assert "report_path: /home/hermes/.hermes/controlled-runs/357f97b7884143c488d05f4f1f0d40ae/controlled_execution_report.json" in summary
+    assert "workspace: /tmp/hermes-gateway-controlled-runs/357f97b7884143c488d05f4f1f0d40ae" in summary
+    assert "status: completed" not in summary
+    assert "applied_count=1" not in summary
+    assert "tests: passed" not in summary
+    assert "~" not in summary
+
+
+def test_controlled_manual_summary_uses_report_values_for_executed_case() -> None:
+    summary = format_controlled_manual_summary(
+        {
+            "status": "completed",
+            "report_artifacts": {
+                "run_id": "pipe-report-1",
+                "durable_report_path": "/home/hermes/.hermes/controlled-runs/pipe-report-1/controlled_execution_report.json",
+                "workspace_report_path": "/tmp/hermes-gateway-controlled-runs/pipe-report-1/controlled_execution_report.json",
+            },
+            "report": {
+                "status": "completed",
+                "routing": {"selected_pipeline_id": "engineering_review_pipeline"},
+                "controller": {"executed": True, "execution_mode": "controlled_manual"},
+                "completion": {"final_verdict": "completed", "blocked_reason": None},
+                "tests": {"status": "passed", "summary": "focused"},
+                "usage_summary": {
+                    "providers_used": ["openrouter", "openai-codex"],
+                    "models_used": ["xiaomi/mimo-v2.5-pro", "gpt-5.5"],
+                },
+                "review": {"reviewer_invoked": True},
+                "changed_files": ["tests/test_generated_example.py"],
+            },
+        }
+    )
+
+    assert summary is not None
+    assert "status: completed" in summary
+    assert "report_execution_invoked: True" in summary
+    assert "mutation: changed_files=1" in summary
+    assert "tests: passed (focused)" in summary
+    assert "models_used: openrouter / xiaomi/mimo-v2.5-pro, openai-codex / gpt-5.5" in summary
+    assert "reviewer_invoked: True" in summary
+
+
+def test_controlled_manual_summary_drops_placeholder_values_without_dropping_tilde_text() -> None:
+    summary = format_controlled_manual_summary(
+        {
+            "status": "blocked",
+            "report_artifacts": {
+                "run_id": "~",
+                "durable_report_path": "~",
+                "workspace_report_path": "~",
+            },
+            "report": {
+                "status": "not_executed",
+                "routing": {"selected_pipeline_id": "engineering_review_pipeline"},
+                "controller": {"executed": False, "execution_mode": "observe_plan_only"},
+                "completion": {
+                    "final_verdict": "observe_engineering_preflight_blocked",
+                    "blocked_reason": "awaiting_user_input ~ keep note",
+                },
+                "tests": {"status": "unavailable"},
+                "usage_summary": {"providers_used": [], "models_used": []},
+            },
+        }
+    )
+
+    assert summary is not None
+    assert "blocked_reason: awaiting_user_input ~ keep note" in summary
+    assert "report_run_id:" not in summary
+    assert "report_path:" not in summary
+    assert "workspace:" not in summary
+
+
+def test_controlled_manual_summary_renders_unknown_for_provider_model_length_mismatch() -> None:
+    summary = format_controlled_manual_summary(
+        {
+            "status": "completed",
+            "report": {
+                "status": "completed",
+                "changed_files": ["a.py"],
+                "routing": {"selected_pipeline_id": "engineering_review_pipeline"},
+                "controller": {"executed": True, "execution_mode": "controlled_runtime_loop"},
+                "completion": {"final_verdict": "executed", "blocked_reason": None},
+                "tests": {"status": "passed", "summary": "ok"},
+                "usage_summary": {
+                    "providers_used": ["openrouter"],
+                    "models_used": ["xiaomi/mimo-v2.5-pro", "gpt-5.5"],
+                },
+                "review": {"reviewer_invoked": False},
+            },
+        }
+    )
+
+    assert summary is not None
+    assert "models_used: openrouter / xiaomi/mimo-v2.5-pro, unknown / gpt-5.5" in summary
 
 
 @pytest.mark.asyncio
