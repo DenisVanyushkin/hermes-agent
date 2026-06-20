@@ -519,6 +519,52 @@ def test_observe_logs_invalid_confidence_diagnostics(monkeypatch, caplog):
     assert '"invalid_confidence_summary": "str(len=12, category=redacted)"' in log_message
 
 
+def test_observe_logs_dropped_alternative_diagnostics_without_raw_payload(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    sensitive = "sk-live-router-secret"
+    decision = RouterDecision(
+        pipeline_session_id="pipe-dropped-alts",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id=None,
+        confidence=0.9,
+        reasoning_summary="Engineering request classified successfully.",
+        requires_clarification=False,
+        fallback_safe=False,
+        policy_block_reason=None,
+        routing_failure_reason=None,
+        dropped_alternatives_count=2,
+        dropped_alternatives_reasons=("null_pipeline_id", "unknown_pipeline_id"),
+        alternatives=(),
+        selected_provider="openrouter",
+        selected_model="openrouter/owl-alpha",
+        actual_provider="openrouter",
+        actual_model="openrouter/owl-alpha",
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={"pipelines": {"router": {"mode": "observe", "strategy": "llm"}}},
+            user_message=f"Fix router bug. {sensitive}",
+            session_id="sess-dropped-alt-log",
+        )
+
+    assert result == decision
+    log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
+    assert '"dropped_alternatives_count": 2' in log_message
+    assert '"dropped_alternatives_reasons": ["null_pipeline_id", "unknown_pipeline_id"]' in log_message
+    assert sensitive not in log_message
+
+
 def test_observe_logs_invalid_router_contract_diagnostics(monkeypatch, caplog):
     from hermes_cli import pipeline_observe
 

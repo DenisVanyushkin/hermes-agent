@@ -115,6 +115,8 @@ def observe_pipeline_router_decision(
                     "invalid_confidence_summary": decision.invalid_confidence_summary,
                     "invalid_router_contract_kind": decision.invalid_router_contract_kind,
                     "invalid_router_contract_summary": decision.invalid_router_contract_summary,
+                    "dropped_alternatives_count": decision.dropped_alternatives_count,
+                    "dropped_alternatives_reasons": list(decision.dropped_alternatives_reasons),
                     "reasoning_summary": decision.reasoning_summary,
                     "matched_signals": list(decision.matched_signals),
                     "alternatives": [
@@ -248,6 +250,8 @@ def _replace_decision(
         invalid_confidence_summary=decision.invalid_confidence_summary,
         invalid_router_contract_kind=decision.invalid_router_contract_kind,
         invalid_router_contract_summary=decision.invalid_router_contract_summary,
+        dropped_alternatives_count=decision.dropped_alternatives_count,
+        dropped_alternatives_reasons=decision.dropped_alternatives_reasons,
     )
 
 

@@ -243,6 +243,8 @@ class RouterDecision:
     invalid_confidence_summary: str | None = None
     invalid_router_contract_kind: str | None = None
     invalid_router_contract_summary: str | None = None
+    dropped_alternatives_count: int = 0
+    dropped_alternatives_reasons: tuple[str, ...] = field(default_factory=tuple)
 
 
 class PipelineRouter:
@@ -567,7 +569,10 @@ class LlmPipelineRouter(PipelineRouter):
                 )
             if payload.get("status") == "no_specialized_pipeline":
                 payload.setdefault("fallback_pipeline_id", DEFAULT_PIPELINE_ID)
-            return parse_router_decision(payload, loaded_specs=self._loaded_specs)
+            return parse_router_decision(
+                _sanitize_router_payload(payload, loaded_specs=self._loaded_specs),
+                loaded_specs=self._loaded_specs,
+            )
         except Exception as exc:
             if self._fallback_strategy == "deterministic":
                 return self._deterministic_router.route(
@@ -781,6 +786,12 @@ def parse_router_decision(
         invalid_confidence_summary=_optional_str(data.get("invalid_confidence_summary")),
         invalid_router_contract_kind=_optional_str(data.get("invalid_router_contract_kind")),
         invalid_router_contract_summary=_optional_str(data.get("invalid_router_contract_summary")),
+        dropped_alternatives_count=int(data.get("dropped_alternatives_count", 0) or 0),
+        dropped_alternatives_reasons=tuple(
+            str(entry).strip()
+            for entry in data.get("dropped_alternatives_reasons", [])
+            if str(entry).strip()
+        ),
     )
 
 
@@ -818,7 +829,15 @@ def _validate_router_decision_dict(data: dict[str, Any], specs: LoadedPipelineSp
             "Router status 'routing_failed' may only use the default fallback when fallback_safe=True"
         )
 
-    for index, alternative in enumerate(data.get("alternatives", [])):
+    alternatives = data.get("alternatives", [])
+    if not isinstance(alternatives, list):
+        raise RouterDecisionValidationError("alternatives must be a list")
+    if "dropped_alternatives_count" in data and not isinstance(data.get("dropped_alternatives_count"), int):
+        raise RouterDecisionValidationError("dropped_alternatives_count must be an integer")
+    dropped_alternatives_reasons = data.get("dropped_alternatives_reasons", [])
+    if not isinstance(dropped_alternatives_reasons, list):
+        raise RouterDecisionValidationError("dropped_alternatives_reasons must be a list")
+    for index, alternative in enumerate(alternatives):
         if not isinstance(alternative, dict):
             raise RouterDecisionValidationError(f"Alternative at index {index} must be a mapping")
         pipeline_id = alternative.get("pipeline_id")
@@ -946,6 +965,7 @@ def _build_router_messages(
                 "return blocked_by_policy. Return JSON only. confidence must be a JSON number between 0 and 1 inclusive. "
                 "Do not return confidence as a string, percentage, labels, null, missing field, or 0..100 scale. "
                 "Every alternatives confidence entry must follow the same numeric 0..1 contract. "
+                "alternatives are optional; omit alternatives if unsure. Every alternative must use a valid known pipeline_id, and you must never return pipeline_id null in alternatives. "
                 "status must be exactly one of: selected, no_specialized_pipeline, needs_clarification, blocked_by_policy, routing_failed. "
                 "Pipeline ids must never appear in status. default_conversation_pipeline is a pipeline id or fallback, never a status. "
                 "If no specialized pipeline is selected, return status no_specialized_pipeline, selected_pipeline_id null, and fallback_pipeline_id default_conversation_pipeline. "
@@ -1123,6 +1143,65 @@ def _invalid_router_contract_diagnostic(payload: dict[str, Any]) -> dict[str, st
                 "summary": f"selected_pipeline_id={_summarize_router_contract_value(raw_selected_pipeline_id)}",
             }
     return None
+
+
+def _sanitize_router_payload(
+    payload: dict[str, Any],
+    *,
+    loaded_specs: LoadedPipelineSpecs,
+) -> dict[str, Any]:
+    sanitized = dict(payload)
+    alternatives = sanitized.get("alternatives", [])
+    cleaned_alternatives, dropped_reasons = _sanitize_advisory_alternatives(
+        alternatives,
+        registered_pipeline_ids=set(loaded_specs.pipeline_specs),
+    )
+    sanitized["alternatives"] = cleaned_alternatives
+    sanitized["dropped_alternatives_count"] = len(dropped_reasons)
+    sanitized["dropped_alternatives_reasons"] = dropped_reasons
+    return sanitized
+
+
+def _sanitize_advisory_alternatives(
+    alternatives: Any,
+    *,
+    registered_pipeline_ids: set[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if alternatives is None:
+        return [], []
+    if not isinstance(alternatives, list):
+        return [], ["invalid_alternatives_container"]
+
+    cleaned: list[dict[str, Any]] = []
+    dropped_reasons: list[str] = []
+    for alternative in alternatives:
+        if not isinstance(alternative, dict):
+            dropped_reasons.append("invalid_alternative_mapping")
+            continue
+        if "pipeline_id" not in alternative:
+            dropped_reasons.append("missing_pipeline_id")
+            continue
+        pipeline_id = alternative.get("pipeline_id")
+        if pipeline_id is None:
+            dropped_reasons.append("null_pipeline_id")
+            continue
+        if not isinstance(pipeline_id, str):
+            dropped_reasons.append("non_string_pipeline_id")
+            continue
+        normalized_pipeline_id = pipeline_id.strip()
+        if not normalized_pipeline_id:
+            dropped_reasons.append("empty_pipeline_id")
+            continue
+        if normalized_pipeline_id not in registered_pipeline_ids:
+            dropped_reasons.append("unknown_pipeline_id")
+            continue
+        cleaned.append(
+            {
+                **alternative,
+                "pipeline_id": normalized_pipeline_id,
+            }
+        )
+    return cleaned, dropped_reasons
 
 
 def _summarize_router_contract_value(raw: Any) -> str:
