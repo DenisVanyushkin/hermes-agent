@@ -113,6 +113,8 @@ def observe_pipeline_router_decision(
                     "routing_failure_reason": decision.routing_failure_reason,
                     "invalid_confidence_kind": decision.invalid_confidence_kind,
                     "invalid_confidence_summary": decision.invalid_confidence_summary,
+                    "invalid_router_contract_kind": decision.invalid_router_contract_kind,
+                    "invalid_router_contract_summary": decision.invalid_router_contract_summary,
                     "reasoning_summary": decision.reasoning_summary,
                     "matched_signals": list(decision.matched_signals),
                     "alternatives": [
@@ -242,6 +244,10 @@ def _replace_decision(
         actual_model=actual_model,
         token_usage=decision.token_usage,
         cache_usage=decision.cache_usage,
+        invalid_confidence_kind=decision.invalid_confidence_kind,
+        invalid_confidence_summary=decision.invalid_confidence_summary,
+        invalid_router_contract_kind=decision.invalid_router_contract_kind,
+        invalid_router_contract_summary=decision.invalid_router_contract_summary,
     )
 
 

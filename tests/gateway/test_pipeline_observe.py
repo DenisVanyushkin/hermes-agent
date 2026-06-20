@@ -517,3 +517,47 @@ def test_observe_logs_invalid_confidence_diagnostics(monkeypatch, caplog):
     log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
     assert '"invalid_confidence_kind": "non_numeric"' in log_message
     assert '"invalid_confidence_summary": "str(len=12, category=redacted)"' in log_message
+
+
+def test_observe_logs_invalid_router_contract_diagnostics(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    decision = RouterDecision(
+        pipeline_session_id="pipe-invalid-status",
+        router_subagent_id="hermes_pipeline_router",
+        status="routing_failed",
+        selected_pipeline_id=None,
+        fallback_pipeline_id=None,
+        confidence=0.2,
+        reasoning_summary="Router returned an invalid router contract shape.",
+        requires_clarification=False,
+        fallback_safe=False,
+        policy_block_reason=None,
+        routing_failure_reason="Unknown router status: 'default_conversation_pipeline'",
+        invalid_router_contract_kind="invalid_status",
+        invalid_router_contract_summary="str(len=29, category=pipeline_id_like), looks_like_pipeline_id=True",
+        alternatives=(),
+        selected_provider="openai-codex",
+        selected_model="gpt-5.4-mini",
+        actual_provider="openai-codex",
+        actual_model="gpt-5.4-mini",
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={"pipelines": {"router": {"mode": "observe"}}},
+            user_message="Explain the architecture in plain language.",
+            session_id="sess-invalid-router-contract",
+        )
+
+    assert result == decision
+    log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
+    assert '"invalid_router_contract_kind": "invalid_status"' in log_message
+    assert '"invalid_router_contract_summary": "str(len=29, category=pipeline_id_like), looks_like_pipeline_id=True"' in log_message
