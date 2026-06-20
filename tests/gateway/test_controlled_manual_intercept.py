@@ -101,6 +101,7 @@ def _controlled_report(
     pipeline_id: str = "engineering_review_pipeline",
     completion_allowed: bool = True,
     blocked_reason: str | None = None,
+    report_artifacts: dict[str, object] | None = None,
 ):
     return SimpleNamespace(
         state=SimpleNamespace(
@@ -114,6 +115,7 @@ def _controlled_report(
             final_response_text=final_response_text,
             completion_allowed=completion_allowed,
             blocked_reason=blocked_reason,
+            report_artifacts=report_artifacts,
         ),
     )
 
@@ -185,6 +187,38 @@ async def test_controlled_manual_intercepts_safe_final_response(monkeypatch, tmp
 
     assert len(observe_calls) == 1
     assert result["final_response"] == "safe controlled reply"
+    assert _CapturingAgent.run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_controlled_manual_intercepts_safe_final_response_with_report_reference(monkeypatch, tmp_path):
+    config = {
+        "pipelines": {
+            "enabled": True,
+            "orchestrator": {"mode": "controlled_manual"},
+            "execution": {"mode": "controlled_manual"},
+        }
+    }
+
+    result, observe_calls = await _run_once(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        report=_controlled_report(
+            actual_execution_invoked=True,
+            final_response_text="safe controlled reply",
+            report_artifacts={
+                "run_id": "pipe-report-1",
+                "workspace_report_path": "/tmp/hermes-gateway-controlled-runs/pipe-report-1/controlled_execution_report.json",
+                "durable_report_path": "/home/hermes/.hermes/controlled-runs/pipe-report-1/controlled_execution_report.json",
+            },
+        ),
+    )
+
+    assert len(observe_calls) == 1
+    assert "safe controlled reply" in result["final_response"]
+    assert "report_run_id: pipe-report-1" in result["final_response"]
+    assert "controlled_execution_report.json" in result["final_response"]
     assert _CapturingAgent.run_calls == []
 
 

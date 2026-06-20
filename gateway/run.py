@@ -18829,7 +18829,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return None
 
         final_response_text = final_response_text.strip()
-        return final_response_text or None
+        if not final_response_text:
+            return None
+
+        report_artifacts = getattr(controller, "report_artifacts", None)
+        if not isinstance(report_artifacts, dict) or not report_artifacts:
+            return final_response_text
+
+        reference_lines = []
+        run_id = str(report_artifacts.get("run_id") or "").strip()
+        report_path = str(
+            report_artifacts.get("durable_report_path")
+            or report_artifacts.get("workspace_report_path")
+            or ""
+        ).strip()
+        if run_id:
+            reference_lines.append(f"report_run_id: {run_id}")
+        if report_path:
+            reference_lines.append(f"report_path: {report_path}")
+        if not reference_lines:
+            return final_response_text
+        return f"{final_response_text}\n" + "\n".join(reference_lines)
 
     def _pipeline_engineering_plan_only_response(self, report: Any) -> str | None:
         """Block normal-agent mutation when observe selected engineering but execution is disabled."""

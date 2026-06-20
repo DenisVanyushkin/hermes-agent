@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from hermes_cli.pipeline_report import PipelineReportStatus, build_pipeline_execution_report
+from hermes_cli.pipeline_report_artifacts import (
+    persist_controlled_execution_report_artifacts,
+    sanitize_report_artifact_metadata,
+    sanitize_report_run_id,
+)
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_specs import load_pipeline_specs
@@ -661,3 +667,220 @@ def test_report_preserves_structured_test_summary() -> None:
     assert payload["tests"]["status"] == "failed"
     assert payload["tests"]["blocked_reason"] == "test_command_failed"
     assert payload["tests"]["results"][0]["cwd"] == "repo"
+
+
+def test_persist_controlled_execution_report_artifacts_writes_workspace_and_durable_reports(tmp_path: Path) -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "completion_allowed": True,
+        "completion_blocked_reason": None,
+        "final_verdict": "completed",
+    })
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        final_response_text="Controlled pipeline validation completed.",
+        review_overrides={"reviewer_approved": True},
+    )
+    workspace = tmp_path / "controlled-workspace"
+    workspace.mkdir()
+    durable_root = tmp_path / "durable"
+
+    metadata = persist_controlled_execution_report_artifacts(
+        session=session,
+        state_snapshot=snapshot,
+        controller_payload={
+            "status": "completed",
+            "actual_execution_invoked": True,
+            "execution_mode": "controlled_manual",
+            "helper_result_status": "completed",
+            "workspace_basename": workspace.name,
+        },
+        pipeline_execution_report_payload=report.to_safe_dict(),
+        router_decision=RouterDecision(
+            pipeline_session_id=session.pipeline_session_id,
+            router_subagent_id="hermes_pipeline_router",
+            status="selected",
+            selected_pipeline_id="engineering_review_pipeline",
+            fallback_pipeline_id="default_conversation_pipeline",
+            confidence=0.99,
+            reasoning_summary="controlled_manual_trigger_override",
+            selected_provider="openai-codex",
+            selected_model="gpt-5.4-mini",
+        ),
+        workspace_path=workspace,
+        durable_root=durable_root,
+    )
+
+    workspace_report = workspace / "controlled_execution_report.json"
+    durable_report = durable_root / session.pipeline_session_id / "controlled_execution_report.json"
+
+    assert metadata["run_id"] == session.pipeline_session_id
+    assert metadata["workspace_report_path"] == str(workspace_report)
+    assert metadata["durable_report_path"] == str(durable_report)
+    assert metadata["workspace_report_written"] is True
+    assert metadata["durable_report_written"] is True
+    assert workspace_report.exists()
+    assert durable_report.exists()
+
+    payload = json.loads(workspace_report.read_text(encoding="utf-8"))
+    assert payload["run_id"] == session.pipeline_session_id
+    assert payload["routing"]["selected_pipeline_id"] == "engineering_review_pipeline"
+    assert payload["execution"]["actual_execution_invoked"] is True
+    assert payload["execution"]["executed_subagent_count"] == 0
+    assert payload["review"]["reviewer_invoked"] is False
+    assert payload["subagent_runs"] == []
+    assert payload["artifacts"]["workspace_report_path"] == str(workspace_report)
+    assert payload["artifacts"]["durable_report_path"] == str(durable_report)
+    assert payload["workspace"]["path"] == str(workspace)
+    assert payload["workspace"]["basename"] == workspace.name
+    assert payload["routing"]["router_provider"] == "openai-codex"
+    assert payload["routing"]["router_model"] == "gpt-5.4-mini"
+    assert payload["pipeline_execution_report"]["completion"]["completion_allowed"] is True
+    encoded = json.dumps(payload, sort_keys=True)
+    assert "SECRET_TOKEN=abc123" not in encoded
+    assert "raw_metadata" not in encoded
+    assert "output_text" not in encoded
+    assert payload["execution"]["api_calls"] is None
+    assert payload["execution"]["api_calls_known"] is False
+
+
+def test_persist_controlled_execution_report_artifacts_writes_partial_failure_payload(tmp_path: Path) -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        preflight_result={"allowed": False, "reason_code": "observe_only"},
+    )
+    workspace = tmp_path / "controlled-workspace"
+    workspace.mkdir()
+
+    metadata = persist_controlled_execution_report_artifacts(
+        session=session,
+        state_snapshot=snapshot,
+        controller_payload={
+            "status": "execution_failed",
+            "blocked_reason": "controller_helper_failed",
+            "actual_execution_invoked": True,
+            "execution_mode": "controlled_manual",
+            "helper_result_status": "controller_helper_failed",
+            "helper_error": "RuntimeError",
+            "workspace_basename": workspace.name,
+        },
+        pipeline_execution_report_payload=report.to_safe_dict(),
+        workspace_path=workspace,
+        durable_root=None,
+    )
+
+    payload = json.loads((workspace / "controlled_execution_report.json").read_text(encoding="utf-8"))
+
+    assert metadata["durable_report_path"] is None
+    assert payload["status"] == "execution_failed"
+    assert payload["first_failed_point"] == "controller_helper_failed"
+    assert payload["error"]["class"] == "RuntimeError"
+    assert payload["error"]["summary"] == "controller_helper_failed"
+    assert payload["execution"]["actual_execution_invoked"] is True
+    assert payload["pipeline_execution_report"]["status"] == "not_executed"
+
+
+def test_persist_controlled_execution_report_artifacts_sanitizes_durable_run_id(tmp_path: Path) -> None:
+    loaded = load_pipeline_specs()
+    base_session = _session_for("engineering_review_pipeline", status="selected")
+    session = base_session.__class__(**{**base_session.__dict__, "pipeline_session_id": "../unsafe/run-id"})
+    snapshot = build_pipeline_state_snapshot(
+        session=base_session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    durable_root = tmp_path / "durable"
+
+    metadata = persist_controlled_execution_report_artifacts(
+        session=session,
+        state_snapshot=snapshot,
+        controller_payload={"status": "completed", "actual_execution_invoked": True, "execution_mode": "controlled_manual"},
+        pipeline_execution_report_payload=build_pipeline_execution_report(
+            session=base_session,
+            state_snapshot=snapshot,
+        ).to_safe_dict(),
+        durable_root=durable_root,
+    )
+
+    assert metadata["durable_report_path"] is not None
+    assert "../" not in metadata["durable_report_path"]
+    assert "/../" not in metadata["durable_report_path"]
+    assert Path(metadata["durable_report_path"]).parent.name != "run-id"
+    assert Path(metadata["durable_report_path"]).exists()
+
+
+def test_persist_controlled_execution_report_artifacts_tolerates_write_failures(tmp_path: Path, monkeypatch, caplog) -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    report_payload = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+    ).to_safe_dict()
+
+    def _boom(self: Path, content: str, encoding: str) -> int:
+        raise PermissionError("no write")
+
+    monkeypatch.setattr(Path, "write_text", _boom)
+
+    with caplog.at_level("WARNING"):
+        metadata = persist_controlled_execution_report_artifacts(
+            session=session,
+            state_snapshot=snapshot,
+            controller_payload={"status": "completed", "actual_execution_invoked": True, "execution_mode": "controlled_manual"},
+            pipeline_execution_report_payload=report_payload,
+            workspace_path=tmp_path / "workspace",
+            durable_root=tmp_path / "durable",
+        )
+
+    assert metadata["workspace_report_written"] is False
+    assert metadata["durable_report_written"] is False
+    assert metadata["workspace_report_path"] is None
+    assert metadata["durable_report_path"] is None
+    assert "controlled execution report workspace write failed" in caplog.text
+    assert "controlled execution report durable write failed" in caplog.text
+
+
+def test_sanitize_report_artifact_metadata_excludes_absolute_paths() -> None:
+    payload = sanitize_report_artifact_metadata(
+        {
+            "run_id": "pipe-report-1",
+            "workspace_report_path": "/tmp/hermes-gateway-controlled-runs/pipe-report-1/controlled_execution_report.json",
+            "durable_report_path": "/home/hermes/.hermes/controlled-runs/pipe-report-1/controlled_execution_report.json",
+            "workspace_report_written": True,
+            "durable_report_written": True,
+            "workspace_basename": "pipe-report-1",
+            "report_workspace_filename": "controlled_execution_report.json",
+            "durable_report_available": True,
+        }
+    )
+
+    encoded = json.dumps(payload, sort_keys=True)
+    assert payload["report_artifact_written"] is True
+    assert payload["report_run_id"] == "pipe-report-1"
+    assert payload["report_workspace_filename"] == "controlled_execution_report.json"
+    assert payload["durable_report_available"] is True
+    assert "/tmp/hermes-gateway-controlled-runs" not in encoded
+    assert "/home/hermes/.hermes/controlled-runs" not in encoded
+
+
+def test_sanitize_report_run_id_accepts_safe_ids_and_rewrites_unsafe_ids() -> None:
+    assert sanitize_report_run_id("pipe-report-1") == "pipe-report-1"
+    assert sanitize_report_run_id("../pipe-report-1") != "../pipe-report-1"
