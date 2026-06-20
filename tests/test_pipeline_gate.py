@@ -131,6 +131,28 @@ def test_pipeline_gate_observe_mode_denies_execution():
     assert "runtime_constructor_verified" not in payload["required_checks_summary"]["failed"]
 
 
+def test_pipeline_gate_controlled_manual_mode_is_valid_and_allows_preflight():
+    gate = importlib.import_module("hermes_cli.pipeline_gate")
+
+    decision = gate.evaluate_pipeline_gate(
+        gate.PipelineGateRequest(
+            config=_execution_config("controlled_manual"),
+            router_decision=_selected_decision(),
+            pipeline_plan_payload=_plan_payload(),
+            platform_allowed=True,
+            destructive_task=False,
+        )
+    )
+
+    payload = decision.to_safe_dict()
+    assert decision.allowed is True
+    assert decision.mode.value == "controlled_manual"
+    assert decision.reason_code == "allowed"
+    assert payload["would_execute"] is True
+    assert payload["executed"] is False
+    assert "runtime_constructor_verified" in payload["required_checks_summary"]["passed"]
+
+
 def test_pipeline_gate_invalid_mode_fails_closed():
     gate = importlib.import_module("hermes_cli.pipeline_gate")
     config = _execution_config("execute")

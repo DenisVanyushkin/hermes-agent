@@ -188,6 +188,10 @@ async def test_controlled_manual_intercepts_safe_final_response(monkeypatch, tmp
 
     assert len(observe_calls) == 1
     assert result["final_response"] == "safe controlled reply"
+    assert result["model"] == "gpt-5.4"
+    assert result["requested_model"] == "gpt-5.4"
+    assert result["last_prompt_tokens"] == 0
+    assert result["context_length"] == 0
     assert _CapturingAgent.run_calls == []
 
 

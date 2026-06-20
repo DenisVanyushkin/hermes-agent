@@ -142,6 +142,16 @@ def observe_gateway_turn(
         preflight_result=pipeline_preflight.to_safe_dict(),
     ).to_safe_dict()
     if mode == CONTROLLED_MANUAL_MODE:
+        helper_report = None
+        if (
+            pipeline_execution_controller.actual_execution_invoked
+            and isinstance(pipeline_execution_controller.helper_result, dict)
+        ):
+            candidate_report = pipeline_execution_controller.helper_result.get("report")
+            if isinstance(candidate_report, dict):
+                helper_report = dict(candidate_report)
+        if helper_report is not None:
+            pipeline_execution_report_payload = helper_report
         report_artifacts = persist_controlled_execution_report_artifacts(
             session=session,
             state_snapshot=state_snapshot,

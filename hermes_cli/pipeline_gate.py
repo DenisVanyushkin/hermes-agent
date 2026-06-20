@@ -21,6 +21,7 @@ class PipelineGateMode(str, Enum):
     OBSERVE = "observe"
     PLAN_ONLY = "plan_only"
     EXECUTE = "execute"
+    CONTROLLED_MANUAL = "controlled_manual"
 
 
 @dataclass(frozen=True)
