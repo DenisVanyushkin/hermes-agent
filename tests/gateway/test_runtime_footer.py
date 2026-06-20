@@ -139,6 +139,19 @@ def test_format_footer_drops_cwd_when_empty(monkeypatch):
     # cwd silently dropped; model + pct remain
     assert out == "gpt-5.4 · ctx 50%"
 
+
+def test_format_footer_suppresses_cwd_only_placeholder_when_model_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    out = format_runtime_footer(
+        model="",
+        requested_model="",
+        context_tokens=0,
+        context_length=0,
+        cwd=str(tmp_path),
+        fields=("model", "context_pct", "cwd"),
+    )
+    assert out == ""
+
 def test_format_footer_custom_field_order():
     out = format_runtime_footer(
         model="openai/gpt-5.4",

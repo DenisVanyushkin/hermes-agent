@@ -125,23 +125,34 @@ def format_runtime_footer(
     Fields are skipped silently when their underlying data is missing — a
     partially-populated footer is better than a line with ``?%`` or empty slots.
     """
+    requested_fields = tuple(str(field) for field in fields)
     parts: list[str] = []
-    for field in fields:
+    emitted_fields: list[str] = []
+    for field in requested_fields:
         if field == "model":
             m = _format_model_pair(requested_model, model)
             if m:
                 parts.append(m)
+                emitted_fields.append(field)
         elif field == "context_pct":
             if context_length and context_length > 0 and context_tokens >= 0:
                 pct = max(0, min(100, round((context_tokens / context_length) * 100)))
                 parts.append(f"ctx {pct}%")
+                emitted_fields.append(field)
         elif field == "cwd":
             rel = _home_relative_cwd(cwd or os.environ.get("TERMINAL_CWD", ""))
             if rel:
                 parts.append(rel)
+                emitted_fields.append(field)
         # Unknown field names are silently ignored.
 
     if not parts:
+        return ""
+    if (
+        emitted_fields == ["cwd"]
+        and "model" in requested_fields
+        and len(requested_fields) > 1
+    ):
         return ""
     return _SEP.join(parts)
 
