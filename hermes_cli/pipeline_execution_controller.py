@@ -15,6 +15,7 @@ from hermes_cli.pipeline_execution_fuse import (
 )
 from hermes_cli.pipeline_rework_loop import evaluate_pipeline_rework_loop_fuse
 from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE, CONTROLLED_VALIDATION_TRIGGER
+from hermes_cli.pipeline_report_artifacts import sanitize_report_artifact_metadata
 from hermes_cli.pipeline_specs import load_pipeline_specs
 
 
@@ -33,6 +34,7 @@ class PipelineExecutionControllerResult:
     helper_error: str | None = None
     final_response_text: str | None = None
     workspace_basename: str | None = None
+    report_artifacts: dict[str, Any] | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +51,7 @@ class PipelineExecutionControllerResult:
             "helper_error": self.helper_error,
             "final_response_text": self.final_response_text,
             "workspace_basename": self.workspace_basename,
+            "report_artifacts": sanitize_report_artifact_metadata(self.report_artifacts),
         }
 
 

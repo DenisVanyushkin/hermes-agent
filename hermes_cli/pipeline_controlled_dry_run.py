@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from hermes_cli.pipeline_report_artifacts import persist_controlled_execution_report_artifacts
 from hermes_cli.pipeline_rework_loop import execute_bounded_rework_loop
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
@@ -27,6 +28,7 @@ def run_controlled_engineering_e2e_dry_run(*, task: str, workspace: Path | None)
 
     repo_root = Path(__file__).resolve().parent.parent
     loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    session = _controlled_manual_session(task)
     try:
         dry_run_workspace = prepare_controlled_e2e_workspace(repo_root=repo_root, workspace=workspace)
     except ValueError as exc:
@@ -34,7 +36,7 @@ def run_controlled_engineering_e2e_dry_run(*, task: str, workspace: Path | None)
 
     result = execute_bounded_rework_loop(
         config=_controlled_manual_config(),
-        session=_controlled_manual_session(task),
+        session=session,
         loaded_specs=loaded_specs,
         runtime_factory=RuntimeFactory(repo_root=repo_root),
         runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
@@ -72,6 +74,34 @@ def run_controlled_engineering_e2e_dry_run(*, task: str, workspace: Path | None)
         },
     )
     report = result.execution_report.to_safe_dict() if result.execution_report is not None else None
+    report_artifacts = None
+    if report is not None:
+        report_artifacts = persist_controlled_execution_report_artifacts(
+            session=session,
+            state_snapshot=result.execution_report,
+            controller_payload={
+                "status": _result_status(result),
+                "blocked_reason": result.blocked_reason,
+                "actual_execution_invoked": True,
+                "execution_mode": CONTROLLED_MANUAL_MODE,
+                "helper_result_status": _result_status(result),
+                "workspace_basename": dry_run_workspace.name,
+            },
+            pipeline_execution_report_payload=report,
+            router_decision=RouterDecision(
+                pipeline_session_id=session.pipeline_session_id,
+                router_subagent_id="hermes_pipeline_router",
+                status="selected",
+                selected_pipeline_id=ENGINEERING_PIPELINE_ID,
+                fallback_pipeline_id="default_conversation_pipeline",
+                confidence=0.99,
+                reasoning_summary="local fake smoke harness",
+                selected_provider="openai-codex",
+                selected_model="gpt-5.4-mini",
+            ),
+            workspace_path=dry_run_workspace,
+            durable_root=None,
+        )
     return {
         "scenario": "controlled-engineering-e2e",
         "runner_mode": "fake",
@@ -93,6 +123,11 @@ def run_controlled_engineering_e2e_dry_run(*, task: str, workspace: Path | None)
         "git_gate": dict(result.git_gate),
         "mutation_summary": dict(result.mutation_summary or {}),
         "test_summary": dict(result.test_summary or {}),
+        "report_artifacts": {
+            "run_id": (report_artifacts or {}).get("run_id"),
+            "workspace_basename": (report_artifacts or {}).get("workspace_basename"),
+            "report_written": bool(report_artifacts),
+        },
         "report": report,
     }
 
