@@ -590,6 +590,130 @@ def test_llm_router_low_numeric_confidence_needs_clarification_not_invalid(tmp_p
     assert decision.invalid_confidence_kind is None
 
 
+def test_llm_router_rejects_pipeline_id_shaped_status_with_diagnostics(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: {
+            "status": "default_conversation_pipeline",
+            "confidence": 0.8,
+            "reasoning_summary": "ordinary prompt",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route("Explain the architecture in plain language.", pipeline_session_id="sess-invalid-status")
+
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id is None
+    assert decision.routing_failure_reason == "Unknown router status: 'default_conversation_pipeline'"
+    assert decision.invalid_router_contract_kind == "invalid_status"
+    assert decision.invalid_router_contract_summary is not None
+    assert "pipeline_id_like" in decision.invalid_router_contract_summary
+
+
+@pytest.mark.parametrize(
+    ("selected_pipeline_id", "expected_summary"),
+    [
+        pytest.param(None, "NoneType(null)", id="missing"),
+        pytest.param(123, "int(123)", id="non-string"),
+    ],
+)
+def test_llm_router_rejects_selected_without_pipeline_id_with_diagnostics(
+    tmp_path: Path,
+    selected_pipeline_id: object,
+    expected_summary: str,
+) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    payload = {
+        "status": "selected",
+        "confidence": 0.8,
+        "reasoning_summary": "The request asks to modify code or tests.",
+        "requires_clarification": False,
+        "alternatives": [],
+    }
+    if selected_pipeline_id is not None:
+        payload["selected_pipeline_id"] = selected_pipeline_id
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: payload,
+    )
+
+    decision = router.route("Patch the repo and update tests.", pipeline_session_id="sess-selected-missing-id")
+
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id is None
+    assert decision.routing_failure_reason == "Router status 'selected' requires selected_pipeline_id"
+    assert decision.invalid_router_contract_kind == "selected_missing_pipeline_id"
+    assert decision.invalid_router_contract_summary == f"selected_pipeline_id={expected_summary}"
+
+
+def test_llm_router_accepts_valid_default_shape(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: {
+            "status": "no_specialized_pipeline",
+            "selected_pipeline_id": None,
+            "fallback_pipeline_id": DEFAULT_PIPELINE_ID,
+            "confidence": 0.8,
+            "reasoning_summary": "Ordinary conversation should use the default pipeline.",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route("Explain the architecture in plain language.", pipeline_session_id="sess-valid-default")
+
+    assert decision.status == "no_specialized_pipeline"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+    assert decision.invalid_router_contract_kind is None
+
+
+def test_llm_router_accepts_valid_engineering_shape(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "fallback_pipeline_id": None,
+            "confidence": 0.8,
+            "reasoning_summary": "The request asks to modify code or tests.",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route("Patch the repo and update tests.", pipeline_session_id="sess-valid-engineering")
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.fallback_pipeline_id is None
+    assert decision.invalid_router_contract_kind is None
+
+
 def test_default_router_llm_call_passes_response_format_payload(monkeypatch):
     from hermes_cli import pipeline_router as module
     from agent import auxiliary_client
@@ -623,6 +747,25 @@ def test_default_router_llm_call_passes_response_format_payload(monkeypatch):
     assert captured["extra_body"] == _ROUTER_RESPONSE_FORMAT
     assert captured["model"] == "resolved-model"
     assert result["token_usage"] == {"input_tokens": 12, "output_tokens": 7}
+
+
+def test_router_prompt_explicitly_requires_status_contract_and_examples(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    messages = _build_router_messages(loaded_specs, "Fix the router bug.")
+
+    combined = "\n".join(message["content"] for message in messages)
+    assert "status must be exactly one of: selected, no_specialized_pipeline, needs_clarification, blocked_by_policy, routing_failed" in combined
+    assert "Pipeline ids must never appear in status" in combined
+    assert "default_conversation_pipeline is a pipeline id or fallback, never a status" in combined
+    assert "Example A - default or ordinary prompt" in combined
+    assert '"status": "no_specialized_pipeline"' in combined
+    assert '"requires_clarification": false' in combined
+    assert '"fallback_safe": true' in combined
+    assert "Example B - engineering prompt" in combined
+    assert '"selected_pipeline_id": "engineering_review_pipeline"' in combined
+    assert '"fallback_safe": false' in combined
+    assert "Example C - recruiter or career writing prompt" in combined
 
 
 def test_summarize_confidence_value_redacts_strings() -> None:

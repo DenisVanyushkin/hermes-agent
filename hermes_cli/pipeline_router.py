@@ -241,6 +241,8 @@ class RouterDecision:
     cache_usage: dict[str, Any] | None = None
     invalid_confidence_kind: str | None = None
     invalid_confidence_summary: str | None = None
+    invalid_router_contract_kind: str | None = None
+    invalid_router_contract_summary: str | None = None
 
 
 class PipelineRouter:
@@ -541,6 +543,18 @@ class LlmPipelineRouter(PipelineRouter):
                     invalid_confidence_kind=invalid_confidence["kind"],
                     invalid_confidence_summary=invalid_confidence["summary"],
                 )
+            invalid_router_contract = _invalid_router_contract_diagnostic(payload)
+            if invalid_router_contract is not None:
+                return self._fallback_decision(
+                    user_message,
+                    pipeline_session_id=pipeline_session_id,
+                    router_subagent_id=router_subagent_id,
+                    reason=invalid_router_contract["reason"],
+                    reasoning_summary=_optional_str(payload.get("reasoning_summary"))
+                    or "The LLM router returned an invalid router contract shape, so Hermes failed closed.",
+                    invalid_router_contract_kind=invalid_router_contract["kind"],
+                    invalid_router_contract_summary=invalid_router_contract["summary"],
+                )
             confidence_value = float(payload["confidence"])
             if payload.get("status") == "selected" and confidence_value < self._min_confidence:
                 return self._fallback_decision(
@@ -590,6 +604,8 @@ class LlmPipelineRouter(PipelineRouter):
         reasoning_summary: str,
         invalid_confidence_kind: str | None = None,
         invalid_confidence_summary: str | None = None,
+        invalid_router_contract_kind: str | None = None,
+        invalid_router_contract_summary: str | None = None,
     ) -> RouterDecision:
         if self._fallback_strategy == "deterministic":
             base = self._deterministic_router.route(
@@ -619,6 +635,8 @@ class LlmPipelineRouter(PipelineRouter):
                         "actual_model": self._model,
                         "invalid_confidence_kind": invalid_confidence_kind,
                         "invalid_confidence_summary": invalid_confidence_summary,
+                        "invalid_router_contract_kind": invalid_router_contract_kind,
+                        "invalid_router_contract_summary": invalid_router_contract_summary,
                     },
                     loaded_specs=self._loaded_specs,
                 )
@@ -644,6 +662,8 @@ class LlmPipelineRouter(PipelineRouter):
                     "actual_model": self._model,
                     "invalid_confidence_kind": invalid_confidence_kind,
                     "invalid_confidence_summary": invalid_confidence_summary,
+                    "invalid_router_contract_kind": invalid_router_contract_kind,
+                    "invalid_router_contract_summary": invalid_router_contract_summary,
                 },
                 loaded_specs=self._loaded_specs,
             )
@@ -689,6 +709,8 @@ class LlmPipelineRouter(PipelineRouter):
                 "actual_model": self._model,
                 "invalid_confidence_kind": invalid_confidence_kind,
                 "invalid_confidence_summary": invalid_confidence_summary,
+                "invalid_router_contract_kind": invalid_router_contract_kind,
+                "invalid_router_contract_summary": invalid_router_contract_summary,
             },
             loaded_specs=self._loaded_specs,
         )
@@ -757,6 +779,8 @@ def parse_router_decision(
         cache_usage=data.get("cache_usage"),
         invalid_confidence_kind=_optional_str(data.get("invalid_confidence_kind")),
         invalid_confidence_summary=_optional_str(data.get("invalid_confidence_summary")),
+        invalid_router_contract_kind=_optional_str(data.get("invalid_router_contract_kind")),
+        invalid_router_contract_summary=_optional_str(data.get("invalid_router_contract_summary")),
     )
 
 
@@ -921,7 +945,12 @@ def _build_router_messages(
                 "return needs_clarification. If the request asks for unsafe bypass, secret exfiltration, or destructive misuse, "
                 "return blocked_by_policy. Return JSON only. confidence must be a JSON number between 0 and 1 inclusive. "
                 "Do not return confidence as a string, percentage, labels, null, missing field, or 0..100 scale. "
-                "Every alternatives confidence entry must follow the same numeric 0..1 contract."
+                "Every alternatives confidence entry must follow the same numeric 0..1 contract. "
+                "status must be exactly one of: selected, no_specialized_pipeline, needs_clarification, blocked_by_policy, routing_failed. "
+                "Pipeline ids must never appear in status. default_conversation_pipeline is a pipeline id or fallback, never a status. "
+                "If no specialized pipeline is selected, return status no_specialized_pipeline, selected_pipeline_id null, and fallback_pipeline_id default_conversation_pipeline. "
+                "If selecting engineering, return status selected, selected_pipeline_id engineering_review_pipeline, and fallback_pipeline_id null. "
+                "Do not place the selected pipeline id into status, pipeline_id, pipeline, selected_pipeline, fallback_pipeline_id, reasoning_summary, or alternatives unless the schema field explicitly requires it."
             ),
         },
         {
@@ -929,6 +958,37 @@ def _build_router_messages(
             "content": (
                 f"Pipeline registry and schema:\n{registry_blob}\n\n"
                 f"Structured routing request context:\n{request_context_blob}\n\n"
+                "Compact examples:\n"
+                'Example A - default or ordinary prompt:\n'
+                '{\n'
+                '  "status": "no_specialized_pipeline",\n'
+                '  "selected_pipeline_id": null,\n'
+                '  "fallback_pipeline_id": "default_conversation_pipeline",\n'
+                '  "confidence": 0.8,\n'
+                '  "requires_clarification": false,\n'
+                '  "fallback_safe": true,\n'
+                '  "reasoning_summary": "Ordinary conversation should use the default pipeline."\n'
+                '}\n\n'
+                'Example B - engineering prompt:\n'
+                '{\n'
+                '  "status": "selected",\n'
+                '  "selected_pipeline_id": "engineering_review_pipeline",\n'
+                '  "fallback_pipeline_id": null,\n'
+                '  "confidence": 0.8,\n'
+                '  "requires_clarification": false,\n'
+                '  "fallback_safe": false,\n'
+                '  "reasoning_summary": "The request asks to modify code or tests."\n'
+                '}\n\n'
+                'Example C - recruiter or career writing prompt:\n'
+                '{\n'
+                '  "status": "no_specialized_pipeline",\n'
+                '  "selected_pipeline_id": null,\n'
+                '  "fallback_pipeline_id": "default_conversation_pipeline",\n'
+                '  "confidence": 0.8,\n'
+                '  "requires_clarification": false,\n'
+                '  "fallback_safe": true,\n'
+                '  "reasoning_summary": "Career writing is not an engineering code-change pipeline."\n'
+                '}\n\n'
                 f"User message:\n{user_message.strip()}\n"
             ),
         },
@@ -969,6 +1029,8 @@ def _default_router_llm_call(
     if client is None:
         raise RuntimeError(f"No credentials or client available for router provider={provider!r}")
 
+    # The Codex chat-completions shim may not enforce extra_body.response_format
+    # end-to-end, so parse_router_decision remains the safety boundary.
     response = client.chat.completions.create(
         model=resolved_model or model,
         messages=messages,
@@ -1038,6 +1100,51 @@ def _invalid_confidence_diagnostic(payload: dict[str, Any]) -> dict[str, str] | 
     if value > 1.0:
         return {"kind": "out_of_range_high", "summary": _summarize_confidence_value(raw)}
     return None
+
+
+def _invalid_router_contract_diagnostic(payload: dict[str, Any]) -> dict[str, str] | None:
+    status = payload.get("status")
+    if status not in VALID_ROUTER_STATUSES:
+        summary = _summarize_router_contract_value(status)
+        if _looks_like_pipeline_id(status):
+            summary = f"{summary}, looks_like_pipeline_id=True"
+        return {
+            "kind": "invalid_status",
+            "reason": f"Unknown router status: {status!r}",
+            "summary": summary,
+        }
+
+    if status == "selected":
+        raw_selected_pipeline_id = payload.get("selected_pipeline_id")
+        if raw_selected_pipeline_id is None or not isinstance(raw_selected_pipeline_id, str) or not raw_selected_pipeline_id.strip():
+            return {
+                "kind": "selected_missing_pipeline_id",
+                "reason": "Router status 'selected' requires selected_pipeline_id",
+                "summary": f"selected_pipeline_id={_summarize_router_contract_value(raw_selected_pipeline_id)}",
+            }
+    return None
+
+
+def _summarize_router_contract_value(raw: Any) -> str:
+    if raw is None:
+        return "NoneType(null)"
+    if isinstance(raw, bool):
+        return f"bool({raw})"
+    if isinstance(raw, (int, float)):
+        return f"{type(raw).__name__}({raw})"
+    if isinstance(raw, str):
+        category = "pipeline_id_like" if _looks_like_pipeline_id(raw) else ("redacted" if _looks_sensitive_string(raw) else "text")
+        return f"str(len={len(raw)}, category={category})"
+    return type(raw).__name__
+
+
+def _looks_like_pipeline_id(raw: Any) -> bool:
+    if not isinstance(raw, str):
+        return False
+    normalized = raw.strip().lower()
+    if not normalized:
+        return False
+    return normalized in {DEFAULT_PIPELINE_ID, ENGINEERING_PIPELINE_ID} or normalized.endswith("_pipeline")
 
 
 def _summarize_confidence_value(raw: Any) -> str:
