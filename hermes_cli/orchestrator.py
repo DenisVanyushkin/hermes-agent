@@ -13,6 +13,7 @@ from hermes_cli.pipeline_execution_controller import evaluate_pipeline_execution
 from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode, PipelineGateRequest, evaluate_pipeline_gate
 from hermes_cli.pipeline_router import DEFAULT_PIPELINE_ID, RouterDecision
 from hermes_cli.pipeline_report import build_pipeline_execution_report
+from hermes_cli.pipeline_report_artifacts import DEFAULT_DURABLE_ROOT, persist_controlled_execution_report_artifacts
 from hermes_cli.pipeline_controlled_dry_run import (
     CONTROLLED_MANUAL_MODE,
     CONTROLLED_VALIDATION_TRIGGER,
@@ -134,6 +135,25 @@ def observe_gateway_turn(
         warnings=[],
         elapsed_ms=elapsed_ms,
     )
+    pipeline_execution_report_payload = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=state_snapshot,
+        preflight_result=pipeline_preflight.to_safe_dict(),
+    ).to_safe_dict()
+    if mode == CONTROLLED_MANUAL_MODE:
+        report_artifacts = persist_controlled_execution_report_artifacts(
+            session=session,
+            state_snapshot=state_snapshot,
+            controller_payload=pipeline_execution_controller.to_safe_dict(),
+            pipeline_execution_report_payload=pipeline_execution_report_payload,
+            router_decision=router_decision,
+            workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, dict) else None,
+            durable_root=DEFAULT_DURABLE_ROOT,
+        )
+        pipeline_execution_controller = replace(
+            pipeline_execution_controller,
+            report_artifacts=report_artifacts,
+        )
     report = OrchestratorObserveReport(
         session=session,
         state=state,
@@ -148,11 +168,7 @@ def observe_gateway_turn(
         pipeline_plan_payload=pipeline_plan_payload,
         pipeline_preflight_payload=pipeline_preflight.to_safe_dict(),
         pipeline_execution_controller_payload=pipeline_execution_controller.to_safe_dict(),
-        pipeline_execution_report_payload=build_pipeline_execution_report(
-            session=session,
-            state_snapshot=state_snapshot,
-            preflight_result=pipeline_preflight.to_safe_dict(),
-        ).to_safe_dict(),
+        pipeline_execution_report_payload=pipeline_execution_report_payload,
     )
     return report
 

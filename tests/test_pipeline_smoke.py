@@ -155,6 +155,15 @@ def test_controlled_engineering_e2e_manual_dry_run_writes_safe_report(tmp_path: 
     assert payload["report"]["final_response"]["placeholder_reason"] is None
     assert payload["report"]["git_gate"]["completion_blocked_reason"] is None
     assert workspace.joinpath("tests/test_generated_example.py").exists()
+    artifact_path = workspace / "controlled_execution_report.json"
+    artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact_path.exists()
+    assert artifact_payload["execution"]["actual_execution_invoked"] is True
+    assert artifact_payload["routing"]["selected_pipeline_id"] == "engineering_review_pipeline"
+    assert artifact_payload["subagent_runs"][0]["actual_provider"] == "openrouter"
+    assert artifact_payload["subagent_runs"][0]["actual_model"] == "xiaomi/mimo-v2.5-pro"
+    assert artifact_payload["subagent_runs"][1]["actual_provider"] == "openai-codex"
+    assert "raw_metadata" not in json.dumps(artifact_payload, sort_keys=True)
     encoded = json.dumps(payload, sort_keys=True)
     assert str(workspace) not in encoded
     assert "engineer runtime completed" not in encoded
