@@ -49,7 +49,10 @@ class PipelineExecutionControllerResult:
             "helper_result_status": self.helper_result_status,
             "helper_result": dict(self.helper_result) if isinstance(self.helper_result, dict) else self.helper_result,
             "helper_error": self.helper_error,
-            "final_response_text": self.final_response_text,
+            "final_response_text": _sanitize_final_response_text_for_safe_payload(
+                self.final_response_text,
+                workspace_basename=self.workspace_basename,
+            ),
             "workspace_basename": self.workspace_basename,
             "report_artifacts": sanitize_report_artifact_metadata(self.report_artifacts),
         }
@@ -318,3 +321,28 @@ def _final_response_text(helper_result: Any, helper_execution_context: Mapping[s
     from hermes_cli.pipeline_controlled_dry_run import format_controlled_manual_summary
 
     return format_controlled_manual_summary(helper_result, workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, Mapping) else None)
+
+
+def _sanitize_final_response_text_for_safe_payload(
+    final_response_text: str | None,
+    *,
+    workspace_basename: str | None,
+) -> str | None:
+    if not isinstance(final_response_text, str):
+        return final_response_text
+
+    redacted_lines: list[str] = []
+    safe_workspace_suffix = workspace_basename or "workspace"
+    for raw_line in final_response_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            redacted_lines.append(raw_line)
+            continue
+        if line.startswith("report_path: "):
+            redacted_lines.append("report_path: <redacted_absolute_path>")
+            continue
+        if line.startswith("workspace: "):
+            redacted_lines.append(f"workspace: <redacted_absolute_path>/{safe_workspace_suffix}")
+            continue
+        redacted_lines.append(raw_line)
+    return "\n".join(redacted_lines)

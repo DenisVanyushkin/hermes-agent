@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
@@ -223,6 +224,14 @@ def _ensure_controlled_e2e_workspace_layout(*, workspace: Path, repo_root: Path)
 def format_controlled_manual_summary(helper_result: dict[str, Any] | None, *, workspace_path: str | None = None) -> str | None:
     if not isinstance(helper_result, dict):
         return None
+    report = helper_result.get("report")
+    if isinstance(report, dict):
+        return _format_controlled_manual_summary_from_report(
+            report,
+            report_artifacts=helper_result.get("report_artifacts"),
+            workspace_path=workspace_path,
+            controller_status=str(helper_result.get("status") or "").strip() or None,
+        )
     mutation_summary = dict(helper_result.get('mutation_summary') or {})
     test_summary = dict(helper_result.get('test_summary') or {})
     workspace_name = Path(workspace_path).name if workspace_path else None
@@ -244,6 +253,123 @@ def format_controlled_manual_summary(helper_result: dict[str, Any] | None, *, wo
     if workspace_name:
         lines.append(f'workspace: {workspace_name}')
     return '\n'.join(lines)
+
+
+def _format_controlled_manual_summary_from_report(
+    report: dict[str, Any],
+    *,
+    report_artifacts: Any,
+    workspace_path: str | None,
+    controller_status: str | None,
+) -> str:
+    routing = dict(report.get("routing") or {})
+    controller = dict(report.get("controller") or {})
+    completion = dict(report.get("completion") or {})
+    tests = dict(report.get("tests") or {})
+    usage = dict(report.get("usage_summary") or report.get("usage") or {})
+    review = dict(report.get("review") or {})
+    artifacts = dict(report_artifacts or {})
+    changed_files = list(report.get("changed_files") or [])
+    actual_execution_invoked = bool(controller.get("executed"))
+    controller_invoked = controller_status is not None
+
+    lines = [
+        "Controlled pipeline validation report.",
+        f"status: {report.get('status', 'unknown')}",
+        f"pipeline: {routing.get('selected_pipeline_id') or routing.get('pipeline_id') or ENGINEERING_PIPELINE_ID}",
+        f"execution_mode: {controller.get('execution_mode') or report.get('execution_mode') or 'unknown'}",
+        f"final_verdict: {completion.get('final_verdict') or report.get('status') or 'unknown'}",
+        f"blocked_reason: {completion.get('blocked_reason') or 'none'}",
+        f"controller_invoked: {controller_invoked}",
+        f"report_execution_invoked: {actual_execution_invoked}",
+    ]
+
+    if actual_execution_invoked:
+        lines.append(_executed_mutation_line(changed_files))
+        lines.append(_executed_tests_line(tests))
+        lines.append(_executed_models_line(usage))
+        lines.append(f"reviewer_invoked: {bool(review.get('reviewer_invoked'))}")
+    else:
+        lines.append("mutation: none")
+        lines.append(f"tests: {_non_executed_tests_label(tests)}")
+        lines.append("models_used: none")
+        planned_models = _planned_models_lines(report)
+        if planned_models:
+            lines.extend(planned_models)
+
+    report_run_id = _clean_placeholder(artifacts.get("run_id"))
+    durable_report_path = _clean_placeholder(artifacts.get("durable_report_path"))
+    workspace_report_path = _clean_placeholder(artifacts.get("workspace_report_path"))
+    selected_report_path = durable_report_path or workspace_report_path
+    selected_workspace_path = (
+        workspace_report_path.rsplit("/", 1)[0]
+        if workspace_report_path
+        else _clean_placeholder(workspace_path)
+    )
+
+    if report_run_id:
+        lines.append(f"report_run_id: {report_run_id}")
+    if selected_report_path:
+        lines.append(f"report_path: {selected_report_path}")
+    if selected_workspace_path:
+        lines.append(f"workspace: {selected_workspace_path}")
+
+    return "\n".join(line for line in lines if line)
+
+
+def _executed_mutation_line(changed_files: list[str]) -> str:
+    if not changed_files:
+        return "mutation: none"
+    return f"mutation: changed_files={len(changed_files)}"
+
+
+def _executed_tests_line(tests: dict[str, Any]) -> str:
+    status = str(tests.get("status") or "unknown")
+    summary = str(tests.get("summary") or "").strip()
+    if summary:
+        return f"tests: {status} ({summary})"
+    return f"tests: {status}"
+
+
+def _executed_models_line(usage: dict[str, Any]) -> str:
+    providers = list(usage.get("providers_used") or [])
+    models = list(usage.get("models_used") or [])
+    if not providers and not models:
+        return "models_used: none"
+    pairs = [
+        f"{provider or 'unknown'} / {model or 'unknown'}"
+        for provider, model in zip_longest(providers, models, fillvalue="unknown")
+    ]
+    return f"models_used: {', '.join(str(item) for item in pairs)}"
+
+
+def _non_executed_tests_label(tests: dict[str, Any]) -> str:
+    status = str(tests.get("status") or "unavailable").strip().lower()
+    if status in {"unavailable", "not_run", "not-run"}:
+        return "not_run"
+    return status
+
+
+def _planned_models_lines(report: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for item in report.get("models") or []:
+        if not isinstance(item, dict):
+            continue
+        role_id = str(item.get("role_id") or "unknown")
+        provider = str(item.get("provider") or "unknown")
+        model = str(item.get("model") or "unknown")
+        runtime_status = str(item.get("runtime_status") or item.get("execution_mode") or "unknown")
+        lines.append(f"planned_model: {role_id}: {provider} / {model}, {runtime_status}")
+    return lines
+
+
+def _clean_placeholder(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in {"", "~"}:
+        return None
+    return text
 
 
 def _blocked_payload(reason: str) -> dict[str, Any]:

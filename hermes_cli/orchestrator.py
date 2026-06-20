@@ -18,6 +18,7 @@ from hermes_cli.pipeline_controlled_dry_run import (
     CONTROLLED_MANUAL_MODE,
     CONTROLLED_VALIDATION_TRIGGER,
     build_controlled_manual_helper_context,
+    format_controlled_manual_summary,
 )
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_state import (
@@ -150,8 +151,15 @@ def observe_gateway_turn(
             workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, dict) else None,
             durable_root=DEFAULT_DURABLE_ROOT,
         )
+        response_helper_result = dict(pipeline_execution_controller.helper_result or {})
+        response_helper_result["report"] = pipeline_execution_report_payload
+        response_helper_result["report_artifacts"] = report_artifacts
         pipeline_execution_controller = replace(
             pipeline_execution_controller,
+            final_response_text=format_controlled_manual_summary(
+                response_helper_result,
+                workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, dict) else None,
+            ),
             report_artifacts=report_artifacts,
         )
     report = OrchestratorObserveReport(
