@@ -14,7 +14,7 @@ from hermes_cli.pipeline_mutations import apply_controlled_mutations
 from hermes_cli.pipeline_test_runner import run_controlled_tests
 
 
-_ALLOWED_TOOL_NAMES = (
+_ENGINEER_ALLOWED_TOOL_NAMES = (
     "read_file",
     "search_files",
     "patch",
@@ -22,6 +22,12 @@ _ALLOWED_TOOL_NAMES = (
     "git_status",
     "git_diff",
     "pytest",
+)
+_REVIEWER_ALLOWED_TOOL_NAMES = (
+    "read_file",
+    "search_files",
+    "git_status",
+    "git_diff",
 )
 
 
@@ -50,6 +56,7 @@ class AIAgentSubagentExecutorBridge:
 
     def __call__(self, request: Any, runtime_plan: Any) -> dict[str, Any]:
         self._validate_runtime_plan(runtime_plan)
+        self._validate_request(request, runtime_plan)
         self._tool_calls = []
         agent = self._build_agent(runtime_plan)
         result = self.conversation_runner(self, agent, request, runtime_plan)
@@ -65,7 +72,7 @@ class AIAgentSubagentExecutorBridge:
             {
                 "workspace_root": self.workspace_root.name,
                 "subagent_id": runtime_plan.subagent_id,
-                "role_id": "engineer",
+                "role_id": self._bridge_role_id(runtime_plan),
             },
         )
         return {
@@ -79,7 +86,7 @@ class AIAgentSubagentExecutorBridge:
 
     def execute_tool(self, tool_name: str, arguments: Mapping[str, Any] | None = None) -> str:
         args = dict(arguments or {})
-        if tool_name not in _ALLOWED_TOOL_NAMES:
+        if tool_name not in self._allowed_tool_names():
             raise AIAgentExecutorBridgeError(f"tool_not_allowed:{tool_name}")
 
         if tool_name == "read_file":
@@ -192,17 +199,13 @@ class AIAgentSubagentExecutorBridge:
         )
         agent = self.agent_factory(**kwargs)
         agent.tools = self._tool_definitions()
-        agent.valid_tool_names = set(_ALLOWED_TOOL_NAMES)
+        agent.valid_tool_names = set(self._allowed_tool_names())
         agent.enabled_toolsets = []
         agent.disabled_toolsets = list(kwargs["disabled_toolsets"])
         return agent
 
     def _default_conversation_runner(self, _bridge: "AIAgentSubagentExecutorBridge", agent: Any, request: Any, _runtime_plan: Any) -> Mapping[str, Any]:
-        user_message = ""
-        if getattr(request, "input_messages", None):
-            first = request.input_messages[0]
-            if isinstance(first, Mapping):
-                user_message = str(first.get("content") or "")
+        user_message = self._build_user_message(request)
         with self.patched_tool_dispatch():
             return agent.run_conversation(user_message)
 
@@ -224,12 +227,32 @@ class AIAgentSubagentExecutorBridge:
         raise AIAgentExecutorBridgeError("invalid_agent_result")
 
     def _validate_runtime_plan(self, runtime_plan: Any) -> None:
-        if getattr(runtime_plan, "subagent_id", None) != "hermes_engineer_core":
+        if getattr(runtime_plan, "subagent_id", None) != self._supported_subagent_id():
             raise AIAgentExecutorBridgeError("unsupported_subagent")
         if getattr(runtime_plan, "actual_runtime_status", None) != "ready_to_construct":
             raise AIAgentExecutorBridgeError("runtime_plan_not_ready")
         if not (self.workspace_root / ".git").exists():
             raise AIAgentExecutorBridgeError("workspace_not_git_repo")
+
+    def _validate_request(self, request: Any, runtime_plan: Any) -> None:
+        del request, runtime_plan
+
+    def _supported_subagent_id(self) -> str:
+        return "hermes_engineer_core"
+
+    def _bridge_role_id(self, runtime_plan: Any) -> str:
+        del runtime_plan
+        return "engineer"
+
+    def _allowed_tool_names(self) -> tuple[str, ...]:
+        return _ENGINEER_ALLOWED_TOOL_NAMES
+
+    def _build_user_message(self, request: Any) -> str:
+        if getattr(request, "input_messages", None):
+            first = request.input_messages[0]
+            if isinstance(first, Mapping):
+                return str(first.get("content") or "")
+        return ""
 
     def _load_prompt_text(self, runtime_plan: Any) -> str | None:
         prompt = getattr(runtime_plan, "prompt", None)
@@ -245,15 +268,16 @@ class AIAgentSubagentExecutorBridge:
             return None
 
     def _tool_definitions(self) -> list[dict[str, Any]]:
-        return [
-            self._tool_definition("read_file", "Read a file inside the controlled workspace.", {"path": {"type": "string"}}, ["path"]),
-            self._tool_definition("search_files", "Search files inside the controlled workspace.", {"pattern": {"type": "string"}}, ["pattern"]),
-            self._tool_definition("patch", "Replace file content inside the controlled workspace.", {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}, "content": {"type": "string"}}, ["path"]),
-            self._tool_definition("write_file", "Write a file inside the controlled workspace.", {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
-            self._tool_definition("git_status", "Show git status for the controlled workspace.", {}, []),
-            self._tool_definition("git_diff", "Show git diff for the controlled workspace.", {}, []),
-            self._tool_definition("pytest", "Run an allowed pytest command inside the controlled workspace.", {"command": {"type": "string"}}, ["command"]),
-        ]
+        definitions = {
+            "read_file": self._tool_definition("read_file", "Read a file inside the controlled workspace.", {"path": {"type": "string"}}, ["path"]),
+            "search_files": self._tool_definition("search_files", "Search files inside the controlled workspace.", {"pattern": {"type": "string"}}, ["pattern"]),
+            "patch": self._tool_definition("patch", "Replace file content inside the controlled workspace.", {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}, "content": {"type": "string"}}, ["path"]),
+            "write_file": self._tool_definition("write_file", "Write a file inside the controlled workspace.", {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
+            "git_status": self._tool_definition("git_status", "Show git status for the controlled workspace.", {}, []),
+            "git_diff": self._tool_definition("git_diff", "Show git diff for the controlled workspace.", {}, []),
+            "pytest": self._tool_definition("pytest", "Run an allowed pytest command inside the controlled workspace.", {"command": {"type": "string"}}, ["command"]),
+        }
+        return [definitions[name] for name in self._allowed_tool_names()]
 
     def _tool_definition(self, name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
         return {
@@ -326,3 +350,46 @@ class AIAgentSubagentExecutorBridge:
         finally:
             run_agent.handle_function_call = original_run_agent
             model_tools.handle_function_call = original_model_tools
+
+
+class AIAgentReviewerExecutorBridge(AIAgentSubagentExecutorBridge):
+    def _supported_subagent_id(self) -> str:
+        return "hermes_code_reviewer"
+
+    def _bridge_role_id(self, runtime_plan: Any) -> str:
+        del runtime_plan
+        return "reviewer"
+
+    def _allowed_tool_names(self) -> tuple[str, ...]:
+        return _REVIEWER_ALLOWED_TOOL_NAMES
+
+    def _validate_request(self, request: Any, runtime_plan: Any) -> None:
+        del runtime_plan
+        metadata = getattr(request, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            raise AIAgentExecutorBridgeError("reviewer_packet_missing")
+        reviewer_packet = metadata.get("reviewer_packet")
+        if not isinstance(reviewer_packet, Mapping):
+            raise AIAgentExecutorBridgeError("reviewer_packet_missing")
+        safe_packet = reviewer_packet.get("safe_packet")
+        if not isinstance(safe_packet, Mapping):
+            raise AIAgentExecutorBridgeError("reviewer_packet_invalid")
+        if reviewer_packet.get("present") is not True:
+            raise AIAgentExecutorBridgeError("reviewer_packet_invalid")
+        if safe_packet.get("packet_status") != "ready_for_review":
+            raise AIAgentExecutorBridgeError("reviewer_packet_invalid")
+
+    def _build_user_message(self, request: Any) -> str:
+        user_message = super()._build_user_message(request)
+        metadata = getattr(request, "metadata", None)
+        reviewer_packet = dict((metadata or {}).get("reviewer_packet") or {})
+        safe_packet = dict(reviewer_packet.get("safe_packet") or {})
+        packet_json = json.dumps(safe_packet, sort_keys=True, ensure_ascii=False)
+        return "\n\n".join(
+            [
+                user_message,
+                "Review the engineer candidate using the attached reviewer packet only.",
+                "Reviewer packet:",
+                packet_json,
+            ]
+        )
