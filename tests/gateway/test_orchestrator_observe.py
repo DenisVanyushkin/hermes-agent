@@ -587,7 +587,9 @@ def test_controlled_manual_router_mode_reaches_orchestrator_execution_gate(monke
     assert observe_payload["selected_pipeline_id"] == "engineering_review_pipeline"
     orchestrator_payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
     assert orchestrator_payload["pipeline_execution_controller"]["actual_execution_invoked"] is True
-    assert orchestrator_payload["pipeline_execution_controller"]["helper_result"]["provider_execution_mode"] == "fake_real_provider_client"
+    assert orchestrator_payload["pipeline_execution_controller"]["blocked_reason"] == "real_subagent_executor_missing"
+    assert "provider_execution_mode" not in orchestrator_payload["pipeline_execution_controller"]["helper_result"]
+    assert orchestrator_payload["pipeline_execution_controller"]["helper_result"]["report"]["review"]["reviewer_invoked"] is False
     assert not any("Invalid pipelines.router.mode" in record.message for record in caplog.records)
 
 
@@ -633,7 +635,7 @@ def test_gateway_orchestrator_controlled_manual_authorized_operator_without_trig
 
     assert report is not None
     payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
-    assert payload["pipeline_execution_controller"]["blocked_reason"] is None
+    assert payload["pipeline_execution_controller"]["blocked_reason"] == "real_subagent_executor_missing"
     assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is True
 
 
@@ -776,10 +778,11 @@ def test_gateway_orchestrator_controlled_manual_trigger_overrides_default_fallba
     assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is True
     final_response_text = payload["pipeline_execution_controller"]["final_response_text"]
     assert final_response_text.startswith("Controlled pipeline validation report.")
-    assert "status: blocked" in final_response_text
-    assert "report_execution_invoked: True" in final_response_text
+    assert "status: not_executed" in final_response_text
+    assert "blocked_reason: real_subagent_executor_missing" in final_response_text
+    assert "report_execution_invoked: False" in final_response_text
     assert "mutation: none" in final_response_text
-    assert "tests: passed" in final_response_text
+    assert "tests: not_run" in final_response_text
     dumped = json.dumps(payload, sort_keys=True)
     assert "/tmp/hermes-gateway-controlled-runs" not in dumped
     assert "/home/hermes/.hermes/controlled-runs" not in dumped
@@ -863,7 +866,7 @@ def test_gateway_orchestrator_controlled_manual_trigger_requires_controlled_exec
     assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is False
 
 
-def test_gateway_orchestrator_controlled_manual_executes_fake_only_dry_run(caplog):
+def test_gateway_orchestrator_controlled_manual_fails_closed_without_real_executor(caplog):
     orchestrator = importlib.import_module("hermes_cli.orchestrator")
 
     decision = RouterDecision(
@@ -905,18 +908,20 @@ def test_gateway_orchestrator_controlled_manual_executes_fake_only_dry_run(caplo
     payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
     assert payload["execution_report"]["executed"] is True
     assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is True
-    assert payload["pipeline_execution_controller"]["helper_result"]["provider_execution_mode"] == "fake_real_provider_client"
+    assert payload["pipeline_execution_controller"]["blocked_reason"] == "real_subagent_executor_missing"
+    assert "provider_execution_mode" not in payload["pipeline_execution_controller"]["helper_result"]
     final_response_text = payload["pipeline_execution_controller"]["final_response_text"]
     assert final_response_text.startswith("Controlled pipeline validation report.")
-    assert "status: blocked" in final_response_text
-    assert "execution_mode: controlled_runtime_loop" in final_response_text
-    assert "report_execution_invoked: True" in final_response_text
-    assert "tests: passed" in final_response_text
+    assert "status: not_executed" in final_response_text
+    assert "execution_mode: controlled_manual" in final_response_text
+    assert "blocked_reason: real_subagent_executor_missing" in final_response_text
+    assert "report_execution_invoked: False" in final_response_text
+    assert "tests: not_run" in final_response_text
     assert "workspace: <redacted_absolute_path>/router-controlled-manual-exec" in final_response_text
-    assert payload["pipeline_execution_report"]["status"] == "blocked"
-    assert payload["pipeline_execution_report"]["controller"]["executed"] is True
-    assert payload["pipeline_execution_report"]["tests"]["status"] == "passed"
-    assert payload["pipeline_execution_report"]["mutation_summary"]["applied_count"] == 1
+    assert payload["pipeline_execution_report"]["status"] == "not_executed"
+    assert payload["pipeline_execution_report"]["controller"]["executed"] is False
+    assert payload["pipeline_execution_report"]["tests"]["status"] == "unavailable"
+    assert payload["pipeline_execution_report"]["review"]["reviewer_invoked"] is False
     dumped = json.dumps(payload, sort_keys=True)
     assert "/tmp/hermes-gateway-controlled-runs" not in dumped
     assert "/home/hermes/.hermes/controlled-runs" not in dumped
