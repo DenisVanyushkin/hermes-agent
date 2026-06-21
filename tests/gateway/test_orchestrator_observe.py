@@ -591,7 +591,7 @@ def test_controlled_manual_router_mode_reaches_orchestrator_execution_gate(monke
     assert not any("Invalid pipelines.router.mode" in record.message for record in caplog.records)
 
 
-def test_gateway_orchestrator_controlled_manual_requires_explicit_trigger(caplog):
+def test_gateway_orchestrator_controlled_manual_authorized_operator_without_trigger_executes(caplog):
     orchestrator = importlib.import_module("hermes_cli.orchestrator")
 
     decision = RouterDecision(
@@ -625,6 +625,100 @@ def test_gateway_orchestrator_controlled_manual_requires_explicit_trigger(caplog
             user_message="ordinary engineering request",
             session_id="sess-controlled-manual-missing-trigger",
             platform="telegram",
+            chat_id="chat-123",
+            user_id="user-1",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_execution_controller"]["blocked_reason"] is None
+    assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is True
+
+
+def test_gateway_orchestrator_controlled_manual_unknown_context_without_trigger_stays_blocked(caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-controlled-manual-unknown-context",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={
+                "pipelines": {
+                    "enabled": True,
+                    "orchestrator": {"mode": "controlled_manual"},
+                    "execution": {
+                        "mode": "controlled_manual",
+                        "enable_gateway_execution_controller": True,
+                        "allow_actual_subagent_invocation": True,
+                        "allow_actual_reviewer_invocation": True,
+                        "allow_actual_rework_loop": True,
+                        "allow_pipelines": ["engineering_review_pipeline"],
+                        "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                    },
+                }
+            },
+            user_message="ordinary engineering request",
+            session_id=None,
+            platform=None,
+            chat_id=None,
+            user_id=None,
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_execution_controller"]["blocked_reason"] == "controlled_manual_trigger_missing"
+    assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is False
+
+
+def test_gateway_orchestrator_controlled_manual_cron_without_trigger_stays_blocked(caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-controlled-manual-cron-context",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={
+                "pipelines": {
+                    "enabled": True,
+                    "orchestrator": {"mode": "controlled_manual"},
+                    "execution": {
+                        "mode": "controlled_manual",
+                        "enable_gateway_execution_controller": True,
+                        "allow_actual_subagent_invocation": True,
+                        "allow_actual_reviewer_invocation": True,
+                        "allow_actual_rework_loop": True,
+                        "allow_pipelines": ["engineering_review_pipeline"],
+                        "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                    },
+                }
+            },
+            user_message="ordinary engineering request",
+            session_id="cron-session-1",
+            platform="cron",
+            chat_id="cron-room",
+            user_id="cron-user",
             router_decision=decision,
             logger=logging.getLogger("gateway.test"),
         )

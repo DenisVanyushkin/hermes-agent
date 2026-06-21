@@ -18,6 +18,17 @@ from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE, CONTR
 from hermes_cli.pipeline_report_artifacts import sanitize_report_artifact_metadata
 from hermes_cli.pipeline_specs import load_pipeline_specs
 
+_AUTHORIZED_MANUAL_CHAT_PLATFORMS = {
+    "discord",
+    "feishu",
+    "matrix",
+    "signal",
+    "slack",
+    "sms",
+    "telegram",
+    "whatsapp",
+}
+
 
 @dataclass(frozen=True)
 class PipelineExecutionControllerResult:
@@ -92,7 +103,11 @@ def evaluate_pipeline_execution_controller(
         return replace(base, status="would_execute", blocked_reason="gateway_execution_not_enabled")
 
     if execution_mode == CONTROLLED_MANUAL_MODE:
-        if not _controlled_manual_trigger_present(helper_execution_context):
+        if not _controlled_manual_execution_authorized(
+            session=session,
+            pipeline_id=pipeline_id,
+            helper_execution_context=helper_execution_context,
+        ):
             return replace(base, status="blocked", blocked_reason="controlled_manual_trigger_missing")
         allow_test_execution = True
         allow_registered_helper_selection = True
@@ -302,6 +317,39 @@ def _controlled_manual_trigger_present(helper_execution_context: Mapping[str, An
         return False
     user_message = str(helper_execution_context.get("user_message") or "")
     return CONTROLLED_VALIDATION_TRIGGER in user_message
+
+
+def _controlled_manual_execution_authorized(
+    *,
+    session: Any,
+    pipeline_id: str | None,
+    helper_execution_context: Mapping[str, Any] | None,
+) -> bool:
+    if _controlled_manual_trigger_present(helper_execution_context):
+        return True
+    return _authorized_manual_chat_operator_context(
+        session=session,
+        pipeline_id=pipeline_id,
+    )
+
+
+def _authorized_manual_chat_operator_context(*, session: Any, pipeline_id: str | None) -> bool:
+    if pipeline_id != "engineering_review_pipeline":
+        return False
+    if getattr(session, "router_status", None) != "selected":
+        return False
+    platform = str(getattr(session, "platform", "") or "").strip().lower()
+    if not platform or platform == "cron":
+        return False
+    if platform not in _AUTHORIZED_MANUAL_CHAT_PLATFORMS:
+        return False
+
+    markers = (
+        getattr(session, "chat_id", None),
+        getattr(session, "thread_id", None),
+        getattr(session, "user_id", None),
+    )
+    return any(str(marker or "").strip() for marker in markers)
 
 
 def _workspace_basename(helper_execution_context: Mapping[str, Any] | None) -> str | None:
