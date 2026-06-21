@@ -103,6 +103,7 @@ def observe_gateway_turn(
     allow_registered_helper_selection = False
     if mode == CONTROLLED_MANUAL_MODE:
         helper_execution_context = build_controlled_manual_helper_context(
+            config=config,
             user_message=user_message,
             session_id=session_id,
             pipeline_session_id=pipeline_session_id,

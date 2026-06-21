@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE
+from hermes_cli.pipeline_controlled_dry_run import ENGINEER_SUBAGENT_ID, REVIEWER_SUBAGENT_ID
 from hermes_cli.pipeline_rework_loop import execute_bounded_rework_loop
 
 
@@ -80,15 +81,11 @@ def execute_engineering_review_helper(
 ) -> Any:
     execution_mode = str((((config or {}).get('pipelines') or {}).get('execution') or {}).get('mode') or '').strip().lower()
     if execution_mode == CONTROLLED_MANUAL_MODE:
+        blocked_reason = _controlled_manual_blocked_reason(controlled_runtime_context)
         if not isinstance(controlled_runtime_context, dict) or controlled_runtime_context.get("real_executor_ready") is not True:
-            return _blocked_helper_payload("real_subagent_executor_missing")
-        if not (
-            callable(controlled_runtime_context.get("executor_bridge"))
-            or
-            callable(controlled_runtime_context.get("invocation_client"))
-            or callable(controlled_runtime_context.get("real_provider_client_factory"))
-        ):
-            return _blocked_helper_payload("real_subagent_executor_missing")
+            return _blocked_helper_payload(blocked_reason)
+        if not _has_real_executor_path(controlled_runtime_context):
+            return _blocked_helper_payload(blocked_reason)
     try:
         return execute_bounded_rework_loop(
             config=config,
@@ -171,6 +168,26 @@ def _blocked_helper_payload(blocked_reason: str) -> dict[str, Any]:
             "changed_files": [],
         },
     }
+
+
+def _controlled_manual_blocked_reason(controlled_runtime_context: Any) -> str:
+    if isinstance(controlled_runtime_context, dict):
+        value = str(controlled_runtime_context.get("blocked_reason") or "").strip()
+        if value:
+            return value
+    return "real_subagent_executor_missing"
+
+
+def _has_real_executor_path(controlled_runtime_context: dict[str, Any]) -> bool:
+    executor_bridge = controlled_runtime_context.get("executor_bridge")
+    if callable(executor_bridge):
+        return True
+    if isinstance(executor_bridge, dict):
+        return all(callable(executor_bridge.get(subagent_id)) for subagent_id in (ENGINEER_SUBAGENT_ID, REVIEWER_SUBAGENT_ID))
+    return (
+        callable(controlled_runtime_context.get("invocation_client"))
+        or callable(controlled_runtime_context.get("real_provider_client_factory"))
+    )
 
 
 def _helper_name_for_pipeline(pipeline_id: str | None) -> str | None:

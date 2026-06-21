@@ -5,14 +5,16 @@ from __future__ import annotations
 import subprocess
 from itertools import zip_longest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+from hermes_cli.pipeline_aiagent_executor import AIAgentReviewerExecutorBridge, AIAgentSubagentExecutorBridge
 from hermes_cli.pipeline_report_artifacts import persist_controlled_execution_report_artifacts
 from hermes_cli.pipeline_rework_loop import execute_bounded_rework_loop
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_specs import load_pipeline_specs
-from hermes_cli.runtime_factory import RuntimeFactory
+from hermes_cli.runtime_factory import RuntimeFactory, RuntimeFactoryPlan, build_runtime_factory_plan
 from hermes_cli.subagent_runner import ControlledRuntimeRunner, SubagentRunner
 
 ENGINEER_SUBAGENT_ID = "hermes_engineer_core"
@@ -133,31 +135,128 @@ def run_controlled_engineering_e2e_dry_run(*, task: str, workspace: Path | None)
     }
 
 
-def build_controlled_manual_helper_context(*, user_message: str, session_id: str | None, pipeline_session_id: str | None, repo_root: Path | None = None) -> dict[str, Any]:
+def build_controlled_manual_helper_context(
+    *,
+    config: dict[str, Any] | None = None,
+    user_message: str,
+    session_id: str | None,
+    pipeline_session_id: str | None,
+    repo_root: Path | None = None,
+) -> dict[str, Any]:
     base_repo_root = Path(__file__).resolve().parent.parent if repo_root is None else Path(repo_root)
     workspace = gateway_controlled_workspace(session_id=session_id, pipeline_session_id=pipeline_session_id)
-    return {
+    controlled_runtime_context = _default_controlled_runtime_context(workspace)
+    helper_context = {
         "runtime_factory": RuntimeFactory(repo_root=base_repo_root),
         "runner": SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
         "user_message": user_message,
         "repo_path": str(workspace),
         "allow_completion_after_review": True,
-        "controlled_runtime_context": {
-            "real_executor_ready": False,
-            "blocked_reason": "real_subagent_executor_missing",
-            "allow_real_provider_execution": False,
-            "request_real_provider_execution": False,
-            "allowed_real_providers": (),
-            "allowed_real_models": (),
-            "allowed_real_providers_by_role": {},
-            "allowed_real_models_by_role": {},
-            "allowed_real_providers_by_subagent": {},
-            "allowed_real_models_by_subagent": {},
-            "allow_mutations": False,
-            "mutation_workspace": str(workspace),
-            "allow_test_commands": False,
-            "test_workspace": str(workspace),
-        },
+        "controlled_runtime_context": controlled_runtime_context,
+    }
+    if not _allow_real_provider_execution(config):
+        return helper_context
+
+    controlled_runtime_context["allow_real_provider_execution"] = True
+    controlled_runtime_context["request_real_provider_execution"] = True
+    controlled_runtime_context["allow_mutations"] = True
+    controlled_runtime_context["allow_test_commands"] = True
+
+    try:
+        workspace = prepare_controlled_e2e_workspace(repo_root=base_repo_root, workspace=workspace)
+    except ValueError as exc:
+        controlled_runtime_context["blocked_reason"] = str(exc)
+        helper_context["repo_path"] = str(workspace)
+        return helper_context
+
+    helper_context["repo_path"] = str(workspace)
+    controlled_runtime_context["mutation_workspace"] = str(workspace)
+    controlled_runtime_context["test_workspace"] = str(workspace)
+
+    loaded_specs = load_pipeline_specs(repo_root=base_repo_root)
+    bridge_runtime_plans = _build_bridge_runtime_plans(
+        loaded_specs=loaded_specs,
+        pipeline_session_id=pipeline_session_id,
+        user_message=user_message,
+        config=config,
+    )
+    controlled_runtime_context["bridge_runtime_plans"] = {
+        key: value.to_safe_dict() for key, value in bridge_runtime_plans.items()
+    }
+
+    engineer_plan = bridge_runtime_plans[ENGINEER_SUBAGENT_ID]
+    reviewer_plan = bridge_runtime_plans[REVIEWER_SUBAGENT_ID]
+    if engineer_plan.errors:
+        controlled_runtime_context["blocked_reason"] = f"runtime_plan_blocked:{ENGINEER_SUBAGENT_ID}"
+        return helper_context
+    if reviewer_plan.errors:
+        controlled_runtime_context["blocked_reason"] = f"runtime_plan_blocked:{REVIEWER_SUBAGENT_ID}"
+        return helper_context
+
+    controlled_runtime_context["executor_bridge"] = {
+        ENGINEER_SUBAGENT_ID: AIAgentSubagentExecutorBridge(
+            workspace_root=workspace,
+            repo_root=base_repo_root,
+        ),
+        REVIEWER_SUBAGENT_ID: AIAgentReviewerExecutorBridge(
+            workspace_root=workspace,
+            repo_root=base_repo_root,
+        ),
+    }
+    controlled_runtime_context["real_executor_ready"] = True
+    controlled_runtime_context["blocked_reason"] = None
+    return helper_context
+
+
+def _default_controlled_runtime_context(workspace: Path) -> dict[str, Any]:
+    return {
+        "real_executor_ready": False,
+        "blocked_reason": "real_subagent_executor_missing",
+        "allow_real_provider_execution": False,
+        "request_real_provider_execution": False,
+        "allowed_real_providers": (),
+        "allowed_real_models": (),
+        "allowed_real_providers_by_role": {},
+        "allowed_real_models_by_role": {},
+        "allowed_real_providers_by_subagent": {},
+        "allowed_real_models_by_subagent": {},
+        "allow_mutations": False,
+        "mutation_workspace": str(workspace),
+        "allow_test_commands": False,
+        "test_workspace": str(workspace),
+    }
+
+
+def _allow_real_provider_execution(config: dict[str, Any] | None) -> bool:
+    return bool((((config or {}).get("pipelines") or {}).get("execution") or {}).get("allow_real_provider_execution", False))
+
+
+def _build_bridge_runtime_plans(
+    *,
+    loaded_specs: Any,
+    pipeline_session_id: str | None,
+    user_message: str,
+    config: dict[str, Any] | None,
+) -> dict[str, RuntimeFactoryPlan]:
+    session = SimpleNamespace(
+        pipeline_session_id=pipeline_session_id or "controlled-manual",
+        trace_id=pipeline_session_id or "controlled-manual",
+        pipeline_id=ENGINEERING_PIPELINE_ID,
+        user_message=user_message,
+    )
+    return {
+        ENGINEER_SUBAGENT_ID: build_runtime_factory_plan(
+            session=session,
+            planned_step=SimpleNamespace(subagent_id=ENGINEER_SUBAGENT_ID, step_kind="engineer"),
+            subagent_spec=loaded_specs.subagent_specs.get(ENGINEER_SUBAGENT_ID),
+            config=config,
+        ),
+        REVIEWER_SUBAGENT_ID: build_runtime_factory_plan(
+            session=session,
+            planned_step=SimpleNamespace(subagent_id=REVIEWER_SUBAGENT_ID, step_kind="reviewer"),
+            subagent_spec=loaded_specs.subagent_specs.get(REVIEWER_SUBAGENT_ID),
+            config=config,
+        ),
     }
 
 
