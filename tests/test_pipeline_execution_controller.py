@@ -185,6 +185,52 @@ def _controlled_runtime_context(*, mutate_repo: Path | None = None) -> dict[str,
     }
 
 
+def _controlled_manual_executor_context(
+    *,
+    mutate_repo: Path | None = None,
+    calls: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    def _executor(request, runtime_plan):
+        prompt = ""
+        if request.input_messages:
+            prompt = str(request.input_messages[0].get("content") or "")
+        if calls is not None:
+            calls.append(
+                {
+                    "subagent_id": request.subagent_id,
+                    "runtime_subagent_id": runtime_plan.subagent_id,
+                    "prompt": prompt,
+                }
+            )
+        if request.subagent_id == "hermes_engineer_core":
+            if mutate_repo is not None:
+                _write(mutate_repo, "engineer_notes.txt", f"{prompt}\n")
+            return {
+                "output_text": "engineer ok",
+                "completion_reason": "completed",
+                "execution_status": "completed",
+                "token_usage": {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+                "raw_metadata": {
+                    "structured_output": _engineer_output(
+                        summary="Updated engineer_notes.txt",
+                        changes=[{"path": "engineer_notes.txt", "kind": "modify"}],
+                    )
+                },
+            }
+        return {
+            "output_text": "review ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "token_usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    return {
+        "executor_bridge": _executor,
+        "real_executor_ready": True,
+    }
+
+
 def _config(
     *,
     mode: str = "controlled_one_step",
@@ -407,6 +453,51 @@ def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_
     assert "workspace: <redacted_absolute_path>/" in safe_payload["final_response_text"]
 
 
+def test_controlled_manual_executor_bridge_uses_subagent_runner_and_observed_git_delta(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    session = type(session)(
+        **{
+            **session.__dict__,
+            "chat_id": "chat-bridge",
+            "user_id": "user-bridge",
+        }
+    )
+    repo_root = _copy_spec_tree(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    executor_calls: list[dict[str, object]] = []
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="controlled_manual"),
+        session=session,
+        state_snapshot=snapshot,
+        helper_execution_context={
+            "runtime_factory": RuntimeFactory(repo_root=repo_root),
+            "runner": SubagentRunner(
+                executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))
+            ),
+            "user_message": "HERMES CONTROLLED PIPELINE VALIDATION - executor bridge mutation proof",
+            "repo_path": str(git_repo),
+            "allow_completion_after_review": True,
+            "controlled_runtime_context": _controlled_manual_executor_context(
+                mutate_repo=git_repo,
+                calls=executor_calls,
+            ),
+        },
+    )
+
+    assert result.actual_execution_invoked is True
+    assert result.blocked_reason is None
+    assert result.helper_result is not None
+    assert result.helper_result["candidate_complete"] is True
+    assert result.helper_result["completion_allowed"] is True
+    assert result.helper_result["git_gate"]["changed_files"] == ["engineer_notes.txt"]
+    assert result.helper_result["reviewer_packet"]["safe_packet"]["git"]["changed_files"] == ["engineer_notes.txt"]
+    assert [call["subagent_id"] for call in executor_calls] == ["hermes_engineer_core", "hermes_code_reviewer"]
+    assert executor_calls[0]["runtime_subagent_id"] == "hermes_engineer_core"
+    assert (git_repo / "engineer_notes.txt").read_text(encoding="utf-8") == "HERMES CONTROLLED PIPELINE VALIDATION - executor bridge mutation proof\n"
+
+
 def test_controlled_manual_registered_helper_does_not_use_manual_dry_run_provider_factory(monkeypatch, tmp_path: Path) -> None:
     helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
     dry_run = importlib.import_module("hermes_cli.pipeline_controlled_dry_run")
@@ -435,6 +526,36 @@ def test_controlled_manual_registered_helper_does_not_use_manual_dry_run_provide
     assert result["report"]["review"]["reviewer_invoked"] is False
     assert result["report"]["changed_files"] == []
     assert not (git_repo / "tests" / "test_generated_example.py").exists()
+
+
+def test_controlled_manual_executor_bridge_does_not_use_manual_dry_run_provider_factory(monkeypatch, tmp_path: Path) -> None:
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+    dry_run = importlib.import_module("hermes_cli.pipeline_controlled_dry_run")
+    session, _snapshot = _snapshot_for()
+    repo_root = _copy_spec_tree(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("_manual_dry_run_provider_factory must stay smoke-only")
+
+    monkeypatch.setattr(dry_run, "_manual_dry_run_provider_factory", _boom)
+
+    result = helpers.execute_engineering_review_helper(
+        config=_config(mode="controlled_manual"),
+        session=session,
+        loaded_specs=load_pipeline_specs(),
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="HERMES CONTROLLED PIPELINE VALIDATION - executor bridge mutation proof",
+        repo_path=str(git_repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context=_controlled_manual_executor_context(mutate_repo=git_repo),
+    )
+
+    assert result.candidate_complete is True
+    assert result.completion_allowed is True
+    assert result.git_gate["changed_files"] == ["engineer_notes.txt"]
+    assert result.reviewer_packet["safe_packet"]["git"]["changed_files"] == ["engineer_notes.txt"]
 
 
 def test_controlled_manual_cron_context_without_trigger_remains_blocked(tmp_path: Path) -> None:
