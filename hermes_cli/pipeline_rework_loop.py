@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,12 @@ class ReworkLoopIterationRecord:
         }
 
 
+class ExecutorBridgeResolutionError(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class PipelineReworkLoopResult:
     fuse: PipelineExecutionFuseResult
@@ -119,7 +126,7 @@ class PipelineReworkLoopResult:
     max_review_iterations: int
     policy_source: str
     original_task: str
-    appended_rework_context: list[str]
+    appended_rework_context: list[dict[str, Any]]
     completion_allowed: bool
     candidate_complete: bool
     user_action_required: bool
@@ -141,7 +148,7 @@ class PipelineReworkLoopResult:
             "original_task": "[redacted]",
             "original_task_hash": _stable_text_hash(self.original_task),
             "appended_rework_context": ["[redacted]" for _ in self.appended_rework_context],
-            "appended_rework_context_hashes": [_stable_text_hash(item) for item in self.appended_rework_context],
+            "appended_rework_context_hashes": [_stable_text_hash(_serialize_rework_context(item)) for item in self.appended_rework_context],
             "completion_allowed": self.completion_allowed,
             "candidate_complete": self.candidate_complete,
             "user_action_required": self.user_action_required,
@@ -200,7 +207,7 @@ def execute_bounded_rework_loop(
             usage_summary=_usage_summary_from_subagent_runs([]),
         )
 
-    appended_rework_context: list[str] = []
+    appended_rework_context: list[dict[str, Any]] = []
     iteration_history: list[ReworkLoopIterationRecord] = []
     current_snapshot = initial_snapshot
     review_iterations_completed = 0
@@ -235,25 +242,46 @@ def execute_bounded_rework_loop(
             original_task=user_message,
             appended_rework_context=appended_rework_context,
         )
-        engineer_result = _execute_step(
-            config=config,
-            session=session,
-            loaded_specs=loaded_specs,
-            runtime_factory=runtime_factory,
-            runner=runner,
-            controlled_runtime_context=runtime_context,
-            pipeline_spec=pipeline_spec,
-            current_snapshot=current_snapshot,
-            step_index=0,
-            step_kind="engineer",
-            user_message=engineer_message,
-            metadata={
-                "execution_backend": "controlled_runtime_runner" if runtime_context is not None else "legacy_runner",
-                "execution_scope": fuse.execution_scope,
-                "loop_allowed": True,
-                "review_iterations_completed": review_iterations_completed,
-            },
-        )
+        try:
+            engineer_result = _execute_step(
+                config=config,
+                session=session,
+                loaded_specs=loaded_specs,
+                runtime_factory=runtime_factory,
+                runner=runner,
+                controlled_runtime_context=runtime_context,
+                pipeline_spec=pipeline_spec,
+                current_snapshot=current_snapshot,
+                step_index=0,
+                step_kind="engineer",
+                user_message=engineer_message,
+                metadata={
+                    "execution_backend": "controlled_runtime_runner" if runtime_context is not None else "legacy_runner",
+                    "execution_scope": fuse.execution_scope,
+                    "loop_allowed": True,
+                    "review_iterations_completed": review_iterations_completed,
+                },
+            )
+        except ExecutorBridgeResolutionError as exc:
+            return _blocked_loop_result(
+                fuse=fuse,
+                session=session,
+                snapshot=current_snapshot,
+                original_task=user_message,
+                appended_rework_context=appended_rework_context,
+                iteration_history=iteration_history,
+                review_iterations_completed=review_iterations_completed,
+                max_review_iterations=max_review_iterations,
+                policy_source=policy_source,
+                blocked_reason=exc.reason,
+                user_action_required=True,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
+                subagent_runs=accumulated_subagent_runs,
+                usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
+            )
         current_snapshot = engineer_result.state_snapshot
         _append_step_run(accumulated_subagent_runs, current_snapshot, 0)
         engineer_output = _step_structured_output(current_snapshot, 0)
@@ -856,27 +884,48 @@ def execute_bounded_rework_loop(
             engineer_message=engineer_message,
             appended_rework_context=appended_rework_context,
         )
-        reviewer_result = _execute_step(
-            config=config,
-            session=session,
-            loaded_specs=loaded_specs,
-            runtime_factory=runtime_factory,
-            runner=runner,
-            controlled_runtime_context=runtime_context,
-            pipeline_spec=pipeline_spec,
-            current_snapshot=current_snapshot,
-            step_index=1,
-            step_kind="reviewer",
-            user_message=reviewer_message,
-            metadata={
-                "execution_backend": "controlled_runtime_runner" if runtime_context is not None else "legacy_runner",
-                "execution_scope": reviewer_fuse.execution_scope,
-                "engineer_result_present": True,
-                "loop_allowed": True,
-                "review_iterations_completed": review_iterations_completed,
-                "reviewer_packet": current_reviewer_packet,
-            },
-        )
+        try:
+            reviewer_result = _execute_step(
+                config=config,
+                session=session,
+                loaded_specs=loaded_specs,
+                runtime_factory=runtime_factory,
+                runner=runner,
+                controlled_runtime_context=runtime_context,
+                pipeline_spec=pipeline_spec,
+                current_snapshot=current_snapshot,
+                step_index=1,
+                step_kind="reviewer",
+                user_message=reviewer_message,
+                metadata={
+                    "execution_backend": "controlled_runtime_runner" if runtime_context is not None else "legacy_runner",
+                    "execution_scope": reviewer_fuse.execution_scope,
+                    "engineer_result_present": True,
+                    "loop_allowed": True,
+                    "review_iterations_completed": review_iterations_completed,
+                    "reviewer_packet": current_reviewer_packet,
+                },
+            )
+        except ExecutorBridgeResolutionError as exc:
+            return _blocked_loop_result(
+                fuse=fuse,
+                session=session,
+                snapshot=current_snapshot,
+                original_task=user_message,
+                appended_rework_context=appended_rework_context,
+                iteration_history=iteration_history,
+                review_iterations_completed=review_iterations_completed,
+                max_review_iterations=max_review_iterations,
+                policy_source=policy_source,
+                blocked_reason=exc.reason,
+                user_action_required=True,
+                git_gate=current_git_gate,
+                reviewer_packet=current_reviewer_packet,
+                subagent_runs=accumulated_subagent_runs,
+                usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
+                mutation_summary=current_mutation_summary,
+                test_summary=current_test_summary,
+            )
         current_snapshot = reviewer_result.state_snapshot
         _append_step_run(accumulated_subagent_runs, current_snapshot, 1)
         try:
@@ -1080,7 +1129,14 @@ def execute_bounded_rework_loop(
             )
 
         pending_reviewer_blockers = list(reviewer_blockers)
-        appended_rework_context.append(_format_blocker_context(review_iterations_completed, reviewer_blockers))
+        appended_rework_context.append(
+            _build_rework_context(
+                iteration_index=review_iterations_completed,
+                reviewer_eval=reviewer_eval,
+                reviewer_structured_output=_step_structured_output(current_snapshot, 1),
+                reviewer_packet=current_reviewer_packet,
+            )
+        )
 
 
 def evaluate_pipeline_rework_loop_fuse(
@@ -1343,11 +1399,11 @@ def _resolve_executor_bridge(executor_bridge: Any, subagent_id: str) -> Any:
     if isinstance(executor_bridge, dict):
         selected = executor_bridge.get(subagent_id)
         if selected is None:
-            raise ValueError(f"executor_bridge_missing:{subagent_id}")
+            raise ExecutorBridgeResolutionError(f"executor_bridge_missing:{subagent_id}")
         if not callable(selected):
-            raise ValueError(f"executor_bridge_invalid:{subagent_id}")
+            raise ExecutorBridgeResolutionError(f"executor_bridge_invalid:{subagent_id}")
         return selected
-    raise ValueError("executor_bridge must be callable or a mapping of subagent_id to callable")
+    raise ExecutorBridgeResolutionError("executor_bridge_invalid_configuration")
 
 
 def _execute_model_escalation_if_allowed(
@@ -1641,7 +1697,7 @@ def _blocked_loop_result(
     session: PipelineSession,
     snapshot: Any,
     original_task: str,
-    appended_rework_context: list[str],
+    appended_rework_context: list[dict[str, Any]],
     iteration_history: list[ReworkLoopIterationRecord],
     review_iterations_completed: int,
     max_review_iterations: int,
@@ -1698,7 +1754,7 @@ def _finalize_loop_result(
     max_review_iterations: int,
     policy_source: str,
     original_task: str,
-    appended_rework_context: list[str],
+    appended_rework_context: list[dict[str, Any]],
     completion_allowed: bool,
     candidate_complete: bool,
     user_action_required: bool,
@@ -2108,21 +2164,21 @@ def _reviewer_packet_metadata(*, packet: Any) -> dict[str, Any]:
     }
 
 
-def _compose_engineer_message(*, original_task: str, appended_rework_context: list[str]) -> str:
+def _compose_engineer_message(*, original_task: str, appended_rework_context: list[dict[str, Any]]) -> str:
     if not appended_rework_context:
         return original_task
-    return "\n\n".join([original_task, *appended_rework_context])
+    return "\n\n".join([original_task, "Normalized reviewer feedback:", *[_serialize_rework_context(item) for item in appended_rework_context]])
 
 
 def _compose_reviewer_message(
     *,
     original_task: str,
     engineer_message: str,
-    appended_rework_context: list[str],
+    appended_rework_context: list[dict[str, Any]],
 ) -> str:
     parts = [original_task, "Engineer candidate follows.", engineer_message]
     if appended_rework_context:
-        parts.extend(appended_rework_context)
+        parts.extend(_serialize_rework_context(item) for item in appended_rework_context)
     return "\n\n".join(parts)
 
 
@@ -2153,8 +2209,45 @@ def _compose_escalation_message(*, original_task: str, reviewer_blockers: list[s
     )
 
 
-def _format_blocker_context(iteration_index: int, blockers: list[str]) -> str:
-    return f"Reviewer blockers after iteration {iteration_index}: " + "; ".join(blockers)
+def _serialize_rework_context(value: dict[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=True)
+
+
+def _build_rework_context(
+    *,
+    iteration_index: int,
+    reviewer_eval: dict[str, Any],
+    reviewer_structured_output: dict[str, Any],
+    reviewer_packet: dict[str, Any],
+) -> dict[str, Any]:
+    blocking_findings: list[str] = []
+    non_blocking_findings: list[str] = []
+    for item in list(reviewer_structured_output.get("findings") or []):
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("summary") or "").strip()
+        if not summary:
+            continue
+        severity = str(item.get("severity") or "").lower()
+        if severity in {"high", "critical", "blocker"}:
+            blocking_findings.append(summary)
+        else:
+            non_blocking_findings.append(summary)
+    safe_packet = dict(reviewer_packet.get("safe_packet") or {})
+    git_payload = dict(safe_packet.get("git") or {})
+    return {
+        "review_iteration": iteration_index,
+        "reviewer_verdict": str(reviewer_eval.get("status") or "not_evaluated"),
+        "reviewer_blockers": [str(item) for item in list(reviewer_eval.get("blockers") or []) if item],
+        "blocking_findings": blocking_findings,
+        "non_blocking_findings": non_blocking_findings,
+        "reviewer_packet_summary": {
+            "packet_status": safe_packet.get("packet_status"),
+            "changed_files": list(git_payload.get("changed_files") or []),
+            "material_change_status": git_payload.get("material_change_status"),
+            "review_required": bool(safe_packet.get("review_required")),
+        },
+    }
 
 
 def _engineer_requests_disagreement(engineer_output: dict[str, Any]) -> bool:
