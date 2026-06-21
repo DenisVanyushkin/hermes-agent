@@ -83,6 +83,8 @@ def execute_engineering_review_helper(
         if not isinstance(controlled_runtime_context, dict) or controlled_runtime_context.get("real_executor_ready") is not True:
             return _blocked_helper_payload("real_subagent_executor_missing")
         if not (
+            callable(controlled_runtime_context.get("executor_bridge"))
+            or
             callable(controlled_runtime_context.get("invocation_client"))
             or callable(controlled_runtime_context.get("real_provider_client_factory"))
         ):
