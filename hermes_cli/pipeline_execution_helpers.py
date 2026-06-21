@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable
 
-from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE, run_controlled_engineering_e2e_dry_run
+from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE
 from hermes_cli.pipeline_rework_loop import execute_bounded_rework_loop
 
 
@@ -81,8 +80,13 @@ def execute_engineering_review_helper(
 ) -> Any:
     execution_mode = str((((config or {}).get('pipelines') or {}).get('execution') or {}).get('mode') or '').strip().lower()
     if execution_mode == CONTROLLED_MANUAL_MODE:
-        workspace = Path(repo_path).expanduser() if repo_path else None
-        return run_controlled_engineering_e2e_dry_run(task=user_message, workspace=workspace)
+        if not isinstance(controlled_runtime_context, dict) or controlled_runtime_context.get("real_executor_ready") is not True:
+            return _blocked_helper_payload("real_subagent_executor_missing")
+        if not (
+            callable(controlled_runtime_context.get("invocation_client"))
+            or callable(controlled_runtime_context.get("real_provider_client_factory"))
+        ):
+            return _blocked_helper_payload("real_subagent_executor_missing")
     try:
         return execute_bounded_rework_loop(
             config=config,
@@ -121,6 +125,50 @@ def execute_engineering_review_helper(
                 "providers_used": [],
             },
         }
+
+
+def _blocked_helper_payload(blocked_reason: str) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "blocked_reason": blocked_reason,
+        "completion_allowed": False,
+        "candidate_complete": False,
+        "user_action_required": True,
+        "subagent_runs": [],
+        "usage_summary": {
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_tokens": 0,
+            "token_sources": [],
+            "cache_sources": [],
+            "planned_subagent_count": 0,
+            "executed_subagent_count": 0,
+            "subagent_run_instance_count": 0,
+            "execution_round_count": 0,
+            "subagent_count": 0,
+            "models_used": [],
+            "providers_used": [],
+        },
+        "report": {
+            "status": "not_executed",
+            "routing": {
+                "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+                "router_status": "selected",
+            },
+            "controller": {
+                "executed": False,
+                "execution_mode": CONTROLLED_MANUAL_MODE,
+            },
+            "completion": {
+                "final_verdict": "blocked",
+                "blocked_reason": blocked_reason,
+            },
+            "tests": {"status": "unavailable", "summary": None},
+            "usage_summary": {"providers_used": [], "models_used": []},
+            "review": {"reviewer_invoked": False},
+            "changed_files": [],
+        },
+    }
 
 
 def _helper_name_for_pipeline(pipeline_id: str | None) -> str | None:

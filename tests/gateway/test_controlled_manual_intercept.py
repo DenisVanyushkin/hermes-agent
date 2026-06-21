@@ -13,6 +13,7 @@ import gateway.run as gateway_run
 from gateway.config import Platform
 from gateway.session import SessionSource
 from hermes_cli.pipeline_controlled_dry_run import format_controlled_manual_summary
+from hermes_cli.pipeline_router import RouterDecision
 
 
 class _CapturingAgent:
@@ -597,6 +598,78 @@ async def test_controlled_manual_without_actual_invocation_returns_static_block_
     assert "blocked_reason: controlled_manual_trigger_missing" in result["final_response"]
     assert "execution_invoked: false" in result["final_response"]
     assert len(_CapturingAgent.run_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_controlled_manual_production_context_blocks_without_fake_provider_factory(monkeypatch, tmp_path):
+    config = {
+        "pipelines": {
+            "enabled": True,
+            "orchestrator": {"mode": "controlled_manual"},
+            "execution": {
+                "mode": "controlled_manual",
+                "enable_gateway_execution_controller": True,
+                "allow_actual_subagent_invocation": True,
+                "allow_actual_reviewer_invocation": True,
+                "allow_actual_rework_loop": True,
+                "allow_pipelines": ["engineering_review_pipeline"],
+                "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+            },
+        }
+    }
+    captured_contexts = []
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    original_evaluate = orchestrator.evaluate_pipeline_execution_controller
+
+    def _capturing_evaluate(**kwargs):
+        captured_contexts.append(kwargs.get("helper_execution_context"))
+        return original_evaluate(**kwargs)
+
+    monkeypatch.setattr(orchestrator, "evaluate_pipeline_execution_controller", _capturing_evaluate)
+    monkeypatch.setattr(orchestrator, "persist_controlled_execution_report_artifacts", lambda **_kwargs: {})
+
+    report = orchestrator.observe_gateway_turn(
+        config=config,
+        user_message="HERMES CONTROLLED PIPELINE VALIDATION - run controlled engineering e2e dry-run",
+        session_id="session-1",
+        session_key="agent:main:telegram:dm:12345",
+        platform="telegram",
+        chat_id="12345",
+        user_id="user-1",
+        router_decision=RouterDecision(
+            pipeline_session_id="pipe-controlled-manual-test",
+            router_subagent_id="hermes_pipeline_router",
+            status="no_specialized_pipeline",
+            selected_pipeline_id=None,
+            fallback_pipeline_id="default_conversation_pipeline",
+            confidence=0.42,
+            reasoning_summary="default",
+            fallback_safe=True,
+        ),
+    )
+
+    assert report is not None
+    assert len(captured_contexts) == 1
+    context = captured_contexts[0]
+    assert isinstance(context, dict)
+    controlled_context = context["controlled_runtime_context"]
+    assert controlled_context["real_executor_ready"] is False
+    assert controlled_context["blocked_reason"] == "real_subagent_executor_missing"
+    assert "real_provider_client_factory" not in controlled_context
+    assert "invocation_client" not in controlled_context
+    assert controlled_context["allow_mutations"] is False
+    assert controlled_context["allow_test_commands"] is False
+    controller_result = report.pipeline_execution_controller
+    assert controller_result.status == "blocked"
+    assert controller_result.blocked_reason == "real_subagent_executor_missing"
+    assert controller_result.helper_result is not None
+    assert controller_result.helper_result["completion_allowed"] is False
+    assert controller_result.helper_result["report"]["review"]["reviewer_invoked"] is False
+    assert "completion_allowed" not in (controller_result.final_response_text or "")
+    assert "runtime_mode=real_provider" not in (controller_result.final_response_text or "")
+    assert "reviewer_invoked=True" not in (controller_result.final_response_text or "")
+    assert not (tmp_path / "tests" / "test_generated_example.py").exists()
+    assert _CapturingAgent.run_calls == []
 
 
 @pytest.mark.asyncio

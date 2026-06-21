@@ -181,6 +181,7 @@ def _controlled_runtime_context(*, mutate_repo: Path | None = None) -> dict[str,
     return {
         "invocation_client": _client,
         "controlled_runner": ControlledRuntimeRunner(),
+        "real_executor_ready": True,
     }
 
 
@@ -326,7 +327,7 @@ def test_controlled_manual_unknown_context_without_trigger_remains_blocked(tmp_p
     assert result.actual_execution_invoked is False
 
 
-def test_controlled_manual_authorized_manual_operator_without_trigger_executes_registered_helper(tmp_path: Path) -> None:
+def test_controlled_manual_authorized_manual_operator_without_real_executor_fails_closed(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()
     session = type(session)(
@@ -351,13 +352,23 @@ def test_controlled_manual_authorized_manual_operator_without_trigger_executes_r
             "user_message": "Implement controller helper selection",
             "repo_path": str(git_repo),
             "allow_completion_after_review": True,
-            "controlled_runtime_context": _controlled_runtime_context(mutate_repo=git_repo),
+            "controlled_runtime_context": {
+                "real_executor_ready": False,
+                "blocked_reason": "real_subagent_executor_missing",
+            },
         },
     )
 
     assert result.actual_execution_invoked is True
-    assert result.blocked_reason is None
+    assert result.blocked_reason == "real_subagent_executor_missing"
+    assert result.helper_result_status == "blocked"
     assert result.helper_result is not None
+    assert result.helper_result["blocked_reason"] == "real_subagent_executor_missing"
+    assert result.helper_result["completion_allowed"] is False
+    assert result.helper_result["report"]["review"]["reviewer_invoked"] is False
+    assert result.helper_result["report"]["changed_files"] == []
+    assert result.helper_result is not None
+    assert not (git_repo / "tests" / "test_generated_example.py").exists()
 
 
 def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_path: Path) -> None:
@@ -385,7 +396,7 @@ def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_
     assert result.actual_execution_invoked is True
     assert result.helper_result is not None
     assert result.final_response_text is not None
-    assert "Controlled pipeline validation report." in result.final_response_text
+    assert "Controlled pipeline validation completed." in result.final_response_text
     assert "pipeline: engineering_review_pipeline" in result.final_response_text
     assert "workspace:" in result.final_response_text
     assert result.workspace_basename == git_repo.name
@@ -393,8 +404,37 @@ def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_
     assert safe_payload["final_response_text"] is not None
     assert "/tmp/hermes-gateway-controlled-runs" not in safe_payload["final_response_text"]
     assert "/home/hermes/.hermes/controlled-runs" not in safe_payload["final_response_text"]
-    assert "report_path: <redacted_absolute_path>" in safe_payload["final_response_text"]
     assert "workspace: <redacted_absolute_path>/" in safe_payload["final_response_text"]
+
+
+def test_controlled_manual_registered_helper_does_not_use_manual_dry_run_provider_factory(monkeypatch, tmp_path: Path) -> None:
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+    dry_run = importlib.import_module("hermes_cli.pipeline_controlled_dry_run")
+    session, _snapshot = _snapshot_for()
+    git_repo = _init_git_repo(tmp_path)
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("_manual_dry_run_provider_factory must stay smoke-only")
+
+    monkeypatch.setattr(dry_run, "_manual_dry_run_provider_factory", _boom)
+
+    result = helpers.execute_engineering_review_helper(
+        config=_config(mode="controlled_manual"),
+        session=session,
+        loaded_specs=load_pipeline_specs(),
+        runtime_factory=None,
+        runner=None,
+        user_message="HERMES CONTROLLED PIPELINE VALIDATION - run controlled engineering e2e dry-run",
+        repo_path=str(git_repo),
+        controlled_runtime_context={"real_executor_ready": False},
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "real_subagent_executor_missing"
+    assert result["completion_allowed"] is False
+    assert result["report"]["review"]["reviewer_invoked"] is False
+    assert result["report"]["changed_files"] == []
+    assert not (git_repo / "tests" / "test_generated_example.py").exists()
 
 
 def test_controlled_manual_cron_context_without_trigger_remains_blocked(tmp_path: Path) -> None:
@@ -839,7 +879,7 @@ def test_registered_helper_invalid_controlled_context_fails_closed_with_structur
 
     assert result.status == "blocked"
     assert result.execution_allowed is True
-    assert result.blocked_reason is None
+    assert result.blocked_reason == "invalid_controlled_runtime_context"
     assert result.actual_execution_invoked is True
     assert result.helper_result_status == "blocked"
     assert result.helper_error is None
