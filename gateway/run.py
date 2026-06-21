@@ -20161,6 +20161,57 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "I can only provide a read-only plan for this request."
         )
 
+    def _pipeline_controlled_block_response(self, report: Any, *, orchestrator_mode: str) -> str | None:
+        if str(orchestrator_mode or "").strip().lower() != "controlled_manual":
+            return None
+        if report is None:
+            return None
+
+        state = getattr(report, "state", None)
+        router_status = str(getattr(state, "router_status", "") or "").strip().lower()
+        if router_status != "selected":
+            return None
+
+        pipeline_id = str(
+            getattr(state, "pipeline_id", None)
+            or getattr(state, "selected_pipeline_id", None)
+            or ""
+        ).strip()
+        if not pipeline_id or pipeline_id == "default_conversation_pipeline":
+            return None
+
+        controller = getattr(report, "pipeline_execution_controller", None)
+        if controller is None:
+            return None
+        if bool(getattr(controller, "actual_execution_invoked", False)):
+            return None
+
+        blocked_reason = self._pipeline_controlled_block_value(
+            getattr(controller, "blocked_reason", None),
+        )
+        if not blocked_reason:
+            return None
+
+        safe_pipeline = self._pipeline_controlled_block_value(pipeline_id) or "unavailable"
+        return (
+            "Controlled pipeline required.\n\n"
+            f"pipeline: {safe_pipeline}\n"
+            "status: blocked\n"
+            f"blocked_reason: {blocked_reason}\n"
+            "execution_invoked: false\n\n"
+            "This request was classified for a controlled pipeline but could not be executed in the current context. "
+            "Use an authorized operator context or an explicit controlled trigger."
+        )
+
+    @staticmethod
+    def _pipeline_controlled_block_value(value: Any) -> str | None:
+        text = str(value or "").strip()
+        if not text or len(text) > 128:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", text):
+            return None
+        return text
+
     # ------------------------------------------------------------------
 
     async def _run_agent(
@@ -20435,6 +20486,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": engineering_plan_only_response},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
+        controlled_block_response = self._pipeline_controlled_block_response(
+            pipeline_orchestrator_report,
+            orchestrator_mode=_orchestrator_mode,
+        )
+        if controlled_block_response is not None:
+            logger.info(
+                "pipeline controlled manual guard blocked normal agent fallback: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": controlled_block_response,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": controlled_block_response},
                 ],
                 "api_calls": 0,
                 "tools": [],
