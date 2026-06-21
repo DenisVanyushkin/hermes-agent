@@ -223,7 +223,9 @@ def test_blockers_trigger_one_rework_then_approval(tmp_path: Path) -> None:
         "hermes_code_reviewer",
     ]
     assert len(result.iteration_history) == 2
-    assert result.appended_rework_context == ["Reviewer blockers after iteration 1: missing regression test"]
+    assert result.appended_rework_context[0]["reviewer_verdict"] == "blocked"
+    assert result.appended_rework_context[0]["reviewer_blockers"] == ["missing regression test"]
+    assert result.appended_rework_context[0]["review_iteration"] == 1
 
 
 def test_engineer_allowed_mutation_flows_through_git_gate_and_report(tmp_path: Path) -> None:
@@ -434,6 +436,65 @@ def test_loop_limit_exceeded_blocks_before_extra_rework(tmp_path: Path) -> None:
     assert result.blocked_reason == "review_loop_limit_exceeded"
 
 
+def test_missing_reviewer_bridge_mapping_fails_closed_without_uncaught_exception(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": lambda _request, _runtime_plan: {
+                    "output_text": "ok",
+                    "completion_reason": "completed",
+                    "execution_status": "completed",
+                    "raw_metadata": {"structured_output": _engineer_output()},
+                }
+            },
+        },
+    )
+
+    assert result.iteration_history == []
+    assert result.blocked_reason == "executor_bridge_missing:hermes_code_reviewer"
+    assert result.completion_allowed is False
+    assert result.user_action_required is True
+
+
+def test_invalid_reviewer_bridge_mapping_fails_closed_without_uncaught_exception(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": lambda _request, _runtime_plan: {
+                    "output_text": "ok",
+                    "completion_reason": "completed",
+                    "execution_status": "completed",
+                    "raw_metadata": {"structured_output": _engineer_output()},
+                },
+                "hermes_code_reviewer": "not-callable",
+            },
+        },
+    )
+
+    assert result.iteration_history == []
+    assert result.blocked_reason == "executor_bridge_invalid:hermes_code_reviewer"
+    assert result.completion_allowed is False
+    assert result.user_action_required is True
+
+
 def test_invalid_reviewer_structured_output_fails_closed_without_rework(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     repo_root, loaded_specs = _loaded_specs(tmp_path)
@@ -571,6 +632,106 @@ def test_missing_reviewer_status_fails_closed_without_keyerror(tmp_path: Path) -
     assert result.candidate_complete is False
     assert result.user_action_required is True
     assert result.blocked_reason == "reviewer_result_invalid"
+
+
+def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulative(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    engineer_messages: list[str] = []
+    reviewer_packets: list[dict[str, object]] = []
+    first_request = {"seen": False}
+
+    def _engineer_executor(request, _runtime_plan):
+        engineer_messages.append(request.input_messages[0]["content"])
+        if not first_request["seen"]:
+            first_request["seen"] = True
+            _write(git_repo, "feature.txt", "first pass\n")
+            payload = _engineer_output(
+                summary="Initial implementation",
+                changes=[{"path": "feature.txt", "kind": "modify"}],
+            )
+        else:
+            _write(git_repo, "feature.txt", "first pass\nsecond pass\n")
+            payload = _engineer_output(
+                summary="Addressed reviewer feedback",
+                changes=[{"path": "feature.txt", "kind": "modify"}],
+            )
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": payload},
+        }
+
+    def _reviewer_executor(request, _runtime_plan):
+        reviewer_packets.append(dict(request.metadata["reviewer_packet"]["safe_packet"]))
+        if len(reviewer_packets) == 1:
+            return {
+                "output_text": "needs changes",
+                "completion_reason": "completed",
+                "execution_status": "completed",
+                "raw_metadata": {
+                    "structured_output": {
+                        **_reviewer_output(blockers=["missing regression test"]),
+                        "findings": [
+                            {"severity": "high", "summary": "missing regression test"},
+                            {"severity": "medium", "summary": "add note in summary"},
+                        ],
+                    }
+                },
+            }
+        return {
+            "output_text": "approved",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config={
+            "pipelines": {
+                "enabled": True,
+                "execution": {
+                    "mode": "controlled_manual",
+                    "enable_gateway_execution_controller": True,
+                    "allow_actual_subagent_invocation": True,
+                    "allow_actual_reviewer_invocation": True,
+                    "allow_actual_rework_loop": True,
+                    "allow_pipelines": ["engineering_review_pipeline"],
+                    "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                }
+            }
+        },
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _engineer_executor,
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+        },
+    )
+
+    assert len(engineer_messages) == 2
+    assert len(reviewer_packets) == 2
+    assert result.completion_allowed is True
+    assert result.reviewer_packet["safe_packet"]["git"]["changed_files"] == ["feature.txt"]
+    assert reviewer_packets[0]["git"]["changed_files"] == ["feature.txt"]
+    assert reviewer_packets[1]["git"]["changed_files"] == ["feature.txt"]
+    assert "second pass" in (git_repo / "feature.txt").read_text(encoding="utf-8")
+    assert result.appended_rework_context[0]["reviewer_verdict"] == "blocked"
+    assert result.appended_rework_context[0]["reviewer_blockers"] == ["missing regression test"]
+    assert result.appended_rework_context[0]["blocking_findings"] == ["missing regression test"]
+    assert result.appended_rework_context[0]["non_blocking_findings"] == ["add note in summary"]
+    assert result.appended_rework_context[0]["reviewer_packet_summary"]["changed_files"] == ["feature.txt"]
+    assert '"reviewer_verdict": "blocked"' in engineer_messages[1]
+    assert '"reviewer_blockers": [' in engineer_messages[1]
 
 
 
