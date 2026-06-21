@@ -556,6 +556,7 @@ def execute_bounded_rework_loop(
                     "loop_allowed": True,
                     "review_iterations_completed": review_iterations_completed,
                     "peer_discussion": True,
+                    "reviewer_packet": current_reviewer_packet,
                 },
             )
             current_snapshot = reviewer_result.state_snapshot
@@ -873,6 +874,7 @@ def execute_bounded_rework_loop(
                 "engineer_result_present": True,
                 "loop_allowed": True,
                 "review_iterations_completed": review_iterations_completed,
+                "reviewer_packet": current_reviewer_packet,
             },
         )
         current_snapshot = reviewer_result.state_snapshot
@@ -1161,7 +1163,11 @@ def _execute_step(
     metadata: dict[str, Any],
 ) -> ControlledOneStepExecutionResult:
     step = current_snapshot.planned_steps[step_index]
-    if controlled_runtime_context is not None and callable(controlled_runtime_context.executor_bridge):
+    executor_bridge = _resolve_executor_bridge(
+        controlled_runtime_context.executor_bridge if controlled_runtime_context is not None else None,
+        step.subagent_id,
+    )
+    if executor_bridge is not None:
         runtime_plan = runtime_factory.build(
             RuntimeBuildRequest(
                 loaded_specs=loaded_specs,
@@ -1183,7 +1189,7 @@ def _execute_step(
             input_messages=[{"role": "user", "content": user_message}],
             metadata=metadata,
         )
-        invocation_result = SubagentRunner(controlled_runtime_context.executor_bridge).run(runtime_plan, invocation_request)
+        invocation_result = SubagentRunner(executor_bridge).run(runtime_plan, invocation_request)
         adapted_runner_result = _adapt_runner_result(
             invocation_result=invocation_result,
             runner_request=runner_request,
@@ -1327,6 +1333,21 @@ def _execute_step(
             preflight_result={"allowed": True, "reason_code": "rework_loop_step_executed"},
         ),
     )
+
+
+def _resolve_executor_bridge(executor_bridge: Any, subagent_id: str) -> Any:
+    if executor_bridge is None:
+        return None
+    if callable(executor_bridge):
+        return executor_bridge
+    if isinstance(executor_bridge, dict):
+        selected = executor_bridge.get(subagent_id)
+        if selected is None:
+            raise ValueError(f"executor_bridge_missing:{subagent_id}")
+        if not callable(selected):
+            raise ValueError(f"executor_bridge_invalid:{subagent_id}")
+        return selected
+    raise ValueError("executor_bridge must be callable or a mapping of subagent_id to callable")
 
 
 def _execute_model_escalation_if_allowed(

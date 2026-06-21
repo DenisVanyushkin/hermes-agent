@@ -6,7 +6,11 @@ import run_agent
 import shutil
 import subprocess
 
-from hermes_cli.pipeline_aiagent_executor import AIAgentExecutorBridgeError, AIAgentSubagentExecutorBridge
+from hermes_cli.pipeline_aiagent_executor import (
+    AIAgentExecutorBridgeError,
+    AIAgentReviewerExecutorBridge,
+    AIAgentSubagentExecutorBridge,
+)
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_specs import load_pipeline_specs
@@ -69,6 +73,21 @@ def _build_runtime_result(tmp_path: Path):
             subagent_id="hermes_engineer_core",
             pipeline_session_id="pipe-aiagent-bridge",
             invocation_id="inv-aiagent-bridge",
+        )
+    )
+    return repo_root, result
+
+
+def _build_reviewer_runtime_result(tmp_path: Path):
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    factory = RuntimeFactory(repo_root=repo_root)
+    result = factory.build(
+        RuntimeBuildRequest(
+            loaded_specs=loaded_specs,
+            subagent_id="hermes_code_reviewer",
+            pipeline_session_id="pipe-aiagent-bridge",
+            invocation_id="inv-aiagent-reviewer-bridge",
         )
     )
     return repo_root, result
@@ -432,3 +451,157 @@ def test_bridge_integrates_with_bounded_rework_loop_and_observed_git_delta(tmp_p
     assert (git_repo / "bridge_loop.txt").read_text(encoding="utf-8") == "loop mutation\n"
     assert result.subagent_runs[0]["actual_provider"] == "openrouter"
     assert result.subagent_runs[0]["tool_call_summaries"][0]["tool_name"] == "write_file"
+
+
+def test_reviewer_bridge_requires_actual_packet_and_disallows_mutating_tools(tmp_path: Path) -> None:
+    repo_root, runtime_result = _build_reviewer_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentReviewerExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_FakeAgent,
+        conversation_runner=lambda _bridge, _agent, request, _runtime: {
+            "output_text": request.metadata["reviewer_packet"]["safe_packet"]["git"]["changed_files"][0],
+            "raw_metadata": {
+                "structured_output": {
+                    "schema_version": "v1",
+                    "subagent_id": "hermes_code_reviewer",
+                    "role": "reviewer",
+                    "status": "succeeded",
+                    "summary": "approved",
+                    "findings": [],
+                    "changes": [],
+                    "blockers": [],
+                    "artifacts": [],
+                    "confidence": 0.9,
+                    "requires_review": False,
+                    "next_action": "none",
+                }
+            },
+        },
+    )
+
+    for tool_name in ("write_file", "patch", "pytest", "terminal"):
+        try:
+            bridge.execute_tool(tool_name, {"path": "blocked.txt", "content": "nope"})
+        except AIAgentExecutorBridgeError as exc:
+            assert str(exc) == f"tool_not_allowed:{tool_name}"
+        else:
+            raise AssertionError("expected reviewer tool policy failure")
+
+    try:
+        bridge(
+            SubagentInvocationRequest(
+                subagent_id="hermes_code_reviewer",
+                pipeline_session_id=runtime_result.pipeline_session_id,
+                invocation_id="inv-reviewer-missing-packet",
+                input_messages=[{"role": "user", "content": "Review change"}],
+                metadata={},
+            ),
+            runtime_result,
+        )
+    except AIAgentExecutorBridgeError as exc:
+        assert str(exc) == "reviewer_packet_missing"
+    else:
+        raise AssertionError("expected reviewer packet guard failure")
+
+
+def test_bridge_loop_routes_reviewer_to_read_only_bridge_and_passes_actual_packet(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    git_repo = _init_git_repo(tmp_path)
+    reviewer_packets: list[dict[str, object]] = []
+
+    def _engineer_runner(bridge, _agent, request, _runtime):
+        assert request.subagent_id == "hermes_engineer_core"
+        bridge.execute_tool("write_file", {"path": "bridge_loop.txt", "content": "loop mutation\n"})
+        return {
+            "output_text": "engineer ok",
+            "raw_metadata": {
+                "structured_output": {
+                    "schema_version": "v1",
+                    "subagent_id": "hermes_engineer_core",
+                    "role": "engineer",
+                    "status": "succeeded",
+                    "summary": "Prepared patch.",
+                    "findings": [],
+                    "changes": [{"path": "bridge_loop.txt", "kind": "modify"}],
+                    "blockers": [],
+                    "artifacts": [],
+                    "confidence": 0.9,
+                    "requires_review": False,
+                    "next_action": "none",
+                }
+            },
+        }
+
+    def _reviewer_runner(_bridge, _agent, request, _runtime):
+        reviewer_packets.append(dict(request.metadata["reviewer_packet"]["safe_packet"]))
+        return {
+            "output_text": "review ok",
+            "raw_metadata": {
+                "structured_output": {
+                    "schema_version": "v1",
+                    "subagent_id": "hermes_code_reviewer",
+                    "role": "reviewer",
+                    "status": "succeeded",
+                    "summary": "approved",
+                    "findings": [],
+                    "changes": [],
+                    "blockers": [],
+                    "artifacts": [],
+                    "confidence": 0.9,
+                    "requires_review": False,
+                    "next_action": "none",
+                }
+            },
+        }
+
+    engineer_bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_FakeAgent,
+        conversation_runner=_engineer_runner,
+    )
+    reviewer_bridge = AIAgentReviewerExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_FakeAgent,
+        conversation_runner=_reviewer_runner,
+    )
+
+    result = execute_bounded_rework_loop(
+        config={
+            "pipelines": {
+                "enabled": True,
+                "execution": {
+                    "mode": "controlled_manual",
+                    "enable_gateway_execution_controller": True,
+                    "allow_actual_subagent_invocation": True,
+                    "allow_actual_reviewer_invocation": True,
+                    "allow_actual_rework_loop": True,
+                    "allow_pipelines": ["engineering_review_pipeline"],
+                    "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                }
+            }
+        },
+        session=_engineering_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bridge loop",
+        repo_path=str(git_repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": engineer_bridge,
+                "hermes_code_reviewer": reviewer_bridge,
+            },
+            "invocation_client": lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fake runtime must not be used")),
+        },
+    )
+
+    assert result.completion_allowed is True
+    assert reviewer_packets and reviewer_packets[0]["git"]["changed_files"] == ["bridge_loop.txt"]
+    assert reviewer_packets[0]["packet_status"] == "ready_for_review"
+    assert result.subagent_runs[1]["actual_provider"] == "openai-codex"
