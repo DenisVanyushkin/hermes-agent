@@ -10,16 +10,10 @@ from typing import Any
 
 from hermes_cli.config import cfg_get
 from hermes_cli.pipeline_execution_controller import evaluate_pipeline_execution_controller
+from hermes_cli.pipeline_autonomous_execution import AUTONOMOUS_MODE, build_autonomous_helper_context
 from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode, PipelineGateRequest, evaluate_pipeline_gate
 from hermes_cli.pipeline_router import DEFAULT_PIPELINE_ID, RouterDecision
 from hermes_cli.pipeline_report import build_pipeline_execution_report
-from hermes_cli.pipeline_report_artifacts import DEFAULT_DURABLE_ROOT, persist_controlled_execution_report_artifacts
-from hermes_cli.pipeline_controlled_dry_run import (
-    CONTROLLED_MANUAL_MODE,
-    CONTROLLED_VALIDATION_TRIGGER,
-    build_controlled_manual_helper_context,
-    format_controlled_manual_summary,
-)
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_state import (
     ExecutionReport,
@@ -32,11 +26,9 @@ from hermes_cli.pipeline_state_machine import PipelineStateSnapshot, build_pipel
 
 logger = logging.getLogger(__name__)
 
-_VALID_ORCHESTRATOR_MODES = {"disabled", "observe", CONTROLLED_MANUAL_MODE}
+_VALID_ORCHESTRATOR_MODES = {"disabled", "observe", AUTONOMOUS_MODE}
 _UNAVAILABLE = "unavailable"
 _ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
-_CONTROLLED_MANUAL_OVERRIDE_CONFIDENCE = 0.99
-_CONTROLLED_MANUAL_OVERRIDE_REASON = "controlled_manual_trigger_override"
 
 
 def observe_gateway_turn(
@@ -62,12 +54,6 @@ def observe_gateway_turn(
 
     started = time.perf_counter()
     gateway_logger = logger or globals()["logger"]
-    router_decision = _effective_router_decision_for_execution(
-        config=config,
-        user_message=user_message,
-        router_decision=router_decision,
-        orchestrator_mode=mode,
-    )
     session = create_pipeline_session(
         request=PipelineSessionRequest(
             router_decision=router_decision,
@@ -97,12 +83,12 @@ def observe_gateway_turn(
         platform=platform,
         user_message=user_message,
     )
-    state_snapshot = _build_state_snapshot_for_observe(config=config, session=session)
+    state_snapshot = _build_state_snapshot(config=config, session=session)
     helper_execution_context = None
     allow_test_execution = False
     allow_registered_helper_selection = False
-    if mode == CONTROLLED_MANUAL_MODE:
-        helper_execution_context = build_controlled_manual_helper_context(
+    if mode == AUTONOMOUS_MODE and pipeline_preflight.allowed:
+        helper_execution_context = build_autonomous_helper_context(
             config=config,
             user_message=user_message,
             session_id=session_id,
@@ -142,37 +128,15 @@ def observe_gateway_turn(
         state_snapshot=state_snapshot,
         preflight_result=pipeline_preflight.to_safe_dict(),
     ).to_safe_dict()
-    if mode == CONTROLLED_MANUAL_MODE:
+    if mode == AUTONOMOUS_MODE:
         helper_report = None
-        if (
-            pipeline_execution_controller.actual_execution_invoked
-            and isinstance(pipeline_execution_controller.helper_result, dict)
-        ):
+        if isinstance(pipeline_execution_controller.helper_result, dict):
             candidate_report = pipeline_execution_controller.helper_result.get("report")
             if isinstance(candidate_report, dict):
                 helper_report = dict(candidate_report)
         if helper_report is not None:
             pipeline_execution_report_payload = helper_report
-        report_artifacts = persist_controlled_execution_report_artifacts(
-            session=session,
-            state_snapshot=state_snapshot,
-            controller_payload=pipeline_execution_controller.to_safe_dict(),
-            pipeline_execution_report_payload=pipeline_execution_report_payload,
-            router_decision=router_decision,
-            workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, dict) else None,
-            durable_root=DEFAULT_DURABLE_ROOT,
-        )
-        response_helper_result = dict(pipeline_execution_controller.helper_result or {})
-        response_helper_result["report"] = pipeline_execution_report_payload
-        response_helper_result["report_artifacts"] = report_artifacts
-        pipeline_execution_controller = replace(
-            pipeline_execution_controller,
-            final_response_text=format_controlled_manual_summary(
-                response_helper_result,
-                workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, dict) else None,
-            ),
-            report_artifacts=report_artifacts,
-        )
+        pipeline_execution_controller = replace(pipeline_execution_controller, report_artifacts=None)
     report = OrchestratorObserveReport(
         session=session,
         state=state,
@@ -190,49 +154,6 @@ def observe_gateway_turn(
         pipeline_execution_report_payload=pipeline_execution_report_payload,
     )
     return report
-
-
-def _effective_router_decision_for_execution(
-    *,
-    config: dict[str, Any] | None,
-    user_message: str,
-    router_decision: RouterDecision | None,
-    orchestrator_mode: str,
-) -> RouterDecision | None:
-    override_pipeline_id = _controlled_manual_pipeline_override(
-        orchestrator_mode=orchestrator_mode,
-        execution_mode=_execution_mode(config),
-        user_message=user_message,
-        selected_pipeline_id=getattr(router_decision, "selected_pipeline_id", None),
-    )
-    if override_pipeline_id is None or router_decision is None:
-        return router_decision
-    return replace(
-        router_decision,
-        status="selected",
-        selected_pipeline_id=override_pipeline_id,
-        confidence=_CONTROLLED_MANUAL_OVERRIDE_CONFIDENCE,
-        reasoning_summary=_CONTROLLED_MANUAL_OVERRIDE_REASON,
-        fallback_safe=False,
-    )
-
-
-def _controlled_manual_pipeline_override(
-    *,
-    orchestrator_mode: str,
-    execution_mode: str,
-    user_message: str,
-    selected_pipeline_id: str | None,
-) -> str | None:
-    if orchestrator_mode != CONTROLLED_MANUAL_MODE:
-        return None
-    if execution_mode != CONTROLLED_MANUAL_MODE:
-        return None
-    if CONTROLLED_VALIDATION_TRIGGER not in (user_message or ""):
-        return None
-    if selected_pipeline_id == _ENGINEERING_PIPELINE_ID:
-        return None
-    return _ENGINEERING_PIPELINE_ID
 
 
 def _evaluate_pipeline_gate_safely(
@@ -307,7 +228,7 @@ def _build_pipeline_state(
     session: PipelineSession,
     config: dict[str, Any] | None,
 ) -> PipelineState:
-    snapshot = _build_state_snapshot_for_observe(config=config, session=session)
+    snapshot = _build_state_snapshot(config=config, session=session)
     return PipelineState(
         pipeline_session_id=session.pipeline_session_id,
         pipeline_id=session.pipeline_id,
@@ -401,6 +322,7 @@ def _build_pipeline_plan_payload(
         snapshot = build_pipeline_state_snapshot(
             session=session,
             pipeline_spec=pipeline_spec,
+            execution_mode=AUTONOMOUS_MODE if _orchestrator_mode(config) == AUTONOMOUS_MODE else "observe_plan_only",
         )
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
         result = _snapshot_to_plan_payload(snapshot)
@@ -448,7 +370,7 @@ def _should_plan_pipeline(
     config: dict[str, Any] | None,
     session: PipelineSession,
 ) -> bool:
-    if _orchestrator_mode(config) != "observe":
+    if _orchestrator_mode(config) not in {"observe", AUTONOMOUS_MODE}:
         return False
     return session.pipeline_id in {_ENGINEERING_PIPELINE_ID, DEFAULT_PIPELINE_ID}
 
@@ -458,17 +380,22 @@ def _load_pipeline_specs(*, repo_root: Any):
 
     return load_pipeline_specs(repo_root=repo_root)
 
-def _build_state_snapshot_for_observe(
+def _build_state_snapshot(
     *,
     config: dict[str, Any] | None,
     session: PipelineSession,
 ) -> PipelineStateSnapshot:
-    if _orchestrator_mode(config) not in {"observe", CONTROLLED_MANUAL_MODE}:
-        raise ValueError("observe state snapshot requested while orchestrator is not in observe or controlled_manual mode")
+    mode = _orchestrator_mode(config)
+    if mode not in {"observe", AUTONOMOUS_MODE}:
+        raise ValueError("pipeline state snapshot requested while orchestrator is not in observe or autonomous mode")
 
     loaded_specs = _load_pipeline_specs(repo_root=None)
     pipeline_spec = loaded_specs.pipeline_specs[session.pipeline_id]
-    return build_pipeline_state_snapshot(session=session, pipeline_spec=pipeline_spec)
+    return build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=pipeline_spec,
+        execution_mode=AUTONOMOUS_MODE if mode == AUTONOMOUS_MODE else "observe_plan_only",
+    )
 
 
 def _snapshot_to_plan_payload(snapshot: PipelineStateSnapshot) -> dict[str, Any]:

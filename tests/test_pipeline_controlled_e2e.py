@@ -56,7 +56,7 @@ def _config() -> dict[str, object]:
         "pipelines": {
             "enabled": True,
             "execution": {
-                "mode": "controlled_one_step",
+                "mode": "autonomous",
                 "allow_pipelines": ["engineering_review_pipeline"],
                 "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
                 "allow_actual_subagent_invocation": True,

@@ -1219,6 +1219,9 @@ def _execute_step(
     metadata: dict[str, Any],
 ) -> ControlledOneStepExecutionResult:
     step = current_snapshot.planned_steps[step_index]
+    configured_execution_mode = str(
+        (((config or {}).get("pipelines") or {}).get("execution") or {}).get("mode") or "disabled"
+    ).strip().lower()
     executor_bridge = _resolve_executor_bridge(
         controlled_runtime_context.executor_bridge if controlled_runtime_context is not None else None,
         step.subagent_id,
@@ -1236,7 +1239,7 @@ def _execute_step(
             session=session,
             planned_step=step,
             runtime_plan=runtime_plan,
-            execution_mode="controlled_manual",
+            execution_mode=configured_execution_mode,
         )
         invocation_request = SubagentInvocationRequest(
             subagent_id=step.subagent_id,
@@ -1252,7 +1255,7 @@ def _execute_step(
             runtime_plan=runtime_plan,
         )
         runner_request_payload = runner_request.to_safe_dict()
-        execution_mode = "controlled_manual"
+        execution_mode = configured_execution_mode
     elif controlled_runtime_context is not None:
         runtime_plan = build_runtime_factory_plan(
             session=session,

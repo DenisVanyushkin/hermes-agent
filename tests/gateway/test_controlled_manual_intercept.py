@@ -12,6 +12,7 @@ import pytest
 import gateway.run as gateway_run
 from gateway.config import Platform
 from gateway.session import SessionSource
+from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode
 from hermes_cli.pipeline_controlled_dry_run import format_controlled_manual_summary
 from hermes_cli.pipeline_router import RouterDecision
 
@@ -601,13 +602,13 @@ async def test_controlled_manual_without_actual_invocation_returns_static_block_
 
 
 @pytest.mark.asyncio
-async def test_controlled_manual_production_context_blocks_without_fake_provider_factory(monkeypatch, tmp_path):
+async def test_autonomous_production_context_blocks_without_real_provider_enablement(monkeypatch, tmp_path):
     config = {
         "pipelines": {
             "enabled": True,
-            "orchestrator": {"mode": "controlled_manual"},
+            "orchestrator": {"mode": "autonomous"},
             "execution": {
-                "mode": "controlled_manual",
+                "mode": "autonomous",
                 "enable_gateway_execution_controller": True,
                 "allow_actual_subagent_invocation": True,
                 "allow_actual_reviewer_invocation": True,
@@ -626,7 +627,26 @@ async def test_controlled_manual_production_context_blocks_without_fake_provider
         return original_evaluate(**kwargs)
 
     monkeypatch.setattr(orchestrator, "evaluate_pipeline_execution_controller", _capturing_evaluate)
-    monkeypatch.setattr(orchestrator, "persist_controlled_execution_report_artifacts", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        orchestrator,
+        "_evaluate_pipeline_gate_safely",
+        lambda **_kwargs: PipelineGateDecision(
+            allowed=True,
+            mode=PipelineGateMode.AUTONOMOUS,
+            pipeline_id="engineering_review_pipeline",
+            pipeline_session_id="pipe-autonomous-test",
+            selected_pipeline_id="engineering_review_pipeline",
+            planned_steps_count=2,
+            reason_code="allowed",
+            reason="forced test preflight",
+            would_execute=True,
+            executed=False,
+            requirements_met=["test_override"],
+            requirements_failed=[],
+            risk_level="medium",
+            safe_to_log_payload={"mode": "autonomous"},
+        ),
+    )
 
     report = orchestrator.observe_gateway_turn(
         config=config,
@@ -637,14 +657,14 @@ async def test_controlled_manual_production_context_blocks_without_fake_provider
         chat_id="12345",
         user_id="user-1",
         router_decision=RouterDecision(
-            pipeline_session_id="pipe-controlled-manual-test",
+            pipeline_session_id="pipe-autonomous-test",
             router_subagent_id="hermes_pipeline_router",
-            status="no_specialized_pipeline",
-            selected_pipeline_id=None,
+            status="selected",
+            selected_pipeline_id="engineering_review_pipeline",
             fallback_pipeline_id="default_conversation_pipeline",
-            confidence=0.42,
-            reasoning_summary="default",
-            fallback_safe=True,
+            confidence=0.99,
+            reasoning_summary="autonomous test",
+            fallback_safe=False,
         ),
     )
 

@@ -55,7 +55,7 @@ def _config() -> dict[str, object]:
         "pipelines": {
             "enabled": True,
             "execution": {
-                "mode": "controlled_one_step",
+                "mode": "autonomous",
                 "allow_pipelines": ["engineering_review_pipeline"],
                 "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
                 "allow_actual_subagent_invocation": True,
@@ -693,7 +693,7 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
             "pipelines": {
                 "enabled": True,
                 "execution": {
-                    "mode": "controlled_manual",
+                        "mode": "autonomous",
                     "enable_gateway_execution_controller": True,
                     "allow_actual_subagent_invocation": True,
                     "allow_actual_reviewer_invocation": True,

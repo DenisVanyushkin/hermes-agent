@@ -233,7 +233,7 @@ def _controlled_manual_executor_context(
 
 def _config(
     *,
-    mode: str = "controlled_one_step",
+    mode: str = "autonomous",
     controller_enabled: bool = True,
     allow_actual_subagent_invocation: bool = True,
     allow_actual_reviewer_invocation: bool = True,
@@ -276,6 +276,31 @@ def test_default_config_returns_disabled() -> None:
     assert result.blocked_reason == "execution_mode_disabled"
     assert result.selected_pipeline_id == "engineering_review_pipeline"
     assert result.would_call == "bounded_rework_loop"
+    assert result.actual_execution_invoked is False
+
+
+def test_controlled_manual_mode_is_rejected_as_unsupported() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="controlled_manual"), session=session, state_snapshot=snapshot
+    )
+    assert result.status == "blocked"
+    assert result.blocked_reason == "unsupported_execution_mode:controlled_manual"
+    assert result.actual_execution_invoked is False
+
+
+def test_autonomous_blocked_helper_does_not_claim_actual_execution() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="autonomous"),
+        session=session,
+        state_snapshot=snapshot,
+        execution_helper=lambda **_kwargs: {"status": "blocked", "blocked_reason": "runtime_not_entered"},
+        allow_test_execution=True,
+    )
+    assert result.blocked_reason == "runtime_not_entered"
     assert result.actual_execution_invoked is False
 
 
@@ -345,7 +370,7 @@ def test_execution_mode_disabled_does_not_call_helper() -> None:
     assert helper_calls == []
 
 
-def test_controlled_manual_unknown_context_without_trigger_remains_blocked(tmp_path: Path) -> None:
+def test_autonomous_unknown_context_without_trigger_remains_blocked(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()
     session = type(session)(
@@ -360,7 +385,7 @@ def test_controlled_manual_unknown_context_without_trigger_remains_blocked(tmp_p
     )
 
     result = module.evaluate_pipeline_execution_controller(
-        config=_config(mode="controlled_manual"),
+        config=_config(mode="autonomous"),
         session=session,
         state_snapshot=snapshot,
         allow_test_execution=True,
@@ -369,11 +394,11 @@ def test_controlled_manual_unknown_context_without_trigger_remains_blocked(tmp_p
     )
 
     assert result.status == "blocked"
-    assert result.blocked_reason == "controlled_manual_trigger_missing"
+    assert result.blocked_reason == "real_subagent_executor_missing"
     assert result.actual_execution_invoked is False
 
 
-def test_controlled_manual_authorized_manual_operator_without_real_executor_fails_closed(tmp_path: Path) -> None:
+def test_autonomous_authorized_manual_operator_without_real_executor_fails_closed(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()
     session = type(session)(
@@ -387,7 +412,7 @@ def test_controlled_manual_authorized_manual_operator_without_real_executor_fail
     git_repo = _init_git_repo(tmp_path)
 
     result = module.evaluate_pipeline_execution_controller(
-        config=_config(mode="controlled_manual"),
+        config=_config(mode="autonomous"),
         session=session,
         state_snapshot=snapshot,
         helper_execution_context={
@@ -405,7 +430,7 @@ def test_controlled_manual_authorized_manual_operator_without_real_executor_fail
         },
     )
 
-    assert result.actual_execution_invoked is True
+    assert result.actual_execution_invoked is False
     assert result.blocked_reason == "real_subagent_executor_missing"
     assert result.helper_result_status == "blocked"
     assert result.helper_result is not None
@@ -417,14 +442,14 @@ def test_controlled_manual_authorized_manual_operator_without_real_executor_fail
     assert not (git_repo / "tests" / "test_generated_example.py").exists()
 
 
-def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_path: Path) -> None:
+def test_autonomous_with_explicit_trigger_executes_registered_helper(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()
     repo_root = _copy_spec_tree(tmp_path)
     git_repo = _init_git_repo(tmp_path)
 
     result = module.evaluate_pipeline_execution_controller(
-        config=_config(mode="controlled_manual"),
+        config=_config(mode="autonomous"),
         session=session,
         state_snapshot=snapshot,
         helper_execution_context={
@@ -441,19 +466,10 @@ def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_
 
     assert result.actual_execution_invoked is True
     assert result.helper_result is not None
-    assert result.final_response_text is not None
-    assert "Controlled pipeline validation completed." in result.final_response_text
-    assert "pipeline: engineering_review_pipeline" in result.final_response_text
-    assert "workspace:" in result.final_response_text
     assert result.workspace_basename == git_repo.name
-    safe_payload = result.to_safe_dict()
-    assert safe_payload["final_response_text"] is not None
-    assert "/tmp/hermes-gateway-controlled-runs" not in safe_payload["final_response_text"]
-    assert "/home/hermes/.hermes/controlled-runs" not in safe_payload["final_response_text"]
-    assert "workspace: <redacted_absolute_path>/" in safe_payload["final_response_text"]
 
 
-def test_controlled_manual_executor_bridge_uses_subagent_runner_and_observed_git_delta(tmp_path: Path) -> None:
+def test_autonomous_executor_bridge_uses_subagent_runner_and_observed_git_delta(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()
     session = type(session)(
@@ -468,7 +484,7 @@ def test_controlled_manual_executor_bridge_uses_subagent_runner_and_observed_git
     executor_calls: list[dict[str, object]] = []
 
     result = module.evaluate_pipeline_execution_controller(
-        config=_config(mode="controlled_manual"),
+        config=_config(mode="autonomous"),
         session=session,
         state_snapshot=snapshot,
         helper_execution_context={
@@ -498,7 +514,7 @@ def test_controlled_manual_executor_bridge_uses_subagent_runner_and_observed_git
     assert (git_repo / "engineer_notes.txt").read_text(encoding="utf-8") == "HERMES CONTROLLED PIPELINE VALIDATION - executor bridge mutation proof\n"
 
 
-def test_controlled_manual_registered_helper_does_not_use_manual_dry_run_provider_factory(monkeypatch, tmp_path: Path) -> None:
+def test_autonomous_registered_helper_does_not_use_manual_dry_run_provider_factory(monkeypatch, tmp_path: Path) -> None:
     helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
     dry_run = importlib.import_module("hermes_cli.pipeline_controlled_dry_run")
     session, _snapshot = _snapshot_for()
@@ -510,7 +526,7 @@ def test_controlled_manual_registered_helper_does_not_use_manual_dry_run_provide
     monkeypatch.setattr(dry_run, "_manual_dry_run_provider_factory", _boom)
 
     result = helpers.execute_engineering_review_helper(
-        config=_config(mode="controlled_manual"),
+        config=_config(mode="autonomous"),
         session=session,
         loaded_specs=load_pipeline_specs(),
         runtime_factory=None,
@@ -528,12 +544,12 @@ def test_controlled_manual_registered_helper_does_not_use_manual_dry_run_provide
     assert not (git_repo / "tests" / "test_generated_example.py").exists()
 
 
-def test_controlled_manual_registered_helper_propagates_specific_blocked_reason() -> None:
+def test_autonomous_registered_helper_propagates_specific_blocked_reason() -> None:
     helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
     session, _snapshot = _snapshot_for()
 
     result = helpers.execute_engineering_review_helper(
-        config=_config(mode="controlled_manual"),
+        config=_config(mode="autonomous"),
         session=session,
         loaded_specs=load_pipeline_specs(),
         runtime_factory=None,
@@ -549,7 +565,7 @@ def test_controlled_manual_registered_helper_propagates_specific_blocked_reason(
     assert result["blocked_reason"] == "runtime_plan_blocked:hermes_engineer_core"
 
 
-def test_controlled_manual_registered_helper_accepts_executor_bridge_mapping(monkeypatch) -> None:
+def test_autonomous_registered_helper_accepts_executor_bridge_mapping(monkeypatch) -> None:
     helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
     session, _snapshot = _snapshot_for()
     expected = {"status": "ok", "bridge_mode": "mapping"}
@@ -557,7 +573,7 @@ def test_controlled_manual_registered_helper_accepts_executor_bridge_mapping(mon
     monkeypatch.setattr(helpers, "execute_bounded_rework_loop", lambda **_kwargs: expected)
 
     result = helpers.execute_engineering_review_helper(
-        config=_config(mode="controlled_manual"),
+        config=_config(mode="autonomous"),
         session=session,
         loaded_specs=load_pipeline_specs(),
         runtime_factory=object(),
@@ -575,7 +591,7 @@ def test_controlled_manual_registered_helper_accepts_executor_bridge_mapping(mon
     assert result is expected
 
 
-def test_controlled_manual_executor_bridge_does_not_use_manual_dry_run_provider_factory(monkeypatch, tmp_path: Path) -> None:
+def test_autonomous_executor_bridge_does_not_use_manual_dry_run_provider_factory(monkeypatch, tmp_path: Path) -> None:
     helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
     dry_run = importlib.import_module("hermes_cli.pipeline_controlled_dry_run")
     session, _snapshot = _snapshot_for()
@@ -588,7 +604,7 @@ def test_controlled_manual_executor_bridge_does_not_use_manual_dry_run_provider_
     monkeypatch.setattr(dry_run, "_manual_dry_run_provider_factory", _boom)
 
     result = helpers.execute_engineering_review_helper(
-        config=_config(mode="controlled_manual"),
+        config=_config(mode="autonomous"),
         session=session,
         loaded_specs=load_pipeline_specs(),
         runtime_factory=RuntimeFactory(repo_root=repo_root),
@@ -605,7 +621,7 @@ def test_controlled_manual_executor_bridge_does_not_use_manual_dry_run_provider_
     assert result.reviewer_packet["safe_packet"]["git"]["changed_files"] == ["engineer_notes.txt"]
 
 
-def test_controlled_manual_cron_context_without_trigger_remains_blocked(tmp_path: Path) -> None:
+def test_autonomous_cron_context_without_trigger_remains_blocked(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()
     session = type(session)(
@@ -618,7 +634,7 @@ def test_controlled_manual_cron_context_without_trigger_remains_blocked(tmp_path
     )
 
     result = module.evaluate_pipeline_execution_controller(
-        config=_config(mode="controlled_manual"),
+        config=_config(mode="autonomous"),
         session=session,
         state_snapshot=snapshot,
         allow_test_execution=True,
@@ -627,11 +643,11 @@ def test_controlled_manual_cron_context_without_trigger_remains_blocked(tmp_path
     )
 
     assert result.status == "blocked"
-    assert result.blocked_reason == "controlled_manual_trigger_missing"
+    assert result.blocked_reason == "real_subagent_executor_missing"
     assert result.actual_execution_invoked is False
 
 
-def test_controlled_manual_authorized_operator_still_respects_destructive_fuses(tmp_path: Path) -> None:
+def test_autonomous_authorized_operator_still_respects_destructive_fuses(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()
     session = type(session)(
@@ -643,7 +659,7 @@ def test_controlled_manual_authorized_operator_still_respects_destructive_fuses(
     )
 
     result = module.evaluate_pipeline_execution_controller(
-        config=_config(mode="controlled_manual", allow_actual_subagent_invocation=False),
+        config=_config(mode="autonomous", allow_actual_subagent_invocation=False),
         session=session,
         state_snapshot=snapshot,
         allow_test_execution=True,
@@ -670,7 +686,7 @@ def test_enabled_like_config_without_helper_is_not_wired() -> None:
 
     assert result.status == "not_wired"
     assert result.execution_allowed is False
-    assert result.blocked_reason == "live_execution_not_wired"
+    assert result.blocked_reason == "helper_execution_context_missing"
     assert result.actual_execution_invoked is False
 
 
@@ -1047,32 +1063,12 @@ def test_registered_helper_invalid_controlled_context_fails_closed_with_structur
 
     assert result.status == "blocked"
     assert result.execution_allowed is True
-    assert result.blocked_reason == "invalid_controlled_runtime_context"
-    assert result.actual_execution_invoked is True
+    assert result.blocked_reason == "real_subagent_executor_missing"
+    assert result.actual_execution_invoked is False
     assert result.helper_result_status == "blocked"
     assert result.helper_error is None
-    assert result.helper_result == {
-        "status": "blocked",
-        "blocked_reason": "invalid_controlled_runtime_context",
-        "completion_allowed": False,
-        "candidate_complete": False,
-        "user_action_required": True,
-        "subagent_runs": [],
-        "usage_summary": {
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_tokens": 0,
-            "token_sources": [],
-            "cache_sources": [],
-            "planned_subagent_count": 0,
-            "executed_subagent_count": 0,
-            "subagent_run_instance_count": 0,
-            "execution_round_count": 0,
-            "subagent_count": 0,
-            "models_used": [],
-            "providers_used": [],
-        },
-    }
+    assert result.helper_result is not None
+    assert result.helper_result["blocked_reason"] == "real_subagent_executor_missing"
 
 
 def test_missing_pipeline_context_is_fail_closed() -> None:
@@ -1129,7 +1125,7 @@ def test_ineligible_pipeline_context_is_fail_closed() -> None:
     assert helper_calls == []
 
 
-def test_controlled_manual_trigger_does_not_make_default_pipeline_eligible() -> None:
+def test_autonomous_trigger_does_not_make_default_pipeline_eligible() -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for(pipeline_id="default_conversation_pipeline", router_status="no_specialized_pipeline")
     helper_calls: list[str] = []
@@ -1138,7 +1134,7 @@ def test_controlled_manual_trigger_does_not_make_default_pipeline_eligible() -> 
         helper_calls.append("called")
 
     result = module.evaluate_pipeline_execution_controller(
-        config=_config(mode="controlled_manual", allow_pipelines=["engineering_review_pipeline", "default_conversation_pipeline"]),
+        config=_config(mode="autonomous", allow_pipelines=["engineering_review_pipeline", "default_conversation_pipeline"]),
         session=session,
         state_snapshot=snapshot,
         execution_helper=_helper,

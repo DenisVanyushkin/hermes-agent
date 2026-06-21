@@ -23,9 +23,9 @@ from hermes_cli.pipeline_specs import load_pipeline_specs
 
 logger = logging.getLogger(__name__)
 
-# `controlled_manual` remains observe-only at the router layer; execution stays gated downstream.
-CONTROLLED_MANUAL_ROUTER_MODE = "controlled_manual"
-_VALID_ROUTER_MODES = {"disabled", "observe", CONTROLLED_MANUAL_ROUTER_MODE}
+# Autonomous routing builds metadata first; execution remains gated downstream.
+AUTONOMOUS_ROUTER_MODE = "autonomous"
+_VALID_ROUTER_MODES = {"disabled", "observe", AUTONOMOUS_ROUTER_MODE}
 
 
 def observe_pipeline_router_decision(
