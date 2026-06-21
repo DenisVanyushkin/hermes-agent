@@ -528,6 +528,53 @@ def test_controlled_manual_registered_helper_does_not_use_manual_dry_run_provide
     assert not (git_repo / "tests" / "test_generated_example.py").exists()
 
 
+def test_controlled_manual_registered_helper_propagates_specific_blocked_reason() -> None:
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+    session, _snapshot = _snapshot_for()
+
+    result = helpers.execute_engineering_review_helper(
+        config=_config(mode="controlled_manual"),
+        session=session,
+        loaded_specs=load_pipeline_specs(),
+        runtime_factory=None,
+        runner=None,
+        user_message="HERMES CONTROLLED PIPELINE VALIDATION - helper readiness diagnostics",
+        controlled_runtime_context={
+            "real_executor_ready": False,
+            "blocked_reason": "runtime_plan_blocked:hermes_engineer_core",
+        },
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "runtime_plan_blocked:hermes_engineer_core"
+
+
+def test_controlled_manual_registered_helper_accepts_executor_bridge_mapping(monkeypatch) -> None:
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+    session, _snapshot = _snapshot_for()
+    expected = {"status": "ok", "bridge_mode": "mapping"}
+
+    monkeypatch.setattr(helpers, "execute_bounded_rework_loop", lambda **_kwargs: expected)
+
+    result = helpers.execute_engineering_review_helper(
+        config=_config(mode="controlled_manual"),
+        session=session,
+        loaded_specs=load_pipeline_specs(),
+        runtime_factory=object(),
+        runner=object(),
+        user_message="HERMES CONTROLLED PIPELINE VALIDATION - bridge mapping",
+        controlled_runtime_context={
+            "real_executor_ready": True,
+            "executor_bridge": {
+                "hermes_engineer_core": lambda *_args, **_kwargs: None,
+                "hermes_code_reviewer": lambda *_args, **_kwargs: None,
+            },
+        },
+    )
+
+    assert result is expected
+
+
 def test_controlled_manual_executor_bridge_does_not_use_manual_dry_run_provider_factory(monkeypatch, tmp_path: Path) -> None:
     helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
     dry_run = importlib.import_module("hermes_cli.pipeline_controlled_dry_run")
