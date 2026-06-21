@@ -55,7 +55,7 @@ def _copy_spec_tree(tmp_path: Path) -> Path:
     return repo_root
 
 
-def _runtime_context(tmp_path: Path) -> dict[str, object]:
+def _runtime_context(tmp_path: Path, *, user_message: str = "Implement controller helper selection") -> dict[str, object]:
     repo_root = _copy_spec_tree(tmp_path)
     return {
         "runtime_factory": RuntimeFactory(repo_root=repo_root),
@@ -82,7 +82,7 @@ def _runtime_context(tmp_path: Path) -> dict[str, object]:
                 },
             }
         ),
-        "user_message": "Implement controller helper selection",
+        "user_message": user_message,
     }
 
 
@@ -298,9 +298,19 @@ def test_execution_mode_disabled_does_not_call_helper() -> None:
     assert helper_calls == []
 
 
-def test_controlled_manual_requires_explicit_trigger(tmp_path: Path) -> None:
+def test_controlled_manual_unknown_context_without_trigger_remains_blocked(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()
+    session = type(session)(
+        **{
+            **session.__dict__,
+            "platform": None,
+            "chat_id": None,
+            "thread_id": None,
+            "user_id": None,
+            "session_id": None,
+        }
+    )
 
     result = module.evaluate_pipeline_execution_controller(
         config=_config(mode="controlled_manual"),
@@ -314,6 +324,40 @@ def test_controlled_manual_requires_explicit_trigger(tmp_path: Path) -> None:
     assert result.status == "blocked"
     assert result.blocked_reason == "controlled_manual_trigger_missing"
     assert result.actual_execution_invoked is False
+
+
+def test_controlled_manual_authorized_manual_operator_without_trigger_executes_registered_helper(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    session = type(session)(
+        **{
+            **session.__dict__,
+            "chat_id": "chat-1",
+            "user_id": "user-1",
+        }
+    )
+    repo_root = _copy_spec_tree(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="controlled_manual"),
+        session=session,
+        state_snapshot=snapshot,
+        helper_execution_context={
+            "runtime_factory": RuntimeFactory(repo_root=repo_root),
+            "runner": SubagentRunner(
+                executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))
+            ),
+            "user_message": "Implement controller helper selection",
+            "repo_path": str(git_repo),
+            "allow_completion_after_review": True,
+            "controlled_runtime_context": _controlled_runtime_context(mutate_repo=git_repo),
+        },
+    )
+
+    assert result.actual_execution_invoked is True
+    assert result.blocked_reason is None
+    assert result.helper_result is not None
 
 
 def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_path: Path) -> None:
@@ -351,6 +395,57 @@ def test_controlled_manual_with_explicit_trigger_executes_registered_helper(tmp_
     assert "/home/hermes/.hermes/controlled-runs" not in safe_payload["final_response_text"]
     assert "report_path: <redacted_absolute_path>" in safe_payload["final_response_text"]
     assert "workspace: <redacted_absolute_path>/" in safe_payload["final_response_text"]
+
+
+def test_controlled_manual_cron_context_without_trigger_remains_blocked(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    session = type(session)(
+        **{
+            **session.__dict__,
+            "platform": "cron",
+            "chat_id": "cron-room",
+            "user_id": "cron-user",
+        }
+    )
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="controlled_manual"),
+        session=session,
+        state_snapshot=snapshot,
+        allow_test_execution=True,
+        allow_registered_helper_selection=True,
+        helper_execution_context=_runtime_context(tmp_path),
+    )
+
+    assert result.status == "blocked"
+    assert result.blocked_reason == "controlled_manual_trigger_missing"
+    assert result.actual_execution_invoked is False
+
+
+def test_controlled_manual_authorized_operator_still_respects_destructive_fuses(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    session = type(session)(
+        **{
+            **session.__dict__,
+            "chat_id": "chat-1",
+            "user_id": "user-1",
+        }
+    )
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="controlled_manual", allow_actual_subagent_invocation=False),
+        session=session,
+        state_snapshot=snapshot,
+        allow_test_execution=True,
+        allow_registered_helper_selection=True,
+        helper_execution_context=_runtime_context(tmp_path),
+    )
+
+    assert result.status == "blocked"
+    assert result.blocked_reason == "actual_invocation_fuse_disabled"
+    assert result.actual_execution_invoked is False
 
 
 def test_enabled_like_config_without_helper_is_not_wired() -> None:

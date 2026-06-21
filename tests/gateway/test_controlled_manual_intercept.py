@@ -108,6 +108,7 @@ def _controlled_report(
         state=SimpleNamespace(
             pipeline_id=pipeline_id,
             selected_pipeline_id=pipeline_id if pipeline_id == "engineering_review_pipeline" else None,
+            router_status="selected" if pipeline_id != "default_conversation_pipeline" else "no_specialized_pipeline",
         ),
         execution_report=SimpleNamespace(executed=actual_execution_invoked, execution_mode=execution_mode),
         pipeline_execution_controller=SimpleNamespace(
@@ -570,7 +571,7 @@ async def test_controlled_manual_blocked_execution_with_safe_final_response_inte
 
 
 @pytest.mark.asyncio
-async def test_controlled_manual_without_actual_invocation_falls_back(monkeypatch, tmp_path):
+async def test_controlled_manual_without_actual_invocation_returns_static_block_without_agent(monkeypatch, tmp_path):
     config = {
         "pipelines": {
             "enabled": True,
@@ -583,12 +584,19 @@ async def test_controlled_manual_without_actual_invocation_falls_back(monkeypatc
         monkeypatch,
         tmp_path,
         config=config,
-        report=_controlled_report(actual_execution_invoked=False, final_response_text="safe controlled reply"),
+        report=_controlled_report(
+            actual_execution_invoked=False,
+            final_response_text="safe controlled reply",
+            blocked_reason="controlled_manual_trigger_missing",
+        ),
     )
 
     assert len(observe_calls) == 1
-    assert result["final_response"] == "normal agent reply"
-    assert len(_CapturingAgent.run_calls) == 1
+    assert result["final_response"].startswith("Controlled pipeline required.")
+    assert "pipeline: engineering_review_pipeline" in result["final_response"]
+    assert "blocked_reason: controlled_manual_trigger_missing" in result["final_response"]
+    assert "execution_invoked: false" in result["final_response"]
+    assert len(_CapturingAgent.run_calls) == 0
 
 
 @pytest.mark.asyncio
