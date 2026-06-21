@@ -61,7 +61,19 @@ def test_blocker_then_approval_preserves_append_only_rework_context() -> None:
         "hermes_code_reviewer",
     ]
     assert payload["appended_rework_context"] == [
-        "Reviewer blockers after iteration 1: missing regression test",
+        {
+            "blocking_findings": [],
+            "non_blocking_findings": [],
+            "review_iteration": 1,
+            "reviewer_blockers": ["missing regression test"],
+            "reviewer_packet_summary": {
+                "changed_files": [],
+                "material_change_status": None,
+                "packet_status": None,
+                "review_required": False,
+            },
+            "reviewer_verdict": "blocked",
+        }
     ]
 
 

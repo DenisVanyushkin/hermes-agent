@@ -14,20 +14,11 @@ from hermes_cli.pipeline_execution_fuse import (
     evaluate_pipeline_reviewer_execution_fuse,
 )
 from hermes_cli.pipeline_rework_loop import evaluate_pipeline_rework_loop_fuse
-from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE, CONTROLLED_VALIDATION_TRIGGER
 from hermes_cli.pipeline_report_artifacts import sanitize_report_artifact_metadata
 from hermes_cli.pipeline_specs import load_pipeline_specs
 
-_AUTHORIZED_MANUAL_CHAT_PLATFORMS = {
-    "discord",
-    "feishu",
-    "matrix",
-    "signal",
-    "slack",
-    "sms",
-    "telegram",
-    "whatsapp",
-}
+AUTONOMOUS_MODE = "autonomous"
+_VALID_EXECUTION_MODES = {"disabled", "observe", AUTONOMOUS_MODE}
 
 
 @dataclass(frozen=True)
@@ -99,16 +90,16 @@ def evaluate_pipeline_execution_controller(
     if execution_mode == "disabled":
         return replace(base, status="disabled", blocked_reason="execution_mode_disabled")
 
+    if execution_mode not in _VALID_EXECUTION_MODES:
+        return replace(base, status="blocked", blocked_reason=f"unsupported_execution_mode:{execution_mode}")
+
+    if execution_mode == "observe":
+        return replace(base, status="blocked", blocked_reason="observe_only")
+
     if not _actual_gateway_execution_enabled(config):
         return replace(base, status="would_execute", blocked_reason="gateway_execution_not_enabled")
 
-    if execution_mode == CONTROLLED_MANUAL_MODE:
-        if not _controlled_manual_execution_authorized(
-            session=session,
-            pipeline_id=pipeline_id,
-            helper_execution_context=helper_execution_context,
-        ):
-            return replace(base, status="blocked", blocked_reason="controlled_manual_trigger_missing")
+    if execution_mode == AUTONOMOUS_MODE:
         allow_test_execution = True
         allow_registered_helper_selection = True
 
@@ -205,7 +196,7 @@ def evaluate_pipeline_execution_controller(
         status=helper_status,
         execution_allowed=True,
         blocked_reason=helper_blocked_reason,
-        actual_execution_invoked=True,
+        actual_execution_invoked=helper_status != "blocked",
         resolved_helper_name=helper_resolution.helper_name,
         helper_result_status=helper_status,
         helper_result=safe_helper_result,
@@ -323,46 +314,6 @@ def _helper_blocked_reason(safe_helper_result: dict[str, Any] | None) -> str | N
     return None
 
 
-def _controlled_manual_trigger_present(helper_execution_context: Mapping[str, Any] | None) -> bool:
-    if not isinstance(helper_execution_context, Mapping):
-        return False
-    user_message = str(helper_execution_context.get("user_message") or "")
-    return CONTROLLED_VALIDATION_TRIGGER in user_message
-
-
-def _controlled_manual_execution_authorized(
-    *,
-    session: Any,
-    pipeline_id: str | None,
-    helper_execution_context: Mapping[str, Any] | None,
-) -> bool:
-    if _controlled_manual_trigger_present(helper_execution_context):
-        return True
-    return _authorized_manual_chat_operator_context(
-        session=session,
-        pipeline_id=pipeline_id,
-    )
-
-
-def _authorized_manual_chat_operator_context(*, session: Any, pipeline_id: str | None) -> bool:
-    if pipeline_id != "engineering_review_pipeline":
-        return False
-    if getattr(session, "router_status", None) != "selected":
-        return False
-    platform = str(getattr(session, "platform", "") or "").strip().lower()
-    if not platform or platform == "cron":
-        return False
-    if platform not in _AUTHORIZED_MANUAL_CHAT_PLATFORMS:
-        return False
-
-    markers = (
-        getattr(session, "chat_id", None),
-        getattr(session, "thread_id", None),
-        getattr(session, "user_id", None),
-    )
-    return any(str(marker or "").strip() for marker in markers)
-
-
 def _workspace_basename(helper_execution_context: Mapping[str, Any] | None) -> str | None:
     if not isinstance(helper_execution_context, Mapping):
         return None
@@ -377,9 +328,12 @@ def _workspace_basename(helper_execution_context: Mapping[str, Any] | None) -> s
 def _final_response_text(helper_result: Any, helper_execution_context: Mapping[str, Any] | None) -> str | None:
     if not isinstance(helper_result, dict):
         return None
-    from hermes_cli.pipeline_controlled_dry_run import format_controlled_manual_summary
-
-    return format_controlled_manual_summary(helper_result, workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, Mapping) else None)
+    report = helper_result.get("report")
+    if isinstance(report, Mapping):
+        final_response = report.get("final_response")
+        if isinstance(final_response, Mapping) and isinstance(final_response.get("text"), str):
+            return final_response["text"]
+    return None
 
 
 def _sanitize_final_response_text_for_safe_payload(

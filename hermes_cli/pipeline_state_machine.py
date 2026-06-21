@@ -46,6 +46,7 @@ def build_pipeline_state_snapshot(
     session: PipelineSession,
     pipeline_spec: dict[str, Any],
     loaded_specs: Any | None = None,
+    execution_mode: str = "observe_plan_only",
 ) -> PipelineStateSnapshot:
     loop_policy = resolve_loop_limit_policy(pipeline_spec).to_safe_dict()
     enriched_steps, runtime_factory_plans = _build_step_contracts(
@@ -79,7 +80,7 @@ def build_pipeline_state_snapshot(
         state="preflight_blocked_execution",
         transition_path=transition_path,
         completion_reason="plan_only",
-        execution_mode="observe_plan_only",
+        execution_mode=execution_mode,
         executed=False,
         completion_allowed=True,
         completion_blocked_reason="execution_disabled",

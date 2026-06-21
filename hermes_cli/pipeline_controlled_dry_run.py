@@ -20,7 +20,9 @@ from hermes_cli.subagent_runner import ControlledRuntimeRunner, SubagentRunner
 ENGINEER_SUBAGENT_ID = "hermes_engineer_core"
 REVIEWER_SUBAGENT_ID = "hermes_code_reviewer"
 ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
-CONTROLLED_MANUAL_MODE = "controlled_manual"
+# Legacy helper/test names remain for dry-run compatibility, but they now
+# exercise the autonomous execution path only.
+AUTONOMOUS_MODE = "autonomous"
 CONTROLLED_VALIDATION_TRIGGER = "HERMES CONTROLLED PIPELINE VALIDATION"
 GATEWAY_WORKSPACE_ROOT = Path('/tmp/hermes-gateway-controlled-runs')
 
@@ -86,7 +88,7 @@ def run_controlled_engineering_e2e_dry_run(*, task: str, workspace: Path | None)
                 "status": _result_status(result),
                 "blocked_reason": result.blocked_reason,
                 "actual_execution_invoked": True,
-                "execution_mode": CONTROLLED_MANUAL_MODE,
+                "execution_mode": AUTONOMOUS_MODE,
                 "helper_result_status": _result_status(result),
                 "workspace_basename": dry_run_workspace.name,
             },
@@ -493,7 +495,7 @@ def _controlled_manual_config() -> dict[str, Any]:
         'pipelines': {
             'enabled': True,
             'execution': {
-                'mode': CONTROLLED_MANUAL_MODE,
+                'mode': AUTONOMOUS_MODE,
                 'allow_pipelines': [ENGINEERING_PIPELINE_ID],
                 'allowed_subagents': [ENGINEER_SUBAGENT_ID, REVIEWER_SUBAGENT_ID],
                 'allow_actual_subagent_invocation': True,

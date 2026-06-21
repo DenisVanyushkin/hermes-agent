@@ -421,7 +421,7 @@ def test_bridge_integrates_with_bounded_rework_loop_and_observed_git_delta(tmp_p
             "pipelines": {
                 "enabled": True,
                 "execution": {
-                    "mode": "controlled_manual",
+                    "mode": "autonomous",
                     "enable_gateway_execution_controller": True,
                     "allow_actual_subagent_invocation": True,
                     "allow_actual_reviewer_invocation": True,
@@ -575,7 +575,7 @@ def test_bridge_loop_routes_reviewer_to_read_only_bridge_and_passes_actual_packe
             "pipelines": {
                 "enabled": True,
                 "execution": {
-                    "mode": "controlled_manual",
+                    "mode": "autonomous",
                     "enable_gateway_execution_controller": True,
                     "allow_actual_subagent_invocation": True,
                     "allow_actual_reviewer_invocation": True,
@@ -602,6 +602,9 @@ def test_bridge_loop_routes_reviewer_to_read_only_bridge_and_passes_actual_packe
     )
 
     assert result.completion_allowed is True
+    assert result.execution_report is not None
+    assert result.execution_report.execution_mode == "autonomous"
+    assert result.execution_report.executed is True
     assert reviewer_packets and reviewer_packets[0]["git"]["changed_files"] == ["bridge_loop.txt"]
     assert reviewer_packets[0]["packet_status"] == "ready_for_review"
     assert result.subagent_runs[1]["actual_provider"] == "openai-codex"

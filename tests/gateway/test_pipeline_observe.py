@@ -74,7 +74,7 @@ def test_observe_invalid_mode_is_treated_as_disabled(monkeypatch, caplog):
     assert any("Invalid pipelines.router.mode" in record.message for record in caplog.records)
 
 
-def test_controlled_manual_router_mode_routes_without_invalid_mode_warning(monkeypatch, caplog):
+def test_autonomous_router_mode_routes_without_invalid_mode_warning(monkeypatch, caplog):
     from hermes_cli import pipeline_observe
 
     decision = RouterDecision(
@@ -84,7 +84,7 @@ def test_controlled_manual_router_mode_routes_without_invalid_mode_warning(monke
         selected_pipeline_id="engineering_review_pipeline",
         fallback_pipeline_id="default_conversation_pipeline",
         confidence=0.93,
-        reasoning_summary="controlled manual engineering request",
+            reasoning_summary="autonomous engineering request",
         requires_clarification=False,
         fallback_safe=False,
         policy_block_reason=None,
@@ -98,7 +98,7 @@ def test_controlled_manual_router_mode_routes_without_invalid_mode_warning(monke
 
     class _FakeRouter:
         def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
-            assert user_message == "HERMES CONTROLLED PIPELINE VALIDATION - run controlled engineering e2e dry-run"
+            assert user_message == "run autonomous engineering pipeline"
             assert pipeline_session_id
             assert router_subagent_id == "hermes_pipeline_router"
             return decision
@@ -108,8 +108,8 @@ def test_controlled_manual_router_mode_routes_without_invalid_mode_warning(monke
 
     with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
         result = pipeline_observe.observe_pipeline_router_decision(
-            config={"pipelines": {"router": {"mode": "controlled_manual"}}},
-            user_message="HERMES CONTROLLED PIPELINE VALIDATION - run controlled engineering e2e dry-run",
+            config={"pipelines": {"router": {"mode": "autonomous"}}},
+            user_message="run autonomous engineering pipeline",
             session_id="sess-controlled-router",
             platform="telegram",
         )
