@@ -64,8 +64,9 @@ _SENSITIVE_PARTS = ("api_key", "token", "password", "secret", "credential")
 
 @dataclass(frozen=True)
 class ControlledRuntimeContext:
-    invocation_client: Any
     controlled_runner: ControlledRuntimeRunner
+    invocation_client: Any = None
+    executor_bridge: Any = None
     allow_model_escalation: bool = False
     allow_real_provider_execution: bool = False
     request_real_provider_execution: bool = False
@@ -1160,7 +1161,37 @@ def _execute_step(
     metadata: dict[str, Any],
 ) -> ControlledOneStepExecutionResult:
     step = current_snapshot.planned_steps[step_index]
-    if controlled_runtime_context is not None:
+    if controlled_runtime_context is not None and callable(controlled_runtime_context.executor_bridge):
+        runtime_plan = runtime_factory.build(
+            RuntimeBuildRequest(
+                loaded_specs=loaded_specs,
+                subagent_id=step.subagent_id,
+                pipeline_session_id=session.pipeline_session_id,
+                invocation_id=f"{session.pipeline_session_id}:{step_kind}:loop:{step_index}",
+            )
+        )
+        runner_request = _build_runner_request_from_runtime_plan(
+            session=session,
+            planned_step=step,
+            runtime_plan=runtime_plan,
+            execution_mode="controlled_manual",
+        )
+        invocation_request = SubagentInvocationRequest(
+            subagent_id=step.subagent_id,
+            pipeline_session_id=session.pipeline_session_id,
+            invocation_id=f"{session.pipeline_session_id}:{step_kind}:loop:{step_index}",
+            input_messages=[{"role": "user", "content": user_message}],
+            metadata=metadata,
+        )
+        invocation_result = SubagentRunner(controlled_runtime_context.executor_bridge).run(runtime_plan, invocation_request)
+        adapted_runner_result = _adapt_runner_result(
+            invocation_result=invocation_result,
+            runner_request=runner_request,
+            runtime_plan=runtime_plan,
+        )
+        runner_request_payload = runner_request.to_safe_dict()
+        execution_mode = "controlled_manual"
+    elif controlled_runtime_context is not None:
         runtime_plan = build_runtime_factory_plan(
             session=session,
             planned_step=step,
@@ -1708,13 +1739,16 @@ def _normalize_controlled_runtime_context(
         return None
     if isinstance(value, ControlledRuntimeContext):
         return value
-    if not isinstance(value, dict) or value.get("invocation_client") is None:
-        raise ValueError("controlled_runtime_context requires invocation_client")
+    if not isinstance(value, dict):
+        raise ValueError("controlled_runtime_context must be a mapping")
+    if value.get("invocation_client") is None and value.get("executor_bridge") is None:
+        raise ValueError("controlled_runtime_context requires invocation_client or executor_bridge")
     controlled_runner = value.get("controlled_runner")
     if not isinstance(controlled_runner, ControlledRuntimeRunner):
         controlled_runner = ControlledRuntimeRunner()
     return ControlledRuntimeContext(
-        invocation_client=value["invocation_client"],
+        invocation_client=value.get("invocation_client"),
+        executor_bridge=value.get("executor_bridge"),
         controlled_runner=controlled_runner,
         allow_model_escalation=bool(value.get("allow_model_escalation", False)),
         allow_real_provider_execution=bool(value.get("allow_real_provider_execution", False)),
