@@ -198,14 +198,16 @@ def evaluate_pipeline_execution_controller(
         )
 
     safe_helper_result = _safe_helper_result(helper_result)
+    helper_status = _helper_result_status(helper_result)
+    helper_blocked_reason = _helper_blocked_reason(safe_helper_result) if helper_status == "blocked" else None
     return replace(
         base,
-        status=_helper_result_status(helper_result),
+        status=helper_status,
         execution_allowed=True,
-        blocked_reason=None,
+        blocked_reason=helper_blocked_reason,
         actual_execution_invoked=True,
         resolved_helper_name=helper_resolution.helper_name,
-        helper_result_status=_helper_result_status(helper_result),
+        helper_result_status=helper_status,
         helper_result=safe_helper_result,
         final_response_text=_final_response_text(safe_helper_result, helper_execution_context),
         workspace_basename=_workspace_basename(helper_execution_context),
@@ -309,6 +311,15 @@ def _safe_helper_result(helper_result: Any) -> dict[str, Any] | None:
         return safe if isinstance(safe, dict) else {"value": safe}
     if isinstance(helper_result, Mapping):
         return dict(helper_result)
+    return None
+
+
+def _helper_blocked_reason(safe_helper_result: dict[str, Any] | None) -> str | None:
+    if not isinstance(safe_helper_result, Mapping):
+        return None
+    value = safe_helper_result.get("blocked_reason")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
 
 
