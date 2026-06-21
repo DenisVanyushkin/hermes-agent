@@ -21,7 +21,7 @@ class PipelineGateMode(str, Enum):
     OBSERVE = "observe"
     PLAN_ONLY = "plan_only"
     EXECUTE = "execute"
-    CONTROLLED_MANUAL = "controlled_manual"
+    AUTONOMOUS = "autonomous"
 
 
 @dataclass(frozen=True)
@@ -90,6 +90,7 @@ class PipelineGateDecision:
 
 def evaluate_pipeline_gate(request: PipelineGateRequest) -> PipelineGateDecision:
     policy = _load_policy(request.config)
+    raw_execution_mode = _raw_execution_mode(request.config)
     router = request.router_decision
     payload = dict(request.pipeline_plan_payload or {})
     selected_pipeline_id = getattr(router, "selected_pipeline_id", None)
@@ -115,6 +116,13 @@ def evaluate_pipeline_gate(request: PipelineGateRequest) -> PipelineGateDecision
             requirements_failed=requirements_failed,
             risk_level=risk_level,
             safe_to_log_payload=_safe_payload(request, policy, pipeline_id, pipeline_session_id),
+        )
+
+    if raw_execution_mode != "invalid" and raw_execution_mode not in {mode.value for mode in PipelineGateMode}:
+        requirements_failed.append("supported_execution_mode")
+        return deny(
+            f"unsupported_execution_mode:{raw_execution_mode}",
+            f"Unsupported pipeline execution mode: {raw_execution_mode}",
         )
 
     if not policy.config_valid:
@@ -288,6 +296,13 @@ def _load_policy(config: Mapping[str, Any] | None) -> PipelineGatePolicy:
     )
 
 
+def _raw_execution_mode(config: Mapping[str, Any] | None) -> str:
+    raw = cfg_get(config, "pipelines", "execution", "mode", default="disabled")
+    if not isinstance(raw, str):
+        return "invalid"
+    return raw.strip().lower() or "disabled"
+
+
 def _contains_expected_steps(planned_subagent_ids: list[str], planned_step_subagents: list[str]) -> bool:
     expected = set(EXPECTED_SUBAGENT_IDS)
     return expected.issubset(set(planned_subagent_ids)) and expected.issubset(set(planned_step_subagents))
@@ -295,8 +310,9 @@ def _contains_expected_steps(planned_subagent_ids: list[str], planned_step_subag
 
 def _constructors_verified(step_records: list[Mapping[str, Any]]) -> bool:
     for step in step_records:
-        provider = step.get("constructor_provider")
-        model = step.get("constructor_model")
+        runtime_plan = step.get("runtime_factory_plan")
+        provider = step.get("constructor_provider") or (runtime_plan.get("provider") if isinstance(runtime_plan, Mapping) else None)
+        model = step.get("constructor_model") or (runtime_plan.get("model") if isinstance(runtime_plan, Mapping) else None)
         if not provider or not model:
             return False
     return True

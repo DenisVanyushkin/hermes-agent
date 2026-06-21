@@ -158,7 +158,7 @@ def _smoke_config() -> dict[str, Any]:
     execution = copy.deepcopy(pipelines.get("execution") or {})
     execution.update(
         {
-            "mode": "controlled_one_step",
+            "mode": "autonomous",
             "allow_pipelines": [ENGINEERING_PIPELINE_ID],
             "allowed_subagents": [ENGINEER_SUBAGENT_ID, REVIEWER_SUBAGENT_ID],
             "allow_actual_subagent_invocation": True,

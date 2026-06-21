@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 import shutil
 
 from hermes_cli.pipeline_aiagent_executor import AIAgentReviewerExecutorBridge, AIAgentSubagentExecutorBridge
@@ -37,6 +38,48 @@ def test_build_controlled_manual_helper_context_defaults_to_fail_closed(monkeypa
     assert controlled_context["blocked_reason"] == "real_subagent_executor_missing"
     assert controlled_context["allow_real_provider_execution"] is False
     assert "executor_bridge" not in controlled_context
+
+
+def test_autonomous_context_blocks_before_bridge_construction_when_provider_gate_is_false(monkeypatch, tmp_path: Path) -> None:
+    module = __import__("hermes_cli.pipeline_autonomous_execution", fromlist=["build_autonomous_helper_context"])
+    monkeypatch.setattr(module, "autonomous_workspace", lambda **_kwargs: tmp_path / "workspace")
+    monkeypatch.setattr(module, "AIAgentSubagentExecutorBridge", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("engineer bridge must not be built")))
+    monkeypatch.setattr(module, "AIAgentReviewerExecutorBridge", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("reviewer bridge must not be built")))
+    context = module.build_autonomous_helper_context(
+        config={"pipelines": {"execution": {"allow_real_provider_execution": False}}},
+        user_message="task",
+        session_id="session",
+        pipeline_session_id="pipeline",
+        repo_root=tmp_path,
+    )
+    assert context["controlled_runtime_context"]["real_executor_ready"] is False
+    assert context["controlled_runtime_context"]["allow_real_provider_execution"] is False
+
+
+def test_autonomous_context_builds_engineer_and_reviewer_bridges_after_provider_gate(monkeypatch, tmp_path: Path) -> None:
+    module = __import__("hermes_cli.pipeline_autonomous_execution", fromlist=["build_autonomous_helper_context"])
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(module, "autonomous_workspace", lambda **_kwargs: workspace)
+    monkeypatch.setattr(module, "prepare_autonomous_workspace", lambda **_kwargs: workspace)
+    plan = SimpleNamespace(errors=[], to_safe_dict=lambda: {"status": "ready"})
+    monkeypatch.setattr(module, "_build_bridge_runtime_plans", lambda **_kwargs: {module.ENGINEER_SUBAGENT_ID: plan, module.REVIEWER_SUBAGENT_ID: plan})
+    monkeypatch.setattr(module, "load_pipeline_specs", lambda **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(module, "AIAgentSubagentExecutorBridge", lambda **_kwargs: "engineer-bridge")
+    monkeypatch.setattr(module, "AIAgentReviewerExecutorBridge", lambda **_kwargs: "reviewer-bridge")
+    context = module.build_autonomous_helper_context(
+        config={"pipelines": {"execution": {"allow_real_provider_execution": True}}},
+        user_message="task",
+        session_id="session",
+        pipeline_session_id="pipeline",
+        repo_root=tmp_path,
+    )
+    runtime_context = context["controlled_runtime_context"]
+    assert runtime_context["real_executor_ready"] is True
+    assert runtime_context["executor_bridge"] == {
+        "hermes_engineer_core": "engineer-bridge",
+        "hermes_code_reviewer": "reviewer-bridge",
+    }
 
 
 def test_build_controlled_manual_helper_context_builds_executor_bridge_mapping_when_gate_enabled(monkeypatch, tmp_path: Path) -> None:

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from hermes_cli.pipeline_controlled_dry_run import CONTROLLED_MANUAL_MODE
 from hermes_cli.pipeline_controlled_dry_run import ENGINEER_SUBAGENT_ID, REVIEWER_SUBAGENT_ID
 from hermes_cli.pipeline_rework_loop import execute_bounded_rework_loop
 
@@ -80,7 +79,7 @@ def execute_engineering_review_helper(
     **_kwargs: Any,
 ) -> Any:
     execution_mode = str((((config or {}).get('pipelines') or {}).get('execution') or {}).get('mode') or '').strip().lower()
-    if execution_mode == CONTROLLED_MANUAL_MODE:
+    if execution_mode == "autonomous":
         blocked_reason = _controlled_manual_blocked_reason(controlled_runtime_context)
         if not isinstance(controlled_runtime_context, dict) or controlled_runtime_context.get("real_executor_ready") is not True:
             return _blocked_helper_payload(blocked_reason)
@@ -156,7 +155,7 @@ def _blocked_helper_payload(blocked_reason: str) -> dict[str, Any]:
             },
             "controller": {
                 "executed": False,
-                "execution_mode": CONTROLLED_MANUAL_MODE,
+                "execution_mode": "autonomous",
             },
             "completion": {
                 "final_verdict": "blocked",

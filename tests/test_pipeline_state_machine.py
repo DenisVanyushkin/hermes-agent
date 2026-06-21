@@ -75,6 +75,23 @@ def test_state_machine_engineering_plan_includes_engineer_and_reviewer_steps():
     assert snapshot.executed is False
 
 
+def test_autonomous_pipeline_reuses_planned_state_contract():
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+        execution_mode="autonomous",
+    )
+    assert snapshot.status == "planned"
+    assert snapshot.completion_reason == "plan_only"
+    assert snapshot.execution_mode == "autonomous"
+    assert [step.subagent_id for step in snapshot.planned_steps] == [
+        "hermes_engineer_core",
+        "hermes_code_reviewer",
+    ]
+
+
 def test_state_machine_default_route_plans_response_and_blocks_execution():
     loaded = load_pipeline_specs()
     session = _session_for(None, status="no_specialized_pipeline")
