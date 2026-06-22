@@ -71,7 +71,51 @@ def observe_gateway_turn(
     state = _build_pipeline_state(
         session=session,
         config=config,
+        router_decision=router_decision,
     )
+    if _router_failed_fail_closed(router_decision):
+        pipeline_execution_controller = _routing_failed_controller_result(mode=mode)
+        pipeline_execution_report_payload = _routing_failed_execution_report_payload(
+            session=session,
+            router_decision=router_decision,
+            execution_mode=mode,
+        )
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        execution_report = ExecutionReport(
+            pipeline_session_id=pipeline_session_id,
+            pipeline_id=state.pipeline_id,
+            router_status=state.router_status,
+            selected_pipeline_id=state.selected_pipeline_id,
+            fallback_pipeline_id=state.fallback_pipeline_id,
+            completion_allowed=state.completion_allowed,
+            completion_reason="routing_failed_fail_closed",
+            executed=False,
+            would_execute=False,
+            execution_mode=mode,
+            runtime_status="not_executed",
+            token_usage=getattr(router_decision, "token_usage", None) if router_decision is not None else _UNAVAILABLE,
+            cache_usage=getattr(router_decision, "cache_usage", None) if router_decision is not None else _UNAVAILABLE,
+            tool_call_summary=[],
+            warnings=[],
+            elapsed_ms=elapsed_ms,
+        )
+        report = OrchestratorObserveReport(
+            session=session,
+            state=state,
+            execution_report=execution_report,
+            pipeline_execution_controller=pipeline_execution_controller,
+        )
+        _log_observe_report(
+            gateway_logger=gateway_logger,
+            report=report,
+            router_decision=router_decision,
+            orchestrator_mode=mode,
+            pipeline_plan_payload=_routing_failed_plan_payload(),
+            pipeline_preflight_payload=_routing_failed_preflight_payload(router_decision),
+            pipeline_execution_controller_payload=pipeline_execution_controller.to_safe_dict(),
+            pipeline_execution_report_payload=pipeline_execution_report_payload,
+        )
+        return report
     pipeline_plan_payload = _build_pipeline_plan_payload(
         config=config,
         session=session,
@@ -227,7 +271,21 @@ def _build_pipeline_state(
     *,
     session: PipelineSession,
     config: dict[str, Any] | None,
+    router_decision: RouterDecision | None = None,
 ) -> PipelineState:
+    if _router_failed_fail_closed(router_decision):
+        return PipelineState(
+            pipeline_session_id=session.pipeline_session_id,
+            pipeline_id=session.pipeline_id,
+            state="safe_default_fallback",
+            mode=session.mode,
+            router_status=session.router_status or _UNAVAILABLE,
+            selected_pipeline_id=getattr(router_decision, "selected_pipeline_id", None),
+            fallback_pipeline_id=DEFAULT_PIPELINE_ID,
+            completion_allowed=False,
+            completion_blocked_reason="autonomous_not_selected",
+            final_verdict="safe_default_fallback_used",
+        )
     snapshot = _build_state_snapshot(config=config, session=session)
     return PipelineState(
         pipeline_session_id=session.pipeline_session_id,
@@ -241,6 +299,173 @@ def _build_pipeline_state(
         completion_blocked_reason=snapshot.completion_blocked_reason,
         final_verdict=snapshot.final_verdict,
     )
+
+
+def _router_failed_fail_closed(router_decision: RouterDecision | None) -> bool:
+    if router_decision is None:
+        return False
+    return (
+        str(getattr(router_decision, "status", "") or "").strip().lower() == "routing_failed"
+        and not getattr(router_decision, "selected_pipeline_id", None)
+        and not bool(getattr(router_decision, "fallback_safe", False))
+    )
+
+
+def _routing_failed_controller_result(*, mode: str):
+    from hermes_cli.pipeline_execution_controller import PipelineExecutionControllerResult
+
+    return PipelineExecutionControllerResult(
+        status="blocked",
+        execution_allowed=False,
+        blocked_reason="autonomous_not_selected",
+        selected_pipeline_id=None,
+        would_call=None,
+        actual_execution_invoked=False,
+        execution_mode=mode,
+        resolved_helper_name=None,
+        helper_result_status="not_invoked",
+        helper_result=None,
+        helper_error=None,
+        final_response_text=None,
+        workspace_basename=None,
+        report_artifacts=None,
+    )
+
+
+def _routing_failed_plan_payload() -> dict[str, Any]:
+    return {
+        "pipeline_plan_status": "not_applicable",
+        "pipeline_plan_completion_reason": "safe_default_fallback_used",
+        "pipeline_plan_mode": "not_applicable",
+        "planned_steps_count": 0,
+        "planned_subagent_ids": [],
+        "engineer_step_present": False,
+        "reviewer_planned": False,
+        "reviewer_step_present": False,
+        "reviewer_condition": None,
+        "pipeline_plan_elapsed_ms": 0.0,
+        "runtime_plan_failed": False,
+        "pipeline_plan_error": None,
+        "pipeline_plan": None,
+    }
+
+
+def _routing_failed_preflight_payload(router_decision: RouterDecision | None) -> dict[str, Any]:
+    return {
+        "allowed": False,
+        "blocked": True,
+        "executed": False,
+        "would_execute": False,
+        "selected_pipeline_id": getattr(router_decision, "selected_pipeline_id", None),
+        "pipeline_id": DEFAULT_PIPELINE_ID,
+        "pipeline_session_id": getattr(router_decision, "pipeline_session_id", None),
+        "planned_steps_count": 0,
+        "reason_code": "safe_default_fallback_used",
+        "reason": "Router did not safely select an autonomous pipeline; using no-tools default fallback.",
+        "requirements_met": [],
+        "requirements_failed": ["autonomous_pipeline_not_selected"],
+        "risk_level": "medium",
+        "mode": PipelineGateMode.DISABLED.value,
+        "tools_enabled": False,
+        "safe_default_fallback": True,
+    }
+
+
+def _routing_failed_execution_report_payload(
+    *,
+    session: PipelineSession,
+    router_decision: RouterDecision | None,
+    execution_mode: str,
+) -> dict[str, Any]:
+    models_used = []
+    providers_used = []
+    actual_model = str(getattr(router_decision, "actual_model", "") or "").strip()
+    actual_provider = str(getattr(router_decision, "actual_provider", "") or "").strip()
+    if actual_model:
+        models_used.append(actual_model)
+    if actual_provider:
+        providers_used.append(actual_provider)
+    return {
+        "schema_version": "pipeline_execution_report.v1",
+        "status": "not_executed",
+        "summary": {
+            "pipeline_session_id": session.pipeline_session_id,
+            "trace_id": session.trace_id,
+            "pipeline_id": DEFAULT_PIPELINE_ID,
+            "router_status": "routing_failed",
+            "router_confidence": session.router_confidence,
+            "execution_mode": execution_mode,
+            "route_status": "safe_default_fallback_used",
+            "selected_subagents": [],
+            "blockers": ["autonomous_not_selected"],
+            "user_action_required": False,
+        },
+        "subagents": [],
+        "models": [],
+        "gate": {
+            "preflight_allowed": False,
+            "preflight_reason_code": "safe_default_fallback_used",
+            "evaluation_statuses": [],
+            "review_required": False,
+            "escalation_required": False,
+            "disagreement_present": False,
+            "control_statuses": ["not_invoked"],
+            "loop_limit_statuses": [],
+            "tools_enabled": False,
+        },
+        "safety": {
+            "executed": False,
+            "execution_enabled": False,
+            "policy_notes": ["safe_default_fallback_used", "tools_enabled=false", "mutation=none"],
+            "secrets_redacted": True,
+            "prompts_redacted": True,
+            "environment_redacted": True,
+        },
+        "usage": {
+            "input_tokens": None,
+            "output_tokens": None,
+            "reasoning_tokens": None,
+            "total_tokens": None,
+            "cache_hit": None,
+            "cache_write": None,
+            "tool_calls": 0,
+            "usage_known": False,
+            "token_sources": [],
+            "cache_sources": [],
+            "planned_subagent_count": 0,
+            "executed_subagent_count": 0,
+            "subagent_run_instance_count": 0,
+            "execution_round_count": 0,
+            "subagent_count": 0,
+            "models_used": models_used,
+            "providers_used": providers_used,
+        },
+        "completion": {
+            "completion_allowed": False,
+            "candidate_complete": False,
+            "blocked_reason": "autonomous_not_selected",
+            "final_verdict": "safe_default_fallback_used",
+            "review_required": False,
+            "escalation_required": False,
+            "disagreement_present": False,
+            "user_action_required": False,
+        },
+        "final_response": {
+            "text": None,
+            "summary_lines": [
+                "status: not_executed",
+                "execution_mode: autonomous",
+                "final_verdict: safe_default_fallback_used",
+                "blocked_reason: autonomous_not_selected",
+                "safe_default_fallback_used: true",
+                "tools_enabled: false",
+                "controller_invoked: false",
+                "report_execution_invoked: false",
+                "mutation: none",
+                "tests: not_run",
+            ],
+        },
+    }
 
 
 def _hash_user_message(user_message: str) -> str:

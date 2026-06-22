@@ -52,7 +52,7 @@ class PipelineSessionRequest:
 class PipelineSession:
     pipeline_session_id: str
     trace_id: str
-    pipeline_id: str
+    pipeline_id: str | None
     router_status: str
     router_confidence: float
     platform: str | None
@@ -104,13 +104,17 @@ def create_pipeline_session(*, request: PipelineSessionRequest) -> PipelineSessi
     )
 
 
-def _effective_pipeline_id(router: RouterDecision | None) -> str:
+def _effective_pipeline_id(router: RouterDecision | None) -> str | None:
     if router is None:
+        return DEFAULT_PIPELINE_ID
+    if router.status == "routing_failed" and not router.selected_pipeline_id and not router.fallback_safe:
         return DEFAULT_PIPELINE_ID
     return router.selected_pipeline_id or router.fallback_pipeline_id or DEFAULT_PIPELINE_ID
 
 
-def _planned_steps(pipeline_id: str) -> list[PipelineStepPlan]:
+def _planned_steps(pipeline_id: str | None) -> list[PipelineStepPlan]:
+    if pipeline_id is None:
+        return []
     if pipeline_id == ENGINEERING_PIPELINE_ID:
         return [
             PipelineStepPlan(step_kind="engineer", subagent_id="hermes_engineer_core", condition=None),
