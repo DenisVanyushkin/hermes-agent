@@ -1725,6 +1725,7 @@ def _blocked_loop_result(
             git_gate=git_gate,
             tests=_tests_payload(test_summary),
             mutation_summary=mutation_summary or {},
+            blocked_reason_override=blocked_reason,
         ),
         iteration_history=iteration_history,
         review_iterations_completed=review_iterations_completed,

@@ -210,7 +210,10 @@ def _execution_mode(config: Mapping[str, Any] | None) -> str:
 
 
 def _actual_gateway_execution_enabled(config: Mapping[str, Any] | None) -> bool:
-    return bool(cfg_get(config, "pipelines", "execution", "enable_gateway_execution_controller", default=False))
+    nested_value = cfg_get(config, "pipelines", "execution", "enable_gateway_execution_controller", default=None)
+    if nested_value is not None:
+        return bool(nested_value)
+    return bool(cfg_get(config, "enable_gateway_execution_controller", default=False))
 
 
 def _would_call_for_pipeline(pipeline_id: str | None) -> str | None:

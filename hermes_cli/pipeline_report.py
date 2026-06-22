@@ -445,6 +445,7 @@ def build_pipeline_execution_report(
     decisive_subagent: str | None = None,
     subagent_runs_override: list[Mapping[str, Any]] | None = None,
     mutation_summary: Mapping[str, Any] | None = None,
+    blocked_reason_override: str | None = None,
 ) -> PipelineExecutionReport:
     _validate_required_metadata(session=session, state_snapshot=state_snapshot)
 
@@ -457,12 +458,18 @@ def build_pipeline_execution_report(
     user_action_required = _user_action_required(state_snapshot.planned_steps)
     completion_allowed = bool(state_snapshot.executed and state_snapshot.completion_allowed)
     candidate_complete = any(_evaluation(step).get("completion", {}).get("candidate_complete", False) for step in state_snapshot.planned_steps)
+    evaluation_blocked_reason = _first_present(
+        _evaluation(step).get("completion", {}).get("blocked_reason")
+        for step in state_snapshot.planned_steps
+    )
     blocked_reason = (
-        state_snapshot.completion_blocked_reason
-        or _first_present(
-            _evaluation(step).get("completion", {}).get("blocked_reason")
-            for step in state_snapshot.planned_steps
+        blocked_reason_override
+        or (
+            evaluation_blocked_reason
+            if state_snapshot.executed and state_snapshot.completion_blocked_reason == "execution_disabled"
+            else state_snapshot.completion_blocked_reason
         )
+        or evaluation_blocked_reason
         or ("execution_disabled" if not state_snapshot.executed else None)
     )
     if completion_allowed:

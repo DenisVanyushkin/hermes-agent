@@ -15,6 +15,7 @@ from typing import Any, Callable, Sequence
 
 ENGINEER_SUBAGENT_ID = "hermes_engineer_core"
 ALLOWED_EXECUTABLES = {
+    ("pytest",),
     ("venv/bin/pytest",),
     (".venv/bin/pytest",),
     ("python", "-m", "pytest"),
@@ -302,6 +303,8 @@ def _denied_summary(workspace_name: str | None, requests: Sequence[str], reason:
 
 
 def _resolve_execution_command(command: Sequence[str]) -> list[str]:
+    if tuple(command[:1]) == ("pytest",):
+        return [sys.executable, "-m", "pytest", *command[1:]]
     if tuple(command[:3]) == ("python", "-m", "pytest"):
         return [sys.executable, *command[1:]]
     return list(command)
