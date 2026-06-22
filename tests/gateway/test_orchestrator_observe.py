@@ -783,3 +783,53 @@ def test_gateway_orchestrator_autonomous_routing_failed_is_terminal(caplog):
     assert payload["pipeline_execution_report"]["safety"]["executed"] is False
     assert "tools_enabled=false" in payload["pipeline_execution_report"]["safety"]["policy_notes"]
     assert payload["pipeline_execution_report"]["usage"]["tool_calls"] == 0
+
+
+def test_gateway_orchestrator_autonomous_default_fallback_stays_non_executing(caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-autonomous-default-fallback",
+        router_subagent_id="hermes_pipeline_router",
+        status="no_specialized_pipeline",
+        selected_pipeline_id=None,
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.76,
+        reasoning_summary="Clear non-engineering chat used the safe default conversation fallback after router failure.",
+        fallback_safe=True,
+        routing_failure_reason="TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout",
+        routing_fallback_used=True,
+        routing_fallback_reason="TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout",
+        router_strategy="heuristic_timeout_default_fallback",
+    )
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={
+                "pipelines": {
+                    "enabled": True,
+                    "router": {"mode": "autonomous"},
+                    "orchestrator": {"mode": "autonomous"},
+                    "execution": {"mode": "autonomous", "enable_gateway_execution_controller": True},
+                }
+            },
+            user_message="Привет, что ты умеешь?",
+            session_id="sess-default-fallback",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    assert report.session.pipeline_id == "default_conversation_pipeline"
+    assert report.state.pipeline_id == "default_conversation_pipeline"
+    assert report.state.router_status == "no_specialized_pipeline"
+    assert report.pipeline_execution_controller.actual_execution_invoked is False
+    assert report.pipeline_execution_controller.subagent_execution_invoked is False
+    assert report.pipeline_execution_controller.real_provider_bridge_invoked is False
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["effective_pipeline_id"] == "default_conversation_pipeline"
+    assert payload["router_status"] == "no_specialized_pipeline"
+    assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is False
+    assert payload["pipeline_execution_controller"]["subagent_execution_invoked"] is False
+    assert payload["pipeline_execution_controller"]["real_provider_bridge_invoked"] is False

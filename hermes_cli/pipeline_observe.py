@@ -101,7 +101,7 @@ def observe_pipeline_router_decision(
                     "event": "pipeline_router_observe_decision",
                     "pipeline_session_id": decision.pipeline_session_id,
                     "status": decision.status,
-                    "router_strategy": strategy,
+                    "router_strategy": decision.router_strategy or strategy,
                     "router_fallback_strategy": fallback_strategy,
                     "selected_pipeline_id": decision.selected_pipeline_id,
                     "fallback_pipeline_id": decision.fallback_pipeline_id,
@@ -111,6 +111,8 @@ def observe_pipeline_router_decision(
                     "requires_clarification": decision.requires_clarification,
                     "policy_block_reason": decision.policy_block_reason,
                     "routing_failure_reason": decision.routing_failure_reason,
+                    "routing_fallback_used": decision.routing_fallback_used,
+                    "routing_fallback_reason": decision.routing_fallback_reason,
                     "invalid_confidence_kind": decision.invalid_confidence_kind,
                     "invalid_confidence_summary": decision.invalid_confidence_summary,
                     "invalid_router_contract_kind": decision.invalid_router_contract_kind,
@@ -252,6 +254,9 @@ def _replace_decision(
         invalid_router_contract_summary=decision.invalid_router_contract_summary,
         dropped_alternatives_count=decision.dropped_alternatives_count,
         dropped_alternatives_reasons=decision.dropped_alternatives_reasons,
+        routing_fallback_used=decision.routing_fallback_used,
+        routing_fallback_reason=decision.routing_fallback_reason,
+        router_strategy=decision.router_strategy,
     )
 
 
