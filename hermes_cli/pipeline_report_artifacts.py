@@ -174,6 +174,7 @@ def build_controlled_execution_report_artifact(
                 _string(report.get("routing", {}).get("fallback_pipeline_id")) if isinstance(report.get("routing"), Mapping) else None,
             ),
             "confidence": getattr(router_decision, "confidence", session.router_confidence) if router_decision is not None else session.router_confidence,
+            "routing_confidence_source": getattr(router_decision, "routing_confidence_source", None) if router_decision is not None else None,
             "reasoning_summary": getattr(router_decision, "reasoning_summary", None) if router_decision is not None else None,
             "routing_failure_reason": getattr(router_decision, "routing_failure_reason", None) if router_decision is not None else None,
             "invalid_confidence_kind": getattr(router_decision, "invalid_confidence_kind", None) if router_decision is not None else None,

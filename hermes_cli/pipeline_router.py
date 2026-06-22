@@ -290,6 +290,7 @@ class RouterDecision:
     routing_fallback_used: bool = False
     routing_fallback_reason: str | None = None
     router_strategy: str | None = None
+    routing_confidence_source: str | None = None
 
 
 class PipelineRouter:
@@ -868,6 +869,7 @@ class LlmPipelineRouter(PipelineRouter):
                 "routing_fallback_used": True,
                 "routing_fallback_reason": failure_reason,
                 "router_strategy": "heuristic_timeout_fallback",
+                "routing_confidence_source": "heuristic_strict",
             },
             loaded_specs=self._loaded_specs,
         )
@@ -1058,6 +1060,7 @@ def parse_router_decision(
         routing_fallback_used=bool(data.get("routing_fallback_used", False)),
         routing_fallback_reason=_optional_str(data.get("routing_fallback_reason")),
         router_strategy=_optional_str(data.get("router_strategy")),
+        routing_confidence_source=_optional_str(data.get("routing_confidence_source")),
     )
 
 

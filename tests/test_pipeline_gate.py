@@ -296,3 +296,61 @@ def test_pipeline_gate_execute_mode_returns_allowed_preflight():
     assert payload["selected_pipeline_id"] == "engineering_review_pipeline"
     assert payload["planned_steps_count"] == 2
     assert "runtime_constructor_verified" in payload["required_checks_summary"]["passed"]
+
+
+def test_pipeline_gate_autonomous_accepts_strict_heuristic_fallback_below_llm_threshold():
+    gate = importlib.import_module("hermes_cli.pipeline_gate")
+
+    decision = gate.evaluate_pipeline_gate(
+        gate.PipelineGateRequest(
+            config=_execution_config("autonomous"),
+            router_decision=RouterDecision(
+                pipeline_session_id="pipe-heuristic-strict",
+                router_subagent_id="hermes_pipeline_router",
+                status="selected",
+                selected_pipeline_id="engineering_review_pipeline",
+                fallback_pipeline_id=None,
+                confidence=0.74,
+                reasoning_summary="strict heuristic fallback",
+                fallback_safe=False,
+                routing_fallback_used=True,
+                router_strategy="heuristic_timeout_fallback",
+                routing_confidence_source="heuristic_strict",
+            ),
+            pipeline_plan_payload=_plan_payload(),
+            platform_allowed=True,
+            destructive_task=False,
+        )
+    )
+
+    assert decision.allowed is True
+    assert decision.reason_code == "allowed"
+
+
+def test_pipeline_gate_autonomous_blocks_low_confidence_llm_route():
+    gate = importlib.import_module("hermes_cli.pipeline_gate")
+
+    decision = gate.evaluate_pipeline_gate(
+        gate.PipelineGateRequest(
+            config=_execution_config("autonomous"),
+            router_decision=RouterDecision(
+                pipeline_session_id="pipe-llm-low-confidence",
+                router_subagent_id="hermes_pipeline_router",
+                status="selected",
+                selected_pipeline_id="engineering_review_pipeline",
+                fallback_pipeline_id=None,
+                confidence=0.74,
+                reasoning_summary="low confidence llm route",
+                fallback_safe=False,
+                routing_fallback_used=False,
+                router_strategy="llm",
+                routing_confidence_source="llm",
+            ),
+            pipeline_plan_payload=_plan_payload(),
+            platform_allowed=True,
+            destructive_task=False,
+        )
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "low_router_confidence"

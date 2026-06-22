@@ -463,9 +463,40 @@ def test_llm_router_invalid_confidence_uses_narrow_engineering_fallback_for_stro
     assert decision.status == "selected"
     assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
     assert decision.routing_fallback_used is True
+    assert decision.routing_confidence_source == "heuristic_strict"
     assert decision.invalid_confidence_kind == "non_numeric"
     assert decision.routing_fallback_reason is not None
     assert "confidence" in decision.routing_fallback_reason.lower()
+
+
+def test_llm_router_timeout_strict_engineering_fallback_exposes_confidence_source(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        min_confidence=0.70,
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(
+            TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+        ),
+    )
+
+    decision = router.route(
+        (
+            "HERMES AUTONOMOUS PIPELINE VALIDATION\n\n"
+            "Create tests/autonomous_runtime_smoke_marker.py and add one trivial pytest test.\n"
+            "Do not modify production behavior.\n"
+            "Do not touch DB persistence.\n"
+        ),
+        pipeline_session_id="sess-timeout-confidence-source",
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.routing_fallback_used is True
+    assert decision.routing_confidence_source == "heuristic_strict"
 
 
 def test_llm_router_timeout_keeps_fail_closed_for_vague_prompt(tmp_path: Path) -> None:

@@ -113,6 +113,7 @@ def observe_pipeline_router_decision(
                     "routing_failure_reason": decision.routing_failure_reason,
                     "routing_fallback_used": decision.routing_fallback_used,
                     "routing_fallback_reason": decision.routing_fallback_reason,
+                    "routing_confidence_source": decision.routing_confidence_source,
                     "invalid_confidence_kind": decision.invalid_confidence_kind,
                     "invalid_confidence_summary": decision.invalid_confidence_summary,
                     "invalid_router_contract_kind": decision.invalid_router_contract_kind,

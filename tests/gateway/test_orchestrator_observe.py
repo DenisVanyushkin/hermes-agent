@@ -833,3 +833,51 @@ def test_gateway_orchestrator_autonomous_default_fallback_stays_non_executing(ca
     assert payload["pipeline_execution_controller"]["actual_execution_invoked"] is False
     assert payload["pipeline_execution_controller"]["subagent_execution_invoked"] is False
     assert payload["pipeline_execution_controller"]["real_provider_bridge_invoked"] is False
+
+
+def test_gateway_orchestrator_autonomous_strict_heuristic_fallback_surfaces_confidence_source(caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+
+    decision = RouterDecision(
+        pipeline_session_id="router-autonomous-heuristic-strict",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id=None,
+        confidence=0.74,
+        reasoning_summary="Narrow heuristic timeout fallback selected engineering.",
+        fallback_safe=False,
+        routing_failure_reason="TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout",
+        routing_fallback_used=True,
+        routing_fallback_reason="TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout",
+        router_strategy="heuristic_timeout_fallback",
+        routing_confidence_source="heuristic_strict",
+    )
+
+    with caplog.at_level(logging.INFO, logger="gateway.test"):
+        report = orchestrator.observe_gateway_turn(
+            config={
+                "pipelines": {
+                    "enabled": True,
+                    "router": {"mode": "autonomous"},
+                    "orchestrator": {"mode": "autonomous"},
+                    "execution": {
+                        "mode": "autonomous",
+                        "enable_gateway_execution_controller": True,
+                        "allow_pipelines": ["engineering_review_pipeline"],
+                        "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                    },
+                }
+            },
+            user_message="Create tests/autonomous_runtime_smoke_marker.py and write one trivial pytest test.",
+            session_id="sess-heuristic-strict",
+            platform="telegram",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.test"),
+        )
+
+    assert report is not None
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["router_confidence"] == 0.74
+    assert payload["routing_confidence_source"] == "heuristic_strict"
+    assert payload["pipeline_preflight"]["reason_code"] == "allowed"
