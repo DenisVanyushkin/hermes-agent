@@ -20161,6 +20161,77 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "I can only provide a read-only plan for this request."
         )
 
+    def _pipeline_autonomous_fail_closed_response(self, report: Any, *, orchestrator_mode: str, user_message: str) -> str | None:
+        if str(orchestrator_mode or "").strip().lower() != "autonomous":
+            return None
+        if report is None:
+            return None
+
+        state = getattr(report, "state", None)
+        if str(getattr(state, "router_status", "") or "").strip().lower() != "routing_failed":
+            return None
+
+        controller = getattr(report, "pipeline_execution_controller", None)
+        if controller is None:
+            return None
+        if bool(getattr(controller, "actual_execution_invoked", False)):
+            return None
+
+        blocked_reason = self._pipeline_controlled_block_value(
+            getattr(controller, "blocked_reason", None),
+        ) or "autonomous_not_selected"
+
+        if self._looks_like_mutation_request(user_message):
+            return (
+                "I could not reliably select the autonomous engineering pipeline for this request, "
+                "so I did not make code or file changes. Please retry or phrase it as an explicit engineering task.\n\n"
+                "status: not_executed\n"
+                "effective_pipeline: default_conversation_pipeline\n"
+                "final_verdict: safe_default_fallback_used\n"
+                f"blocked_reason: {blocked_reason}\n"
+                "tools_enabled: false\n"
+                "controller_invoked: false\n"
+                "report_execution_invoked: false\n"
+                "mutation: none"
+            )
+
+        return (
+            "I stayed in a safe default conversational fallback for this turn.\n\n"
+            "status: not_executed\n"
+            "effective_pipeline: default_conversation_pipeline\n"
+            "execution_mode: autonomous\n"
+            "final_verdict: safe_default_fallback_used\n"
+            f"blocked_reason: {blocked_reason}\n"
+            "tools_enabled: false\n"
+            "controller_invoked: false\n"
+            "report_execution_invoked: false\n"
+            "mutation: none\n"
+            "tests: not_run\n\n"
+            "I did not run terminal commands, invoke tools, or modify the workspace."
+        )
+
+    @staticmethod
+    def _looks_like_mutation_request(user_message: str) -> bool:
+        text = str(user_message or "").lower()
+        indicators = (
+            "create ",
+            "write ",
+            "modify ",
+            "edit ",
+            "patch ",
+            "change ",
+            "update ",
+            "implement ",
+            "fix ",
+            "tests/",
+            ".py",
+            ".ts",
+            ".js",
+            "file",
+            "repo",
+        )
+        return any(token in text for token in indicators)
+
     def _pipeline_controlled_block_response(self, report: Any, *, orchestrator_mode: str) -> str | None:
         if str(orchestrator_mode or "").strip().lower() != "controlled_manual":
             return None
@@ -20417,7 +20488,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         pipeline_orchestrator_report = None
         _orchestrator_mode = str(cfg_get(user_config, "pipelines", "orchestrator", "mode", default="disabled") or "disabled").strip().lower()
-        if bool(cfg_get(user_config, "pipelines", "enabled", default=False)) and _orchestrator_mode in {"observe", "controlled_manual"}:
+        if bool(cfg_get(user_config, "pipelines", "enabled", default=False)) and _orchestrator_mode in {"observe", "controlled_manual", "autonomous"}:
             try:
                 from hermes_cli.orchestrator import observe_gateway_turn
 
@@ -20486,6 +20557,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": engineering_plan_only_response},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
+        autonomous_fail_closed_response = self._pipeline_autonomous_fail_closed_response(
+            pipeline_orchestrator_report,
+            orchestrator_mode=_orchestrator_mode,
+            user_message=message,
+        )
+        if autonomous_fail_closed_response is not None:
+            logger.info(
+                "pipeline autonomous fail-closed guard blocked normal agent fallback: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": autonomous_fail_closed_response,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": autonomous_fail_closed_response},
                 ],
                 "api_calls": 0,
                 "tools": [],
