@@ -113,6 +113,59 @@ def test_python_module_pytest_executes_via_active_interpreter(tmp_path: Path) ->
     assert calls == [[sys.executable, "-m", "pytest", "-q", "tests/test_example.py"]]
 
 
+def test_bare_pytest_executes_via_active_interpreter(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_example.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def _runner(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout=".\n1 passed\n", stderr="")
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["pytest -q tests/test_example.py"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "passed"
+    assert payload["results"][0]["command"] == ["pytest", "-q", "tests/test_example.py"]
+    assert calls == [[sys.executable, "-m", "pytest", "-q", "tests/test_example.py"]]
+
+
+def test_path_traversal_command_is_denied_without_spawning_subprocess(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    calls: list[list[str]] = []
+
+    def _unexpected_runner(argv, **kwargs):
+        calls.append(list(argv))
+        raise AssertionError("path traversal must not reach subprocess runner")
+
+    repo = _init_git_repo(tmp_path)
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["pytest -q tests/../secrets.py"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_unexpected_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "test_command_denied"
+    assert calls == []
+
+
 def test_unsafe_command_is_denied_without_spawning_subprocess(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_test_runner")
     calls: list[list[str]] = []

@@ -1995,6 +1995,60 @@ def test_blocked_result_without_test_summary_keeps_safe_and_report_payloads_cons
     assert safe_payload["test_summary"] == report_payload["tests"]
 
 
+def test_test_command_denied_report_uses_runtime_block_reason_not_execution_disabled(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_example.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    class _InvocationClient:
+        def __call__(self, runtime, _payload):
+            if runtime.role_id == "engineer":
+                return {
+                    "provider": runtime.provider,
+                    "model": runtime.model,
+                    "structured_output": _engineer_output(
+                        summary="Prepared patch.",
+                        changes=[{"path": "tests/test_example.py", "kind": "modify"}],
+                        tests=["pytest -q tests/../escape.py"],
+                    ),
+                    "output_text": "ok",
+                }
+            return {
+                "provider": runtime.provider,
+                "model": runtime.model,
+                "structured_output": _reviewer_output(blockers=[]),
+                "output_text": "ok",
+            }
+
+    runtime_context = module.ControlledRuntimeContext(
+        invocation_client=_InvocationClient(),
+        controlled_runner=module.ControlledRuntimeRunner(),
+        allow_test_commands=True,
+        test_workspace=str(repo),
+    )
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        controlled_runtime_context=runtime_context,
+    )
+
+    report_payload = result.execution_report.to_safe_dict()
+
+    assert result.blocked_reason == "test_command_denied"
+    assert report_payload["executed"] is True
+    assert report_payload["completion"]["blocked_reason"] == "test_command_denied"
+    assert report_payload["final_response"]["placeholder_reason"] == "test_command_denied"
+    assert report_payload["tests"]["blocked_reason"] == "test_command_denied"
+    assert report_payload["reviewer_packet"]["blocked_reason"] is None
+
+
 def test_safe_test_text_keeps_venv_and_environment_diagnostics() -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
 

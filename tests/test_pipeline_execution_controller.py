@@ -347,6 +347,65 @@ def test_controller_disabled_does_not_call_helper() -> None:
     assert helper_calls == []
 
 
+def test_top_level_controller_key_enables_gateway_execution_for_compatibility() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+
+    result = module.evaluate_pipeline_execution_controller(
+        config={
+            "enable_gateway_execution_controller": True,
+            "pipelines": {
+                "enabled": True,
+                "execution": {
+                    "mode": "autonomous",
+                    "allow_actual_subagent_invocation": True,
+                    "allow_actual_reviewer_invocation": True,
+                    "allow_actual_rework_loop": True,
+                    "allow_pipelines": ["engineering_review_pipeline"],
+                    "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                },
+            },
+        },
+        session=session,
+        state_snapshot=snapshot,
+        execution_helper=lambda **_kwargs: {"status": "blocked", "blocked_reason": "runtime_not_entered"},
+        allow_test_execution=True,
+    )
+
+    assert result.blocked_reason == "runtime_not_entered"
+    assert result.status == "blocked"
+
+
+def test_nested_controller_key_takes_precedence_over_top_level_compatibility_key() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+
+    result = module.evaluate_pipeline_execution_controller(
+        config={
+            "enable_gateway_execution_controller": True,
+            "pipelines": {
+                "enabled": True,
+                "execution": {
+                    "mode": "autonomous",
+                    "enable_gateway_execution_controller": False,
+                    "allow_actual_subagent_invocation": True,
+                    "allow_actual_reviewer_invocation": True,
+                    "allow_actual_rework_loop": True,
+                    "allow_pipelines": ["engineering_review_pipeline"],
+                    "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                },
+            },
+        },
+        session=session,
+        state_snapshot=snapshot,
+        execution_helper=lambda **_kwargs: {"status": "completed"},
+        allow_test_execution=True,
+    )
+
+    assert result.blocked_reason == "gateway_execution_not_enabled"
+    assert result.status == "would_execute"
+
+
 def test_execution_mode_disabled_does_not_call_helper() -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()

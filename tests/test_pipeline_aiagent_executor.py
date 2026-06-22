@@ -281,6 +281,18 @@ def test_bridge_pytest_is_constrained_and_terminal_missing(tmp_path: Path) -> No
     assert all(tool["function"]["name"] != "terminal" for tool in bridge._tool_definitions())
 
 
+def test_bridge_pytest_accepts_bare_pytest_safe_form(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    (git_repo / "tests").mkdir()
+    (git_repo / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent, conversation_runner=lambda *_args: {"output_text": "ok"})
+
+    payload = json.loads(bridge.execute_tool("pytest", {"command": "pytest -q tests/test_ok.py"}))
+
+    assert payload["status"] == "passed"
+
+
 def test_bridge_can_patch_existing_file(tmp_path: Path) -> None:
     repo_root, _runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)
