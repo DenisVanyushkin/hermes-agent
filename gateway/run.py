@@ -18965,6 +18965,48 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "I did not run terminal commands, invoke tools, or modify the workspace."
         )
 
+    def _pipeline_autonomous_terminal_response(self, report: Any, *, orchestrator_mode: str) -> str | None:
+        if str(orchestrator_mode or "").strip().lower() != "autonomous":
+            return None
+        if report is None:
+            return None
+
+        controller = getattr(report, "pipeline_execution_controller", None)
+        if controller is None:
+            return None
+
+        invoked = any(
+            bool(getattr(controller, field, False))
+            for field in (
+                "actual_execution_invoked",
+                "subagent_execution_invoked",
+                "real_provider_bridge_invoked",
+            )
+        )
+        if not invoked:
+            return None
+
+        final_response_text = getattr(controller, "final_response_text", None)
+        if isinstance(final_response_text, str) and final_response_text.strip():
+            return final_response_text.strip()
+
+        blocked_reason = self._pipeline_controlled_block_value(
+            getattr(controller, "blocked_reason", None),
+        ) or "autonomous_execution_missing_final_response"
+
+        return (
+            "Autonomous execution reached the controlled engineering path, but it did not produce a terminal controlled response.\n\n"
+            "status: blocked\n"
+            "execution_mode: autonomous\n"
+            "final_verdict: autonomous_fail_closed\n"
+            f"blocked_reason: {blocked_reason}\n"
+            "normal_agent_fallback_blocked: true\n"
+            "tools_enabled: false\n"
+            "mutation: withheld\n\n"
+            "I did not continue into the normal conversational agent for this turn."
+        )
+
+
     @staticmethod
     def _looks_like_mutation_request(user_message: str) -> bool:
         text = str(user_message or "").lower()
@@ -19312,6 +19354,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": engineering_plan_only_response},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
+        autonomous_terminal_response = self._pipeline_autonomous_terminal_response(
+            pipeline_orchestrator_report,
+            orchestrator_mode=_orchestrator_mode,
+        )
+        if autonomous_terminal_response is not None:
+            logger.info(
+                "pipeline autonomous terminal guard blocked normal agent fallback: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": autonomous_terminal_response,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": autonomous_terminal_response},
                 ],
                 "api_calls": 0,
                 "tools": [],
