@@ -330,18 +330,12 @@ def _helper_blocked_reason(safe_helper_result: dict[str, Any] | None) -> str | N
 
 
 def _subagent_execution_invoked(safe_helper_result: dict[str, Any] | None) -> bool:
-    report = safe_helper_result.get("report") if isinstance(safe_helper_result, Mapping) else None
-    if not isinstance(report, Mapping):
-        return False
-    subagent_runs = report.get("subagent_runs")
+    subagent_runs = _helper_subagent_runs(safe_helper_result)
     return isinstance(subagent_runs, list) and any(isinstance(item, Mapping) for item in subagent_runs)
 
 
 def _real_provider_bridge_invoked(safe_helper_result: dict[str, Any] | None) -> bool:
-    report = safe_helper_result.get("report") if isinstance(safe_helper_result, Mapping) else None
-    if not isinstance(report, Mapping):
-        return False
-    for item in list(report.get("subagent_runs") or []):
+    for item in list(_helper_subagent_runs(safe_helper_result) or []):
         if not isinstance(item, Mapping):
             continue
         runtime_mode = str(item.get("runtime_mode") or "")
@@ -351,6 +345,17 @@ def _real_provider_bridge_invoked(safe_helper_result: dict[str, Any] | None) -> 
         if bool(item.get("real_provider_allowed")) and provider_policy_status in {"ready_to_construct", "allowed"}:
             return True
     return False
+
+
+def _helper_subagent_runs(safe_helper_result: dict[str, Any] | None) -> list[Any]:
+    if not isinstance(safe_helper_result, Mapping):
+        return []
+    report = safe_helper_result.get("report")
+    if isinstance(report, Mapping) and isinstance(report.get("subagent_runs"), list):
+        return list(report.get("subagent_runs") or [])
+    if isinstance(safe_helper_result.get("subagent_runs"), list):
+        return list(safe_helper_result.get("subagent_runs") or [])
+    return []
 
 
 def _workspace_basename(helper_execution_context: Mapping[str, Any] | None) -> str | None:

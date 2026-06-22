@@ -225,6 +225,109 @@ def test_bridge_workspace_write_and_git_delta_succeed(tmp_path: Path) -> None:
     assert "notes.txt" in subprocess.run(["git", "-C", str(git_repo), "status", "--short", "--untracked-files=all"], check=True, text=True, capture_output=True).stdout
 
 
+def test_normalize_result_preserves_raw_metadata_structured_output(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    payload = {
+        "output_text": "ok",
+        "raw_metadata": {"structured_output": {"schema_version": "1", "subagent_id": "hermes_engineer_core", "role": "engineer", "status": "completed", "summary": "done"}},
+    }
+    normalized = bridge._normalize_result(payload)
+    assert normalized["raw_metadata"]["structured_output"]["subagent_id"] == "hermes_engineer_core"
+    assert normalized["raw_metadata"]["structured_output_source"] == "raw_metadata.structured_output"
+
+
+def test_normalize_result_copies_top_level_structured_output(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    normalized = bridge._normalize_result(
+        {
+            "output_text": "ok",
+            "structured_output": {"schema_version": "1", "subagent_id": "hermes_engineer_core", "role": "engineer", "status": "completed", "summary": "done"},
+        }
+    )
+    assert normalized["raw_metadata"]["structured_output_source"] == "structured_output"
+    assert normalized["raw_metadata"]["structured_output"]["role"] == "engineer"
+
+
+def test_normalize_result_extracts_structured_output_from_final_response_mapping(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    normalized = bridge._normalize_result(
+        {
+            "final_response": {
+                "schema_version": "1",
+                "subagent_id": "hermes_engineer_core",
+                "role": "engineer",
+                "status": "completed",
+                "summary": "done",
+                "blockers": [],
+            }
+        }
+    )
+    assert normalized["raw_metadata"]["structured_output_source"] == "final_response"
+    assert normalized["raw_metadata"]["structured_output"]["summary"] == "done"
+    assert normalized["output_text"] is None
+
+
+def test_normalize_result_extracts_parseable_json_from_output_text(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    normalized = bridge._normalize_result(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "subagent_id": "hermes_engineer_core",
+                "role": "engineer",
+                "status": "completed",
+                "summary": "done",
+                "blockers": [],
+                "artifacts": [],
+                "confidence": 0.8,
+                "requires_review": True,
+                "next_action": "review",
+                "changes": [],
+            }
+        )
+    )
+    assert normalized["raw_metadata"]["structured_output_source"] == "output_text_json"
+    assert normalized["raw_metadata"]["structured_output"]["next_action"] == "review"
+
+
+def test_normalize_result_records_parse_failure_without_structured_output(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    normalized = bridge._normalize_result("not json")
+    assert normalized["raw_metadata"]["structured_output_missing"] is True
+    assert normalized["raw_metadata"]["structured_output_source"] == "none"
+    assert normalized["raw_metadata"]["structured_output_parse_error"].startswith("json_decode_error:")
+
+
+def test_engineer_prompt_and_config_describe_structured_output_envelope(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    prompt_text = (repo_root / "prompts/subagents/hermes_engineer_core.md").read_text(encoding="utf-8")
+    config_text = (repo_root / "config/subagents/hermes_engineer_core.yaml").read_text(encoding="utf-8")
+    for required_field in (
+        "schema_version",
+        "subagent_id",
+        "role",
+        "status",
+        "summary",
+        "blockers",
+        "artifacts",
+        "confidence",
+        "requires_review",
+        "next_action",
+    ):
+        assert required_field in prompt_text
+        assert required_field in config_text
+
+
 def test_bridge_rejects_absolute_and_traversal_paths(tmp_path: Path) -> None:
     repo_root, runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)
