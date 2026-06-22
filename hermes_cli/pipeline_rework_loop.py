@@ -1828,6 +1828,11 @@ def _finalize_loop_result(
     review_overrides: dict[str, Any] | None = None,
     test_summary: dict[str, Any] | None = None,
 ) -> PipelineReworkLoopResult:
+    blocked_final_response_text = _blocked_final_response_text(
+        blocked_reason=blocked_reason,
+        test_summary=test_summary,
+        reviewer_packet=reviewer_packet,
+    )
     return PipelineReworkLoopResult(
         fuse=fuse,
         state_snapshot=snapshot,
@@ -1835,6 +1840,7 @@ def _finalize_loop_result(
             session=session,
             state_snapshot=snapshot,
             preflight_result={"allowed": preflight_allowed, "reason_code": preflight_reason_code},
+            final_response_text=blocked_final_response_text,
             peer_messages=peer_messages,
             disagreements=disagreements,
             decisive_subagent=decisive_subagent,

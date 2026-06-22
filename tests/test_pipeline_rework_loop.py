@@ -155,6 +155,86 @@ def test_blocked_final_response_text_handles_missing_structured_output() -> None
     assert "required structured output packet" in text
 
 
+def test_finalize_loop_result_preserves_blocked_final_response_text(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    session_module = importlib.import_module("hermes_cli.pipeline_session")
+    state_module = importlib.import_module("hermes_cli.pipeline_state_machine")
+    loaded_specs = _loaded_specs(tmp_path)[1]
+    session = session_module.PipelineSession(
+        pipeline_session_id="pipe-1",
+        trace_id="pipe-1",
+        pipeline_id="engineering_review_pipeline",
+        router_status="selected",
+        router_confidence=0.98,
+        platform="telegram",
+        session_key="agent:main:telegram:dm:1",
+        session_id="session-1",
+        chat_id="1",
+        thread_id=None,
+        user_id="user-1",
+        created_at="2026-06-22T00:00:00+00:00",
+        user_message_hash="hash",
+        mode="autonomous",
+        current_state="rework_loop_reviewer_fail_closed",
+        status="created",
+        planned_steps=[],
+        selected_subagent_ids=["hermes_engineer_core", "hermes_code_reviewer"],
+        reviewer_condition="code_changes_require_review",
+    )
+    snapshot = state_module.build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+        loaded_specs=loaded_specs,
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "completion_allowed": False,
+        "completion_blocked_reason": "missing_structured_output",
+        "final_verdict": "controlled_rework_loop_reviewer_fail_closed",
+    })
+
+    result = module._finalize_loop_result(
+        fuse=module.PipelineExecutionFuseResult(
+            execution_mode="autonomous",
+            actual_invocation_allowed=True,
+            blocked_reason=None,
+            selected_pipeline_id="engineering_review_pipeline",
+            selected_step_kind="reviewer",
+            selected_subagent_id="hermes_code_reviewer",
+        ),
+        session=session,
+        snapshot=snapshot,
+        preflight_allowed=True,
+        preflight_reason_code="rework_loop_fuse_allowed",
+        iteration_history=[],
+        review_iterations_completed=1,
+        max_review_iterations=3,
+        policy_source="pipeline_spec",
+        original_task="task",
+        appended_rework_context=[],
+        completion_allowed=False,
+        candidate_complete=False,
+        user_action_required=True,
+        blocked_reason="missing_structured_output",
+        git_gate={},
+        reviewer_packet={},
+        subagent_runs=[],
+        peer_messages=[],
+        disagreements=[],
+        decisive_subagent=None,
+        model_escalations=[],
+        tests={},
+        mutation_summary={},
+        review_overrides={},
+        test_summary={"status": "not_requested"},
+    )
+
+    payload = result.execution_report.to_safe_dict()
+    assert payload["final_response"]["text"] is not None
+    assert "required structured output packet" in payload["final_response"]["text"]
+
+
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
