@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
+import pytest
 import run_agent
 import shutil
 import subprocess
@@ -19,6 +21,7 @@ from hermes_cli.subagent_runner import SubagentInvocationRequest, SubagentRunner
 from hermes_cli.pipeline_rework_loop import execute_bounded_rework_loop
 
 REPO_ROOT = Path("/home/hermes/.hermes/hermes-agent")
+BRIDGE_MODULE = REPO_ROOT / "hermes_cli" / "pipeline_aiagent_executor.py"
 
 
 def _copy_spec_tree(tmp_path: Path) -> Path:
@@ -100,6 +103,13 @@ class _FakeAgent:
         self.valid_tool_names = set()
         self.enabled_toolsets = None
         self.disabled_toolsets = None
+        fallback_model = kwargs.get("fallback_model")
+        if isinstance(fallback_model, list):
+            self._fallback_chain = list(fallback_model)
+        elif isinstance(fallback_model, dict) and fallback_model.get("provider") and fallback_model.get("model"):
+            self._fallback_chain = [dict(fallback_model)]
+        else:
+            self._fallback_chain = []
 
     def run_conversation(self, _message: str):
         return {"final_response": "unused"}
@@ -166,11 +176,116 @@ def test_bridge_constructs_aiagent_from_runtime_kwargs(tmp_path: Path) -> None:
 
     assert captured["provider"] == "openrouter"
     assert captured["model"] == "xiaomi/mimo-v2.5-pro"
+    assert captured["fallback_model"] == {
+        "provider": "openai-codex",
+        "model": "gpt-5.4",
+    }
     assert captured["api_mode"] == runtime_result.constructor_api_mode
     assert captured["quiet_mode"] is True
     assert captured["enabled_toolsets"] == []
     assert captured["disabled_toolsets"] == ["terminal", "browser", "web", "code_execution", "computer_use", "messaging"]
     assert result["output_text"] == "ok"
+
+
+def test_bridge_production_code_does_not_hardcode_current_engineer_fallback() -> None:
+    source = BRIDGE_MODULE.read_text(encoding="utf-8")
+
+    assert "_ENGINEER_REQUIRED_FALLBACK" not in source
+    assert '"provider": "openai-codex"' not in source
+    assert '"model": "gpt-5.4"' not in source
+
+
+def test_bridge_rejects_engineer_agent_when_fallback_chain_is_missing(tmp_path: Path) -> None:
+    repo_root, runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_FakeAgent,
+    )
+
+    missing_fallback_result = replace(runtime_result, fallback_policy=None)
+
+    with pytest.raises(AIAgentExecutorBridgeError, match="missing_engineer_fallback_policy"):
+        bridge._build_agent(missing_fallback_result)
+
+
+def test_bridge_accepts_config_derived_engineer_fallback_without_python_changes(tmp_path: Path) -> None:
+    repo_root, runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    alt_policy = replace(
+        runtime_result.fallback_policy,
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+    )
+    alt_runtime_result = replace(runtime_result, fallback_policy=alt_policy)
+    captured: dict[str, object] = {}
+
+    def _factory(**kwargs):
+        captured.update(kwargs)
+        return _FakeAgent(**kwargs)
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_factory,
+        conversation_runner=lambda _bridge, _agent, _request, _runtime: {"output_text": "ok"},
+    )
+
+    result = bridge(
+        SubagentInvocationRequest(
+            subagent_id="hermes_engineer_core",
+            pipeline_session_id=alt_runtime_result.pipeline_session_id,
+            invocation_id="inv-alt-fallback",
+            input_messages=[{"role": "user", "content": "Implement change"}],
+        ),
+        alt_runtime_result,
+    )
+
+    assert captured["fallback_model"] == {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+    }
+    assert result["output_text"] == "ok"
+
+
+def test_bridge_rejects_engineer_agent_when_fallback_chain_is_missing_after_construction(tmp_path: Path) -> None:
+    repo_root, runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    class _MissingFallbackAgent(_FakeAgent):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._fallback_chain = []
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_MissingFallbackAgent,
+    )
+
+    with pytest.raises(AIAgentExecutorBridgeError, match="invalid_engineer_fallback_chain"):
+        bridge._build_agent(runtime_result)
+
+
+def test_bridge_rejects_engineer_agent_when_global_fallback_chain_leaks_in(tmp_path: Path) -> None:
+    repo_root, runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    class _WrongFallbackAgent(_FakeAgent):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._fallback_chain = [{"provider": "openrouter", "model": "google/gemma-4-31b-it:free"}]
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_WrongFallbackAgent,
+    )
+
+    with pytest.raises(AIAgentExecutorBridgeError, match="invalid_engineer_fallback_chain"):
+        bridge._build_agent(runtime_result)
 
 
 def test_bridge_workspace_write_and_git_delta_succeed(tmp_path: Path) -> None:

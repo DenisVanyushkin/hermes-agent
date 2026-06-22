@@ -189,6 +189,7 @@ class AIAgentSubagentExecutorBridge:
 
     def _build_agent(self, runtime_plan: Any) -> Any:
         kwargs = runtime_plan.to_aiagent_kwargs()
+        expected_fallback = kwargs.get("fallback_model")
         kwargs.update(
             {
                 "quiet_mode": True,
@@ -202,11 +203,35 @@ class AIAgentSubagentExecutorBridge:
             }
         )
         agent = self.agent_factory(**kwargs)
+        self._validate_agent_fallback_policy(agent, runtime_plan, expected_fallback)
         agent.tools = self._tool_definitions()
         agent.valid_tool_names = set(self._allowed_tool_names())
         agent.enabled_toolsets = []
         agent.disabled_toolsets = list(kwargs["disabled_toolsets"])
         return agent
+
+    def _validate_agent_fallback_policy(
+        self,
+        agent: Any,
+        runtime_plan: Any,
+        expected_fallback: Mapping[str, Any] | None,
+    ) -> None:
+        if getattr(runtime_plan, "subagent_id", "") != "hermes_engineer_core":
+            return
+        if not isinstance(expected_fallback, Mapping):
+            raise AIAgentExecutorBridgeError("missing_engineer_fallback_policy")
+        provider = str(expected_fallback.get("provider") or "").strip()
+        model = str(expected_fallback.get("model") or "").strip()
+        if not provider or not model:
+            raise AIAgentExecutorBridgeError("missing_engineer_fallback_policy")
+
+        fallback_chain = list(getattr(agent, "_fallback_chain", []) or [])
+        expected_chain = [{"provider": provider, "model": model}]
+        if fallback_chain != expected_chain:
+            raise AIAgentExecutorBridgeError(
+                "invalid_engineer_fallback_chain:"
+                f"expected={expected_chain!r}:actual={fallback_chain!r}"
+            )
 
     def _default_conversation_runner(self, _bridge: "AIAgentSubagentExecutorBridge", agent: Any, request: Any, _runtime_plan: Any) -> Mapping[str, Any]:
         user_message = self._build_user_message(request)
