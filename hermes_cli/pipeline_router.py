@@ -179,6 +179,48 @@ _ARCHITECTURE_ONLY_KEYWORDS = (
     "draft a plan",
     "architecture discussion",
 )
+_HEURISTIC_ENGINEERING_FALLBACK_TEST_KEYWORDS = (
+    "pytest",
+    "test file",
+    "trivial pytest test",
+    "marker file",
+    "regression",
+    "function",
+    "module",
+    "tests/",
+)
+_HEURISTIC_ENGINEERING_FALLBACK_MUTATION_KEYWORDS = (
+    "create",
+    "add",
+    "modify",
+    "fix",
+    "update",
+    "write",
+    "edit",
+    "patch",
+)
+_HEURISTIC_ENGINEERING_FALLBACK_ANCHORS = (
+    "hermes autonomous pipeline validation",
+    "do not modify production behavior",
+    "do not touch db persistence",
+)
+_HEURISTIC_DEFAULT_CONVERSATION_KEYWORDS = (
+    "привет",
+    "как дела",
+    "что ты умеешь",
+    "объясни",
+    "напиши текст письма",
+    "суммируй",
+    "помоги сформулировать",
+    "какой следующий шаг",
+    "hello",
+    "hi",
+    "what can you do",
+    "explain",
+    "summarize",
+    "help me phrase",
+    "draft an email",
+)
 _AMBIGUOUS_KEYWORDS = (
     "посмотри это и реши, надо ли чинить",
     "look at this and decide if it needs fixing",
@@ -245,6 +287,9 @@ class RouterDecision:
     invalid_router_contract_summary: str | None = None
     dropped_alternatives_count: int = 0
     dropped_alternatives_reasons: tuple[str, ...] = field(default_factory=tuple)
+    routing_fallback_used: bool = False
+    routing_fallback_reason: str | None = None
+    router_strategy: str | None = None
 
 
 class PipelineRouter:
@@ -574,6 +619,23 @@ class LlmPipelineRouter(PipelineRouter):
                 loaded_specs=self._loaded_specs,
             )
         except Exception as exc:
+            failure_reason = _exception_summary(exc)
+            fallback_selection = self._heuristic_engineering_timeout_fallback(
+                user_message,
+                pipeline_session_id=pipeline_session_id,
+                router_subagent_id=router_subagent_id,
+                failure_reason=failure_reason,
+            )
+            if fallback_selection is not None:
+                return fallback_selection
+            fallback_selection = self._heuristic_default_timeout_fallback(
+                user_message,
+                pipeline_session_id=pipeline_session_id,
+                router_subagent_id=router_subagent_id,
+                failure_reason=failure_reason,
+            )
+            if fallback_selection is not None:
+                return fallback_selection
             if self._fallback_strategy == "deterministic":
                 return self._deterministic_router.route(
                     user_message,
@@ -588,7 +650,7 @@ class LlmPipelineRouter(PipelineRouter):
                     "confidence": DEFAULT_CONFIDENCE,
                     "reasoning_summary": "The LLM pipeline router failed before it could produce a valid registry-constrained decision.",
                     "requires_clarification": False,
-                    "routing_failure_reason": _exception_summary(exc),
+                    "routing_failure_reason": failure_reason,
                     "fallback_safe": False,
                     "alternatives": [],
                     "selected_provider": self._provider,
@@ -612,6 +674,37 @@ class LlmPipelineRouter(PipelineRouter):
         invalid_router_contract_kind: str | None = None,
         invalid_router_contract_summary: str | None = None,
     ) -> RouterDecision:
+        fallback_failure_reason = reason
+        if invalid_router_contract_summary:
+            fallback_failure_reason = f"{reason}: {invalid_router_contract_summary}"
+        elif invalid_confidence_summary:
+            fallback_failure_reason = f"{reason}: {invalid_confidence_summary}"
+        fallback_selection = self._heuristic_engineering_timeout_fallback(
+            user_message,
+            pipeline_session_id=pipeline_session_id,
+            router_subagent_id=router_subagent_id,
+            failure_reason=fallback_failure_reason,
+            failure_code=reason,
+            invalid_confidence_kind=invalid_confidence_kind,
+            invalid_confidence_summary=invalid_confidence_summary,
+            invalid_router_contract_kind=invalid_router_contract_kind,
+            invalid_router_contract_summary=invalid_router_contract_summary,
+        )
+        if fallback_selection is not None:
+            return fallback_selection
+        fallback_selection = self._heuristic_default_timeout_fallback(
+            user_message,
+            pipeline_session_id=pipeline_session_id,
+            router_subagent_id=router_subagent_id,
+            failure_reason=fallback_failure_reason,
+            failure_code=reason,
+            invalid_confidence_kind=invalid_confidence_kind,
+            invalid_confidence_summary=invalid_confidence_summary,
+            invalid_router_contract_kind=invalid_router_contract_kind,
+            invalid_router_contract_summary=invalid_router_contract_summary,
+        )
+        if fallback_selection is not None:
+            return fallback_selection
         if self._fallback_strategy == "deterministic":
             base = self._deterministic_router.route(
                 user_message,
@@ -720,6 +813,176 @@ class LlmPipelineRouter(PipelineRouter):
             loaded_specs=self._loaded_specs,
         )
 
+    def _heuristic_engineering_timeout_fallback(
+        self,
+        user_message: str,
+        *,
+        pipeline_session_id: str,
+        router_subagent_id: str,
+        failure_reason: str,
+        failure_code: str | None = None,
+        invalid_confidence_kind: str | None = None,
+        invalid_confidence_summary: str | None = None,
+        invalid_router_contract_kind: str | None = None,
+        invalid_router_contract_summary: str | None = None,
+    ) -> RouterDecision | None:
+        if not self._is_heuristic_engineering_fallback_failure(
+            failure_reason,
+            failure_code=failure_code,
+            invalid_confidence_kind=invalid_confidence_kind,
+            invalid_router_contract_kind=invalid_router_contract_kind,
+        ):
+            return None
+
+        base = self._deterministic_router.route(
+            user_message,
+            pipeline_session_id=pipeline_session_id,
+            router_subagent_id=router_subagent_id,
+        )
+        if not self._is_strong_engineering_fallback_candidate(user_message, base):
+            return None
+
+        return parse_router_decision(
+            {
+                "pipeline_session_id": base.pipeline_session_id,
+                "router_subagent_id": base.router_subagent_id,
+                "status": "selected",
+                "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+                "fallback_pipeline_id": None,
+                "confidence": max(self._min_confidence, 0.74),
+                "reasoning_summary": "The LLM router failed, but the request matched a narrow deterministic engineering smoke signature, so Hermes selected the engineering pipeline without opening the normal fallback path.",
+                "requires_clarification": False,
+                "policy_block_reason": base.policy_block_reason,
+                "routing_failure_reason": failure_reason,
+                "matched_signals": list(base.matched_signals),
+                "alternatives": [alternative.__dict__ for alternative in base.alternatives],
+                "fallback_safe": False,
+                "selected_provider": self._provider,
+                "selected_model": self._model,
+                "actual_provider": self._provider,
+                "actual_model": self._model,
+                "invalid_confidence_kind": invalid_confidence_kind,
+                "invalid_confidence_summary": invalid_confidence_summary,
+                "invalid_router_contract_kind": invalid_router_contract_kind,
+                "invalid_router_contract_summary": invalid_router_contract_summary,
+                "routing_fallback_used": True,
+                "routing_fallback_reason": failure_reason,
+                "router_strategy": "heuristic_timeout_fallback",
+            },
+            loaded_specs=self._loaded_specs,
+        )
+
+    def _heuristic_default_timeout_fallback(
+        self,
+        user_message: str,
+        *,
+        pipeline_session_id: str,
+        router_subagent_id: str,
+        failure_reason: str,
+        failure_code: str | None = None,
+        invalid_confidence_kind: str | None = None,
+        invalid_confidence_summary: str | None = None,
+        invalid_router_contract_kind: str | None = None,
+        invalid_router_contract_summary: str | None = None,
+    ) -> RouterDecision | None:
+        if not self._is_heuristic_engineering_fallback_failure(
+            failure_reason,
+            failure_code=failure_code,
+            invalid_confidence_kind=invalid_confidence_kind,
+            invalid_router_contract_kind=invalid_router_contract_kind,
+        ):
+            return None
+
+        base = self._deterministic_router.route(
+            user_message,
+            pipeline_session_id=pipeline_session_id,
+            router_subagent_id=router_subagent_id,
+        )
+        if base.status != "no_specialized_pipeline" or base.fallback_pipeline_id != DEFAULT_PIPELINE_ID:
+            return None
+        if not base.fallback_safe or base.requires_clarification:
+            return None
+        if not self._is_clear_non_engineering_default_candidate(user_message):
+            return None
+
+        return parse_router_decision(
+            {
+                "pipeline_session_id": base.pipeline_session_id,
+                "router_subagent_id": base.router_subagent_id,
+                "status": "no_specialized_pipeline",
+                "selected_pipeline_id": None,
+                "fallback_pipeline_id": DEFAULT_PIPELINE_ID,
+                "confidence": max(base.confidence, 0.76),
+                "reasoning_summary": "The LLM router failed, but the request matched a clear non-engineering conversation pattern, so Hermes used the safe default conversation fallback.",
+                "requires_clarification": False,
+                "policy_block_reason": base.policy_block_reason,
+                "routing_failure_reason": failure_reason,
+                "matched_signals": list(base.matched_signals),
+                "alternatives": [alternative.__dict__ for alternative in base.alternatives],
+                "fallback_safe": True,
+                "selected_provider": self._provider,
+                "selected_model": self._model,
+                "actual_provider": self._provider,
+                "actual_model": self._model,
+                "invalid_confidence_kind": invalid_confidence_kind,
+                "invalid_confidence_summary": invalid_confidence_summary,
+                "invalid_router_contract_kind": invalid_router_contract_kind,
+                "invalid_router_contract_summary": invalid_router_contract_summary,
+                "routing_fallback_used": True,
+                "routing_fallback_reason": failure_reason,
+                "router_strategy": "heuristic_timeout_default_fallback",
+            },
+            loaded_specs=self._loaded_specs,
+        )
+
+    def _is_clear_non_engineering_default_candidate(self, user_message: str) -> bool:
+        normalized = _normalize_text(user_message.strip())
+        if _ENGINEERING_PATH_PATTERN.search(normalized):
+            return False
+        if _matches_any(normalized, _ENGINEERING_MUTATION_KEYWORDS):
+            return False
+        if _matches_any(normalized, _ENGINEERING_DEBUG_KEYWORDS):
+            return False
+        return _matches_any(normalized, _HEURISTIC_DEFAULT_CONVERSATION_KEYWORDS)
+
+    def _is_heuristic_engineering_fallback_failure(
+        self,
+        failure_reason: str,
+        *,
+        failure_code: str | None,
+        invalid_confidence_kind: str | None,
+        invalid_router_contract_kind: str | None,
+    ) -> bool:
+        normalized_reason = (failure_reason or "").strip().lower()
+        if normalized_reason.startswith("timeouterror:"):
+            return True
+        if "jsondecodeerror" in normalized_reason:
+            return True
+        if failure_code == "llm_invalid_confidence" and invalid_confidence_kind is not None:
+            return True
+        return False
+
+    def _is_strong_engineering_fallback_candidate(
+        self,
+        user_message: str,
+        base: RouterDecision,
+    ) -> bool:
+        if base.status != "selected" or base.selected_pipeline_id != ENGINEERING_PIPELINE_ID:
+            return False
+        normalized = _normalize_text(user_message.strip())
+        if not _ENGINEERING_PATH_PATTERN.search(normalized):
+            return False
+        if not (
+            _matches_any(normalized, _ENGINEERING_MUTATION_KEYWORDS)
+            or _matches_any(normalized, _HEURISTIC_ENGINEERING_FALLBACK_MUTATION_KEYWORDS)
+        ):
+            return False
+        if not _matches_any(normalized, _HEURISTIC_ENGINEERING_FALLBACK_TEST_KEYWORDS):
+            return False
+        if not _matches_any(normalized, _HEURISTIC_ENGINEERING_FALLBACK_ANCHORS):
+            return False
+        return True
+
 
 def build_pipeline_router(
     *,
@@ -792,6 +1055,9 @@ def parse_router_decision(
             for entry in data.get("dropped_alternatives_reasons", [])
             if str(entry).strip()
         ),
+        routing_fallback_used=bool(data.get("routing_fallback_used", False)),
+        routing_fallback_reason=_optional_str(data.get("routing_fallback_reason")),
+        router_strategy=_optional_str(data.get("router_strategy")),
     )
 
 
