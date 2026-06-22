@@ -461,6 +461,127 @@ def test_observe_low_confidence_fallback_logs_failure_reason(monkeypatch, caplog
     assert '"routing_failure_reason": "llm_low_confidence"' in log_message
 
 
+def test_observe_logs_heuristic_timeout_fallback_fields(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    decision = RouterDecision(
+        pipeline_session_id="pipe-timeout-fallback",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id=None,
+        confidence=0.74,
+        reasoning_summary="Narrow heuristic timeout fallback selected engineering.",
+        requires_clarification=False,
+        fallback_safe=False,
+        policy_block_reason=None,
+        routing_failure_reason="TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout",
+        routing_fallback_used=True,
+        routing_fallback_reason="TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout",
+        router_strategy="heuristic_timeout_fallback",
+        alternatives=(),
+        selected_provider="openrouter",
+        selected_model="openrouter/owl-alpha",
+        actual_provider="openrouter",
+        actual_model="openrouter/owl-alpha",
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={
+                "pipelines": {
+                    "router": {
+                        "mode": "autonomous",
+                        "strategy": "llm",
+                        "llm": {
+                            "provider": "openrouter",
+                            "model": "openrouter/owl-alpha",
+                            "timeout_seconds": 7,
+                            "fallback_strategy": "fail_closed",
+                            "min_confidence": 0.70,
+                        },
+                    }
+                }
+            },
+            user_message="Create tests/autonomous_runtime_smoke_marker.py and add one trivial pytest test.",
+            session_id="sess-timeout-fallback-log",
+        )
+
+    assert result == decision
+    log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
+    assert '"router_strategy": "heuristic_timeout_fallback"' in log_message
+    assert '"routing_fallback_used": true' in log_message
+    assert '"routing_fallback_reason": "TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout"' in log_message
+
+
+def test_observe_logs_heuristic_default_fallback_fields(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    decision = RouterDecision(
+        pipeline_session_id="pipe-timeout-default-fallback",
+        router_subagent_id="hermes_pipeline_router",
+        status="no_specialized_pipeline",
+        selected_pipeline_id=None,
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.76,
+        reasoning_summary="Clear non-engineering chat used the safe default conversation fallback after router failure.",
+        requires_clarification=False,
+        fallback_safe=True,
+        policy_block_reason=None,
+        routing_failure_reason="TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout",
+        routing_fallback_used=True,
+        routing_fallback_reason="TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout",
+        router_strategy="heuristic_timeout_default_fallback",
+        alternatives=(),
+        selected_provider="openrouter",
+        selected_model="openrouter/owl-alpha",
+        actual_provider="openrouter",
+        actual_model="openrouter/owl-alpha",
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={
+                "pipelines": {
+                    "router": {
+                        "mode": "autonomous",
+                        "strategy": "llm",
+                        "llm": {
+                            "provider": "openrouter",
+                            "model": "openrouter/owl-alpha",
+                            "timeout_seconds": 7,
+                            "fallback_strategy": "fail_closed",
+                            "min_confidence": 0.70,
+                        },
+                    }
+                }
+            },
+            user_message="Привет, что ты умеешь?",
+            session_id="sess-timeout-default-fallback-log",
+        )
+
+    assert result == decision
+    log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
+    assert '"router_strategy": "heuristic_timeout_default_fallback"' in log_message
+    assert '"fallback_pipeline_id": "default_conversation_pipeline"' in log_message
+    assert '"routing_fallback_used": true' in log_message
+    assert '"routing_fallback_reason": "TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout"' in log_message
+
+
 def test_observe_logs_invalid_confidence_diagnostics(monkeypatch, caplog):
     from hermes_cli import pipeline_observe
 

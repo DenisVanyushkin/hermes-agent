@@ -395,6 +395,208 @@ def test_llm_router_returns_routing_failed_when_fail_closed(tmp_path: Path) -> N
     assert "RuntimeError" in (decision.routing_failure_reason or "")
 
 
+def test_llm_router_timeout_uses_narrow_engineering_fallback_for_strong_smoke_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        min_confidence=0.70,
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(
+            TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+        ),
+    )
+
+    decision = router.route(
+        (
+            "HERMES AUTONOMOUS PIPELINE VALIDATION\n\n"
+            "Create a tiny autonomous-runtime smoke marker file:\n"
+            "tests/autonomous_runtime_smoke_marker.py\n\n"
+            "The file should contain one trivial pytest test with a unique marker string.\n"
+            "Do not modify production behavior.\n"
+            "Do not touch DB persistence.\n"
+        ),
+        pipeline_session_id="sess-timeout-fallback",
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.routing_fallback_used is True
+    assert decision.routing_fallback_reason is not None
+    assert "TimeoutError" in decision.routing_fallback_reason
+    assert "TimeoutError" in (decision.routing_failure_reason or "")
+    assert decision.router_strategy == "heuristic_timeout_fallback"
+    assert decision.confidence >= 0.70
+
+
+def test_llm_router_invalid_confidence_uses_narrow_engineering_fallback_for_strong_smoke_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        min_confidence=0.70,
+        llm_call=lambda **kwargs: {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "confidence": "high",
+            "reasoning_summary": "broken confidence contract",
+            "requires_clarification": False,
+            "alternatives": [],
+        },
+    )
+
+    decision = router.route(
+        (
+            "HERMES AUTONOMOUS PIPELINE VALIDATION\n\n"
+            "Create tests/autonomous_runtime_smoke_marker.py and add one trivial pytest test.\n"
+            "Do not modify production behavior.\n"
+            "Do not touch DB persistence.\n"
+        ),
+        pipeline_session_id="sess-invalid-confidence-fallback",
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.routing_fallback_used is True
+    assert decision.invalid_confidence_kind == "non_numeric"
+    assert decision.routing_fallback_reason is not None
+    assert "confidence" in decision.routing_fallback_reason.lower()
+
+
+def test_llm_router_timeout_keeps_fail_closed_for_vague_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(
+            TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+        ),
+    )
+
+    decision = router.route(
+        "Help me with Hermes.",
+        pipeline_session_id="sess-timeout-vague",
+    )
+
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.routing_fallback_used is False
+    assert "TimeoutError" in (decision.routing_failure_reason or "")
+
+
+def test_llm_router_timeout_uses_default_fallback_for_clear_generic_chat(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(
+            TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+        ),
+    )
+
+    decision = router.route(
+        "Привет, что ты умеешь?",
+        pipeline_session_id="sess-timeout-default-chat",
+    )
+
+    assert decision.status == "no_specialized_pipeline"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+    assert decision.fallback_safe is True
+    assert decision.routing_fallback_used is True
+    assert decision.routing_fallback_reason is not None
+    assert "TimeoutError" in decision.routing_fallback_reason
+    assert "TimeoutError" in (decision.routing_failure_reason or "")
+    assert decision.router_strategy == "heuristic_timeout_default_fallback"
+
+
+def test_llm_router_invalid_response_uses_default_fallback_for_clear_generic_chat(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: "not json at all",
+    )
+
+    decision = router.route(
+        "Помоги сформулировать короткое письмо.",
+        pipeline_session_id="sess-invalid-default-chat",
+    )
+
+    assert decision.status == "no_specialized_pipeline"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+    assert decision.fallback_safe is True
+    assert decision.routing_fallback_used is True
+    assert decision.routing_fallback_reason is not None
+    assert "JSONDecodeError" in decision.routing_fallback_reason
+    assert "JSONDecodeError" in (decision.routing_failure_reason or "")
+    assert decision.router_strategy == "heuristic_timeout_default_fallback"
+
+
+def test_llm_router_timeout_keeps_fail_closed_for_non_engineering_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(
+            TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+        ),
+    )
+
+    decision = router.route(
+        "Summarize the latest autonomous smoke and explain whether it was green.",
+        pipeline_session_id="sess-timeout-non-engineering",
+    )
+
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.routing_fallback_used is False
+    assert "TimeoutError" in (decision.routing_failure_reason or "")
+
+
+def test_llm_router_timeout_keeps_fail_closed_for_ambiguous_engineeringish_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(
+            TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+        ),
+    )
+
+    decision = router.route(
+        "почини Hermes",
+        pipeline_session_id="sess-timeout-ambiguous-engineeringish",
+    )
+
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id is None
+    assert decision.routing_fallback_used is False
+    assert "TimeoutError" in (decision.routing_failure_reason or "")
+
+
 @pytest.mark.parametrize(
     ("confidence", "expect_selected"),
     [
