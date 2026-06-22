@@ -1757,7 +1757,7 @@ def _blocked_final_response_text(
     test_summary: dict[str, Any] | None,
     reviewer_packet: dict[str, Any],
 ) -> str | None:
-    if blocked_reason not in {"test_command_denied", "invalid_engineer_output", "engineer_result_invalid"}:
+    if blocked_reason not in {"test_command_denied", "invalid_engineer_output", "engineer_result_invalid", "missing_structured_output"}:
         return None
     lines = [
         "Autonomous execution did not complete successfully.",
@@ -1770,6 +1770,15 @@ def _blocked_final_response_text(
                 "- The requested file changes were prepared in the autonomous workspace.",
                 "- Pytest was requested but blocked by the controlled test validator.",
                 "- Reviewer was not invoked because engineer output was invalid after the blocked test step.",
+                "",
+                "No verified passing test result is available.",
+            ]
+        )
+    elif blocked_reason == "missing_structured_output":
+        lines.extend(
+            [
+                "- The autonomous bridge reached execution, but the engineer result did not contain the required structured output packet.",
+                "- Reviewer was not invoked because the engineer result failed the structured-output contract.",
                 "",
                 "No verified passing test result is available.",
             ]
@@ -2599,6 +2608,8 @@ def _engineer_fail_closed_reason(state_snapshot: Any) -> str | None:
         return "engineer_result_missing"
     if runner_status != "succeeded":
         return "engineer_result_failed"
+    if not _step_structured_output(state_snapshot, 0):
+        return "missing_structured_output"
     if _engineer_requests_disagreement(_step_structured_output(state_snapshot, 0)):
         return None
     if evaluation_status != REVIEWER_APPROVAL_STATUS:

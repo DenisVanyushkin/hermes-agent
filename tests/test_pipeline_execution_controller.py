@@ -304,6 +304,27 @@ def test_autonomous_blocked_helper_does_not_claim_actual_execution() -> None:
     assert result.actual_execution_invoked is False
 
 
+def test_autonomous_helper_without_subagent_boundary_exposes_false_bridge_flags() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="autonomous"),
+        session=session,
+        state_snapshot=snapshot,
+        execution_helper=lambda **_kwargs: {
+            "status": "completed",
+            "report": {"subagent_runs": []},
+        },
+        allow_test_execution=True,
+    )
+
+    assert result.status == "completed"
+    assert result.actual_execution_invoked is True
+    assert result.subagent_execution_invoked is False
+    assert result.real_provider_bridge_invoked is False
+
+
 def test_default_config_does_not_resolve_helper(monkeypatch) -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")

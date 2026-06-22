@@ -780,6 +780,9 @@ class RuntimeBuildResult:
     current_session_model: str | None
     selected_runtime_differs_from_session_default: bool
     fallback_policy: FallbackPolicyRecord | None
+    runtime_mode: str = "fake"
+    real_provider_allowed: bool = False
+    provider_policy_status: str = "not_requested"
     errors: list[RuntimeFactoryErrorDetail] = field(default_factory=list)
 
     def to_safe_dict(self) -> dict[str, Any]:
@@ -795,6 +798,9 @@ class RuntimeBuildResult:
             "constructor_model": self.constructor_model,
             "constructor_api_mode": self.constructor_api_mode,
             "constructor_base_url": self.constructor_base_url,
+            "runtime_mode": self.runtime_mode,
+            "real_provider_allowed": self.real_provider_allowed,
+            "provider_policy_status": self.provider_policy_status,
             "session_default_provider": self.current_session_provider,
             "session_default_model": self.current_session_model,
             "session_default_mismatch": self.selected_runtime_differs_from_session_default,
@@ -892,6 +898,9 @@ class RuntimeFactory:
             constructor_model=constructor_model,
             constructor_api_mode=constructor_api_mode,
             constructor_base_url=constructor_base_url,
+            runtime_mode="bridge_executor" if status == "ready_to_construct" else "fake",
+            real_provider_allowed=bool(status == "ready_to_construct" and constructor_provider and constructor_model),
+            provider_policy_status="ready_to_construct" if status == "ready_to_construct" else "not_requested",
             current_session_provider=request.current_session_provider,
             current_session_model=request.current_session_model,
             selected_runtime_differs_from_session_default=differs,
@@ -1022,6 +1031,9 @@ class RuntimeFactory:
             constructor_model=None,
             constructor_api_mode=None,
             constructor_base_url=None,
+            runtime_mode="blocked",
+            real_provider_allowed=False,
+            provider_policy_status="blocked",
             current_session_provider=request.current_session_provider,
             current_session_model=request.current_session_model,
             selected_runtime_differs_from_session_default=False,

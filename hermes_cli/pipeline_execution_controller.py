@@ -30,6 +30,8 @@ class PipelineExecutionControllerResult:
     would_call: str | None
     actual_execution_invoked: bool
     execution_mode: str
+    subagent_execution_invoked: bool = False
+    real_provider_bridge_invoked: bool = False
     resolved_helper_name: str | None = None
     helper_result_status: str | None = None
     helper_result: dict[str, Any] | None = None
@@ -46,6 +48,8 @@ class PipelineExecutionControllerResult:
             "selected_pipeline_id": self.selected_pipeline_id,
             "would_call": self.would_call,
             "actual_execution_invoked": self.actual_execution_invoked,
+            "subagent_execution_invoked": self.subagent_execution_invoked,
+            "real_provider_bridge_invoked": self.real_provider_bridge_invoked,
             "execution_mode": self.execution_mode,
             "resolved_helper_name": self.resolved_helper_name,
             "helper_result_status": self.helper_result_status,
@@ -80,6 +84,8 @@ def evaluate_pipeline_execution_controller(
         selected_pipeline_id=pipeline_id,
         would_call=would_call,
         actual_execution_invoked=False,
+        subagent_execution_invoked=False,
+        real_provider_bridge_invoked=False,
         execution_mode=execution_mode,
         resolved_helper_name=None,
     )
@@ -183,6 +189,8 @@ def evaluate_pipeline_execution_controller(
             status="execution_failed",
             blocked_reason="controller_helper_failed",
             actual_execution_invoked=True,
+            subagent_execution_invoked=False,
+            real_provider_bridge_invoked=False,
             resolved_helper_name=helper_resolution.helper_name,
             helper_result_status="controller_helper_failed",
             helper_error=type(exc).__name__,
@@ -191,12 +199,16 @@ def evaluate_pipeline_execution_controller(
     safe_helper_result = _safe_helper_result(helper_result)
     helper_status = _helper_result_status(helper_result)
     helper_blocked_reason = _helper_blocked_reason(safe_helper_result) if helper_status == "blocked" else None
+    subagent_execution_invoked = _subagent_execution_invoked(safe_helper_result)
+    real_provider_bridge_invoked = _real_provider_bridge_invoked(safe_helper_result)
     return replace(
         base,
         status=helper_status,
         execution_allowed=True,
         blocked_reason=helper_blocked_reason,
         actual_execution_invoked=helper_status != "blocked",
+        subagent_execution_invoked=subagent_execution_invoked,
+        real_provider_bridge_invoked=real_provider_bridge_invoked,
         resolved_helper_name=helper_resolution.helper_name,
         helper_result_status=helper_status,
         helper_result=safe_helper_result,
@@ -315,6 +327,30 @@ def _helper_blocked_reason(safe_helper_result: dict[str, Any] | None) -> str | N
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _subagent_execution_invoked(safe_helper_result: dict[str, Any] | None) -> bool:
+    report = safe_helper_result.get("report") if isinstance(safe_helper_result, Mapping) else None
+    if not isinstance(report, Mapping):
+        return False
+    subagent_runs = report.get("subagent_runs")
+    return isinstance(subagent_runs, list) and any(isinstance(item, Mapping) for item in subagent_runs)
+
+
+def _real_provider_bridge_invoked(safe_helper_result: dict[str, Any] | None) -> bool:
+    report = safe_helper_result.get("report") if isinstance(safe_helper_result, Mapping) else None
+    if not isinstance(report, Mapping):
+        return False
+    for item in list(report.get("subagent_runs") or []):
+        if not isinstance(item, Mapping):
+            continue
+        runtime_mode = str(item.get("runtime_mode") or "")
+        provider_policy_status = str(item.get("provider_policy_status") or "")
+        if runtime_mode in {"bridge_executor", "real_provider"}:
+            return True
+        if bool(item.get("real_provider_allowed")) and provider_policy_status in {"ready_to_construct", "allowed"}:
+            return True
+    return False
 
 
 def _workspace_basename(helper_execution_context: Mapping[str, Any] | None) -> str | None:

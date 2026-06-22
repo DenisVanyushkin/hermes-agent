@@ -19,7 +19,7 @@ _BLOCKING_GIT_STATUSES = {
 _BLOCKING_ENGINEER_STATUSES = {"failed", "blocked"}
 _DIFF_MARKERS = ("diff --git", "@@", "+++", "---")
 _SENSITIVE_PARTS = ("api_key", "token", "password", "secret", "credential", "env")
-_VALID_TEST_STATUSES = {"not_run", "passed", "failed", "blocked", "unknown"}
+_VALID_TEST_STATUSES = {"not_run", "not_requested", "passed", "failed", "blocked", "unknown"}
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,7 @@ class ReviewerPacket:
     completion_allowed_without_review: bool
     user_action_required: bool
     blocked_reason: str | None
+    blocked_reason_detail: str | None
     task_summary: str | None
     engineer_summary: str | None
     engineer_status: str
@@ -52,6 +53,7 @@ class ReviewerPacket:
             "completion_allowed_without_review": self.completion_allowed_without_review,
             "user_action_required": self.user_action_required,
             "blocked_reason": self.blocked_reason,
+            "blocked_reason_detail": self.blocked_reason_detail,
             "task_summary": self.task_summary,
             "engineer_summary": self.engineer_summary,
             "engineer_status": self.engineer_status,
@@ -89,6 +91,7 @@ def build_reviewer_packet(
         or engineer["failed"]
     )
     blocked_reason = _blocked_reason(git_result=git_result, engineer=engineer)
+    blocked_reason_detail = _blocked_reason_detail(git_result=git_result, engineer=engineer)
     user_action_required = blocked_reason is not None
     completion_allowed_without_review = not review_required and blocked_reason is None
     if blocked_reason is not None:
@@ -108,6 +111,7 @@ def build_reviewer_packet(
         completion_allowed_without_review=completion_allowed_without_review,
         user_action_required=user_action_required,
         blocked_reason=blocked_reason,
+        blocked_reason_detail=blocked_reason_detail,
         task_summary=_clean_optional_text(task_summary),
         engineer_summary=engineer["summary"],
         engineer_status=engineer["status"],
@@ -126,6 +130,7 @@ def summarize_engineer_output(engineer_output: Any) -> dict[str, Any]:
     return {
         "status": status,
         "summary": _clean_optional_text(payload.get("summary")),
+        "validation_status": validation_status,
         "requires_review": bool(requires_review) if isinstance(requires_review, bool) else None,
         "failed": status in _BLOCKING_ENGINEER_STATUSES,
         "invalid": validation_status != "valid",
@@ -180,6 +185,16 @@ def _blocked_reason(*, git_result: GitMaterialChangeResult, engineer: dict[str, 
         return "invalid_engineer_output"
     if engineer["failed"]:
         return "engineer_failed"
+    return None
+
+
+def _blocked_reason_detail(*, git_result: GitMaterialChangeResult, engineer: dict[str, Any]) -> str | None:
+    if git_result.status in _BLOCKING_GIT_STATUSES or git_result.baseline_dirty:
+        return None
+    if engineer["invalid"]:
+        if engineer.get("validation_status") == "missing_structured_output":
+            return "missing_structured_output"
+        return "invalid_engineer_structured_output"
     return None
 
 
