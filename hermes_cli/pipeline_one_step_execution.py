@@ -291,6 +291,9 @@ def _adapt_runner_result(
         actual_provider=runtime_plan.constructor_provider,
         actual_model=runtime_plan.constructor_model,
         actual_model_class=runtime_plan.selection.selected_model_class if runtime_plan.selection else None,
+        runtime_mode=_runtime_mode_from_invocation(invocation_result.raw_metadata, runtime_plan),
+        real_provider_allowed=_real_provider_allowed_from_invocation(invocation_result.raw_metadata, runtime_plan),
+        provider_policy_status=_provider_policy_status_from_invocation(invocation_result.raw_metadata, runtime_plan),
         usage_summary=SubagentUsageSummary(
             input_tokens=token_usage.get("input_tokens"),
             output_tokens=token_usage.get("output_tokens"),
@@ -318,6 +321,52 @@ def _structured_output_from_invocation(raw_metadata: dict[str, Any] | None) -> S
     if not isinstance(raw_metadata, dict) or "structured_output" not in raw_metadata:
         return None
     return validate_structured_output_envelope(raw_metadata.get("structured_output"))
+
+
+def _bridge_metadata(raw_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(raw_metadata, dict):
+        return {}
+    metadata = raw_metadata.get("bridge_metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _runtime_mode_from_invocation(raw_metadata: dict[str, Any] | None, runtime_plan: Any) -> str:
+    bridge_metadata = _bridge_metadata(raw_metadata)
+    value = bridge_metadata.get("runtime_mode")
+    if isinstance(value, str) and value.strip():
+        return value
+    runtime_mode = getattr(runtime_plan, "runtime_mode", None)
+    if isinstance(runtime_mode, str) and runtime_mode.strip() and runtime_mode != "fake":
+        return runtime_mode
+    if getattr(runtime_plan, "actual_runtime_status", None) == "ready_to_construct":
+        return "bridge_executor"
+    return "fake"
+
+
+def _real_provider_allowed_from_invocation(raw_metadata: dict[str, Any] | None, runtime_plan: Any) -> bool:
+    bridge_metadata = _bridge_metadata(raw_metadata)
+    if "real_provider_allowed" in bridge_metadata:
+        return bool(bridge_metadata.get("real_provider_allowed"))
+    if bool(getattr(runtime_plan, "real_provider_allowed", False)):
+        return True
+    return bool(
+        getattr(runtime_plan, "actual_runtime_status", None) == "ready_to_construct"
+        and getattr(runtime_plan, "constructor_provider", None)
+        and getattr(runtime_plan, "constructor_model", None)
+    )
+
+
+def _provider_policy_status_from_invocation(raw_metadata: dict[str, Any] | None, runtime_plan: Any) -> str:
+    bridge_metadata = _bridge_metadata(raw_metadata)
+    value = bridge_metadata.get("provider_policy_status")
+    if isinstance(value, str) and value.strip():
+        return value
+    provider_policy_status = getattr(runtime_plan, "provider_policy_status", None)
+    if isinstance(provider_policy_status, str) and provider_policy_status.strip() and provider_policy_status != "not_requested":
+        return provider_policy_status
+    if getattr(runtime_plan, "actual_runtime_status", None) == "ready_to_construct":
+        return "ready_to_construct"
+    return "not_requested"
 
 
 def _runner_request_payload(request: SubagentRunnerRequest, runtime_plan: Any) -> dict[str, Any]:

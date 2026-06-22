@@ -322,6 +322,8 @@ def _routing_failed_controller_result(*, mode: str):
         would_call=None,
         actual_execution_invoked=False,
         execution_mode=mode,
+        subagent_execution_invoked=False,
+        real_provider_bridge_invoked=False,
         resolved_helper_name=None,
         helper_result_status="not_invoked",
         helper_result=None,

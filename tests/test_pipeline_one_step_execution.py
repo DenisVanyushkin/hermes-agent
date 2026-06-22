@@ -4,6 +4,7 @@ from dataclasses import replace
 import importlib
 from pathlib import Path
 import shutil
+from types import SimpleNamespace
 
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
@@ -218,6 +219,45 @@ def test_allowed_one_step_result_is_validated_evaluated_and_reported(tmp_path: P
         "hermes_engineer_core",
         "hermes_code_reviewer",
     ]
+
+
+def test_one_step_adapter_preserves_bridge_runtime_metadata(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
+    adapted = module._adapt_runner_result(
+        invocation_result=SimpleNamespace(
+            ok=True,
+            execution_status="completed",
+            completion_reason="completed",
+            token_usage={},
+            tool_intents=[],
+            raw_metadata={"structured_output": _valid_structured_output()},
+            record=SimpleNamespace(elapsed_ms=12.0),
+            error_code=None,
+        ),
+        runner_request=SimpleNamespace(
+            pipeline_session_id="pipe-one-step-1",
+            trace_id="trace-one-step-1",
+            pipeline_id="engineering_review_pipeline",
+            step_id="engineer",
+            subagent_id="hermes_engineer_core",
+            role_id="engineer",
+            runtime_factory_plan_id="rfp-1",
+            runtime_factory_status="ready_to_construct",
+        ),
+        runtime_plan=SimpleNamespace(
+            constructor_provider="openrouter",
+            constructor_model="xiaomi/mimo-v2.5-pro",
+            selection=SimpleNamespace(selected_model_class="frontier"),
+            actual_runtime_status="ready_to_construct",
+            runtime_mode="real_provider",
+            real_provider_allowed=True,
+            provider_policy_status="ready_to_construct",
+        ),
+    )
+
+    assert adapted.runtime_mode == "real_provider"
+    assert adapted.real_provider_allowed is True
+    assert adapted.provider_policy_status == "ready_to_construct"
 
 
 def test_final_report_marks_only_one_step_executed_but_not_final_completion(tmp_path: Path) -> None:

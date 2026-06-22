@@ -270,6 +270,7 @@ def test_long_text_is_bounded() -> None:
         ({"status": "passed"}, "passed"),
         ({"status": "failed"}, "failed"),
         ({"status": "not_run"}, "not_run"),
+        ({"status": "not_requested"}, "not_requested"),
         ({}, "unknown"),
         (None, "unknown"),
     ],
@@ -298,6 +299,24 @@ def test_invalid_engineer_output_blocks_and_requires_review() -> None:
     assert packet.review_required is True
     assert packet.user_action_required is True
     assert packet.engineer_status == "failed"
+
+
+def test_missing_structured_output_gets_explicit_block_reason() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+
+    packet = module.build_reviewer_packet(
+        pipeline_id="engineering_review_pipeline",
+        task_summary="Engineer output missing structured payload",
+        engineer_output=_engineer_output(status="failed", validation_status="missing_structured_output"),
+        baseline_snapshot=_snapshot(head_sha="abc123"),
+        post_snapshot=_snapshot(head_sha="def456", staged_files=("b.py",)),
+        git_result=_git_result(changed_files=["b.py"], staged_files=["b.py"]),
+        test_summary={"status": "not_requested", "results": []},
+    )
+
+    assert packet.blocked_reason == "invalid_engineer_output"
+    assert packet.blocked_reason_detail == "missing_structured_output"
+    assert packet.tests["status"] == "not_requested"
 
 
 def test_module_does_not_run_git_commands(monkeypatch: pytest.MonkeyPatch) -> None:
