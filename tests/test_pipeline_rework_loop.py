@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 import shutil
+from types import SimpleNamespace
 import subprocess
 
 from hermes_cli.pipeline_router import RouterDecision
@@ -125,6 +126,33 @@ def _invalid_output() -> dict[str, object]:
     return {
         "status": "approved",
     }
+
+
+def test_engineer_fail_closed_reason_distinguishes_missing_structured_output() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    snapshot = SimpleNamespace(
+        planned_steps=[
+            SimpleNamespace(
+                runner_result={"status": "succeeded", "structured_output": None},
+                evaluation_result={"status": "blocked"},
+            )
+        ]
+    )
+
+    assert module._engineer_fail_closed_reason(snapshot) == "missing_structured_output"
+
+
+def test_blocked_final_response_text_handles_missing_structured_output() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._blocked_final_response_text(
+        blocked_reason="missing_structured_output",
+        test_summary={"status": "not_requested"},
+        reviewer_packet={},
+    )
+
+    assert text is not None
+    assert "required structured output packet" in text
 
 
 
