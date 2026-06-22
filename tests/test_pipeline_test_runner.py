@@ -113,6 +113,34 @@ def test_python_module_pytest_executes_via_active_interpreter(tmp_path: Path) ->
     assert calls == [[sys.executable, "-m", "pytest", "-q", "tests/test_example.py"]]
 
 
+def test_structured_pytest_payload_executes_via_canonical_argv(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_example.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def _runner(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout=".\n1 passed\n", stderr="")
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=[{"targets": ["tests/test_example.py"], "quiet": True, "maxfail": 1}],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "passed"
+    assert payload["results"][0]["command"] == [sys.executable, "-m", "pytest", "-q", "--maxfail=1", "tests/test_example.py"]
+    assert calls == [[sys.executable, "-m", "pytest", "-q", "--maxfail=1", "tests/test_example.py"]]
+
+
 def test_bare_pytest_executes_via_active_interpreter(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_test_runner")
     repo = _init_git_repo(tmp_path)
@@ -189,6 +217,56 @@ def test_unsafe_command_is_denied_without_spawning_subprocess(tmp_path: Path) ->
     assert payload["status"] == "blocked"
     assert payload["blocked_reason"] == "test_command_denied"
     assert payload["denied_count"] == 1
+    assert calls == []
+
+
+def test_absolute_path_structured_target_is_denied_without_spawning_subprocess(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    calls: list[list[str]] = []
+
+    def _unexpected_runner(argv, **kwargs):
+        calls.append(list(argv))
+        raise AssertionError("absolute path target must not reach subprocess runner")
+
+    repo = _init_git_repo(tmp_path)
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=[{"targets": ["/tmp/test_example.py"], "quiet": True}],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_unexpected_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "test_command_denied"
+    assert calls == []
+
+
+def test_non_tests_structured_target_is_denied_without_spawning_subprocess(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    calls: list[list[str]] = []
+
+    def _unexpected_runner(argv, **kwargs):
+        calls.append(list(argv))
+        raise AssertionError("non-tests target must not reach subprocess runner")
+
+    repo = _init_git_repo(tmp_path)
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=[{"targets": ["src/test_example.py"], "quiet": True}],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_unexpected_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "test_command_denied"
     assert calls == []
 
 
@@ -319,3 +397,24 @@ def test_too_many_test_commands_fail_closed_without_spawning_subprocess(tmp_path
     assert payload["denied_count"] > 0
     assert payload["executed_count"] == 0
     assert calls == []
+
+
+def test_denied_command_captures_sanitized_forensics(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["pytest -q tests/test_example.py --api-key=secret-value"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+    )
+
+    payload = summary.to_safe_dict()
+    denied = payload["results"][0]
+
+    assert payload["blocked_reason"] == "test_command_denied"
+    assert denied["status"] == "denied"
+    assert denied["command"][0] == "pytest"
+    assert "secret-value" not in str(denied)

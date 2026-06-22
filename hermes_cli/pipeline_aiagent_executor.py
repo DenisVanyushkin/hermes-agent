@@ -159,11 +159,15 @@ class AIAgentSubagentExecutorBridge:
             )
             result = {"status": completed.returncode, "output": completed.stdout}
         elif tool_name == "pytest":
-            command = str(args.get("command") or "").strip()
+            pytest_request: Any
+            if isinstance(args.get("command"), str) and str(args.get("command") or "").strip():
+                pytest_request = str(args.get("command") or "").strip()
+            else:
+                pytest_request = args
             summary = run_controlled_tests(
                 allow_test_commands=True,
                 test_workspace=self.workspace_root,
-                tests_payload=[command],
+                tests_payload=[pytest_request],
                 step_kind="engineer",
                 step_subagent_id="hermes_engineer_core",
                 subprocess_runner=self.subprocess_runner,
@@ -275,7 +279,16 @@ class AIAgentSubagentExecutorBridge:
             "write_file": self._tool_definition("write_file", "Write a file inside the controlled workspace.", {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
             "git_status": self._tool_definition("git_status", "Show git status for the controlled workspace.", {}, []),
             "git_diff": self._tool_definition("git_diff", "Show git diff for the controlled workspace.", {}, []),
-            "pytest": self._tool_definition("pytest", "Run an allowed pytest command inside the controlled workspace.", {"command": {"type": "string"}}, ["command"]),
+            "pytest": self._tool_definition(
+                "pytest",
+                "Run allowed pytest targets inside the controlled workspace. The runtime chooses the executable.",
+                {
+                    "targets": {"type": "array", "items": {"type": "string"}},
+                    "quiet": {"type": "boolean"},
+                    "maxfail": {"type": "integer"},
+                },
+                ["targets"],
+            ),
         }
         return [definitions[name] for name in self._allowed_tool_names()]
 
