@@ -342,6 +342,382 @@ def test_autonomous_routing_failed_blocks_normal_agent_fallback(monkeypatch):
     assert "mutation: none" in result["final_response"]
 
 
+def test_autonomous_helper_invocation_blocks_normal_agent_fallback(monkeypatch):
+    events: list[str] = []
+
+    class _FailIfCalledAgent:
+        def __init__(self, *args, **kwargs):
+            self.tools = []
+
+        def run_conversation(self, user_message: str, conversation_history=None, task_id=None, **kwargs):
+            events.append("run_conversation")
+            raise AssertionError("normal AIAgent fallback must not run after autonomous helper invocation")
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _FailIfCalledAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "pipelines": {
+                "enabled": True,
+                "router": {"mode": "autonomous"},
+                "orchestrator": {"mode": "autonomous"},
+                "execution": {"mode": "autonomous"},
+            }
+        },
+    )
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "api_key": "***",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+            "max_tokens": None,
+        },
+    )
+
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    report = OrchestratorObserveReport(
+        session=PipelineSession(
+            pipeline_session_id="pipe-terminal",
+            trace_id="pipe-terminal",
+            pipeline_id="engineering_review_pipeline",
+            router_status="selected",
+            router_confidence=0.98,
+            platform="local",
+            session_key="agent:main:local:dm",
+            session_id="session-auto-terminal",
+            chat_id="cli",
+            thread_id=None,
+            user_id="user-1",
+            created_at="2026-06-22T00:00:00+00:00",
+            user_message_hash="hash",
+            mode="autonomous",
+            current_state="preflight_blocked_execution",
+            status=PipelineSessionStatus.CREATED,
+            planned_steps=[],
+            selected_subagent_ids=["hermes_engineer_core", "hermes_code_reviewer"],
+            reviewer_condition="code_changes_require_review",
+        ),
+        state=PipelineState(
+            pipeline_session_id="pipe-terminal",
+            pipeline_id="engineering_review_pipeline",
+            state="preflight_blocked_execution",
+            mode="autonomous",
+            router_status="selected",
+            selected_pipeline_id="engineering_review_pipeline",
+            fallback_pipeline_id="default_conversation_pipeline",
+            completion_allowed=True,
+            completion_blocked_reason="missing_structured_output",
+            final_verdict="controlled_rework_loop_reviewer_fail_closed",
+        ),
+        execution_report=ExecutionReport(
+            pipeline_session_id="pipe-terminal",
+            pipeline_id="engineering_review_pipeline",
+            router_status="selected",
+            selected_pipeline_id="engineering_review_pipeline",
+            fallback_pipeline_id="default_conversation_pipeline",
+            completion_allowed=True,
+            completion_reason="observe_only_default_path",
+            executed=True,
+            would_execute=False,
+            execution_mode="autonomous",
+            runtime_status="executed",
+        ),
+        pipeline_execution_controller=type(
+            "ControllerStub",
+            (),
+            {
+                "actual_execution_invoked": True,
+                "subagent_execution_invoked": True,
+                "real_provider_bridge_invoked": True,
+                "blocked_reason": "missing_structured_output",
+                "final_response_text": None,
+            },
+        )(),
+    )
+    monkeypatch.setattr(orchestrator, "observe_gateway_turn", lambda **_kwargs: report)
+
+    runner = _make_runner()
+    source = SessionSource(platform=Platform.LOCAL, chat_id="cli", chat_name="CLI", chat_type="dm", user_id="user-1")
+    result = asyncio.run(
+        runner._run_agent(
+            message="Create tests/autonomous_runtime_fallback_smoke_marker.py and write a marker",
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id="session-auto-terminal",
+            session_key="agent:main:local:dm",
+        )
+    )
+
+    assert events == []
+    assert result["api_calls"] == 0
+    assert "Autonomous execution reached the controlled engineering path" in result["final_response"]
+    assert "normal_agent_fallback_blocked: true" in result["final_response"]
+    assert "blocked_reason: missing_structured_output" in result["final_response"]
+
+
+def test_autonomous_subagent_only_invocation_blocks_normal_agent_fallback(monkeypatch):
+    events: list[str] = []
+
+    class _FailIfCalledAgent:
+        def __init__(self, *args, **kwargs):
+            self.tools = []
+
+        def run_conversation(self, user_message: str, conversation_history=None, task_id=None, **kwargs):
+            events.append("run_conversation")
+            raise AssertionError(
+                "normal AIAgent fallback must not run after autonomous subagent execution"
+            )
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _FailIfCalledAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "pipelines": {
+                "enabled": True,
+                "router": {"mode": "autonomous"},
+                "orchestrator": {"mode": "autonomous"},
+                "execution": {"mode": "autonomous"},
+            }
+        },
+    )
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "api_key": "***",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+            "max_tokens": None,
+        },
+    )
+
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    report = OrchestratorObserveReport(
+        session=PipelineSession(
+            pipeline_session_id="pipe-subagent-only",
+            trace_id="pipe-subagent-only",
+            pipeline_id="engineering_review_pipeline",
+            router_status="selected",
+            router_confidence=0.98,
+            platform="local",
+            session_key="agent:main:local:dm",
+            session_id="session-auto-subagent-only",
+            chat_id="cli",
+            thread_id=None,
+            user_id="user-1",
+            created_at="2026-06-22T00:00:00+00:00",
+            user_message_hash="hash",
+            mode="autonomous",
+            current_state="preflight_blocked_execution",
+            status=PipelineSessionStatus.CREATED,
+            planned_steps=[],
+            selected_subagent_ids=["hermes_engineer_core"],
+            reviewer_condition="code_changes_require_review",
+        ),
+        state=PipelineState(
+            pipeline_session_id="pipe-subagent-only",
+            pipeline_id="engineering_review_pipeline",
+            state="preflight_blocked_execution",
+            mode="autonomous",
+            router_status="selected",
+            selected_pipeline_id="engineering_review_pipeline",
+            fallback_pipeline_id="default_conversation_pipeline",
+            completion_allowed=True,
+            completion_blocked_reason="missing_structured_output",
+            final_verdict="controlled_rework_loop_reviewer_fail_closed",
+        ),
+        execution_report=ExecutionReport(
+            pipeline_session_id="pipe-subagent-only",
+            pipeline_id="engineering_review_pipeline",
+            router_status="selected",
+            selected_pipeline_id="engineering_review_pipeline",
+            fallback_pipeline_id="default_conversation_pipeline",
+            completion_allowed=True,
+            completion_reason="observe_only_default_path",
+            executed=True,
+            would_execute=False,
+            execution_mode="autonomous",
+            runtime_status="executed",
+        ),
+        pipeline_execution_controller=type(
+            "ControllerStub",
+            (),
+            {
+                "actual_execution_invoked": False,
+                "subagent_execution_invoked": True,
+                "real_provider_bridge_invoked": False,
+                "blocked_reason": "missing_structured_output",
+                "final_response_text": None,
+            },
+        )(),
+    )
+    monkeypatch.setattr(orchestrator, "observe_gateway_turn", lambda **_kwargs: report)
+
+    runner = _make_runner()
+    source = SessionSource(platform=Platform.LOCAL, chat_id="cli", chat_name="CLI", chat_type="dm", user_id="user-1")
+    result = asyncio.run(
+        runner._run_agent(
+            message="Create tests/autonomous_runtime_subagent_only_marker.py and write a marker",
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id="session-auto-subagent-only",
+            session_key="agent:main:local:dm",
+        )
+    )
+
+    assert events == []
+    assert result["api_calls"] == 0
+    assert result["tools"] == []
+    assert "Autonomous execution reached the controlled engineering path" in result["final_response"]
+    assert "normal_agent_fallback_blocked: true" in result["final_response"]
+    assert "blocked_reason: missing_structured_output" in result["final_response"]
+
+
+def test_autonomous_helper_final_response_text_short_circuits_normal_agent(monkeypatch):
+    events: list[str] = []
+
+    class _FailIfCalledAgent:
+        def __init__(self, *args, **kwargs):
+            self.tools = []
+
+        def run_conversation(self, user_message: str, conversation_history=None, task_id=None, **kwargs):
+            events.append("run_conversation")
+            raise AssertionError(
+                "normal AIAgent fallback must not run after autonomous helper final response"
+            )
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _FailIfCalledAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "pipelines": {
+                "enabled": True,
+                "router": {"mode": "autonomous"},
+                "orchestrator": {"mode": "autonomous"},
+                "execution": {"mode": "autonomous"},
+            }
+        },
+    )
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "api_key": "***",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+            "max_tokens": None,
+        },
+    )
+
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    report = OrchestratorObserveReport(
+        session=PipelineSession(
+            pipeline_session_id="pipe-final-response",
+            trace_id="pipe-final-response",
+            pipeline_id="engineering_review_pipeline",
+            router_status="selected",
+            router_confidence=0.98,
+            platform="local",
+            session_key="agent:main:local:dm",
+            session_id="session-auto-final-response",
+            chat_id="cli",
+            thread_id=None,
+            user_id="user-1",
+            created_at="2026-06-22T00:00:00+00:00",
+            user_message_hash="hash",
+            mode="autonomous",
+            current_state="preflight_blocked_execution",
+            status=PipelineSessionStatus.CREATED,
+            planned_steps=[],
+            selected_subagent_ids=["hermes_engineer_core", "hermes_code_reviewer"],
+            reviewer_condition="code_changes_require_review",
+        ),
+        state=PipelineState(
+            pipeline_session_id="pipe-final-response",
+            pipeline_id="engineering_review_pipeline",
+            state="preflight_blocked_execution",
+            mode="autonomous",
+            router_status="selected",
+            selected_pipeline_id="engineering_review_pipeline",
+            fallback_pipeline_id="default_conversation_pipeline",
+            completion_allowed=True,
+            completion_blocked_reason=None,
+            final_verdict="controlled_execution_completed",
+        ),
+        execution_report=ExecutionReport(
+            pipeline_session_id="pipe-final-response",
+            pipeline_id="engineering_review_pipeline",
+            router_status="selected",
+            selected_pipeline_id="engineering_review_pipeline",
+            fallback_pipeline_id="default_conversation_pipeline",
+            completion_allowed=True,
+            completion_reason="observe_only_default_path",
+            executed=True,
+            would_execute=False,
+            execution_mode="autonomous",
+            runtime_status="executed",
+        ),
+        pipeline_execution_controller=type(
+            "ControllerStub",
+            (),
+            {
+                "actual_execution_invoked": True,
+                "subagent_execution_invoked": True,
+                "real_provider_bridge_invoked": True,
+                "blocked_reason": None,
+                "final_response_text": "controlled autonomous final response",
+            },
+        )(),
+    )
+    monkeypatch.setattr(orchestrator, "observe_gateway_turn", lambda **_kwargs: report)
+
+    runner = _make_runner()
+    source = SessionSource(platform=Platform.LOCAL, chat_id="cli", chat_name="CLI", chat_type="dm", user_id="user-1")
+    result = asyncio.run(
+        runner._run_agent(
+            message="Create tests/autonomous_runtime_final_response_marker.py and write a marker",
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id="session-auto-final-response",
+            session_key="agent:main:local:dm",
+        )
+    )
+
+    assert events == []
+    assert result["api_calls"] == 0
+    assert result["tools"] == []
+    assert result["final_response"] == "controlled autonomous final response"
+
+
 @pytest.mark.asyncio
 async def test_pipeline_observe_hook_runs_before_proxy_return_without_changing_result(monkeypatch):
     events: list[tuple[str, object]] = []
