@@ -1721,6 +1721,11 @@ def _blocked_loop_result(
             session=session,
             state_snapshot=snapshot,
             preflight_result={"allowed": False, "reason_code": blocked_reason},
+            final_response_text=_blocked_final_response_text(
+                blocked_reason=blocked_reason,
+                test_summary=test_summary,
+                reviewer_packet=reviewer_packet,
+            ),
             reviewer_packet=reviewer_packet,
             git_gate=git_gate,
             tests=_tests_payload(test_summary),
@@ -1744,6 +1749,45 @@ def _blocked_loop_result(
         mutation_summary=mutation_summary or {},
         test_summary=test_summary,
     )
+
+
+def _blocked_final_response_text(
+    *,
+    blocked_reason: str | None,
+    test_summary: dict[str, Any] | None,
+    reviewer_packet: dict[str, Any],
+) -> str | None:
+    if blocked_reason not in {"test_command_denied", "invalid_engineer_output", "engineer_result_invalid"}:
+        return None
+    lines = [
+        "Autonomous execution did not complete successfully.",
+        "",
+        "What happened:",
+    ]
+    if blocked_reason == "test_command_denied":
+        lines.extend(
+            [
+                "- The requested file changes were prepared in the autonomous workspace.",
+                "- Pytest was requested but blocked by the controlled test validator.",
+                "- Reviewer was not invoked because engineer output was invalid after the blocked test step.",
+                "",
+                "No verified passing test result is available.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "- Engineer output did not satisfy the controlled execution contract.",
+                "- Reviewer was not invoked because engineer output was invalid.",
+            ]
+        )
+    safe_summary = _safe_test_text((test_summary or {}).get("blocked_reason"))
+    if safe_summary and safe_summary not in {"test_command_denied", "engineer_result_invalid"}:
+        lines.append(f"Blocked reason: {safe_summary}")
+    packet_status = str(reviewer_packet.get("packet_status") or "").strip()
+    if packet_status and packet_status != "disabled":
+        lines.append(f"Reviewer status: {packet_status}")
+    return "\n".join(lines)
 
 
 def _finalize_loop_result(
@@ -2558,7 +2602,7 @@ def _engineer_fail_closed_reason(state_snapshot: Any) -> str | None:
     if _engineer_requests_disagreement(_step_structured_output(state_snapshot, 0)):
         return None
     if evaluation_status != REVIEWER_APPROVAL_STATUS:
-        return "engineer_result_invalid"
+        return "invalid_engineer_output"
     return None
 
 

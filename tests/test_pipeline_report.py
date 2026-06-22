@@ -288,9 +288,35 @@ def test_report_builder_prefers_runtime_block_reason_after_execution_starts() ->
     assert payload["final_response"]["placeholder_reason"] == "test_command_denied"
     assert payload["safety"]["execution_enabled"] is True
     assert "execution_disabled" not in payload["safety"]["policy_notes"]
-    assert payload["review"]["blocked_reason"] is None
-    assert payload["final_response"]["placeholder_reason"] is None
-    assert payload["git_gate"]["completion_blocked_reason"] is None
+    assert payload["review"]["blocked_reason"] == "test_command_denied"
+    assert payload["git_gate"]["completion_blocked_reason"] == "test_command_denied"
+
+
+def test_report_builder_preserves_honest_blocked_final_response_text() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "completion_allowed": False,
+        "completion_blocked_reason": "execution_disabled",
+        "final_verdict": "engineer_invalid_after_test_denied",
+    })
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        final_response_text="Autonomous execution did not complete successfully.",
+        blocked_reason_override="test_command_denied",
+    )
+    payload = report.to_safe_dict()
+
+    assert payload["final_response"]["text"] == "Autonomous execution did not complete successfully."
+    assert payload["final_response"]["placeholder_reason"] == "test_command_denied"
 
 
 def test_report_builder_blocked_completion_preserves_blocked_reason() -> None:
