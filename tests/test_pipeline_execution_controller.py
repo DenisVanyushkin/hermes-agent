@@ -1147,3 +1147,45 @@ def test_autonomous_trigger_does_not_make_default_pipeline_eligible() -> None:
     assert result.blocked_reason == "ineligible_pipeline_execution_context"
     assert result.actual_execution_invoked is False
     assert helper_calls == []
+
+
+def test_routing_failed_without_pipeline_selection_is_fail_closed() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+    helper_calls: list[str] = []
+
+    session = type(session)(
+        **{
+            **session.__dict__,
+            "pipeline_id": "default_conversation_pipeline",
+            "router_status": "routing_failed",
+            "planned_steps": [],
+            "selected_subagent_ids": ["general_operator"],
+        }
+    )
+    snapshot = type(
+        "RoutingFailedSnapshot",
+        (),
+        {
+            "pipeline_id": "default_conversation_pipeline",
+            "pipeline_session_id": snapshot.pipeline_session_id,
+            "planned_steps": [],
+        },
+    )()
+
+    def _helper(**_kwargs):
+        helper_calls.append("called")
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="autonomous"),
+        session=session,
+        state_snapshot=snapshot,
+        execution_helper=_helper,
+        allow_test_execution=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.execution_allowed is False
+    assert result.blocked_reason == "ineligible_pipeline_execution_context"
+    assert result.actual_execution_invoked is False
+    assert helper_calls == []

@@ -18,6 +18,8 @@ import pytest
 import gateway.run as gateway_run
 from gateway.config import Platform
 from gateway.session import SessionSource
+from hermes_cli.pipeline_state import ExecutionReport, OrchestratorObserveReport, PipelineState
+from hermes_cli.pipeline_session import PipelineSession, PipelineSessionStatus
 
 
 class _CapturingAgent:
@@ -209,6 +211,135 @@ def test_pipeline_observe_hook_runs_before_run_conversation_without_changing_res
     assert run_payload["user_message"] == "ping"
     assert run_payload["conversation_history"] == []
     assert run_payload["task_id"] == "session-observe-1"
+
+
+def test_autonomous_routing_failed_blocks_normal_agent_fallback(monkeypatch):
+    events: list[str] = []
+
+    class _FailIfCalledAgent:
+        def __init__(self, *args, **kwargs):
+            self.tools = []
+
+        def run_conversation(self, user_message: str, conversation_history=None, task_id=None, **kwargs):
+            events.append("run_conversation")
+            raise AssertionError("normal AIAgent fallback must not run after autonomous routing failure")
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _FailIfCalledAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "pipelines": {
+                "enabled": True,
+                "router": {"mode": "autonomous"},
+                "orchestrator": {"mode": "autonomous"},
+                "execution": {"mode": "autonomous"},
+            }
+        },
+    )
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "api_key": "***",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+            "max_tokens": None,
+        },
+    )
+
+    pipeline_observe = importlib.import_module("hermes_cli.pipeline_observe")
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    monkeypatch.setattr(
+        pipeline_observe,
+        "observe_pipeline_router_decision",
+        lambda **_kwargs: gateway_run.dataclasses.make_dataclass("RouterStub", [("status", str)])("routing_failed"),
+    )
+
+    report = OrchestratorObserveReport(
+        session=PipelineSession(
+            pipeline_session_id="pipe-failed",
+            trace_id="pipe-failed",
+            pipeline_id="default_conversation_pipeline",
+            router_status="routing_failed",
+            router_confidence=0.0,
+            platform="local",
+            session_key="agent:main:local:dm",
+            session_id="session-auto-failed",
+            chat_id="cli",
+            thread_id=None,
+            user_id="user-1",
+            created_at="2026-06-22T00:00:00+00:00",
+            user_message_hash="hash",
+            mode="autonomous",
+            current_state="safe_default_fallback",
+            status=PipelineSessionStatus.CREATED,
+            planned_steps=[],
+            selected_subagent_ids=["general_operator"],
+            reviewer_condition=None,
+        ),
+        state=PipelineState(
+            pipeline_session_id="pipe-failed",
+            pipeline_id="default_conversation_pipeline",
+            state="safe_default_fallback",
+            mode="autonomous",
+            router_status="routing_failed",
+            selected_pipeline_id=None,
+            fallback_pipeline_id="default_conversation_pipeline",
+            completion_allowed=False,
+            completion_blocked_reason="autonomous_not_selected",
+            final_verdict="safe_default_fallback_used",
+        ),
+        execution_report=ExecutionReport(
+            pipeline_session_id="pipe-failed",
+            pipeline_id="default_conversation_pipeline",
+            router_status="routing_failed",
+            selected_pipeline_id=None,
+            fallback_pipeline_id="default_conversation_pipeline",
+            completion_allowed=False,
+            completion_reason="safe_default_fallback_used",
+            executed=False,
+            would_execute=False,
+            execution_mode="autonomous",
+            runtime_status="not_executed",
+        ),
+        pipeline_execution_controller=type(
+            "ControllerStub",
+            (),
+            {"actual_execution_invoked": False, "blocked_reason": "autonomous_not_selected"},
+        )(),
+    )
+    monkeypatch.setattr(orchestrator, "observe_gateway_turn", lambda **_kwargs: report)
+
+    runner = _make_runner()
+    source = SessionSource(platform=Platform.LOCAL, chat_id="cli", chat_name="CLI", chat_type="dm", user_id="user-1")
+    result = asyncio.run(
+        runner._run_agent(
+            message="Create tests/autonomous_runtime_smoke_marker.py and write a marker",
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id="session-auto-failed",
+            session_key="agent:main:local:dm",
+        )
+    )
+
+    assert events == []
+    assert result["api_calls"] == 0
+    assert result["tools"] == []
+    assert "I could not reliably select the autonomous engineering pipeline" in result["final_response"]
+    assert "effective_pipeline: default_conversation_pipeline" in result["final_response"]
+    assert "final_verdict: safe_default_fallback_used" in result["final_response"]
+    assert "tools_enabled: false" in result["final_response"]
+    assert "controller_invoked: false" in result["final_response"]
+    assert "mutation: none" in result["final_response"]
 
 
 @pytest.mark.asyncio
