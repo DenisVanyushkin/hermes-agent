@@ -178,6 +178,11 @@ def observe_gateway_turn(
             candidate_report = pipeline_execution_controller.helper_result.get("report")
             if isinstance(candidate_report, dict):
                 helper_report = dict(candidate_report)
+                helper_report.setdefault("execution_mode", mode)
+                controller_payload = helper_report.setdefault("controller", {})
+                if isinstance(controller_payload, dict):
+                    controller_payload["executed"] = bool(pipeline_execution_controller.actual_execution_invoked)
+                    controller_payload["execution_mode"] = mode
         if helper_report is not None:
             pipeline_execution_report_payload = helper_report
         pipeline_execution_controller = replace(pipeline_execution_controller, report_artifacts=None)

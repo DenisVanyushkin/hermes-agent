@@ -92,21 +92,33 @@ input_schema:
 output_schema:
   status:
     enum:
-      - done
-      - needs_user_input
+      - completed
+      - succeeded
       - blocked
       - failed
-      - disagree_with_reviewer
+      - needs_input
+      - disagreement
   required_fields:
+    - schema_version
+    - subagent_id
+    - role
+    - status
     - summary
-    - changed_files
-    - tests_run
-    - risks
+    - blockers
+    - artifacts
     - confidence
+    - requires_review
+    - next_action
   optional_fields:
+    - findings
+    - changes
+    - mutations
+    - tests
     - reviewer_objections
-    - questions_for_user
-    - questions_for_peer_subagent
+  contract_notes:
+    - final output must be a StructuredOutputEnvelope compatible with hermes_cli.subagent_runner.validate_structured_output_envelope
+    - include at least one of findings or changes
+    - tests are optional and must not make pytest mandatory when the pipeline did not request tests
 communication:
   can_send_to:
     - hermes_code_reviewer
