@@ -215,20 +215,82 @@ class AIAgentSubagentExecutorBridge:
 
     def _normalize_result(self, result: Any) -> dict[str, Any]:
         if isinstance(result, Mapping):
-            if "final_response" in result and "output_text" not in result:
-                return {
-                    "output_text": result.get("final_response"),
-                    "execution_status": result.get("execution_status") or "completed",
-                    "completion_reason": result.get("completion_reason") or "completed",
-                    "token_usage": result.get("token_usage") or {},
-                    "raw_metadata": {
-                        "structured_output": result.get("structured_output"),
-                    },
-                }
-            return dict(result)
+            normalized = dict(result)
+            raw_metadata = dict(normalized.get("raw_metadata") or {})
+            structured_output, source, parse_error = self._extract_structured_output_candidate(result, raw_metadata)
+            if "final_response" in normalized and "output_text" not in normalized:
+                final_response = normalized.get("final_response")
+                normalized["output_text"] = final_response if isinstance(final_response, str) else None
+            normalized["execution_status"] = normalized.get("execution_status") or "completed"
+            normalized["completion_reason"] = normalized.get("completion_reason") or "completed"
+            normalized["token_usage"] = normalized.get("token_usage") or {}
+            if structured_output is not None:
+                raw_metadata["structured_output"] = structured_output
+            else:
+                raw_metadata["structured_output_missing"] = True
+            raw_metadata["structured_output_source"] = source
+            if parse_error is not None:
+                raw_metadata["structured_output_parse_error"] = parse_error
+            normalized["raw_metadata"] = raw_metadata
+            return normalized
         if isinstance(result, str):
-            return {"output_text": result, "execution_status": "completed", "completion_reason": "completed", "raw_metadata": {}}
+            structured_output, source, parse_error = self._structured_output_from_output_text(result)
+            raw_metadata: dict[str, Any] = {"structured_output_source": source}
+            if structured_output is not None:
+                raw_metadata["structured_output"] = structured_output
+            else:
+                raw_metadata["structured_output_missing"] = True
+            if parse_error is not None:
+                raw_metadata["structured_output_parse_error"] = parse_error
+            return {
+                "output_text": result,
+                "execution_status": "completed",
+                "completion_reason": "completed",
+                "raw_metadata": raw_metadata,
+            }
         raise AIAgentExecutorBridgeError("invalid_agent_result")
+
+    def _extract_structured_output_candidate(
+        self,
+        result: Mapping[str, Any],
+        raw_metadata: Mapping[str, Any],
+    ) -> tuple[dict[str, Any] | None, str, str | None]:
+        candidate = raw_metadata.get("structured_output")
+        if isinstance(candidate, Mapping):
+            return dict(candidate), "raw_metadata.structured_output", None
+
+        candidate = result.get("structured_output")
+        if isinstance(candidate, Mapping):
+            return dict(candidate), "structured_output", None
+
+        final_response = result.get("final_response")
+        if isinstance(final_response, Mapping):
+            candidate = final_response.get("structured_output")
+            if isinstance(candidate, Mapping):
+                return dict(candidate), "final_response.structured_output", None
+            if self._looks_like_structured_output_mapping(final_response):
+                return dict(final_response), "final_response", None
+
+        output_text = result.get("output_text")
+        if isinstance(output_text, str):
+            return self._structured_output_from_output_text(output_text)
+
+        return None, "none", None
+
+    def _structured_output_from_output_text(self, output_text: str) -> tuple[dict[str, Any] | None, str, str | None]:
+        text = output_text.strip()
+        if not text:
+            return None, "none", None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return None, "none", f"json_decode_error:{exc.msg}"
+        if isinstance(parsed, Mapping):
+            return dict(parsed), "output_text_json", None
+        return None, "none", f"json_not_mapping:{type(parsed).__name__}"
+
+    def _looks_like_structured_output_mapping(self, value: Mapping[str, Any]) -> bool:
+        return all(field in value for field in ("schema_version", "subagent_id", "role", "status", "summary"))
 
     def _validate_runtime_plan(self, runtime_plan: Any) -> None:
         if getattr(runtime_plan, "subagent_id", None) != self._supported_subagent_id():

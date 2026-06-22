@@ -325,6 +325,25 @@ def test_autonomous_helper_without_subagent_boundary_exposes_false_bridge_flags(
     assert result.real_provider_bridge_invoked is False
 
 
+def test_autonomous_helper_detects_top_level_subagent_runs() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="autonomous"),
+        session=session,
+        state_snapshot=snapshot,
+        execution_helper=lambda **_kwargs: {
+            "status": "completed",
+            "subagent_runs": [{"subagent_id": "hermes_engineer_core", "runtime_mode": "bridge_executor"}],
+        },
+        allow_test_execution=True,
+    )
+
+    assert result.subagent_execution_invoked is True
+    assert result.real_provider_bridge_invoked is True
+
+
 def test_default_config_does_not_resolve_helper(monkeypatch) -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
