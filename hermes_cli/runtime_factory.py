@@ -745,9 +745,20 @@ class RuntimeSelectionRecord:
 class FallbackPolicyRecord:
     mode: str | None
     reason: str | None
+    provider: str | None = None
+    model: str | None = None
+    model_class: str | None = None
+    max_tokens: int | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
-        return {"mode": self.mode, "reason": self.reason}
+        return {
+            "mode": self.mode,
+            "reason": self.reason,
+            "provider": self.provider,
+            "model": self.model,
+            "model_class": self.model_class,
+            "max_tokens": self.max_tokens,
+        }
 
 
 @dataclass(frozen=True)
@@ -828,6 +839,11 @@ class RuntimeBuildResult:
             "provider": self.constructor_provider,
             "model": self.constructor_model,
         }
+        if self.fallback_policy and self.fallback_policy.provider and self.fallback_policy.model:
+            kwargs["fallback_model"] = {
+                "provider": self.fallback_policy.provider,
+                "model": self.fallback_policy.model,
+            }
         if self.constructor_api_mode:
             kwargs["api_mode"] = self.constructor_api_mode
         if self.constructor_base_url:
@@ -855,6 +871,10 @@ class RuntimeFactory:
         fallback_policy = FallbackPolicyRecord(
             mode=self._nested_str(spec, ("models", "fallback", "mode")),
             reason=self._nested_str(spec, ("models", "fallback", "reason")),
+            provider=self._nested_str(spec, ("models", "fallback", "provider")),
+            model=self._nested_str(spec, ("models", "fallback", "model")),
+            model_class=self._nested_str(spec, ("models", "fallback", "class")),
+            max_tokens=self._nested_int(spec, ("models", "fallback", "max_tokens")),
         )
 
         if errors:
@@ -1102,6 +1122,11 @@ class RuntimeFactory:
     def _nested_str(cls, container: dict[str, Any], path: tuple[str, ...]) -> str | None:
         value = cls._nested(container, path)
         return cls._string_or_none(value)
+
+    @classmethod
+    def _nested_int(cls, container: dict[str, Any], path: tuple[str, ...]) -> int | None:
+        value = cls._nested(container, path)
+        return value if isinstance(value, int) and value > 0 else None
 
     @staticmethod
     def _string_or_none(value: Any) -> str | None:
