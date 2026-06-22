@@ -157,6 +157,7 @@ _GATEWAY_SECRET_PATTERNS = (
     re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._\-]{20,}\b"),
 )
+_NEWS_INGEST_ONLY_TELEGRAM_CHAT_IDS = frozenset({"-1003989016070"})
 
 
 def _ensure_windows_gateway_venv_imports() -> None:
@@ -229,6 +230,20 @@ def _non_conversational_metadata(
     merged = dict(metadata or {})
     merged["non_conversational"] = True
     return merged
+
+def _classify_news_ingest_only_source(source: Any) -> dict[str, Any]:
+    platform_value = _gateway_platform_value(getattr(source, "platform", None))
+    chat_id = str(getattr(source, "chat_id", "") or "").strip()
+    ingest_only = platform_value == "telegram" and chat_id in _NEWS_INGEST_ONLY_TELEGRAM_CHAT_IDS
+    return {
+        "telegram_chat_mode": "news_ingest_only" if ingest_only else "interactive",
+        "telegram_chat_id": chat_id or None,
+        "telegram_reply_allowed": not ingest_only,
+        "ingest_only": ingest_only,
+        "news_digest_candidate": ingest_only,
+        "model_invoked": False,
+        "pipeline_routing_skipped_reason": "news_ingest_only" if ingest_only else None,
+    }
 
 
 def _is_transient_network_error(exc: BaseException) -> bool:
@@ -10007,6 +10022,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         7. Return response
         """
         source = event.source
+        ingest_policy = _classify_news_ingest_only_source(source)
+        if ingest_policy["ingest_only"]:
+            logger.info(
+                "telegram news ingest-only skip %s",
+                json.dumps(ingest_policy, ensure_ascii=False, sort_keys=True),
+            )
+            return None
 
         # 🔴 Cross-session leak guard. This handler runs inside a per-message
         # asyncio task created via create_task(), which snapshots the spawning

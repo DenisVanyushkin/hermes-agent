@@ -38,8 +38,12 @@ models:
           model: gpt-5.5
           class: senior_coding
   fallback:
-    mode: fail_closed
-    reason: no approved coding model available
+    mode: explicit_model
+    reason: preserve engineering capability without using a global free fallback
+    provider: openai-codex
+    model: gpt-5.4
+    class: senior_coding_fallback
+    max_tokens: 16384
 tools:
   read:
     - file_read
