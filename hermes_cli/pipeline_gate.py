@@ -158,7 +158,7 @@ def evaluate_pipeline_gate(request: PipelineGateRequest) -> PipelineGateDecision
         return deny("missing_pipeline_session", "Selected pipeline execution requires a pipeline session id.")
     requirements_met.append("pipeline_session_present")
 
-    if float(router.confidence) < float(policy.min_router_confidence):
+    if _router_confidence_below_threshold(router, policy):
         requirements_failed.append("router_confidence_threshold")
         return deny("low_router_confidence", "Router confidence is below the configured execution threshold.")
     requirements_met.append("router_confidence_threshold")
@@ -293,6 +293,22 @@ def _load_policy(config: Mapping[str, Any] | None) -> PipelineGatePolicy:
         allow_pipelines=allow_pipelines,
         min_router_confidence=min_router_confidence,
         config_valid=config_valid,
+    )
+
+
+def _router_confidence_below_threshold(router: RouterDecision, policy: PipelineGatePolicy) -> bool:
+    confidence = float(router.confidence)
+    if confidence >= float(policy.min_router_confidence):
+        return False
+    return not _strict_engineering_heuristic_route(router)
+
+
+def _strict_engineering_heuristic_route(router: RouterDecision) -> bool:
+    return (
+        getattr(router, "selected_pipeline_id", None) == ENGINEERING_PIPELINE_ID
+        and bool(getattr(router, "routing_fallback_used", False))
+        and str(getattr(router, "router_strategy", "") or "").strip().lower() == "heuristic_timeout_fallback"
+        and str(getattr(router, "routing_confidence_source", "") or "").strip().lower() == "heuristic_strict"
     )
 
 

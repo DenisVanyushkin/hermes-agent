@@ -479,6 +479,7 @@ def test_observe_logs_heuristic_timeout_fallback_fields(monkeypatch, caplog):
         routing_fallback_used=True,
         routing_fallback_reason="TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout",
         router_strategy="heuristic_timeout_fallback",
+        routing_confidence_source="heuristic_strict",
         alternatives=(),
         selected_provider="openrouter",
         selected_model="openrouter/owl-alpha",
@@ -518,6 +519,7 @@ def test_observe_logs_heuristic_timeout_fallback_fields(monkeypatch, caplog):
     log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
     assert '"router_strategy": "heuristic_timeout_fallback"' in log_message
     assert '"routing_fallback_used": true' in log_message
+    assert '"routing_confidence_source": "heuristic_strict"' in log_message
     assert '"routing_fallback_reason": "TimeoutError: Codex auxiliary Responses stream exceeded 10.0s total timeout"' in log_message
 
 

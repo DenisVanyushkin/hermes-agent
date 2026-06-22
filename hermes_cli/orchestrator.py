@@ -503,6 +503,7 @@ def _log_observe_report(
         "user_id": report.session.user_id,
         "router_status": report.state.router_status,
         "router_confidence": getattr(router_decision, "confidence", report.session.router_confidence),
+        "routing_confidence_source": getattr(router_decision, "routing_confidence_source", None),
         "router_reasoning_summary": getattr(router_decision, "reasoning_summary", "") or "",
         "selected_pipeline_id": report.state.selected_pipeline_id,
         "fallback_pipeline_id": report.state.fallback_pipeline_id,
