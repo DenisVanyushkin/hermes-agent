@@ -10,7 +10,7 @@ import shlex
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 ENGINEER_SUBAGENT_ID = "hermes_engineer_core"
@@ -43,6 +43,9 @@ class TestCommandResult:
     stderr_truncated: bool = False
     timed_out: bool = False
     reason: str | None = None
+    denied_command_raw_sanitized: str | None = None
+    denied_argv_sanitized: list[str] | None = None
+    validator_reason: str | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -57,6 +60,9 @@ class TestCommandResult:
             "stderr_truncated": self.stderr_truncated,
             "timed_out": self.timed_out,
             "reason": self.reason,
+            "denied_command_raw_sanitized": self.denied_command_raw_sanitized,
+            "denied_argv_sanitized": list(self.denied_argv_sanitized) if self.denied_argv_sanitized is not None else None,
+            "validator_reason": self.validator_reason,
         }
 
 
@@ -92,19 +98,27 @@ class TestRunSummary:
 
 
 @dataclass(frozen=True)
+class PytestInvocation:
+    reported_command: list[str]
+    execution_command: list[str]
+    raw_command_sanitized: str | None = None
+    denied_argv_sanitized: list[str] | None = None
+    validator_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class ControlledTestRunner:
     workspace: Path
     subprocess_runner: Callable[..., Any] = subprocess.run
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
 
-    def run(self, commands: list[list[str]]) -> TestRunSummary:
+    def run(self, invocations: list[PytestInvocation]) -> TestRunSummary:
         results: list[TestCommandResult] = []
-        for command in commands:
+        for invocation in invocations:
             start = time.perf_counter()
-            execution_command = _resolve_execution_command(command)
             try:
                 completed = self.subprocess_runner(
-                    execution_command,
+                    invocation.execution_command,
                     cwd=str(self.workspace),
                     shell=False,
                     timeout=self.timeout_seconds,
@@ -116,7 +130,7 @@ class ControlledTestRunner:
                 stdout_excerpt, stdout_truncated = _sanitize_output(getattr(exc, "stdout", None))
                 stderr_excerpt, stderr_truncated = _sanitize_output(getattr(exc, "stderr", None))
                 result = TestCommandResult(
-                    command=list(command),
+                    command=list(invocation.reported_command),
                     cwd=self.workspace.name,
                     status="timeout",
                     duration_ms=_duration_ms(start),
@@ -126,32 +140,41 @@ class ControlledTestRunner:
                     stderr_truncated=stderr_truncated,
                     timed_out=True,
                     reason="test_command_timeout",
+                    denied_command_raw_sanitized=invocation.raw_command_sanitized,
+                    denied_argv_sanitized=list(invocation.denied_argv_sanitized) if invocation.denied_argv_sanitized is not None else None,
+                    validator_reason=invocation.validator_reason,
                 )
-                return _summary_from_results(self.workspace, commands, results + [result], "test_command_timeout")
+                return _summary_from_results(self.workspace, invocations, results + [result], "test_command_timeout")
             except FileNotFoundError:
                 result = TestCommandResult(
-                    command=list(command),
+                    command=list(invocation.reported_command),
                     cwd=self.workspace.name,
                     status="blocked",
                     duration_ms=_duration_ms(start),
                     reason="test_command_start_failed",
+                    denied_command_raw_sanitized=invocation.raw_command_sanitized,
+                    denied_argv_sanitized=list(invocation.denied_argv_sanitized) if invocation.denied_argv_sanitized is not None else None,
+                    validator_reason=invocation.validator_reason,
                 )
-                return _summary_from_results(self.workspace, commands, results + [result], "test_command_start_failed")
+                return _summary_from_results(self.workspace, invocations, results + [result], "test_command_start_failed")
             except Exception:
                 result = TestCommandResult(
-                    command=list(command),
+                    command=list(invocation.reported_command),
                     cwd=self.workspace.name,
                     status="error",
                     duration_ms=_duration_ms(start),
                     reason="test_command_failed",
+                    denied_command_raw_sanitized=invocation.raw_command_sanitized,
+                    denied_argv_sanitized=list(invocation.denied_argv_sanitized) if invocation.denied_argv_sanitized is not None else None,
+                    validator_reason=invocation.validator_reason,
                 )
-                return _summary_from_results(self.workspace, commands, results + [result], "test_command_failed")
+                return _summary_from_results(self.workspace, invocations, results + [result], "test_command_failed")
 
             stdout_excerpt, stdout_truncated = _sanitize_output(completed.stdout)
             stderr_excerpt, stderr_truncated = _sanitize_output(completed.stderr)
             status = "passed" if completed.returncode == 0 else "failed"
             result = TestCommandResult(
-                command=list(command),
+                command=list(invocation.reported_command),
                 cwd=self.workspace.name,
                 status=status,
                 exit_code=int(completed.returncode),
@@ -161,11 +184,14 @@ class ControlledTestRunner:
                 stdout_truncated=stdout_truncated,
                 stderr_truncated=stderr_truncated,
                 reason=None if status == "passed" else "test_command_failed",
+                denied_command_raw_sanitized=invocation.raw_command_sanitized,
+                denied_argv_sanitized=list(invocation.denied_argv_sanitized) if invocation.denied_argv_sanitized is not None else None,
+                validator_reason=invocation.validator_reason,
             )
             results.append(result)
             if completed.returncode != 0:
-                return _summary_from_results(self.workspace, commands, results, "test_command_failed")
-        return _summary_from_results(self.workspace, commands, results, None)
+                return _summary_from_results(self.workspace, invocations, results, "test_command_failed")
+        return _summary_from_results(self.workspace, invocations, results, None)
 
 
 def run_controlled_tests(
@@ -215,22 +241,31 @@ def run_controlled_tests(
         return _denied_summary(workspace_name, requests, "test_command_gate_disabled", enabled=False)
     workspace = _validate_workspace(test_workspace)
     try:
-        commands = [_validate_command(request, workspace) for request in requests]
-    except ValueError:
-        return _denied_summary(workspace.name, requests, "test_command_denied", enabled=True)
+        invocations = [_normalize_invocation(request, workspace) for request in requests]
+    except ValueError as exc:
+        return _denied_summary(workspace.name, requests, "test_command_denied", enabled=True, validator_reason=str(exc) or "test_command_denied")
     return ControlledTestRunner(
         workspace=workspace,
         subprocess_runner=subprocess_runner,
         timeout_seconds=timeout_seconds,
-    ).run(commands)
+    ).run(invocations)
 
 
-def _coerce_test_requests(payload: Any) -> list[str]:
+def _coerce_test_requests(payload: Any) -> list[Any]:
     if payload is None:
         return []
     if not isinstance(payload, list):
         raise ValueError("tests payload must be a list")
-    requests = [str(item).strip() for item in payload if item is not None and str(item).strip()]
+    requests: list[Any] = []
+    for item in payload:
+        if item is None:
+            continue
+        if isinstance(item, Mapping):
+            requests.append(dict(item))
+            continue
+        text = str(item).strip()
+        if text:
+            requests.append(text)
     if len(requests) > MAX_TEST_COMMAND_COUNT:
         raise ValueError("test command count exceeded")
     return requests
@@ -247,7 +282,15 @@ def _validate_workspace(workspace: str | Path | None) -> Path:
     return root.resolve()
 
 
-def _validate_command(raw_command: str, workspace: Path) -> list[str]:
+def _normalize_invocation(request: Any, workspace: Path) -> PytestInvocation:
+    if isinstance(request, Mapping):
+        return _normalize_structured_invocation(request, workspace)
+    if isinstance(request, str):
+        return _normalize_legacy_command(request, workspace)
+    raise ValueError("test_command_denied")
+
+
+def _normalize_legacy_command(raw_command: str, workspace: Path) -> PytestInvocation:
     if any(marker in raw_command for marker in _DISALLOWED_SHELL_MARKERS):
         raise ValueError("test_command_denied")
     argv = shlex.split(raw_command, posix=True)
@@ -263,7 +306,43 @@ def _validate_command(raw_command: str, workspace: Path) -> list[str]:
         raise ValueError("test_command_denied")
     for test_path in path_args[1:]:
         _validate_test_path(test_path, workspace)
-    return argv
+    return PytestInvocation(
+        reported_command=list(argv),
+        execution_command=_resolve_execution_command(argv),
+        raw_command_sanitized=_sanitize_command_text(raw_command),
+        denied_argv_sanitized=_safe_command_tokens(raw_command),
+        validator_reason="legacy_pytest_command",
+    )
+
+
+def _normalize_structured_invocation(payload: Mapping[str, Any], workspace: Path) -> PytestInvocation:
+    targets = payload.get("targets")
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("test_command_denied")
+    if not bool(payload.get("quiet", False)):
+        raise ValueError("test_command_denied")
+    argv = [sys.executable, "-m", "pytest", "-q"]
+    maxfail = payload.get("maxfail")
+    if maxfail is not None:
+        try:
+            coerced_maxfail = int(maxfail)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("test_command_denied") from exc
+        if coerced_maxfail <= 0:
+            raise ValueError("test_command_denied")
+        argv.append(f"--maxfail={coerced_maxfail}")
+    for raw_target in targets:
+        target = str(raw_target).strip()
+        if not target:
+            raise ValueError("test_command_denied")
+        _validate_test_path(target, workspace)
+        argv.append(target)
+    return PytestInvocation(
+        reported_command=list(argv),
+        execution_command=list(argv),
+        denied_argv_sanitized=list(argv),
+        validator_reason="structured_pytest_payload",
+    )
 
 
 def _validate_test_path(path_value: str, workspace: Path) -> None:
@@ -278,7 +357,7 @@ def _validate_test_path(path_value: str, workspace: Path) -> None:
     destination.relative_to(workspace)
 
 
-def _denied_summary(workspace_name: str | None, requests: Sequence[str], reason: str, *, enabled: bool) -> TestRunSummary:
+def _denied_summary(workspace_name: str | None, requests: Sequence[Any], reason: str, *, enabled: bool, validator_reason: str | None = None) -> TestRunSummary:
     return TestRunSummary(
         enabled=enabled,
         workspace=workspace_name,
@@ -292,10 +371,13 @@ def _denied_summary(workspace_name: str | None, requests: Sequence[str], reason:
         blocked_reason=reason,
         results=[
             TestCommandResult(
-                command=_safe_command_tokens(request),
+                command=_safe_request_tokens(request),
                 cwd=workspace_name,
                 status="denied",
                 reason=reason,
+                denied_command_raw_sanitized=_sanitize_request_text(request),
+                denied_argv_sanitized=_safe_request_tokens(request),
+                validator_reason=validator_reason or reason,
             ).to_safe_dict()
             for request in requests
         ],
@@ -310,12 +392,12 @@ def _resolve_execution_command(command: Sequence[str]) -> list[str]:
     return list(command)
 
 
-def _summary_from_results(workspace: Path, commands: Sequence[list[str]], results: list[TestCommandResult], blocked_reason: str | None) -> TestRunSummary:
+def _summary_from_results(workspace: Path, invocations: Sequence[PytestInvocation], results: list[TestCommandResult], blocked_reason: str | None) -> TestRunSummary:
     return TestRunSummary(
         enabled=True,
         workspace=workspace.name,
         status="passed" if blocked_reason is None else ("failed" if blocked_reason == "test_command_failed" else "blocked"),
-        requested_count=len(commands),
+        requested_count=len(invocations),
         executed_count=len(results),
         passed_count=sum(1 for item in results if item.status == "passed"),
         failed_count=sum(1 for item in results if item.status == "failed"),
@@ -342,6 +424,26 @@ def _safe_command_tokens(raw_command: str) -> list[str]:
     except ValueError:
         return ["[denied]"]
     return [_SECRET_PATTERN.sub(r"\1=[redacted]", token) for token in tokens[:MAX_ARGV_LENGTH]] or ["[denied]"]
+
+
+def _safe_request_tokens(request: Any) -> list[str]:
+    if isinstance(request, Mapping):
+        targets = request.get("targets")
+        if not isinstance(targets, list):
+            return ["[denied]"]
+        return [str(item).strip() for item in targets[:MAX_ARGV_LENGTH] if str(item).strip()] or ["[denied]"]
+    return _safe_command_tokens(str(request))
+
+
+def _sanitize_request_text(request: Any) -> str | None:
+    if isinstance(request, Mapping):
+        return "targets=" + ",".join(_safe_request_tokens(request))
+    return _sanitize_command_text(str(request))
+
+
+def _sanitize_command_text(raw_command: str) -> str | None:
+    sanitized = " ".join(_safe_command_tokens(raw_command))
+    return sanitized or None
 
 
 def _summary_text(summary: TestRunSummary) -> str | None:
