@@ -204,6 +204,36 @@ _HEURISTIC_ENGINEERING_FALLBACK_ANCHORS = (
     "do not modify production behavior",
     "do not touch db persistence",
 )
+_HEURISTIC_RUNTIME_ANALYSIS_PIPELINE_ANCHORS = (
+    "engineering_review_pipeline",
+    "autonomous engineering pipeline",
+    "autonomous execution controller",
+    "runtime smoke",
+    "post-fix runtime smoke",
+    "helper/subagent bridge",
+    "pipeline_execution_report",
+    "actual_execution_invoked",
+)
+_HEURISTIC_RUNTIME_ANALYSIS_TOOL_REPO_ANCHORS = (
+    "find_files",
+    "read_file",
+    "search_files",
+    "repo-relative",
+    "engineer bridge",
+    "commit ",
+    "repository",
+    "repo",
+    "репозитории",
+    "репозитории",
+)
+_HEURISTIC_RUNTIME_ANALYSIS_SAFETY_ANCHORS = (
+    "do not change code",
+    "не меняй код",
+    "do not commit",
+    "не делай commit",
+    "do not push",
+    "не делай push",
+)
 _HEURISTIC_DEFAULT_CONVERSATION_KEYWORDS = (
     "привет",
     "как дела",
@@ -979,11 +1009,19 @@ class LlmPipelineRouter(PipelineRouter):
             or _matches_any(normalized, _HEURISTIC_ENGINEERING_FALLBACK_MUTATION_KEYWORDS)
         ):
             return False
-        if not _matches_any(normalized, _HEURISTIC_ENGINEERING_FALLBACK_TEST_KEYWORDS):
+        if _looks_ambiguous(normalized):
             return False
-        if not _matches_any(normalized, _HEURISTIC_ENGINEERING_FALLBACK_ANCHORS):
-            return False
-        return True
+
+        old_smoke_marker_shape = (
+            _matches_any(normalized, _HEURISTIC_ENGINEERING_FALLBACK_TEST_KEYWORDS)
+            and _matches_any(normalized, _HEURISTIC_ENGINEERING_FALLBACK_ANCHORS)
+        )
+        runtime_analysis_shape = (
+            _matches_any(normalized, _HEURISTIC_RUNTIME_ANALYSIS_PIPELINE_ANCHORS)
+            and _matches_any(normalized, _HEURISTIC_RUNTIME_ANALYSIS_TOOL_REPO_ANCHORS)
+            and _matches_any(normalized, _HEURISTIC_RUNTIME_ANALYSIS_SAFETY_ANCHORS)
+        )
+        return old_smoke_marker_shape or runtime_analysis_shape
 
 
 def build_pipeline_router(
