@@ -128,6 +128,53 @@ def _invalid_output() -> dict[str, object]:
     }
 
 
+def test_pipeline_rework_loop_result_to_safe_dict_exposes_authoritative_report() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    execution_report = {
+        "status": "blocked",
+        "blocked_reason": "missing_structured_output",
+        "final_verdict": "controlled_rework_loop_reviewer_fail_closed",
+        "final_response": {"text": "plain text diagnostic summary"},
+    }
+    result = module.PipelineReworkLoopResult(
+        fuse=module.PipelineExecutionFuseResult(
+            execution_mode="autonomous",
+            actual_invocation_allowed=True,
+            blocked_reason=None,
+            selected_pipeline_id="engineering_review_pipeline",
+            selected_step_kind="reviewer",
+            selected_subagent_id="hermes_code_reviewer",
+        ),
+        state_snapshot=SimpleNamespace(),
+        execution_report=execution_report,
+        iteration_history=[],
+        review_iterations_completed=0,
+        max_review_iterations=3,
+        policy_source="pipeline_spec",
+        original_task="task",
+        appended_rework_context=[],
+        completion_allowed=False,
+        candidate_complete=False,
+        user_action_required=True,
+        blocked_reason="missing_structured_output",
+        git_gate={},
+        reviewer_packet={},
+        subagent_runs=[],
+        usage_summary={},
+        mutation_summary={},
+        test_summary={"status": "not_requested"},
+    )
+
+    safe = result.to_safe_dict()
+
+    assert safe["report"]["final_response"]["text"] == "plain text diagnostic summary"
+    assert safe["report"]["status"] == "blocked"
+    assert safe["report"]["blocked_reason"] == "missing_structured_output"
+    assert safe["report"]["final_verdict"] == "controlled_rework_loop_reviewer_fail_closed"
+    assert safe["execution_report"] == safe["report"]
+
+
 def test_engineer_fail_closed_reason_distinguishes_missing_structured_output() -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     snapshot = SimpleNamespace(

@@ -84,6 +84,91 @@ def test_gateway_autonomous_builds_plan_before_controller_and_uses_execution_rep
     assert "observe_plan_only" not in json.dumps(payload["pipeline_execution_report"])
 
 
+def test_gateway_autonomous_prefers_helper_execution_report_fallback(monkeypatch, caplog):
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    controller_module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    executed_report = {
+        "status": "blocked",
+        "executed": True,
+        "execution_mode": "autonomous",
+        "blocked_reason": "missing_structured_output",
+        "final_verdict": "controlled_rework_loop_reviewer_fail_closed",
+        "final_response": {"text": "plain text diagnostic summary"},
+        "controller": {"executed": True, "execution_mode": "autonomous"},
+        "completion": {"final_verdict": "controlled_rework_loop_reviewer_fail_closed", "blocked_reason": "missing_structured_output"},
+        "subagent_runs": [
+            {
+                "subagent_id": "hermes_engineer_core",
+                "runtime_mode": "bridge_executor",
+                "real_provider_allowed": True,
+                "provider_policy_status": "ready_to_construct",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(orchestrator, "build_autonomous_helper_context", lambda **_kwargs: {"runtime_factory": object(), "runner": object(), "user_message": "task"})
+    monkeypatch.setattr(
+        orchestrator,
+        "evaluate_pipeline_execution_controller",
+        lambda **_kwargs: controller_module.PipelineExecutionControllerResult(
+            status="executed",
+            execution_allowed=True,
+            blocked_reason="missing_structured_output",
+            selected_pipeline_id="engineering_review_pipeline",
+            would_call="bounded_rework_loop",
+            actual_execution_invoked=True,
+            execution_mode="autonomous",
+            subagent_execution_invoked=True,
+            real_provider_bridge_invoked=True,
+            resolved_helper_name="bounded_rework_loop",
+            helper_result_status="executed",
+            helper_result={"execution_report": executed_report},
+            final_response_text="plain text diagnostic summary",
+        ),
+    )
+    decision = RouterDecision(
+        pipeline_session_id="router-autonomous-execution-report",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.99,
+        reasoning_summary="engineering request",
+        fallback_safe=False,
+    )
+    config = {
+        "pipelines": {
+            "enabled": True,
+            "router": {"mode": "autonomous"},
+            "orchestrator": {"mode": "autonomous"},
+            "execution": {
+                "mode": "autonomous",
+                "enable_gateway_execution_controller": True,
+                "allow_real_provider_execution": True,
+                "allow_pipelines": ["engineering_review_pipeline"],
+                "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+            },
+        }
+    }
+
+    with caplog.at_level(logging.INFO, logger="gateway.autonomous.execution-report"):
+        report = orchestrator.observe_gateway_turn(
+            config=config,
+            user_message="implement through autonomous pipeline",
+            session_id="sess-autonomous-execution-report",
+            platform="telegram",
+            chat_id="chat-autonomous",
+            router_decision=decision,
+            logger=logging.getLogger("gateway.autonomous.execution-report"),
+        )
+
+    assert report is not None
+    payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
+    assert payload["pipeline_execution_report"]["status"] == "blocked"
+    assert payload["pipeline_execution_report"]["final_response"]["text"] == "plain text diagnostic summary"
+    assert payload["pipeline_execution_report"]["completion"]["blocked_reason"] == "missing_structured_output"
+
+
 def test_gateway_autonomous_prefers_helper_report_over_stale_snapshot(monkeypatch, caplog):
     orchestrator = importlib.import_module("hermes_cli.orchestrator")
     controller_module = importlib.import_module("hermes_cli.pipeline_execution_controller")

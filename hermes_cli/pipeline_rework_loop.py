@@ -139,6 +139,7 @@ class PipelineReworkLoopResult:
     test_summary: dict[str, Any] | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
+        report_payload = _safe_execution_report_payload(self.execution_report)
         return {
             "fuse": self.fuse.to_safe_dict(),
             "iteration_history": [item.to_safe_dict() for item in self.iteration_history],
@@ -159,6 +160,8 @@ class PipelineReworkLoopResult:
             "usage_summary": dict(self.usage_summary),
             "mutation_summary": dict(self.mutation_summary or {}),
             "test_summary": _tests_payload(self.test_summary),
+            "report": report_payload,
+            "execution_report": report_payload,
         }
 
 
@@ -2285,6 +2288,15 @@ def _compose_escalation_message(*, original_task: str, reviewer_blockers: list[s
             "Reviewer blockers: " + "; ".join(reviewer_blockers or ["none"]),
         ]
     )
+
+
+def _safe_execution_report_payload(execution_report: Any) -> dict[str, Any] | None:
+    if hasattr(execution_report, "to_safe_dict"):
+        payload = execution_report.to_safe_dict()
+        return dict(payload) if isinstance(payload, dict) else None
+    if isinstance(execution_report, dict):
+        return dict(execution_report)
+    return None
 
 
 def _serialize_rework_context(value: dict[str, Any]) -> str:

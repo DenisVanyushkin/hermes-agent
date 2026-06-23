@@ -122,6 +122,31 @@ def _reviewer_output(*, blockers: list[str]) -> dict[str, object]:
     }
 
 
+def test_final_response_text_reads_report_or_execution_report() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+
+    assert module._final_response_text(
+        {"report": {"final_response": {"text": "from report"}}},
+        None,
+    ) == "from report"
+    assert module._final_response_text(
+        {"execution_report": {"final_response": {"text": "from execution report"}}},
+        None,
+    ) == "from execution report"
+
+
+def test_helper_blocked_reason_preserves_top_level_or_report_reason() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+
+    assert module._helper_blocked_reason({"blocked_reason": "missing_structured_output"}) == "missing_structured_output"
+    assert module._helper_blocked_reason(
+        {"execution_report": {"completion": {"blocked_reason": "invalid_engineer_output"}}}
+    ) == "invalid_engineer_output"
+    assert module._helper_blocked_reason(
+        {"execution_report": {"blocked_reason": "max_iterations_plain_text_output"}}
+    ) == "max_iterations_plain_text_output"
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(repo), *args],

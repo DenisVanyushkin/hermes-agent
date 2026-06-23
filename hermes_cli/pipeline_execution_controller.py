@@ -198,7 +198,7 @@ def evaluate_pipeline_execution_controller(
 
     safe_helper_result = _safe_helper_result(helper_result)
     helper_status = _helper_result_status(helper_result)
-    helper_blocked_reason = _helper_blocked_reason(safe_helper_result) if helper_status == "blocked" else None
+    helper_blocked_reason = _helper_blocked_reason(safe_helper_result)
     subagent_execution_invoked = _subagent_execution_invoked(safe_helper_result)
     real_provider_bridge_invoked = _real_provider_bridge_invoked(safe_helper_result)
     return replace(
@@ -326,6 +326,21 @@ def _helper_blocked_reason(safe_helper_result: dict[str, Any] | None) -> str | N
     value = safe_helper_result.get("blocked_reason")
     if isinstance(value, str) and value.strip():
         return value.strip()
+    report = _helper_report_payload(safe_helper_result)
+    if isinstance(report, Mapping):
+        completion = report.get("completion")
+        if isinstance(completion, Mapping):
+            value = completion.get("blocked_reason")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        value = report.get("blocked_reason")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        final_response = report.get("final_response")
+        if isinstance(final_response, Mapping):
+            value = final_response.get("placeholder_reason")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     return None
 
 
@@ -350,12 +365,22 @@ def _real_provider_bridge_invoked(safe_helper_result: dict[str, Any] | None) -> 
 def _helper_subagent_runs(safe_helper_result: dict[str, Any] | None) -> list[Any]:
     if not isinstance(safe_helper_result, Mapping):
         return []
-    report = safe_helper_result.get("report")
+    report = _helper_report_payload(safe_helper_result)
     if isinstance(report, Mapping) and isinstance(report.get("subagent_runs"), list):
         return list(report.get("subagent_runs") or [])
     if isinstance(safe_helper_result.get("subagent_runs"), list):
         return list(safe_helper_result.get("subagent_runs") or [])
     return []
+
+
+def _helper_report_payload(safe_helper_result: dict[str, Any] | None) -> Mapping[str, Any] | None:
+    if not isinstance(safe_helper_result, Mapping):
+        return None
+    for key in ("report", "execution_report"):
+        value = safe_helper_result.get(key)
+        if isinstance(value, Mapping):
+            return value
+    return None
 
 
 def _workspace_basename(helper_execution_context: Mapping[str, Any] | None) -> str | None:
@@ -372,7 +397,7 @@ def _workspace_basename(helper_execution_context: Mapping[str, Any] | None) -> s
 def _final_response_text(helper_result: Any, helper_execution_context: Mapping[str, Any] | None) -> str | None:
     if not isinstance(helper_result, dict):
         return None
-    report = helper_result.get("report")
+    report = _helper_report_payload(helper_result)
     if isinstance(report, Mapping):
         final_response = report.get("final_response")
         if isinstance(final_response, Mapping) and isinstance(final_response.get("text"), str):
