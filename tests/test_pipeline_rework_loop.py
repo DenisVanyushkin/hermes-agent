@@ -142,6 +142,29 @@ def test_engineer_fail_closed_reason_distinguishes_missing_structured_output() -
     assert module._engineer_fail_closed_reason(snapshot) == "missing_structured_output"
 
 
+def test_engineer_fail_closed_reason_distinguishes_max_iterations_plain_text_output() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    snapshot = SimpleNamespace(
+        planned_steps=[
+            SimpleNamespace(
+                runner_result={
+                    "status": "succeeded",
+                    "structured_output": {
+                        "summary": "plain text diagnostic summary",
+                        "validation_status": "missing_structured_output",
+                        "validation_errors": [
+                            {"field": "payload", "message": "engineer_max_iterations_without_structured_output"}
+                        ],
+                    },
+                },
+                evaluation_result={"status": "blocked"},
+            )
+        ]
+    )
+
+    assert module._engineer_fail_closed_reason(snapshot) == "max_iterations_plain_text_output"
+
+
 def test_blocked_final_response_text_handles_missing_structured_output() -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
 
@@ -153,6 +176,25 @@ def test_blocked_final_response_text_handles_missing_structured_output() -> None
 
     assert text is not None
     assert "required structured output packet" in text
+
+
+def test_blocked_final_response_text_preserves_max_iterations_plain_text_summary() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._blocked_final_response_text(
+        blocked_reason="max_iterations_plain_text_output",
+        test_summary={"status": "not_requested"},
+        reviewer_packet={
+            "engineer_summary": "plain text diagnostic summary",
+            "blocked_reason_detail": "engineer_max_iterations_without_structured_output",
+            "packet_status": "blocked",
+        },
+    )
+
+    assert text is not None
+    assert "iteration cap" in text
+    assert "plain text diagnostic summary" in text
+    assert "engineer_max_iterations_without_structured_output" in text
 
 
 def test_finalize_loop_result_preserves_blocked_final_response_text(tmp_path: Path) -> None:

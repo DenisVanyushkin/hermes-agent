@@ -1757,7 +1757,7 @@ def _blocked_final_response_text(
     test_summary: dict[str, Any] | None,
     reviewer_packet: dict[str, Any],
 ) -> str | None:
-    if blocked_reason not in {"test_command_denied", "invalid_engineer_output", "engineer_result_invalid", "missing_structured_output"}:
+    if blocked_reason not in {"test_command_denied", "invalid_engineer_output", "engineer_result_invalid", "missing_structured_output", "max_iterations_plain_text_output"}:
         return None
     lines = [
         "Autonomous execution did not complete successfully.",
@@ -1783,6 +1783,15 @@ def _blocked_final_response_text(
                 "No verified passing test result is available.",
             ]
         )
+    elif blocked_reason == "max_iterations_plain_text_output":
+        lines.extend(
+            [
+                "- The engineer hit the autonomous iteration cap and returned plain-text output instead of the required structured output packet.",
+                "- Reviewer was not invoked because the engineer result failed the structured-output contract.",
+                "",
+                "No verified passing test result is available.",
+            ]
+        )
     else:
         lines.extend(
             [
@@ -1790,9 +1799,15 @@ def _blocked_final_response_text(
                 "- Reviewer was not invoked because engineer output was invalid.",
             ]
         )
+    engineer_summary = _safe_test_text(reviewer_packet.get("engineer_summary"))
+    if blocked_reason == "max_iterations_plain_text_output" and engineer_summary:
+        lines.extend(["", "Preserved diagnostic summary:", engineer_summary])
     safe_summary = _safe_test_text((test_summary or {}).get("blocked_reason"))
     if safe_summary and safe_summary not in {"test_command_denied", "engineer_result_invalid"}:
         lines.append(f"Blocked reason: {safe_summary}")
+    detail = _safe_test_text(reviewer_packet.get("blocked_reason_detail"))
+    if detail and detail not in {"missing_structured_output", "invalid_engineer_structured_output"}:
+        lines.append(f"Blocked reason detail: {detail}")
     packet_status = str(reviewer_packet.get("packet_status") or "").strip()
     if packet_status and packet_status != "disabled":
         lines.append(f"Reviewer status: {packet_status}")
@@ -2614,9 +2629,18 @@ def _engineer_fail_closed_reason(state_snapshot: Any) -> str | None:
         return "engineer_result_missing"
     if runner_status != "succeeded":
         return "engineer_result_failed"
-    if not _step_structured_output(state_snapshot, 0):
+    structured_output = _step_structured_output(state_snapshot, 0)
+    if not structured_output:
         return "missing_structured_output"
-    if _engineer_requests_disagreement(_step_structured_output(state_snapshot, 0)):
+    if structured_output.get("validation_status") == "missing_structured_output":
+        for item in list(structured_output.get("validation_errors") or []):
+            if not isinstance(item, dict):
+                continue
+            message = str(item.get("message") or "").strip()
+            if message == "engineer_max_iterations_without_structured_output":
+                return "max_iterations_plain_text_output"
+        return "missing_structured_output"
+    if _engineer_requests_disagreement(structured_output):
         return None
     if evaluation_status != REVIEWER_APPROVAL_STATUS:
         return "invalid_engineer_output"
