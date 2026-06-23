@@ -175,7 +175,7 @@ def observe_gateway_turn(
     if mode == AUTONOMOUS_MODE:
         helper_report = None
         if isinstance(pipeline_execution_controller.helper_result, dict):
-            candidate_report = pipeline_execution_controller.helper_result.get("report")
+            candidate_report = _helper_runtime_report_payload(pipeline_execution_controller.helper_result)
             if isinstance(candidate_report, dict):
                 helper_report = dict(candidate_report)
                 helper_report.setdefault("execution_mode", mode)
@@ -203,6 +203,16 @@ def observe_gateway_turn(
         pipeline_execution_report_payload=pipeline_execution_report_payload,
     )
     return report
+
+
+def _helper_runtime_report_payload(helper_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(helper_result, dict):
+        return None
+    for key in ("report", "execution_report"):
+        value = helper_result.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
 
 
 def _evaluate_pipeline_gate_safely(
