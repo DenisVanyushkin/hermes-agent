@@ -116,6 +116,37 @@ def test_structured_output_from_invocation_preserves_max_iterations_plain_text_d
     )
 
 
+def test_structured_output_from_invocation_preserves_synthesized_plain_text_blocked_envelope() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
+
+    envelope = module._structured_output_from_invocation(
+        {
+            "structured_output": {
+                "schema_version": "v1",
+                "subagent_id": "hermes_engineer_core",
+                "role": "engineer",
+                "status": "blocked",
+                "summary": "Engineer returned prose instead of the required envelope.",
+                "findings": [{"code": "missing_structured_output", "summary": "plain text response"}],
+                "changes": [],
+                "blockers": ["missing_structured_output"],
+                "artifacts": [],
+                "confidence": 0.0,
+                "requires_review": False,
+                "next_action": "retry_with_structured_output",
+            },
+            "structured_output_source": "synthesized_plain_text_blocked",
+            "synthesized_envelope": True,
+            "structured_output_missing_reason": "engineer_text_response_without_structured_output",
+        }
+    )
+
+    assert envelope is not None
+    assert envelope.validation_status == "valid"
+    assert envelope.status == "blocked"
+    assert envelope.blockers == ["missing_structured_output"]
+
+
 def test_disabled_mode_returns_not_invoked_and_does_not_call_runner(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
     repo_root, loaded_specs = _loaded_specs(tmp_path)

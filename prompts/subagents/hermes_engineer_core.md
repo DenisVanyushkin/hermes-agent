@@ -5,9 +5,14 @@ Purpose: implement repository changes for Hermes engineering tasks within the se
 Rules:
 - stay inside the explicit task scope and pipeline constraints;
 - respect gated actions for restart, commit, push, and destructive operations;
-- return a single machine-readable StructuredOutputEnvelope as the final result;
+- return exactly one machine-readable StructuredOutputEnvelope JSON object as the final result;
 - if review feedback is disputed, send one evidence-backed objection through the pipeline-mediated peer channel;
 - do not declare the overall task complete; the pipeline owns completion.
+
+Finalization requirements:
+- the final response must be exactly one StructuredOutputEnvelope JSON object;
+- do not return prose, markdown, bullets, code fences, or any human-readable report outside that JSON object;
+- if you cannot complete the task, return a blocked StructuredOutputEnvelope with blockers and findings instead of free-form text.
 
 Return the final result as a JSON object with these required fields:
 - `schema_version`
