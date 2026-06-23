@@ -211,6 +211,67 @@ class TestFallbackChainAdvancement:
             assert agent._try_activate_fallback() is True
             assert agent.api_mode == "anthropic_messages"
 
+    def test_cross_provider_fallback_updates_turn_runtime_request(self):
+        agent = _make_agent(
+            fallback_model=[
+                {"provider": "openai-codex", "model": "gpt-5.4"},
+            ]
+        )
+        agent.provider = "openrouter"
+        agent.model = "xiaomi/mimo-v2.5-pro"
+        agent.api_mode = "chat_completions"
+        agent.base_url = "https://openrouter.ai/api/v1"
+        agent.api_key = "primary-openrouter-key"
+        agent._base_url_lower = agent.base_url.lower()
+        agent._base_url_hostname = "openrouter.ai"
+        agent._turn_runtime_request = {
+            "purpose": "main_turn",
+            "selected_role": "hermes_engineer_core",
+            "canonical_role": "hermes_engineer_core",
+            "selected_provider": "openrouter",
+            "selected_model": "xiaomi/mimo-v2.5-pro",
+            "policy_name": "coding",
+            "policy_class": "coding",
+            "actual_provider": "openrouter",
+            "actual_model": "xiaomi/mimo-v2.5-pro",
+            "actual_base_url": "https://openrouter.ai/api/v1",
+            "actual_api_key": "primary-openrouter-key",
+            "actual_api_mode": "chat_completions",
+            "fallback_used": False,
+            "fallback_reason": "",
+            "request_id": "req-123",
+        }
+
+        fallback_client = _mock_client(
+            base_url="https://chatgpt.com/backend-api/codex/",
+            api_key="fallback-codex-key",
+        )
+
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(fallback_client, "gpt-5.4"),
+            ),
+            patch("agent.model_metadata.get_model_context_length", return_value=200000),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        runtime_request = agent._turn_runtime_request
+        assert runtime_request["selected_role"] == "hermes_engineer_core"
+        assert runtime_request["request_id"] == "req-123"
+        assert runtime_request["actual_provider"] == "openai-codex"
+        assert runtime_request["actual_model"] == "gpt-5.4"
+        assert runtime_request["actual_base_url"] == "https://chatgpt.com/backend-api/codex/"
+        assert runtime_request["actual_api_key"] == "fallback-codex-key"
+        assert runtime_request["actual_api_mode"] == "codex_responses"
+        assert runtime_request["fallback_activated"] is True
+        assert runtime_request["fallback_from_provider"] == "openrouter"
+        assert runtime_request["fallback_from_model"] == "xiaomi/mimo-v2.5-pro"
+
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+        assert "input" in kwargs
+        assert "messages" not in kwargs
+
 
 # ── Pool-rotation vs fallback gating (#11314) ────────────────────────────
 
