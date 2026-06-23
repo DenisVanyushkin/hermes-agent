@@ -423,6 +423,24 @@ def test_normalize_result_records_parse_failure_without_structured_output(tmp_pa
     assert normalized["raw_metadata"]["structured_output_parse_error"].startswith("json_decode_error:")
 
 
+def test_normalize_result_marks_max_iterations_plain_text_as_controlled_missing_structured_output(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    normalized = bridge._normalize_result(
+        {
+            "final_response": "plain text diagnostic summary",
+            "output_text": "plain text diagnostic summary",
+            "raw_metadata": {"end_reason": "max_iterations_reached(12/12)"},
+        }
+    )
+    assert normalized["completion_reason"] == "max_iterations_reached(12/12)"
+    assert normalized["raw_metadata"]["structured_output_missing"] is True
+    assert normalized["raw_metadata"]["structured_output_missing_reason"] == "engineer_max_iterations_without_structured_output"
+    assert normalized["raw_metadata"]["structured_output_missing_blocked_reason"] == "max_iterations_plain_text_output"
+    assert normalized["raw_metadata"]["diagnostic_output_text"] == "plain text diagnostic summary"
+
+
 def test_engineer_prompt_and_config_describe_structured_output_envelope(tmp_path: Path) -> None:
     repo_root = _copy_spec_tree(tmp_path)
     prompt_text = (repo_root / "prompts/subagents/hermes_engineer_core.md").read_text(encoding="utf-8")

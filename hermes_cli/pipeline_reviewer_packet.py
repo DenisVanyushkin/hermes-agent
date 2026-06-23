@@ -131,6 +131,7 @@ def summarize_engineer_output(engineer_output: Any) -> dict[str, Any]:
         "status": status,
         "summary": _clean_optional_text(payload.get("summary")),
         "validation_status": validation_status,
+        "validation_errors": _sanitize_validation_errors(payload.get("validation_errors")),
         "requires_review": bool(requires_review) if isinstance(requires_review, bool) else None,
         "failed": status in _BLOCKING_ENGINEER_STATUSES,
         "invalid": validation_status != "valid",
@@ -193,9 +194,27 @@ def _blocked_reason_detail(*, git_result: GitMaterialChangeResult, engineer: dic
         return None
     if engineer["invalid"]:
         if engineer.get("validation_status") == "missing_structured_output":
+            for item in engineer.get("validation_errors") or []:
+                message = _clean_optional_text(item.get("message"), max_length=128) if isinstance(item, Mapping) else None
+                if message == "engineer_max_iterations_without_structured_output":
+                    return message
             return "missing_structured_output"
         return "invalid_engineer_structured_output"
     return None
+
+
+def _sanitize_validation_errors(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    sanitized: list[dict[str, str]] = []
+    for item in value[:4]:
+        if not isinstance(item, Mapping):
+            continue
+        field_name = _clean_optional_text(item.get("field"), max_length=64)
+        message = _clean_optional_text(item.get("message"), max_length=128)
+        if field_name and message:
+            sanitized.append({"field": field_name, "message": message})
+    return sanitized
 
 
 def _sanitize_artifacts(value: Any) -> list[dict[str, Any]]:

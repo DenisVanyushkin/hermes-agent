@@ -318,9 +318,29 @@ def _adapt_runner_result(
 
 
 def _structured_output_from_invocation(raw_metadata: dict[str, Any] | None) -> StructuredOutputEnvelope | None:
-    if not isinstance(raw_metadata, dict) or "structured_output" not in raw_metadata:
+    if not isinstance(raw_metadata, dict):
         return None
-    return validate_structured_output_envelope(raw_metadata.get("structured_output"))
+    if "structured_output" in raw_metadata:
+        return validate_structured_output_envelope(raw_metadata.get("structured_output"))
+    if raw_metadata.get("structured_output_missing_reason") != "engineer_max_iterations_without_structured_output":
+        return None
+    output_text = raw_metadata.get("diagnostic_output_text")
+    if not isinstance(output_text, str) or not output_text.strip():
+        return None
+    return StructuredOutputEnvelope(
+        schema_version=None,
+        subagent_id=None,
+        role=None,
+        status="blocked",
+        summary=output_text.strip(),
+        validation_status="missing_structured_output",
+        validation_errors=[
+            {
+                "field": "payload",
+                "message": "engineer_max_iterations_without_structured_output",
+            }
+        ],
+    )
 
 
 def _bridge_metadata(raw_metadata: dict[str, Any] | None) -> dict[str, Any]:
