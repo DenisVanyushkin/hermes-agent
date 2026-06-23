@@ -251,10 +251,8 @@ class AIAgentSubagentExecutorBridge:
         if isinstance(result, Mapping):
             normalized = dict(result)
             raw_metadata = dict(normalized.get("raw_metadata") or {})
+            self._preserve_terminal_aliases(normalized, raw_metadata)
             structured_output, source, parse_error = self._extract_structured_output_candidate(result, raw_metadata)
-            if "final_response" in normalized and "output_text" not in normalized:
-                final_response = normalized.get("final_response")
-                normalized["output_text"] = final_response if isinstance(final_response, str) else None
             normalized["execution_status"] = normalized.get("execution_status") or "completed"
             normalized["completion_reason"] = normalized.get("completion_reason") or self._detect_completion_reason(result, raw_metadata) or "completed"
             normalized["token_usage"] = normalized.get("token_usage") or {}
@@ -266,30 +264,41 @@ class AIAgentSubagentExecutorBridge:
                     result=result,
                     raw_metadata=raw_metadata,
                     output_text=normalized.get("output_text"),
+                    parse_error=parse_error,
                 )
                 raw_metadata.update(missing_metadata)
                 output_text = normalized.get("output_text")
                 if (
                     self._supported_subagent_id() == "hermes_engineer_core"
                     and raw_metadata.get("structured_output") is None
-                    and not missing_metadata
-                    and isinstance(output_text, str)
-                    and output_text.strip()
-                    and normalized["completion_reason"].startswith("text_response")
+                    and self._should_synthesize_blocked_envelope(
+                        completion_reason=normalized["completion_reason"],
+                        output_text=output_text,
+                        missing_metadata=missing_metadata,
+                    )
                 ):
                     raw_metadata["structured_output"] = self._synthesized_blocked_structured_output(
-                        output_text=output_text,
+                        output_text=self._synthesis_summary_text(output_text, missing_metadata),
                         raw_metadata=raw_metadata,
                     )
-                    raw_metadata["structured_output_source"] = "synthesized_plain_text_blocked"
-                    raw_metadata["structured_output_missing_reason"] = "engineer_text_response_without_structured_output"
-                    raw_metadata["structured_output_missing_blocked_reason"] = "invalid_engineer_output"
-                    raw_metadata["reason"] = "text_response_without_structured_output"
+                    raw_metadata["structured_output_source"] = str(
+                        missing_metadata.get("structured_output_source") or "synthesized_plain_text_blocked"
+                    )
+                    raw_metadata["structured_output_missing_reason"] = str(
+                        missing_metadata.get("structured_output_missing_reason") or "engineer_text_response_without_structured_output"
+                    )
+                    raw_metadata["structured_output_missing_blocked_reason"] = str(
+                        missing_metadata.get("structured_output_missing_blocked_reason") or "invalid_engineer_output"
+                    )
+                    raw_metadata["reason"] = str(
+                        missing_metadata.get("reason") or "text_response_without_structured_output"
+                    )
                     raw_metadata["repair_attempted"] = False
                     raw_metadata["repair_succeeded"] = False
                     raw_metadata["synthesized_envelope"] = True
-                    raw_metadata["original_output_text_length"] = len(output_text)
-                    raw_metadata["original_output_text_excerpt"] = output_text.strip()[:500]
+                    if isinstance(output_text, str):
+                        raw_metadata["original_output_text_length"] = len(output_text)
+                        raw_metadata["original_output_text_excerpt"] = output_text.strip()[:500]
             raw_metadata.setdefault("structured_output_source", source)
             if parse_error is not None:
                 raw_metadata["structured_output_parse_error"] = parse_error
@@ -302,6 +311,7 @@ class AIAgentSubagentExecutorBridge:
                 raw_metadata["structured_output"] = structured_output
             else:
                 raw_metadata["structured_output_missing"] = True
+            parse_error = parse_error or self._legacy_string_parse_error(result)
             if parse_error is not None:
                 raw_metadata["structured_output_parse_error"] = parse_error
             return {
@@ -311,6 +321,18 @@ class AIAgentSubagentExecutorBridge:
                 "raw_metadata": raw_metadata,
             }
         raise AIAgentExecutorBridgeError("invalid_agent_result")
+
+    def _preserve_terminal_aliases(self, normalized: dict[str, Any], raw_metadata: dict[str, Any]) -> None:
+        completion_reason = self._first_text_value(normalized, ("completion_reason", "turn_exit_reason"))
+        if completion_reason is not None and "completion_reason" not in normalized:
+            normalized["completion_reason"] = completion_reason
+        output_text = self._detect_output_text(normalized)
+        if output_text is not None and "output_text" not in normalized:
+            normalized["output_text"] = output_text
+        for key in ("turn_exit_reason", "final_response", "final_response_text", "response_text", "text"):
+            value = normalized.get(key)
+            if value is not None:
+                raw_metadata.setdefault(key, value)
 
     def _extract_structured_output_candidate(
         self,
@@ -333,7 +355,7 @@ class AIAgentSubagentExecutorBridge:
             if self._looks_like_structured_output_mapping(final_response):
                 return dict(final_response), "final_response", None
 
-        output_text = result.get("output_text")
+        output_text = self._detect_output_text(result)
         if isinstance(output_text, str):
             return self._structured_output_from_output_text(output_text)
 
@@ -343,6 +365,8 @@ class AIAgentSubagentExecutorBridge:
         text = output_text.strip()
         if not text:
             return None, "none", None
+        if not text.startswith(("{", "[")):
+            return None, "none", None
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as exc:
@@ -351,15 +375,35 @@ class AIAgentSubagentExecutorBridge:
             return dict(parsed), "output_text_json", None
         return None, "none", f"json_not_mapping:{type(parsed).__name__}"
 
+    def _legacy_string_parse_error(self, output_text: str) -> str | None:
+        text = output_text.strip()
+        if not text:
+            return None
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as exc:
+            return f"json_decode_error:{exc.msg}"
+        return None
+
     def _looks_like_structured_output_mapping(self, value: Mapping[str, Any]) -> bool:
         return all(field in value for field in ("schema_version", "subagent_id", "role", "status", "summary"))
 
     def _detect_completion_reason(self, result: Mapping[str, Any], raw_metadata: Mapping[str, Any]) -> str | None:
-        for key in ("completion_reason", "stop_reason", "end_reason", "reason"):
+        for key in ("completion_reason", "turn_exit_reason", "stop_reason", "end_reason", "reason"):
             for payload in (result, raw_metadata):
                 value = payload.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+        return None
+
+    def _detect_output_text(self, payload: Mapping[str, Any]) -> str | None:
+        return self._first_text_value(payload, ("output_text", "final_response", "final_response_text", "response_text", "text"))
+
+    def _first_text_value(self, payload: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, str):
+                return value
         return None
 
     def _missing_structured_output_metadata(
@@ -368,16 +412,90 @@ class AIAgentSubagentExecutorBridge:
         result: Mapping[str, Any],
         raw_metadata: Mapping[str, Any],
         output_text: Any,
+        parse_error: str | None,
     ) -> dict[str, Any]:
-        if not isinstance(output_text, str) or not output_text.strip():
-            return {}
+        if parse_error is not None:
+            diagnostic_text = output_text if isinstance(output_text, str) else ""
+            return {
+                "structured_output_missing_reason": "malformed_structured_output",
+                "structured_output_missing_blocked_reason": "malformed_structured_output",
+                "structured_output_source": "synthesized_parse_failure_blocked",
+                "reason": "malformed_structured_output",
+                "diagnostic_output_text": diagnostic_text,
+            }
         if not self._is_max_iterations_result(result, raw_metadata):
+            provider_failure = self._provider_failure_metadata(raw_metadata)
+            if provider_failure is not None:
+                return provider_failure
+            empty_output = not isinstance(output_text, str) or not output_text.strip()
+            if empty_output:
+                return {
+                    "structured_output_missing_reason": "engineer_empty_output_without_structured_output",
+                    "structured_output_missing_blocked_reason": "empty_output_without_structured_output",
+                    "structured_output_source": "synthesized_empty_output_blocked",
+                    "reason": "empty_output_without_structured_output",
+                }
             return {}
         return {
             "structured_output_missing_reason": "engineer_max_iterations_without_structured_output",
             "structured_output_missing_blocked_reason": "max_iterations_plain_text_output",
+            "structured_output_source": "synthesized_max_iterations_blocked",
+            "reason": "max_iterations_without_structured_output",
             "diagnostic_output_text": output_text,
         }
+
+    def _provider_failure_metadata(self, raw_metadata: Mapping[str, Any]) -> dict[str, Any] | None:
+        if not raw_metadata.get("real_provider_bridge_invoked"):
+            return None
+        provider_error = raw_metadata.get("provider_error")
+        http_status = raw_metadata.get("http_status")
+        fallback_status = str(raw_metadata.get("fallback_status") or "").strip().lower()
+        fallback_diagnostic = str(raw_metadata.get("fallback_diagnostic") or "").strip()
+        if fallback_status in {"exhausted", "unavailable"} or fallback_diagnostic:
+            return {
+                "structured_output_missing_reason": "engineer_fallback_exhausted_without_structured_output",
+                "structured_output_missing_blocked_reason": "fallback_exhausted_without_structured_output",
+                "structured_output_source": "synthesized_fallback_exhausted_blocked",
+                "reason": "fallback_exhausted_without_structured_output",
+                "diagnostic_output_text": fallback_diagnostic or f"Fallback {fallback_status or 'unavailable'} without structured output.",
+            }
+        if provider_error is not None or http_status is not None:
+            diagnostic_parts = []
+            if provider_error is not None:
+                diagnostic_parts.append(str(provider_error))
+            if http_status is not None and str(http_status) not in " ".join(diagnostic_parts):
+                diagnostic_parts.append(f"HTTP {http_status}")
+            diagnostic_text = " ".join(part for part in diagnostic_parts if part).strip()
+            return {
+                "structured_output_missing_reason": "engineer_provider_error_without_structured_output",
+                "structured_output_missing_blocked_reason": "provider_error_without_structured_output",
+                "structured_output_source": "synthesized_provider_error_blocked",
+                "reason": "provider_error_without_structured_output",
+                "diagnostic_output_text": diagnostic_text or "Provider error without structured output.",
+            }
+        return None
+
+    def _should_synthesize_blocked_envelope(
+        self,
+        *,
+        completion_reason: str,
+        output_text: Any,
+        missing_metadata: Mapping[str, Any],
+    ) -> bool:
+        if missing_metadata:
+            return True
+        return isinstance(output_text, str) and output_text.strip() and completion_reason.startswith("text_response")
+
+    def _synthesis_summary_text(self, output_text: Any, missing_metadata: Mapping[str, Any]) -> str:
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text
+        diagnostic_text = missing_metadata.get("diagnostic_output_text")
+        if isinstance(diagnostic_text, str) and diagnostic_text.strip():
+            return diagnostic_text
+        blocked_reason = missing_metadata.get("structured_output_missing_blocked_reason")
+        if blocked_reason == "empty_output_without_structured_output":
+            return "Engineer bridge returned empty output instead of the required StructuredOutputEnvelope."
+        return "Engineer bridge terminated without returning the required StructuredOutputEnvelope."
 
     def _synthesized_blocked_structured_output(
         self,
@@ -417,7 +535,7 @@ class AIAgentSubagentExecutorBridge:
         return f"{first_line[:217].rstrip()}..."
 
     def _is_max_iterations_result(self, result: Mapping[str, Any], raw_metadata: Mapping[str, Any]) -> bool:
-        for key in ("completion_reason", "stop_reason", "end_reason", "reason"):
+        for key in ("completion_reason", "turn_exit_reason", "stop_reason", "end_reason", "reason"):
             for payload in (result, raw_metadata):
                 value = payload.get(key)
                 if isinstance(value, str) and "max_iterations_reached" in value:
