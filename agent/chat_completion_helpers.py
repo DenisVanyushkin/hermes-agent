@@ -500,6 +500,37 @@ def direct_api_call(agent, api_kwargs: dict):
             agent._close_request_openai_client(request_client, reason="request_complete")
 
 
+def _sync_turn_runtime_request_for_fallback(
+    agent,
+    *,
+    previous_provider: str,
+    previous_model: str,
+    previous_base_url: str,
+    previous_api_mode: str,
+) -> None:
+    """Update the active turn runtime to the effective fallback provider."""
+    runtime_request = getattr(agent, "_turn_runtime_request", None)
+    if not isinstance(runtime_request, dict):
+        return
+
+    runtime_request["actual_provider"] = agent.provider
+    runtime_request["actual_model"] = agent.model
+    runtime_request["actual_base_url"] = agent.base_url
+    runtime_request["actual_api_key"] = agent.api_key
+    runtime_request["actual_api_mode"] = agent.api_mode
+    runtime_request["fallback_activated"] = True
+    runtime_request["fallback_from_provider"] = previous_provider
+    runtime_request["fallback_from_model"] = previous_model
+    runtime_request["fallback_from_base_url"] = previous_base_url
+    runtime_request["fallback_from_api_mode"] = previous_api_mode
+    runtime_request["fallback_used"] = True
+    runtime_request["fallback_reason"] = (
+        f"fallback runtime activated: {previous_provider or 'unknown'}"
+        f"/{previous_model or 'unknown'} -> {agent.provider or 'unknown'}"
+        f"/{agent.model or 'unknown'}"
+    )
+
+
 def interruptible_api_call(agent, api_kwargs: dict):
     """
     Run the API call in a background thread so the main conversation loop
@@ -1719,8 +1750,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         ):
             fb_api_mode = "bedrock_converse"
 
+        old_provider = getattr(agent, "provider", "")
         old_model = agent.model
         old_provider = agent.provider
+        old_base_url = str(getattr(agent, "base_url", "") or "")
+        old_api_mode = getattr(agent, "api_mode", "")
 
         # Clear the per-config context_length override so the fallback
         # model's actual context window is resolved instead of inheriting
@@ -1883,6 +1917,14 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # Keep the prompt's self-identity in sync with the model actually
         # answering, so "what model are you?" doesn't report the primary.
         rewrite_prompt_model_identity(agent, fb_model, fb_provider)
+
+        _sync_turn_runtime_request_for_fallback(
+            agent,
+            previous_provider=old_provider,
+            previous_model=old_model,
+            previous_base_url=old_base_url,
+            previous_api_mode=old_api_mode,
+        )
 
         agent._buffer_status(
             f"🔄 Primary model failed — switching to fallback: "
