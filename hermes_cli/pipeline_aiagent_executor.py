@@ -262,14 +262,35 @@ class AIAgentSubagentExecutorBridge:
                 raw_metadata["structured_output"] = structured_output
             else:
                 raw_metadata["structured_output_missing"] = True
-                raw_metadata.update(
-                    self._missing_structured_output_metadata(
-                        result=result,
-                        raw_metadata=raw_metadata,
-                        output_text=normalized.get("output_text"),
-                    )
+                missing_metadata = self._missing_structured_output_metadata(
+                    result=result,
+                    raw_metadata=raw_metadata,
+                    output_text=normalized.get("output_text"),
                 )
-            raw_metadata["structured_output_source"] = source
+                raw_metadata.update(missing_metadata)
+                output_text = normalized.get("output_text")
+                if (
+                    self._supported_subagent_id() == "hermes_engineer_core"
+                    and raw_metadata.get("structured_output") is None
+                    and not missing_metadata
+                    and isinstance(output_text, str)
+                    and output_text.strip()
+                    and normalized["completion_reason"].startswith("text_response")
+                ):
+                    raw_metadata["structured_output"] = self._synthesized_blocked_structured_output(
+                        output_text=output_text,
+                        raw_metadata=raw_metadata,
+                    )
+                    raw_metadata["structured_output_source"] = "synthesized_plain_text_blocked"
+                    raw_metadata["structured_output_missing_reason"] = "engineer_text_response_without_structured_output"
+                    raw_metadata["structured_output_missing_blocked_reason"] = "invalid_engineer_output"
+                    raw_metadata["reason"] = "text_response_without_structured_output"
+                    raw_metadata["repair_attempted"] = False
+                    raw_metadata["repair_succeeded"] = False
+                    raw_metadata["synthesized_envelope"] = True
+                    raw_metadata["original_output_text_length"] = len(output_text)
+                    raw_metadata["original_output_text_excerpt"] = output_text.strip()[:500]
+            raw_metadata.setdefault("structured_output_source", source)
             if parse_error is not None:
                 raw_metadata["structured_output_parse_error"] = parse_error
             normalized["raw_metadata"] = raw_metadata
@@ -357,6 +378,43 @@ class AIAgentSubagentExecutorBridge:
             "structured_output_missing_blocked_reason": "max_iterations_plain_text_output",
             "diagnostic_output_text": output_text,
         }
+
+    def _synthesized_blocked_structured_output(
+        self,
+        *,
+        output_text: str,
+        raw_metadata: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        normalized_text = output_text.strip()
+        summary = self._plain_text_summary(normalized_text)
+        return {
+            "schema_version": "v1",
+            "subagent_id": "hermes_engineer_core",
+            "role": "engineer",
+            "status": "blocked",
+            "summary": summary,
+            "findings": [
+                {
+                    "code": "missing_structured_output",
+                    "summary": "Engineer model returned plain text instead of a StructuredOutputEnvelope.",
+                    "details": summary,
+                }
+            ],
+            "changes": [],
+            "blockers": ["missing_structured_output"],
+            "artifacts": [],
+            "confidence": 0.0,
+            "requires_review": False,
+            "next_action": "retry_with_structured_output",
+        }
+
+    def _plain_text_summary(self, output_text: str) -> str:
+        first_line = next((line.strip() for line in output_text.splitlines() if line.strip()), "")
+        if not first_line:
+            return "Engineer model returned plain text instead of the required StructuredOutputEnvelope."
+        if len(first_line) <= 220:
+            return first_line
+        return f"{first_line[:217].rstrip()}..."
 
     def _is_max_iterations_result(self, result: Mapping[str, Any], raw_metadata: Mapping[str, Any]) -> bool:
         for key in ("completion_reason", "stop_reason", "end_reason", "reason"):

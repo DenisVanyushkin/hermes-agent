@@ -385,7 +385,87 @@ def test_normalize_result_extracts_structured_output_from_final_response_mapping
     )
     assert normalized["raw_metadata"]["structured_output_source"] == "final_response"
     assert normalized["raw_metadata"]["structured_output"]["summary"] == "done"
-    assert normalized["output_text"] is None
+
+
+def test_normalize_result_synthesizes_blocked_envelope_for_plain_text_response(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    normalized = bridge._normalize_result(
+        {
+            "output_text": "Investigated the runtime path and confirmed the bridge reached execution.",
+            "completion_reason": "text_response(finish_reason=stop)",
+            "execution_status": "completed",
+        }
+    )
+
+    structured_output = normalized["raw_metadata"]["structured_output"]
+    assert structured_output["status"] == "blocked"
+    assert structured_output["subagent_id"] == "hermes_engineer_core"
+    assert structured_output["role"] == "engineer"
+    assert structured_output["next_action"] == "retry_with_structured_output"
+    assert structured_output["blockers"] == ["missing_structured_output"]
+    assert structured_output["findings"][0]["code"] == "missing_structured_output"
+    assert normalized["raw_metadata"]["structured_output_source"] == "synthesized_plain_text_blocked"
+    assert normalized["raw_metadata"]["synthesized_envelope"] is True
+    assert normalized["raw_metadata"]["repair_attempted"] is False
+    assert normalized["raw_metadata"]["repair_succeeded"] is False
+    assert normalized["raw_metadata"]["structured_output_missing_reason"] == "engineer_text_response_without_structured_output"
+
+
+def test_normalize_result_keeps_valid_structured_output_without_synthesis(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    normalized = bridge._normalize_result(
+        {
+            "output_text": "ignored because raw structured output is authoritative",
+            "raw_metadata": {
+                "structured_output": {
+                    "schema_version": "v1",
+                    "subagent_id": "hermes_engineer_core",
+                    "role": "engineer",
+                    "status": "blocked",
+                    "summary": "already structured",
+                    "findings": [{"code": "structured", "summary": "already structured"}],
+                    "changes": [],
+                    "blockers": ["upstream"],
+                    "artifacts": [],
+                    "confidence": 0.2,
+                    "requires_review": False,
+                    "next_action": "none",
+                }
+            },
+        }
+    )
+
+    assert normalized["raw_metadata"]["structured_output_source"] == "raw_metadata.structured_output"
+    assert normalized["raw_metadata"].get("synthesized_envelope") is None
+    assert normalized["output_text"] == "ignored because raw structured output is authoritative"
+
+
+def test_reviewer_bridge_plain_text_does_not_synthesize_engineer_envelope(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_reviewer_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentReviewerExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    normalized = bridge._normalize_result(
+        {
+            "output_text": "plain reviewer text",
+            "completion_reason": "text_response(finish_reason=stop)",
+            "execution_status": "completed",
+        }
+    )
+
+    raw_metadata = normalized["raw_metadata"]
+    assert raw_metadata.get("synthesized_envelope") is None
+    assert raw_metadata.get("structured_output") is None
+    assert raw_metadata["structured_output_missing"] is True
+    assert raw_metadata["structured_output_source"] == "none"
+    assert raw_metadata.get("structured_output_missing_reason") is None
+    assert raw_metadata.get("structured_output_missing_blocked_reason") is None
 
 
 def test_normalize_result_extracts_parseable_json_from_output_text(tmp_path: Path) -> None:

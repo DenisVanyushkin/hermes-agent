@@ -121,6 +121,8 @@ output_schema:
     - reviewer_objections
   contract_notes:
     - final output must be a StructuredOutputEnvelope compatible with hermes_cli.subagent_runner.validate_structured_output_envelope
+    - final output must be exactly one StructuredOutputEnvelope JSON object with no prose or markdown outside the JSON object
+    - if the task cannot be completed, return a blocked StructuredOutputEnvelope with blockers and findings instead of plain text
     - include at least one of findings or changes
     - tests are optional and must not make pytest mandatory when the pipeline did not request tests
     - use find_files for filename discovery because it returns repo-relative workspace paths
