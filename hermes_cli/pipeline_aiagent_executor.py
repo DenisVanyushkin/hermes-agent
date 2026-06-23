@@ -67,6 +67,8 @@ class AIAgentSubagentExecutorBridge:
             for item in self._tool_calls
         ]
         raw_metadata = dict(normalized.get("raw_metadata") or {})
+        fallback_metadata = self._fallback_metadata(normalized, runtime_plan)
+        raw_metadata.update(fallback_metadata)
         raw_metadata.setdefault("tool_calls", list(self._tool_calls))
         raw_metadata.setdefault(
             "bridge_metadata",
@@ -82,6 +84,17 @@ class AIAgentSubagentExecutorBridge:
             "execution_status": normalized.get("execution_status") or "completed",
             "token_usage": dict(normalized.get("token_usage") or {}),
             "tool_intents": tool_intents,
+            "effective_provider": fallback_metadata["effective_provider"],
+            "effective_model": fallback_metadata["effective_model"],
+            "fallback_attempted": fallback_metadata["fallback_attempted"],
+            "fallback_activated": fallback_metadata["fallback_activated"],
+            "fallback_provider": fallback_metadata["fallback_provider"],
+            "fallback_model": fallback_metadata["fallback_model"],
+            "fallback_base_url": fallback_metadata["fallback_base_url"],
+            "fallback_api_mode": fallback_metadata["fallback_api_mode"],
+            "fallback_error": fallback_metadata["fallback_error"],
+            "fallback_result": fallback_metadata["fallback_result"],
+            "providers_used_effective": list(fallback_metadata["providers_used_effective"]),
             "raw_metadata": raw_metadata,
         }
 
@@ -474,6 +487,73 @@ class AIAgentSubagentExecutorBridge:
                 "diagnostic_output_text": diagnostic_text or "Provider error without structured output.",
             }
         return None
+
+    def _fallback_metadata(self, normalized: Mapping[str, Any], runtime_plan: Any) -> dict[str, Any]:
+        raw_metadata = dict(normalized.get("raw_metadata") or {})
+        initial_provider = self._metadata_text({"value": getattr(runtime_plan, "constructor_provider", None)}, "value")
+        initial_model = self._metadata_text({"value": getattr(runtime_plan, "constructor_model", None)}, "value")
+        effective_provider = self._metadata_text(raw_metadata, "effective_provider") or self._metadata_text(normalized, "provider") or initial_provider
+        effective_model = self._metadata_text(raw_metadata, "effective_model") or self._metadata_text(normalized, "model") or initial_model
+        fallback_result = self._metadata_text(raw_metadata, "fallback_result") or self._metadata_text(raw_metadata, "fallback_status")
+        fallback_error = (
+            self._metadata_text(raw_metadata, "fallback_error")
+            or self._metadata_text(raw_metadata, "fallback_diagnostic")
+            or self._metadata_text(raw_metadata, "provider_error")
+        )
+        fallback_attempted = bool(raw_metadata.get("fallback_attempted"))
+        fallback_activated = bool(raw_metadata.get("fallback_activated"))
+        if not fallback_attempted:
+            fallback_attempted = fallback_activated or bool(fallback_result) or bool(fallback_error)
+            if not fallback_attempted:
+                fallback_attempted = effective_provider != initial_provider or effective_model != initial_model
+        if not fallback_activated:
+            fallback_activated = effective_provider != initial_provider or effective_model != initial_model
+        fallback_provider = self._metadata_text(raw_metadata, "fallback_provider")
+        fallback_model = self._metadata_text(raw_metadata, "fallback_model")
+        fallback_base_url = self._metadata_text(raw_metadata, "fallback_base_url")
+        fallback_api_mode = self._metadata_text(raw_metadata, "fallback_api_mode")
+        if fallback_activated:
+            fallback_provider = fallback_provider or effective_provider
+            fallback_model = fallback_model or effective_model
+            fallback_base_url = fallback_base_url or self._metadata_text(normalized, "base_url")
+            fallback_api_mode = fallback_api_mode or self._metadata_text(normalized, "api_mode")
+            fallback_result = fallback_result or "activated"
+        elif fallback_attempted:
+            fallback_result = fallback_result or "attempted"
+        providers_used_effective = raw_metadata.get("providers_used_effective")
+        providers: list[str] = []
+        for candidate in (initial_provider, effective_provider):
+            if candidate and candidate not in providers:
+                providers.append(candidate)
+        if isinstance(providers_used_effective, list):
+            for candidate in providers_used_effective:
+                if not isinstance(candidate, str):
+                    continue
+                text = candidate.strip()
+                if text and text not in providers:
+                    providers.append(text)
+        return {
+            "initial_provider": initial_provider,
+            "initial_model": initial_model,
+            "effective_provider": effective_provider,
+            "effective_model": effective_model,
+            "fallback_attempted": fallback_attempted,
+            "fallback_activated": fallback_activated,
+            "fallback_provider": fallback_provider,
+            "fallback_model": fallback_model,
+            "fallback_base_url": fallback_base_url,
+            "fallback_api_mode": fallback_api_mode,
+            "fallback_error": fallback_error,
+            "fallback_result": fallback_result,
+            "providers_used_effective": providers,
+        }
+
+    def _metadata_text(self, payload: Mapping[str, Any], key: str) -> str | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
     def _should_synthesize_blocked_envelope(
         self,

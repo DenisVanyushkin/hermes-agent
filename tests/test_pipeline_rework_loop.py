@@ -1304,6 +1304,44 @@ def test_controlled_runtime_context_preserves_distinct_engineer_and_reviewer_mod
     assert result.execution_report.to_safe_dict()["usage"]["total_tokens"] == 21
 
 
+def test_controlled_runtime_context_reports_effective_fallback_provider_separately_from_constructor_provider(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    engineer_run = {
+        "step_id": "engineer",
+        "subagent_id": "hermes_engineer_core",
+        "role_id": "engineer",
+        "status": "succeeded",
+        "runtime_mode": "autonomous",
+        "real_provider_allowed": True,
+        "provider_policy_status": "requested",
+        "actual_provider": "openrouter",
+        "actual_model": "xiaomi/mimo-v2.5-pro",
+        "effective_provider": "openai-codex",
+        "effective_model": "gpt-5.4",
+        "fallback_attempted": True,
+        "fallback_activated": True,
+        "fallback_provider": "openai-codex",
+        "fallback_model": "gpt-5.4",
+        "fallback_result": "activated",
+        "providers_used_effective": ["openrouter", "openai-codex"],
+        "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "source": "reported"},
+        "cache": {"source": "unavailable"},
+        "tool_call_summaries": [],
+        "raw_output_redacted": True,
+    }
+
+    payload = module._usage_summary_from_subagent_runs([engineer_run], planned_subagent_count=1)
+
+    assert engineer_run["actual_provider"] == "openrouter"
+    assert engineer_run["effective_provider"] == "openai-codex"
+    assert engineer_run["effective_model"] == "gpt-5.4"
+    assert engineer_run["fallback_attempted"] is True
+    assert engineer_run["fallback_activated"] is True
+    assert engineer_run["providers_used_effective"] == ["openrouter", "openai-codex"]
+    assert payload["providers_used"] == ["openrouter"]
+    assert payload["providers_used_effective"] == ["openrouter", "openai-codex"]
+
+
 def test_controlled_runtime_context_fails_closed_on_provider_model_mismatch(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     repo_root, loaded_specs = _loaded_specs(tmp_path)

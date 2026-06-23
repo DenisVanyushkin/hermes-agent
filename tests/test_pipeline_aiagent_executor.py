@@ -604,6 +604,157 @@ def test_normalize_result_fallback_exhausted_without_output_synthesizes_blocked_
     _assert_engineer_blocked_envelope(normalized["raw_metadata"]["structured_output"], summary_fragment="unavailable")
 
 
+def test_bridge_exposes_effective_fallback_metadata_when_fallback_activates(tmp_path: Path) -> None:
+    repo_root, runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_FakeAgent,
+        conversation_runner=lambda _bridge, _agent, _request, _runtime: {
+            "output_text": "fallback ok",
+            "provider": "openai-codex",
+            "model": "gpt-5.4",
+            "base_url": "https://chatgpt.com/backend-api/codex/",
+            "raw_metadata": {
+                "fallback_activated": True,
+                "fallback_attempted": True,
+                "fallback_result": "activated",
+                "structured_output": {
+                    "schema_version": "v1",
+                    "subagent_id": "hermes_engineer_core",
+                    "role": "engineer",
+                    "status": "succeeded",
+                    "summary": "Prepared patch.",
+                    "findings": [],
+                    "changes": [],
+                    "blockers": [],
+                    "artifacts": [],
+                    "confidence": 0.9,
+                    "requires_review": False,
+                    "next_action": "none",
+                },
+            },
+        },
+    )
+
+    result = bridge(
+        SubagentInvocationRequest(
+            subagent_id="hermes_engineer_core",
+            pipeline_session_id=runtime_result.pipeline_session_id,
+            invocation_id="inv-fallback-activated",
+            input_messages=[{"role": "user", "content": "Implement change"}],
+        ),
+        runtime_result,
+    )
+
+    raw_metadata = result["raw_metadata"]
+    assert raw_metadata["initial_provider"] == "openrouter"
+    assert raw_metadata["initial_model"] == "xiaomi/mimo-v2.5-pro"
+    assert raw_metadata["effective_provider"] == "openai-codex"
+    assert raw_metadata["effective_model"] == "gpt-5.4"
+    assert raw_metadata["fallback_attempted"] is True
+    assert raw_metadata["fallback_activated"] is True
+    assert raw_metadata["fallback_provider"] == "openai-codex"
+    assert raw_metadata["fallback_model"] == "gpt-5.4"
+    assert raw_metadata["fallback_base_url"] == "https://chatgpt.com/backend-api/codex/"
+    assert raw_metadata["providers_used_effective"] == ["openrouter", "openai-codex"]
+
+
+def test_bridge_ignores_non_string_providers_used_effective_entries(tmp_path: Path) -> None:
+    repo_root, runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_FakeAgent,
+        conversation_runner=lambda _bridge, _agent, _request, _runtime: {
+            "output_text": "fallback ok",
+            "provider": "openai-codex",
+            "model": "gpt-5.4",
+            "raw_metadata": {
+                "fallback_activated": True,
+                "providers_used_effective": [
+                    " openai-codex ",
+                    {"p": "openrouter"},
+                    ["anthropic"],
+                    123,
+                    "",
+                ],
+                "structured_output": {
+                    "schema_version": "v1",
+                    "subagent_id": "hermes_engineer_core",
+                    "role": "engineer",
+                    "status": "succeeded",
+                    "summary": "Prepared patch.",
+                    "findings": [],
+                    "changes": [],
+                    "blockers": [],
+                    "artifacts": [],
+                    "confidence": 0.9,
+                    "requires_review": False,
+                    "next_action": "none",
+                },
+            },
+        },
+    )
+
+    result = bridge(
+        SubagentInvocationRequest(
+            subagent_id="hermes_engineer_core",
+            pipeline_session_id=runtime_result.pipeline_session_id,
+            invocation_id="inv-fallback-typed-providers",
+            input_messages=[{"role": "user", "content": "Implement change"}],
+        ),
+        runtime_result,
+    )
+
+    assert result["raw_metadata"]["providers_used_effective"] == ["openrouter", "openai-codex"]
+
+
+def test_bridge_exposes_fallback_failure_metadata_without_masquerading_constructor_provider(tmp_path: Path) -> None:
+    repo_root, runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_FakeAgent,
+        conversation_runner=lambda _bridge, _agent, _request, _runtime: {
+            "turn_exit_reason": "fallback_exhausted",
+            "provider": "openrouter",
+            "model": "xiaomi/mimo-v2.5-pro",
+            "raw_metadata": {
+                "real_provider_bridge_invoked": True,
+                "fallback_status": "exhausted",
+                "fallback_error": "HTTP 402 Payment Required",
+                "fallback_diagnostic": "openai-codex/gpt-5.4 unavailable after retries",
+            },
+        },
+    )
+
+    result = bridge(
+        SubagentInvocationRequest(
+            subagent_id="hermes_engineer_core",
+            pipeline_session_id=runtime_result.pipeline_session_id,
+            invocation_id="inv-fallback-exhausted",
+            input_messages=[{"role": "user", "content": "Implement change"}],
+        ),
+        runtime_result,
+    )
+
+    raw_metadata = result["raw_metadata"]
+    assert raw_metadata["initial_provider"] == "openrouter"
+    assert raw_metadata["effective_provider"] == "openrouter"
+    assert raw_metadata["fallback_attempted"] is True
+    assert raw_metadata["fallback_activated"] is False
+    assert raw_metadata["fallback_error"] == "HTTP 402 Payment Required"
+    assert raw_metadata["fallback_result"] == "exhausted"
+    assert raw_metadata["providers_used_effective"] == ["openrouter"]
+
+
 def test_normalize_result_turn_exit_reason_max_iterations_synthesizes_blocked_envelope(tmp_path: Path) -> None:
     repo_root, _runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)
