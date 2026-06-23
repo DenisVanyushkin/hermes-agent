@@ -1012,10 +1012,42 @@ def test_helper_exception_is_fail_closed() -> None:
     assert result.execution_allowed is False
     assert result.blocked_reason == "controller_helper_failed"
     assert result.actual_execution_invoked is True
-    assert result.helper_result is None
     assert result.helper_result_status == "controller_helper_failed"
     assert result.helper_error == "RuntimeError"
+    assert result.helper_result is None
     assert helper_calls == ["called"]
+
+
+def test_blocked_helper_report_final_response_text_is_propagated() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+
+    def _helper(**_kwargs):
+        return {
+            "status": "blocked",
+            "blocked_reason": "max_iterations_plain_text_output",
+            "report": {
+                "final_response": {
+                    "text": "plain text diagnostic summary",
+                    "source": "engineer_max_iterations_plain_text",
+                }
+            },
+        }
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(),
+        session=session,
+        state_snapshot=snapshot,
+        execution_helper=_helper,
+        allow_test_execution=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.execution_allowed is True
+    assert result.blocked_reason == "max_iterations_plain_text_output"
+    assert result.helper_result_status == "blocked"
+    assert result.final_response_text == "plain text diagnostic summary"
+    assert result.helper_error is None
 
 
 def test_registered_helper_exception_is_fail_closed(monkeypatch, tmp_path: Path) -> None:

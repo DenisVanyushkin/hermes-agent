@@ -94,6 +94,28 @@ def _valid_structured_output() -> dict[str, object]:
     }
 
 
+def test_structured_output_from_invocation_preserves_max_iterations_plain_text_diagnostic() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
+
+    envelope = module._structured_output_from_invocation(
+        {
+            "structured_output_missing": True,
+            "structured_output_missing_reason": "engineer_max_iterations_without_structured_output",
+            "structured_output_missing_blocked_reason": "max_iterations_plain_text_output",
+            "diagnostic_output_text": "plain text diagnostic summary",
+        }
+    )
+
+    assert envelope is not None
+    assert envelope.status == "blocked"
+    assert envelope.summary == "plain text diagnostic summary"
+    assert envelope.validation_status == "missing_structured_output"
+    assert any(
+        item.get("message") == "engineer_max_iterations_without_structured_output"
+        for item in envelope.validation_errors
+    )
+
+
 def test_disabled_mode_returns_not_invoked_and_does_not_call_runner(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
     repo_root, loaded_specs = _loaded_specs(tmp_path)

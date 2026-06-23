@@ -247,12 +247,19 @@ class AIAgentSubagentExecutorBridge:
                 final_response = normalized.get("final_response")
                 normalized["output_text"] = final_response if isinstance(final_response, str) else None
             normalized["execution_status"] = normalized.get("execution_status") or "completed"
-            normalized["completion_reason"] = normalized.get("completion_reason") or "completed"
+            normalized["completion_reason"] = normalized.get("completion_reason") or self._detect_completion_reason(result, raw_metadata) or "completed"
             normalized["token_usage"] = normalized.get("token_usage") or {}
             if structured_output is not None:
                 raw_metadata["structured_output"] = structured_output
             else:
                 raw_metadata["structured_output_missing"] = True
+                raw_metadata.update(
+                    self._missing_structured_output_metadata(
+                        result=result,
+                        raw_metadata=raw_metadata,
+                        output_text=normalized.get("output_text"),
+                    )
+                )
             raw_metadata["structured_output_source"] = source
             if parse_error is not None:
                 raw_metadata["structured_output_parse_error"] = parse_error
@@ -316,6 +323,39 @@ class AIAgentSubagentExecutorBridge:
 
     def _looks_like_structured_output_mapping(self, value: Mapping[str, Any]) -> bool:
         return all(field in value for field in ("schema_version", "subagent_id", "role", "status", "summary"))
+
+    def _detect_completion_reason(self, result: Mapping[str, Any], raw_metadata: Mapping[str, Any]) -> str | None:
+        for key in ("completion_reason", "stop_reason", "end_reason", "reason"):
+            for payload in (result, raw_metadata):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
+    def _missing_structured_output_metadata(
+        self,
+        *,
+        result: Mapping[str, Any],
+        raw_metadata: Mapping[str, Any],
+        output_text: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(output_text, str) or not output_text.strip():
+            return {}
+        if not self._is_max_iterations_result(result, raw_metadata):
+            return {}
+        return {
+            "structured_output_missing_reason": "engineer_max_iterations_without_structured_output",
+            "structured_output_missing_blocked_reason": "max_iterations_plain_text_output",
+            "diagnostic_output_text": output_text,
+        }
+
+    def _is_max_iterations_result(self, result: Mapping[str, Any], raw_metadata: Mapping[str, Any]) -> bool:
+        for key in ("completion_reason", "stop_reason", "end_reason", "reason"):
+            for payload in (result, raw_metadata):
+                value = payload.get(key)
+                if isinstance(value, str) and "max_iterations_reached" in value:
+                    return True
+        return False
 
     def _validate_runtime_plan(self, runtime_plan: Any) -> None:
         if getattr(runtime_plan, "subagent_id", None) != self._supported_subagent_id():

@@ -319,6 +319,31 @@ def test_missing_structured_output_gets_explicit_block_reason() -> None:
     assert packet.tests["status"] == "not_requested"
 
 
+def test_max_iterations_plain_text_missing_structured_output_gets_precise_block_reason_detail() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+
+    packet = module.build_reviewer_packet(
+        pipeline_id="engineering_review_pipeline",
+        task_summary="Engineer hit max iterations without structured output",
+        engineer_output=_engineer_output(
+            status="failed",
+            summary="plain text diagnostic summary",
+            validation_status="missing_structured_output",
+            validation_errors=[
+                {"field": "payload", "message": "engineer_max_iterations_without_structured_output"}
+            ],
+        ),
+        baseline_snapshot=_snapshot(head_sha="abc123"),
+        post_snapshot=_snapshot(head_sha="def456", staged_files=("b.py",)),
+        git_result=_git_result(changed_files=["b.py"], staged_files=["b.py"]),
+        test_summary={"status": "not_requested", "results": []},
+    )
+
+    assert packet.blocked_reason == "invalid_engineer_output"
+    assert packet.blocked_reason_detail == "engineer_max_iterations_without_structured_output"
+    assert packet.engineer_summary == "plain text diagnostic summary"
+
+
 def test_module_does_not_run_git_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
     seen: list[list[str]] = []
