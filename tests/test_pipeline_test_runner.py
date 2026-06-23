@@ -192,6 +192,8 @@ def test_path_traversal_command_is_denied_without_spawning_subprocess(tmp_path: 
     assert payload["status"] == "blocked"
     assert payload["blocked_reason"] == "test_command_denied"
     assert calls == []
+    assert payload["results"][0]["denied_command_raw_sanitized"] == "pytest -q tests/../secrets.py"
+    assert payload["results"][0]["validator_reason"] == "test_command_denied"
 
 
 def test_unsafe_command_is_denied_without_spawning_subprocess(tmp_path: Path) -> None:
@@ -217,6 +219,34 @@ def test_unsafe_command_is_denied_without_spawning_subprocess(tmp_path: Path) ->
     assert payload["status"] == "blocked"
     assert payload["blocked_reason"] == "test_command_denied"
     assert payload["denied_count"] == 1
+    assert calls == []
+
+
+def test_malformed_diagnostic_mapping_is_denied_with_forensics_without_claiming_pytest(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    calls: list[list[str]] = []
+
+    def _unexpected_runner(argv, **kwargs):
+        calls.append(list(argv))
+        raise AssertionError("malformed diagnostic payload must not reach subprocess runner")
+
+    repo = _init_git_repo(tmp_path)
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=[{"status": "observed", "summary": "workspace only contains tracked.txt"}],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_unexpected_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "blocked"
+    assert payload["blocked_reason"] == "test_command_denied"
+    assert payload["results"][0]["command"] == ["[denied]"]
+    assert payload["results"][0]["denied_command_raw_sanitized"] == "targets=[denied]"
+    assert payload["results"][0]["validator_reason"] == "structured_pytest_payload_missing_targets"
     assert calls == []
 
 

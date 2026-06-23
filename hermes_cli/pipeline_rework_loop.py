@@ -1768,15 +1768,32 @@ def _blocked_final_response_text(
         "What happened:",
     ]
     if blocked_reason == "test_command_denied":
+        denied_results = list((test_summary or {}).get("results") or [])
+        denied_result = denied_results[0] if denied_results else {}
+        denied_command = _safe_test_text(denied_result.get("denied_command_raw_sanitized"))
+        validator_reason = _safe_test_text(denied_result.get("validator_reason"))
+        malformed_payload = (
+            denied_command == "targets=[denied]"
+            or (validator_reason is not None and validator_reason.startswith("structured_pytest_payload_"))
+            or (denied_command is not None and denied_command.lstrip().startswith("{"))
+        )
         lines.extend(
             [
                 "- The requested file changes were prepared in the autonomous workspace.",
-                "- Pytest was requested but blocked by the controlled test validator.",
+                (
+                    "- A malformed test payload was blocked by the controlled test validator."
+                    if malformed_payload
+                    else "- Pytest was requested but blocked by the controlled test validator."
+                ),
                 "- Reviewer was not invoked because engineer output was invalid after the blocked test step.",
                 "",
                 "No verified passing test result is available.",
             ]
         )
+        if denied_command:
+            lines.append(f"Denied payload: {denied_command}")
+        if validator_reason and validator_reason != "test_command_denied":
+            lines.append(f"Validator rule: {validator_reason}")
     elif blocked_reason == "missing_structured_output":
         lines.extend(
             [
