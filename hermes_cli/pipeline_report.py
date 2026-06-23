@@ -166,6 +166,7 @@ class PipelineUsageReport:
     subagent_count: int = 0
     models_used: list[str] = field(default_factory=list)
     providers_used: list[str] = field(default_factory=list)
+    providers_used_effective: list[str] = field(default_factory=list)
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -186,6 +187,7 @@ class PipelineUsageReport:
             "subagent_count": self.subagent_count,
             "models_used": list(self.models_used),
             "providers_used": list(self.providers_used),
+            "providers_used_effective": list(self.providers_used_effective),
         }
 
 
@@ -231,6 +233,19 @@ class PipelineSubagentRunReport:
     input_hash: str | None = None
     prompt_hash: str | None = None
     response_output_hash: str | None = None
+    initial_provider: str | None = None
+    initial_model: str | None = None
+    effective_provider: str | None = None
+    effective_model: str | None = None
+    fallback_attempted: bool = False
+    fallback_activated: bool = False
+    fallback_provider: str | None = None
+    fallback_model: str | None = None
+    fallback_base_url: str | None = None
+    fallback_api_mode: str | None = None
+    fallback_error: str | None = None
+    fallback_result: str | None = None
+    providers_used_effective: list[str] = field(default_factory=list)
     token_usage: dict[str, Any] = field(default_factory=dict)
     cache: dict[str, Any] = field(default_factory=dict)
     tool_call_summaries: list[dict[str, Any]] = field(default_factory=list)
@@ -250,6 +265,19 @@ class PipelineSubagentRunReport:
             "provider_policy_status": self.provider_policy_status,
             "actual_provider": self.actual_provider,
             "actual_model": self.actual_model,
+            "initial_provider": self.initial_provider,
+            "initial_model": self.initial_model,
+            "effective_provider": self.effective_provider,
+            "effective_model": self.effective_model,
+            "fallback_attempted": self.fallback_attempted,
+            "fallback_activated": self.fallback_activated,
+            "fallback_provider": self.fallback_provider,
+            "fallback_model": self.fallback_model,
+            "fallback_base_url": self.fallback_base_url,
+            "fallback_api_mode": self.fallback_api_mode,
+            "fallback_error": self.fallback_error,
+            "fallback_result": self.fallback_result,
+            "providers_used_effective": list(self.providers_used_effective),
             "input_hash": self.input_hash,
             "prompt_hash": self.prompt_hash,
             "response_output_hash": self.response_output_hash,
@@ -633,6 +661,19 @@ def _build_subagent_run_reports(steps: list[PipelineStepPlan]) -> list[PipelineS
                 provider_policy_status=str(runner_result.get("provider_policy_status") or "not_requested"),
                 actual_provider=_mapping_value(runner_result, "actual_provider"),
                 actual_model=_mapping_value(runner_result, "actual_model"),
+                initial_provider=_mapping_value(runner_result, "initial_provider"),
+                initial_model=_mapping_value(runner_result, "initial_model"),
+                effective_provider=_mapping_value(runner_result, "effective_provider"),
+                effective_model=_mapping_value(runner_result, "effective_model"),
+                fallback_attempted=bool(runner_result.get("fallback_attempted", False)),
+                fallback_activated=bool(runner_result.get("fallback_activated", False)),
+                fallback_provider=_mapping_value(runner_result, "fallback_provider"),
+                fallback_model=_mapping_value(runner_result, "fallback_model"),
+                fallback_base_url=_mapping_value(runner_result, "fallback_base_url"),
+                fallback_api_mode=_mapping_value(runner_result, "fallback_api_mode"),
+                fallback_error=_mapping_value(runner_result, "fallback_error"),
+                fallback_result=_mapping_value(runner_result, "fallback_result"),
+                providers_used_effective=[str(item) for item in list(runner_result.get("providers_used_effective") or []) if str(item)],
                 input_hash=_mapping_value(runner_result, "input_hash"),
                 prompt_hash=_mapping_value(runner_result, "prompt_hash"),
                 response_output_hash=_mapping_value(runner_result, "response_output_hash"),
@@ -662,6 +703,19 @@ def _coerce_subagent_run_reports(payloads: list[Mapping[str, Any]] | None) -> li
                 provider_policy_status=str(item.get("provider_policy_status") or "not_requested"),
                 actual_provider=_mapping_value(item, "actual_provider"),
                 actual_model=_mapping_value(item, "actual_model"),
+                initial_provider=_mapping_value(item, "initial_provider"),
+                initial_model=_mapping_value(item, "initial_model"),
+                effective_provider=_mapping_value(item, "effective_provider"),
+                effective_model=_mapping_value(item, "effective_model"),
+                fallback_attempted=bool(item.get("fallback_attempted", False)),
+                fallback_activated=bool(item.get("fallback_activated", False)),
+                fallback_provider=_mapping_value(item, "fallback_provider"),
+                fallback_model=_mapping_value(item, "fallback_model"),
+                fallback_base_url=_mapping_value(item, "fallback_base_url"),
+                fallback_api_mode=_mapping_value(item, "fallback_api_mode"),
+                fallback_error=_mapping_value(item, "fallback_error"),
+                fallback_result=_mapping_value(item, "fallback_result"),
+                providers_used_effective=[str(value) for value in list(item.get("providers_used_effective") or []) if str(value)],
                 input_hash=_mapping_value(item, "input_hash"),
                 prompt_hash=_mapping_value(item, "prompt_hash"),
                 response_output_hash=_mapping_value(item, "response_output_hash"),
@@ -693,6 +747,7 @@ def _build_usage_report(
     cache_sources: list[str] = []
     models_used: list[str] = []
     providers_used: list[str] = []
+    providers_used_effective: list[str] = []
     planned_subagent_count = len(steps)
     executed_subagent_count = 0
     subagent_run_instance_count = 0
@@ -725,6 +780,12 @@ def _build_usage_report(
             models_used.append(run.actual_model)
         if run.actual_provider and run.actual_provider not in providers_used:
             providers_used.append(run.actual_provider)
+        effective_chain = list(run.providers_used_effective)
+        if not effective_chain and run.effective_provider:
+            effective_chain = [run.effective_provider]
+        for provider in effective_chain:
+            if provider and provider not in providers_used_effective:
+                providers_used_effective.append(provider)
     return PipelineUsageReport(
         input_tokens=input_tokens if usage_known else None,
         output_tokens=output_tokens if usage_known else None,
@@ -746,6 +807,7 @@ def _build_usage_report(
         subagent_count=subagent_run_instance_count,
         models_used=models_used,
         providers_used=providers_used,
+        providers_used_effective=providers_used_effective,
     )
 
 

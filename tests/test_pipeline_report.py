@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from hermes_cli.pipeline_report import PipelineReportStatus, build_pipeline_execution_report
+from hermes_cli.pipeline_report import (
+    PipelineReportStatus,
+    _build_subagent_run_reports,
+    _coerce_subagent_run_reports,
+    build_pipeline_execution_report,
+)
 from hermes_cli.pipeline_report_artifacts import (
     persist_controlled_execution_report_artifacts,
     sanitize_report_artifact_metadata,
@@ -114,6 +119,156 @@ def test_report_builder_preserves_evaluation_and_policy_metadata() -> None:
     assert report.completion.user_action_required is True
     assert report.summary.user_action_required is True
     assert report.models[0].candidate_model == {"provider": "openai-codex", "model": "gpt-5.5"}
+
+
+def test_coerce_subagent_run_reports_preserves_effective_fallback_fields() -> None:
+    runs = _coerce_subagent_run_reports([
+        {
+            "step_id": "engineer",
+            "subagent_id": "hermes_engineer_core",
+            "role_id": "engineer",
+            "status": "succeeded",
+            "actual_provider": "openrouter",
+            "actual_model": "xiaomi/mimo-v2.5-pro",
+            "initial_provider": "openrouter",
+            "initial_model": "xiaomi/mimo-v2.5-pro",
+            "effective_provider": "openai-codex",
+            "effective_model": "gpt-5.4",
+            "fallback_attempted": True,
+            "fallback_activated": True,
+            "fallback_provider": "openai-codex",
+            "fallback_model": "gpt-5.4",
+            "fallback_base_url": "https://chatgpt.com/backend-api/codex",
+            "fallback_api_mode": "responses",
+            "fallback_error": "provider_402",
+            "fallback_result": "activated",
+            "providers_used_effective": ["openrouter", "openai-codex"],
+        }
+    ])
+
+    payload = runs[0].to_safe_dict()
+
+    assert payload["actual_provider"] == "openrouter"
+    assert payload["actual_model"] == "xiaomi/mimo-v2.5-pro"
+    assert payload["initial_provider"] == "openrouter"
+    assert payload["initial_model"] == "xiaomi/mimo-v2.5-pro"
+    assert payload["effective_provider"] == "openai-codex"
+    assert payload["effective_model"] == "gpt-5.4"
+    assert payload["fallback_attempted"] is True
+    assert payload["fallback_activated"] is True
+    assert payload["fallback_provider"] == "openai-codex"
+    assert payload["fallback_model"] == "gpt-5.4"
+    assert payload["fallback_base_url"] == "https://chatgpt.com/backend-api/codex"
+    assert payload["fallback_api_mode"] == "responses"
+    assert payload["fallback_error"] == "provider_402"
+    assert payload["fallback_result"] == "activated"
+    assert payload["providers_used_effective"] == ["openrouter", "openai-codex"]
+
+
+def test_build_subagent_run_reports_preserves_effective_fallback_fields_from_runner_result() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    engineer_step = snapshot.planned_steps[0]
+    engineer_runner = {
+        "status": "succeeded",
+        "runtime_mode": "autonomous",
+        "actual_provider": "openrouter",
+        "actual_model": "xiaomi/mimo-v2.5-pro",
+        "initial_provider": "openrouter",
+        "initial_model": "xiaomi/mimo-v2.5-pro",
+        "effective_provider": "openai-codex",
+        "effective_model": "gpt-5.4",
+        "fallback_attempted": True,
+        "fallback_activated": True,
+        "fallback_provider": "openai-codex",
+        "fallback_model": "gpt-5.4",
+        "fallback_base_url": "https://chatgpt.com/backend-api/codex",
+        "fallback_api_mode": "responses",
+        "fallback_error": "provider_402",
+        "fallback_result": "activated",
+        "providers_used_effective": ["openrouter", "openai-codex"],
+        "raw_output_redacted": True,
+    }
+    snapshot.planned_steps[0] = engineer_step.__class__(**{**engineer_step.__dict__, "runner_result": engineer_runner})
+
+    runs = _build_subagent_run_reports(snapshot.planned_steps)
+    payload = runs[0].to_safe_dict()
+
+    assert payload["effective_provider"] == "openai-codex"
+    assert payload["effective_model"] == "gpt-5.4"
+    assert payload["fallback_attempted"] is True
+    assert payload["fallback_activated"] is True
+    assert payload["fallback_provider"] == "openai-codex"
+    assert payload["fallback_model"] == "gpt-5.4"
+    assert payload["providers_used_effective"] == ["openrouter", "openai-codex"]
+
+
+def test_report_builder_usage_preserves_providers_used_effective_distinct_from_providers_used() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        subagent_runs_override=[
+            {
+                "step_id": "engineer",
+                "subagent_id": "hermes_engineer_core",
+                "role_id": "engineer",
+                "status": "succeeded",
+                "actual_provider": "openrouter",
+                "actual_model": "xiaomi/mimo-v2.5-pro",
+                "effective_provider": "openai-codex",
+                "effective_model": "gpt-5.4",
+                "fallback_attempted": True,
+                "fallback_activated": True,
+                "fallback_provider": "openai-codex",
+                "fallback_model": "gpt-5.4",
+                "providers_used_effective": ["openrouter", "openai-codex"],
+                "raw_output_redacted": True,
+            }
+        ],
+    )
+    payload = report.to_safe_dict()
+
+    assert payload["usage"]["providers_used"] == ["openrouter"]
+    assert payload["usage"]["providers_used_effective"] == ["openrouter", "openai-codex"]
+    assert payload["usage_summary"]["providers_used"] == ["openrouter"]
+    assert payload["usage_summary"]["providers_used_effective"] == ["openrouter", "openai-codex"]
+
+
+def test_constructor_provider_stays_backward_compatible_without_inventing_fallback_metadata() -> None:
+    runs = _coerce_subagent_run_reports([
+        {
+            "step_id": "engineer",
+            "subagent_id": "hermes_engineer_core",
+            "role_id": "engineer",
+            "status": "succeeded",
+            "actual_provider": "openrouter",
+            "actual_model": "xiaomi/mimo-v2.5-pro",
+        }
+    ])
+
+    payload = runs[0].to_safe_dict()
+
+    assert payload["actual_provider"] == "openrouter"
+    assert payload["actual_model"] == "xiaomi/mimo-v2.5-pro"
+    assert payload["effective_provider"] is None
+    assert payload["effective_model"] is None
+    assert payload["fallback_attempted"] is False
+    assert payload["fallback_activated"] is False
+    assert payload["fallback_provider"] is None
+    assert payload["fallback_model"] is None
+    assert payload["providers_used_effective"] == []
 
 
 def test_report_builder_default_pipeline_has_no_fake_engineering_steps() -> None:
