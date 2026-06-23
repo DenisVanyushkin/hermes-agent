@@ -19,7 +19,7 @@ _BLOCKING_GIT_STATUSES = {
 _BLOCKING_ENGINEER_STATUSES = {"failed", "blocked"}
 _DIFF_MARKERS = ("diff --git", "@@", "+++", "---")
 _SENSITIVE_PARTS = ("api_key", "token", "password", "secret", "credential", "env")
-_VALID_TEST_STATUSES = {"not_run", "not_requested", "passed", "failed", "blocked", "unknown"}
+_VALID_TEST_STATUSES = {"not_run", "not_requested", "passed", "failed", "blocked", "invalid", "unknown"}
 
 
 @dataclass(frozen=True)
@@ -251,6 +251,8 @@ def _sanitize_test_results(value: list[Any]) -> list[dict[str, Any]]:
             "cwd": _clean_optional_text(item.get("cwd"), max_length=128),
             "stdout_excerpt": _clean_optional_text(item.get("stdout_excerpt")),
             "stderr_excerpt": _clean_optional_text(item.get("stderr_excerpt")),
+            "denied_command_raw_sanitized": _clean_optional_text(item.get("denied_command_raw_sanitized")),
+            "validator_reason": _clean_optional_text(item.get("validator_reason"), max_length=128),
         }
         sanitized.append({key: value for key, value in safe_item.items() if value is not None})
     return sanitized
