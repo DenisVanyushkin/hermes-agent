@@ -212,6 +212,37 @@ def test_engineer_fail_closed_reason_distinguishes_max_iterations_plain_text_out
     assert module._engineer_fail_closed_reason(snapshot) == "max_iterations_plain_text_output"
 
 
+def test_engineer_fail_closed_reason_uses_invalid_engineer_output_for_valid_blocked_envelope() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    snapshot = SimpleNamespace(
+        planned_steps=[
+            SimpleNamespace(
+                runner_result={
+                    "status": "succeeded",
+                    "structured_output": {
+                        "schema_version": "v1",
+                        "subagent_id": "hermes_engineer_core",
+                        "role": "engineer",
+                        "status": "blocked",
+                        "summary": "Engineer returned prose instead of the required envelope.",
+                        "findings": [{"code": "missing_structured_output", "summary": "plain text response"}],
+                        "changes": [],
+                        "blockers": ["missing_structured_output"],
+                        "artifacts": [],
+                        "confidence": 0.0,
+                        "requires_review": False,
+                        "next_action": "retry_with_structured_output",
+                        "validation_status": "valid",
+                    },
+                },
+                evaluation_result={"status": "blocked"},
+            )
+        ]
+    )
+
+    assert module._engineer_fail_closed_reason(snapshot) == "invalid_engineer_output"
+
+
 def test_blocked_final_response_text_handles_missing_structured_output() -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
 
