@@ -505,6 +505,57 @@ def test_bridge_rejects_symlink_escape(tmp_path: Path) -> None:
         raise AssertionError("expected symlink guard failure")
 
 
+def test_bridge_find_files_returns_repo_relative_paths_only(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    (git_repo / "src").mkdir()
+    (git_repo / "src" / "keep.py").write_text("print('ok')\n", encoding="utf-8")
+    (git_repo / ".git" / "ignored.py").write_text("ignored\n", encoding="utf-8")
+    (git_repo / "__pycache__").mkdir()
+    (git_repo / "__pycache__" / "ignored.py").write_text("ignored\n", encoding="utf-8")
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    payload = json.loads(bridge.execute_tool("find_files", {"pattern": "**/*.py"}))
+
+    assert payload["status"] == "ok"
+    assert payload["files"] == ["src/keep.py"]
+    assert all(not path.startswith("/") for path in payload["files"])
+
+
+def test_bridge_read_file_denials_capture_actionable_forensics(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    for denied_path, reason, message_fragment in [
+        ("missing.py", "path_missing", "repo-relative path"),
+        ("/home/hermes/.hermes/hermes-agent/missing.py", "absolute_path_denied", "absolute paths are denied"),
+    ]:
+        with pytest.raises(AIAgentExecutorBridgeError, match=reason):
+            bridge.execute_tool("read_file", {"path": denied_path})
+
+        tool_call = bridge._tool_calls[-1]
+        assert tool_call["tool_name"] == "read_file"
+        assert tool_call["status"] == "failed"
+        assert tool_call["arguments"]["path"] == denied_path
+        assert tool_call["error"]["kind"] == reason
+        assert message_fragment in tool_call["error"]["message"]
+
+
+def test_engineer_prompt_and_config_describe_file_discovery_contract(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    prompt_text = (repo_root / "prompts/subagents/hermes_engineer_core.md").read_text(encoding="utf-8")
+    config_text = (repo_root / "config/subagents/hermes_engineer_core.yaml").read_text(encoding="utf-8")
+
+    assert "find_files" in prompt_text
+    assert "repo-relative" in prompt_text
+    assert "search_files" in prompt_text
+    assert "content search" in prompt_text
+    assert "\"*.py\"" in prompt_text
+    assert "find_files" in config_text
+    assert "repo-relative" in config_text
+
+
 def test_bridge_pytest_is_constrained_and_terminal_missing(tmp_path: Path) -> None:
     repo_root, _runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)

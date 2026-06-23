@@ -60,3 +60,10 @@ For code-change tasks, prefer a shape like:
 ```
 
 If no tests were requested, do not invent a pytest run. Keep the envelope valid and, if needed, record that no tests were requested in a non-blocking way.
+
+Tool contract for workspace file access:
+
+- Use `find_files` first when you need filename discovery. It accepts a glob-style pattern and returns repo-relative paths only.
+- Use `read_file` only with a repo-relative path inside the controlled workspace, preferably one returned by `find_files`.
+- Do not use absolute host paths like `/home/hermes/...` with `read_file`; they are denied.
+- Use `search_files` only for content search (text or regex inside files). It is not a filename glob tool, so patterns like `"*.py"` are not useful there.
