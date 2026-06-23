@@ -16,6 +16,7 @@ from hermes_cli.pipeline_test_runner import run_controlled_tests
 
 _ENGINEER_ALLOWED_TOOL_NAMES = (
     "read_file",
+    "find_files",
     "search_files",
     "patch",
     "write_file",
@@ -89,102 +90,110 @@ class AIAgentSubagentExecutorBridge:
         if tool_name not in self._allowed_tool_names():
             raise AIAgentExecutorBridgeError(f"tool_not_allowed:{tool_name}")
 
-        if tool_name == "read_file":
-            path = self._resolve_workspace_path(str(args.get("path") or ""), allow_missing=False)
-            result = {"path": self._relative_path(path), "content": path.read_text(encoding="utf-8")}
-        elif tool_name == "search_files":
-            pattern = str(args.get("pattern") or "").strip()
-            if not pattern:
-                raise AIAgentExecutorBridgeError("invalid_search_pattern")
-            completed = self.subprocess_runner(
-                ["rg", "-n", "--color", "never", pattern, "."],
-                cwd=str(self.workspace_root),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            result = {
-                "pattern": pattern,
-                "status": "matched" if completed.returncode in {0, 1} else "failed",
-                "output": completed.stdout,
-            }
-        elif tool_name == "write_file":
-            path_value = str(args.get("path") or "")
-            content = str(args.get("content") or "")
-            summary = apply_controlled_mutations(
-                allow_mutations=True,
-                mutation_workspace=self.workspace_root,
-                mutations_payload=[{"operation": "write_text", "path": path_value, "content": content}],
-            )
-            result = summary.to_safe_dict()
-            if summary.denied_count:
-                raise AIAgentExecutorBridgeError(result["results"][0]["reason"])
-        elif tool_name == "patch":
-            path = self._resolve_workspace_path(str(args.get("path") or ""), allow_missing=False)
-            original = path.read_text(encoding="utf-8")
-            if "content" in args:
-                new_content = str(args.get("content") or "")
+        try:
+            if tool_name == "read_file":
+                path = self._resolve_workspace_path(str(args.get("path") or ""), allow_missing=False)
+                result = {"path": self._relative_path(path), "content": path.read_text(encoding="utf-8")}
+            elif tool_name == "find_files":
+                result = self._find_files(args)
+            elif tool_name == "search_files":
+                pattern = str(args.get("pattern") or "").strip()
+                if not pattern:
+                    raise AIAgentExecutorBridgeError("invalid_search_pattern")
+                completed = self.subprocess_runner(
+                    ["rg", "-n", "--color", "never", pattern, "."],
+                    cwd=str(self.workspace_root),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                result = {
+                    "pattern": pattern,
+                    "status": "matched" if completed.returncode in {0, 1} else "failed",
+                    "output": completed.stdout,
+                }
+            elif tool_name == "write_file":
+                path_value = str(args.get("path") or "")
+                content = str(args.get("content") or "")
+                summary = apply_controlled_mutations(
+                    allow_mutations=True,
+                    mutation_workspace=self.workspace_root,
+                    mutations_payload=[{"operation": "write_text", "path": path_value, "content": content}],
+                )
+                result = summary.to_safe_dict()
+                if summary.denied_count:
+                    raise AIAgentExecutorBridgeError(result["results"][0]["reason"])
+            elif tool_name == "patch":
+                path = self._resolve_workspace_path(str(args.get("path") or ""), allow_missing=False)
+                original = path.read_text(encoding="utf-8")
+                if "content" in args:
+                    new_content = str(args.get("content") or "")
+                else:
+                    old = str(args.get("old") or "")
+                    new = str(args.get("new") or "")
+                    if not old:
+                        raise AIAgentExecutorBridgeError("patch_old_missing")
+                    if old not in original:
+                        raise AIAgentExecutorBridgeError("patch_old_not_found")
+                    new_content = original.replace(old, new, 1)
+                summary = apply_controlled_mutations(
+                    allow_mutations=True,
+                    mutation_workspace=self.workspace_root,
+                    mutations_payload=[{"operation": "write_text", "path": self._relative_path(path), "content": new_content}],
+                )
+                result = summary.to_safe_dict()
+                if summary.denied_count:
+                    raise AIAgentExecutorBridgeError(result["results"][0]["reason"])
+            elif tool_name == "git_status":
+                completed = self.subprocess_runner(
+                    ["git", "status", "--short", "--untracked-files=all"],
+                    cwd=str(self.workspace_root),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                result = {"status": completed.returncode, "output": completed.stdout}
+            elif tool_name == "git_diff":
+                completed = self.subprocess_runner(
+                    ["git", "diff", "--no-ext-diff"],
+                    cwd=str(self.workspace_root),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                result = {"status": completed.returncode, "output": completed.stdout}
+            elif tool_name == "pytest":
+                pytest_request: Any
+                if isinstance(args.get("command"), str) and str(args.get("command") or "").strip():
+                    pytest_request = str(args.get("command") or "").strip()
+                else:
+                    pytest_request = args
+                summary = run_controlled_tests(
+                    allow_test_commands=True,
+                    test_workspace=self.workspace_root,
+                    tests_payload=[pytest_request],
+                    step_kind="engineer",
+                    step_subagent_id="hermes_engineer_core",
+                    subprocess_runner=self.subprocess_runner,
+                )
+                result = summary.to_safe_dict()
+                if summary.blocked_reason is not None:
+                    raise AIAgentExecutorBridgeError(summary.blocked_reason)
             else:
-                old = str(args.get("old") or "")
-                new = str(args.get("new") or "")
-                if not old:
-                    raise AIAgentExecutorBridgeError("patch_old_missing")
-                if old not in original:
-                    raise AIAgentExecutorBridgeError("patch_old_not_found")
-                new_content = original.replace(old, new, 1)
-            summary = apply_controlled_mutations(
-                allow_mutations=True,
-                mutation_workspace=self.workspace_root,
-                mutations_payload=[{"operation": "write_text", "path": self._relative_path(path), "content": new_content}],
+                raise AIAgentExecutorBridgeError(f"tool_not_implemented:{tool_name}")
+        except AIAgentExecutorBridgeError as exc:
+            self._record_tool_call(
+                tool_name,
+                args,
+                status="failed",
+                error={
+                    "kind": str(exc),
+                    "message": self._tool_error_message(tool_name, args, str(exc)),
+                },
             )
-            result = summary.to_safe_dict()
-            if summary.denied_count:
-                raise AIAgentExecutorBridgeError(result["results"][0]["reason"])
-        elif tool_name == "git_status":
-            completed = self.subprocess_runner(
-                ["git", "status", "--short", "--untracked-files=all"],
-                cwd=str(self.workspace_root),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            result = {"status": completed.returncode, "output": completed.stdout}
-        elif tool_name == "git_diff":
-            completed = self.subprocess_runner(
-                ["git", "diff", "--no-ext-diff"],
-                cwd=str(self.workspace_root),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            result = {"status": completed.returncode, "output": completed.stdout}
-        elif tool_name == "pytest":
-            pytest_request: Any
-            if isinstance(args.get("command"), str) and str(args.get("command") or "").strip():
-                pytest_request = str(args.get("command") or "").strip()
-            else:
-                pytest_request = args
-            summary = run_controlled_tests(
-                allow_test_commands=True,
-                test_workspace=self.workspace_root,
-                tests_payload=[pytest_request],
-                step_kind="engineer",
-                step_subagent_id="hermes_engineer_core",
-                subprocess_runner=self.subprocess_runner,
-            )
-            result = summary.to_safe_dict()
-            if summary.blocked_reason is not None:
-                raise AIAgentExecutorBridgeError(summary.blocked_reason)
-        else:
-            raise AIAgentExecutorBridgeError(f"tool_not_implemented:{tool_name}")
+            raise
 
-        self._tool_calls.append(
-            {
-                "tool_name": tool_name,
-                "arguments": self._redacted_arguments(args),
-                "status": "succeeded",
-            }
-        )
+        self._record_tool_call(tool_name, args, status="succeeded")
         return json.dumps(result, ensure_ascii=False)
 
     def _build_agent(self, runtime_plan: Any) -> Any:
@@ -400,8 +409,9 @@ class AIAgentSubagentExecutorBridge:
 
     def _tool_definitions(self) -> list[dict[str, Any]]:
         definitions = {
-            "read_file": self._tool_definition("read_file", "Read a file inside the controlled workspace.", {"path": {"type": "string"}}, ["path"]),
-            "search_files": self._tool_definition("search_files", "Search files inside the controlled workspace.", {"pattern": {"type": "string"}}, ["pattern"]),
+            "read_file": self._tool_definition("read_file", "Read a file inside the controlled workspace using a repo-relative path returned by find_files.", {"path": {"type": "string"}}, ["path"]),
+            "find_files": self._tool_definition("find_files", "List filenames inside the controlled workspace. Use this for filename or glob discovery. Returns repo-relative paths only.", {"pattern": {"type": "string"}, "max_results": {"type": "integer", "minimum": 1, "maximum": 500}}, []),
+            "search_files": self._tool_definition("search_files", "Search file contents inside the controlled workspace. Use this for text or regex content search, not filename globbing. Patterns like \"*.py\" are not useful here; use find_files for filenames.", {"pattern": {"type": "string"}}, ["pattern"]),
             "patch": self._tool_definition("patch", "Replace file content inside the controlled workspace.", {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}, "content": {"type": "string"}}, ["path"]),
             "write_file": self._tool_definition("write_file", "Write a file inside the controlled workspace.", {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
             "git_status": self._tool_definition("git_status", "Show git status for the controlled workspace.", {}, []),
@@ -461,6 +471,69 @@ class AIAgentSubagentExecutorBridge:
 
     def _relative_path(self, path: Path) -> str:
         return path.resolve(strict=False).relative_to(self.workspace_root).as_posix()
+
+    def _find_files(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        pattern = str(arguments.get("pattern") or "**/*").strip() or "**/*"
+        requested_max = arguments.get("max_results")
+        if requested_max is None:
+            max_results = 200
+        else:
+            try:
+                max_results = int(requested_max)
+            except (TypeError, ValueError) as exc:
+                raise AIAgentExecutorBridgeError("invalid_max_results") from exc
+            if max_results < 1 or max_results > 500:
+                raise AIAgentExecutorBridgeError("invalid_max_results")
+
+        files: list[str] = []
+        truncated = False
+        for candidate in sorted(self.workspace_root.rglob("*")):
+            if not candidate.is_file():
+                continue
+            relative = candidate.relative_to(self.workspace_root)
+            if any(part in {".git", "__pycache__", ".pytest_cache", "venv", ".venv", "node_modules"} for part in relative.parts):
+                continue
+            relative_path = relative.as_posix()
+            if not PurePosixPath(relative_path).match(pattern):
+                continue
+            files.append(relative_path)
+            if len(files) >= max_results:
+                truncated = True
+                break
+        return {"status": "ok", "pattern": pattern, "files": files, "truncated": truncated}
+
+    def _record_tool_call(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        status: str,
+        error: Mapping[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "tool_name": tool_name,
+            "arguments": self._redacted_arguments(arguments),
+            "status": status,
+        }
+        if error is not None:
+            payload["error"] = dict(error)
+        self._tool_calls.append(payload)
+
+    def _tool_error_message(self, tool_name: str, arguments: Mapping[str, Any], reason: str) -> str:
+        if tool_name == "read_file" and reason == "path_missing":
+            return (
+                "read_file expects a repo-relative path inside the controlled workspace. "
+                "Do not use absolute host paths like /home/hermes/... Use a path returned by find_files."
+            )
+        if tool_name == "read_file" and reason == "absolute_path_denied":
+            return (
+                "read_file absolute paths are denied. Convert the path to a repo-relative path under the controlled workspace "
+                "and prefer a path returned by find_files."
+            )
+        if tool_name == "search_files" and reason == "invalid_search_pattern":
+            return "search_files expects a non-empty content pattern. Use find_files for filename discovery."
+        del arguments
+        return reason
 
     def _redacted_arguments(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         redacted: dict[str, Any] = {}

@@ -123,6 +123,9 @@ output_schema:
     - final output must be a StructuredOutputEnvelope compatible with hermes_cli.subagent_runner.validate_structured_output_envelope
     - include at least one of findings or changes
     - tests are optional and must not make pytest mandatory when the pipeline did not request tests
+    - use find_files for filename discovery because it returns repo-relative workspace paths
+    - use read_file only with repo-relative paths inside the controlled workspace
+    - search_files is content search, not filename globbing; patterns like "*.py" should use find_files instead
 communication:
   can_send_to:
     - hermes_code_reviewer
