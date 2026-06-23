@@ -979,6 +979,31 @@ def test_bridge_pytest_denial_captures_forensics(tmp_path: Path) -> None:
         raise AssertionError("expected constrained pytest denial")
 
 
+def test_bridge_find_files_sees_real_repo_directories_when_workspace_is_repo_root(tmp_path: Path) -> None:
+    repo_root = _init_git_repo(tmp_path)
+    for relative_path in (
+        "hermes_cli/pipeline_autonomous_execution.py",
+        "gateway/run.py",
+        "tests/test_pipeline_aiagent_executor.py",
+        "docs/architecture.md",
+    ):
+        target = repo_root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("marker\n", encoding="utf-8")
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=repo_root,
+        repo_root=repo_root,
+        agent_factory=_FakeAgent,
+        conversation_runner=lambda *_args: {"output_text": "ok"},
+    )
+
+    assert "hermes_cli/pipeline_autonomous_execution.py" in json.loads(bridge.execute_tool("find_files", {"pattern": "hermes_cli/*"}))["files"]
+    assert "gateway/run.py" in json.loads(bridge.execute_tool("find_files", {"pattern": "gateway/*"}))["files"]
+    assert "tests/test_pipeline_aiagent_executor.py" in json.loads(bridge.execute_tool("find_files", {"pattern": "tests/*"}))["files"]
+    assert "docs/architecture.md" in json.loads(bridge.execute_tool("find_files", {"pattern": "docs/*"}))["files"]
+
+
 def test_bridge_can_patch_existing_file(tmp_path: Path) -> None:
     repo_root, _runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)

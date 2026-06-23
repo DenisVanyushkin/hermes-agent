@@ -318,23 +318,23 @@ def _normalize_legacy_command(raw_command: str, workspace: Path) -> PytestInvoca
 def _normalize_structured_invocation(payload: Mapping[str, Any], workspace: Path) -> PytestInvocation:
     targets = payload.get("targets")
     if not isinstance(targets, list) or not targets:
-        raise ValueError("test_command_denied")
+        raise ValueError("structured_pytest_payload_missing_targets")
     if not bool(payload.get("quiet", False)):
-        raise ValueError("test_command_denied")
+        raise ValueError("structured_pytest_payload_quiet_required")
     argv = [sys.executable, "-m", "pytest", "-q"]
     maxfail = payload.get("maxfail")
     if maxfail is not None:
         try:
             coerced_maxfail = int(maxfail)
         except (TypeError, ValueError) as exc:
-            raise ValueError("test_command_denied") from exc
+            raise ValueError("structured_pytest_payload_invalid_maxfail") from exc
         if coerced_maxfail <= 0:
-            raise ValueError("test_command_denied")
+            raise ValueError("structured_pytest_payload_invalid_maxfail")
         argv.append(f"--maxfail={coerced_maxfail}")
     for raw_target in targets:
         target = str(raw_target).strip()
         if not target:
-            raise ValueError("test_command_denied")
+            raise ValueError("structured_pytest_payload_empty_target")
         _validate_test_path(target, workspace)
         argv.append(target)
     return PytestInvocation(

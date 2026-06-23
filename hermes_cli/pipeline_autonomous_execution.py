@@ -27,8 +27,9 @@ def build_autonomous_helper_context(
     pipeline_session_id: str | None,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
-    base_repo_root = Path(__file__).resolve().parent.parent if repo_root is None else Path(repo_root)
-    workspace = autonomous_workspace(session_id=session_id, pipeline_session_id=pipeline_session_id)
+    inferred_repo_root = Path(__file__).resolve().parent.parent
+    base_repo_root = inferred_repo_root if repo_root is None else Path(repo_root)
+    workspace = base_repo_root.resolve()
     runtime_context = _default_runtime_context(workspace)
     helper_context = {
         "runtime_factory": RuntimeFactory(repo_root=base_repo_root),
@@ -48,7 +49,11 @@ def build_autonomous_helper_context(
         allow_test_commands=True,
     )
     try:
-        workspace = prepare_autonomous_workspace(repo_root=base_repo_root, workspace=workspace)
+        workspace = prepare_autonomous_workspace(
+            repo_root=base_repo_root,
+            workspace=workspace,
+            expected_repo_root=inferred_repo_root if repo_root is None else None,
+        )
     except ValueError as exc:
         runtime_context["blocked_reason"] = str(exc)
         return helper_context
@@ -56,6 +61,7 @@ def build_autonomous_helper_context(
     helper_context["repo_path"] = str(workspace)
     runtime_context["mutation_workspace"] = str(workspace)
     runtime_context["test_workspace"] = str(workspace)
+    runtime_context["workspace_baseline_head"] = _git_stdout(workspace, "rev-parse", "HEAD")
     loaded_specs = load_pipeline_specs(repo_root=base_repo_root)
     plans = _build_bridge_runtime_plans(
         loaded_specs=loaded_specs,
@@ -84,11 +90,12 @@ def autonomous_workspace(*, session_id: str | None, pipeline_session_id: str | N
     return (AUTONOMOUS_WORKSPACE_ROOT / slug).resolve()
 
 
-def prepare_autonomous_workspace(*, repo_root: Path, workspace: Path) -> Path:
+def prepare_autonomous_workspace(*, repo_root: Path, workspace: Path, expected_repo_root: Path | None = None) -> Path:
     resolved_repo_root = repo_root.resolve()
     resolved_workspace = workspace.resolve() if workspace.exists() else workspace.resolve(strict=False)
     if resolved_workspace == resolved_repo_root:
-        raise ValueError("workspace_matches_repo_root")
+        _validate_repo_root_workspace(repo_root=resolved_repo_root, expected_repo_root=expected_repo_root)
+        return resolved_repo_root
     if workspace.exists():
         if not workspace.is_dir() or not (workspace / ".git").exists():
             raise ValueError("workspace_not_git_repo")
@@ -116,6 +123,23 @@ def _ensure_workspace_layout(*, workspace: Path, repo_root: Path) -> None:
     elif workspace_venv.exists():
         raise ValueError("workspace_venv_conflict")
     workspace_venv.symlink_to(repo_root / "venv")
+
+
+def _validate_repo_root_workspace(*, repo_root: Path, expected_repo_root: Path | None) -> None:
+    if not repo_root.exists() or not repo_root.is_dir():
+        raise ValueError("workspace_repo_missing")
+    if expected_repo_root is not None and repo_root != expected_repo_root.resolve():
+        raise ValueError("workspace_repo_root_mismatch")
+    if not (repo_root / ".git").exists():
+        raise ValueError("workspace_not_git_repo")
+    try:
+        _git_stdout(repo_root, "rev-parse", "--is-inside-work-tree")
+        _git_stdout(repo_root, "rev-parse", "HEAD")
+    except ValueError as exc:
+        raise ValueError("workspace_not_git_repo") from exc
+    status = _git_stdout(repo_root, "status", "--short", "--untracked-files=all")
+    if status.strip():
+        raise ValueError("workspace_dirty_baseline")
 
 
 def _build_bridge_runtime_plans(*, loaded_specs: Any, pipeline_session_id: str | None, user_message: str, config: dict[str, Any] | None) -> dict[str, Any]:
@@ -163,3 +187,10 @@ def _git(cwd: Path, *args: str) -> None:
     result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
     if result.returncode != 0:
         raise ValueError("workspace_git_setup_failed")
+
+
+def _git_stdout(cwd: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise ValueError("workspace_git_setup_failed")
+    return result.stdout.strip()
