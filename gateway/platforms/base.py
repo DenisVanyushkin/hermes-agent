@@ -91,6 +91,54 @@ def _mark_notify_metadata(metadata: dict | None) -> dict:
     notify_metadata["notify"] = True
     return notify_metadata
 
+_TELEGRAM_DM_THREAD_METADATA_KEYS = frozenset(
+    {
+        "thread_id",
+        "message_thread_id",
+        "direct_messages_topic_id",
+        "telegram_direct_messages_topic_id",
+        "telegram_dm_topic_reply_fallback",
+        "telegram_reply_to_message_id",
+        "reply_to_message_id",
+    }
+)
+
+
+def _looks_like_telegram_private_chat_id(chat_id: object) -> bool:
+    try:
+        return int(str(chat_id)) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _telegram_dm_thread_not_found_plain_fallback(
+    *,
+    platform: object,
+    chat_id: object,
+    error: str | None,
+    metadata: object,
+) -> dict[str, object]:
+    """Strip orphaned Telegram DM-topic routing after the topic disappears."""
+    unchanged = {"changed": False, "metadata": metadata}
+    if _platform_name(platform) != "telegram":
+        return unchanged
+    if not _looks_like_telegram_private_chat_id(chat_id):
+        return unchanged
+    error_text = str(error or "").lower()
+    if "thread not found" not in error_text:
+        return unchanged
+    if not isinstance(metadata, dict):
+        return unchanged
+    has_dm_topic_metadata = any(key in metadata for key in _TELEGRAM_DM_THREAD_METADATA_KEYS)
+    if not has_dm_topic_metadata:
+        return unchanged
+    stripped = {
+        key: value
+        for key, value in metadata.items()
+        if key not in _TELEGRAM_DM_THREAD_METADATA_KEYS
+    }
+    return {"changed": True, "metadata": stripped or None}
+
 
 def _reply_anchor_for_event(event) -> str | None:
     """Return reply_to id for platforms that need reply semantics.
@@ -4328,11 +4376,22 @@ class BasePlatformAdapter(ABC):
 
         # Non-network / post-retry formatting failure: try plain text as fallback
         logger.warning("[%s] Send failed: %s — trying plain-text fallback", self.name, error_str)
+        fallback_reply_to = reply_to
+        fallback_metadata = metadata
+        telegram_dm_fallback = _telegram_dm_thread_not_found_plain_fallback(
+            platform=self.platform,
+            chat_id=chat_id,
+            error=error_str,
+            metadata=metadata,
+        )
+        if bool(telegram_dm_fallback.get("changed")):
+            fallback_reply_to = None
+            fallback_metadata = telegram_dm_fallback.get("metadata")
         fallback_result = await self.send(
             chat_id=chat_id,
             content=f"(Response formatting failed, plain text:)\n\n{content[:3500]}",
-            reply_to=reply_to,
-            metadata=metadata,
+            reply_to=fallback_reply_to,
+            metadata=fallback_metadata,
         )
         if not fallback_result.success:
             logger.error("[%s] Fallback send also failed: %s", self.name, fallback_result.error)

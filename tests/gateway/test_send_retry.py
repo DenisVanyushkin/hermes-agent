@@ -24,7 +24,7 @@ class _StubAdapter(BasePlatformAdapter):
         cfg = PlatformConfig()
         super().__init__(cfg, Platform.TELEGRAM)
         self._send_results = []   # queue of SendResult to return per call
-        self._send_calls = []     # record of (chat_id, content) sent
+        self._send_calls = []     # record of (chat_id, content, reply_to, metadata) sent
 
     def _next_result(self) -> SendResult:
         if self._send_results:
@@ -32,7 +32,7 @@ class _StubAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id="ok")
 
     async def send(self, chat_id, content, reply_to=None, metadata=None, **kwargs) -> SendResult:
-        self._send_calls.append((chat_id, content))
+        self._send_calls.append((chat_id, content, reply_to, metadata))
         return self._next_result()
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -336,3 +336,128 @@ class TestSendWithRetryAfter:
         # Sleep should be ~2s (base_delay * 2^0 + jitter), NOT 37s
         first_sleep = mock_sleep.call_args_list[0][0][0]
         assert first_sleep < 5.0
+
+    @pytest.mark.asyncio
+    async def test_telegram_dm_thread_not_found_fallback_strips_thread_metadata(self):
+        adapter = _StubAdapter()
+        adapter._send_results = [
+            SendResult(success=False, error="Message thread not found"),
+            SendResult(success=True, message_id="fallback_ok"),
+        ]
+        metadata = {
+            "thread_id": "96927",
+            "message_thread_id": "96927",
+            "direct_messages_topic_id": "96927",
+            "telegram_direct_messages_topic_id": "96927",
+            "telegram_dm_topic_reply_fallback": True,
+            "telegram_reply_to_message_id": "96927",
+            "notify": True,
+        }
+
+        result = await adapter._send_with_retry(
+            "79564752",
+            "hello",
+            reply_to="96927",
+            metadata=metadata,
+            max_retries=0,
+        )
+
+        assert result.success
+        assert len(adapter._send_calls) == 2
+        assert adapter._send_calls[0][2] == "96927"
+        assert adapter._send_calls[0][3]["thread_id"] == "96927"
+        assert adapter._send_calls[1][2] is None
+        assert adapter._send_calls[1][3] == {"notify": True}
+
+    @pytest.mark.asyncio
+    async def test_telegram_dm_thread_not_found_generic_fallback_does_not_repeat_invalid_metadata(self):
+        adapter = _StubAdapter()
+        adapter._send_results = [
+            SendResult(success=False, error="Bad Request: Message thread not found"),
+            SendResult(success=False, error="Bad Request: Message thread not found"),
+        ]
+        metadata = {
+            "thread_id": "96927",
+            "direct_messages_topic_id": "96927",
+            "telegram_dm_topic_reply_fallback": True,
+            "telegram_reply_to_message_id": "96927",
+        }
+
+        result = await adapter._send_with_retry(
+            "79564752",
+            "hello",
+            reply_to="96927",
+            metadata=metadata,
+            max_retries=0,
+        )
+
+        assert not result.success
+        assert len(adapter._send_calls) == 2
+        assert adapter._send_calls[0][2] == "96927"
+        assert adapter._send_calls[0][3]["direct_messages_topic_id"] == "96927"
+        assert adapter._send_calls[1][2] is None
+        assert adapter._send_calls[1][3] is None
+
+    @pytest.mark.asyncio
+    async def test_telegram_dm_thread_not_found_fallback_strips_reply_to_message_id_only_metadata(self):
+        adapter = _StubAdapter()
+        adapter._send_results = [
+            SendResult(success=False, error="Message thread not found"),
+            SendResult(success=True, message_id="fallback_ok"),
+        ]
+
+        result = await adapter._send_with_retry(
+            "79564752",
+            "hello",
+            reply_to="96927",
+            metadata={"reply_to_message_id": "96927"},
+            max_retries=0,
+        )
+
+        assert result.success
+        assert len(adapter._send_calls) == 2
+        assert adapter._send_calls[1][2] is None
+        assert adapter._send_calls[1][3] is None
+
+    @pytest.mark.asyncio
+    async def test_telegram_non_thread_fallback_preserves_reply_to(self):
+        adapter = _StubAdapter()
+        adapter._send_results = [
+            SendResult(success=False, error="Bad Request: can't parse entities"),
+            SendResult(success=True, message_id="fallback_ok"),
+        ]
+
+        result = await adapter._send_with_retry(
+            "-100123",
+            "**hello**",
+            reply_to="message-42",
+            metadata={"thread_id": "17585", "notify": True},
+            max_retries=0,
+        )
+
+        assert result.success
+        assert len(adapter._send_calls) == 2
+        assert adapter._send_calls[1][2] == "message-42"
+        assert adapter._send_calls[1][3] == {"thread_id": "17585", "notify": True}
+
+    @pytest.mark.asyncio
+    async def test_telegram_group_thread_not_found_fallback_preserves_forum_metadata(self):
+        adapter = _StubAdapter()
+        adapter._send_results = [
+            SendResult(success=False, error="Message thread not found"),
+            SendResult(success=False, error="Message thread not found"),
+        ]
+        metadata = {"thread_id": "17585", "notify": True}
+
+        result = await adapter._send_with_retry(
+            "-100123",
+            "hello",
+            reply_to="message-42",
+            metadata=metadata,
+            max_retries=0,
+        )
+
+        assert not result.success
+        assert len(adapter._send_calls) == 2
+        assert adapter._send_calls[1][2] == "message-42"
+        assert adapter._send_calls[1][3] == metadata
