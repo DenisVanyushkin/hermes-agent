@@ -196,6 +196,19 @@ class SubagentRunnerResult:
     actual_provider: str | None = None
     actual_model: str | None = None
     actual_model_class: str | None = None
+    initial_provider: str | None = None
+    initial_model: str | None = None
+    effective_provider: str | None = None
+    effective_model: str | None = None
+    fallback_attempted: bool = False
+    fallback_activated: bool = False
+    fallback_provider: str | None = None
+    fallback_model: str | None = None
+    fallback_base_url: str | None = None
+    fallback_api_mode: str | None = None
+    fallback_error: str | None = None
+    fallback_result: str | None = None
+    providers_used_effective: list[str] = field(default_factory=list)
     runtime_mode: str = "fake"
     real_provider_allowed: bool = False
     provider_policy_status: str = "not_requested"
@@ -227,6 +240,19 @@ class SubagentRunnerResult:
             "actual_provider": self.actual_provider,
             "actual_model": self.actual_model,
             "actual_model_class": self.actual_model_class,
+            "initial_provider": self.initial_provider,
+            "initial_model": self.initial_model,
+            "effective_provider": self.effective_provider,
+            "effective_model": self.effective_model,
+            "fallback_attempted": self.fallback_attempted,
+            "fallback_activated": self.fallback_activated,
+            "fallback_provider": self.fallback_provider,
+            "fallback_model": self.fallback_model,
+            "fallback_base_url": self.fallback_base_url,
+            "fallback_api_mode": self.fallback_api_mode,
+            "fallback_error": self.fallback_error,
+            "fallback_result": self.fallback_result,
+            "providers_used_effective": list(self.providers_used_effective),
             "runtime_mode": self.runtime_mode,
             "real_provider_allowed": self.real_provider_allowed,
             "provider_policy_status": self.provider_policy_status,
@@ -343,6 +369,19 @@ class ControlledRuntimeRunner:
             response_output_hash=output_hash,
             actual_provider=reported_provider,
             actual_model=reported_model,
+            initial_provider=_string_or_none(raw_result.get("initial_provider")) or runtime.provider,
+            initial_model=_string_or_none(raw_result.get("initial_model")) or runtime.model,
+            effective_provider=_string_or_none(raw_result.get("effective_provider")) or reported_provider,
+            effective_model=_string_or_none(raw_result.get("effective_model")) or reported_model,
+            fallback_attempted=bool(raw_result.get("fallback_attempted")),
+            fallback_activated=bool(raw_result.get("fallback_activated")),
+            fallback_provider=_string_or_none(raw_result.get("fallback_provider")),
+            fallback_model=_string_or_none(raw_result.get("fallback_model")),
+            fallback_base_url=_string_or_none(raw_result.get("fallback_base_url")),
+            fallback_api_mode=_string_or_none(raw_result.get("fallback_api_mode")),
+            fallback_error=_string_or_none(raw_result.get("fallback_error")),
+            fallback_result=_string_or_none(raw_result.get("fallback_result")),
+            providers_used_effective=_string_list(raw_result.get("providers_used_effective")),
             usage_summary=usage_summary,
             cache_summary=cache_summary,
             tool_call_summaries=tool_call_summaries,
@@ -363,6 +402,19 @@ class ControlledRuntimeRunner:
         response_output_hash: str | None = None,
         actual_provider: str | None = None,
         actual_model: str | None = None,
+        initial_provider: str | None = None,
+        initial_model: str | None = None,
+        effective_provider: str | None = None,
+        effective_model: str | None = None,
+        fallback_attempted: bool = False,
+        fallback_activated: bool = False,
+        fallback_provider: str | None = None,
+        fallback_model: str | None = None,
+        fallback_base_url: str | None = None,
+        fallback_api_mode: str | None = None,
+        fallback_error: str | None = None,
+        fallback_result: str | None = None,
+        providers_used_effective: list[str] | None = None,
         usage_summary: SubagentUsageSummary | None = None,
         cache_summary: SubagentCacheSummary | None = None,
         tool_call_summaries: list[SubagentToolCallSummary] | None = None,
@@ -382,6 +434,19 @@ class ControlledRuntimeRunner:
             actual_provider=actual_provider or runtime.provider,
             actual_model=actual_model or runtime.model,
             actual_model_class=runtime.model_class,
+            initial_provider=initial_provider or runtime.provider,
+            initial_model=initial_model or runtime.model,
+            effective_provider=effective_provider or actual_provider or runtime.provider,
+            effective_model=effective_model or actual_model or runtime.model,
+            fallback_attempted=fallback_attempted,
+            fallback_activated=fallback_activated,
+            fallback_provider=fallback_provider,
+            fallback_model=fallback_model,
+            fallback_base_url=fallback_base_url,
+            fallback_api_mode=fallback_api_mode,
+            fallback_error=fallback_error,
+            fallback_result=fallback_result,
+            providers_used_effective=list(providers_used_effective or []),
             runtime_mode=runtime.runtime_mode,
             real_provider_allowed=runtime.real_provider_allowed,
             provider_policy_status=runtime.provider_policy_status,
@@ -899,6 +964,15 @@ def _string_or_none(value: Any) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _string_list(value: Any) -> list[str]:
+    items: list[str] = []
+    for item in list(value or []):
+        text = _string_or_none(item)
+        if text and text not in items:
+            items.append(text)
+    return items
 
 
 def _safe_mapping(value: Any) -> dict[str, Any] | None:

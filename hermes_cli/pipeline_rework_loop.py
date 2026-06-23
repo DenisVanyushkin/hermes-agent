@@ -2057,6 +2057,19 @@ def _collect_subagent_runs(snapshot: Any) -> list[dict[str, Any]]:
                 "provider_policy_status": runner_payload.get("provider_policy_status"),
                 "actual_provider": runner_payload.get("actual_provider"),
                 "actual_model": runner_payload.get("actual_model"),
+                "initial_provider": runner_payload.get("initial_provider"),
+                "initial_model": runner_payload.get("initial_model"),
+                "effective_provider": runner_payload.get("effective_provider"),
+                "effective_model": runner_payload.get("effective_model"),
+                "fallback_attempted": bool(runner_payload.get("fallback_attempted", False)),
+                "fallback_activated": bool(runner_payload.get("fallback_activated", False)),
+                "fallback_provider": runner_payload.get("fallback_provider"),
+                "fallback_model": runner_payload.get("fallback_model"),
+                "fallback_base_url": runner_payload.get("fallback_base_url"),
+                "fallback_api_mode": runner_payload.get("fallback_api_mode"),
+                "fallback_error": runner_payload.get("fallback_error"),
+                "fallback_result": runner_payload.get("fallback_result"),
+                "providers_used_effective": list(runner_payload.get("providers_used_effective") or []),
                 "input_hash": runner_payload.get("input_hash"),
                 "prompt_hash": runner_payload.get("prompt_hash"),
                 "response_output_hash": runner_payload.get("response_output_hash"),
@@ -2092,6 +2105,19 @@ def _append_step_run(accumulator: list[dict[str, Any]], snapshot: Any, step_inde
             "provider_policy_status": runner_payload.get("provider_policy_status"),
             "actual_provider": runner_payload.get("actual_provider"),
             "actual_model": runner_payload.get("actual_model"),
+            "initial_provider": runner_payload.get("initial_provider"),
+            "initial_model": runner_payload.get("initial_model"),
+            "effective_provider": runner_payload.get("effective_provider"),
+            "effective_model": runner_payload.get("effective_model"),
+            "fallback_attempted": bool(runner_payload.get("fallback_attempted", False)),
+            "fallback_activated": bool(runner_payload.get("fallback_activated", False)),
+            "fallback_provider": runner_payload.get("fallback_provider"),
+            "fallback_model": runner_payload.get("fallback_model"),
+            "fallback_base_url": runner_payload.get("fallback_base_url"),
+            "fallback_api_mode": runner_payload.get("fallback_api_mode"),
+            "fallback_error": runner_payload.get("fallback_error"),
+            "fallback_result": runner_payload.get("fallback_result"),
+            "providers_used_effective": list(runner_payload.get("providers_used_effective") or []),
             "input_hash": runner_payload.get("input_hash"),
             "prompt_hash": runner_payload.get("prompt_hash"),
             "response_output_hash": runner_payload.get("response_output_hash"),
@@ -2124,6 +2150,7 @@ def _usage_summary_from_subagent_runs(
     cache_sources: list[str] = []
     models_used: list[str] = []
     providers_used: list[str] = []
+    providers_used_effective: list[str] = []
     planned_count = max(int(planned_subagent_count if planned_subagent_count is not None else len(subagent_runs)), 0)
     executed_subagent_count = 0
     subagent_run_instance_count = 0
@@ -2141,6 +2168,8 @@ def _usage_summary_from_subagent_runs(
         cache_source = cache.get("source")
         model = run.get("actual_model")
         provider = run.get("actual_provider")
+        effective_provider = run.get("effective_provider")
+        effective_chain = [str(item) for item in list(run.get("providers_used_effective") or []) if str(item)]
         if token_source and token_source not in token_sources:
             token_sources.append(str(token_source))
         if cache_source and cache_source not in cache_sources:
@@ -2149,6 +2178,9 @@ def _usage_summary_from_subagent_runs(
             models_used.append(str(model))
         if provider and provider not in providers_used:
             providers_used.append(str(provider))
+        for candidate in effective_chain or ([str(effective_provider)] if effective_provider else []):
+            if candidate and candidate not in providers_used_effective:
+                providers_used_effective.append(candidate)
     return {
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
@@ -2165,6 +2197,7 @@ def _usage_summary_from_subagent_runs(
         "subagent_count": subagent_run_instance_count,
         "models_used": models_used,
         "providers_used": providers_used,
+        "providers_used_effective": providers_used_effective,
     }
 
 
@@ -2484,6 +2517,19 @@ def _subagent_run_from_result(*, step_id: str, subagent_id: str, role_id: str, r
         "provider_policy_status": runner_result.get("provider_policy_status"),
         "actual_provider": runner_result.get("actual_provider"),
         "actual_model": runner_result.get("actual_model"),
+        "initial_provider": runner_result.get("initial_provider"),
+        "initial_model": runner_result.get("initial_model"),
+        "effective_provider": runner_result.get("effective_provider"),
+        "effective_model": runner_result.get("effective_model"),
+        "fallback_attempted": bool(runner_result.get("fallback_attempted", False)),
+        "fallback_activated": bool(runner_result.get("fallback_activated", False)),
+        "fallback_provider": runner_result.get("fallback_provider"),
+        "fallback_model": runner_result.get("fallback_model"),
+        "fallback_base_url": runner_result.get("fallback_base_url"),
+        "fallback_api_mode": runner_result.get("fallback_api_mode"),
+        "fallback_error": runner_result.get("fallback_error"),
+        "fallback_result": runner_result.get("fallback_result"),
+        "providers_used_effective": list(runner_result.get("providers_used_effective") or []),
         "input_hash": runner_result.get("input_hash"),
         "prompt_hash": runner_result.get("prompt_hash"),
         "response_output_hash": runner_result.get("response_output_hash"),
