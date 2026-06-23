@@ -499,6 +499,44 @@ def test_llm_router_timeout_strict_engineering_fallback_exposes_confidence_sourc
     assert decision.routing_confidence_source == "heuristic_strict"
 
 
+def test_llm_router_timeout_uses_engineering_fallback_for_runtime_analysis_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        min_confidence=0.70,
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(
+            TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+        ),
+    )
+
+    decision = router.route(
+        (
+            "HERMES-AUTO-SMOKE-20260623-ALMATY-005\n\n"
+            "This is an autonomous engineering pipeline runtime smoke for "
+            "engineering_review_pipeline.\n"
+            "Validate the post-fix runtime smoke after commit 81100a4e.\n"
+            "Use find_files, read_file, and search_files with repo-relative paths.\n"
+            "Report whether the autonomous execution controller, helper/subagent bridge, "
+            "and pipeline_execution_report were exercised.\n"
+            "Do not change code. Do not commit. Do not push.\n"
+        ),
+        pipeline_session_id="sess-timeout-runtime-analysis",
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.routing_fallback_used is True
+    assert decision.router_strategy == "heuristic_timeout_fallback"
+    assert decision.routing_confidence_source == "heuristic_strict"
+    assert decision.routing_fallback_reason is not None
+    assert "TimeoutError" in decision.routing_fallback_reason
+    assert "TimeoutError" in (decision.routing_failure_reason or "")
+
+
 def test_llm_router_timeout_keeps_fail_closed_for_vague_prompt(tmp_path: Path) -> None:
     loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
 
@@ -624,6 +662,30 @@ def test_llm_router_timeout_keeps_fail_closed_for_ambiguous_engineeringish_promp
     assert decision.status == "routing_failed"
     assert decision.selected_pipeline_id is None
     assert decision.fallback_pipeline_id is None
+    assert decision.routing_fallback_used is False
+    assert "TimeoutError" in (decision.routing_failure_reason or "")
+
+
+def test_llm_router_timeout_keeps_fail_closed_for_ambiguous_repo_opinion_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(
+            TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+        ),
+    )
+
+    decision = router.route(
+        "проверь репозиторий и скажи что думаешь",
+        pipeline_session_id="sess-timeout-ambiguous-repo-opinion",
+    )
+
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
     assert decision.routing_fallback_used is False
     assert "TimeoutError" in (decision.routing_failure_reason or "")
 
