@@ -521,6 +521,147 @@ def test_normalize_result_marks_max_iterations_plain_text_as_controlled_missing_
     assert normalized["raw_metadata"]["diagnostic_output_text"] == "plain text diagnostic summary"
 
 
+def _assert_engineer_blocked_envelope(envelope: dict[str, object], *, summary_fragment: str | None = None) -> None:
+    assert envelope["schema_version"] == "v1"
+    assert envelope["subagent_id"] == "hermes_engineer_core"
+    assert envelope["role"] == "engineer"
+    assert envelope["status"] == "blocked"
+    assert isinstance(envelope.get("findings"), list) and envelope["findings"]
+    assert envelope["changes"] == []
+    assert isinstance(envelope.get("blockers"), list) and envelope["blockers"]
+    assert envelope["artifacts"] == []
+    assert envelope["confidence"] == 0.0
+    assert envelope["requires_review"] is False
+    assert envelope["next_action"] == "retry_with_structured_output"
+    if summary_fragment is not None:
+        haystack = json.dumps(envelope, ensure_ascii=False).lower()
+        assert summary_fragment.lower() in haystack
+
+
+def test_normalize_result_real_aiagent_text_response_shape_normalizes_terminal_fields(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    normalized = bridge._normalize_result(
+        {
+            "turn_exit_reason": "text_response(finish_reason=stop)",
+            "final_response": "Bridge reached execution but returned prose instead of the required envelope.",
+            "raw_metadata": {"real_provider_bridge_invoked": True},
+        }
+    )
+
+    assert normalized["completion_reason"] == "text_response(finish_reason=stop)"
+    assert normalized["output_text"] == "Bridge reached execution but returned prose instead of the required envelope."
+    assert normalized["raw_metadata"]["structured_output_source"] == "synthesized_plain_text_blocked"
+    assert normalized["raw_metadata"]["structured_output_missing_reason"] == "engineer_text_response_without_structured_output"
+    _assert_engineer_blocked_envelope(normalized["raw_metadata"]["structured_output"], summary_fragment="required envelope")
+
+
+def test_normalize_result_provider_error_without_output_synthesizes_blocked_envelope(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    normalized = bridge._normalize_result(
+        {
+            "turn_exit_reason": "provider_error",
+            "final_response": None,
+            "raw_metadata": {
+                "real_provider_bridge_invoked": True,
+                "provider_error": "HTTP 402 Payment Required",
+                "http_status": 402,
+            },
+        }
+    )
+
+    assert normalized["completion_reason"] == "provider_error"
+    assert normalized["raw_metadata"]["structured_output_missing_reason"] == "engineer_provider_error_without_structured_output"
+    assert normalized["raw_metadata"]["structured_output_missing_blocked_reason"] == "provider_error_without_structured_output"
+    _assert_engineer_blocked_envelope(normalized["raw_metadata"]["structured_output"], summary_fragment="402")
+
+
+def test_normalize_result_fallback_exhausted_without_output_synthesizes_blocked_envelope(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    normalized = bridge._normalize_result(
+        {
+            "turn_exit_reason": "fallback_exhausted",
+            "final_response": None,
+            "raw_metadata": {
+                "real_provider_bridge_invoked": True,
+                "fallback_status": "exhausted",
+                "fallback_diagnostic": "openai-codex/gpt-5.4 unavailable after retries",
+            },
+        }
+    )
+
+    assert normalized["completion_reason"] == "fallback_exhausted"
+    assert normalized["raw_metadata"]["structured_output_missing_reason"] == "engineer_fallback_exhausted_without_structured_output"
+    assert normalized["raw_metadata"]["structured_output_missing_blocked_reason"] == "fallback_exhausted_without_structured_output"
+    _assert_engineer_blocked_envelope(normalized["raw_metadata"]["structured_output"], summary_fragment="unavailable")
+
+
+def test_normalize_result_turn_exit_reason_max_iterations_synthesizes_blocked_envelope(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    normalized = bridge._normalize_result(
+        {
+            "turn_exit_reason": "max_iterations_reached(12/12)",
+            "final_response": "plain text diagnostic summary",
+            "raw_metadata": {"real_provider_bridge_invoked": True},
+        }
+    )
+
+    assert normalized["completion_reason"] == "max_iterations_reached(12/12)"
+    assert normalized["raw_metadata"]["structured_output_missing_reason"] == "engineer_max_iterations_without_structured_output"
+    assert normalized["raw_metadata"]["structured_output_missing_blocked_reason"] == "max_iterations_plain_text_output"
+    _assert_engineer_blocked_envelope(normalized["raw_metadata"]["structured_output"], summary_fragment="plain text diagnostic summary")
+
+
+def test_normalize_result_parse_failure_synthesizes_blocked_envelope(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    normalized = bridge._normalize_result(
+        {
+            "output_text": "{not valid json",
+            "completion_reason": "text_response(finish_reason=stop)",
+            "raw_metadata": {"real_provider_bridge_invoked": True},
+        }
+    )
+
+    assert normalized["raw_metadata"]["structured_output_parse_error"].startswith("json_decode_error:")
+    assert normalized["raw_metadata"]["structured_output_missing_reason"] == "malformed_structured_output"
+    assert normalized["raw_metadata"]["structured_output_missing_blocked_reason"] == "malformed_structured_output"
+    _assert_engineer_blocked_envelope(normalized["raw_metadata"]["structured_output"], summary_fragment="json")
+
+
+def test_normalize_result_empty_output_without_diagnostic_synthesizes_blocked_envelope(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    normalized = bridge._normalize_result(
+        {
+            "turn_exit_reason": "text_response(finish_reason=stop)",
+            "final_response": "",
+            "output_text": "",
+            "raw_metadata": {"real_provider_bridge_invoked": True},
+        }
+    )
+
+    assert normalized["completion_reason"] == "text_response(finish_reason=stop)"
+    assert normalized["raw_metadata"]["structured_output_missing_reason"] == "engineer_empty_output_without_structured_output"
+    assert normalized["raw_metadata"]["structured_output_missing_blocked_reason"] == "empty_output_without_structured_output"
+    _assert_engineer_blocked_envelope(normalized["raw_metadata"]["structured_output"], summary_fragment="empty")
+
+
 def test_engineer_prompt_and_config_describe_structured_output_envelope(tmp_path: Path) -> None:
     repo_root = _copy_spec_tree(tmp_path)
     prompt_text = (repo_root / "prompts/subagents/hermes_engineer_core.md").read_text(encoding="utf-8")
