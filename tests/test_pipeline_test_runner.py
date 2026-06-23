@@ -242,11 +242,13 @@ def test_malformed_diagnostic_mapping_is_denied_with_forensics_without_claiming_
 
     payload = summary.to_safe_dict()
 
-    assert payload["status"] == "blocked"
-    assert payload["blocked_reason"] == "test_command_denied"
-    assert payload["results"][0]["command"] == ["[denied]"]
-    assert payload["results"][0]["denied_command_raw_sanitized"] == "targets=[denied]"
-    assert payload["results"][0]["validator_reason"] == "structured_pytest_payload_missing_targets"
+    assert payload["status"] == "invalid"
+    assert payload["blocked_reason"] is None
+    assert payload["denied_count"] == 0
+    assert payload["results"][0]["status"] == "invalid"
+    assert payload["results"][0]["command"] == ["[invalid]"]
+    assert payload["results"][0]["denied_command_raw_sanitized"] == "{status: observed, summary: workspace only contains tracked.txt}"
+    assert payload["results"][0]["validator_reason"] == "malformed_test_payload"
     assert calls == []
 
 

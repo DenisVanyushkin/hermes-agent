@@ -2267,6 +2267,8 @@ def test_test_command_denied_report_uses_runtime_block_reason_not_execution_disa
     repo = _init_git_repo(tmp_path)
     (repo / "tests").mkdir()
     (repo / "tests" / "test_example.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    _git(repo, "add", "tests/test_example.py")
+    _git(repo, "commit", "-m", "add test fixture")
 
     class _InvocationClient:
         def __call__(self, runtime, _payload):
@@ -2321,6 +2323,8 @@ def test_test_command_denied_final_response_is_honest_and_reviewer_not_invoked(t
     repo = _init_git_repo(tmp_path)
     (repo / "tests").mkdir()
     (repo / "tests" / "test_example.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    _git(repo, "add", "tests/test_example.py")
+    _git(repo, "commit", "-m", "add test fixture")
 
     class _InvocationClient:
         def __call__(self, runtime, _payload):
@@ -2370,21 +2374,29 @@ def test_test_command_denied_final_response_reports_malformed_payload_forensics(
     repo = _init_git_repo(tmp_path)
     (repo / "tests").mkdir()
     (repo / "tests" / "test_example.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    _git(repo, "add", "tests/test_example.py")
+    _git(repo, "commit", "-m", "add test fixture")
 
     class _InvocationClient:
         def __call__(self, runtime, _payload):
             if runtime.role_id == "engineer":
+                _write(repo, "new.txt", "created by engineer\n")
                 return {
                     "provider": runtime.provider,
                     "model": runtime.model,
                     "structured_output": _engineer_output(
                         summary="Prepared patch.",
-                        changes=[{"path": "tests/test_example.py", "kind": "modify"}],
+                        changes=[{"path": "new.txt", "kind": "create"}],
                         tests=[{"status": "observed", "summary": "workspace only contains tracked.txt"}],
                     ),
                     "output_text": "diagnostic only",
                 }
-            raise AssertionError("reviewer must not be invoked after malformed test payload")
+            return {
+                "provider": runtime.provider,
+                "model": runtime.model,
+                "structured_output": _reviewer_output(blockers=[]),
+                "output_text": "reviewed with warning",
+            }
 
     runtime_context = module.ControlledRuntimeContext(
         invocation_client=_InvocationClient(),
@@ -2401,18 +2413,22 @@ def test_test_command_denied_final_response_reports_malformed_payload_forensics(
         runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
         user_message="Implement bounded rework loop",
         controlled_runtime_context=runtime_context,
+        repo_path=str(repo),
     )
 
     report_payload = result.execution_report.to_safe_dict()
-    final_text = report_payload["final_response"]["text"] or ""
-    denied_result = report_payload["tests"]["results"][0]
+    test_result = report_payload["tests"]["results"][0]
+    reviewer_tests = report_payload["reviewer_packet"]["safe_packet"]["tests"]
 
-    assert result.blocked_reason == "test_command_denied"
-    assert report_payload["review"]["reviewer_invoked"] is False
-    assert "Pytest was requested but blocked" not in final_text
-    assert "malformed test payload" in final_text
-    assert denied_result["denied_command_raw_sanitized"] == "{status: observed, summary: workspace only contains tracked.txt}"
-    assert denied_result["validator_reason"] == "test_command_denied"
+    assert result.blocked_reason == "loop_harness_not_live_final"
+    assert report_payload["review"]["reviewer_invoked"] is True
+    assert report_payload["tests"]["status"] == "invalid"
+    assert "blocked_reason" not in report_payload["tests"]
+    assert test_result["status"] == "invalid"
+    assert test_result["denied_command_raw_sanitized"] == "{status: observed, summary: workspace only contains tracked.txt}"
+    assert test_result["validator_reason"] == "malformed_test_payload"
+    assert reviewer_tests["status"] == "invalid"
+    assert reviewer_tests["results"][0]["denied_command_raw_sanitized"] == "{status: observed, summary: workspace only contains tracked.txt}"
 
 
 def test_safe_test_text_keeps_venv_and_environment_diagnostics() -> None:

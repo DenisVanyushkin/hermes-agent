@@ -243,6 +243,37 @@ def test_safe_dict_is_json_serializable_and_redacts_diff_like_content() -> None:
     assert "@@" not in encoded
 
 
+def test_invalid_test_summary_status_is_preserved_for_reviewer_forensics() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+
+    packet = module.build_reviewer_packet(
+        pipeline_id="engineering_review_pipeline",
+        task_summary="Malformed test payload should reach reviewer as warning",
+        engineer_output=_engineer_output(),
+        baseline_snapshot=_snapshot(head_sha="abc123"),
+        post_snapshot=_snapshot(head_sha="def456", staged_files=("b.py",)),
+        git_result=_git_result(changed_files=["b.py"], staged_files=["b.py"]),
+        test_summary={
+            "status": "invalid",
+            "summary": "test evidence unavailable: malformed_test_payload",
+            "results": [
+                {
+                    "command": ["[invalid]"],
+                    "status": "invalid",
+                    "cwd": "repo",
+                    "denied_command_raw_sanitized": "{status: observed, summary: workspace only contains tracked.txt}",
+                }
+            ],
+        },
+    )
+
+    payload = packet.to_safe_dict()
+
+    assert payload["tests"]["status"] == "invalid"
+    assert payload["tests"]["results"][0]["status"] == "invalid"
+    assert payload["tests"]["results"][0]["denied_command_raw_sanitized"] == "{status: observed, summary: workspace only contains tracked.txt}"
+
+
 def test_long_text_is_bounded() -> None:
     module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
     long_text = "x" * 5000
