@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -207,21 +208,11 @@ def run_controlled_tests(
     workspace_name = Path(test_workspace).name if test_workspace else None
     try:
         requests = _coerce_test_requests(tests_payload)
-    except ValueError:
-        requested_count = len(tests_payload) if isinstance(tests_payload, list) else 1
-        return TestRunSummary(
-            enabled=bool(allow_test_commands),
-            workspace=workspace_name,
-            status="blocked",
-            requested_count=requested_count,
-            executed_count=0,
-            passed_count=0,
-            failed_count=0,
-            denied_count=requested_count,
-            timeout_count=0,
-            blocked_reason="test_command_denied",
-            results=[],
-        )
+    except ValueError as exc:
+        requests = _coerce_requests_for_forensics(tests_payload)
+        if _is_non_terminal_test_payload_reason(str(exc)):
+            return _invalid_summary(workspace_name, requests, enabled=bool(allow_test_commands), validator_reason="malformed_test_payload")
+        return _denied_summary(workspace_name, requests, "test_command_denied", enabled=bool(allow_test_commands), validator_reason=str(exc) or "test_command_denied")
     if not requests:
         return TestRunSummary(
             enabled=bool(allow_test_commands),
@@ -243,6 +234,8 @@ def run_controlled_tests(
     try:
         invocations = [_normalize_invocation(request, workspace) for request in requests]
     except ValueError as exc:
+        if _is_non_terminal_test_payload_reason(str(exc)):
+            return _invalid_summary(workspace.name, requests, enabled=True, validator_reason="malformed_test_payload")
         return _denied_summary(workspace.name, requests, "test_command_denied", enabled=True, validator_reason=str(exc) or "test_command_denied")
     return ControlledTestRunner(
         workspace=workspace,
@@ -295,13 +288,15 @@ def _normalize_legacy_command(raw_command: str, workspace: Path) -> PytestInvoca
         raise ValueError("test_command_denied")
     argv = shlex.split(raw_command, posix=True)
     if not argv or len(argv) > MAX_ARGV_LENGTH or any(len(arg) > MAX_ARG_LENGTH for arg in argv):
-        raise ValueError("test_command_denied")
+        raise ValueError("malformed_test_payload")
     if tuple(argv[:1]) in ALLOWED_EXECUTABLES:
         path_args = argv[1:]
     elif tuple(argv[:3]) in ALLOWED_EXECUTABLES:
         path_args = argv[3:]
     else:
-        raise ValueError("test_command_denied")
+        if _looks_like_forbidden_operation(argv[0]):
+            raise ValueError("test_command_denied")
+        raise ValueError("malformed_test_payload")
     if len(path_args) < 2 or path_args[0] != "-q":
         raise ValueError("test_command_denied")
     for test_path in path_args[1:]:
@@ -384,6 +379,33 @@ def _denied_summary(workspace_name: str | None, requests: Sequence[Any], reason:
     )
 
 
+def _invalid_summary(workspace_name: str | None, requests: Sequence[Any], *, enabled: bool, validator_reason: str) -> TestRunSummary:
+    return TestRunSummary(
+        enabled=enabled,
+        workspace=workspace_name,
+        status="invalid",
+        requested_count=len(requests),
+        executed_count=0,
+        passed_count=0,
+        failed_count=0,
+        denied_count=0,
+        timeout_count=0,
+        blocked_reason=None,
+        results=[
+            TestCommandResult(
+                command=["[invalid]"],
+                cwd=workspace_name,
+                status="invalid",
+                reason="malformed_test_payload",
+                denied_command_raw_sanitized=_sanitize_request_text(request),
+                denied_argv_sanitized=_safe_request_tokens(request),
+                validator_reason=validator_reason,
+            ).to_safe_dict()
+            for request in requests
+        ],
+    )
+
+
 def _resolve_execution_command(command: Sequence[str]) -> list[str]:
     if tuple(command[:1]) == ("pytest",):
         return [sys.executable, "-m", "pytest", *command[1:]]
@@ -430,14 +452,14 @@ def _safe_request_tokens(request: Any) -> list[str]:
     if isinstance(request, Mapping):
         targets = request.get("targets")
         if not isinstance(targets, list):
-            return ["[denied]"]
+            return ["[invalid]"]
         return [str(item).strip() for item in targets[:MAX_ARGV_LENGTH] if str(item).strip()] or ["[denied]"]
     return _safe_command_tokens(str(request))
 
 
 def _sanitize_request_text(request: Any) -> str | None:
     if isinstance(request, Mapping):
-        return "targets=" + ",".join(_safe_request_tokens(request))
+        return _sanitize_mapping_text(request)
     return _sanitize_command_text(str(request))
 
 
@@ -451,8 +473,67 @@ def _summary_text(summary: TestRunSummary) -> str | None:
         return None
     if summary.blocked_reason:
         return summary.blocked_reason
+    if summary.status == "invalid":
+        return "test evidence unavailable: malformed_test_payload"
     return f"{summary.passed_count} test command passed"
 
 
 def _duration_ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 3)
+
+
+def _coerce_requests_for_forensics(payload: Any) -> list[Any]:
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if item is not None]
+    return [payload]
+
+
+def _is_non_terminal_test_payload_reason(reason: str) -> bool:
+    return reason in {"malformed_test_payload", "tests payload must be a list"} or reason.startswith("structured_pytest_payload_")
+
+
+def _looks_like_forbidden_operation(token: str) -> bool:
+    normalized = str(token or "").strip().lower()
+    return normalized in {
+        "bash",
+        "cat",
+        "curl",
+        "docker",
+        "git",
+        "kill",
+        "pkill",
+        "python",
+        "python3",
+        "reboot",
+        "rm",
+        "scp",
+        "service",
+        "sh",
+        "ssh",
+        "systemctl",
+        "zsh",
+    }
+
+
+def _sanitize_mapping_text(request: Mapping[str, Any]) -> str | None:
+    safe_items: list[str] = []
+    for key, value in request.items():
+        safe_key = str(key).strip()
+        if not safe_key:
+            continue
+        safe_items.append(f"{safe_key}: {_sanitize_mapping_value(value)}")
+    return "{" + ", ".join(safe_items) + "}" if safe_items else None
+
+
+def _sanitize_mapping_value(value: Any) -> str:
+    if isinstance(value, str):
+        return _SECRET_PATTERN.sub(r"\1=[redacted]", value.strip())
+    if isinstance(value, list):
+        items = [_sanitize_mapping_value(item) for item in value[:MAX_ARGV_LENGTH]]
+        return "[" + ", ".join(items) + "]"
+    if isinstance(value, Mapping):
+        nested = _sanitize_mapping_text(value)
+        return nested or "{}"
+    return _SECRET_PATTERN.sub(r"\1=[redacted]", json.dumps(value, ensure_ascii=True))
