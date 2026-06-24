@@ -343,6 +343,7 @@ def execute_bounded_rework_loop(
                     post_snapshot=post_snapshot,
                     git_result=git_result,
                     test_summary=current_test_summary,
+                    engineer_evaluation_status=_step_evaluation_status(current_snapshot.planned_steps[0]),
                 )
             )
         if current_test_summary.get("blocked_reason") is not None:
@@ -365,7 +366,10 @@ def execute_bounded_rework_loop(
                 mutation_summary=current_mutation_summary,
                 test_summary=current_test_summary,
             )
-        engineer_fail_closed_reason = _engineer_fail_closed_reason(current_snapshot)
+        engineer_fail_closed_reason = _engineer_fail_closed_reason(
+            current_snapshot,
+            material_changes_present=bool(git_result.material_changes_present) if git_result is not None else False,
+        )
         if engineer_fail_closed_reason is not None:
             return _blocked_loop_result(
                 fuse=fuse,
@@ -860,6 +864,7 @@ def execute_bounded_rework_loop(
             config=config,
             session=session,
             state_snapshot=current_snapshot,
+            material_changes_present=bool(git_result.material_changes_present) if git_result is not None else False,
         )
         if not reviewer_fuse.actual_invocation_allowed:
             return _blocked_loop_result(
@@ -2693,7 +2698,7 @@ def _git_result_blocks_completion(git_result: GitMaterialChangeResult) -> bool:
     } or bool(git_result.baseline_dirty)
 
 
-def _engineer_fail_closed_reason(state_snapshot: Any) -> str | None:
+def _engineer_fail_closed_reason(state_snapshot: Any, *, material_changes_present: bool = False) -> str | None:
     planned_steps = list(getattr(state_snapshot, "planned_steps", []) or [])
     if not planned_steps:
         return "engineer_result_missing"
@@ -2706,8 +2711,12 @@ def _engineer_fail_closed_reason(state_snapshot: Any) -> str | None:
         return "engineer_result_failed"
     structured_output = _step_structured_output(state_snapshot, 0)
     if not structured_output:
+        if material_changes_present:
+            return None
         return "missing_structured_output"
     if structured_output.get("validation_status") == "missing_structured_output":
+        if material_changes_present:
+            return None
         for item in list(structured_output.get("validation_errors") or []):
             if not isinstance(item, dict):
                 continue
@@ -2718,6 +2727,8 @@ def _engineer_fail_closed_reason(state_snapshot: Any) -> str | None:
     if _engineer_requests_disagreement(structured_output):
         return None
     if evaluation_status != REVIEWER_APPROVAL_STATUS:
+        if material_changes_present:
+            return None
         return "invalid_engineer_output"
     return None
 
