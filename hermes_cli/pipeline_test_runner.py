@@ -244,6 +244,53 @@ def run_controlled_tests(
     ).run(invocations)
 
 
+def preserve_explicit_pytest_command(
+    *,
+    raw_command: str,
+    test_workspace: str | Path | None,
+    source: str,
+) -> dict[str, Any]:
+    workspace = _validate_workspace(test_workspace)
+    try:
+        invocation = _normalize_legacy_command(raw_command, workspace)
+    except ValueError as exc:
+        requests = [raw_command]
+        reason = str(exc) or "test_command_denied"
+        if _is_non_terminal_test_payload_reason(reason):
+            payload = _invalid_summary(workspace.name, requests, enabled=True, validator_reason=reason).to_safe_dict()
+            payload["command"] = _sanitize_command_text(raw_command)
+            payload["source"] = source
+            return payload
+        payload = _denied_summary(
+            workspace.name,
+            requests,
+            "test_command_denied",
+            enabled=True,
+            validator_reason=reason,
+        ).to_safe_dict()
+        payload["command"] = _sanitize_command_text(raw_command)
+        payload["source"] = source
+        return payload
+
+    normalized_command = " ".join(invocation.reported_command)
+    return {
+        "enabled": True,
+        "workspace": workspace.name,
+        "status": "requested_not_executed",
+        "requested_count": 1,
+        "executed_count": 0,
+        "passed_count": 0,
+        "failed_count": 0,
+        "denied_count": 0,
+        "timeout_count": 0,
+        "blocked_reason": None,
+        "command": normalized_command,
+        "source": source,
+        "summary": "requested test command was preserved but not executed",
+        "results": [],
+    }
+
+
 def _coerce_test_requests(payload: Any) -> list[Any]:
     if payload is None:
         return []

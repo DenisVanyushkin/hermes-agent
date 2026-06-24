@@ -35,7 +35,7 @@ from hermes_cli.pipeline_report import (
 from hermes_cli.pipeline_reviewer_packet import build_reviewer_packet
 from hermes_cli.pipeline_session import PipelineSession
 from hermes_cli.pipeline_state_machine import build_pipeline_state_snapshot
-from hermes_cli.pipeline_test_runner import run_controlled_tests
+from hermes_cli.pipeline_test_runner import preserve_explicit_pytest_command, run_controlled_tests
 from hermes_cli.runtime_factory import RuntimeBuildRequest, build_controlled_runtime, build_runtime_factory_plan
 from hermes_cli.subagent_runner import (
     ControlledRuntimeRunner,
@@ -47,11 +47,6 @@ from hermes_cli.subagent_runner import (
 
 SAFE_FALLBACK_MAX_REVIEW_ITERATIONS = 1
 REVIEWER_APPROVAL_STATUS = "candidate_complete"
-REVIEWER_DECISION_APPROVED = "approved"
-REVIEWER_DECISION_REWORK_REQUIRED = "rework_required"
-REVIEWER_DECISION_TERMINAL_BLOCKED = "terminal_blocked"
-REVIEWER_DECISION_INVALID = "reviewer_invalid"
-REVIEWER_DECISION_UNAVAILABLE = "reviewer_unavailable"
 ESCALATED_REVIEWER_SUBAGENT_ID = "hermes_code_reviewer_escalated"
 ESCALATED_REVIEWER_ROLE_ID = "reviewer"
 ESCALATED_REVIEWER_DECISION_APPROVED = "approved"
@@ -66,27 +61,6 @@ MAX_SAFE_EVIDENCE_ITEMS = 5
 MAX_SAFE_EVIDENCE_LABEL_CHARS = 64
 _DIFF_MARKERS = ("diff --git", "@@", "+++", "---")
 _SENSITIVE_PARTS = ("api_key", "token", "password", "secret", "credential")
-_CATASTROPHIC_REVIEW_CODES = {
-    "forbidden_safety_issue",
-    "credential_exfiltration_risk",
-    "unrelated_repo_mutation",
-    "destructive_operation",
-    "severely_broken_code",
-    "uninspectable_diff",
-}
-_CATASTROPHIC_REVIEW_TEXT = (
-    "credential",
-    "exfiltration",
-    "secret",
-    "token leak",
-    "password leak",
-    "unrelated mutation",
-    "destructive",
-    "rm -rf",
-    "cannot safely inspect",
-    "unsafe to evaluate",
-    "catastrophic",
-)
 
 
 @dataclass(frozen=True)
@@ -349,6 +323,14 @@ def execute_bounded_rework_loop(
         )
         if int(engineer_test_summary.get("requested_count") or 0) > 0 or engineer_test_summary.get("blocked_reason") is not None:
             current_test_summary = engineer_test_summary
+        current_test_summary = _preserve_requested_test_summary(
+            current=current_test_summary,
+            original_task=user_message,
+            engineer_output=engineer_output,
+            runner_result=getattr(current_snapshot.planned_steps[0], "runner_result", None),
+            runtime_context=runtime_context,
+            test_workspace=repo_path or (runtime_context.test_workspace if runtime_context is not None else None),
+        )
         post_snapshot: GitSnapshot | None = None
         git_result: GitMaterialChangeResult | None = None
         if baseline_snapshot is not None:
@@ -684,6 +666,10 @@ def execute_bounded_rework_loop(
             reviewer_eval = getattr(reviewer_step, "evaluation_result", None) or {}
             reviewer_blockers = list(reviewer_eval.get("blockers") or [])
             reviewer_status = str(reviewer_eval.get("status") or "not_evaluated")
+            current_reviewer_packet = _with_reviewer_findings(
+                current_reviewer_packet,
+                _extract_reviewer_findings(_step_structured_output(current_snapshot, 1)),
+            )
             if reviewer_status == REVIEWER_APPROVAL_STATUS and not reviewer_blockers:
                 disagreements[-1]["status"] = "resolved"
                 disagreements[-1]["resolution"] = "reviewer_revised_to_approved"
@@ -1024,6 +1010,11 @@ def execute_bounded_rework_loop(
         reviewer_eval = getattr(reviewer_step, "evaluation_result", None) or {}
         reviewer_blockers = list(reviewer_eval.get("blockers") or [])
         reviewer_status = str(reviewer_eval.get("status") or "not_evaluated")
+        reviewer_structured_output = _step_structured_output(current_snapshot, 1)
+        current_reviewer_packet = _with_reviewer_findings(
+            current_reviewer_packet,
+            _extract_reviewer_findings(reviewer_structured_output),
+        )
         engineer_step = engineer_result.state_snapshot.planned_steps[0]
 
         review_iterations_completed += 1
@@ -1041,21 +1032,11 @@ def execute_bounded_rework_loop(
             )
         )
 
-        reviewer_outcome = _classify_reviewer_outcome(
+        reviewer_fail_closed_reason = _reviewer_fail_closed_reason(
             reviewer_status=reviewer_status,
-            reviewer_runner_status=_step_runner_status(reviewer_step),
             reviewer_blockers=reviewer_blockers,
-            reviewer_structured_output=_step_structured_output(current_snapshot, 1),
-            reviewer_packet=current_reviewer_packet,
-            current_test_summary=current_test_summary,
-            attempts_remaining=max(max_review_iterations - review_iterations_completed, 0),
         )
-        if reviewer_outcome["category"] in {
-            REVIEWER_DECISION_TERMINAL_BLOCKED,
-            REVIEWER_DECISION_INVALID,
-            REVIEWER_DECISION_UNAVAILABLE,
-        }:
-            reviewer_fail_closed_reason = str(reviewer_outcome["reason"] or "reviewer_verdict_blocked")
+        if reviewer_fail_closed_reason is not None:
             final_snapshot = replace(
                 current_snapshot,
                 state="rework_loop_reviewer_fail_closed",
@@ -1090,11 +1071,6 @@ def execute_bounded_rework_loop(
                 model_escalations=model_escalations,
                 tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
-                review_overrides=_review_overrides_from_outcome(
-                    outcome=reviewer_outcome,
-                    rework_attempted=bool(appended_rework_context),
-                    rework_exhausted=reviewer_outcome["reason"].startswith("rework_exhausted_after_"),
-                ),
                 test_summary=current_test_summary,
             )
 
@@ -1139,6 +1115,16 @@ def execute_bounded_rework_loop(
                 test_summary=current_test_summary,
             )
 
+        appended_rework_context.append(
+            _build_rework_context(
+                iteration_index=review_iterations_completed,
+                reviewer_eval=reviewer_eval,
+                reviewer_structured_output=_step_structured_output(current_snapshot, 1),
+                reviewer_packet=current_reviewer_packet,
+                test_summary=current_test_summary,
+            )
+        )
+
         if review_iterations_completed >= max_review_iterations:
             final_snapshot = replace(
                 current_snapshot,
@@ -1164,7 +1150,12 @@ def execute_bounded_rework_loop(
                 completion_allowed=False,
                 candidate_complete=False,
                 user_action_required=True,
-                blocked_reason="review_loop_limit_exceeded",
+                blocked_reason=_rework_exhausted_reason(
+                    reviewer_status=reviewer_status,
+                    reviewer_blockers=reviewer_blockers,
+                    reviewer_packet=current_reviewer_packet,
+                    test_summary=current_test_summary,
+                ),
                 git_gate=current_git_gate,
                 reviewer_packet=current_reviewer_packet,
                 subagent_runs=accumulated_subagent_runs,
@@ -1178,16 +1169,6 @@ def execute_bounded_rework_loop(
             )
 
         pending_reviewer_blockers = list(reviewer_blockers)
-        appended_rework_context.append(
-            _build_rework_context(
-                iteration_index=review_iterations_completed,
-                reviewer_eval=reviewer_eval,
-                reviewer_structured_output=_step_structured_output(current_snapshot, 1),
-                reviewer_packet=current_reviewer_packet,
-                reviewer_outcome=reviewer_outcome,
-                current_test_summary=current_test_summary,
-            )
-        )
 
 
 def evaluate_pipeline_rework_loop_fuse(
@@ -1814,10 +1795,9 @@ def _blocked_final_response_text(
         "engineer_result_invalid",
         "missing_structured_output",
         "max_iterations_plain_text_output",
-        "reviewer_requested_rework_missing_test_evidence",
-        "rework_exhausted_after_missing_test_evidence",
-        "ordinary_reviewer_findings",
+        "review_loop_limit_exceeded",
         "rework_exhausted_after_ordinary_reviewer_findings",
+        "rework_exhausted_after_missing_test_evidence",
     }:
         return None
     lines = [
@@ -1870,29 +1850,29 @@ def _blocked_final_response_text(
                 "No verified passing test result is available.",
             ]
         )
-    elif blocked_reason in {"reviewer_requested_rework_missing_test_evidence", "rework_exhausted_after_missing_test_evidence"}:
+    elif blocked_reason in {
+        "review_loop_limit_exceeded",
+        "rework_exhausted_after_ordinary_reviewer_findings",
+        "rework_exhausted_after_missing_test_evidence",
+    }:
         lines.extend(
             [
-                "- Reviewer requested rework because test evidence is missing for a reviewable diff.",
-                "- The controlled test summary does not show a captured execution of the requested pytest command.",
-                (
-                    "- Rework attempts were exhausted before verified test evidence was produced."
-                    if blocked_reason == "rework_exhausted_after_missing_test_evidence"
-                    else "- Another bounded rework attempt is required to run or capture the requested test evidence."
-                ),
+                "- Reviewer requested implementation rework.",
+                "- Rework attempts were exhausted before the reviewer issues were resolved.",
             ]
         )
-    elif blocked_reason in {"ordinary_reviewer_findings", "rework_exhausted_after_ordinary_reviewer_findings"}:
-        lines.extend(
-            [
-                "- Reviewer requested implementation rework for ordinary code-review findings.",
-                (
-                    "- Rework attempts were exhausted before the reviewer findings were resolved."
-                    if blocked_reason == "rework_exhausted_after_ordinary_reviewer_findings"
-                    else "- Another bounded rework attempt is required before the reviewer can approve the change."
-                ),
-            ]
-        )
+        if blocked_reason == "rework_exhausted_after_missing_test_evidence":
+            lines.append("- Missing test evidence remained unresolved at the review boundary.")
+        findings = list(reviewer_packet.get("review_findings") or [])
+        if findings:
+            lines.extend(["", "Reviewer findings:"])
+            for item in findings:
+                if isinstance(item, dict):
+                    summary = _safe_test_text(item.get("summary"))
+                else:
+                    summary = _safe_test_text(item)
+                if summary:
+                    lines.append(f"- {summary}")
     else:
         lines.extend(
             [
@@ -1903,15 +1883,15 @@ def _blocked_final_response_text(
     engineer_summary = _safe_test_text(reviewer_packet.get("engineer_summary"))
     if blocked_reason == "max_iterations_plain_text_output" and engineer_summary:
         lines.extend(["", "Preserved diagnostic summary:", engineer_summary])
+    test_status = _safe_test_text((test_summary or {}).get("status"))
+    test_command = _safe_test_text((test_summary or {}).get("command"))
+    if test_status:
+        lines.append(f"Test status: {test_status}")
+    if test_command:
+        lines.append(f"Test command: {test_command}")
     safe_summary = _safe_test_text((test_summary or {}).get("blocked_reason"))
     if safe_summary and safe_summary not in {"test_command_denied", "engineer_result_invalid"}:
         lines.append(f"Blocked reason: {safe_summary}")
-    test_status = _safe_test_text((test_summary or {}).get("status"))
-    if test_status:
-        lines.append(f"Test status: {test_status}")
-    test_command = _safe_test_text((test_summary or {}).get("command"))
-    if test_command:
-        lines.append(f"Test command: {test_command}")
     detail = _safe_test_text(reviewer_packet.get("blocked_reason_detail"))
     if detail and detail not in {"missing_structured_output", "invalid_engineer_structured_output"}:
         lines.append(f"Blocked reason detail: {detail}")
@@ -2122,6 +2102,85 @@ def _apply_step_tests(
         step_kind=step_kind,
         step_subagent_id=step_subagent_id,
     ).to_safe_dict()
+
+
+def _preserve_requested_test_summary(
+    *,
+    current: dict[str, Any],
+    original_task: str,
+    engineer_output: dict[str, Any],
+    runner_result: Any,
+    runtime_context: ControlledRuntimeContext | None,
+    test_workspace: str | None,
+) -> dict[str, Any]:
+    if str(current.get("status") or "") != "not_requested":
+        return current
+    if not test_workspace:
+        return current
+    for source, command in _candidate_test_commands(
+        original_task=original_task,
+        engineer_output=engineer_output,
+        runner_result=runner_result,
+    ):
+        try:
+            return preserve_explicit_pytest_command(
+                raw_command=command,
+                test_workspace=test_workspace,
+                source=source,
+            )
+        except ValueError:
+            continue
+    return current
+
+
+def _candidate_test_commands(
+    *,
+    original_task: str,
+    engineer_output: dict[str, Any],
+    runner_result: Any,
+) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(source: str, text: Any) -> None:
+        for command in _extract_explicit_pytest_commands(text):
+            if command in seen:
+                continue
+            seen.add(command)
+            candidates.append((source, command))
+
+    for item in list(engineer_output.get("tests") or []):
+        _add("engineer_output", item)
+    if isinstance(runner_result, dict):
+        _add("engineer_output", runner_result.get("output_text"))
+        for tool_call in _mapping_list(runner_result.get("tool_call_summaries")):
+            if str(tool_call.get("tool_name") or "") == "pytest":
+                _add("prompt_via_pytest_intent", original_task)
+                break
+    _add("prompt", original_task)
+    return candidates
+
+
+def _extract_explicit_pytest_commands(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        lines = [line.strip() for line in value.splitlines()]
+        if len(lines) == 1:
+            lines.append(value.strip())
+    else:
+        lines = [str(value).strip()]
+    commands: list[str] = []
+    prefixes = ("venv/bin/pytest ", ".venv/bin/pytest ", "pytest ", "python -m pytest ", "python3 -m pytest ")
+    for line in lines:
+        if not line:
+            continue
+        normalized = line.strip("`").strip()
+        if normalized in {"venv/bin/pytest", ".venv/bin/pytest", "pytest"}:
+            continue
+        if any(normalized.startswith(prefix) for prefix in prefixes):
+            commands.append(normalized)
+    return commands
 
 
 def _test_summary_disabled(runtime_context: ControlledRuntimeContext | None) -> dict[str, Any]:
@@ -2382,6 +2441,49 @@ def _reviewer_packet_metadata(*, packet: Any) -> dict[str, Any]:
     }
 
 
+def _with_reviewer_findings(current: dict[str, Any], findings: list[str]) -> dict[str, Any]:
+    if not findings:
+        return current
+    updated = dict(current)
+    updated["review_findings"] = list(findings)
+    return updated
+
+
+def _extract_reviewer_findings(reviewer_structured_output: dict[str, Any]) -> list[str]:
+    findings: list[str] = []
+    for item in list(reviewer_structured_output.get("findings") or []):
+        if not isinstance(item, dict):
+            continue
+        summary = _safe_test_text(item.get("summary"))
+        if summary:
+            findings.append(summary)
+    return findings
+
+
+_CATASTROPHIC_REVIEW_CODES = {
+    "credential_exfiltration_risk",
+    "credential_exposure",
+    "destructive_operation",
+    "unrelated_repo_mutation",
+    "uninspectable_diff",
+    "severely_broken_code",
+    "safety_policy_violation",
+    "unsafe_bypass",
+}
+
+_CATASTROPHIC_REVIEW_TEXT = (
+    "credential exfiltration",
+    "credential exposure",
+    "secret leak",
+    "destructive operation",
+    "rm -rf",
+    "unrelated mutation",
+    "cannot inspect diff",
+    "uninspectable diff",
+    "unsafe bypass",
+)
+
+
 def _compose_engineer_message(*, original_task: str, appended_rework_context: list[dict[str, Any]]) -> str:
     if not appended_rework_context:
         return original_task
@@ -2446,8 +2548,7 @@ def _build_rework_context(
     reviewer_eval: dict[str, Any],
     reviewer_structured_output: dict[str, Any],
     reviewer_packet: dict[str, Any],
-    reviewer_outcome: dict[str, Any] | None = None,
-    current_test_summary: dict[str, Any] | None = None,
+    test_summary: dict[str, Any],
 ) -> dict[str, Any]:
     blocking_findings: list[str] = []
     non_blocking_findings: list[str] = []
@@ -2467,8 +2568,6 @@ def _build_rework_context(
     return {
         "review_iteration": iteration_index,
         "reviewer_verdict": str(reviewer_eval.get("status") or "not_evaluated"),
-        "reviewer_decision_category": str((reviewer_outcome or {}).get("category") or REVIEWER_DECISION_REWORK_REQUIRED),
-        "reviewer_reason": str((reviewer_outcome or {}).get("reason") or "ordinary_reviewer_findings"),
         "reviewer_blockers": [str(item) for item in list(reviewer_eval.get("blockers") or []) if item],
         "blocking_findings": blocking_findings,
         "non_blocking_findings": non_blocking_findings,
@@ -2478,10 +2577,8 @@ def _build_rework_context(
             "material_change_status": git_payload.get("material_change_status"),
             "review_required": bool(safe_packet.get("review_required")),
         },
-        "tests": {
-            "status": str((current_test_summary or {}).get("status") or "unknown"),
-            "command": _safe_test_text((current_test_summary or {}).get("command")),
-        },
+        "test_status": str(test_summary.get("status") or "unknown"),
+        "test_command": _safe_test_text(test_summary.get("command")),
     }
 
 
@@ -2823,126 +2920,52 @@ def _engineer_fail_closed_reason(state_snapshot: Any, *, material_changes_presen
     return None
 
 
-def _classify_reviewer_outcome(
-    *,
-    reviewer_status: str,
-    reviewer_runner_status: str,
-    reviewer_blockers: list[str],
-    reviewer_structured_output: dict[str, Any],
-    reviewer_packet: dict[str, Any],
-    current_test_summary: dict[str, Any] | None,
-    attempts_remaining: int,
-) -> dict[str, Any]:
-    if reviewer_status == REVIEWER_APPROVAL_STATUS and not reviewer_blockers:
-        return {"category": REVIEWER_DECISION_APPROVED, "reason": "approved", "terminal": False}
-    if reviewer_runner_status == "not_invoked":
-        return {"category": REVIEWER_DECISION_UNAVAILABLE, "reason": "reviewer_unavailable", "terminal": True}
-    if reviewer_runner_status != "succeeded":
-        return {"category": REVIEWER_DECISION_UNAVAILABLE, "reason": "reviewer_unavailable", "terminal": True}
-    if reviewer_status == "invalid_structured_output":
-        return {"category": REVIEWER_DECISION_INVALID, "reason": "reviewer_result_invalid", "terminal": True}
-    if reviewer_status in {"not_evaluated", "", "None"}:
-        return {"category": REVIEWER_DECISION_UNAVAILABLE, "reason": "reviewer_unavailable", "terminal": True}
-
-    catastrophic_reason = _catastrophic_reviewer_reason(
-        reviewer_blockers=reviewer_blockers,
-        reviewer_structured_output=reviewer_structured_output,
-    )
-    reason = _reviewer_rework_reason(
-        reviewer_blockers=reviewer_blockers,
-        reviewer_structured_output=reviewer_structured_output,
-        reviewer_packet=reviewer_packet,
-        current_test_summary=current_test_summary,
-    )
+def _reviewer_fail_closed_reason(*, reviewer_status: str, reviewer_blockers: list[str]) -> str | None:
+    if reviewer_status == REVIEWER_APPROVAL_STATUS:
+        return None if not reviewer_blockers else "reviewer_verdict_blocked"
+    catastrophic_reason = _catastrophic_reviewer_reason(reviewer_blockers)
     if catastrophic_reason is not None:
-        return {"category": REVIEWER_DECISION_TERMINAL_BLOCKED, "reason": catastrophic_reason, "terminal": True}
-    if attempts_remaining <= 0:
-        return {
-            "category": REVIEWER_DECISION_TERMINAL_BLOCKED,
-            "reason": _rework_exhausted_reason(reason),
-            "terminal": True,
-        }
-    return {"category": REVIEWER_DECISION_REWORK_REQUIRED, "reason": reason, "terminal": False}
+        return catastrophic_reason
+    if reviewer_blockers:
+        return None
+    if reviewer_status == "invalid_structured_output":
+        return "reviewer_result_invalid"
+    if reviewer_status in {"blocked", "needs_review", "needs_escalation"}:
+        return "reviewer_verdict_blocked"
+    if reviewer_status in {"not_evaluated", "", "None"}:
+        return "reviewer_unavailable"
+    return "reviewer_result_invalid"
 
 
-def _reviewer_rework_reason(
-    *,
-    reviewer_blockers: list[str],
-    reviewer_structured_output: dict[str, Any],
-    reviewer_packet: dict[str, Any],
-    current_test_summary: dict[str, Any] | None,
-) -> str:
-    tests_payload = dict((reviewer_packet.get("safe_packet") or {}).get("tests") or {})
-    test_status = str((current_test_summary or {}).get("status") or tests_payload.get("status") or "").strip()
-    missing_evidence_statuses = {"not_requested", "requested_not_executed", "unavailable", "invalid", "missing"}
-    combined_text = " ".join(
-        [
-            *[str(item) for item in reviewer_blockers if item],
-            *[
-                str(item.get("summary") or "")
-                for item in list(reviewer_structured_output.get("findings") or [])
-                if isinstance(item, dict)
-            ],
-        ]
-    ).lower()
-    if test_status in missing_evidence_statuses and (
-        "test" in combined_text or "pytest" in combined_text
-    ):
-        return "missing_test_evidence"
-    if "test evidence" in combined_text or "missing test" in combined_text:
-        return "missing_test_evidence"
-    return "ordinary_reviewer_findings"
-
-
-def _catastrophic_reviewer_reason(*, reviewer_blockers: list[str], reviewer_structured_output: dict[str, Any]) -> str | None:
-    for item in list(reviewer_structured_output.get("findings") or []):
-        if not isinstance(item, dict):
+def _catastrophic_reviewer_reason(reviewer_blockers: list[str]) -> str | None:
+    for raw_item in reviewer_blockers:
+        blocker = str(raw_item or "").strip()
+        if not blocker:
             continue
-        code = str(item.get("code") or "").lower()
-        summary = str(item.get("summary") or "").lower()
-        if code in _CATASTROPHIC_REVIEW_CODES:
-            return code
-        if any(marker in summary for marker in _CATASTROPHIC_REVIEW_TEXT):
-            return code or "reviewer_verdict_blocked"
-    for blocker in reviewer_blockers:
-        lowered = str(blocker).lower()
-        if any(marker in lowered for marker in _CATASTROPHIC_REVIEW_TEXT):
-            return "reviewer_verdict_blocked"
+        normalized = blocker.lower()
+        if normalized in _CATASTROPHIC_REVIEW_CODES:
+            return "terminal_blocked"
+        if any(marker in normalized for marker in _CATASTROPHIC_REVIEW_TEXT):
+            return "terminal_blocked"
     return None
 
 
-def _rework_exhausted_reason(reason: str) -> str:
-    if reason == "missing_test_evidence":
-        return "rework_exhausted_after_missing_test_evidence"
-    if reason == "ordinary_reviewer_findings":
-        return "rework_exhausted_after_ordinary_reviewer_findings"
-    return f"rework_exhausted_after_{reason}"
-
-
-def _review_overrides_from_outcome(
+def _rework_exhausted_reason(
     *,
-    outcome: dict[str, Any],
-    rework_attempted: bool,
-    rework_exhausted: bool,
-) -> dict[str, Any]:
-    category = str(outcome.get("category") or REVIEWER_DECISION_INVALID)
-    if category == REVIEWER_DECISION_REWORK_REQUIRED:
-        final_decision = "changes_requested"
-    elif category == REVIEWER_DECISION_APPROVED:
-        final_decision = "approved"
-    elif category == REVIEWER_DECISION_UNAVAILABLE:
-        final_decision = "unable_to_review"
-    else:
-        final_decision = "blocker_maintained"
-    return {
-        "status": category,
-        "reviewer_approved": category == REVIEWER_DECISION_APPROVED,
-        "final_review_decision": final_decision,
-        "decision_category": category,
-        "decision_reason": outcome.get("reason"),
-        "rework_attempted": rework_attempted,
-        "rework_exhausted": rework_exhausted,
-    }
+    reviewer_status: str,
+    reviewer_blockers: list[str],
+    reviewer_packet: dict[str, Any],
+    test_summary: dict[str, Any],
+) -> str:
+    if reviewer_status in {"blocked", "needs_review", "needs_escalation"}:
+        findings = list(reviewer_packet.get("review_findings") or [])
+        if findings or reviewer_blockers:
+            if any("missing_test_evidence" in str(item or "").lower() for item in reviewer_blockers):
+                return "rework_exhausted_after_missing_test_evidence"
+            return "rework_exhausted_after_ordinary_reviewer_findings"
+    if str(test_summary.get("status") or "") == "requested_not_executed":
+        return "rework_exhausted_after_missing_test_evidence"
+    return "review_loop_limit_exceeded"
 
 
 def _stable_text_hash(value: str | None) -> str | None:

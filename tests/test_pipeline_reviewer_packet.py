@@ -302,6 +302,7 @@ def test_long_text_is_bounded() -> None:
         ({"status": "failed"}, "failed"),
         ({"status": "not_run"}, "not_run"),
         ({"status": "not_requested"}, "not_requested"),
+        ({"status": "requested_not_executed"}, "requested_not_executed"),
         ({}, "unknown"),
         (None, "unknown"),
     ],
@@ -506,3 +507,32 @@ def test_test_summary_results_are_sanitized_and_path_safe() -> None:
     assert payload["tests"]["results"][0]["command"] == ["venv/bin/pytest", "-q", "tests/test_example.py"]
     assert payload["tests"]["results"][0]["cwd"] == "tmp-worktree"
     assert "password=123" not in json.dumps(payload["tests"], sort_keys=True)
+
+
+def test_requested_not_executed_test_summary_is_preserved_with_command() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+
+    packet = module.build_reviewer_packet(
+        pipeline_id="engineering_review_pipeline",
+        task_summary="Preserve explicit pytest request when execution evidence is missing",
+        engineer_output=_engineer_output(
+            status="failed",
+            summary="plain text diagnostic summary",
+            validation_status="invalid_structured_output",
+        ),
+        baseline_snapshot=_snapshot(head_sha="abc123"),
+        post_snapshot=_snapshot(head_sha="def456", staged_files=("b.py",)),
+        git_result=_git_result(changed_files=["b.py"], staged_files=["b.py"]),
+        engineer_evaluation_status="invalid_structured_output",
+        test_summary={
+            "status": "requested_not_executed",
+            "command": "venv/bin/pytest -q tests/test_smoke_square.py",
+            "summary": "requested test command was preserved but not executed",
+        },
+    )
+
+    payload = packet.to_safe_dict()
+
+    assert payload["tests"]["status"] == "requested_not_executed"
+    assert payload["tests"]["command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert "preserved but not executed" in (payload["tests"]["summary"] or "")

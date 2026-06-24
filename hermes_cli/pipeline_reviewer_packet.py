@@ -19,7 +19,16 @@ _BLOCKING_GIT_STATUSES = {
 _BLOCKING_ENGINEER_STATUSES = {"failed", "blocked"}
 _DIFF_MARKERS = ("diff --git", "@@", "+++", "---")
 _SENSITIVE_PARTS = ("api_key", "token", "password", "secret", "credential", "env")
-_VALID_TEST_STATUSES = {"not_run", "not_requested", "passed", "failed", "blocked", "invalid", "unknown"}
+_VALID_TEST_STATUSES = {
+    "not_run",
+    "not_requested",
+    "requested_not_executed",
+    "passed",
+    "failed",
+    "blocked",
+    "invalid",
+    "unknown",
+}
 
 
 @dataclass(frozen=True)
@@ -167,7 +176,7 @@ def normalize_test_summary(test_summary: Any) -> dict[str, Any]:
         status = "unknown"
     normalized = {
         "status": status,
-        "command": _clean_optional_text(payload.get("command"), max_length=512),
+        "command": _clean_test_command_text(payload.get("command"), max_length=512),
         "summary": _clean_optional_text(payload.get("summary")),
         "blocked_reason": _clean_optional_text(payload.get("blocked_reason"), max_length=128),
     }
@@ -338,6 +347,25 @@ def _clean_optional_text(value: Any, *, max_length: int = _MAX_TEXT_LENGTH) -> s
             continue
         if line:
             lines.append(line)
+    cleaned = " ".join(lines).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) <= max_length:
+        return cleaned
+    return cleaned[: max_length - 12].rstrip() + " [truncated]"
+
+
+def _clean_test_command_text(value: Any, *, max_length: int = 512) -> str | None:
+    if value is None:
+        return None
+    lines: list[str] = []
+    for raw_line in str(value).splitlines():
+        line = raw_line.strip()
+        if any(marker in line for marker in _DIFF_MARKERS):
+            continue
+        if not line:
+            continue
+        lines.append(line)
     cleaned = " ".join(lines).strip()
     if not cleaned:
         return None
