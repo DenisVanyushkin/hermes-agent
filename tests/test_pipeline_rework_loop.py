@@ -2732,6 +2732,130 @@ def test_normal_reviewer_path_surfaces_findings_in_packet_and_final_response(tmp
     assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in final_response
 
 
+def test_reviewer_fail_closed_final_response_is_diagnostic() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    reviewer_packet = {
+        "packet_status": "review_failed",
+        "blocked_reason_detail": "reviewer_invalid_structured_output",
+        "review_findings": ["Reviewer envelope was invalid after reading the patch."],
+    }
+    test_summary = {
+        "status": "requested_not_executed",
+        "command": "venv/bin/pytest -q tests/test_smoke_square.py",
+    }
+
+    invalid_text = module._blocked_final_response_text(
+        blocked_reason="reviewer_result_invalid",
+        test_summary=test_summary,
+        reviewer_packet=reviewer_packet,
+    )
+    blocked_text = module._blocked_final_response_text(
+        blocked_reason="reviewer_verdict_blocked",
+        test_summary=test_summary,
+        reviewer_packet={
+            **reviewer_packet,
+            "packet_status": "blocked",
+            "review_findings": ["Reviewer blocked the patch for an unresolved correctness issue."],
+        },
+    )
+    unavailable_text = module._blocked_final_response_text(
+        blocked_reason="reviewer_unavailable",
+        test_summary=test_summary,
+        reviewer_packet={
+            **reviewer_packet,
+            "packet_status": "not_evaluated",
+            "review_findings": [],
+        },
+    )
+
+    assert invalid_text is not None
+    assert "reviewer could not produce a valid review" in invalid_text.lower()
+    assert "Test status: requested_not_executed" in invalid_text
+    assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in invalid_text
+    assert "Reviewer status: review_failed" in invalid_text
+
+    assert blocked_text is not None
+    assert "reviewer blocked completion" in blocked_text.lower()
+    assert "Reviewer blocked the patch for an unresolved correctness issue." in blocked_text
+
+    assert unavailable_text is not None
+    assert "reviewer did not complete a usable review" in unavailable_text.lower()
+    assert "Reviewer status: not_evaluated" in unavailable_text
+
+
+def test_terminal_blocked_final_response_is_sanitized() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._blocked_final_response_text(
+        blocked_reason="terminal_blocked",
+        test_summary={"status": "passed", "command": "venv/bin/pytest -q tests/test_smoke_square.py"},
+        reviewer_packet={
+            "packet_status": "blocked",
+            "blocked_reason_detail": "credential_exfiltration_risk",
+            "review_findings": [
+                "Patch leaks protected data to stdout.",
+                "password=abc123 should never appear in the response.",
+            ],
+        },
+    )
+
+    assert text is not None
+    assert "terminal safety block" in text.lower()
+    assert "Blocked reason: terminal_blocked" in text
+    assert "Blocked reason detail: credential_exfiltration_risk" in text
+    assert "Patch leaks protected data to stdout." in text
+    assert "password=abc123" not in text
+    assert "Test status: passed" in text
+
+
+def test_git_gate_blocked_final_response_is_diagnostic() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    baseline_text = module._blocked_final_response_text(
+        blocked_reason="baseline_dirty",
+        test_summary={"status": "not_requested"},
+        reviewer_packet={"packet_status": "ready_for_review"},
+    )
+    diff_text = module._blocked_final_response_text(
+        blocked_reason="git_diff_failed",
+        test_summary={"status": "not_requested"},
+        reviewer_packet={"packet_status": "ready_for_review"},
+    )
+
+    assert baseline_text is not None
+    assert "workspace baseline was not clean" in baseline_text.lower()
+    assert "repository baseline must be clean" in baseline_text.lower()
+
+    assert diff_text is not None
+    assert "material diff could not be trusted" in diff_text.lower()
+    assert "Blocked reason: git_diff_failed" in diff_text
+
+
+def test_malformed_test_payload_final_response_is_diagnostic() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._blocked_final_response_text(
+        blocked_reason="test_command_denied",
+        test_summary={
+            "status": "invalid",
+            "blocked_reason": "test_command_denied",
+            "results": [
+                {
+                    "denied_command_raw_sanitized": "{status: observed, summary: workspace only contains tracked.txt}",
+                    "validator_reason": "malformed_test_payload",
+                }
+            ],
+        },
+        reviewer_packet={"packet_status": "disabled"},
+    )
+
+    assert text is not None
+    assert "malformed test payload was blocked" in text.lower()
+    assert "Validator rule: malformed_test_payload" in text
+    assert "Denied payload: {status: observed, summary: workspace only contains tracked.txt}" in text
+
+
 def test_missing_test_evidence_exhaustion_returns_diagnostic_text() -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
 
