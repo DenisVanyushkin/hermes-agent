@@ -24,6 +24,7 @@ DEFAULT_ROUTER_LLM_PROVIDER = "openai-codex"
 DEFAULT_ROUTER_LLM_MODEL = "gpt-5.4-mini"
 DEFAULT_ROUTER_LLM_TIMEOUT_SECONDS = 10.0
 DEFAULT_ROUTER_LLM_MIN_CONFIDENCE = 0.70
+DEFAULT_ROUTER_LLM_MAX_ATTEMPTS = 2
 VALID_ROUTER_STRATEGIES = {"deterministic", "llm"}
 VALID_LLM_FALLBACK_STRATEGIES = {"deterministic", "fail_closed"}
 
@@ -198,6 +199,44 @@ _HEURISTIC_ENGINEERING_FALLBACK_MUTATION_KEYWORDS = (
     "write",
     "edit",
     "patch",
+)
+_STRONG_ENGINEERING_MUTATION_KEYWORDS = (
+    "implement",
+    "implementation",
+    "create ",
+    "create file",
+    "update file",
+    "change file",
+    "code implementation",
+    "create test",
+    "update test",
+    "add test",
+    "создай файл",
+    "создай",
+    "добавь тест",
+    "добавь тесты",
+    "обнови тест",
+    "обнови тесты",
+    "запусти pytest",
+    "запусти только этот тест",
+    "инженерную правку",
+    "правку в репозитории",
+)
+_STRONG_ENGINEERING_SAFETY_KEYWORDS = (
+    "do not commit",
+    "do not push",
+    "do not restart",
+    "do not change live config",
+    "не делай commit",
+    "не делай push",
+    "не перезапускай gateway",
+    "не меняй live config",
+)
+_STRONG_ENGINEERING_TEST_KEYWORDS = (
+    "pytest",
+    "venv/bin/pytest",
+    "tests/",
+    "test_",
 )
 _HEURISTIC_ENGINEERING_FALLBACK_ANCHORS = (
     "hermes autonomous pipeline validation",
@@ -578,18 +617,38 @@ class LlmPipelineRouter(PipelineRouter):
                 },
                 loaded_specs=self._loaded_specs,
             )
+        if self._is_deterministic_strong_engineering_candidate(user_message, guardrail_decision):
+            return parse_router_decision(
+                {
+                    "pipeline_session_id": guardrail_decision.pipeline_session_id,
+                    "router_subagent_id": guardrail_decision.router_subagent_id,
+                    "status": "selected",
+                    "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+                    "fallback_pipeline_id": None,
+                    "confidence": max(guardrail_decision.confidence, self._min_confidence),
+                    "reasoning_summary": "The deterministic router found strong concrete engineering mutation signals, so Hermes selected the engineering pipeline before consulting the LLM router.",
+                    "requires_clarification": False,
+                    "policy_block_reason": guardrail_decision.policy_block_reason,
+                    "routing_failure_reason": None,
+                    "matched_signals": list(guardrail_decision.matched_signals),
+                    "alternatives": [alternative.__dict__ for alternative in guardrail_decision.alternatives],
+                    "fallback_safe": False,
+                    "selected_provider": self._provider,
+                    "selected_model": self._model,
+                    "actual_provider": None,
+                    "actual_model": None,
+                    "routing_fallback_used": False,
+                    "routing_fallback_reason": None,
+                    "router_strategy": "deterministic_strong",
+                    "routing_confidence_source": "deterministic_strong",
+                },
+                loaded_specs=self._loaded_specs,
+            )
 
         try:
-            raw = self._llm_call(
-                provider=self._provider,
-                model=self._model,
-                timeout_seconds=self._timeout_seconds,
-                messages=_build_router_messages(
-                    self._loaded_specs,
-                    user_message,
-                    routing_context=routing_context,
-                    candidate_hints=self._deterministic_router.candidate_hints(user_message),
-                ),
+            raw = self._call_llm_with_retry(
+                user_message,
+                routing_context=routing_context,
             )
             payload = _coerce_llm_router_payload(raw)
             payload["pipeline_session_id"] = pipeline_session_id
@@ -844,6 +903,33 @@ class LlmPipelineRouter(PipelineRouter):
             loaded_specs=self._loaded_specs,
         )
 
+    def _call_llm_with_retry(
+        self,
+        user_message: str,
+        *,
+        routing_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        last_exc: Exception | None = None
+        for attempt in range(1, DEFAULT_ROUTER_LLM_MAX_ATTEMPTS + 1):
+            try:
+                return self._llm_call(
+                    provider=self._provider,
+                    model=self._model,
+                    timeout_seconds=self._timeout_seconds,
+                    messages=_build_router_messages(
+                        self._loaded_specs,
+                        user_message,
+                        routing_context=routing_context,
+                        candidate_hints=self._deterministic_router.candidate_hints(user_message),
+                    ),
+                )
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= DEFAULT_ROUTER_LLM_MAX_ATTEMPTS or not self._is_retryable_llm_exception(exc):
+                    raise
+        assert last_exc is not None
+        raise last_exc
+
     def _heuristic_engineering_timeout_fallback(
         self,
         user_message: str,
@@ -994,7 +1080,16 @@ class LlmPipelineRouter(PipelineRouter):
             return True
         return False
 
-    def _is_strong_engineering_fallback_candidate(
+    def _is_retryable_llm_exception(self, exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            return True
+        normalized = _exception_summary(exc).lower()
+        return any(
+            marker in normalized
+            for marker in ("timeout", "tempor", "bad gateway", "service unavailable", "connection reset")
+        )
+
+    def _is_deterministic_strong_engineering_candidate(
         self,
         user_message: str,
         base: RouterDecision,
@@ -1002,15 +1097,23 @@ class LlmPipelineRouter(PipelineRouter):
         if base.status != "selected" or base.selected_pipeline_id != ENGINEERING_PIPELINE_ID:
             return False
         normalized = _normalize_text(user_message.strip())
-        if not _ENGINEERING_PATH_PATTERN.search(normalized):
-            return False
-        if not (
-            _matches_any(normalized, _ENGINEERING_MUTATION_KEYWORDS)
-            or _matches_any(normalized, _HEURISTIC_ENGINEERING_FALLBACK_MUTATION_KEYWORDS)
-        ):
-            return False
         if _looks_ambiguous(normalized):
             return False
+        if not _ENGINEERING_PATH_PATTERN.search(normalized):
+            return False
+        if not _matches_any(normalized, _STRONG_ENGINEERING_MUTATION_KEYWORDS):
+            return False
+        has_test_signal = _matches_any(normalized, _STRONG_ENGINEERING_TEST_KEYWORDS)
+        return has_test_signal
+
+    def _is_strong_engineering_fallback_candidate(
+        self,
+        user_message: str,
+        base: RouterDecision,
+    ) -> bool:
+        if not self._is_deterministic_strong_engineering_candidate(user_message, base):
+            return False
+        normalized = _normalize_text(user_message.strip())
 
         old_smoke_marker_shape = (
             _matches_any(normalized, _HEURISTIC_ENGINEERING_FALLBACK_TEST_KEYWORDS)

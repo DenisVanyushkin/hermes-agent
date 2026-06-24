@@ -24,6 +24,34 @@ from hermes_cli.pipeline_specs import load_pipeline_specs
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+SMOKE_013_PROMPT = """Нужно сделать маленькую инженерную правку в репозитории.
+
+Задача:
+Добавь простой Python utility для вычисления квадрата числа и тест к нему.
+
+Требования:
+1. Создай файл hermes_cli/smoke_square.py.
+2. В нем должна быть функция square_number(value), которая возвращает квадрат числа.
+3. Функция должна принимать int или float.
+4. Для bool нужно выбрасывать TypeError, потому что bool не должен считаться числом в этой utility.
+5. Для остальных нечисловых типов нужно выбрасывать TypeError.
+6. Добавь marker SQUARE-013-20260624 в комментарий или docstring файла.
+7. Добавь тесты в tests/test_smoke_square.py:
+   - square_number(4) == 16
+   - square_number(-3) == 9
+   - square_number(2.5) == 6.25
+   - bool rejected with TypeError
+   - string rejected with TypeError
+
+После изменения запусти только этот тест:
+venv/bin/pytest -q tests/test_smoke_square.py
+
+Не делай commit.
+Не делай push.
+Не перезапускай gateway.
+Не меняй live config.
+"""
+
 
 def _copy_spec_tree(tmp_path: Path) -> Path:
     repo_root = tmp_path / "repo"
@@ -373,6 +401,97 @@ def test_llm_router_falls_back_to_deterministic_strategy_on_failure(tmp_path: Pa
     assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
 
 
+def test_llm_router_uses_deterministic_strong_route_before_llm_for_exact_013_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    def _llm_call_should_not_run(**kwargs):
+        raise AssertionError("llm router should not be invoked for deterministic strong engineering prompts")
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        llm_call=_llm_call_should_not_run,
+    )
+
+    decision = router.route(
+        SMOKE_013_PROMPT,
+        pipeline_session_id="sess-013-deterministic-strong",
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.router_strategy == "deterministic_strong"
+    assert decision.routing_fallback_used is False
+    assert decision.routing_failure_reason is None
+    assert "task_intent includes code_mutation" in decision.matched_signals
+    assert "target_paths match engineering_path_patterns" in decision.matched_signals
+
+
+def test_llm_router_timeout_retries_once_and_uses_retry_result_for_ambiguous_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+    attempts: list[int] = []
+
+    def _flaky_llm_call(**kwargs):
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            raise TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+        return {
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "confidence": 0.93,
+            "reasoning_summary": "retry succeeded",
+            "requires_clarification": False,
+            "alternatives": [],
+        }
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        llm_call=_flaky_llm_call,
+    )
+
+    decision = router.route(
+        "Исправь баг в Hermes",
+        pipeline_session_id="sess-llm-retry-success",
+    )
+
+    assert len(attempts) == 2
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.routing_failure_reason is None
+
+
+def test_llm_router_timeout_retry_still_fails_closed_for_ambiguous_prompt(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+    attempts: list[int] = []
+
+    def _timing_out_llm_call(**kwargs):
+        attempts.append(len(attempts) + 1)
+        raise TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openrouter",
+        model="openrouter/owl-alpha",
+        fallback_strategy="fail_closed",
+        llm_call=_timing_out_llm_call,
+    )
+
+    decision = router.route(
+        "почини Hermes",
+        pipeline_session_id="sess-llm-retry-fail-closed",
+    )
+
+    assert len(attempts) == 2
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert "TimeoutError" in (decision.routing_failure_reason or "")
+
+
 def test_llm_router_returns_routing_failed_when_fail_closed(tmp_path: Path) -> None:
     loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
 
@@ -395,7 +514,7 @@ def test_llm_router_returns_routing_failed_when_fail_closed(tmp_path: Path) -> N
     assert "RuntimeError" in (decision.routing_failure_reason or "")
 
 
-def test_llm_router_timeout_uses_narrow_engineering_fallback_for_strong_smoke_prompt(tmp_path: Path) -> None:
+def test_llm_router_timeout_uses_deterministic_strong_route_for_strong_smoke_prompt(tmp_path: Path) -> None:
     loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
 
     router = LlmPipelineRouter(
@@ -423,11 +542,10 @@ def test_llm_router_timeout_uses_narrow_engineering_fallback_for_strong_smoke_pr
 
     assert decision.status == "selected"
     assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
-    assert decision.routing_fallback_used is True
-    assert decision.routing_fallback_reason is not None
-    assert "TimeoutError" in decision.routing_fallback_reason
-    assert "TimeoutError" in (decision.routing_failure_reason or "")
-    assert decision.router_strategy == "heuristic_timeout_fallback"
+    assert decision.routing_fallback_used is False
+    assert decision.routing_fallback_reason is None
+    assert decision.routing_failure_reason is None
+    assert decision.router_strategy == "deterministic_strong"
     assert decision.confidence >= 0.70
 
 
@@ -462,11 +580,10 @@ def test_llm_router_invalid_confidence_uses_narrow_engineering_fallback_for_stro
 
     assert decision.status == "selected"
     assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
-    assert decision.routing_fallback_used is True
-    assert decision.routing_confidence_source == "heuristic_strict"
-    assert decision.invalid_confidence_kind == "non_numeric"
-    assert decision.routing_fallback_reason is not None
-    assert "confidence" in decision.routing_fallback_reason.lower()
+    assert decision.routing_fallback_used is False
+    assert decision.routing_confidence_source == "deterministic_strong"
+    assert decision.invalid_confidence_kind is None
+    assert decision.routing_fallback_reason is None
 
 
 def test_llm_router_timeout_strict_engineering_fallback_exposes_confidence_source(tmp_path: Path) -> None:
@@ -495,11 +612,11 @@ def test_llm_router_timeout_strict_engineering_fallback_exposes_confidence_sourc
 
     assert decision.status == "selected"
     assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
-    assert decision.routing_fallback_used is True
-    assert decision.routing_confidence_source == "heuristic_strict"
+    assert decision.routing_fallback_used is False
+    assert decision.routing_confidence_source == "deterministic_strong"
 
 
-def test_llm_router_timeout_uses_engineering_fallback_for_runtime_analysis_prompt(tmp_path: Path) -> None:
+def test_llm_router_timeout_keeps_fail_closed_for_runtime_analysis_prompt(tmp_path: Path) -> None:
     loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
 
     router = LlmPipelineRouter(
@@ -527,13 +644,12 @@ def test_llm_router_timeout_uses_engineering_fallback_for_runtime_analysis_promp
         pipeline_session_id="sess-timeout-runtime-analysis",
     )
 
-    assert decision.status == "selected"
-    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
-    assert decision.routing_fallback_used is True
-    assert decision.router_strategy == "heuristic_timeout_fallback"
-    assert decision.routing_confidence_source == "heuristic_strict"
-    assert decision.routing_fallback_reason is not None
-    assert "TimeoutError" in decision.routing_fallback_reason
+    assert decision.status == "routing_failed"
+    assert decision.selected_pipeline_id is None
+    assert decision.routing_fallback_used is False
+    assert decision.router_strategy is None
+    assert decision.routing_confidence_source is None
+    assert decision.routing_fallback_reason is None
     assert "TimeoutError" in (decision.routing_failure_reason or "")
 
 
