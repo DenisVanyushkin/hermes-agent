@@ -329,6 +329,70 @@ def test_autonomous_blocked_helper_does_not_claim_actual_execution() -> None:
     assert result.actual_execution_invoked is False
 
 
+def test_autonomous_blocked_helper_with_runtime_markers_preserves_actual_execution() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="autonomous"),
+        session=session,
+        state_snapshot=snapshot,
+        execution_helper=lambda **_kwargs: {
+            "status": "blocked",
+            "blocked_reason": "reviewer_verdict_blocked",
+            "report": {
+                "subagent_runs": [
+                    {
+                        "subagent_id": "hermes_engineer_core",
+                        "runtime_mode": "bridge_executor",
+                    }
+                ]
+            },
+        },
+        allow_test_execution=True,
+    )
+
+    assert result.status == "blocked"
+    assert result.blocked_reason == "reviewer_verdict_blocked"
+    assert result.actual_execution_invoked is True
+    assert result.subagent_execution_invoked is True
+    assert result.real_provider_bridge_invoked is True
+
+
+def test_autonomous_rework_exhausted_with_run_counts_preserves_actual_execution() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_controller")
+    session, snapshot = _snapshot_for()
+
+    result = module.evaluate_pipeline_execution_controller(
+        config=_config(mode="autonomous"),
+        session=session,
+        state_snapshot=snapshot,
+        execution_helper=lambda **_kwargs: {
+            "status": "rework_exhausted",
+            "blocked_reason": "rework_exhausted",
+            "report": {
+                "subagent_runs": [
+                    {
+                        "subagent_id": "hermes_engineer_core",
+                        "runtime_mode": "fake",
+                    }
+                ],
+                "usage_summary": {
+                    "executed_subagent_count": 1,
+                    "subagent_run_instance_count": 1,
+                },
+            },
+        },
+        allow_test_execution=True,
+    )
+
+    assert result.status == "rework_exhausted"
+    assert result.blocked_reason == "rework_exhausted"
+    assert result.actual_execution_invoked is True
+    assert result.subagent_execution_invoked is True
+    assert result.real_provider_bridge_invoked is False
+
+
 def test_autonomous_helper_without_subagent_boundary_exposes_false_bridge_flags() -> None:
     module = importlib.import_module("hermes_cli.pipeline_execution_controller")
     session, snapshot = _snapshot_for()

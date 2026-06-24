@@ -124,7 +124,11 @@ def build_controlled_execution_report_artifact(
         or _string(controller.get("blocked_reason"))
         or _string(report.get("status"))
     )
-    actual_execution_invoked = bool(controller.get("actual_execution_invoked"))
+    actual_execution_invoked = _runtime_authoritative_actual_execution_invoked(
+        controller=controller,
+        report=report,
+        usage=usage,
+    )
 
     return {
         "schema_version": CONTROLLED_EXECUTION_REPORT_SCHEMA_VERSION,
@@ -259,6 +263,50 @@ def _controlled_manual_trigger_evidence(*, controller: Mapping[str, Any], actual
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _runtime_authoritative_actual_execution_invoked(
+    *,
+    controller: Mapping[str, Any],
+    report: Mapping[str, Any],
+    usage: Mapping[str, Any],
+) -> bool:
+    if bool(controller.get("actual_execution_invoked")):
+        return True
+    if bool(controller.get("subagent_execution_invoked")):
+        return True
+    if bool(controller.get("real_provider_bridge_invoked")):
+        return True
+    if int(usage.get("executed_subagent_count") or 0) > 0:
+        return True
+    if int(usage.get("subagent_run_instance_count") or 0) > 0:
+        return True
+    if _bridge_executor_used(report):
+        return True
+    if _providers_used_effective_after_bridge(report):
+        return True
+    return False
+
+
+def _bridge_executor_used(report: Mapping[str, Any]) -> bool:
+    for item in list(report.get("subagent_runs") or []):
+        if not isinstance(item, Mapping):
+            continue
+        if _string(item.get("runtime_mode")) == "bridge_executor":
+            return True
+    return False
+
+
+def _providers_used_effective_after_bridge(report: Mapping[str, Any]) -> bool:
+    for item in list(report.get("subagent_runs") or []):
+        if not isinstance(item, Mapping):
+            continue
+        if _string(item.get("runtime_mode")) != "bridge_executor":
+            continue
+        providers = item.get("providers_used_effective")
+        if isinstance(providers, (list, tuple)) and any(_string(provider) for provider in providers):
+            return True
+    return False
 
 
 def _string(value: Any) -> str | None:
