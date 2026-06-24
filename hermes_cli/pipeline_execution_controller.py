@@ -206,7 +206,12 @@ def evaluate_pipeline_execution_controller(
         status=helper_status,
         execution_allowed=True,
         blocked_reason=helper_blocked_reason,
-        actual_execution_invoked=helper_status != "blocked",
+        actual_execution_invoked=_actual_execution_invoked(
+            helper_status=helper_status,
+            safe_helper_result=safe_helper_result,
+            subagent_execution_invoked=subagent_execution_invoked,
+            real_provider_bridge_invoked=real_provider_bridge_invoked,
+        ),
         subagent_execution_invoked=subagent_execution_invoked,
         real_provider_bridge_invoked=real_provider_bridge_invoked,
         resolved_helper_name=helper_resolution.helper_name,
@@ -346,7 +351,11 @@ def _helper_blocked_reason(safe_helper_result: dict[str, Any] | None) -> str | N
 
 def _subagent_execution_invoked(safe_helper_result: dict[str, Any] | None) -> bool:
     subagent_runs = _helper_subagent_runs(safe_helper_result)
-    return isinstance(subagent_runs, list) and any(isinstance(item, Mapping) for item in subagent_runs)
+    if isinstance(subagent_runs, list) and any(isinstance(item, Mapping) for item in subagent_runs):
+        return True
+    return _helper_usage_count(safe_helper_result, "executed_subagent_count") > 0 or _helper_usage_count(
+        safe_helper_result, "subagent_run_instance_count"
+    ) > 0
 
 
 def _real_provider_bridge_invoked(safe_helper_result: dict[str, Any] | None) -> bool:
@@ -381,6 +390,75 @@ def _helper_report_payload(safe_helper_result: dict[str, Any] | None) -> Mapping
         if isinstance(value, Mapping):
             return value
     return None
+
+
+def _actual_execution_invoked(
+    *,
+    helper_status: str,
+    safe_helper_result: dict[str, Any] | None,
+    subagent_execution_invoked: bool,
+    real_provider_bridge_invoked: bool,
+) -> bool:
+    if helper_status != "blocked":
+        return True
+    if subagent_execution_invoked or real_provider_bridge_invoked:
+        return True
+    if _helper_usage_count(safe_helper_result, "executed_subagent_count") > 0:
+        return True
+    if _helper_usage_count(safe_helper_result, "subagent_run_instance_count") > 0:
+        return True
+    if _bridge_executor_used(safe_helper_result):
+        return True
+    if _providers_used_effective_after_bridge(safe_helper_result):
+        return True
+    return False
+
+
+def _helper_usage_count(safe_helper_result: dict[str, Any] | None, key: str) -> int:
+    report = _helper_report_payload(safe_helper_result)
+    if isinstance(report, Mapping):
+        usage_summary = report.get("usage_summary")
+        if isinstance(usage_summary, Mapping):
+            value = usage_summary.get(key)
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, int):
+                return value
+        usage = report.get("usage")
+        if isinstance(usage, Mapping):
+            value = usage.get(key)
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, int):
+                return value
+    if isinstance(safe_helper_result, Mapping):
+        value = safe_helper_result.get(key)
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+    return 0
+
+
+def _bridge_executor_used(safe_helper_result: dict[str, Any] | None) -> bool:
+    for item in list(_helper_subagent_runs(safe_helper_result) or []):
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("runtime_mode") or "") == "bridge_executor":
+            return True
+    return False
+
+
+def _providers_used_effective_after_bridge(safe_helper_result: dict[str, Any] | None) -> bool:
+    for item in list(_helper_subagent_runs(safe_helper_result) or []):
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("runtime_mode") or "") != "bridge_executor":
+            continue
+        providers = item.get("providers_used_effective")
+        if isinstance(providers, (list, tuple)) and any(str(provider).strip() for provider in providers):
+            return True
+    return False
 
 
 def _workspace_basename(helper_execution_context: Mapping[str, Any] | None) -> str | None:
