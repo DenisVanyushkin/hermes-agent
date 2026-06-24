@@ -96,7 +96,7 @@ def test_missing_explicit_loop_fuse_blocks_rework_loop() -> None:
 
     result = module.evaluate_pipeline_rework_loop_fuse(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -153,7 +153,7 @@ def test_missing_boolean_fuse_blocks_actual_invocation() -> None:
     session, snapshot = _snapshot_for()
 
     result = module.evaluate_pipeline_execution_fuse(
-        config=_config(mode="one_step", allow_actual_subagent_invocation=False),
+        config=_config(mode="autonomous", allow_actual_subagent_invocation=False),
         session=session,
         state_snapshot=snapshot,
     )
@@ -167,7 +167,7 @@ def test_wrong_pipeline_blocks_actual_invocation() -> None:
     session, snapshot = _snapshot_for("default_conversation_pipeline")
 
     result = module.evaluate_pipeline_execution_fuse(
-        config=_config(mode="one_step", allow_actual_subagent_invocation=True),
+        config=_config(mode="autonomous", allow_actual_subagent_invocation=True),
         session=session,
         state_snapshot=snapshot,
     )
@@ -183,7 +183,7 @@ def test_wrong_subagent_blocks_actual_invocation() -> None:
 
     result = module.evaluate_pipeline_execution_fuse(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allowed_subagents=["hermes_code_reviewer"],
         ),
@@ -201,14 +201,14 @@ def test_one_step_mode_and_explicit_fuse_allow_only_first_engineer_step() -> Non
     session, snapshot = _snapshot_for()
 
     result = module.evaluate_pipeline_execution_fuse(
-        config=_config(mode="controlled_one_step", allow_actual_subagent_invocation=True),
+        config=_config(mode="autonomous", allow_actual_subagent_invocation=True),
         session=session,
         state_snapshot=snapshot,
     )
 
     assert result.actual_invocation_allowed is True
     assert result.blocked_reason is None
-    assert result.execution_mode == "controlled_one_step"
+    assert result.execution_mode == "autonomous"
     assert result.selected_pipeline_id == "engineering_review_pipeline"
     assert result.selected_subagent_id == "hermes_engineer_core"
     assert result.selected_step_kind == "engineer"
@@ -242,7 +242,7 @@ def test_missing_reviewer_boolean_fuse_blocks_reviewer_invocation() -> None:
 
     result = module.evaluate_pipeline_reviewer_execution_fuse(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=False,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -261,7 +261,7 @@ def test_wrong_pipeline_blocks_reviewer_invocation() -> None:
 
     result = module.evaluate_pipeline_reviewer_execution_fuse(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -301,7 +301,7 @@ def test_wrong_reviewer_subagent_blocks_reviewer_invocation() -> None:
 
     result = module.evaluate_pipeline_reviewer_execution_fuse(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -320,7 +320,7 @@ def test_reviewer_requires_existing_engineer_result() -> None:
 
     result = module.evaluate_pipeline_reviewer_execution_fuse(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -362,7 +362,7 @@ def test_invalid_engineer_result_blocks_reviewer_invocation() -> None:
 
     result = module.evaluate_pipeline_reviewer_execution_fuse(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -373,6 +373,50 @@ def test_invalid_engineer_result_blocks_reviewer_invocation() -> None:
 
     assert result.actual_invocation_allowed is False
     assert result.blocked_reason == "engineer_result_invalid"
+
+
+def test_invalid_engineer_result_with_material_changes_allows_reviewer_invocation() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_execution_fuse")
+    session, snapshot = _snapshot_for()
+    engineer_step = snapshot.planned_steps[0]
+    snapshot = snapshot.__class__(
+        **{
+            **snapshot.__dict__,
+            "planned_steps": [
+                engineer_step.__class__(
+                    step_kind=engineer_step.step_kind,
+                    subagent_id=engineer_step.subagent_id,
+                    condition=engineer_step.condition,
+                    execution_status="executed_one_step",
+                    planning_mode="controlled_one_step",
+                    runtime_factory_plan=engineer_step.runtime_factory_plan,
+                    runner_request=engineer_step.runner_request,
+                    runner_result={
+                        "status": "succeeded",
+                        "structured_output": {"validation_status": "invalid_structured_output"},
+                    },
+                    evaluation_result={"status": "invalid_structured_output"},
+                ),
+                snapshot.planned_steps[1],
+            ],
+        }
+    )
+
+    result = module.evaluate_pipeline_reviewer_execution_fuse(
+        config=_config(
+            mode="autonomous",
+            allow_actual_subagent_invocation=True,
+            allow_actual_reviewer_invocation=True,
+            allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
+        ),
+        session=session,
+        state_snapshot=snapshot,
+        material_changes_present=True,
+    )
+
+    assert result.actual_invocation_allowed is True
+    assert result.blocked_reason is None
+    assert result.selected_subagent_id == "hermes_code_reviewer"
 
 
 def test_failed_engineer_result_blocks_reviewer_invocation() -> None:
@@ -401,7 +445,7 @@ def test_failed_engineer_result_blocks_reviewer_invocation() -> None:
 
     result = module.evaluate_pipeline_reviewer_execution_fuse(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -443,7 +487,7 @@ def test_valid_engineer_result_and_explicit_fuse_allow_reviewer_one_step() -> No
 
     result = module.evaluate_pipeline_reviewer_execution_fuse(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],

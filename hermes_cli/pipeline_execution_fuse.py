@@ -146,6 +146,7 @@ def evaluate_pipeline_reviewer_execution_fuse(
     config: Mapping[str, Any] | None,
     session: Any,
     state_snapshot: PipelineStateSnapshot,
+    material_changes_present: bool = False,
 ) -> PipelineExecutionFuseResult:
     del session
 
@@ -211,7 +212,10 @@ def evaluate_pipeline_reviewer_execution_fuse(
         )
     requirements_met.append("supported_subagent_selected")
 
-    engineer_gate_reason = _reviewer_prereq_failure(state_snapshot)
+    engineer_gate_reason = _reviewer_prereq_failure(
+        state_snapshot,
+        material_changes_present=material_changes_present,
+    )
     if engineer_gate_reason is not None:
         requirements_failed.append("valid_engineer_result_present")
         return _blocked(
@@ -279,7 +283,11 @@ def _reviewer_step(state_snapshot: PipelineStateSnapshot) -> Any:
     return None
 
 
-def _reviewer_prereq_failure(state_snapshot: PipelineStateSnapshot) -> str | None:
+def _reviewer_prereq_failure(
+    state_snapshot: PipelineStateSnapshot,
+    *,
+    material_changes_present: bool = False,
+) -> str | None:
     if not state_snapshot.planned_steps:
         return "engineer_result_missing"
 
@@ -296,6 +304,8 @@ def _reviewer_prereq_failure(state_snapshot: PipelineStateSnapshot) -> str | Non
     if runner_status != "succeeded":
         return "engineer_result_failed"
     if validation_status != "valid" or evaluation_status == "invalid_structured_output":
+        if material_changes_present:
+            return None
         return "engineer_result_invalid"
     if evaluation_status != "candidate_complete":
         return "engineer_result_invalid"

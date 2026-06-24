@@ -322,14 +322,67 @@ def test_invalid_engineer_output_blocks_and_requires_review() -> None:
         task_summary="Engineer output invalid",
         engineer_output=_engineer_output(status="failed", validation_status="invalid_structured_output"),
         baseline_snapshot=_snapshot(head_sha="abc123"),
-        post_snapshot=_snapshot(head_sha="def456", staged_files=("b.py",)),
-        git_result=_git_result(changed_files=["b.py"], staged_files=["b.py"]),
+        post_snapshot=_snapshot(head_sha="abc123"),
+        git_result=_git_result(
+            status="no_material_changes",
+            material_changes_present=False,
+            review_required=False,
+            changed_files=[],
+            staged_files=[],
+            unstaged_files=[],
+            baseline_head_sha="abc123",
+            post_head_sha="abc123",
+            head_changed=False,
+            blocked_reason=None,
+            safe_summary="No material repository changes were detected.",
+        ),
     )
 
     assert packet.packet_status == "blocked"
     assert packet.review_required is True
     assert packet.user_action_required is True
     assert packet.engineer_status == "failed"
+
+
+def test_material_changes_with_invalid_engineer_output_still_build_ready_for_review_packet() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+
+    packet = module.build_reviewer_packet(
+        pipeline_id="engineering_review_pipeline",
+        task_summary="Engineer output invalid but repo changed",
+        engineer_output=_engineer_output(
+            status="failed",
+            summary="plain text diagnostic summary",
+            validation_status="invalid_structured_output",
+            validation_errors=[{"field": "status", "message": "missing required enum"}],
+            changes=[{"path": "docs/reports/smoke/autonomous-workspace-011.md", "kind": "modify"}],
+        ),
+        baseline_snapshot=_snapshot(head_sha="abc123"),
+        post_snapshot=_snapshot(head_sha="def456", staged_files=("docs/reports/smoke/autonomous-workspace-011.md",)),
+        git_result=_git_result(
+            changed_files=["docs/reports/smoke/autonomous-workspace-011.md"],
+            staged_files=["docs/reports/smoke/autonomous-workspace-011.md"],
+        ),
+        engineer_evaluation_status="invalid_structured_output",
+        test_summary={"status": "invalid", "summary": "malformed test evidence"},
+    )
+
+    payload = packet.to_safe_dict()
+
+    assert packet.packet_status == "ready_for_review"
+    assert packet.review_required is True
+    assert packet.user_action_required is False
+    assert packet.blocked_reason is None
+    assert payload["engineer_output_valid"] is False
+    assert payload["engineer_output_validation_status"] == "invalid_structured_output"
+    assert payload["engineer_output_evaluation_status"] == "invalid_structured_output"
+    assert payload["engineer_output_warning"] is not None
+    assert payload["engineer_validation_errors"] == [{"field": "status", "message": "missing required enum"}]
+    assert payload["engineer_sanitized_output"]["summary"] == "plain text diagnostic summary"
+    assert payload["engineer_sanitized_output"]["changes"] == [
+        {"path": "docs/reports/smoke/autonomous-workspace-011.md", "kind": "modify"}
+    ]
+    assert payload["tests"]["status"] == "invalid"
 
 
 def test_missing_structured_output_gets_explicit_block_reason() -> None:
@@ -340,8 +393,20 @@ def test_missing_structured_output_gets_explicit_block_reason() -> None:
         task_summary="Engineer output missing structured payload",
         engineer_output=_engineer_output(status="failed", validation_status="missing_structured_output"),
         baseline_snapshot=_snapshot(head_sha="abc123"),
-        post_snapshot=_snapshot(head_sha="def456", staged_files=("b.py",)),
-        git_result=_git_result(changed_files=["b.py"], staged_files=["b.py"]),
+        post_snapshot=_snapshot(head_sha="abc123"),
+        git_result=_git_result(
+            status="no_material_changes",
+            material_changes_present=False,
+            review_required=False,
+            changed_files=[],
+            staged_files=[],
+            unstaged_files=[],
+            baseline_head_sha="abc123",
+            post_head_sha="abc123",
+            head_changed=False,
+            blocked_reason=None,
+            safe_summary="No material repository changes were detected.",
+        ),
         test_summary={"status": "not_requested", "results": []},
     )
 
@@ -365,8 +430,20 @@ def test_max_iterations_plain_text_missing_structured_output_gets_precise_block_
             ],
         ),
         baseline_snapshot=_snapshot(head_sha="abc123"),
-        post_snapshot=_snapshot(head_sha="def456", staged_files=("b.py",)),
-        git_result=_git_result(changed_files=["b.py"], staged_files=["b.py"]),
+        post_snapshot=_snapshot(head_sha="abc123"),
+        git_result=_git_result(
+            status="no_material_changes",
+            material_changes_present=False,
+            review_required=False,
+            changed_files=[],
+            staged_files=[],
+            unstaged_files=[],
+            baseline_head_sha="abc123",
+            post_head_sha="abc123",
+            head_changed=False,
+            blocked_reason=None,
+            safe_summary="No material repository changes were detected.",
+        ),
         test_summary={"status": "not_requested", "results": []},
     )
 

@@ -1104,6 +1104,86 @@ def test_git_gate_material_changes_with_reviewer_approval_allows_completion(tmp_
     assert result.reviewer_packet["safe_packet"]["tests"]["status"] == "passed"
 
 
+def test_material_diff_with_invalid_engineer_output_invokes_reviewer_and_preserves_evidence(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+    reviewer_packets: list[dict[str, object]] = []
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        if request.subagent_id == "hermes_engineer_core":
+            _write(git_repo, "docs/reports/smoke/autonomous-workspace-011.md", "material diff\n")
+            return {
+                "output_text": "engineer emitted invalid structured output",
+                "completion_reason": "completed",
+                "execution_status": "completed",
+                "raw_metadata": {"structured_output": {"status": "approved", "summary": "plain text diagnostic summary"}},
+            }
+        reviewer_packets.append(dict(request.metadata["reviewer_packet"]["safe_packet"]))
+        return {
+            "output_text": "needs changes",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _invalid_output()},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        test_summary={"status": "invalid", "summary": "malformed test evidence"},
+    )
+
+    assert calls == ["hermes_engineer_core", "hermes_code_reviewer"]
+    assert result.blocked_reason == "reviewer_result_invalid"
+    assert result.git_gate["material_changes_present"] is True
+    assert result.reviewer_packet["present"] is True
+    assert reviewer_packets[0]["git"]["changed_files"] == ["docs/reports/smoke/autonomous-workspace-011.md"]
+    assert reviewer_packets[0]["engineer_output_valid"] is False
+    assert reviewer_packets[0]["engineer_output_validation_status"] == "invalid_structured_output"
+    assert reviewer_packets[0]["engineer_output_evaluation_status"] == "invalid_structured_output"
+    assert reviewer_packets[0]["engineer_output_warning"] is not None
+    assert reviewer_packets[0]["engineer_sanitized_output"]["summary"] == "plain text diagnostic summary"
+    assert reviewer_packets[0]["tests"]["status"] == "invalid"
+
+
+def test_invalid_engineer_structured_output_without_material_diff_blocks_before_reviewer(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        return {
+            "output_text": "engineer emitted invalid structured output",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": {"status": "approved", "summary": "plain text diagnostic summary"}},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+    )
+
+    assert calls == ["hermes_engineer_core"]
+    assert result.blocked_reason == "invalid_engineer_output"
+    assert result.git_gate["material_changes_present"] is False
+    assert result.reviewer_packet["present"] is True
+
+
 def test_git_gate_dirty_baseline_fails_closed_without_attributing_existing_changes(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     repo_root, loaded_specs = _loaded_specs(tmp_path)
