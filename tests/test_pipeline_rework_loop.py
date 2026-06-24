@@ -678,221 +678,7 @@ def test_loop_limit_exceeded_blocks_before_extra_rework(tmp_path: Path) -> None:
     assert calls == ["hermes_engineer_core", "hermes_code_reviewer"]
     assert result.user_action_required is True
     assert result.blocked_reason == "rework_exhausted_after_ordinary_reviewer_findings"
-
-
-def test_reviewer_missing_test_evidence_normalizes_to_rework_required() -> None:
-    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
-
-    outcome = module._classify_reviewer_outcome(
-        reviewer_status="blocked",
-        reviewer_runner_status="succeeded",
-        reviewer_blockers=["missing test evidence"],
-        reviewer_structured_output=_reviewer_output_with_findings(
-            blockers=["missing test evidence"],
-            findings=[
-                {
-                    "summary": "Missing test evidence for the requested focused pytest command.",
-                    "severity": "medium",
-                    "code": "missing_test_evidence",
-                }
-            ],
-        ),
-        reviewer_packet={
-            "safe_packet": {
-                "tests": {
-                    "status": "not_requested",
-                    "command": None,
-                    "summary": None,
-                },
-                "git": {
-                    "material_changes_present": True,
-                    "material_change_status": "material_changes_detected",
-                },
-            }
-        },
-        current_test_summary={"status": "not_requested", "command": None, "summary": None},
-        attempts_remaining=1,
-    )
-
-    assert outcome["category"] == "rework_required"
-    assert outcome["reason"] == "missing_test_evidence"
-    assert outcome["terminal"] is False
-
-
-def test_reviewer_ordinary_code_defect_normalizes_to_rework_required() -> None:
-    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
-
-    outcome = module._classify_reviewer_outcome(
-        reviewer_status="blocked",
-        reviewer_runner_status="succeeded",
-        reviewer_blockers=["missing bool edge-case assertion"],
-        reviewer_structured_output=_reviewer_output_with_findings(
-            blockers=["missing bool edge-case assertion"],
-            findings=[
-                {
-                    "summary": "Add an assertion that bool is rejected explicitly.",
-                    "severity": "medium",
-                    "code": "ordinary_code_defect",
-                }
-            ],
-        ),
-        reviewer_packet={
-            "safe_packet": {
-                "tests": {
-                    "status": "passed",
-                    "command": "venv/bin/pytest -q tests/test_smoke_square.py",
-                    "summary": "5 passed",
-                },
-                "git": {
-                    "material_changes_present": True,
-                    "material_change_status": "material_changes_detected",
-                },
-            }
-        },
-        current_test_summary={"status": "passed", "command": "venv/bin/pytest -q tests/test_smoke_square.py"},
-        attempts_remaining=1,
-    )
-
-    assert outcome["category"] == "rework_required"
-    assert outcome["reason"] == "ordinary_reviewer_findings"
-    assert outcome["terminal"] is False
-
-
-def test_reviewer_catastrophic_issue_stays_terminal_blocked() -> None:
-    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
-
-    outcome = module._classify_reviewer_outcome(
-        reviewer_status="blocked",
-        reviewer_runner_status="succeeded",
-        reviewer_blockers=["credential exfiltration risk"],
-        reviewer_structured_output=_reviewer_output_with_findings(
-            blockers=["credential exfiltration risk"],
-            findings=[
-                {
-                    "summary": "The patch prints a secret token to stdout.",
-                    "severity": "critical",
-                    "code": "credential_exfiltration_risk",
-                }
-            ],
-            next_action="block",
-        ),
-        reviewer_packet={
-            "safe_packet": {
-                "tests": {"status": "passed"},
-                "git": {"material_changes_present": True},
-            }
-        },
-        current_test_summary={"status": "passed"},
-        attempts_remaining=1,
-    )
-
-    assert outcome["category"] == "terminal_blocked"
-    assert outcome["reason"] == "credential_exfiltration_risk"
-    assert outcome["terminal"] is True
-
-
-def test_reviewer_critical_severity_without_catastrophic_code_stays_rework_required() -> None:
-    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
-
-    outcome = module._classify_reviewer_outcome(
-        reviewer_status="blocked",
-        reviewer_runner_status="succeeded",
-        reviewer_blockers=["urgent correctness fix needed"],
-        reviewer_structured_output=_reviewer_output_with_findings(
-            blockers=["urgent correctness fix needed"],
-            findings=[
-                {
-                    "summary": "This ordinary correctness defect is urgent but reviewable.",
-                    "severity": "critical",
-                    "code": "ordinary_code_defect",
-                }
-            ],
-        ),
-        reviewer_packet={
-            "safe_packet": {
-                "tests": {"status": "passed"},
-                "git": {"material_changes_present": True},
-            }
-        },
-        current_test_summary={"status": "passed"},
-        attempts_remaining=1,
-    )
-
-    assert outcome["category"] == "rework_required"
-    assert outcome["reason"] == "ordinary_reviewer_findings"
-    assert outcome["terminal"] is False
-
-
-def test_reviewer_missing_test_evidence_exhaustion_uses_accurate_reason() -> None:
-    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
-
-    outcome = module._classify_reviewer_outcome(
-        reviewer_status="blocked",
-        reviewer_runner_status="succeeded",
-        reviewer_blockers=["missing test evidence"],
-        reviewer_structured_output=_reviewer_output_with_findings(
-            blockers=["missing test evidence"],
-            findings=[
-                {
-                    "summary": "Need to run the requested focused pytest command.",
-                    "severity": "medium",
-                    "code": "missing_test_evidence",
-                }
-            ],
-        ),
-        reviewer_packet={
-            "safe_packet": {
-                "tests": {"status": "not_requested"},
-                "git": {"material_changes_present": True},
-            }
-        },
-        current_test_summary={"status": "not_requested"},
-        attempts_remaining=0,
-    )
-
-    assert outcome["category"] == "terminal_blocked"
-    assert outcome["reason"] == "rework_exhausted_after_missing_test_evidence"
-    assert outcome["terminal"] is True
-
-
-def test_reviewer_pytest_refactor_note_with_passed_tests_stays_ordinary_rework() -> None:
-    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
-
-    outcome = module._classify_reviewer_outcome(
-        reviewer_status="blocked",
-        reviewer_runner_status="succeeded",
-        reviewer_blockers=["prefer pytest.mark.parametrize for the repeated cases"],
-        reviewer_structured_output=_reviewer_output_with_findings(
-            blockers=["prefer pytest.mark.parametrize for the repeated cases"],
-            findings=[
-                {
-                    "summary": "Refactor to use pytest.mark.parametrize for coverage.",
-                    "severity": "low",
-                    "code": "ordinary_code_defect",
-                }
-            ],
-        ),
-        reviewer_packet={
-            "safe_packet": {
-                "tests": {
-                    "status": "executed_passed",
-                    "command": "venv/bin/pytest -q tests/test_smoke_square.py",
-                    "summary": "5 passed",
-                },
-                "git": {"material_changes_present": True},
-            }
-        },
-        current_test_summary={
-            "status": "executed_passed",
-            "command": "venv/bin/pytest -q tests/test_smoke_square.py",
-            "summary": "5 passed",
-        },
-        attempts_remaining=1,
-    )
-
-    assert outcome["category"] == "rework_required"
-    assert outcome["reason"] == "ordinary_reviewer_findings"
-    assert outcome["terminal"] is False
+    assert result.reviewer_packet.get("review_findings") is None
 
 
 def test_missing_reviewer_bridge_mapping_fails_closed_without_uncaught_exception(tmp_path: Path) -> None:
@@ -1023,7 +809,7 @@ def test_reviewer_runner_failure_fails_closed_without_rework(tmp_path: Path) -> 
     assert result.candidate_complete is False
     assert result.completion_allowed is False
     assert result.user_action_required is True
-    assert result.blocked_reason == "reviewer_unavailable"
+    assert result.blocked_reason == "reviewer_verdict_blocked"
 
 
 def test_invalid_engineer_result_fails_closed_before_reviewer(tmp_path: Path) -> None:
@@ -1192,6 +978,104 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
     assert '"reviewer_verdict": "blocked"' in engineer_messages[1]
     assert '"reviewer_blockers": [' in engineer_messages[1]
 
+
+
+def test_invalid_engineer_output_preserves_prompt_pytest_command_for_reviewer_and_rework(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    engineer_messages: list[str] = []
+    reviewer_packets: list[dict[str, object]] = []
+    first_request = {"seen": False}
+
+    prompt = (
+        "Add a small utility and focused test coverage.\n\n"
+        "Run exactly:\n"
+        "venv/bin/pytest -q tests/test_smoke_square.py\n"
+    )
+
+    def _engineer_executor(request, _runtime_plan):
+        engineer_messages.append(request.input_messages[0]["content"])
+        if not first_request["seen"]:
+            first_request["seen"] = True
+            _write(git_repo, "feature.txt", "first pass\n")
+            return {
+                "output_text": "engineer emitted invalid structured output",
+                "completion_reason": "completed",
+                "execution_status": "completed",
+                "raw_metadata": {
+                    "structured_output": {
+                        "status": "approved",
+                        "summary": "plain text diagnostic summary",
+                    }
+                },
+            }
+        _write(git_repo, "feature.txt", "first pass\nsecond pass\n")
+        return {
+            "output_text": "engineer emitted invalid structured output again",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": {
+                    "status": "approved",
+                    "summary": "plain text diagnostic summary after rework",
+                }
+            },
+        }
+
+    def _reviewer_executor(request, _runtime_plan):
+        reviewer_packets.append(dict(request.metadata["reviewer_packet"]["safe_packet"]))
+        return {
+            "output_text": "needs exact pytest evidence",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": _reviewer_output_with_findings(
+                    blockers=["missing test evidence"],
+                    findings=[
+                        {"severity": "high", "summary": "Run venv/bin/pytest -q tests/test_smoke_square.py and attach the result."},
+                        {"severity": "medium", "summary": "Include the exact pytest command in the report."},
+                    ],
+                )
+            },
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config={
+            "pipelines": {
+                "enabled": True,
+                "execution": {
+                    "mode": "autonomous",
+                    "enable_gateway_execution_controller": True,
+                    "allow_actual_subagent_invocation": True,
+                    "allow_actual_reviewer_invocation": True,
+                    "allow_actual_rework_loop": True,
+                    "allow_pipelines": ["engineering_review_pipeline"],
+                    "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                }
+            }
+        },
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=prompt,
+        repo_path=str(git_repo),
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _engineer_executor,
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+        },
+    )
+
+    assert reviewer_packets[0]["engineer_output_validation_status"] == "invalid_structured_output"
+    assert reviewer_packets[0]["tests"]["command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert reviewer_packets[0]["tests"]["status"] == "requested_not_executed"
+    assert result.appended_rework_context[0]["test_command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert result.appended_rework_context[0]["test_status"] == "requested_not_executed"
+    assert "venv/bin/pytest -q tests/test_smoke_square.py" in engineer_messages[1]
+    assert result.test_summary["source"] == "prompt"
 
 
 def test_git_gate_disabled_preserves_existing_behavior(tmp_path: Path) -> None:
@@ -2748,3 +2632,182 @@ def test_safe_test_text_keeps_venv_and_environment_diagnostics() -> None:
     assert module._safe_test_text("venv/bin/pytest not found") == "venv/bin/pytest not found"
     assert module._safe_test_text("environment marker failed") == "environment marker failed"
     assert module._safe_test_text("password=abc123") is None
+
+
+def test_ordinary_reviewer_rework_final_response_surfaces_findings_and_test_command() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._blocked_final_response_text(
+        blocked_reason="rework_exhausted_after_ordinary_reviewer_findings",
+        test_summary={
+            "status": "requested_not_executed",
+            "command": "venv/bin/pytest -q tests/test_smoke_square.py",
+            "summary": "requested test command was preserved but not executed",
+        },
+        reviewer_packet={
+            "packet_status": "ready_for_review",
+            "safe_packet": {
+                "tests": {
+                    "status": "requested_not_executed",
+                    "command": "venv/bin/pytest -q tests/test_smoke_square.py",
+                },
+            },
+            "review_findings": [
+                "Run venv/bin/pytest -q tests/test_smoke_square.py and attach the result.",
+                "Include the exact pytest command in the report.",
+            ],
+        },
+    )
+
+    assert text is not None
+    assert "Reviewer requested implementation rework." in text
+    assert "Run venv/bin/pytest -q tests/test_smoke_square.py and attach the result." in text
+    assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in text
+    assert "Test status: requested_not_executed" in text
+    assert "Reviewer status: ready_for_review" in text
+
+
+def test_pytest_tool_intent_uses_prompt_source_label() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    candidates = module._candidate_test_commands(
+        original_task="Please run:\nvenv/bin/pytest -q tests/test_smoke_square.py\nafter the patch.",
+        engineer_output={},
+        runner_result={"tool_call_summaries": [{"tool_name": "pytest", "call_count": 1, "status": "not_invoked"}]},
+    )
+
+    assert candidates == [("prompt_via_pytest_intent", "venv/bin/pytest -q tests/test_smoke_square.py")]
+
+
+def test_normal_reviewer_path_surfaces_findings_in_packet_and_final_response(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    loaded_specs.pipeline_specs["engineering_review_pipeline"]["loop_policy"]["max_review_iterations"] = 1
+    repo = _init_git_repo(tmp_path)
+    runtime_context = _controlled_runtime_context(
+        mutate_repo=repo,
+        responses=[
+            {
+                "structured_output": _engineer_output(),
+                "output_text": "engineer ok",
+                "tool_calls": [{"tool_name": "pytest", "call_count": 1, "status": "not_invoked"}],
+            },
+            {
+                "structured_output": _reviewer_output_with_findings(
+                    blockers=["ordinary_code_defect"],
+                    findings=[
+                        {
+                            "code": "ordinary_code_defect",
+                            "severity": "medium",
+                            "summary": "Run venv/bin/pytest -q tests/test_smoke_square.py and attach the result.",
+                        }
+                    ],
+                ),
+                "output_text": "reviewer blocked",
+            },
+        ],
+    )
+    runtime_context["allow_test_commands"] = True
+    runtime_context["test_workspace"] = str(repo)
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement change.\nRun exactly:\nvenv/bin/pytest -q tests/test_smoke_square.py\n",
+        repo_path=str(repo),
+        controlled_runtime_context=runtime_context,
+    )
+
+    assert result.blocked_reason == "rework_exhausted_after_ordinary_reviewer_findings"
+    assert result.reviewer_packet["review_findings"] == [
+        "Run venv/bin/pytest -q tests/test_smoke_square.py and attach the result."
+    ]
+    final_response = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert final_response is not None
+    assert "Run venv/bin/pytest -q tests/test_smoke_square.py and attach the result." in final_response
+    assert "Test status: requested_not_executed" in final_response
+    assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in final_response
+
+
+def test_missing_test_evidence_exhaustion_returns_diagnostic_text() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._blocked_final_response_text(
+        blocked_reason="rework_exhausted_after_missing_test_evidence",
+        test_summary={
+            "status": "requested_not_executed",
+            "command": "venv/bin/pytest -q tests/test_smoke_square.py",
+        },
+        reviewer_packet={
+            "packet_status": "ready_for_review",
+            "review_findings": ["Run venv/bin/pytest -q tests/test_smoke_square.py and attach the result."],
+        },
+    )
+
+    assert text is not None
+    assert "Missing test evidence remained unresolved" in text
+    assert "Test status: requested_not_executed" in text
+    assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in text
+
+
+def test_reviewer_catastrophic_credential_exfiltration_stays_terminal_blocked() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    assert (
+        module._reviewer_fail_closed_reason(
+            reviewer_status="blocked",
+            reviewer_blockers=["credential_exfiltration_risk"],
+        )
+        == "terminal_blocked"
+    )
+
+
+def test_reviewer_catastrophic_destructive_operation_stays_terminal_blocked() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    assert (
+        module._reviewer_fail_closed_reason(
+            reviewer_status="blocked",
+            reviewer_blockers=["destructive operation requested"],
+        )
+        == "terminal_blocked"
+    )
+
+
+def test_reviewer_catastrophic_unrelated_mutation_stays_terminal_blocked() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    assert (
+        module._reviewer_fail_closed_reason(
+            reviewer_status="blocked",
+            reviewer_blockers=["unrelated mutation outside task scope"],
+        )
+        == "terminal_blocked"
+    )
+
+
+def test_reviewer_catastrophic_uninspectable_diff_stays_terminal_blocked() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    assert (
+        module._reviewer_fail_closed_reason(
+            reviewer_status="blocked",
+            reviewer_blockers=["cannot inspect diff because the patch is missing"],
+        )
+        == "terminal_blocked"
+    )
+
+
+def test_reviewer_critical_ordinary_finding_stays_rework_required() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    assert (
+        module._reviewer_fail_closed_reason(
+            reviewer_status="blocked",
+            reviewer_blockers=["ordinary_code_defect"],
+        )
+        is None
+    )
