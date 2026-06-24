@@ -1054,6 +1054,68 @@ def test_persist_controlled_execution_report_artifacts_writes_partial_failure_pa
     assert payload["pipeline_execution_report"]["status"] == "not_executed"
 
 
+def test_persist_controlled_execution_report_artifact_normalizes_actual_execution_from_runtime_markers(
+    tmp_path: Path,
+) -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    workspace = tmp_path / "controlled-workspace"
+    workspace.mkdir()
+
+    report_payload = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        preflight_result={"allowed": False, "reason_code": "observe_only"},
+    ).to_safe_dict()
+    report_payload["subagent_runs"] = [
+        {
+            "subagent_id": "hermes_engineer_core",
+            "runtime_mode": "bridge_executor",
+            "provider_policy_status": "ready_to_construct",
+            "real_provider_allowed": True,
+        }
+    ]
+    report_payload["usage_summary"] = {
+        "executed_subagent_count": 1,
+        "subagent_run_instance_count": 1,
+        "tool_calls": 0,
+    }
+    report_payload["review"] = {
+        "reviewer_invoked": True,
+        "status": "blocked",
+        "blocked_reason": "reviewer_verdict_blocked",
+    }
+
+    persist_controlled_execution_report_artifacts(
+        session=session,
+        state_snapshot=snapshot,
+        controller_payload={
+            "status": "blocked",
+            "blocked_reason": "reviewer_verdict_blocked",
+            "actual_execution_invoked": False,
+            "subagent_execution_invoked": True,
+            "real_provider_bridge_invoked": True,
+            "execution_mode": "autonomous",
+            "helper_result_status": "blocked",
+            "workspace_basename": workspace.name,
+        },
+        pipeline_execution_report_payload=report_payload,
+        workspace_path=workspace,
+        durable_root=None,
+    )
+
+    payload = json.loads((workspace / "controlled_execution_report.json").read_text(encoding="utf-8"))
+
+    assert payload["execution"]["actual_execution_invoked"] is True
+    assert payload["execution"]["executed_subagent_count"] == 1
+    assert payload["review"]["reviewer_invoked"] is True
+    assert payload["first_failed_point"] is None
+
+
 def test_persist_controlled_execution_report_artifacts_sanitizes_durable_run_id(tmp_path: Path) -> None:
     loaded = load_pipeline_specs()
     base_session = _session_for("engineering_review_pipeline", status="selected")
