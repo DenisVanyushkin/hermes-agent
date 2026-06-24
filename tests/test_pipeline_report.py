@@ -499,6 +499,54 @@ def test_report_builder_blocked_completion_preserves_blocked_reason() -> None:
     assert payload["git_gate"]["completion_blocked_reason"] == "review_blocked"
 
 
+def test_report_builder_surfaces_reviewer_rework_reason_and_test_evidence() -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "completion_allowed": False,
+        "completion_blocked_reason": "reviewer_requested_rework_missing_test_evidence",
+        "final_verdict": "controlled_rework_requested",
+    })
+
+    report = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        final_response_text="Reviewer requested rework because test evidence is missing.",
+        tests={
+            "status": "not_requested",
+            "command": "venv/bin/pytest -q tests/test_smoke_square.py",
+            "summary": "Requested focused pytest command was not captured.",
+        },
+        review_overrides={
+            "status": "rework_required",
+            "reviewer_approved": False,
+            "final_review_decision": "changes_requested",
+            "decision_category": "rework_required",
+            "decision_reason": "missing_test_evidence",
+            "rework_attempted": False,
+            "rework_exhausted": False,
+        },
+    )
+
+    payload = report.to_safe_dict()
+
+    assert payload["review"]["status"] == "rework_required"
+    assert payload["review"]["decision_category"] == "rework_required"
+    assert payload["review"]["decision_reason"] == "missing_test_evidence"
+    assert payload["review"]["final_review_decision"] == "changes_requested"
+    assert payload["review"]["rework_attempted"] is False
+    assert payload["review"]["rework_exhausted"] is False
+    assert payload["tests"]["status"] == "not_requested"
+    assert payload["tests"]["command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert "missing" in payload["final_response"]["text"].lower()
+
+
 def test_report_builder_execution_disabled_preserves_disabled_placeholder_semantics() -> None:
     loaded = load_pipeline_specs()
     session = _session_for("engineering_review_pipeline", status="selected")
