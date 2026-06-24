@@ -2760,6 +2760,8 @@ def test_reviewer_catastrophic_credential_exfiltration_stays_terminal_blocked() 
         module._reviewer_fail_closed_reason(
             reviewer_status="blocked",
             reviewer_blockers=["credential_exfiltration_risk"],
+            reviewer_packet={},
+            test_summary={},
         )
         == "terminal_blocked"
     )
@@ -2772,6 +2774,8 @@ def test_reviewer_catastrophic_destructive_operation_stays_terminal_blocked() ->
         module._reviewer_fail_closed_reason(
             reviewer_status="blocked",
             reviewer_blockers=["destructive operation requested"],
+            reviewer_packet={},
+            test_summary={},
         )
         == "terminal_blocked"
     )
@@ -2784,6 +2788,8 @@ def test_reviewer_catastrophic_unrelated_mutation_stays_terminal_blocked() -> No
         module._reviewer_fail_closed_reason(
             reviewer_status="blocked",
             reviewer_blockers=["unrelated mutation outside task scope"],
+            reviewer_packet={},
+            test_summary={},
         )
         == "terminal_blocked"
     )
@@ -2796,6 +2802,8 @@ def test_reviewer_catastrophic_uninspectable_diff_stays_terminal_blocked() -> No
         module._reviewer_fail_closed_reason(
             reviewer_status="blocked",
             reviewer_blockers=["cannot inspect diff because the patch is missing"],
+            reviewer_packet={},
+            test_summary={},
         )
         == "terminal_blocked"
     )
@@ -2808,6 +2816,74 @@ def test_reviewer_critical_ordinary_finding_stays_rework_required() -> None:
         module._reviewer_fail_closed_reason(
             reviewer_status="blocked",
             reviewer_blockers=["ordinary_code_defect"],
+            reviewer_packet={},
+            test_summary={},
         )
         is None
     )
+
+
+def test_reviewer_requested_not_executed_without_findings_stays_rework_required() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    assert (
+        module._reviewer_fail_closed_reason(
+            reviewer_status="blocked",
+            reviewer_blockers=[],
+            reviewer_packet={"present": True},
+            test_summary={
+                "status": "requested_not_executed",
+                "command": "venv/bin/pytest -q tests/test_smoke_square.py",
+            },
+        )
+        is None
+    )
+
+
+def test_smoke_016_exhaustion_normalizes_empty_blocked_reviewer_to_missing_test_rework(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    loaded_specs.pipeline_specs["engineering_review_pipeline"]["loop_policy"]["max_review_iterations"] = 1
+    repo = _init_git_repo(tmp_path)
+    runtime_context = _controlled_runtime_context(
+        mutate_repo=repo,
+        responses=[
+            {
+                "structured_output": _engineer_output(),
+                "output_text": "engineer ok",
+                "tool_calls": [{"tool_name": "pytest", "call_count": 1, "status": "not_invoked"}],
+            },
+            {
+                "structured_output": _reviewer_output_with_findings(
+                    blockers=[],
+                    findings=[],
+                    status="blocked",
+                ),
+                "output_text": "reviewer blocked without findings",
+            },
+        ],
+    )
+    runtime_context["allow_test_commands"] = True
+    runtime_context["test_workspace"] = str(repo)
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement change.\nRun exactly:\nvenv/bin/pytest -q tests/test_smoke_square.py\n",
+        repo_path=str(repo),
+        controlled_runtime_context=runtime_context,
+    )
+
+    assert result.blocked_reason == "rework_exhausted_after_missing_test_evidence"
+    assert result.review_iterations_completed == 1
+    assert result.appended_rework_context[0]["test_status"] == "requested_not_executed"
+    assert result.appended_rework_context[0]["test_command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert result.appended_rework_context[0]["normalized_rework_reason"] == "requested_test_not_executed"
+    assert result.appended_rework_context[0]["reviewer_verdict"] == "blocked"
+    final_response = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert final_response is not None
+    assert "Test status: requested_not_executed" in final_response
+    assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in final_response
