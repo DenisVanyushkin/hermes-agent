@@ -37,6 +37,12 @@ class ReviewerPacket:
     task_summary: str | None
     engineer_summary: str | None
     engineer_status: str
+    engineer_output_valid: bool
+    engineer_output_validation_status: str
+    engineer_output_evaluation_status: str | None
+    engineer_output_warning: str | None
+    engineer_validation_errors: list[dict[str, str]]
+    engineer_sanitized_output: dict[str, Any]
     git: dict[str, Any]
     tests: dict[str, Any]
     risk_flags: list[str] = field(default_factory=list)
@@ -57,6 +63,12 @@ class ReviewerPacket:
             "task_summary": self.task_summary,
             "engineer_summary": self.engineer_summary,
             "engineer_status": self.engineer_status,
+            "engineer_output_valid": self.engineer_output_valid,
+            "engineer_output_validation_status": self.engineer_output_validation_status,
+            "engineer_output_evaluation_status": self.engineer_output_evaluation_status,
+            "engineer_output_warning": self.engineer_output_warning,
+            "engineer_validation_errors": [dict(item) for item in self.engineer_validation_errors],
+            "engineer_sanitized_output": dict(self.engineer_sanitized_output),
             "git": dict(self.git),
             "tests": dict(self.tests),
             "risk_flags": list(self.risk_flags),
@@ -74,6 +86,7 @@ def build_reviewer_packet(
     git_result: GitMaterialChangeResult,
     session_id: str | None = None,
     test_summary: Any = None,
+    engineer_evaluation_status: str | None = None,
     risk_flags: list[str] | None = None,
     artifacts: list[dict[str, Any]] | None = None,
 ) -> ReviewerPacket:
@@ -115,6 +128,12 @@ def build_reviewer_packet(
         task_summary=_clean_optional_text(task_summary),
         engineer_summary=engineer["summary"],
         engineer_status=engineer["status"],
+        engineer_output_valid=not engineer["invalid"],
+        engineer_output_validation_status=engineer["validation_status"],
+        engineer_output_evaluation_status=_clean_optional_text(engineer_evaluation_status, max_length=128),
+        engineer_output_warning=engineer["warning"],
+        engineer_validation_errors=engineer["validation_errors"],
+        engineer_sanitized_output=dict(engineer["sanitized_output"]),
         git=git_summary,
         tests=tests,
         risk_flags=_sorted_strings(risk_flags or []),
@@ -132,10 +151,12 @@ def summarize_engineer_output(engineer_output: Any) -> dict[str, Any]:
         "summary": _clean_optional_text(payload.get("summary")),
         "validation_status": validation_status,
         "validation_errors": _sanitize_validation_errors(payload.get("validation_errors")),
+        "warning": _engineer_output_warning(validation_status),
         "requires_review": bool(requires_review) if isinstance(requires_review, bool) else None,
         "failed": status in _BLOCKING_ENGINEER_STATUSES,
         "invalid": validation_status != "valid",
         "artifacts": _sanitize_artifacts(payload.get("artifacts")),
+        "sanitized_output": _sanitize_engineer_output_payload(payload),
     }
 
 
@@ -183,8 +204,12 @@ def _blocked_reason(*, git_result: GitMaterialChangeResult, engineer: dict[str, 
     if git_result.baseline_dirty:
         return git_result.blocked_reason or "baseline_dirty"
     if engineer["invalid"]:
+        if git_result.material_changes_present:
+            return None
         return "invalid_engineer_output"
     if engineer["failed"]:
+        if git_result.material_changes_present:
+            return None
         return "engineer_failed"
     return None
 
@@ -193,6 +218,8 @@ def _blocked_reason_detail(*, git_result: GitMaterialChangeResult, engineer: dic
     if git_result.status in _BLOCKING_GIT_STATUSES or git_result.baseline_dirty:
         return None
     if engineer["invalid"]:
+        if git_result.material_changes_present:
+            return None
         if engineer.get("validation_status") == "missing_structured_output":
             for item in engineer.get("validation_errors") or []:
                 message = _clean_optional_text(item.get("message"), max_length=128) if isinstance(item, Mapping) else None
@@ -201,6 +228,42 @@ def _blocked_reason_detail(*, git_result: GitMaterialChangeResult, engineer: dic
             return "missing_structured_output"
         return "invalid_engineer_structured_output"
     return None
+
+
+def _engineer_output_warning(validation_status: str) -> str | None:
+    if validation_status == "valid":
+        return None
+    if validation_status == "missing_structured_output":
+        return "engineer structured output missing; reviewer must rely on observed repo state and sanitized raw output."
+    return "engineer structured output invalid; reviewer must treat engineer metadata as best-effort evidence."
+
+
+def _sanitize_engineer_output_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    safe_payload = {
+        "status": _clean_optional_text(payload.get("status"), max_length=64),
+        "summary": _clean_optional_text(payload.get("summary")),
+        "validation_status": _clean_optional_text(payload.get("validation_status"), max_length=128),
+        "requires_review": payload.get("requires_review") if isinstance(payload.get("requires_review"), bool) else None,
+        "next_action": _clean_optional_text(payload.get("next_action"), max_length=128),
+        "blockers": _sorted_strings(payload.get("blockers")) if isinstance(payload.get("blockers"), list) else [],
+        "changes": _sanitize_changes(payload.get("changes")),
+        "validation_errors": _sanitize_validation_errors(payload.get("validation_errors")),
+    }
+    return {key: value for key, value in safe_payload.items() if value not in (None, [], {})}
+
+
+def _sanitize_changes(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    sanitized: list[dict[str, str]] = []
+    for item in value[:8]:
+        if not isinstance(item, Mapping):
+            continue
+        path = _clean_optional_text(item.get("path"), max_length=256)
+        kind = _clean_optional_text(item.get("kind"), max_length=64)
+        if path and kind:
+            sanitized.append({"path": path, "kind": kind})
+    return sanitized
 
 
 def _sanitize_validation_errors(value: Any) -> list[dict[str, str]]:
