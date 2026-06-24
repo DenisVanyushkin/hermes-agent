@@ -1116,6 +1116,57 @@ def test_persist_controlled_execution_report_artifact_normalizes_actual_executio
     assert payload["first_failed_point"] is None
 
 
+def test_persist_controlled_execution_report_artifact_preserves_blocked_final_response_text(tmp_path: Path) -> None:
+    loaded = load_pipeline_specs()
+    session = _session_for("engineering_review_pipeline", status="selected")
+    snapshot = build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded.pipeline_specs["engineering_review_pipeline"],
+    )
+    workspace = tmp_path / "controlled-workspace"
+    workspace.mkdir()
+
+    report_payload = build_pipeline_execution_report(
+        session=session,
+        state_snapshot=snapshot,
+        preflight_result={"allowed": True, "reason_code": None},
+        final_response_text="Terminal safety block: reviewer blocked completion because credential_exfiltration_risk remained unresolved.",
+        blocked_reason_override="terminal_blocked",
+        review_overrides={
+            "status": "blocked",
+            "reviewer_approved": False,
+            "final_review_decision": "blocker_maintained",
+        },
+        tests={
+            "status": "requested_not_executed",
+            "command": "venv/bin/pytest -q tests/test_smoke_square.py",
+        },
+    ).to_safe_dict()
+
+    persist_controlled_execution_report_artifacts(
+        session=session,
+        state_snapshot=snapshot,
+        controller_payload={
+            "status": "blocked",
+            "blocked_reason": "terminal_blocked",
+            "actual_execution_invoked": True,
+            "execution_mode": "autonomous",
+            "helper_result_status": "blocked",
+            "final_response_text": report_payload["final_response"]["text"],
+            "workspace_basename": workspace.name,
+        },
+        pipeline_execution_report_payload=report_payload,
+        workspace_path=workspace,
+        durable_root=None,
+    )
+
+    payload = json.loads((workspace / "controlled_execution_report.json").read_text(encoding="utf-8"))
+
+    assert payload["pipeline_execution_report"]["final_response"]["text"] == report_payload["final_response"]["text"]
+    assert payload["pipeline_execution_report"]["completion"]["blocked_reason"] == "terminal_blocked"
+    assert payload["review"]["blocked_reason"] == "terminal_blocked"
+
+
 def test_persist_controlled_execution_report_artifacts_sanitizes_durable_run_id(tmp_path: Path) -> None:
     loaded = load_pipeline_specs()
     base_session = _session_for("engineering_review_pipeline", status="selected")

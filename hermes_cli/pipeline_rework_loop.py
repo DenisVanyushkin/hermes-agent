@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -1797,15 +1798,28 @@ def _blocked_final_response_text(
     test_summary: dict[str, Any] | None,
     reviewer_packet: dict[str, Any],
 ) -> str | None:
+    git_gate_reasons = {
+        "baseline_dirty",
+        "baseline_invalid",
+        "post_snapshot_invalid",
+        "repo_path_mismatch",
+        "git_diff_failed",
+        "git_unavailable",
+    }
     if blocked_reason not in {
         "test_command_denied",
         "invalid_engineer_output",
         "engineer_result_invalid",
         "missing_structured_output",
         "max_iterations_plain_text_output",
+        "reviewer_result_invalid",
+        "reviewer_verdict_blocked",
+        "reviewer_unavailable",
+        "terminal_blocked",
         "review_loop_limit_exceeded",
         "rework_exhausted_after_ordinary_reviewer_findings",
         "rework_exhausted_after_missing_test_evidence",
+        *git_gate_reasons,
     }:
         return None
     lines = [
@@ -1858,6 +1872,36 @@ def _blocked_final_response_text(
                 "No verified passing test result is available.",
             ]
         )
+    elif blocked_reason in {"reviewer_result_invalid", "reviewer_verdict_blocked", "reviewer_unavailable"}:
+        lines.append(
+            {
+                "reviewer_result_invalid": "- The reviewer could not produce a valid review packet after controlled execution reached the review boundary.",
+                "reviewer_verdict_blocked": "- The reviewer blocked completion for a terminal review reason.",
+                "reviewer_unavailable": "- The reviewer did not complete a usable review after the patch reached the review boundary.",
+            }[blocked_reason]
+        )
+        lines.append("- Controlled completion remains blocked at the reviewer boundary.")
+        findings = list(reviewer_packet.get("review_findings") or [])
+        if findings:
+            lines.extend(["", "Reviewer findings:"])
+            for item in findings:
+                summary = _safe_test_text(item.get("summary")) if isinstance(item, dict) else _safe_test_text(item)
+                if summary:
+                    lines.append(f"- {summary}")
+    elif blocked_reason == "terminal_blocked":
+        lines.extend(
+            [
+                "- The controlled pipeline issued a terminal safety block.",
+                "- The run stopped instead of routing the issue into another rework attempt.",
+            ]
+        )
+        findings = list(reviewer_packet.get("review_findings") or [])
+        if findings:
+            lines.extend(["", "Safety findings:"])
+            for item in findings:
+                summary = _safe_test_text(item.get("summary")) if isinstance(item, dict) else _safe_test_text(item)
+                if summary:
+                    lines.append(f"- {summary}")
     elif blocked_reason in {
         "review_loop_limit_exceeded",
         "rework_exhausted_after_ordinary_reviewer_findings",
@@ -1875,12 +1919,21 @@ def _blocked_final_response_text(
         if findings:
             lines.extend(["", "Reviewer findings:"])
             for item in findings:
-                if isinstance(item, dict):
-                    summary = _safe_test_text(item.get("summary"))
-                else:
-                    summary = _safe_test_text(item)
+                summary = _safe_test_text(item.get("summary")) if isinstance(item, dict) else _safe_test_text(item)
                 if summary:
                     lines.append(f"- {summary}")
+    elif blocked_reason in git_gate_reasons:
+        lines.append(
+            {
+                "baseline_dirty": "- The workspace baseline was not clean before controlled completion could be trusted.",
+                "baseline_invalid": "- The initial git baseline snapshot was invalid or unavailable.",
+                "post_snapshot_invalid": "- The post-run git snapshot was invalid or unavailable.",
+                "repo_path_mismatch": "- Git snapshot comparison failed because the baseline and post-run repositories did not match.",
+                "git_diff_failed": "- Material diff could not be trusted because the git diff between baseline and post-run state failed.",
+                "git_unavailable": "- Material diff could not be trusted because required git data was unavailable.",
+            }[blocked_reason]
+        )
+        lines.append("- The repository baseline must be clean and comparable before automatic completion can proceed.")
     else:
         lines.extend(
             [
@@ -1900,9 +1953,14 @@ def _blocked_final_response_text(
     safe_summary = _safe_test_text((test_summary or {}).get("blocked_reason"))
     if safe_summary and safe_summary not in {"test_command_denied", "engineer_result_invalid"}:
         lines.append(f"Blocked reason: {safe_summary}")
+    elif blocked_reason in git_gate_reasons | {"terminal_blocked"}:
+        lines.append(f"Blocked reason: {blocked_reason}")
     detail = _safe_test_text(reviewer_packet.get("blocked_reason_detail"))
+    raw_detail = str(reviewer_packet.get("blocked_reason_detail") or "").strip()
     if detail and detail not in {"missing_structured_output", "invalid_engineer_structured_output"}:
         lines.append(f"Blocked reason detail: {detail}")
+    elif blocked_reason == "terminal_blocked" and raw_detail and re.fullmatch(r"[a-z0-9_:-]+", raw_detail):
+        lines.append(f"Blocked reason detail: {raw_detail}")
     packet_status = str(reviewer_packet.get("packet_status") or "").strip()
     if packet_status and packet_status != "disabled":
         lines.append(f"Reviewer status: {packet_status}")
