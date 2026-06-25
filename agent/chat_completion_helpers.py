@@ -1012,6 +1012,74 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
 
 
+
+from urllib.parse import urlparse as _urlparse
+
+_PROVIDER_URL_FAMILIES = {
+    "openai-codex": "codex",
+    "openai": "openai",
+    "xai-oauth": "codex",
+    "openrouter": "openrouter",
+    "nous": "openrouter",
+    "anthropic": "anthropic",
+    "bedrock": "bedrock",
+}
+
+# Each entry: (exact_hostname, required_path_prefix) -> family.
+# Path must equal the prefix exactly or start with prefix + '/'.
+_URL_FAMILY_RULES: tuple[tuple[str, str, str], ...] = (
+    ("chatgpt.com", "/backend-api/codex", "codex"),
+    ("openrouter.ai", "/api/v1", "openrouter"),
+)
+
+
+def _normalize_base_url_family(
+    provider: str | None,
+    api_mode: str | None,
+    base_url: str | None,
+) -> str:
+    """Derive a canonical transport family from base_url, falling back to provider/api_mode.
+
+    Returns one of: 'codex', 'openrouter', 'openai', 'anthropic', 'bedrock', 'unknown'.
+
+    Rules:
+    - If base_url is present: parse with urlparse; match by exact hostname and
+      path prefix only. Any mismatch or unrecognized URL returns 'unknown' — no
+      fallback to provider/api_mode for a present URL. This prevents a bad URL
+      from silently inheriting a known family.
+    - If base_url is absent/empty: derive conservatively from provider, then api_mode.
+    """
+    raw = (base_url or "").strip()
+    if raw:
+        try:
+            parsed = _urlparse(raw)
+            hostname = (parsed.hostname or "").lower()
+            path = parsed.path or ""
+        except Exception:
+            return "unknown"
+        for exact_host, path_prefix, family in _URL_FAMILY_RULES:
+            if hostname == exact_host:
+                # Path must equal prefix exactly or start with prefix + '/'
+                norm_path = path.rstrip("/") or "/"
+                norm_prefix = path_prefix.rstrip("/")
+                if norm_path == norm_prefix or norm_path.startswith(norm_prefix + "/"):
+                    return family
+                return "unknown"  # right host, wrong path
+        return "unknown"
+    # No base_url: derive from provider then api_mode
+    p = (provider or "").strip().lower()
+    if p in _PROVIDER_URL_FAMILIES:
+        return _PROVIDER_URL_FAMILIES[p]
+    m = (api_mode or "").strip().lower()
+    if m == "codex_responses":
+        return "codex"
+    if m == "anthropic_messages":
+        return "anthropic"
+    if m == "bedrock_converse":
+        return "bedrock"
+    return "unknown"
+
+
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
     tools_for_api = agent.tools
@@ -1034,6 +1102,52 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         runtime_request_overrides = agent.request_overrides
         runtime_session_id = getattr(agent, "session_id", None)
         runtime_is_anthropic_oauth = agent._is_anthropic_oauth
+
+    if getattr(agent, '_skip_role_model_selection', False):
+        # Validate outbound (provider, model, api_mode, base_url_family) against the
+        # role-local allowed identity set. Each entry in the set was derived from the
+        # subagent spec at _build_agent time and covers primary + configured fallbacks.
+        # Stale drift from another role, wrong provider, or mismatched transport family
+        # is blocked here before any provider call is made.
+        _allowed_ids = list(getattr(agent, '_controlled_allowed_request_identities', None) or [])
+        if not _allowed_ids:
+            # Defensive: rebuild from constructor attrs if allowed list was not populated
+            _cm = getattr(agent, '_constructor_model', None)
+            _ca = getattr(agent, '_constructor_api_mode', None)
+            _cp = getattr(agent, '_constructor_provider', None)
+            _cb = getattr(agent, '_constructor_base_url', None)
+            if _cm and _ca:
+                _allowed_ids = [{
+                    "provider": _cp or "",
+                    "model": _cm,
+                    "api_mode": _ca,
+                    "base_url_family": _normalize_base_url_family(_cp, _ca, _cb),
+                }]
+        if _allowed_ids:
+            _runtime_family = _normalize_base_url_family(
+                runtime_provider, runtime_api_mode, runtime_base_url
+            )
+            _identity_allowed = any(
+                _id.get("provider") == runtime_provider
+                and _id.get("model") == runtime_model
+                and _id.get("api_mode") == runtime_api_mode
+                and _id.get("base_url_family") == _runtime_family
+                for _id in _allowed_ids
+            )
+            if not _identity_allowed:
+                _allowed_safe = [
+                    {k: v for k, v in _id.items() if k != "base_url"}
+                    for _id in _allowed_ids
+                ]
+                _details = (
+                    f"got_provider={runtime_provider!r} got_model={runtime_model!r} "
+                    f"got_api_mode={runtime_api_mode!r} got_base_url_family={_runtime_family!r} "
+                    f"allowed={_allowed_safe!r}"
+                )
+                raise RuntimeError(
+                    f"controlled_subagent_identity_mismatch: {_details}. "
+                    "Request blocked to prevent cross-role provider/model contamination."
+                )
 
     if runtime_api_mode == "anthropic_messages":
         _transport = agent._get_transport()
