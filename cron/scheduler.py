@@ -2200,6 +2200,26 @@ def _windows_cron_python_invocation(python_exe: str) -> tuple[str, dict[str, str
             env_overlay["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
 
     return str(interpreter), env_overlay
+def _resolve_python_interpreter() -> str:
+    """Return a live Python executable for script jobs.
+
+    The scheduler process is sometimes launched from a stale virtualenv path
+    during container/host handoff. In that case ``sys.executable`` can point at
+    a dead wrapper like ``/home/hermes/.hermes/hermes-agent/venv/bin/python``.
+    For cron script execution we prefer a real, executable interpreter over a
+    broken path, so fall back to ``python3``/``python`` on PATH.
+    """
+    candidate = Path(sys.executable)
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+
+    for name in ("python3", "python"):
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+
+    # Last resort: keep the original value so the caller gets a useful error.
+    return sys.executable
 
 
 def _run_job_script(
@@ -2216,9 +2236,8 @@ def _run_job_script(
     Supported interpreters (chosen by file extension):
 
     * ``.sh`` / ``.bash`` — run with ``/bin/bash``
-    * anything else — run with the current Python interpreter
-      (``sys.executable``), preserving the original behaviour for
-      Python-based pre-check and data-collection scripts.
+    * anything else — run with a live Python interpreter resolved by
+      ``_resolve_python_interpreter()``.
 
     Shell support lets ``no_agent=True`` jobs ship classic bash watchdogs
     (the `memory-watchdog.sh` pattern) without wrapping them in Python.
@@ -2292,7 +2311,7 @@ def _run_job_script(
         argv = [_bash, str(path)]
         env_overlay: dict[str, str] = {}
     else:
-        python_exe, env_overlay = _windows_cron_python_invocation(sys.executable)
+        python_exe, env_overlay = _windows_cron_python_invocation(_resolve_python_interpreter())
         argv = [python_exe, str(path)]
 
     try:
