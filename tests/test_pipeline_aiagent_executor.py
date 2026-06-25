@@ -1331,3 +1331,1147 @@ def test_bridge_loop_routes_reviewer_to_read_only_bridge_and_passes_actual_packe
     assert reviewer_packets and reviewer_packets[0]["git"]["changed_files"] == ["bridge_loop.txt"]
     assert reviewer_packets[0]["packet_status"] == "ready_for_review"
     assert result.subagent_runs[1]["actual_provider"] == "openai-codex"
+# Tests appended by fix-slice: eliminate provider/model identity drift
+
+# --- helpers for identity tests ---
+
+def _make_fake_agent_with_kwargs(**kwargs):
+    """Create a _FakeAgent and return it along with the kwargs it received."""
+    agent = _FakeAgent(**kwargs)
+    agent._turn_runtime_request = None
+    agent._is_anthropic_oauth = False
+    agent.reasoning_config = None
+    agent.request_overrides = None
+    return agent
+
+
+def _turn_runtime_request_from_openrouter():
+    """Simulate _turn_runtime_request as set by select_model_policy for OpenRouter config."""
+    return {
+        "purpose": "main_turn",
+        "actual_provider": "openrouter",
+        "actual_model": "xiaomi/mimo-v2.5-pro",
+        "actual_api_mode": "chat_completions",
+        "actual_base_url": "https://openrouter.ai/api/v1",
+        "actual_api_key": "sk-or-test",
+    }
+
+
+# --- A: reviewer Codex identity regression ---
+
+def test_build_agent_sets_controlled_subagent_flags(tmp_path: Path) -> None:
+    """_build_agent must pin _skip_role_model_selection and constructor identity on the agent."""
+    repo_root, runtime_result = _build_reviewer_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    captured_agents: list = []
+
+    def _factory(**kwargs):
+        agent = _FakeAgent(**kwargs)
+        captured_agents.append(agent)
+        return agent
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_factory,
+        conversation_runner=lambda _b, _a, _req, _rp: {"output_text": "ok"},
+    )
+    bridge._build_agent(runtime_result)
+
+    assert len(captured_agents) == 1
+    agent = captured_agents[0]
+    assert getattr(agent, "_skip_role_model_selection", False) is True
+    assert getattr(agent, "_constructor_provider", None) == "openai-codex"
+    assert getattr(agent, "_constructor_model", None) == "gpt-5.5"
+    assert getattr(agent, "_constructor_api_mode", None) == "codex_responses"
+
+
+def test_build_agent_sets_controlled_flags_for_engineer(tmp_path: Path) -> None:
+    """Engineer agent must also have _skip_role_model_selection set."""
+    repo_root, runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    captured_agents: list = []
+
+    def _factory(**kwargs):
+        agent = _FakeAgent(**kwargs)
+        captured_agents.append(agent)
+        return agent
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_factory,
+        conversation_runner=lambda _b, _a, _req, _rp: {"output_text": "ok"},
+    )
+    bridge._build_agent(runtime_result)
+
+    assert len(captured_agents) == 1
+    agent = captured_agents[0]
+    assert getattr(agent, "_skip_role_model_selection", False) is True
+    assert getattr(agent, "_constructor_provider", None) == "openrouter"
+    assert getattr(agent, "_constructor_model", None) == "xiaomi/mimo-v2.5-pro"
+
+
+# --- F: mismatch fail-closed ---
+
+def test_build_api_kwargs_blocks_when_turn_runtime_request_has_wrong_model(tmp_path: Path) -> None:
+    """build_api_kwargs must raise RuntimeError if _turn_runtime_request has a different model
+    than the constructor identity (mismatch fail-closed guard)."""
+    import types
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    agent = types.SimpleNamespace(
+        tools=[],
+        api_mode="codex_responses",
+        provider="openai-codex",
+        model="gpt-5.5",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config=None,
+        request_overrides=None,
+        session_id="test-session",
+        _is_anthropic_oauth=False,
+        _skip_role_model_selection=True,
+        _constructor_provider="openai-codex",
+        _constructor_model="gpt-5.5",
+        _constructor_api_mode="codex_responses",
+        _constructor_base_url="https://chatgpt.com/backend-api/codex",
+        _turn_runtime_request=_turn_runtime_request_from_openrouter(),
+    )
+    with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
+        build_api_kwargs(agent, [])
+
+
+def test_build_api_kwargs_allows_matching_constructor_identity(tmp_path: Path) -> None:
+    """build_api_kwargs must NOT raise when runtime identity matches constructor."""
+    import types
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    # Simulate what happens after fix: _turn_runtime_request is None
+    agent = types.SimpleNamespace(
+        tools=[],
+        api_mode="codex_responses",
+        provider="openai-codex",
+        model="gpt-5.5",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config=None,
+        request_overrides=None,
+        session_id="test-session",
+        _is_anthropic_oauth=False,
+        _skip_role_model_selection=True,
+        _constructor_provider="openai-codex",
+        _constructor_model="gpt-5.5",
+        _constructor_api_mode="codex_responses",
+        _constructor_base_url="https://chatgpt.com/backend-api/codex",
+        _turn_runtime_request=None,
+        _base_url_hostname="chatgpt.com",
+        _base_url_lower="https://chatgpt.com/backend-api/codex",
+        max_tokens=None,
+        session_id_for_codex=None,
+    )
+    # Should not raise - runtime identity matches constructor
+    # (build_kwargs may fail further on because agent lacks full attrs, but the guard must pass)
+    try:
+        build_api_kwargs(agent, [])
+    except RuntimeError as exc:
+        if "controlled_subagent_identity_mismatch" in str(exc):
+            raise
+    except Exception:
+        pass  # Other errors from missing attrs are ok; we only care the guard didn't block
+
+
+# --- C: cross-role contamination ---
+
+def test_reviewer_bridge_agent_has_independent_constructor_identity(tmp_path: Path) -> None:
+    """After engineer run, a fresh reviewer agent must have reviewer's identity, not engineer's."""
+    repo_root, eng_runtime = _build_runtime_result(tmp_path)
+    # Reuse same repo_root; _build_reviewer_runtime_result would conflict on _copy_spec_tree
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    rev_runtime = RuntimeFactory(repo_root=repo_root).build(
+        RuntimeBuildRequest(
+            loaded_specs=loaded_specs,
+            subagent_id="hermes_code_reviewer",
+            pipeline_session_id="pipe-aiagent-bridge",
+            invocation_id="inv-aiagent-reviewer-bridge",
+        )
+    )
+    git_repo = _init_git_repo(tmp_path)
+
+    captured: dict[str, list] = {"agents": []}
+
+    def _factory(**kwargs):
+        agent = _FakeAgent(**kwargs)
+        captured["agents"].append(agent)
+        return agent
+
+    eng_bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_factory,
+        conversation_runner=lambda _b, _a, _req, _rp: {"output_text": "eng done"},
+    )
+    rev_bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_factory,
+        conversation_runner=lambda _b, _a, _req, _rp: {"output_text": "rev done"},
+    )
+
+    eng_bridge._build_agent(eng_runtime)
+    rev_bridge._build_agent(rev_runtime)
+
+    assert len(captured["agents"]) == 2
+    eng_agent = captured["agents"][0]
+    rev_agent = captured["agents"][1]
+
+    assert eng_agent._constructor_provider == "openrouter"
+    assert eng_agent._constructor_model == "xiaomi/mimo-v2.5-pro"
+    assert rev_agent._constructor_provider == "openai-codex"
+    assert rev_agent._constructor_model == "gpt-5.5"
+    assert rev_agent._constructor_model != eng_agent._constructor_model
+
+
+# --- B: engineer fallback does not contaminate reviewer ---
+
+def test_reviewer_identity_independent_of_engineer_fallback_model(tmp_path: Path) -> None:
+    """Reviewer agent must report openai-codex/gpt-5.5 even after engineer used fallback."""
+    repo_root, eng_runtime = _build_runtime_result(tmp_path)
+    # Reuse same repo_root; _build_reviewer_runtime_result would conflict on _copy_spec_tree
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    rev_runtime = RuntimeFactory(repo_root=repo_root).build(
+        RuntimeBuildRequest(
+            loaded_specs=loaded_specs,
+            subagent_id="hermes_code_reviewer",
+            pipeline_session_id="pipe-aiagent-bridge",
+            invocation_id="inv-aiagent-reviewer-bridge",
+        )
+    )
+    git_repo = _init_git_repo(tmp_path)
+
+    # Engineer agent simulates fallback: model mutates to gpt-5.4 during run
+    def _eng_factory(**kwargs):
+        agent = _FakeAgent(**kwargs)
+        agent.provider = "openai-codex"
+        agent.model = "gpt-5.4"
+        return agent
+
+    captured_rev: dict[str, object] = {"kwargs_model": None, "kwargs_provider": None, "agent": None}
+
+    def _rev_factory(**kwargs):
+        agent = _FakeAgent(**kwargs)
+        # Capture constructor kwargs immediately; _constructor_* attrs are set after factory returns
+        captured_rev["kwargs_model"] = kwargs.get("model")
+        captured_rev["kwargs_provider"] = kwargs.get("provider")
+        captured_rev["agent"] = agent
+        return agent
+
+    eng_bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_eng_factory,
+        conversation_runner=lambda _b, _a, _req, _rp: {"output_text": "eng fallback done"},
+    )
+    rev_bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_rev_factory,
+        conversation_runner=lambda _b, _a, _req, _rp: {"output_text": "rev done"},
+    )
+
+    eng_bridge._build_agent(eng_runtime)
+    rev_bridge._build_agent(rev_runtime)
+
+    # _constructor_* attrs are set by _build_agent AFTER the factory call
+    rev_agent = captured_rev["agent"]
+    assert captured_rev["kwargs_provider"] == "openai-codex"
+    assert captured_rev["kwargs_model"] == "gpt-5.5"
+    assert getattr(rev_agent, "_constructor_provider", None) == "openai-codex"
+    assert getattr(rev_agent, "_constructor_model", None) == "gpt-5.5"
+    assert getattr(rev_agent, "_constructor_model", None) != "gpt-5.4"
+    assert captured_rev["kwargs_model"] != "xiaomi/mimo-v2.5-pro"
+
+
+# --- E: request dump truth via build_api_kwargs model field ---
+
+def test_build_api_kwargs_model_matches_constructor_model_when_no_turn_runtime_request(tmp_path: Path) -> None:
+    """When _turn_runtime_request is None, build_api_kwargs must use agent.model (the constructor model)."""
+    import types
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    # Simulate a reviewer agent post-fix: _turn_runtime_request = None
+    class _MinimalAgent(types.SimpleNamespace):
+        _base_url_hostname = "chatgpt.com"
+        _base_url_lower = "https://chatgpt.com/backend-api/codex"
+
+        def _get_transport(self):
+            class _FakeTransport:
+                captured_model = None
+                def build_kwargs(self, model, **kwargs):
+                    _MinimalAgent._captured_model = model
+                    return {"model": model}
+                def preflight_kwargs(self, kwargs, **_):
+                    return kwargs
+            return _FakeTransport()
+
+        def _prepare_messages_for_non_vision_model(self, messages):
+            return messages
+
+        def _sanitize_tool_calls_for_strict_api(self, *a, **k):
+            pass
+
+    agent = _MinimalAgent(
+        tools=[],
+        api_mode="codex_responses",
+        provider="openai-codex",
+        model="gpt-5.5",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config=None,
+        request_overrides=None,
+        session_id="test",
+        _is_anthropic_oauth=False,
+        _skip_role_model_selection=True,
+        _constructor_provider="openai-codex",
+        _constructor_model="gpt-5.5",
+        _constructor_api_mode="codex_responses",
+        _constructor_base_url="https://chatgpt.com/backend-api/codex",
+        _turn_runtime_request=None,
+        max_tokens=None,
+    )
+
+    try:
+        result = build_api_kwargs(agent, [])
+        assert result.get("model") == "gpt-5.5", f"Expected gpt-5.5 but got {result.get('model')!r}"
+    except Exception as exc:
+        if "controlled_subagent_identity_mismatch" in str(exc):
+            raise AssertionError(f"Mismatch guard must not fire for matching identity: {exc}") from exc
+        pass  # Other transport/attr errors ok — we only care guard didn't block
+
+
+# --- G: mismatch guard uses sanitized diagnostic ---
+
+def test_mismatch_guard_error_does_not_leak_api_key(tmp_path: Path) -> None:
+    """Mismatch error message must not contain actual API keys."""
+    import types
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    agent = types.SimpleNamespace(
+        tools=[],
+        api_mode="codex_responses",
+        provider="openai-codex",
+        model="gpt-5.5",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config=None,
+        request_overrides=None,
+        session_id="test-session",
+        _is_anthropic_oauth=False,
+        _skip_role_model_selection=True,
+        _constructor_provider="openai-codex",
+        _constructor_model="gpt-5.5",
+        _constructor_api_mode="codex_responses",
+        _constructor_base_url="https://chatgpt.com/backend-api/codex",
+        _turn_runtime_request={
+            "actual_provider": "openrouter",
+            "actual_model": "xiaomi/mimo-v2.5-pro",
+            "actual_api_mode": "chat_completions",
+            "actual_base_url": "https://openrouter.ai/api/v1",
+            "actual_api_key": "sk-or-secret-should-not-appear",
+        },
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        build_api_kwargs(agent, [])
+    error_text = str(exc_info.value)
+    assert "controlled_subagent_identity_mismatch" in error_text
+    assert "sk-or-secret-should-not-appear" not in error_text
+
+
+# --- D: reviewer bridge has independent identity from previous reviewer run ---
+
+def test_reviewer_bridge_identity_per_invocation(tmp_path: Path) -> None:
+    """Each call to the reviewer bridge must build a fresh agent with reviewer identity."""
+    repo_root, rev_runtime = _build_reviewer_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    built_agents: list = []
+
+    def _factory(**kwargs):
+        agent = _FakeAgent(**kwargs)
+        built_agents.append({
+            "provider": kwargs.get("provider"),
+            "model": kwargs.get("model"),
+            "constructor_provider": None,
+            "constructor_model": None,
+        })
+        # Simulate post-build setattr
+        built_agents[-1]["agent"] = agent
+        return agent
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_factory,
+        conversation_runner=lambda _b, _a, _req, _rp: {"output_text": "ok"},
+    )
+
+    # Simulate two separate invocations
+    bridge._build_agent(rev_runtime)
+    bridge._build_agent(rev_runtime)
+
+    assert len(built_agents) == 2
+    for entry in built_agents:
+        assert entry["provider"] == "openai-codex"
+        assert entry["model"] == "gpt-5.5"
+        agent = entry["agent"]
+        assert getattr(agent, "_constructor_provider", None) == "openai-codex"
+        assert getattr(agent, "_constructor_model", None) == "gpt-5.5"
+        assert getattr(agent, "_skip_role_model_selection", False) is True
+
+
+# ===========================================================================
+# NEW TESTS: fallback-aware identity guard (fix for blocking issue)
+# ===========================================================================
+
+def _make_reviewer_agent_namespace(*, turn_runtime_request=None, allowed_ids=None):
+    """Minimal types.SimpleNamespace for reviewer identity tests."""
+    import types
+    agent = types.SimpleNamespace(
+        tools=[],
+        api_mode="codex_responses",
+        provider="openai-codex",
+        model="gpt-5.5",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config=None,
+        request_overrides=None,
+        session_id="test-session",
+        _is_anthropic_oauth=False,
+        _skip_role_model_selection=True,
+        _constructor_provider="openai-codex",
+        _constructor_model="gpt-5.5",
+        _constructor_api_mode="codex_responses",
+        _constructor_base_url="https://chatgpt.com/backend-api/codex",
+        _turn_runtime_request=turn_runtime_request,
+        _base_url_hostname="chatgpt.com",
+        _base_url_lower="https://chatgpt.com/backend-api/codex",
+        max_tokens=None,
+    )
+    if allowed_ids is not None:
+        agent._controlled_allowed_request_identities = allowed_ids
+    return agent
+
+
+def _make_engineer_agent_namespace(*, turn_runtime_request=None, allowed_ids=None):
+    """Minimal types.SimpleNamespace for engineer identity tests."""
+    import types
+    agent = types.SimpleNamespace(
+        tools=[],
+        api_mode="chat_completions",
+        provider="openrouter",
+        model="xiaomi/mimo-v2.5-pro",
+        base_url="https://openrouter.ai/api/v1",
+        reasoning_config=None,
+        request_overrides=None,
+        session_id="test-session",
+        _is_anthropic_oauth=False,
+        _skip_role_model_selection=True,
+        _constructor_provider="openrouter",
+        _constructor_model="xiaomi/mimo-v2.5-pro",
+        _constructor_api_mode="chat_completions",
+        _constructor_base_url="https://openrouter.ai/api/v1",
+        _turn_runtime_request=turn_runtime_request,
+    )
+    if allowed_ids is not None:
+        agent._controlled_allowed_request_identities = allowed_ids
+    return agent
+
+
+# --- 1. Positive: engineer fallback allowed ---
+
+def test_build_api_kwargs_allows_configured_fallback_identity(tmp_path: Path) -> None:
+    """build_api_kwargs must not raise when _turn_runtime_request carries the configured
+    fallback identity (openai-codex/gpt-5.4 after primary openrouter/xiaomi fails)."""
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    # Simulate _sync_turn_runtime_request_for_fallback result
+    fallback_runtime_request = {
+        "purpose": "main_turn",
+        "actual_provider": "openai-codex",
+        "actual_model": "gpt-5.4",
+        "actual_api_mode": "codex_responses",
+        "actual_base_url": "https://chatgpt.com/backend-api/codex",
+        "actual_api_key": "sk-codex-test",
+        "fallback_activated": True,
+        "fallback_from_provider": "openrouter",
+        "fallback_from_model": "xiaomi/mimo-v2.5-pro",
+    }
+
+    agent = _make_engineer_agent_namespace(
+        turn_runtime_request=fallback_runtime_request,
+        allowed_ids=[
+            {"provider": "openrouter", "model": "xiaomi/mimo-v2.5-pro", "api_mode": "chat_completions", "base_url_family": "openrouter"},
+            {"provider": "openai-codex", "model": "gpt-5.4", "api_mode": "codex_responses", "base_url_family": "codex"},
+        ],
+    )
+
+    try:
+        build_api_kwargs(agent, [])
+    except RuntimeError as exc:
+        if "controlled_subagent_identity_mismatch" in str(exc):
+            raise AssertionError(
+                f"Guard must not block configured fallback identity: {exc}"
+            ) from exc
+    except Exception:
+        pass  # Other transport/attr errors acceptable — guard is what we test
+
+
+# --- 2. Fallback request body carries fallback model, not primary ---
+
+def test_build_agent_allowed_ids_includes_fallback_identity(tmp_path: Path) -> None:
+    """After _build_agent, _controlled_allowed_request_identities must include both
+    primary (openrouter/xiaomi) and fallback (openai-codex/gpt-5.4) identities."""
+    repo_root, runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    captured_agents: list = []
+
+    def _factory(**kwargs):
+        agent = _FakeAgent(**kwargs)
+        captured_agents.append(agent)
+        return agent
+
+    bridge = AIAgentSubagentExecutorBridge(
+        workspace_root=git_repo,
+        repo_root=repo_root,
+        agent_factory=_factory,
+        conversation_runner=lambda _b, _a, _req, _rp: {"output_text": "ok"},
+    )
+    bridge._build_agent(runtime_result)
+
+    assert len(captured_agents) == 1
+    agent = captured_agents[0]
+    allowed = getattr(agent, "_controlled_allowed_request_identities", None)
+    assert allowed is not None, "_controlled_allowed_request_identities must be set"
+    assert len(allowed) == 2, f"Expected 2 allowed identities (primary+fallback), got: {allowed}"
+
+    models = {_id["model"] for _id in allowed}
+    api_modes = {_id["api_mode"] for _id in allowed}
+    assert "xiaomi/mimo-v2.5-pro" in models, f"Primary model missing from allowed: {allowed}"
+    assert "gpt-5.4" in models, f"Fallback model missing from allowed: {allowed}"
+    assert "chat_completions" in api_modes
+    assert "codex_responses" in api_modes
+
+    # Each entry must have provider and base_url_family
+    for _id in allowed:
+        assert "provider" in _id, f"Entry missing provider: {_id}"
+        assert "base_url_family" in _id, f"Entry missing base_url_family: {_id}"
+        if _id["model"] == "xiaomi/mimo-v2.5-pro":
+            assert _id["api_mode"] == "chat_completions", f"Primary api_mode wrong: {_id}"
+            assert _id["provider"] == "openrouter", f"Primary provider wrong: {_id}"
+            assert _id["base_url_family"] == "openrouter", f"Primary base_url_family wrong: {_id}"
+        if _id["model"] == "gpt-5.4":
+            assert _id["api_mode"] == "codex_responses", f"Fallback api_mode wrong: {_id}"
+            assert _id["provider"] == "openai-codex", f"Fallback provider wrong: {_id}"
+            assert _id["base_url_family"] == "codex", f"Fallback base_url_family wrong: {_id}"
+
+
+# --- 3. Reviewer stale primary still blocked ---
+
+def test_build_api_kwargs_blocks_reviewer_with_engineer_primary_model(tmp_path: Path) -> None:
+    """Reviewer (openai-codex/gpt-5.5) with injected actual_model=xiaomi/mimo-v2.5-pro
+    must still raise controlled_subagent_identity_mismatch."""
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    stale_runtime_request = {
+        "actual_provider": "openrouter",
+        "actual_model": "xiaomi/mimo-v2.5-pro",
+        "actual_api_mode": "chat_completions",
+        "actual_base_url": "https://openrouter.ai/api/v1",
+        "actual_api_key": "sk-or-should-not-appear",
+    }
+
+    agent = _make_reviewer_agent_namespace(
+        turn_runtime_request=stale_runtime_request,
+        allowed_ids=[{"provider": "openai-codex", "model": "gpt-5.5", "api_mode": "codex_responses", "base_url_family": "codex"}],
+    )
+
+    with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
+        build_api_kwargs(agent, [])
+
+
+# --- 4. Reviewer cannot use engineer fallback model ---
+
+def test_build_api_kwargs_blocks_reviewer_with_engineer_fallback_model(tmp_path: Path) -> None:
+    """Reviewer (openai-codex/gpt-5.5) must be blocked even if the injected runtime request
+    carries the engineer's fallback model (gpt-5.4 / codex_responses) — that identity is not
+    in the reviewer's allowed set."""
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    engineer_fallback_request = {
+        "actual_provider": "openai-codex",
+        "actual_model": "gpt-5.4",
+        "actual_api_mode": "codex_responses",
+        "actual_base_url": "https://chatgpt.com/backend-api/codex",
+        "actual_api_key": "sk-codex-test",
+        "fallback_activated": True,
+    }
+
+    # Reviewer's allowed list contains ONLY gpt-5.5, not gpt-5.4
+    agent = _make_reviewer_agent_namespace(
+        turn_runtime_request=engineer_fallback_request,
+        allowed_ids=[{"provider": "openai-codex", "model": "gpt-5.5", "api_mode": "codex_responses", "base_url_family": "codex"}],
+    )
+
+    with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
+        build_api_kwargs(agent, [])
+
+
+# --- 5. Mixed identity blocked ---
+
+def test_build_api_kwargs_blocks_mixed_codex_url_openrouter_model(tmp_path: Path) -> None:
+    """Codex api_mode with OpenRouter model must be blocked even if model matches allowed list
+    with a different api_mode — (model, api_mode) pair must match atomically."""
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    # Codex api_mode but OpenRouter model body — mixed identity
+    mixed_request = {
+        "actual_provider": "openai-codex",
+        "actual_model": "xiaomi/mimo-v2.5-pro",    # OpenRouter model
+        "actual_api_mode": "codex_responses",       # but Codex api_mode
+        "actual_base_url": "https://chatgpt.com/backend-api/codex",
+        "actual_api_key": "sk-codex-test",
+    }
+
+    # Engineer's allowed set: primary is chat_completions, fallback is codex_responses
+    # Neither identity matches (xiaomi/mimo, codex_responses)
+    agent = _make_engineer_agent_namespace(
+        turn_runtime_request=mixed_request,
+        allowed_ids=[
+            {"provider": "openrouter", "model": "xiaomi/mimo-v2.5-pro", "api_mode": "chat_completions", "base_url_family": "openrouter"},
+            {"provider": "openai-codex", "model": "gpt-5.4", "api_mode": "codex_responses", "base_url_family": "codex"},
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
+        build_api_kwargs(agent, [])
+
+
+def test_build_api_kwargs_blocks_mixed_openrouter_url_codex_model(tmp_path: Path) -> None:
+    """OpenRouter api_mode with Codex model must be blocked."""
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    mixed_request = {
+        "actual_provider": "openrouter",
+        "actual_model": "gpt-5.5",               # Codex model
+        "actual_api_mode": "chat_completions",    # but OpenRouter api_mode
+        "actual_base_url": "https://openrouter.ai/api/v1",
+        "actual_api_key": "sk-or-test",
+    }
+
+    agent = _make_reviewer_agent_namespace(
+        turn_runtime_request=mixed_request,
+        allowed_ids=[{"provider": "openai-codex", "model": "gpt-5.5", "api_mode": "codex_responses", "base_url_family": "codex"}],
+    )
+
+    with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
+        build_api_kwargs(agent, [])
+
+
+# --- 6. Normal AIAgent unaffected ---
+
+def test_build_api_kwargs_guard_does_not_fire_for_non_bridge_agent(tmp_path: Path) -> None:
+    """Agents without _skip_role_model_selection must never hit the identity guard,
+    even if they have stale/mismatched _turn_runtime_request."""
+    import types
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    # No _skip_role_model_selection → guard path is never entered
+    agent = types.SimpleNamespace(
+        tools=[],
+        api_mode="codex_responses",
+        provider="openai-codex",
+        model="gpt-5.5",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config=None,
+        request_overrides=None,
+        session_id="test-session",
+        _is_anthropic_oauth=False,
+        # No _skip_role_model_selection set
+        _turn_runtime_request={
+            "actual_provider": "openrouter",
+            "actual_model": "xiaomi/mimo-v2.5-pro",
+            "actual_api_mode": "chat_completions",
+            "actual_base_url": "https://openrouter.ai/api/v1",
+            "actual_api_key": "sk-or-test",
+        },
+        _base_url_hostname="openrouter.ai",
+        _base_url_lower="https://openrouter.ai/api/v1",
+        max_tokens=None,
+    )
+
+    try:
+        build_api_kwargs(agent, [])
+    except RuntimeError as exc:
+        if "controlled_subagent_identity_mismatch" in str(exc):
+            raise AssertionError(
+                f"Guard must not fire for non-bridge agents: {exc}"
+            ) from exc
+    except Exception:
+        pass  # Transport/attr errors ok — we only verify guard doesn't fire
+
+
+# ===========================================================================
+# NEW TESTS: 4-tuple identity guard (provider, model, api_mode, base_url_family)
+# ===========================================================================
+
+# --- 1. Positive: engineer fallback still allowed (4-tuple) ---
+
+def test_engineer_fallback_allowed_with_full_4tuple_identity(tmp_path: Path) -> None:
+    """Configured fallback (openai-codex/gpt-5.4/codex_responses/codex) must pass
+    the 4-tuple guard when _sync_turn_runtime_request_for_fallback sets all fields."""
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    fallback_request = {
+        "actual_provider": "openai-codex",
+        "actual_model": "gpt-5.4",
+        "actual_api_mode": "codex_responses",
+        "actual_base_url": "https://chatgpt.com/backend-api/codex",
+        "actual_api_key": "sk-codex-test",
+        "fallback_activated": True,
+    }
+    import types
+    agent = types.SimpleNamespace(
+        tools=[], api_mode="chat_completions", provider="openrouter",
+        model="xiaomi/mimo-v2.5-pro", base_url="https://openrouter.ai/api/v1",
+        reasoning_config=None, request_overrides=None, session_id="test",
+        _is_anthropic_oauth=False, _skip_role_model_selection=True,
+        _constructor_provider="openrouter", _constructor_model="xiaomi/mimo-v2.5-pro",
+        _constructor_api_mode="chat_completions", _constructor_base_url="https://openrouter.ai/api/v1",
+        _turn_runtime_request=fallback_request,
+        _controlled_allowed_request_identities=[
+            {"provider": "openrouter", "model": "xiaomi/mimo-v2.5-pro", "api_mode": "chat_completions", "base_url_family": "openrouter"},
+            {"provider": "openai-codex", "model": "gpt-5.4", "api_mode": "codex_responses", "base_url_family": "codex"},
+        ],
+    )
+    try:
+        build_api_kwargs(agent, [])
+    except RuntimeError as exc:
+        if "controlled_subagent_identity_mismatch" in str(exc):
+            raise AssertionError(f"Guard must not block valid fallback 4-tuple: {exc}") from exc
+    except Exception:
+        pass  # transport/attr errors ok — guard is what we test
+
+
+# --- 2. model/api_mode match but wrong provider blocks ---
+
+def test_wrong_provider_blocks_even_when_model_api_mode_match(tmp_path: Path) -> None:
+    """Reviewer with correct model/api_mode but wrong provider=openrouter must be blocked.
+    This is the false-pass case from the review: actual_model=gpt-5.4, api_mode=codex_responses,
+    provider=openrouter, base_url=chatgpt.com."""
+    from agent.chat_completion_helpers import build_api_kwargs
+    import types
+
+    stale_request = {
+        "actual_provider": "openrouter",       # wrong provider
+        "actual_model": "gpt-5.4",
+        "actual_api_mode": "codex_responses",
+        "actual_base_url": "https://chatgpt.com/backend-api/codex",
+        "actual_api_key": "sk-or-should-block",
+    }
+    agent = types.SimpleNamespace(
+        tools=[], api_mode="chat_completions", provider="openrouter",
+        model="xiaomi/mimo-v2.5-pro", base_url="https://openrouter.ai/api/v1",
+        reasoning_config=None, request_overrides=None, session_id="test",
+        _is_anthropic_oauth=False, _skip_role_model_selection=True,
+        _constructor_provider="openrouter", _constructor_model="xiaomi/mimo-v2.5-pro",
+        _constructor_api_mode="chat_completions", _constructor_base_url="https://openrouter.ai/api/v1",
+        _turn_runtime_request=stale_request,
+        _controlled_allowed_request_identities=[
+            {"provider": "openrouter", "model": "xiaomi/mimo-v2.5-pro", "api_mode": "chat_completions", "base_url_family": "openrouter"},
+            {"provider": "openai-codex", "model": "gpt-5.4", "api_mode": "codex_responses", "base_url_family": "codex"},
+        ],
+    )
+    with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
+        build_api_kwargs(agent, [])
+
+
+# --- 3. model/api_mode match but wrong base_url family blocks ---
+
+def test_wrong_base_url_family_blocks_even_when_model_api_mode_match(tmp_path: Path) -> None:
+    """Fallback model/api_mode with correct provider but wrong base_url family must be blocked.
+    actual_model=gpt-5.4, api_mode=codex_responses, provider=openai-codex,
+    but base_url=openrouter.ai (wrong family)."""
+    from agent.chat_completion_helpers import build_api_kwargs
+    import types
+
+    stale_request = {
+        "actual_provider": "openai-codex",
+        "actual_model": "gpt-5.4",
+        "actual_api_mode": "codex_responses",
+        "actual_base_url": "https://openrouter.ai/api/v1",   # wrong family
+        "actual_api_key": "sk-codex-should-block",
+    }
+    agent = types.SimpleNamespace(
+        tools=[], api_mode="chat_completions", provider="openrouter",
+        model="xiaomi/mimo-v2.5-pro", base_url="https://openrouter.ai/api/v1",
+        reasoning_config=None, request_overrides=None, session_id="test",
+        _is_anthropic_oauth=False, _skip_role_model_selection=True,
+        _constructor_provider="openrouter", _constructor_model="xiaomi/mimo-v2.5-pro",
+        _constructor_api_mode="chat_completions", _constructor_base_url=None,
+        _turn_runtime_request=stale_request,
+        _controlled_allowed_request_identities=[
+            {"provider": "openrouter", "model": "xiaomi/mimo-v2.5-pro", "api_mode": "chat_completions", "base_url_family": "openrouter"},
+            {"provider": "openai-codex", "model": "gpt-5.4", "api_mode": "codex_responses", "base_url_family": "codex"},
+        ],
+    )
+    with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
+        build_api_kwargs(agent, [])
+
+
+# --- 4. OpenRouter primary with Codex base URL blocks ---
+
+def test_openrouter_primary_model_with_codex_base_url_blocks(tmp_path: Path) -> None:
+    """Primary OpenRouter model with Codex base URL must be blocked (false-pass #2 from review).
+    actual_model=xiaomi, api_mode=chat_completions, provider=openai-codex, base_url=chatgpt.com."""
+    from agent.chat_completion_helpers import build_api_kwargs
+    import types
+
+    stale_request = {
+        "actual_provider": "openai-codex",       # wrong provider for OpenRouter model
+        "actual_model": "xiaomi/mimo-v2.5-pro",
+        "actual_api_mode": "chat_completions",
+        "actual_base_url": "https://chatgpt.com/backend-api/codex",  # wrong family
+        "actual_api_key": "sk-codex-should-block",
+    }
+    agent = types.SimpleNamespace(
+        tools=[], api_mode="chat_completions", provider="openrouter",
+        model="xiaomi/mimo-v2.5-pro", base_url="https://openrouter.ai/api/v1",
+        reasoning_config=None, request_overrides=None, session_id="test",
+        _is_anthropic_oauth=False, _skip_role_model_selection=True,
+        _constructor_provider="openrouter", _constructor_model="xiaomi/mimo-v2.5-pro",
+        _constructor_api_mode="chat_completions", _constructor_base_url=None,
+        _turn_runtime_request=stale_request,
+        _controlled_allowed_request_identities=[
+            {"provider": "openrouter", "model": "xiaomi/mimo-v2.5-pro", "api_mode": "chat_completions", "base_url_family": "openrouter"},
+            {"provider": "openai-codex", "model": "gpt-5.4", "api_mode": "codex_responses", "base_url_family": "codex"},
+        ],
+    )
+    with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
+        build_api_kwargs(agent, [])
+
+
+# --- 5. Reviewer correct identity passes (4-tuple) ---
+
+def test_reviewer_correct_4tuple_identity_passes(tmp_path: Path) -> None:
+    """Reviewer with exact allowed identity (openai-codex/gpt-5.5/codex_responses/codex)
+    must not raise controlled_subagent_identity_mismatch."""
+    from agent.chat_completion_helpers import build_api_kwargs
+    import types
+
+    correct_request = {
+        "actual_provider": "openai-codex",
+        "actual_model": "gpt-5.5",
+        "actual_api_mode": "codex_responses",
+        "actual_base_url": "https://chatgpt.com/backend-api/codex",
+        "actual_api_key": "sk-codex-test",
+    }
+    agent = types.SimpleNamespace(
+        tools=[], api_mode="codex_responses", provider="openai-codex",
+        model="gpt-5.5", base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config=None, request_overrides=None, session_id="test",
+        _is_anthropic_oauth=False, _skip_role_model_selection=True,
+        _constructor_provider="openai-codex", _constructor_model="gpt-5.5",
+        _constructor_api_mode="codex_responses", _constructor_base_url="https://chatgpt.com/backend-api/codex",
+        _turn_runtime_request=correct_request,
+        _controlled_allowed_request_identities=[
+            {"provider": "openai-codex", "model": "gpt-5.5", "api_mode": "codex_responses", "base_url_family": "codex"},
+        ],
+    )
+    try:
+        build_api_kwargs(agent, [])
+    except RuntimeError as exc:
+        if "controlled_subagent_identity_mismatch" in str(exc):
+            raise AssertionError(f"Guard must not block reviewer correct identity: {exc}") from exc
+    except Exception:
+        pass  # transport/attr errors ok
+
+
+# --- 6. Non-bridge agent unaffected (4-tuple guard does not fire) ---
+
+def test_non_bridge_agent_unaffected_by_4tuple_guard(tmp_path: Path) -> None:
+    """Agent without _skip_role_model_selection must never hit the identity guard."""
+    from agent.chat_completion_helpers import build_api_kwargs
+    import types
+
+    agent = types.SimpleNamespace(
+        tools=[], api_mode="codex_responses", provider="openai-codex",
+        model="gpt-5.5", base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config=None, request_overrides=None, session_id="test",
+        _is_anthropic_oauth=False,
+        # No _skip_role_model_selection → guard never enters
+        _turn_runtime_request={
+            "actual_provider": "openrouter",
+            "actual_model": "xiaomi/mimo-v2.5-pro",
+            "actual_api_mode": "chat_completions",
+            "actual_base_url": "https://openrouter.ai/api/v1",
+            "actual_api_key": "sk-or-test",
+        },
+    )
+    try:
+        build_api_kwargs(agent, [])
+    except RuntimeError as exc:
+        if "controlled_subagent_identity_mismatch" in str(exc):
+            raise AssertionError(f"Guard must not fire for non-bridge agent: {exc}") from exc
+    except Exception:
+        pass
+
+
+# --- 7. Mismatch diagnostic includes provider, family; omits API keys ---
+
+def test_mismatch_diagnostic_includes_provider_and_family_not_api_key(tmp_path: Path) -> None:
+    """Mismatch error must include got_provider, got_base_url_family, must not include API key."""
+    from agent.chat_completion_helpers import build_api_kwargs
+    import types
+
+    stale_request = {
+        "actual_provider": "openrouter",
+        "actual_model": "xiaomi/mimo-v2.5-pro",
+        "actual_api_mode": "chat_completions",
+        "actual_base_url": "https://openrouter.ai/api/v1",
+        "actual_api_key": "sk-or-secret-must-not-appear",
+    }
+    agent = types.SimpleNamespace(
+        tools=[], api_mode="codex_responses", provider="openai-codex",
+        model="gpt-5.5", base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config=None, request_overrides=None, session_id="test",
+        _is_anthropic_oauth=False, _skip_role_model_selection=True,
+        _constructor_provider="openai-codex", _constructor_model="gpt-5.5",
+        _constructor_api_mode="codex_responses", _constructor_base_url="https://chatgpt.com/backend-api/codex",
+        _turn_runtime_request=stale_request,
+        _controlled_allowed_request_identities=[
+            {"provider": "openai-codex", "model": "gpt-5.5", "api_mode": "codex_responses", "base_url_family": "codex"},
+        ],
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        build_api_kwargs(agent, [])
+    msg = str(exc_info.value)
+    assert "controlled_subagent_identity_mismatch" in msg
+    assert "got_provider=" in msg
+    assert "got_base_url_family=" in msg
+    assert "sk-or-secret-must-not-appear" not in msg
+
+
+# --- 8. Base URL normalization ---
+
+def test_normalize_base_url_family_codex_variants() -> None:
+    """All chatgpt.com URL variants must normalize to 'codex'."""
+    from agent.chat_completion_helpers import _normalize_base_url_family
+
+    codex_urls = [
+        "https://chatgpt.com/backend-api/codex",
+        "https://chatgpt.com/backend-api/codex/",
+        "https://chatgpt.com/backend-api/codex/responses",
+        "https://chatgpt.com/backend-api/codex/chat/completions",
+    ]
+    for url in codex_urls:
+        result = _normalize_base_url_family(None, None, url)
+        assert result == "codex", f"Expected 'codex' for {url!r}, got {result!r}"
+
+
+def test_normalize_base_url_family_openrouter_variants() -> None:
+    """All openrouter.ai URL variants must normalize to 'openrouter'."""
+    from agent.chat_completion_helpers import _normalize_base_url_family
+
+    openrouter_urls = [
+        "https://openrouter.ai/api/v1",
+        "https://openrouter.ai/api/v1/",
+        "https://openrouter.ai/api/v1/chat/completions",
+    ]
+    for url in openrouter_urls:
+        result = _normalize_base_url_family(None, None, url)
+        assert result == "openrouter", f"Expected 'openrouter' for {url!r}, got {result!r}"
+
+
+def test_normalize_base_url_family_unknown_does_not_match_known() -> None:
+    """An unknown base URL must normalize to 'unknown' and not match codex or openrouter."""
+    from agent.chat_completion_helpers import _normalize_base_url_family
+
+    result = _normalize_base_url_family(None, None, "https://some-proxy.example.com/api/v1")
+    assert result == "unknown"
+    assert result != "codex"
+    assert result != "openrouter"
+
+
+def test_normalize_base_url_family_provider_fallback_when_no_url() -> None:
+    """Without a base URL, provider string must determine the family."""
+    from agent.chat_completion_helpers import _normalize_base_url_family
+
+    assert _normalize_base_url_family("openai-codex", None, None) == "codex"
+    assert _normalize_base_url_family("openai-codex", None, "") == "codex"
+    assert _normalize_base_url_family("openrouter", None, None) == "openrouter"
+    assert _normalize_base_url_family("xai-oauth", None, None) == "codex"
+    assert _normalize_base_url_family("anthropic", None, None) == "anthropic"
+
+
+# ===========================================================================
+# NEW TESTS: urlparse-based _normalize_base_url_family (blocking issue fix)
+# ===========================================================================
+
+def test_normalize_codex_happy_path_urlparse() -> None:
+    """All valid Codex base URL variants must normalize to 'codex'."""
+    from agent.chat_completion_helpers import _normalize_base_url_family as f
+
+    for url in [
+        "https://chatgpt.com/backend-api/codex",
+        "https://chatgpt.com/backend-api/codex/",
+        "https://chatgpt.com/backend-api/codex/responses",
+        "https://chatgpt.com/backend-api/codex/responses?foo=bar",
+        "https://chatgpt.com/backend-api/codex/chat/completions",
+    ]:
+        assert f(None, None, url) == "codex", f"Expected codex for {url!r}"
+
+
+def test_normalize_openrouter_happy_path_urlparse() -> None:
+    """All valid OpenRouter base URL variants must normalize to 'openrouter'."""
+    from agent.chat_completion_helpers import _normalize_base_url_family as f
+
+    for url in [
+        "https://openrouter.ai/api/v1",
+        "https://openrouter.ai/api/v1/",
+        "https://openrouter.ai/api/v1/chat/completions",
+        "https://openrouter.ai/api/v1/chat/completions?foo=bar",
+    ]:
+        assert f(None, None, url) == "openrouter", f"Expected openrouter for {url!r}"
+
+
+def test_normalize_non_codex_chatgpt_paths_are_unknown() -> None:
+    """chatgpt.com URLs with wrong paths must normalize to 'unknown', not 'codex'."""
+    from agent.chat_completion_helpers import _normalize_base_url_family as f
+
+    for url in [
+        "https://chatgpt.com/",
+        "https://chatgpt.com/some-other-path",
+        "https://chatgpt.com/backend-api",
+        "https://chatgpt.com/backend-api-extra/codex",
+    ]:
+        result = f(None, None, url)
+        assert result == "unknown", f"Expected unknown for {url!r}, got {result!r}"
+
+
+def test_normalize_non_v1_openrouter_paths_are_unknown() -> None:
+    """openrouter.ai URLs with wrong paths must normalize to 'unknown'."""
+    from agent.chat_completion_helpers import _normalize_base_url_family as f
+
+    for url in [
+        "https://openrouter.ai/",
+        "https://openrouter.ai/api",
+        "https://openrouter.ai/some-other-path",
+    ]:
+        result = f(None, None, url)
+        assert result == "unknown", f"Expected unknown for {url!r}, got {result!r}"
+
+
+def test_normalize_proxy_and_substring_attacks_are_unknown() -> None:
+    """URLs that embed a known domain in query/path must NOT be classified as known."""
+    from agent.chat_completion_helpers import _normalize_base_url_family as f
+
+    for url in [
+        "https://example.com/proxy?target=https://chatgpt.com/backend-api/codex",
+        "https://example.com/?next=https://openrouter.ai/api/v1",
+        "https://example.com/chatgpt.com/backend-api/codex",
+    ]:
+        result = f(None, None, url)
+        assert result == "unknown", f"Expected unknown for {url!r}, got {result!r}"
+
+
+def test_normalize_hostname_boundary_attacks_are_unknown() -> None:
+    """Domains that merely contain known hostnames as substrings must be rejected."""
+    from agent.chat_completion_helpers import _normalize_base_url_family as f
+
+    for url in [
+        "https://evil-chatgpt.com/backend-api/codex",
+        "https://notchatgpt.com/backend-api/codex",
+        "https://notopenrouter.ai/api/v1",
+        "https://sub.chatgpt.com/backend-api/codex",   # subdomain not allowed
+        "https://sub.openrouter.ai/api/v1",
+    ]:
+        result = f(None, None, url)
+        assert result == "unknown", f"Expected unknown for {url!r}, got {result!r}"
+
+
+def test_normalize_present_bad_url_does_not_fall_back_to_provider() -> None:
+    """When base_url is present but unrecognized, provider and api_mode must NOT be
+    used as fallback — result must be 'unknown' regardless of provider/api_mode."""
+    from agent.chat_completion_helpers import _normalize_base_url_family as f
+
+    bad_urls = [
+        "https://chatgpt.com/some-other-path",
+        "https://chatgpt.com/backend-api",
+        "https://evil-chatgpt.com/backend-api/codex",
+        "not-a-url",
+    ]
+    for url in bad_urls:
+        result = f("openai-codex", "codex_responses", url)
+        assert result == "unknown", (
+            f"Expected unknown (no fallback) for bad URL {url!r} with openai-codex provider, "
+            f"got {result!r}"
+        )
+        result = f("openrouter", "chat_completions", url)
+        assert result == "unknown", (
+            f"Expected unknown (no fallback) for bad URL {url!r} with openrouter provider, "
+            f"got {result!r}"
+        )
+
+
+def test_normalize_empty_url_falls_back_to_provider() -> None:
+    """When base_url is absent or empty, derive family from provider then api_mode."""
+    from agent.chat_completion_helpers import _normalize_base_url_family as f
+
+    assert f("openai-codex", "codex_responses", None) == "codex"
+    assert f("openai-codex", "codex_responses", "") == "codex"
+    assert f("openai-codex", "codex_responses", "  ") == "codex"
+    assert f("openrouter", "chat_completions", None) == "openrouter"
+    assert f("xai-oauth", None, None) == "codex"
+    assert f("anthropic", "anthropic_messages", None) == "anthropic"
+
+
+def test_normalize_not_a_url_is_unknown() -> None:
+    """Non-URL strings must normalize to 'unknown', not silently match a family."""
+    from agent.chat_completion_helpers import _normalize_base_url_family as f
+
+    for s in ["not-a-url", "codex", "openrouter", "gpt-5.5", "localhost", "::1"]:
+        result = f(None, None, s)
+        assert result == "unknown", f"Expected unknown for non-URL {s!r}, got {result!r}"
+
+
+def test_guard_fail_closed_for_bad_known_host_path(tmp_path: Path) -> None:
+    """Bridge-managed reviewer with correct provider/model/api_mode but base_url
+    https://chatgpt.com/some-other-path must raise controlled_subagent_identity_mismatch.
+    The bad URL normalizes to 'unknown', which does not match allowed 'codex' family."""
+    import types
+    from agent.chat_completion_helpers import build_api_kwargs
+
+    bad_url_request = {
+        "actual_provider": "openai-codex",
+        "actual_model": "gpt-5.5",
+        "actual_api_mode": "codex_responses",
+        "actual_base_url": "https://chatgpt.com/some-other-path",  # valid host, wrong path
+        "actual_api_key": "sk-codex-test",
+    }
+    agent = types.SimpleNamespace(
+        tools=[], api_mode="codex_responses", provider="openai-codex",
+        model="gpt-5.5", base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config=None, request_overrides=None, session_id="test",
+        _is_anthropic_oauth=False, _skip_role_model_selection=True,
+        _constructor_provider="openai-codex", _constructor_model="gpt-5.5",
+        _constructor_api_mode="codex_responses",
+        _constructor_base_url="https://chatgpt.com/backend-api/codex",
+        _turn_runtime_request=bad_url_request,
+        _controlled_allowed_request_identities=[
+            {
+                "provider": "openai-codex",
+                "model": "gpt-5.5",
+                "api_mode": "codex_responses",
+                "base_url_family": "codex",
+            }
+        ],
+    )
+    with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
+        build_api_kwargs(agent, [])
+

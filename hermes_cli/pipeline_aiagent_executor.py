@@ -11,6 +11,8 @@ from typing import Any, Callable, Mapping
 import model_tools
 import run_agent
 from hermes_cli.pipeline_mutations import apply_controlled_mutations
+from hermes_cli.runtime_factory import RuntimeFactory
+from agent.chat_completion_helpers import _normalize_base_url_family
 from hermes_cli.pipeline_test_runner import run_controlled_tests
 
 
@@ -230,6 +232,40 @@ class AIAgentSubagentExecutorBridge:
         agent.valid_tool_names = set(self._allowed_tool_names())
         agent.enabled_toolsets = []
         agent.disabled_toolsets = list(kwargs["disabled_toolsets"])
+        agent._skip_role_model_selection = True
+        agent._constructor_provider = str(getattr(runtime_plan, 'constructor_provider', None) or '')
+        agent._constructor_model = str(getattr(runtime_plan, 'constructor_model', None) or '')
+        agent._constructor_api_mode = str(getattr(runtime_plan, 'constructor_api_mode', None) or '')
+        agent._constructor_base_url = str(getattr(runtime_plan, 'constructor_base_url', None) or '')
+        # Build the allowed identity set: primary + all configured fallbacks.
+        # Each entry is a 4-tuple (provider, model, api_mode, base_url_family).
+        # build_api_kwargs validates outbound identity against this set before any call.
+        _allowed_ids: list[dict] = []
+        if agent._constructor_model and agent._constructor_api_mode and agent._constructor_provider:
+            _allowed_ids.append({
+                "provider": agent._constructor_provider,
+                "model": agent._constructor_model,
+                "api_mode": agent._constructor_api_mode,
+                "base_url_family": _normalize_base_url_family(
+                    agent._constructor_provider,
+                    agent._constructor_api_mode,
+                    agent._constructor_base_url or None,
+                ),
+            })
+        _fp = getattr(runtime_plan, 'fallback_policy', None)
+        if _fp and getattr(_fp, 'provider', None) and getattr(_fp, 'model', None):
+            _fb_api_mode = RuntimeFactory._constructor_api_mode(_fp.provider) or ''
+            _allowed_ids.append({
+                "provider": _fp.provider,
+                "model": _fp.model,
+                "api_mode": _fb_api_mode,
+                "base_url_family": _normalize_base_url_family(
+                    _fp.provider,
+                    _fb_api_mode,
+                    None,  # fallback has no explicit base_url in spec; derive from provider
+                ),
+            })
+        agent._controlled_allowed_request_identities = _allowed_ids
         return agent
 
     def _validate_agent_fallback_policy(
