@@ -114,6 +114,20 @@ class TestRunJobScript:
         assert success is True
         assert output == "hello from script"
 
+    def test_python_script_falls_back_from_missing_sys_executable(self, cron_env, monkeypatch):
+        from cron import scheduler as sched_mod
+        from cron.scheduler import _run_job_script
+
+        script = cron_env / "scripts" / "fallback.py"
+        script.write_text('import sys\nprint(f"fallback:{sys.executable}")\n')
+
+        monkeypatch.setattr(sched_mod.sys, "executable", "/home/hermes/.hermes/hermes-agent/venv/bin/python")
+
+        success, output = _run_job_script(str(script))
+        assert success is True
+        assert output.startswith("fallback:")
+        assert "/home/hermes/.hermes/hermes-agent/venv/bin/python" not in output
+
     def test_script_relative_path(self, cron_env):
         from cron.scheduler import _run_job_script
 
@@ -287,14 +301,20 @@ class TestRunJobScript:
         assert output == ""
 
     def test_script_timeout(self, cron_env, monkeypatch):
+        from subprocess import TimeoutExpired
+
         from cron import scheduler as sched_mod
         from cron.scheduler import _run_job_script
 
-        # Use a very short timeout
         monkeypatch.setattr(sched_mod, "_SCRIPT_TIMEOUT", 1)
 
         script = cron_env / "scripts" / "slow.py"
         script.write_text("import time; time.sleep(30)\n")
+
+        def _raise_timeout(*_args, **_kwargs):
+            raise TimeoutExpired(cmd=["python3", str(script)], timeout=1)
+
+        monkeypatch.setattr(sched_mod.subprocess, "run", _raise_timeout)
 
         success, output = _run_job_script(str(script))
         assert success is False
