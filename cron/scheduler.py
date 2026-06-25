@@ -2010,6 +2010,28 @@ def _get_script_timeout() -> int:
     return _DEFAULT_SCRIPT_TIMEOUT
 
 
+def _resolve_python_interpreter() -> str:
+    """Return a live Python executable for script jobs.
+
+    The scheduler process is sometimes launched from a stale virtualenv path
+    during container/host handoff. In that case ``sys.executable`` can point at
+    a dead wrapper like ``/home/hermes/.hermes/hermes-agent/venv/bin/python``.
+    For cron script execution we prefer a real, executable interpreter over a
+    broken path, so fall back to ``python3``/``python`` on PATH.
+    """
+    candidate = Path(sys.executable)
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+
+    for name in ("python3", "python"):
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+
+    # Last resort: keep the original value so the caller gets a useful error.
+    return sys.executable
+
+
 def _run_job_script(script_path: str) -> tuple[bool, str]:
     """Execute a cron job's data-collection script and capture its output.
 
@@ -2021,9 +2043,8 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     Supported interpreters (chosen by file extension):
 
     * ``.sh`` / ``.bash`` — run with ``/bin/bash``
-    * anything else — run with the current Python interpreter
-      (``sys.executable``), preserving the original behaviour for
-      Python-based pre-check and data-collection scripts.
+    * anything else — run with a live Python interpreter resolved by
+      ``_resolve_python_interpreter()``.
 
     Shell support lets ``no_agent=True`` jobs ship classic bash watchdogs
     (the `memory-watchdog.sh` pattern) without wrapping them in Python.
@@ -2090,7 +2111,7 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             )
         argv = [_bash, str(path)]
     else:
-        argv = [sys.executable, str(path)]
+        argv = [_resolve_python_interpreter(), str(path)]
 
     try:
         from tools.environments.local import _sanitize_subprocess_env
