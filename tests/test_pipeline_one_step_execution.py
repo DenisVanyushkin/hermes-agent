@@ -373,6 +373,62 @@ def test_one_step_adapter_preserves_machine_captured_pytest_payload() -> None:
     assert safe["tool_call_summaries"][0]["result_payload"]["results"][0]["exit_code"] == 0
 
 
+def test_one_step_adapter_preserves_timeout_machine_captured_pytest_payload() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
+    adapted = module._adapt_runner_result(
+        invocation_result=SimpleNamespace(
+            ok=True,
+            execution_status="completed",
+            completion_reason="completed",
+            token_usage={},
+            tool_intents=[{"name": "pytest", "arguments": {"command": "venv/bin/pytest -q tests/test_ok.py"}}],
+            raw_metadata={
+                "structured_output": _valid_structured_output(),
+                "tool_calls": [
+                    {
+                        "tool_name": "pytest",
+                        "status": "succeeded",
+                        "result": {
+                            "status": "timeout",
+                            "summary": "timed out after 30s",
+                            "results": [
+                                {
+                                    "command": ["venv/bin/pytest", "-q", "tests/test_ok.py"],
+                                    "status": "timeout",
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            record=SimpleNamespace(elapsed_ms=12.0),
+            error_code=None,
+        ),
+        runner_request=SimpleNamespace(
+            pipeline_session_id="pipe-one-step-1",
+            trace_id="trace-one-step-1",
+            pipeline_id="engineering_review_pipeline",
+            step_id="engineer",
+            subagent_id="hermes_engineer_core",
+            role_id="engineer",
+            runtime_factory_plan_id="rfp-1",
+            runtime_factory_status="ready_to_construct",
+        ),
+        runtime_plan=SimpleNamespace(
+            constructor_provider="openrouter",
+            constructor_model="xiaomi/mimo-v2.5-pro",
+            selection=SimpleNamespace(selected_model_class="frontier"),
+            actual_runtime_status="ready_to_construct",
+            runtime_mode="real_provider",
+            real_provider_allowed=True,
+            provider_policy_status="ready_to_construct",
+        ),
+    )
+
+    safe = adapted.to_safe_dict()
+    assert safe["tool_call_summaries"][0]["result_payload"]["status"] == "timeout"
+
+
 def test_final_report_marks_only_one_step_executed_but_not_final_completion(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
     repo_root, loaded_specs = _loaded_specs(tmp_path)
