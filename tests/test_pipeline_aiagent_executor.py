@@ -937,6 +937,8 @@ def test_bridge_pytest_is_constrained_and_terminal_missing(tmp_path: Path) -> No
 
     payload = json.loads(bridge.execute_tool("pytest", {"command": "python -m pytest -q tests/test_ok.py"}))
     assert payload["status"] == "passed"
+    assert bridge._tool_calls[-1]["result"]["status"] == "passed"
+    assert bridge._tool_calls[-1]["result"]["results"][0]["exit_code"] == 0
     assert all(tool["function"]["name"] != "terminal" for tool in bridge._tool_definitions())
 
 
@@ -977,6 +979,12 @@ def test_bridge_pytest_denial_captures_forensics(tmp_path: Path) -> None:
         assert str(exc) == "test_command_denied"
     else:
         raise AssertionError("expected constrained pytest denial")
+
+    tool_call = bridge._tool_calls[-1]
+    assert tool_call["tool_name"] == "pytest"
+    assert tool_call["status"] == "failed"
+    assert tool_call["result"]["status"] == "blocked"
+    assert tool_call["result"]["results"][0]["validator_reason"] == "test_command_denied"
 
 
 def test_bridge_find_files_sees_real_repo_directories_when_workspace_is_repo_root(tmp_path: Path) -> None:
@@ -2474,4 +2482,3 @@ def test_guard_fail_closed_for_bad_known_host_path(tmp_path: Path) -> None:
     )
     with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
         build_api_kwargs(agent, [])
-

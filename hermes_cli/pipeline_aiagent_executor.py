@@ -105,6 +105,7 @@ class AIAgentSubagentExecutorBridge:
         if tool_name not in self._allowed_tool_names():
             raise AIAgentExecutorBridgeError(f"tool_not_allowed:{tool_name}")
 
+        result: dict[str, Any] | None = None
         try:
             if tool_name == "read_file":
                 path = self._resolve_workspace_path(str(args.get("path") or ""), allow_missing=False)
@@ -201,6 +202,7 @@ class AIAgentSubagentExecutorBridge:
                 tool_name,
                 args,
                 status="failed",
+                result=result if tool_name == "pytest" else None,
                 error={
                     "kind": str(exc),
                     "message": self._tool_error_message(tool_name, args, str(exc)),
@@ -208,7 +210,7 @@ class AIAgentSubagentExecutorBridge:
             )
             raise
 
-        self._record_tool_call(tool_name, args, status="succeeded")
+        self._record_tool_call(tool_name, args, status="succeeded", result=result if tool_name == "pytest" else None)
         return json.dumps(result, ensure_ascii=False)
 
     def _build_agent(self, runtime_plan: Any) -> Any:
@@ -800,6 +802,7 @@ class AIAgentSubagentExecutorBridge:
         arguments: Mapping[str, Any],
         *,
         status: str,
+        result: Mapping[str, Any] | None = None,
         error: Mapping[str, Any] | None = None,
     ) -> None:
         payload: dict[str, Any] = {
@@ -807,6 +810,8 @@ class AIAgentSubagentExecutorBridge:
             "arguments": self._redacted_arguments(arguments),
             "status": status,
         }
+        if result is not None:
+            payload["result"] = dict(result)
         if error is not None:
             payload["error"] = dict(error)
         self._tool_calls.append(payload)

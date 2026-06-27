@@ -177,7 +177,9 @@ def normalize_test_summary(test_summary: Any) -> dict[str, Any]:
     normalized = {
         "status": status,
         "command": _clean_test_command_text(payload.get("command"), max_length=512),
+        "exit_code": payload.get("exit_code") if isinstance(payload.get("exit_code"), int) else None,
         "summary": _clean_optional_text(payload.get("summary")),
+        "source": _clean_optional_text(payload.get("source"), max_length=64),
         "blocked_reason": _clean_optional_text(payload.get("blocked_reason"), max_length=128),
     }
     results = payload.get("results")
@@ -320,6 +322,7 @@ def _sanitize_test_results(value: list[Any]) -> list[dict[str, Any]]:
         safe_item = {
             "command": safe_command,
             "status": _clean_optional_text(item.get("status"), max_length=64),
+            "exit_code": item.get("exit_code") if isinstance(item.get("exit_code"), int) else None,
             "cwd": _clean_optional_text(item.get("cwd"), max_length=128),
             "stdout_excerpt": _clean_optional_text(item.get("stdout_excerpt")),
             "stderr_excerpt": _clean_optional_text(item.get("stderr_excerpt")),

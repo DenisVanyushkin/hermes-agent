@@ -56,13 +56,17 @@ class SubagentToolCallSummary:
     tool_name: str
     call_count: int = 0
     status: str = "not_invoked"
+    result_payload: dict[str, Any] | None = None
 
     def to_safe_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "tool_name": self.tool_name,
             "call_count": self.call_count,
             "status": self.status,
         }
+        if isinstance(self.result_payload, dict):
+            payload["result_payload"] = dict(self.result_payload)
+        return payload
 
 
 @dataclass(frozen=True)

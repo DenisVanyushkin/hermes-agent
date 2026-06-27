@@ -536,3 +536,42 @@ def test_requested_not_executed_test_summary_is_preserved_with_command() -> None
     assert payload["tests"]["status"] == "requested_not_executed"
     assert payload["tests"]["command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
     assert "preserved but not executed" in (payload["tests"]["summary"] or "")
+
+
+def test_executed_test_summary_preserves_exit_code_source_and_results() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+
+    packet = module.build_reviewer_packet(
+        pipeline_id="engineering_review_pipeline",
+        task_summary="Preserve executed test evidence",
+        engineer_output=_engineer_output(),
+        baseline_snapshot=_snapshot(head_sha="abc123"),
+        post_snapshot=_snapshot(head_sha="def456"),
+        git_result=_git_result(),
+        test_summary={
+            "status": "passed",
+            "command": "venv/bin/pytest -q tests/test_smoke_square.py",
+            "exit_code": 0,
+            "summary": "5 passed",
+            "source": "allowed_tool",
+            "results": [
+                {
+                    "command": ["venv/bin/pytest", "-q", "tests/test_smoke_square.py"],
+                    "status": "passed",
+                    "exit_code": 0,
+                    "cwd": "hermes-agent",
+                    "stdout_excerpt": ".....\n5 passed\n",
+                    "stderr_excerpt": "",
+                }
+            ],
+        },
+    )
+
+    payload = packet.to_safe_dict()
+
+    assert payload["tests"]["status"] == "passed"
+    assert payload["tests"]["command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert payload["tests"]["exit_code"] == 0
+    assert payload["tests"]["summary"] == "5 passed"
+    assert payload["tests"]["source"] == "allowed_tool"
+    assert payload["tests"]["results"][0]["exit_code"] == 0
