@@ -28,6 +28,8 @@ from hermes_cli.subagent_runner import (
     validate_structured_output_envelope,
 )
 
+_TOOL_RESULT_ELIGIBLE_STATUSES = {"passed", "failed", "blocked", "timeout", "invalid"}
+
 
 @dataclass(frozen=True)
 class ControlledOneStepExecutionResult:
@@ -266,6 +268,7 @@ def _adapt_runner_result(
     runtime_plan: Any,
 ) -> SubagentRunnerResult:
     structured_output = _structured_output_from_invocation(invocation_result.raw_metadata if invocation_result.ok else None)
+    raw_tool_calls = _raw_tool_calls(invocation_result.raw_metadata)
     if invocation_result.ok:
         if invocation_result.execution_status == "completed":
             status = SubagentRunnerStatus.SUCCEEDED
@@ -303,11 +306,12 @@ def _adapt_runner_result(
         cache_summary=SubagentCacheSummary(),
         tool_call_summaries=[
             SubagentToolCallSummary(
-                tool_name=str(intent.get("name") or "unknown"),
+                tool_name=str(tool_call.get("tool_name") or intent.get("name") or "unknown"),
                 call_count=1,
-                status="planned",
+                status=_tool_call_status(tool_call),
+                result_payload=_tool_result_payload(tool_call),
             )
-            for intent in invocation_result.tool_intents
+            for intent, tool_call in _paired_tool_calls(invocation_result.tool_intents, raw_tool_calls)
         ],
         elapsed_ms=invocation_result.record.elapsed_ms,
         artifacts_created=[],
@@ -315,6 +319,47 @@ def _adapt_runner_result(
         schema_validation_status=structured_output.validation_status if structured_output is not None else "not_applicable",
         raw_output_redacted=True,
     )
+
+
+def _paired_tool_calls(
+    tool_intents: list[dict[str, Any]] | None,
+    raw_tool_calls: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    intents = list(tool_intents or [])
+    if not raw_tool_calls:
+        return [(intent, {}) for intent in intents]
+    if len(raw_tool_calls) >= len(intents):
+        padded_intents = intents + [{} for _ in range(len(raw_tool_calls) - len(intents))]
+        return list(zip(padded_intents, raw_tool_calls))
+    pairs = list(zip(intents[: len(raw_tool_calls)], raw_tool_calls))
+    pairs.extend((intent, {}) for intent in intents[len(raw_tool_calls) :])
+    return pairs
+
+
+def _raw_tool_calls(raw_metadata: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(raw_metadata, dict):
+        return []
+    value = raw_metadata.get("tool_calls")
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _tool_call_status(tool_call: dict[str, Any]) -> str:
+    status = str(tool_call.get("status") or "").strip()
+    return status or "planned"
+
+
+def _tool_result_payload(tool_call: dict[str, Any]) -> dict[str, Any] | None:
+    if str(tool_call.get("tool_name") or "") != "pytest":
+        return None
+    payload = tool_call.get("result")
+    if not isinstance(payload, dict):
+        return None
+    status = str(payload.get("status") or "").strip()
+    if status not in _TOOL_RESULT_ELIGIBLE_STATUSES:
+        return None
+    return dict(payload)
 
 
 def _structured_output_from_invocation(raw_metadata: dict[str, Any] | None) -> StructuredOutputEnvelope | None:

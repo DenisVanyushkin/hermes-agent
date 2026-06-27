@@ -320,6 +320,7 @@ def execute_bounded_rework_loop(
             step_kind="engineer",
             step_subagent_id=ENGINEER_SUBAGENT_ID,
             structured_output=engineer_output,
+            runner_result=getattr(current_snapshot.planned_steps[0], "runner_result", None),
             runtime_context=runtime_context,
         )
         if int(engineer_test_summary.get("requested_count") or 0) > 0 or engineer_test_summary.get("blocked_reason") is not None:
@@ -639,6 +640,7 @@ def execute_bounded_rework_loop(
                 step_kind="reviewer",
                 step_subagent_id=REVIEWER_SUBAGENT_ID,
                 structured_output=_step_structured_output(current_snapshot, 1),
+                runner_result=getattr(current_snapshot.planned_steps[1], "runner_result", None),
                 runtime_context=runtime_context,
             )
             if int(reviewer_test_summary.get("requested_count") or 0) > 0 or reviewer_test_summary.get("blocked_reason") is not None:
@@ -983,6 +985,7 @@ def execute_bounded_rework_loop(
             step_kind="reviewer",
             step_subagent_id=REVIEWER_SUBAGENT_ID,
             structured_output=_step_structured_output(current_snapshot, 1),
+            runner_result=getattr(current_snapshot.planned_steps[1], "runner_result", None),
             runtime_context=runtime_context,
         )
         if int(reviewer_test_summary.get("requested_count") or 0) > 0 or reviewer_test_summary.get("blocked_reason") is not None:
@@ -2156,8 +2159,12 @@ def _apply_step_tests(
     step_kind: str,
     step_subagent_id: str,
     structured_output: dict[str, Any],
+    runner_result: Any,
     runtime_context: ControlledRuntimeContext | None,
 ) -> dict[str, Any]:
+    executed_summary = _machine_captured_test_summary(runner_result)
+    if executed_summary is not None:
+        return executed_summary
     tests = list(structured_output.get("tests") or [])
     if not tests:
         return _test_summary_disabled(runtime_context)
@@ -2197,6 +2204,31 @@ def _preserve_requested_test_summary(
         except ValueError:
             continue
     return current
+
+
+def _machine_captured_test_summary(runner_result: Any) -> dict[str, Any] | None:
+    if not isinstance(runner_result, dict):
+        return None
+    for tool_call in _mapping_list(runner_result.get("tool_call_summaries")):
+        if str(tool_call.get("tool_name") or "") != "pytest":
+            continue
+        payload = tool_call.get("result_payload")
+        if not isinstance(payload, dict):
+            continue
+        status = str(payload.get("status") or "").strip()
+        if status not in {"passed", "failed", "blocked", "timeout", "invalid"}:
+            continue
+        results = _mapping_list(payload.get("results"))
+        first_result = results[0] if results else {}
+        command_tokens = first_result.get("command")
+        command = " ".join(str(token) for token in command_tokens) if isinstance(command_tokens, list) else None
+        normalized = dict(payload)
+        normalized["command"] = command
+        normalized["exit_code"] = first_result.get("exit_code")
+        normalized["source"] = str(payload.get("source") or "allowed_tool")
+        normalized["results"] = results
+        return normalized
+    return None
 
 
 def _candidate_test_commands(
