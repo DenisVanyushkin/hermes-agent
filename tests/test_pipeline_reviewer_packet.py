@@ -300,6 +300,7 @@ def test_long_text_is_bounded() -> None:
     [
         ({"status": "passed"}, "passed"),
         ({"status": "failed"}, "failed"),
+        ({"status": "timeout"}, "timeout"),
         ({"status": "not_run"}, "not_run"),
         ({"status": "not_requested"}, "not_requested"),
         ({"status": "requested_not_executed"}, "requested_not_executed"),
@@ -313,6 +314,38 @@ def test_test_summary_statuses_normalize_correctly(input_summary: dict[str, obje
     normalized = module.normalize_test_summary(input_summary)
 
     assert normalized["status"] == expected_status
+
+
+def test_timeout_test_summary_is_preserved_in_reviewer_packet() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+
+    packet = module.build_reviewer_packet(
+        pipeline_id="engineering_review_pipeline",
+        task_summary="Timeout test evidence",
+        engineer_output=_engineer_output(),
+        baseline_snapshot=_snapshot(head_sha="abc123"),
+        post_snapshot=_snapshot(head_sha="def456"),
+        git_result=_git_result(),
+        test_summary={
+            "status": "timeout",
+            "command": "venv/bin/pytest -q tests/test_smoke_square.py",
+            "summary": "timed out after 30s",
+            "source": "allowed_tool",
+            "results": [
+                {
+                    "command": ["venv/bin/pytest", "-q", "tests/test_smoke_square.py"],
+                    "status": "timeout",
+                    "cwd": "hermes-agent",
+                    "stdout_excerpt": "collecting...",
+                    "stderr_excerpt": "",
+                }
+            ],
+        },
+    )
+
+    payload = packet.to_safe_dict()
+    assert payload["tests"]["status"] == "timeout"
+    assert payload["tests"]["source"] == "allowed_tool"
 
 
 def test_invalid_engineer_output_blocks_and_requires_review() -> None:

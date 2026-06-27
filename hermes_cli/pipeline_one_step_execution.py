@@ -12,6 +12,7 @@ from hermes_cli.pipeline_execution_fuse import (
     evaluate_pipeline_reviewer_execution_fuse,
 )
 from hermes_cli.pipeline_report import build_pipeline_execution_report
+from hermes_cli.pipeline_reviewer_packet import MACHINE_CAPTURED_TEST_STATUSES
 from hermes_cli.pipeline_session import PipelineSession
 from hermes_cli.pipeline_state_machine import PipelineStateSnapshot, build_pipeline_state_snapshot
 from hermes_cli.runtime_factory import RuntimeBuildRequest
@@ -27,9 +28,6 @@ from hermes_cli.subagent_runner import (
     SubagentCacheSummary,
     validate_structured_output_envelope,
 )
-
-_TOOL_RESULT_ELIGIBLE_STATUSES = {"passed", "failed", "blocked", "timeout", "invalid"}
-
 
 @dataclass(frozen=True)
 class ControlledOneStepExecutionResult:
@@ -357,7 +355,7 @@ def _tool_result_payload(tool_call: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     status = str(payload.get("status") or "").strip()
-    if status not in _TOOL_RESULT_ELIGIBLE_STATUSES:
+    if status not in MACHINE_CAPTURED_TEST_STATUSES:
         return None
     return dict(payload)
 

@@ -19,14 +19,12 @@ _BLOCKING_GIT_STATUSES = {
 _BLOCKING_ENGINEER_STATUSES = {"failed", "blocked"}
 _DIFF_MARKERS = ("diff --git", "@@", "+++", "---")
 _SENSITIVE_PARTS = ("api_key", "token", "password", "secret", "credential", "env")
+MACHINE_CAPTURED_TEST_STATUSES = {"passed", "failed", "blocked", "timeout", "invalid"}
 _VALID_TEST_STATUSES = {
     "not_run",
     "not_requested",
     "requested_not_executed",
-    "passed",
-    "failed",
-    "blocked",
-    "invalid",
+    *MACHINE_CAPTURED_TEST_STATUSES,
     "unknown",
 }
 
