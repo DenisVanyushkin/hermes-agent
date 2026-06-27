@@ -1083,7 +1083,6 @@ def test_machine_captured_pytest_payload_wins_over_preserved_requested_command(t
     repo_root, loaded_specs = _loaded_specs(tmp_path)
     git_repo = _init_git_repo(tmp_path)
     reviewer_packets: list[dict[str, object]] = []
-
     prompt = (
         "Add a small utility and focused test coverage.\n\n"
         "Run exactly:\n"
@@ -1179,6 +1178,170 @@ def test_machine_captured_pytest_payload_wins_over_preserved_requested_command(t
     assert reviewer_packets[0]["tests"]["source"] == "allowed_tool"
     assert reviewer_packets[0]["tests"]["results"][0]["exit_code"] == 0
     assert result.test_summary["status"] == "passed"
+    assert result.test_summary["source"] == "allowed_tool"
+
+
+def test_natural_language_pytest_claim_does_not_become_passed_without_machine_captured_payload(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    reviewer_packets: list[dict[str, object]] = []
+
+    prompt = "Add a small utility and update docs."
+
+    def _engineer_executor(_request, _runtime_plan):
+        _write(git_repo, "feature.txt", "first pass\n")
+        return {
+            "output_text": "pytest passed, 5 passed",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": {
+                    "status": "approved",
+                    "summary": "pytest passed, 5 passed",
+                }
+            },
+        }
+
+    def _reviewer_executor(request, _runtime_plan):
+        reviewer_packets.append(dict(request.metadata["reviewer_packet"]["safe_packet"]))
+        return {
+            "output_text": "reviewed",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config={
+            "pipelines": {
+                "enabled": True,
+                "execution": {
+                    "mode": "autonomous",
+                    "enable_gateway_execution_controller": True,
+                    "allow_actual_subagent_invocation": True,
+                    "allow_actual_reviewer_invocation": True,
+                    "allow_actual_rework_loop": True,
+                    "allow_pipelines": ["engineering_review_pipeline"],
+                    "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                }
+            }
+        },
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=prompt,
+        repo_path=str(git_repo),
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _engineer_executor,
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+        },
+    )
+
+    assert reviewer_packets[0]["tests"]["status"] == "not_requested"
+    assert reviewer_packets[0]["tests"].get("command") is None
+    assert result.test_summary["status"] == "not_requested"
+
+
+def test_requested_command_does_not_downgrade_timeout_machine_captured_payload(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    reviewer_packets: list[dict[str, object]] = []
+
+    prompt = (
+        "Add a small utility and focused test coverage.\n\n"
+        "Run exactly:\n"
+        "venv/bin/pytest -q tests/test_smoke_square.py\n"
+    )
+
+    def _engineer_executor(_request, _runtime_plan):
+        _write(git_repo, "feature.txt", "first pass\n")
+        return {
+            "output_text": "engineer emitted invalid structured output",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "tool_intents": [{"name": "pytest", "arguments": {"command": "venv/bin/pytest -q tests/test_smoke_square.py"}}],
+            "raw_metadata": {
+                "structured_output": {
+                    "status": "approved",
+                    "summary": "plain text diagnostic summary",
+                },
+                "tool_calls": [
+                    {
+                        "tool_name": "pytest",
+                        "status": "succeeded",
+                        "result": {
+                            "enabled": True,
+                            "workspace": git_repo.name,
+                            "status": "timeout",
+                            "requested_count": 1,
+                            "executed_count": 1,
+                            "passed_count": 0,
+                            "failed_count": 0,
+                            "denied_count": 0,
+                            "timeout_count": 1,
+                            "blocked_reason": "test_command_timeout",
+                            "summary": "timed out after 30s",
+                            "results": [
+                                {
+                                    "command": ["venv/bin/pytest", "-q", "tests/test_smoke_square.py"],
+                                    "cwd": git_repo.name,
+                                    "status": "timeout",
+                                    "stdout_excerpt": "collecting...",
+                                    "stderr_excerpt": "",
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        }
+
+    def _reviewer_executor(request, _runtime_plan):
+        reviewer_packets.append(dict(request.metadata["reviewer_packet"]["safe_packet"]))
+        return {
+            "output_text": "reviewed",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config={
+            "pipelines": {
+                "enabled": True,
+                "execution": {
+                    "mode": "autonomous",
+                    "enable_gateway_execution_controller": True,
+                    "allow_actual_subagent_invocation": True,
+                    "allow_actual_reviewer_invocation": True,
+                    "allow_actual_rework_loop": True,
+                    "allow_pipelines": ["engineering_review_pipeline"],
+                    "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                }
+            }
+        },
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=prompt,
+        repo_path=str(git_repo),
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _engineer_executor,
+                "hermes_code_reviewer": lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reviewer must not run after timeout block")),
+            },
+        },
+    )
+
+    assert result.blocked_reason == "test_command_timeout"
+    assert result.test_summary["status"] == "timeout"
+    assert result.test_summary["command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
     assert result.test_summary["source"] == "allowed_tool"
 
 

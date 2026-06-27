@@ -34,6 +34,7 @@ from hermes_cli.pipeline_report import (
     build_pipeline_execution_report,
 )
 from hermes_cli.pipeline_reviewer_packet import build_reviewer_packet
+from hermes_cli.pipeline_reviewer_packet import MACHINE_CAPTURED_TEST_STATUSES
 from hermes_cli.pipeline_session import PipelineSession
 from hermes_cli.pipeline_state_machine import build_pipeline_state_snapshot
 from hermes_cli.pipeline_test_runner import preserve_explicit_pytest_command, run_controlled_tests
@@ -2216,7 +2217,7 @@ def _machine_captured_test_summary(runner_result: Any) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             continue
         status = str(payload.get("status") or "").strip()
-        if status not in {"passed", "failed", "blocked", "timeout", "invalid"}:
+        if status not in MACHINE_CAPTURED_TEST_STATUSES:
             continue
         results = _mapping_list(payload.get("results"))
         first_result = results[0] if results else {}
