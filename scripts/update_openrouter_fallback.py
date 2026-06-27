@@ -206,7 +206,7 @@ def restart_gateway(compose_dir: Path) -> dict:
     env.setdefault("HERMES_GID", str(os.getgid()))
 
     restart = subprocess.run(
-        ["docker", "compose", "restart", "gateway"],
+        ["docker-compose", "restart", "gateway"],
         cwd=str(compose_dir),
         env=env,
         capture_output=True,
@@ -220,7 +220,7 @@ def restart_gateway(compose_dir: Path) -> dict:
         }
 
     up = subprocess.run(
-        ["docker", "compose", "up", "-d", "gateway"],
+        ["docker-compose", "up", "-d", "gateway"],
         cwd=str(compose_dir),
         env=env,
         capture_output=True,
