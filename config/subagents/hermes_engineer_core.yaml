@@ -96,12 +96,12 @@ input_schema:
 output_schema:
   status:
     enum:
-      - completed
       - succeeded
-      - blocked
       - failed
-      - needs_input
-      - disagreement
+      - blocked
+      - needs_review
+      - not_invoked
+      - disagree_with_reviewer
   required_fields:
     - schema_version
     - subagent_id
