@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -608,3 +609,76 @@ def test_executed_test_summary_preserves_exit_code_source_and_results() -> None:
     assert payload["tests"]["summary"] == "5 passed"
     assert payload["tests"]["source"] == "allowed_tool"
     assert payload["tests"]["results"][0]["exit_code"] == 0
+
+
+def test_untracked_small_text_files_include_inspectable_contents(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    smoke_impl = repo / "hermes_cli" / "smoke_square.py"
+    smoke_test = repo / "tests" / "test_smoke_square.py"
+    smoke_impl.parent.mkdir(parents=True, exist_ok=True)
+    smoke_test.parent.mkdir(parents=True, exist_ok=True)
+    smoke_impl.write_text(
+        "def square(n: int) -> int:\n"
+        "    return n * n\n",
+        encoding="utf-8",
+    )
+    smoke_test.write_text(
+        "from hermes_cli.smoke_square import square\n\n"
+        "def test_square_negative() -> None:\n"
+        "    assert square(-3) == 9\n",
+        encoding="utf-8",
+    )
+
+    packet = module.build_reviewer_packet(
+        pipeline_id="engineering_review_pipeline",
+        task_summary="Expose untracked smoke-square files to reviewer packet",
+        engineer_output=_engineer_output(),
+        baseline_snapshot=_snapshot(head_sha="abc123", repo_path=str(repo)),
+        post_snapshot=_snapshot(
+            head_sha="def456",
+            repo_path=str(repo),
+            untracked_files=("hermes_cli/smoke_square.py", "tests/test_smoke_square.py"),
+        ),
+        git_result=_git_result(
+            changed_files=["hermes_cli/smoke_square.py", "tests/test_smoke_square.py"],
+            untracked_files=["hermes_cli/smoke_square.py", "tests/test_smoke_square.py"],
+        ),
+    )
+
+    payload = packet.to_safe_dict()
+    details = payload["git"]["untracked_file_details"]
+
+    assert packet.packet_status == "ready_for_review"
+    assert [item["path"] for item in details] == ["hermes_cli/smoke_square.py", "tests/test_smoke_square.py"]
+    assert "def square" in details[0]["content_excerpt"]
+    assert "return n * n" in details[0]["content_excerpt"]
+    assert "square(-3) == 9" in details[1]["content_excerpt"]
+    assert all(item["content_available"] is True for item in details)
+    assert all(item["omission_reason"] is None for item in details)
+
+
+def test_test_summary_classifies_semantic_command_equivalence() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+
+    normalized = module.normalize_test_summary(
+        {
+            "status": "passed",
+            "requested_command": "venv/bin/pytest -q tests/test_smoke_square.py",
+            "executed_command": "/home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py",
+            "exit_code": 0,
+            "summary": "5 passed",
+            "source": "allowed_tool",
+        }
+    )
+
+    assert normalized["requested_command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert normalized["executed_command"] == (
+        "/home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py"
+    )
+    assert normalized["command"] == (
+        "/home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py"
+    )
+    assert normalized["command_relation"] == "equivalent"
+    assert "same pytest target" in normalized["command_relation_reason"]

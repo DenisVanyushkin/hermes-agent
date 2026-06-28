@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+import shlex
 from typing import Any, Mapping
 
 from hermes_cli.pipeline_git_delta import GitMaterialChangeResult, GitSnapshot
@@ -10,6 +12,8 @@ from hermes_cli.pipeline_git_delta import GitMaterialChangeResult, GitSnapshot
 
 _SCHEMA_VERSION = "reviewer_packet.v1"
 _MAX_TEXT_LENGTH = 2000
+_MAX_UNTRACKED_FILE_BYTES = 4096
+_MAX_UNTRACKED_FILE_LINES = 120
 _BLOCKING_GIT_STATUSES = {
     "baseline_invalid",
     "post_snapshot_invalid",
@@ -172,9 +176,20 @@ def normalize_test_summary(test_summary: Any) -> dict[str, Any]:
     status = str(payload.get("status") or "unknown")
     if status not in _VALID_TEST_STATUSES:
         status = "unknown"
+    requested_command = _clean_test_command_text(payload.get("requested_command") or payload.get("command"), max_length=512)
+    executed_command = _clean_test_command_text(payload.get("executed_command") or payload.get("command"), max_length=512)
+    command_relation, command_relation_reason = _classify_test_command_relation(
+        requested_command=requested_command,
+        executed_command=executed_command,
+        exit_code=payload.get("exit_code"),
+    )
     normalized = {
         "status": status,
-        "command": _clean_test_command_text(payload.get("command"), max_length=512),
+        "command": executed_command or requested_command,
+        "requested_command": requested_command,
+        "executed_command": executed_command,
+        "command_relation": command_relation,
+        "command_relation_reason": command_relation_reason,
         "exit_code": payload.get("exit_code") if isinstance(payload.get("exit_code"), int) else None,
         "summary": _clean_optional_text(payload.get("summary")),
         "source": _clean_optional_text(payload.get("source"), max_length=64),
@@ -204,7 +219,136 @@ def packet_from_git_delta(
         "staged_files": _sorted_strings(git_result.staged_files),
         "unstaged_files": _sorted_strings(git_result.unstaged_files),
         "review_reason": git_result.blocked_reason or git_result.status,
+        "untracked_file_details": _collect_untracked_file_details(
+            repo_path=post_snapshot.repo_path or baseline_snapshot.repo_path,
+            untracked_files=git_result.untracked_files,
+        ),
     }
+
+
+def _collect_untracked_file_details(*, repo_path: str | None, untracked_files: list[str]) -> list[dict[str, Any]]:
+    repo_root = Path(repo_path) if repo_path else None
+    details: list[dict[str, Any]] = []
+    for relative_path in _sorted_strings(untracked_files)[:8]:
+        detail = _read_untracked_file_detail(repo_root=repo_root, relative_path=relative_path)
+        if detail is not None:
+            details.append(detail)
+    return details
+
+
+def _read_untracked_file_detail(*, repo_root: Path | None, relative_path: str) -> dict[str, Any] | None:
+    detail: dict[str, Any] = {
+        "path": relative_path,
+        "content_available": False,
+        "content_excerpt": None,
+        "size_bytes": None,
+        "truncated": False,
+        "binary": False,
+        "omission_reason": None,
+    }
+    if repo_root is None:
+        detail["omission_reason"] = "repo_path_unavailable"
+        return detail
+    candidate = (repo_root / relative_path).resolve()
+    try:
+        candidate.relative_to(repo_root.resolve())
+    except ValueError:
+        detail["omission_reason"] = "outside_repo"
+        return detail
+    if not candidate.exists() or not candidate.is_file():
+        detail["omission_reason"] = "file_missing"
+        return detail
+    try:
+        raw = candidate.read_bytes()
+    except OSError:
+        detail["omission_reason"] = "read_failed"
+        return detail
+    detail["size_bytes"] = len(raw)
+    if b"\x00" in raw:
+        detail["binary"] = True
+        detail["omission_reason"] = "binary_file"
+        return detail
+    excerpt = raw[:_MAX_UNTRACKED_FILE_BYTES]
+    truncated = len(raw) > len(excerpt)
+    try:
+        text = excerpt.decode("utf-8")
+    except UnicodeDecodeError:
+        detail["binary"] = True
+        detail["omission_reason"] = "non_utf8_file"
+        return detail
+    lines = text.splitlines()
+    if len(lines) > _MAX_UNTRACKED_FILE_LINES:
+        text = "\n".join(lines[:_MAX_UNTRACKED_FILE_LINES])
+        truncated = True
+    safe_excerpt = _clean_file_excerpt(text)
+    if safe_excerpt is None:
+        detail["omission_reason"] = "content_redacted"
+        return detail
+    detail["content_available"] = True
+    detail["content_excerpt"] = safe_excerpt
+    detail["truncated"] = truncated
+    return detail
+
+
+def _clean_file_excerpt(value: str) -> str | None:
+    lines: list[str] = []
+    for raw_line in value.splitlines():
+        lower = raw_line.lower()
+        if any(part in lower for part in _SENSITIVE_PARTS):
+            continue
+        lines.append(raw_line.rstrip())
+    cleaned = "\n".join(lines).strip()
+    if not cleaned:
+        return None
+    return cleaned
+
+
+def _classify_test_command_relation(
+    *,
+    requested_command: str | None,
+    executed_command: str | None,
+    exit_code: Any,
+) -> tuple[str, str | None]:
+    if not requested_command and not executed_command:
+        return "unknown", None
+    if requested_command and executed_command and requested_command == executed_command:
+        return "same", "Requested and executed commands match exactly."
+    if not requested_command or not executed_command:
+        return "unknown", "Only one command form is available."
+    requested = _parse_pytest_command(requested_command)
+    executed = _parse_pytest_command(executed_command)
+    if requested is None or executed is None:
+        return "unknown", "Could not normalize one or both pytest commands."
+    if requested["targets"] != executed["targets"]:
+        if requested["targets"] and executed["targets"]:
+            if set(executed["targets"]).issubset(set(requested["targets"])):
+                return "narrower", "Executed command covers only a subset of the requested pytest targets."
+            if set(requested["targets"]).issubset(set(executed["targets"])):
+                return "broader", "Executed command covers the requested pytest targets and additional ones."
+            return "different", "Requested and executed commands target different pytest paths."
+        return "unknown", "Target coverage could not be compared."
+    if exit_code == 0:
+        return "equivalent", "Executed command ran the same pytest target with a semantically sufficient invocation."
+    return "equivalent", "Executed command targets the same pytest path after normalization."
+
+
+def _parse_pytest_command(command: str) -> dict[str, Any] | None:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    normalized_tokens = list(tokens)
+    tool = Path(normalized_tokens[0]).name
+    if tool.startswith("python") and len(normalized_tokens) >= 3 and normalized_tokens[1] == "-m" and normalized_tokens[2] == "pytest":
+        normalized_tokens = ["pytest", *normalized_tokens[3:]]
+    else:
+        normalized_tokens[0] = tool
+    if normalized_tokens[0] not in {"pytest", "py.test"}:
+        return None
+    targets = [token for token in normalized_tokens[1:] if not token.startswith("-")]
+    return {"tokens": normalized_tokens, "targets": targets}
 
 
 def _blocked_reason(*, git_result: GitMaterialChangeResult, engineer: dict[str, Any]) -> str | None:
