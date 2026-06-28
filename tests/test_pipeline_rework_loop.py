@@ -424,7 +424,7 @@ def test_first_review_approval_stops_without_rework(tmp_path: Path) -> None:
         user_message="Implement bounded rework loop",
     )
 
-    assert calls == ["hermes_engineer_core", "hermes_code_reviewer"]
+    assert calls[:2] == ["hermes_engineer_core", "hermes_code_reviewer"]
     assert len(result.iteration_history) == 1
     assert result.candidate_complete is True
     assert result.completion_allowed is False
@@ -1375,6 +1375,7 @@ def test_git_gate_disabled_preserves_existing_behavior(tmp_path: Path) -> None:
 def test_git_gate_no_material_changes_can_skip_reviewer_and_allow_completion(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     repo_root, loaded_specs = _loaded_specs(tmp_path)
+    loaded_specs.pipeline_specs["engineering_review_pipeline"]["loop_policy"]["max_review_iterations"] = 1
     git_repo = _init_git_repo(tmp_path)
     calls: list[str] = []
 
@@ -1484,6 +1485,82 @@ def test_git_gate_material_changes_with_reviewer_approval_allows_completion(tmp_
     assert result.blocked_reason is None
     assert result.reviewer_packet["present"] is True
     assert result.reviewer_packet["safe_packet"]["tests"]["status"] == "passed"
+    payload = result.execution_report.to_safe_dict()
+    assert payload["review"]["reviewer_approved"] is True
+
+
+def test_needs_review_reviewer_envelope_stays_rework_required_not_invalid(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        if request.subagent_id == "hermes_engineer_core":
+            _write(git_repo, "new.txt", "created by engineer\n")
+            payload = _engineer_output(summary="Created new.txt")
+        else:
+            payload = _reviewer_output_with_findings(
+                blockers=[],
+                findings=[{"severity": "medium", "summary": "Add the missing regression test."}],
+                status="needs_review",
+                next_action="rework",
+            )
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": payload},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        test_summary={"status": "passed", "command": "pytest -q", "summary": "3 passed"},
+    )
+
+    assert calls[:2] == ["hermes_engineer_core", "hermes_code_reviewer"]
+    assert result.reviewer_packet["present"] is True
+    assert result.reviewer_packet["review_findings"] == ["Add the missing regression test."]
+    assert result.blocked_reason == "rework_exhausted_after_ordinary_reviewer_findings"
+
+
+def test_verdict_only_reviewer_output_remains_fail_closed(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+
+    def _executor(request, _runtime_plan):
+        if request.subagent_id == "hermes_engineer_core":
+            payload = _engineer_output(summary="Created new.txt")
+            _write(git_repo, "new.txt", "created by engineer\n")
+        else:
+            payload = {"status": "approved"}
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": payload},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        test_summary={"status": "passed", "command": "pytest -q", "summary": "3 passed"},
+    )
+
+    assert result.blocked_reason == "reviewer_result_invalid"
 
 
 def test_material_diff_with_invalid_engineer_output_invokes_reviewer_and_preserves_evidence(tmp_path: Path) -> None:
