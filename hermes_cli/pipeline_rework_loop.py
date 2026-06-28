@@ -2187,15 +2187,19 @@ def _preserve_requested_test_summary(
     runtime_context: ControlledRuntimeContext | None,
     test_workspace: str | None,
 ) -> dict[str, Any]:
-    if str(current.get("status") or "") != "not_requested":
-        return current
-    if not test_workspace:
-        return current
     for source, command in _candidate_test_commands(
         original_task=original_task,
         engineer_output=engineer_output,
         runner_result=runner_result,
     ):
+        if str(current.get("status") or "") != "not_requested":
+            updated = dict(current)
+            updated.setdefault("requested_command", command)
+            if updated.get("executed_command") is None and updated.get("command") is not None:
+                updated["executed_command"] = updated.get("command")
+            return updated
+        if not test_workspace:
+            return current
         try:
             return preserve_explicit_pytest_command(
                 raw_command=command,
@@ -2225,6 +2229,7 @@ def _machine_captured_test_summary(runner_result: Any) -> dict[str, Any] | None:
         command = " ".join(str(token) for token in command_tokens) if isinstance(command_tokens, list) else None
         normalized = dict(payload)
         normalized["command"] = command
+        normalized["executed_command"] = command
         normalized["exit_code"] = first_result.get("exit_code")
         normalized["source"] = str(payload.get("source") or "allowed_tool")
         normalized["results"] = results
