@@ -1971,6 +1971,63 @@ def _blocked_final_response_text(
     return "\n".join(lines)
 
 
+def _completion_allowed_final_response_text(
+    *,
+    git_gate: dict[str, Any] | None,
+    test_summary: dict[str, Any] | None,
+    reviewer_packet: dict[str, Any] | None,
+) -> str:
+    lines = [
+        "Controlled engineering execution completed and stopped at the commit gate.",
+        "",
+    ]
+
+    changed_files = [str(item).strip() for item in list((git_gate or {}).get("changed_files") or []) if str(item).strip()]
+    if changed_files:
+        lines.append("Changed files:")
+        for path in changed_files:
+            lines.append(f"- {path}")
+        lines.append("")
+
+    lines.append("Tests:")
+    test_status = _safe_test_text((test_summary or {}).get("status")) or "unavailable"
+    lines.append(f"- status: {test_status}")
+
+    executed_command = _safe_test_text((test_summary or {}).get("executed_command"))
+    requested_command = _safe_test_text((test_summary or {}).get("requested_command"))
+    command = _safe_test_text((test_summary or {}).get("command"))
+    command_relation = _safe_test_text((test_summary or {}).get("command_relation"))
+    summary = _safe_test_text((test_summary or {}).get("summary"))
+
+    if executed_command:
+        lines.append(f"- command: {executed_command}")
+    elif command:
+        lines.append(f"- command: {command}")
+    if requested_command and requested_command != executed_command:
+        lines.append(f"- requested command: {requested_command}")
+    if command_relation:
+        lines.append(f"- command relation: {command_relation}")
+    if summary:
+        lines.append(f"- summary: {summary}")
+
+    lines.extend(
+        [
+            "",
+            "Reviewer:",
+            "- approved: yes",
+            "- decision: candidate_complete",
+            "",
+            "No commit or push was performed. Waiting for user approval before commit.",
+        ]
+    )
+
+    packet_status = str((reviewer_packet or {}).get("packet_status") or "").strip()
+    if packet_status and packet_status not in {"", "disabled", "not_built"}:
+        lines.insert(-2, f"- status: {packet_status}")
+
+    return "\n".join(lines)
+
+
 def _finalize_loop_result(
     *,
     fuse: PipelineExecutionFuseResult,
@@ -2000,10 +2057,18 @@ def _finalize_loop_result(
     review_overrides: dict[str, Any] | None = None,
     test_summary: dict[str, Any] | None = None,
 ) -> PipelineReworkLoopResult:
-    blocked_final_response_text = _blocked_final_response_text(
-        blocked_reason=blocked_reason,
-        test_summary=test_summary,
-        reviewer_packet=reviewer_packet,
+    final_response_text = (
+        _completion_allowed_final_response_text(
+            git_gate=git_gate,
+            test_summary=test_summary,
+            reviewer_packet=reviewer_packet,
+        )
+        if completion_allowed and candidate_complete and blocked_reason is None
+        else _blocked_final_response_text(
+            blocked_reason=blocked_reason,
+            test_summary=test_summary,
+            reviewer_packet=reviewer_packet,
+        )
     )
     return PipelineReworkLoopResult(
         fuse=fuse,
@@ -2012,7 +2077,7 @@ def _finalize_loop_result(
             session=session,
             state_snapshot=snapshot,
             preflight_result={"allowed": preflight_allowed, "reason_code": preflight_reason_code},
-            final_response_text=blocked_final_response_text,
+            final_response_text=final_response_text,
             peer_messages=peer_messages,
             disagreements=disagreements,
             decisive_subagent=decisive_subagent,
