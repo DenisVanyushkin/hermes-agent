@@ -697,6 +697,10 @@ def test_autonomous_executor_bridge_uses_subagent_runner_and_observed_git_delta(
     assert result.helper_result["completion_allowed"] is True
     assert result.helper_result["git_gate"]["changed_files"] == ["engineer_notes.txt"]
     assert result.helper_result["reviewer_packet"]["safe_packet"]["git"]["changed_files"] == ["engineer_notes.txt"]
+    assert result.final_response_text is not None
+    assert "Controlled engineering execution completed and stopped at the commit gate." in result.final_response_text
+    assert "- engineer_notes.txt" in result.final_response_text
+    assert "No commit or push was performed. Waiting for user approval before commit." in result.final_response_text
     assert [call["subagent_id"] for call in executor_calls] == ["hermes_engineer_core", "hermes_code_reviewer"]
     assert executor_calls[0]["runtime_subagent_id"] == "hermes_engineer_core"
     assert (git_repo / "engineer_notes.txt").read_text(encoding="utf-8") == "HERMES CONTROLLED PIPELINE VALIDATION - executor bridge mutation proof\n"

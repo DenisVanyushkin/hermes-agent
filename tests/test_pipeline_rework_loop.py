@@ -371,6 +371,122 @@ def test_finalize_loop_result_preserves_blocked_final_response_text(tmp_path: Pa
     assert "required structured output packet" in payload["final_response"]["text"]
 
 
+def test_completion_allowed_final_response_text_summarizes_commit_gate() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._completion_allowed_final_response_text(
+        git_gate={"changed_files": ["hermes_cli/smoke_square.py", "tests/test_smoke_square.py"]},
+        test_summary={
+            "status": "passed",
+            "executed_command": "/home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py",
+            "requested_command": "/home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py",
+            "command_relation": "same",
+            "summary": "3 passed in 0.37s",
+        },
+        reviewer_packet={"packet_status": "ready_for_review"},
+    )
+
+    assert "Controlled engineering execution completed and stopped at the commit gate." in text
+    assert "- hermes_cli/smoke_square.py" in text
+    assert "- tests/test_smoke_square.py" in text
+    assert "- status: passed" in text
+    assert "- command: /home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py" in text
+    assert "- command relation: same" in text
+    assert "- summary: 3 passed in 0.37s" in text
+    assert "- approved: yes" in text
+    assert "- decision: candidate_complete" in text
+    assert "No commit or push was performed. Waiting for user approval before commit." in text
+
+
+def test_finalize_loop_result_materializes_completion_allowed_final_response_text(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    session_module = importlib.import_module("hermes_cli.pipeline_session")
+    state_module = importlib.import_module("hermes_cli.pipeline_state_machine")
+    loaded_specs = _loaded_specs(tmp_path)[1]
+    session = session_module.PipelineSession(
+        pipeline_session_id="pipe-complete-1",
+        trace_id="pipe-complete-1",
+        pipeline_id="engineering_review_pipeline",
+        router_status="selected",
+        router_confidence=0.98,
+        platform="telegram",
+        session_key="agent:main:telegram:dm:1",
+        session_id="session-complete-1",
+        chat_id="1",
+        thread_id=None,
+        user_id="user-1",
+        created_at="2026-06-22T00:00:00+00:00",
+        user_message_hash="hash",
+        mode="autonomous",
+        current_state="rework_loop_candidate_complete",
+        status="created",
+        planned_steps=[],
+        selected_subagent_ids=["hermes_engineer_core", "hermes_code_reviewer"],
+        reviewer_condition="code_changes_require_review",
+    )
+    snapshot = state_module.build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+        loaded_specs=loaded_specs,
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "completion_allowed": True,
+        "completion_blocked_reason": None,
+        "final_verdict": "controlled_rework_loop_candidate_complete",
+    })
+
+    result = module._finalize_loop_result(
+        fuse=module.PipelineExecutionFuseResult(
+            execution_mode="autonomous",
+            actual_invocation_allowed=True,
+            blocked_reason=None,
+            selected_pipeline_id="engineering_review_pipeline",
+            selected_step_kind="reviewer",
+            selected_subagent_id="hermes_code_reviewer",
+        ),
+        session=session,
+        snapshot=snapshot,
+        preflight_allowed=True,
+        preflight_reason_code="rework_loop_fuse_allowed",
+        iteration_history=[],
+        review_iterations_completed=1,
+        max_review_iterations=3,
+        policy_source="pipeline_spec",
+        original_task="task",
+        appended_rework_context=[],
+        completion_allowed=True,
+        candidate_complete=True,
+        user_action_required=True,
+        blocked_reason=None,
+        git_gate={"changed_files": ["hermes_cli/smoke_square.py", "tests/test_smoke_square.py"]},
+        reviewer_packet={"packet_status": "ready_for_review"},
+        subagent_runs=[],
+        peer_messages=[],
+        disagreements=[],
+        decisive_subagent=None,
+        model_escalations=[],
+        tests={},
+        mutation_summary={},
+        review_overrides={},
+        test_summary={
+            "status": "passed",
+            "executed_command": "/home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py",
+            "requested_command": "/home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py",
+            "command_relation": "same",
+            "summary": "3 passed in 0.37s",
+        },
+    )
+
+    payload = result.execution_report.to_safe_dict()
+    assert payload["completion"]["completion_allowed"] is True
+    assert payload["review"]["reviewer_approved"] is True
+    assert payload["final_response"]["text"] is not None
+    assert "Controlled engineering execution completed and stopped at the commit gate." in payload["final_response"]["text"]
+    assert "No commit or push was performed. Waiting for user approval before commit." in payload["final_response"]["text"]
+
+
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
