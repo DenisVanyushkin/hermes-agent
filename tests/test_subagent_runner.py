@@ -592,6 +592,18 @@ def test_structured_output_envelope_rejects_invalid_status_type() -> None:
         assert any(error["field"] == "status" for error in envelope.validation_errors)
 
 
+def test_structured_output_envelope_rejects_unknown_status_value() -> None:
+    from hermes_cli.subagent_runner import validate_structured_output_envelope
+
+    envelope = validate_structured_output_envelope(_valid_envelope_payload(status="approved"))
+
+    assert envelope.validation_status == "invalid_structured_output"
+    assert any(
+        error["field"] == "status" and error["message"] == "Unknown structured output status"
+        for error in envelope.validation_errors
+    )
+
+
 def test_structured_output_envelope_rejects_invalid_required_string_types() -> None:
     from hermes_cli.subagent_runner import validate_structured_output_envelope
 

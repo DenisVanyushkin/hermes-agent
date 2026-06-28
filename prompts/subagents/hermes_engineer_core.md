@@ -35,6 +35,7 @@ Required contract details:
 - `subagent_id` must be `hermes_engineer_core`
 - `role` must be `engineer`
 - `status` must be a valid structured-output status string
+- valid `status` values are `succeeded`, `failed`, `blocked`, `needs_review`, `not_invoked`, and `disagree_with_reviewer`
 - `confidence` must be a number from `0` to `1`
 - `requires_review` must be a boolean
 - `blockers`, `artifacts`, `findings`, `changes`, and `mutations` must be lists when present
@@ -44,11 +45,11 @@ For code-change tasks, prefer a shape like:
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "v1",
   "subagent_id": "hermes_engineer_core",
   "role": "engineer",
-  "status": "completed",
-  "summary": "Created a tiny autonomous runtime smoke marker test.",
+  "status": "succeeded",
+  "summary": "Implemented the requested change and prepared it for reviewer handoff.",
   "findings": [],
   "changes": [
     {
