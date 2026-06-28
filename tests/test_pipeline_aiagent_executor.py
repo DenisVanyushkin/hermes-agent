@@ -346,7 +346,7 @@ def test_normalize_result_preserves_raw_metadata_structured_output(tmp_path: Pat
     bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
     payload = {
         "output_text": "ok",
-        "raw_metadata": {"structured_output": {"schema_version": "1", "subagent_id": "hermes_engineer_core", "role": "engineer", "status": "completed", "summary": "done"}},
+        "raw_metadata": {"structured_output": {"schema_version": "1", "subagent_id": "hermes_engineer_core", "role": "engineer", "status": "succeeded", "summary": "done"}},
     }
     normalized = bridge._normalize_result(payload)
     assert normalized["raw_metadata"]["structured_output"]["subagent_id"] == "hermes_engineer_core"
@@ -360,7 +360,7 @@ def test_normalize_result_copies_top_level_structured_output(tmp_path: Path) -> 
     normalized = bridge._normalize_result(
         {
             "output_text": "ok",
-            "structured_output": {"schema_version": "1", "subagent_id": "hermes_engineer_core", "role": "engineer", "status": "completed", "summary": "done"},
+            "structured_output": {"schema_version": "1", "subagent_id": "hermes_engineer_core", "role": "engineer", "status": "succeeded", "summary": "done"},
         }
     )
     assert normalized["raw_metadata"]["structured_output_source"] == "structured_output"
@@ -377,7 +377,7 @@ def test_normalize_result_extracts_structured_output_from_final_response_mapping
                 "schema_version": "1",
                 "subagent_id": "hermes_engineer_core",
                 "role": "engineer",
-                "status": "completed",
+                "status": "succeeded",
                 "summary": "done",
                 "blockers": [],
             }
@@ -831,6 +831,18 @@ def test_engineer_prompt_and_config_describe_structured_output_envelope(tmp_path
     ):
         assert required_field in prompt_text
         assert required_field in config_text
+
+    assert '"status": "succeeded"' in prompt_text
+    assert '`status` must be a valid structured-output status string' in prompt_text
+    assert '- succeeded' in config_text
+    assert '- failed' in config_text
+    assert '- blocked' in config_text
+    assert '- needs_review' in config_text
+    assert '- not_invoked' in config_text
+    assert '- disagree_with_reviewer' in config_text
+    assert '- completed' not in config_text
+    assert '- needs_input' not in config_text
+    assert '- disagreement' not in config_text
 
 
 def test_bridge_rejects_absolute_and_traversal_paths(tmp_path: Path) -> None:
