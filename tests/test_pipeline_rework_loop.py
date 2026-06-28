@@ -1173,12 +1173,154 @@ def test_machine_captured_pytest_payload_wins_over_preserved_requested_command(t
 
     assert reviewer_packets[0]["tests"]["status"] == "passed"
     assert reviewer_packets[0]["tests"]["command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert reviewer_packets[0]["tests"]["requested_command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert reviewer_packets[0]["tests"]["executed_command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert reviewer_packets[0]["tests"]["command_relation"] == "same"
     assert reviewer_packets[0]["tests"]["exit_code"] == 0
     assert reviewer_packets[0]["tests"]["summary"] == "5 passed"
     assert reviewer_packets[0]["tests"]["source"] == "allowed_tool"
     assert reviewer_packets[0]["tests"]["results"][0]["exit_code"] == 0
     assert result.test_summary["status"] == "passed"
     assert result.test_summary["source"] == "allowed_tool"
+
+
+def test_reviewer_packet_supports_untracked_smoke_square_and_semantic_test_equivalence(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    reviewer_packets: list[dict[str, object]] = []
+    prompt = (
+        "Implement square(n) in hermes_cli/smoke_square.py and add pytest coverage in tests/test_smoke_square.py.\n\n"
+        "Run exactly:\n"
+        "venv/bin/pytest -q tests/test_smoke_square.py\n"
+    )
+
+    def _engineer_executor(_request, _runtime_plan):
+        _write(
+            git_repo,
+            "hermes_cli/smoke_square.py",
+            "def square(n: int) -> int:\n"
+            "    return n * n\n",
+        )
+        _write(
+            git_repo,
+            "tests/test_smoke_square.py",
+            "from hermes_cli.smoke_square import square\n\n"
+            "def test_square_negative() -> None:\n"
+            "    assert square(-3) == 9\n",
+        )
+        return {
+            "output_text": "engineer emitted patch",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "tool_intents": [{"name": "pytest", "arguments": {"command": "venv/bin/pytest -q tests/test_smoke_square.py"}}],
+            "raw_metadata": {
+                "structured_output": {
+                    "status": "approved",
+                    "summary": "plain text diagnostic summary",
+                },
+                "tool_calls": [
+                    {
+                        "tool_name": "pytest",
+                        "status": "succeeded",
+                        "result": {
+                            "enabled": True,
+                            "workspace": git_repo.name,
+                            "status": "passed",
+                            "requested_count": 1,
+                            "executed_count": 1,
+                            "passed_count": 1,
+                            "failed_count": 0,
+                            "denied_count": 0,
+                            "timeout_count": 0,
+                            "blocked_reason": None,
+                            "summary": "1 passed",
+                            "results": [
+                                {
+                                    "command": [
+                                        str(git_repo / "venv/bin/python"),
+                                        "-m",
+                                        "pytest",
+                                        "-q",
+                                        "--maxfail=1",
+                                        "tests/test_smoke_square.py",
+                                    ],
+                                    "cwd": git_repo.name,
+                                    "status": "passed",
+                                    "exit_code": 0,
+                                    "stdout_excerpt": ".\n1 passed\n",
+                                    "stderr_excerpt": "",
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        }
+
+    def _reviewer_executor(request, _runtime_plan):
+        reviewer_packets.append(dict(request.metadata["reviewer_packet"]["safe_packet"]))
+        return {
+            "output_text": "approved",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config={
+            "pipelines": {
+                "enabled": True,
+                "execution": {
+                    "mode": "autonomous",
+                    "enable_gateway_execution_controller": True,
+                    "allow_actual_subagent_invocation": True,
+                    "allow_actual_reviewer_invocation": True,
+                    "allow_actual_rework_loop": True,
+                    "allow_pipelines": ["engineering_review_pipeline"],
+                    "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+                }
+            }
+        },
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=prompt,
+        repo_path=str(git_repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _engineer_executor,
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+        },
+    )
+
+    packet = reviewer_packets[0]
+    untracked_details = packet["git"]["untracked_file_details"]
+
+    assert result.completion_allowed is True
+    assert result.candidate_complete is True
+    assert packet["tests"]["requested_command"] == "venv/bin/pytest -q tests/test_smoke_square.py"
+    assert packet["tests"]["executed_command"].endswith(" -m pytest -q --maxfail=1 tests/test_smoke_square.py")
+    assert packet["tests"]["command_relation"] == "equivalent"
+    assert packet["tests"]["command_relation_reason"] is not None
+    assert [item["path"] for item in untracked_details] == ["hermes_cli/smoke_square.py", "tests/test_smoke_square.py"]
+    assert "return n * n" in untracked_details[0]["content_excerpt"]
+    assert "square(-3) == 9" in untracked_details[1]["content_excerpt"]
+
+
+def test_reviewer_prompt_and_config_require_semantic_test_sufficiency(tmp_path: Path) -> None:
+    repo_root = _copy_spec_tree(tmp_path)
+    prompt_text = (repo_root / "prompts/subagents/hermes_code_reviewer.md").read_text(encoding="utf-8")
+    config_text = (repo_root / "config/subagents/hermes_code_reviewer.yaml").read_text(encoding="utf-8")
+
+    assert "compare requested and executed test commands semantically, not byte-for-byte" in prompt_text
+    assert "command-string mismatch alone is not a blocker" in prompt_text
+    assert "treat engineer structured output as best-effort evidence" in prompt_text
+    assert "compare_semantically: true" in config_text
+    assert "exact_string_match_required: false" in config_text
 
 
 def test_natural_language_pytest_claim_does_not_become_passed_without_machine_captured_payload(tmp_path: Path) -> None:

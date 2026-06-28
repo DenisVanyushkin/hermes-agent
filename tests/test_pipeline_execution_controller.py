@@ -1259,7 +1259,60 @@ def test_registered_helper_controlled_context_material_change_requires_reviewer_
     assert result.helper_result["usage_summary"]["total_tokens"] == 21
     encoded = __import__("json").dumps(result.helper_result, sort_keys=True)
     assert "Implement controller helper selection with reviewer approval" not in encoded
-    assert "created by engineer" not in encoded
+
+    marker = "created by engineer"
+
+    def _collect_paths(value: object, path: str = "helper_result") -> list[str]:
+        matches: list[str] = []
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                child_path = f"{path}.{key}"
+                matches.extend(_collect_paths(nested, child_path))
+            return matches
+        if isinstance(value, list):
+            for index, nested in enumerate(value):
+                child_path = f"{path}[{index}]"
+                matches.extend(_collect_paths(nested, child_path))
+            return matches
+        if isinstance(value, str) and marker in value:
+            matches.append(path)
+        return matches
+
+    marker_paths = sorted(_collect_paths(result.helper_result))
+    assert marker_paths == sorted([
+        "helper_result.execution_report.reviewer_packet.safe_packet.git.untracked_file_details[0].content_excerpt",
+        "helper_result.report.reviewer_packet.safe_packet.git.untracked_file_details[0].content_excerpt",
+        "helper_result.reviewer_packet.safe_packet.git.untracked_file_details[0].content_excerpt",
+    ])
+
+    primary_packet = result.helper_result["reviewer_packet"]["safe_packet"]
+    report_packet = result.helper_result["report"]["reviewer_packet"]["safe_packet"]
+    execution_report_packet = result.helper_result["execution_report"]["reviewer_packet"]["safe_packet"]
+
+    for packet in (primary_packet, report_packet, execution_report_packet):
+        details = packet["git"]["untracked_file_details"]
+        assert [item["path"] for item in details] == ["new.txt"]
+        assert details[0]["content_excerpt"] == marker
+        assert details[0]["content_available"] is True
+        assert details[0]["truncated"] is False
+        assert details[0]["size_bytes"] == 20
+        assert details[0]["omission_reason"] is None
+
+    forbidden_surfaces = {
+        "final_response_text": result.final_response_text,
+        "helper_status": result.helper_result.get("status"),
+        "helper_blocked_reason": result.helper_result.get("blocked_reason"),
+        "helper_summary": result.helper_result.get("summary"),
+        "report_final_response_text": result.helper_result["report"]["final_response"]["text"],
+        "report_status": result.helper_result["report"]["status"],
+        "report_blocked_reason": result.helper_result["report"]["completion"]["blocked_reason"],
+        "usage_summary": result.helper_result["usage_summary"],
+        "subagent_runs": result.helper_result["subagent_runs"],
+        "git_gate": result.helper_result["git_gate"],
+        "changed_files": result.helper_result["report"]["changed_files"],
+    }
+    forbidden_encoded = __import__("json").dumps(forbidden_surfaces, sort_keys=True)
+    assert marker not in forbidden_encoded
 
 
 def test_registered_helper_invalid_controlled_context_fails_closed_with_structured_reason(tmp_path: Path) -> None:

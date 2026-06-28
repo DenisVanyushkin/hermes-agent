@@ -76,6 +76,7 @@ input_schema:
   optional:
     - peer_messages
     - escalation_reason
+    - reviewer_packet
 output_schema:
   status:
     enum:
@@ -121,3 +122,13 @@ observability:
 failure_policy:
   invalid_output: pipeline_blocks_or_retries
   model_unavailable: fail_closed
+review_contract:
+  source_of_truth:
+    - reviewer_packet.git
+    - reviewer_packet.tests
+  engineer_output_policy: best_effort_when_invalid
+  test_command_policy:
+    compare_semantically: true
+    exact_string_match_required: false
+    mismatch_alone_is_blocker: false
+    accept_equivalent_or_stronger_coverage_when_exit_code_zero: true
