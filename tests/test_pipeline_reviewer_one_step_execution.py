@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 
 from hermes_cli.runtime_factory import RuntimeFactory
+from hermes_cli.subagent_runner import validate_structured_output_envelope
 from hermes_cli.subagent_runner import SubagentRunner
 
 from tests.test_pipeline_one_step_execution import (
@@ -31,6 +32,23 @@ def _reviewer_structured_output(*, blockers: list[str] | None = None) -> dict[st
     }
 
 
+def _reviewer_needs_review_structured_output() -> dict[str, object]:
+    return {
+        "schema_version": "v1",
+        "subagent_id": "hermes_code_reviewer",
+        "role": "reviewer",
+        "status": "needs_review",
+        "summary": "Changes requested before completion.",
+        "findings": [{"code": "missing_regression_test", "summary": "Add the missing regression test."}],
+        "changes": [],
+        "blockers": [],
+        "artifacts": [],
+        "confidence": 0.88,
+        "requires_review": True,
+        "next_action": "rework",
+    }
+
+
 def _runtime_factory(repo_root: Path) -> RuntimeFactory:
     return RuntimeFactory(repo_root=repo_root)
 
@@ -39,7 +57,7 @@ def _engineer_result(module, tmp_path: Path):
     repo_root, loaded_specs = _loaded_specs(tmp_path)
 
     result = module.execute_controlled_one_step(
-        config=_config(mode="controlled_one_step", allow_actual_subagent_invocation=True),
+        config=_config(mode="autonomous", allow_actual_subagent_invocation=True),
         session=_session(),
         loaded_specs=loaded_specs,
         runtime_factory=_runtime_factory(repo_root),
@@ -62,7 +80,7 @@ def test_reviewer_disabled_does_not_call_fake_runner(tmp_path: Path) -> None:
     called = {"count": 0}
 
     result = module.execute_controlled_reviewer_one_step(
-        config=_config(mode="controlled_one_step", allow_actual_subagent_invocation=True),
+        config=_config(mode="autonomous", allow_actual_subagent_invocation=True),
         session=_session(),
         loaded_specs=loaded_specs,
         runtime_factory=_runtime_factory(repo_root),
@@ -94,7 +112,7 @@ def test_reviewer_allowed_calls_fake_runner_exactly_once_without_rerunning_engin
 
     result = module.execute_controlled_reviewer_one_step(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -112,13 +130,43 @@ def test_reviewer_allowed_calls_fake_runner_exactly_once_without_rerunning_engin
     assert result.state_snapshot.planned_steps[1].runner_result["status"] == "succeeded"
 
 
+def test_reviewer_prompt_and_config_require_validator_compatible_envelope(tmp_path: Path) -> None:
+    repo_root, _loaded, _engineer_result_unused = _engineer_result(importlib.import_module("hermes_cli.pipeline_one_step_execution"), tmp_path)
+
+    prompt_text = (repo_root / "prompts/subagents/hermes_code_reviewer.md").read_text(encoding="utf-8")
+    config_text = (repo_root / "config/subagents/hermes_code_reviewer.yaml").read_text(encoding="utf-8")
+
+    assert '"status": "succeeded"' in prompt_text
+    assert 'status="succeeded"' in prompt_text
+    assert 'return a structured verdict of approved, changes_requested, blocked, or failed' not in prompt_text
+    assert 'changes_requested' not in config_text
+    assert '- succeeded' in config_text
+    assert '- needs_review' in config_text
+    assert '- approved' not in config_text
+
+
+def test_validator_accepts_reviewer_approval_envelope() -> None:
+    envelope = validate_structured_output_envelope(_reviewer_structured_output())
+
+    assert envelope.validation_status == "valid"
+    assert envelope.status == "succeeded"
+    assert envelope.requires_review is False
+
+
+def test_validator_rejects_verdict_only_approved_envelope() -> None:
+    envelope = validate_structured_output_envelope({"status": "approved"})
+
+    assert envelope.validation_status == "invalid_structured_output"
+    assert any(item["field"] == "status" for item in envelope.validation_errors)
+
+
 def test_reviewer_invalid_output_fails_closed(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
     repo_root, loaded_specs, engineer_result = _engineer_result(module, tmp_path)
 
     result = module.execute_controlled_reviewer_one_step(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -148,7 +196,7 @@ def test_reviewer_blockers_are_preserved_and_completion_is_blocked(tmp_path: Pat
 
     result = module.execute_controlled_reviewer_one_step(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -183,7 +231,7 @@ def test_reviewer_approval_produces_safe_report_with_reviewer_metadata(tmp_path:
 
     result = module.execute_controlled_reviewer_one_step(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
@@ -209,13 +257,45 @@ def test_reviewer_approval_produces_safe_report_with_reviewer_metadata(tmp_path:
     assert result.execution_report.safety.executed is True
 
 
+
+def test_reviewer_needs_review_envelope_stays_reworkable_not_invalid(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
+    repo_root, loaded_specs, engineer_result = _engineer_result(module, tmp_path)
+
+    result = module.execute_controlled_reviewer_one_step(
+        config=_config(
+            mode="autonomous",
+            allow_actual_subagent_invocation=True,
+            allow_actual_reviewer_invocation=True,
+            allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],
+        ),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=_runtime_factory(repo_root),
+        runner=SubagentRunner(
+            executor=lambda *_args, **_kwargs: {
+                "output_text": "changes requested",
+                "completion_reason": "completed",
+                "execution_status": "completed",
+                "raw_metadata": {"structured_output": _reviewer_needs_review_structured_output()},
+            }
+        ),
+        prior_result=engineer_result,
+        user_message="Review the engineer result",
+    )
+
+    assert result.state_snapshot.planned_steps[1].runner_result["structured_output"]["validation_status"] == "valid"
+    assert result.state_snapshot.planned_steps[1].evaluation_result["status"] != "invalid_structured_output"
+    assert result.execution_report.completion.completion_allowed is False
+
+
 def test_reviewer_helper_never_executes_loop_rework_tools_or_file_mutation(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_one_step_execution")
     repo_root, loaded_specs, engineer_result = _engineer_result(module, tmp_path)
 
     result = module.execute_controlled_reviewer_one_step(
         config=_config(
-            mode="controlled_one_step",
+            mode="autonomous",
             allow_actual_subagent_invocation=True,
             allow_actual_reviewer_invocation=True,
             allowed_subagents=["hermes_engineer_core", "hermes_code_reviewer"],

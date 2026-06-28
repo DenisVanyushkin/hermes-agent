@@ -2,7 +2,7 @@ schema_version: 1
 id: hermes_code_reviewer
 display_name: Hermes Code Reviewer
 version: 1
-purpose: Reviews material engineering changes, returns a structured verdict, and acts as the decisive specialist in the reference engineering pipeline.
+purpose: Reviews material engineering changes, returns a validator-compatible structured review envelope, and acts as the decisive specialist in the reference engineering pipeline.
 selection:
   choose_when:
     - engineering pipeline detected material repository changes
@@ -79,17 +79,29 @@ input_schema:
 output_schema:
   status:
     enum:
-      - approved
-      - changes_requested
-      - blocked
+      - succeeded
       - failed
+      - blocked
+      - needs_review
+      - not_invoked
+      - disagree_with_reviewer
   required_fields:
+    - schema_version
+    - subagent_id
+    - role
+    - status
     - summary
-    - findings
+    - blockers
+    - artifacts
     - confidence
+    - requires_review
+    - next_action
+  one_of:
+    - findings
+    - changes
   optional_fields:
-    - requested_rework
-    - response_to_engineer_objection
+    - mutations
+    - tests
 communication:
   can_send_to:
     - hermes_engineer_core
