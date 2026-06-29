@@ -27,6 +27,7 @@ REQUIRED_POSITIONING_FIELDS = [
     "proven_facts",
     "derived_positioning",
     "gaps",
+    "risks_and_mitigations",
 ]
 BASE_FORBIDDEN_ACTIONS = [
     "send_outbound_message",
