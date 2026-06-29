@@ -930,3 +930,223 @@ def cap_env_passthrough_for_skill(
     # Three-gate intersection
     allowed = skill_env_names & declared & accepted
     return sorted(allowed)
+
+
+# ---------------------------------------------------------------------------
+# Repo-local role package discovery helpers (Recruiter Slice 4)
+# ---------------------------------------------------------------------------
+
+_BUNDLES_SUBDIR = "bundles"
+_ROLE_PACKAGES_REPO_DIRNAME = "role-packages"
+
+
+def _find_repo_root(start: Path) -> Path:
+    """Return the nearest git root for *start*, or *start* itself as fallback."""
+    current = start.resolve()
+    for candidate in [current, *current.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return current
+
+
+def _resolve_repo_root(repo_root: Path | None = None) -> Path:
+    if repo_root is not None:
+        return Path(repo_root).resolve()
+    return _find_repo_root(Path(__file__).resolve())
+
+
+def discover_repo_role_packages(repo_root: Path | None = None) -> list[Path]:
+    """Return repo-local role package dirs under ``<repo_root>/role-packages``.
+
+    This is intentionally separate from installed-package discovery under
+    ``~/.hermes/role-packages`` so repo-local role packages can be inspected
+    without making their skills globally available.
+    """
+    base = _resolve_repo_root(repo_root) / _ROLE_PACKAGES_REPO_DIRNAME
+    return discover_package_dirs(base)
+
+
+def _relative_repo_path(path: Path, repo_root: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(repo_root.resolve()))
+    except ValueError:
+        return str(path.resolve())
+
+
+def _parse_frontmatter_with_fallback(text: str) -> tuple[dict[str, Any], str]:
+    """Return parsed skill frontmatter or raise a controlled role-package error."""
+    try:
+        from agent.skill_utils import parse_frontmatter  # noqa: PLC0415
+    except ImportError as exc:
+        raise RolePackageError(f"frontmatter parser unavailable: {exc}") from exc
+
+    return parse_frontmatter(text)
+
+
+def _extract_markdown_section(body: str, heading: str) -> list[str]:
+    lines = body.splitlines()
+    target = f"## {heading}".strip()
+    in_section = False
+    section_lines: list[str] = []
+    for line in lines:
+        if line.strip() == target:
+            in_section = True
+            continue
+        if in_section and line.startswith("## "):
+            break
+        if in_section:
+            stripped = line.strip()
+            if stripped:
+                section_lines.append(stripped)
+    return section_lines
+
+
+def _normalize_section_items(lines: list[str]) -> list[str]:
+    items: list[str] = []
+    for line in lines:
+        if line.startswith("- "):
+            items.append(line[2:].strip())
+        else:
+            items.append(line)
+    return items
+
+
+def list_repo_role_package_skills(package_dir: Path, repo_root: Path | None = None) -> list[dict[str, Any]]:
+    """Return package-local skill metadata without registering the skills globally."""
+    resolved_repo_root = _resolve_repo_root(repo_root)
+    skills_dir = Path(package_dir).resolve() / _SKILLS_SUBDIR
+    if not skills_dir.is_dir():
+        return []
+
+    result: list[dict[str, Any]] = []
+    for skill_file in sorted(skills_dir.glob("*/SKILL.md")):
+        raw = skill_file.read_text(encoding="utf-8")
+        try:
+            frontmatter, body = _parse_frontmatter_with_fallback(raw)
+        except ImportError as exc:
+            raise RolePackageError(f"frontmatter parser unavailable: {exc}") from exc
+        metadata = frontmatter.get("metadata") if isinstance(frontmatter.get("metadata"), dict) else {}
+        hermes_meta = metadata.get("hermes") if isinstance(metadata.get("hermes"), dict) else {}
+        result.append(
+            {
+                "id": str(frontmatter.get("name") or skill_file.parent.name),
+                "name": str(frontmatter.get("name") or skill_file.parent.name),
+                "description": str(frontmatter.get("description") or "").strip(),
+                "path": _relative_repo_path(skill_file, resolved_repo_root),
+                "tags": [str(tag) for tag in (hermes_meta.get("tags") or [])],
+                "related_skills": [str(name) for name in (hermes_meta.get("related_skills") or [])],
+                "boundaries": _normalize_section_items(_extract_markdown_section(body, "Boundaries")),
+                "required_inputs": _normalize_section_items(_extract_markdown_section(body, "Required Inputs")),
+                "expected_outputs": _normalize_section_items(_extract_markdown_section(body, "Expected Outputs")),
+                "failure_behavior": _normalize_section_items(_extract_markdown_section(body, "Failure Behavior")),
+            }
+        )
+    return result
+
+
+def list_repo_role_package_bundles(package_dir: Path, repo_root: Path | None = None) -> list[dict[str, Any]]:
+    """Return repo-local bundle metadata for a role package."""
+    resolved_repo_root = _resolve_repo_root(repo_root)
+    bundles_dir = Path(package_dir).resolve() / _BUNDLES_SUBDIR
+    if not bundles_dir.is_dir():
+        return []
+
+    result: list[dict[str, Any]] = []
+    for bundle_file in sorted(bundles_dir.glob("*.yaml")):
+        data = yaml.safe_load(bundle_file.read_text(encoding="utf-8")) or {}
+        result.append(
+            {
+                "id": str(data.get("name") or bundle_file.stem),
+                "name": str(data.get("name") or bundle_file.stem),
+                "description": str(data.get("description") or "").strip(),
+                "path": _relative_repo_path(bundle_file, resolved_repo_root),
+                "skills": [str(skill) for skill in (data.get("skills") or [])],
+                "expected_output": str(data.get("expected_output") or "").strip(),
+            }
+        )
+    return result
+
+
+def _discover_repo_package_docs(
+    package_dir: Path,
+    repo_root: Path,
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Return generic package-local docs metadata and controlled read warnings."""
+    docs_dir = Path(package_dir).resolve() / "docs"
+    if not docs_dir.is_dir():
+        return [], []
+
+    docs: list[dict[str, str]] = []
+    warnings: list[str] = []
+    for doc_path in sorted(docs_dir.glob('*.md')):
+        try:
+            content = doc_path.read_text(encoding='utf-8').strip()
+        except OSError as exc:
+            warnings.append(
+                f"could not read package doc {_relative_repo_path(doc_path, repo_root)}: {exc}"
+            )
+            continue
+        docs.append(
+            {
+                "path": _relative_repo_path(doc_path, repo_root),
+                "content": content,
+            }
+        )
+    return docs, warnings
+
+
+def build_repo_role_package_skill_context(
+    package_dir: Path,
+    repo_root: Path | None = None,
+) -> dict[str, Any]:
+    """Build JSON-serializable role-scoped skill metadata for a repo-local package.
+
+    The payload is metadata-only and intended for future prompt/context injection.
+    It does not install the package, alter global skill loading, or invoke any
+    runtime/model behavior.
+    """
+    package_dir = Path(package_dir).resolve()
+    resolved_repo_root = _resolve_repo_root(repo_root)
+
+    manifest, errors, warnings = validate_manifest_path(package_dir, check_builtin_collision=True)
+    if manifest is None or errors:
+        raise RolePackageError(
+            "repo role package validation failed:\n" + "\n".join(f"  - {err}" for err in errors)
+        )
+
+    skills = list_repo_role_package_skills(package_dir, resolved_repo_root)
+    bundles = list_repo_role_package_bundles(package_dir, resolved_repo_root)
+    skills_by_id = {skill["id"]: skill for skill in skills}
+    bundles_by_id = {bundle["id"]: bundle for bundle in bundles}
+
+    for bundle in bundles:
+        missing = [skill_id for skill_id in bundle["skills"] if skill_id not in skills_by_id]
+        if missing:
+            raise RolePackageError(
+                f"bundle {bundle['id']!r} references missing package-local skills: {missing}"
+            )
+
+    package_docs, doc_warnings = _discover_repo_package_docs(package_dir, resolved_repo_root)
+
+    return {
+        "package_id": str(manifest["package"]["name"]),
+        "package_version": str(manifest["package"].get("version", "")),
+        "package_path": _relative_repo_path(package_dir, resolved_repo_root),
+        "role_id": str(manifest["role"]["id"]),
+        "role_display_name": str(manifest["role"].get("display_name", "")),
+        "role_family": str(manifest["role"].get("role_family", "")),
+        "boundary_mode": str(manifest.get("boundary_mode", "advisory")),
+        "purpose_summary": str(manifest["role"].get("purpose_summary", "")).strip(),
+        "persona": str(manifest["role"].get("persona", "")).strip(),
+        "routing_triggers": manifest["role"].get("routing", {}).get("triggers", {}),
+        "allowed_tool_categories": [
+            str(category) for category in (manifest["role"].get("tools", {}).get("allowed_categories") or [])
+        ],
+        "env_requires": [dict(item) for item in (manifest.get("env_requires") or []) if isinstance(item, dict)],
+        "skills": skills,
+        "skills_by_id": skills_by_id,
+        "bundles": bundles,
+        "bundles_by_id": bundles_by_id,
+        "package_docs": package_docs,
+        "validation_warnings": [*warnings, *doc_warnings],
+    }
