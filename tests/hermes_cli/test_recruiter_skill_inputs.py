@@ -102,7 +102,11 @@ def test_builds_ready_inputs_from_ready_context() -> None:
     assert packet.status is RecruiterSkillInputStatus.READY
     assert packet.vacancy_evaluation_input["status"] == RecruiterSkillInputStatus.READY.value
     assert packet.positioning_evidence_input["status"] == RecruiterSkillInputStatus.READY.value
-    assert packet.downstream_gates["document_writer"]["status"] == "READY"
+    assert packet.downstream_gates["document_writer"]["status"] == "POSITIONING_REQUIRED"
+    assert (
+        packet.downstream_gates["document_writer"]["reason"]
+        == "document-writer requires positioning-and-evidence output packet, not merely positioning input readiness"
+    )
     assert packet.provenance["writes_performed"] is False
     encoded = json.dumps(packet.to_dict(), sort_keys=True)
     assert "vacancy-evaluation" in encoded
@@ -149,6 +153,21 @@ def test_partial_private_context_keeps_positioning_ready_with_metadata_only_warn
     assert "private_context_partial" in packet.warnings
 
 
+def test_missing_machine_score_adds_warning_without_changing_ready_status() -> None:
+    context = _context_packet().to_dict()
+    context["machine_score"] = None
+
+    packet = build_recruiter_skill_input_packets(context)
+
+    assert packet.status is RecruiterSkillInputStatus.READY
+    assert packet.vacancy_evaluation_input["status"] == RecruiterSkillInputStatus.READY.value
+    assert packet.vacancy_evaluation_input["machine_score"] == {}
+    assert "machine_score_unavailable" in packet.warnings
+    assert "machine_score_unavailable" in packet.vacancy_evaluation_input["warnings"]
+    assert packet.vacancy_evaluation_input["boundaries"]["do_not_rescore"] is True
+    assert packet.downstream_gates["document_writer"]["status"] == "POSITIONING_REQUIRED"
+
+
 @pytest.mark.parametrize(
     ("context_status", "expected_status"),
     [
@@ -165,6 +184,16 @@ def test_non_ready_context_is_blocked(
     assert packet.status is expected_status
     assert packet.vacancy_evaluation_input is None
     assert packet.positioning_evidence_input is None
+
+
+def test_blocked_packet_keeps_document_writer_positioning_reason() -> None:
+    packet = build_recruiter_skill_input_packets(_context_packet(status=RecruiterContextStatus.SOURCE_REQUIRED))
+
+    assert packet.downstream_gates["document_writer"]["status"] == "POSITIONING_REQUIRED"
+    assert (
+        packet.downstream_gates["document_writer"]["reason"]
+        == "document-writer requires positioning-and-evidence output packet, not merely positioning input readiness"
+    )
 
 
 def test_missing_vacancy_blocks_packet() -> None:
