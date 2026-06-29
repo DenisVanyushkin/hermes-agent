@@ -1,0 +1,6 @@
+name: evaluate-vacancy
+description: Lightweight recruiter bundle for vacancy fit evaluation and evidence mapping.
+skills:
+  - vacancy-evaluation
+  - positioning-and-evidence
+expected_output: RecruiterPositioningPacket

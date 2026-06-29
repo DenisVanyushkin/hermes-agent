@@ -1,0 +1,8 @@
+name: application-materials
+description: Lightweight recruiter bundle for draft-only application materials and review.
+skills:
+  - vacancy-evaluation
+  - positioning-and-evidence
+  - document-writer
+  - document-reviewer
+expected_output: DocumentDraftPacket
