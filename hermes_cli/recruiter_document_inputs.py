@@ -271,13 +271,3 @@ def _dedupe(items: list[str]) -> list[str]:
             seen.add(item)
             ordered.append(item)
     return ordered
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value not in seen:
-            seen.add(value)
-            result.append(value)
-    return result

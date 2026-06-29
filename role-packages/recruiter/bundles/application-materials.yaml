@@ -5,4 +5,4 @@ skills:
   - positioning-and-evidence
   - document-writer
   - document-reviewer
-expected_output: DocumentDraftPacket
+expected_output: recruiter_document_packet_v1

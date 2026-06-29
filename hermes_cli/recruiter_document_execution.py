@@ -24,6 +24,7 @@ FORBIDDEN_ACTIONS = [
     "write_job_intel_db",
     "create_gmail_draft",
     "send_gmail",
+    "read_private_file_contents",
     "mutate_live_config",
     "restart_gateway",
 ]
