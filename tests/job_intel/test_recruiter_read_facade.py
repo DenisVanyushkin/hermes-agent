@@ -309,6 +309,78 @@ def test_get_vacancy_by_url_returns_not_found_without_exception(facade) -> None:
     assert result["warnings"] == ["vacancy_not_found"]
 
 
+def test_get_vacancy_by_url_resolves_duplicates_deterministically(tmp_path: Path) -> None:
+    module = importlib.import_module("job_intel.recruiter_read_facade")
+    store = _seed_store(tmp_path)
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO vacancies (
+                id, vacancy_key, source, source_id, company, title, location, url, description,
+                posted_at, scraped_at, salary, company_url, metadata_json, first_seen_at, last_seen_at, repost_count, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                202,
+                "linkedin:example:2",
+                "linkedin",
+                "example-2",
+                "Acme",
+                "VP Product",
+                "Remote",
+                "https://example.com/jobs/1",
+                "Older duplicate posting",
+                "2026-06-18T00:00:00+00:00",
+                "2026-06-18T00:00:00+00:00",
+                "$180k-$220k",
+                "https://example.com",
+                json.dumps({"seniority": "executive"}),
+                "2026-06-18T00:00:00+00:00",
+                "2026-06-18T00:00:00+00:00",
+                0,
+                "rejected",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO vacancy_evaluations (
+                vacancy_key, run_id, score, tier, recommendation, salary_tier,
+                matched_signals_json, concerns_json, reasons_json, raw_breakdown_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "linkedin:example:2",
+                55,
+                72,
+                "potential_fit",
+                "potential_fit",
+                "mid",
+                json.dumps(["product_leadership"]),
+                json.dumps([]),
+                json.dumps(["older_duplicate"]),
+                json.dumps({"product": 4}),
+                "2026-06-18T00:04:00+00:00",
+            ),
+        )
+    facade = module.RecruiterReadFacade(store=store, stale_after_days=365)
+
+    result = facade.get_vacancy_by_url("https://example.com/jobs/1")
+
+    assert result["status"] == "found"
+    assert result["vacancy"]["vacancy_id"] == 101
+    assert "multiple_vacancies_for_url_resolved" in result["warnings"]
+    assert result["provenance"]["duplicate_count"] == 2
+    assert result["provenance"]["selected_vacancy_id"] == 101
+    assert result["provenance"]["candidate_vacancy_ids"] == [101, 202]
+    assert result["provenance"]["selection_policy"] == [
+        "prefer_opportunity_link",
+        "prefer_machine_score",
+        "prefer_freshness",
+        "tie_break_highest_vacancy_id",
+    ]
+    assert result["vacancy"]["provenance"]["duplicate_url_resolution"]["duplicate_count"] == 2
+
+
 def test_get_opportunity_for_vacancy_returns_source_missing_when_crm_tables_absent(tmp_path: Path) -> None:
     module = importlib.import_module("job_intel.recruiter_read_facade")
     store = JobIntelStore(tmp_path / "minimal.sqlite3")
