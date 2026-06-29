@@ -72,6 +72,50 @@ def test_writer_prompt_contains_manual_safety_boundaries() -> None:
     assert "recruiter_document_packet_v1" in prompt
 
 
+def test_writer_prompt_requires_exact_draft_ready_schema() -> None:
+    client = _FakeClient(
+        json.dumps(
+            {
+                "schema_version": "recruiter_document_packet_v1",
+                "document_type": "cover_letter",
+                "audience": "Hiring manager",
+                "purpose": "Draft cover letter for user review",
+                "source_positioning_packet_ref": {"skill_id": "positioning-and-evidence", "status": "SUCCESS"},
+                "draft": {"format": "text", "content": "Draft", "notes": []},
+                "review": {"status": "PENDING"},
+                "status": "DRAFT_READY",
+            }
+        )
+    )
+    executor = RecruiterDocumentProviderExecutor(client=client, model="gpt-5.4-mini", provider="openai-codex")
+
+    executor.execute(
+        skill_id="document-writer",
+        skill_input={
+            "document_type": "cover_letter",
+            "audience": "Hiring manager",
+            "purpose": "Draft cover letter for user review",
+            "positioning_evidence_result": {"positioning_summary": "Lead with proof."},
+            "vacancy_evaluation_result": {"vacancy_evaluation_summary": "Strong fit."},
+            "boundaries": {
+                "draft_only": True,
+                "user_review_required": True,
+                "do_not_imply_application_submission": True,
+                "no_outbound": True,
+                "no_invented_facts": True,
+            },
+        },
+        expected_schema={"schema_version": "recruiter_document_packet_v1", "draft": "required"},
+    )
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "status must be exactly DRAFT_READY" in prompt
+    assert "do not use draft_only as status" in prompt
+    assert '"format": "text"' in prompt
+    assert '"content": "<draft text>"' in prompt
+    assert '"notes": []' in prompt
+
+
 def test_reviewer_prompt_contains_review_checks() -> None:
     client = _FakeClient(
         json.dumps(
@@ -123,7 +167,19 @@ def test_invalid_json_output_raises_controlled_error() -> None:
         )
 
 
-def test_json_response_format_uses_schema_name() -> None:
-    payload = _json_response_format("recruiter_document_packet_v1", {"type": "object"})
+def test_json_response_format_uses_writer_schema_shape() -> None:
+    payload = _json_response_format(
+        "recruiter_document_packet_v1",
+        {"schema_version": "recruiter_document_packet_v1", "draft": "required"},
+    )
     assert payload["response_format"]["type"] == "json_schema"
     assert payload["response_format"]["json_schema"]["name"] == "recruiter_document_packet_v1"
+    schema = payload["response_format"]["json_schema"]["schema"]
+    assert schema["type"] == "object"
+    assert schema["properties"]["status"]["enum"] == ["DRAFT_READY"]
+    assert schema["properties"]["draft"]["type"] == "object"
+    assert schema["properties"]["draft"]["properties"]["format"]["enum"] == ["text"]
+    assert schema["properties"]["draft"]["properties"]["content"]["type"] == "string"
+    assert schema["properties"]["draft"]["properties"]["notes"]["type"] == "array"
+    assert "status" in schema["required"]
+    assert "draft" in schema["required"]

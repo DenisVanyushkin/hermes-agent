@@ -16,6 +16,15 @@ DOCUMENT_WRITER_SKILL_ID = "document-writer"
 DOCUMENT_REVIEWER_SKILL_ID = "document-reviewer"
 DOCUMENT_PACKET_SCHEMA_VERSION = "recruiter_document_packet_v1"
 DOCUMENT_REVIEWER_VERDICTS = {"APPROVE", "CHANGES_REQUESTED", "BLOCKED"}
+DOCUMENT_WRITER_EXPECTED_SCHEMA = {
+    "schema_version": DOCUMENT_PACKET_SCHEMA_VERSION,
+    "status": ["DRAFT_READY"],
+    "draft": {
+        "format": ["text"],
+        "content": "required",
+        "notes": "required_list",
+    },
+}
 FORBIDDEN_ACTIONS = [
     "call_provider_model",
     "send_outbound_message",
@@ -132,7 +141,7 @@ def run_recruiter_document_execution(
         writer_result = executor.execute(
             skill_id=DOCUMENT_WRITER_SKILL_ID,
             skill_input=writer_input,
-            expected_schema={"schema_version": DOCUMENT_PACKET_SCHEMA_VERSION, "draft": "required"},
+            expected_schema=DOCUMENT_WRITER_EXPECTED_SCHEMA,
         )
     except Exception as exc:
         return RecruiterDocumentExecutionReport(

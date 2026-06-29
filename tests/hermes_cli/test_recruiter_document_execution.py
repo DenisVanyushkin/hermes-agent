@@ -210,6 +210,34 @@ def test_provider_backed_executor_sets_provider_called_true() -> None:
     assert report.provenance["provider_called"] is True
 
 
+def test_writer_expected_schema_requests_draft_ready_object_shape() -> None:
+    seen: dict[str, Any] = {}
+
+    class _SchemaCapturingExecutor(_FakeDocumentExecutor):
+        def execute(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs["skill_id"] == "document-writer":
+                seen["expected_schema"] = kwargs.get("expected_schema")
+            return super().execute(**kwargs)
+
+    report = run_recruiter_document_execution(
+        _execution_report(),
+        document_type="cover_letter",
+        allow_document_execution=True,
+        executor=_SchemaCapturingExecutor(),
+    )
+
+    assert report.status is RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_APPROVED
+    assert seen["expected_schema"] == {
+        "schema_version": "recruiter_document_packet_v1",
+        "status": ["DRAFT_READY"],
+        "draft": {
+            "format": ["text"],
+            "content": "required",
+            "notes": "required_list",
+        },
+    }
+
+
 def test_invalid_writer_output_blocks_before_reviewer() -> None:
     class _InvalidWriterExecutor(_FakeDocumentExecutor):
         def execute(self, **kwargs: Any) -> dict[str, Any]:
