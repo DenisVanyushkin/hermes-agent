@@ -88,6 +88,7 @@ class _FakeDocumentExecutor(RecruiterDocumentExecutor):
     def __init__(self, *, reviewer_verdict: str = "APPROVE") -> None:
         self.calls: list[str] = []
         self.reviewer_verdict = reviewer_verdict
+        self.provider_backed = False
 
     def execute(
         self,
@@ -191,6 +192,22 @@ def test_happy_fake_execution_runs_writer_then_reviewer_and_stays_blocked_on_out
     assert "read_private_file_contents" in report.forbidden_actions
     assert "create_gmail_draft" in report.forbidden_actions
     json.dumps(report.to_dict(), sort_keys=True)
+
+
+def test_provider_backed_executor_sets_provider_called_true() -> None:
+    executor = _FakeDocumentExecutor()
+    executor.provider_backed = True
+
+    report = run_recruiter_document_execution(
+        _execution_report(),
+        document_type="cover_letter",
+        allow_document_execution=True,
+        executor=executor,
+    )
+
+    assert report.status is RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_APPROVED
+    assert report.provider_called is True
+    assert report.provenance["provider_called"] is True
 
 
 def test_invalid_writer_output_blocks_before_reviewer() -> None:

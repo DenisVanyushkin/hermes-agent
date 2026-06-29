@@ -31,6 +31,13 @@ def register_recruiter_document_subparser(subparsers: argparse._SubParsersAction
     execute.add_argument("--document-type", required=True, help="Draft-only recruiter document type")
     execute.add_argument("--audience", default=None, help="Optional audience hint for the draft packet")
     execute.add_argument("--purpose", default=None, help="Optional purpose hint for the draft packet")
+    execute.add_argument(
+        "--allow-provider-execution",
+        action="store_true",
+        help="Explicitly open the provider fuse for manual draft-only document generation",
+    )
+    execute.add_argument("--provider", default=None, help="Optional provider override for manual execution")
+    execute.add_argument("--model", default=None, help="Optional model override for manual execution")
     execute.add_argument("--json", action="store_true", help="Print JSON output")
     execute.set_defaults(func=cmd_recruiter_document_execute)
     return parser
@@ -47,13 +54,35 @@ def cmd_recruiter_document_execute(args: argparse.Namespace) -> None:
         sys.stdout.write(json.dumps(load_result["payload"], sort_keys=True) + "\n")
         raise SystemExit(1)
 
+    allow_provider_execution = bool(getattr(args, "allow_provider_execution", False))
+    executor = None
+    if allow_provider_execution:
+        try:
+            executor = create_provider_document_executor(
+                provider=getattr(args, "provider", None),
+                model=getattr(args, "model", None),
+            )
+        except Exception as exc:
+            sys.stdout.write(
+                json.dumps(
+                    _cli_error_payload(
+                        "DOCUMENT_EXECUTOR_NOT_WIRED",
+                        document_type=getattr(args, "document_type"),
+                        errors=[f"document_provider_executor_unavailable:{type(exc).__name__}"],
+                    ),
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            raise SystemExit(1)
+
     report = run_recruiter_document_execution(
         load_result["payload"],
         getattr(args, "document_type"),
         audience=getattr(args, "audience", None),
         purpose=getattr(args, "purpose", None),
-        allow_document_execution=False,
-        executor=None,
+        allow_document_execution=allow_provider_execution,
+        executor=executor,
     )
     payload = report.to_dict()
     sys.stdout.write(json.dumps(payload, sort_keys=True) + "\n")
@@ -129,3 +158,9 @@ def _cli_error_payload(status: str, *, document_type: str, errors: list[str]) ->
         },
         "forbidden_actions": list(FORBIDDEN_ACTIONS),
     }
+
+
+def create_provider_document_executor(*, provider: str | None = None, model: str | None = None) -> Any:
+    from .recruiter_document_provider_executor import build_recruiter_document_provider_executor
+
+    return build_recruiter_document_provider_executor(provider=provider, model=model)

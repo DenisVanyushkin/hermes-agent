@@ -41,6 +41,8 @@ class RecruiterDocumentExecutionStatus(str, Enum):
 
 
 class RecruiterDocumentExecutor(Protocol):
+    provider_backed: bool
+
     def execute(
         self,
         *,
@@ -124,16 +126,36 @@ def run_recruiter_document_execution(
         base_report.execution_status = "document_execution_enabled_but_executor_unavailable"
         return base_report
 
+    provider_called = bool(getattr(executor, "provider_backed", False))
     writer_input = dict(input_packet.document_writer_input or {})
-    writer_result = executor.execute(
-        skill_id=DOCUMENT_WRITER_SKILL_ID,
-        skill_input=writer_input,
-        expected_schema={"schema_version": DOCUMENT_PACKET_SCHEMA_VERSION, "draft": "required"},
-    )
+    try:
+        writer_result = executor.execute(
+            skill_id=DOCUMENT_WRITER_SKILL_ID,
+            skill_input=writer_input,
+            expected_schema={"schema_version": DOCUMENT_PACKET_SCHEMA_VERSION, "draft": "required"},
+        )
+    except Exception as exc:
+        return RecruiterDocumentExecutionReport(
+            status=RecruiterDocumentExecutionStatus.DOCUMENT_OUTPUT_INVALID,
+            document_type=document_type,
+            writer_input_status=input_packet.status.value,
+            execution_status="document_writer_execution_failed",
+            writer_called=True,
+            reviewer_called=False,
+            provider_called=provider_called,
+            document_writer_input_packet=input_packet.to_dict(),
+            document_packet=None,
+            review_result=None,
+            downstream_gates=_build_downstream_gates("WRITER_OUTPUT_INVALID"),
+            warnings=list(input_packet.warnings),
+            errors=_dedupe([*input_packet.errors, f"document_writer_execution_failed:{type(exc).__name__}"]),
+            provenance={**base_provenance, "provider_called": provider_called},
+        )
     writer_errors = _validate_writer_result(writer_result, document_type=document_type)
     writer_warnings = _dedupe([*input_packet.warnings, *_string_list(writer_result.get("warnings"))])
     writer_provenance = {
         **base_provenance,
+        "provider_called": provider_called,
         "writer_result_provenance": _dict(writer_result.get("provenance")),
     }
     if writer_errors:
@@ -144,7 +166,7 @@ def run_recruiter_document_execution(
             execution_status="document_writer_output_invalid",
             writer_called=True,
             reviewer_called=False,
-            provider_called=False,
+            provider_called=provider_called,
             document_writer_input_packet=input_packet.to_dict(),
             document_packet={"invalid_payload": writer_result},
             review_result=None,
@@ -167,14 +189,32 @@ def run_recruiter_document_execution(
             "no_outbound": True,
             "no_crm_write": True,
             "no_job_intel_db_write": True,
-            "no_provider_call_in_this_slice": True,
+            "provider_execution_enabled_for_manual_cli": provider_called,
         },
     }
-    reviewer_result = executor.execute(
-        skill_id=DOCUMENT_REVIEWER_SKILL_ID,
-        skill_input=reviewer_input,
-        expected_schema={"verdict": ["APPROVE", "CHANGES_REQUESTED", "BLOCKED"]},
-    )
+    try:
+        reviewer_result = executor.execute(
+            skill_id=DOCUMENT_REVIEWER_SKILL_ID,
+            skill_input=reviewer_input,
+            expected_schema={"verdict": ["APPROVE", "CHANGES_REQUESTED", "BLOCKED"]},
+        )
+    except Exception as exc:
+        return RecruiterDocumentExecutionReport(
+            status=RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_INVALID,
+            document_type=document_type,
+            writer_input_status=input_packet.status.value,
+            execution_status="document_reviewer_execution_failed",
+            writer_called=True,
+            reviewer_called=True,
+            provider_called=provider_called,
+            document_writer_input_packet=input_packet.to_dict(),
+            document_packet=writer_result,
+            review_result=None,
+            downstream_gates=_build_downstream_gates("REVIEW_INVALID"),
+            warnings=writer_warnings,
+            errors=_dedupe([*input_packet.errors, f"document_reviewer_execution_failed:{type(exc).__name__}"]),
+            provenance=writer_provenance,
+        )
     review_errors = _validate_reviewer_result(reviewer_result)
     combined_warnings = _dedupe([*writer_warnings, *_string_list(reviewer_result.get("warnings"))])
     combined_provenance = {
@@ -189,7 +229,7 @@ def run_recruiter_document_execution(
             execution_status="document_reviewer_output_invalid",
             writer_called=True,
             reviewer_called=True,
-            provider_called=False,
+            provider_called=provider_called,
             document_writer_input_packet=input_packet.to_dict(),
             document_packet=writer_result,
             review_result={"invalid_payload": reviewer_result},
@@ -208,7 +248,7 @@ def run_recruiter_document_execution(
             execution_status="document_review_changes_requested",
             writer_called=True,
             reviewer_called=True,
-            provider_called=False,
+            provider_called=provider_called,
             document_writer_input_packet=input_packet.to_dict(),
             document_packet=writer_result,
             review_result=reviewer_result,
@@ -225,7 +265,7 @@ def run_recruiter_document_execution(
         execution_status="document_review_approved",
         writer_called=True,
         reviewer_called=True,
-        provider_called=False,
+        provider_called=provider_called,
         document_writer_input_packet=input_packet.to_dict(),
         document_packet=writer_result,
         review_result=reviewer_result,
