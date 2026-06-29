@@ -12,6 +12,11 @@ _REQUIRED_PACKAGE_ID = "hermes-recruiter"
 _VACANCY_SKILL_ID = "vacancy-evaluation"
 _POSITIONING_SKILL_ID = "positioning-and-evidence"
 _DOCUMENT_WRITER_SKILL_ID = "document-writer"
+_PRIVATE_CONTEXT_PARTIAL_STATUS = "PARTIAL"
+_MACHINE_SCORE_UNAVAILABLE_WARNING = "machine_score_unavailable"
+_DOCUMENT_WRITER_POSITIONING_REQUIRED_REASON = (
+    "document-writer requires positioning-and-evidence output packet, not merely positioning input readiness"
+)
 _PRIVATE_SOURCE_PATHS = [
     "~/.hermes/private/career/denis_vanyushkin_structured_resume_v1_1.json",
     "~/.hermes/private/career/opportunity-thesis.md",
@@ -120,13 +125,16 @@ def build_recruiter_skill_input_packets(
     vacancy_input = _build_vacancy_evaluation_input(packet, vacancy, role_package_context)
     positioning_input = _build_positioning_input(packet, vacancy, private_context, private_status, missing_files)
 
+    vacancy_warnings = _string_list(vacancy_input.get("warnings"))
+    warnings = _dedupe([*warnings, *vacancy_warnings])
+
     if private_status == RecruiterContextStatus.PRIVATE_CONTEXT_MISSING.value and "private_context_missing" not in warnings:
         warnings.append("private_context_missing")
-    if private_status == "PARTIAL" and "private_context_partial" not in warnings:
+    if private_status == _PRIVATE_CONTEXT_PARTIAL_STATUS and "private_context_partial" not in warnings:
         warnings.append("private_context_partial")
 
     top_status = RecruiterSkillInputStatus.READY
-    if private_status in {RecruiterContextStatus.PRIVATE_CONTEXT_MISSING.value, "PARTIAL"}:
+    if private_status in {RecruiterContextStatus.PRIVATE_CONTEXT_MISSING.value, _PRIVATE_CONTEXT_PARTIAL_STATUS}:
         top_status = RecruiterSkillInputStatus.PARTIAL
     elif positioning_input.get("status") != RecruiterSkillInputStatus.READY.value:
         top_status = RecruiterSkillInputStatus.PARTIAL
@@ -139,7 +147,8 @@ def build_recruiter_skill_input_packets(
         downstream_gates={
             "document_writer": {
                 "skill_id": _DOCUMENT_WRITER_SKILL_ID,
-                "status": "READY" if positioning_input.get("status") == RecruiterSkillInputStatus.READY.value else "POSITIONING_REQUIRED",
+                "status": "POSITIONING_REQUIRED",
+                "reason": _DOCUMENT_WRITER_POSITIONING_REQUIRED_REASON,
                 "requires": ["positioning-and-evidence"],
                 "references": [_DOCUMENT_WRITER_SKILL_PATH],
             }
@@ -155,11 +164,17 @@ def _build_vacancy_evaluation_input(
     vacancy: dict[str, Any],
     role_package_context: dict[str, Any],
 ) -> dict[str, Any]:
+    machine_score = _dict(packet.get("machine_score"))
+    warnings: list[str] = []
+    if not machine_score:
+        warnings.append(_MACHINE_SCORE_UNAVAILABLE_WARNING)
+
     return {
         "skill_id": _VACANCY_SKILL_ID,
         "status": RecruiterSkillInputStatus.READY.value,
+        "warnings": warnings,
         "vacancy": _vacancy_facts(vacancy),
-        "machine_score": _dict(packet.get("machine_score")),
+        "machine_score": machine_score,
         "opportunity": _dict(packet.get("opportunity")) or None,
         "company_context": list(packet.get("company_context") or []),
         "application_history": _dict(packet.get("application_history")),
@@ -198,12 +213,9 @@ def _build_positioning_input(
     private_status: str,
     missing_files: list[str],
 ) -> dict[str, Any]:
+    status = RecruiterSkillInputStatus.READY.value
     if private_status == RecruiterContextStatus.PRIVATE_CONTEXT_MISSING.value:
         status = RecruiterSkillInputStatus.BLOCKED_PRIVATE_CONTEXT_MISSING.value
-    elif not vacancy:
-        status = RecruiterSkillInputStatus.BLOCKED_MISSING_VACANCY.value
-    else:
-        status = RecruiterSkillInputStatus.READY.value
 
     return {
         "skill_id": _POSITIONING_SKILL_ID,
@@ -285,6 +297,7 @@ def _blocked_packet(
             "document_writer": {
                 "skill_id": _DOCUMENT_WRITER_SKILL_ID,
                 "status": "POSITIONING_REQUIRED",
+                "reason": _DOCUMENT_WRITER_POSITIONING_REQUIRED_REASON,
                 "requires": ["positioning-and-evidence"],
                 "references": [_DOCUMENT_WRITER_SKILL_PATH],
             }
