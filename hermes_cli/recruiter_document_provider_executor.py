@@ -29,7 +29,7 @@ class RecruiterDocumentProviderExecutor:
             messages=[{"role": "system", "content": prompt}],
             temperature=0,
             timeout=120,
-            extra_body=_json_response_format(_schema_name(skill_id), {"type": "object"}) | _extra_body(),
+            extra_body=_json_response_format(_schema_name(skill_id), expected_schema) | _extra_body(),
         )
         raw = _response_text(response)
         try:
@@ -68,6 +68,15 @@ def _build_prompt(*, skill_id: str, skill_input: dict[str, Any], expected_schema
             "Rules: do not invent facts; unsupported claims must be omitted or flagged; "
             "no outbound sending; do not imply that an application was submitted; no CRM writes; "
             "no job-intel DB writes.\n"
+            "Writer output contract:\n"
+            "- status must be exactly DRAFT_READY\n"
+            "- do not use draft_only as status\n"
+            "- draft must be an object, not a string\n"
+            "- draft.format must be text\n"
+            "- draft.content must contain the generated draft text\n"
+            "- draft.notes must be a list; use [] when there are no notes\n"
+            "Required minimal shape example:\n"
+            '{"status": "DRAFT_READY", "draft": {"format": "text", "content": "<draft text>", "notes": []}}\n'
             f"Expected schema marker: {_schema_name(skill_id)}.\n"
             f"Skill input JSON:\n{json.dumps(skill_input, ensure_ascii=True, sort_keys=True)}\n"
             f"Expected schema JSON:\n{json.dumps(expected_schema or {}, ensure_ascii=True, sort_keys=True)}"
@@ -82,16 +91,72 @@ def _build_prompt(*, skill_id: str, skill_input: dict[str, Any], expected_schema
     )
 
 
-def _json_response_format(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+def _json_response_format(name: str, schema: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "response_format": {
             "type": "json_schema",
             "json_schema": {
                 "name": name,
-                "schema": schema,
+                "schema": _response_schema(name, schema),
                 "strict": False,
             },
         }
+    }
+
+
+def _response_schema(name: str, schema: dict[str, Any] | None) -> dict[str, Any]:
+    if name == "recruiter_document_packet_v1":
+        schema = dict(schema or {})
+        draft_schema = schema.get("draft")
+        if not isinstance(draft_schema, dict):
+            draft_schema = {}
+        return {
+            "type": "object",
+            "properties": {
+                "schema_version": {"type": "string", "enum": [str(schema.get("schema_version") or "recruiter_document_packet_v1")]},
+                "document_type": {"type": "string"},
+                "audience": {"type": ["string", "null"]},
+                "purpose": {"type": ["string", "null"]},
+                "source_positioning_packet_id": {"type": ["string", "null"]},
+                "source_positioning_packet_ref": {"type": ["object", "null"]},
+                "draft": {
+                    "type": "object",
+                    "properties": {
+                        "format": {"type": "string", "enum": list(draft_schema.get("format") or ["text"])},
+                        "content": {"type": "string"},
+                        "notes": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["format", "content", "notes"],
+                    "additionalProperties": True,
+                },
+                "review": {"type": ["object", "null"]},
+                "status": {"type": "string", "enum": list(schema.get("status") or ["DRAFT_READY"])},
+                "warnings": {"type": "array", "items": {"type": "string"}},
+                "errors": {"type": "array", "items": {"type": "string"}},
+                "provenance": {"type": "object"},
+            },
+            "required": ["schema_version", "document_type", "draft", "status"],
+            "additionalProperties": True,
+        }
+    verdicts = list((schema or {}).get("verdict") or ["APPROVE", "CHANGES_REQUESTED", "BLOCKED"])
+    return {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "skill_id": {"type": "string"},
+            "verdict": {"type": "string", "enum": verdicts},
+            "hallucination_risk": {"type": ["string", "null"]},
+            "unsupported_claims": {"type": "array", "items": {}},
+            "genericness_assessment": {"type": ["string", "null"]},
+            "tone_seniority_assessment": {"type": ["string", "null"]},
+            "missing_source_references": {"type": "array", "items": {}},
+            "required_changes": {"type": "array", "items": {}},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+            "errors": {"type": "array", "items": {"type": "string"}},
+            "provenance": {"type": "object"},
+        },
+        "required": ["status", "skill_id", "verdict", "unsupported_claims", "missing_source_references", "required_changes", "warnings", "errors", "provenance"],
+        "additionalProperties": True,
     }
 
 
