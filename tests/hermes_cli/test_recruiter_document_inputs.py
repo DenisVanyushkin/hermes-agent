@@ -159,6 +159,49 @@ def test_unsupported_document_type_is_controlled_block() -> None:
     assert packet.document_writer_input is None
 
 
+def test_missing_vacancy_context_is_blocked() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(vacancy_result=None),
+        document_type="cover_letter",
+    )
+
+    assert packet.status is RecruiterDocumentInputStatus.BLOCKED_MISSING_VACANCY_CONTEXT
+    assert "vacancy_evaluation_result_missing" in packet.errors
+
+
+def test_non_ready_execution_report_is_blocked() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(status=RecruiterSkillExecutionStatus.PROVIDER_EXECUTION_BLOCKED),
+        document_type="cover_letter",
+    )
+
+    assert packet.status is RecruiterDocumentInputStatus.BLOCKED_INVALID_EXECUTION_REPORT
+    assert "execution_report_not_ready:PROVIDER_EXECUTION_BLOCKED" in packet.errors
+
+
+def test_dict_input_path_is_supported() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report().to_dict(),
+        document_type="cover_letter",
+        audience="HR recruiter",
+        purpose="Tailored draft",
+    )
+
+    assert packet.status is RecruiterDocumentInputStatus.READY
+    assert packet.document_writer_input is not None
+
+
+def test_unsupported_document_type_takes_precedence_over_invalid_execution_report() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(status=RecruiterSkillExecutionStatus.PROVIDER_EXECUTION_BLOCKED),
+        document_type="press_release",
+    )
+
+    assert packet.status is RecruiterDocumentInputStatus.BLOCKED_UNSUPPORTED_DOCUMENT_TYPE
+    assert "unsupported_document_type:press_release" in packet.errors
+    assert not any(item.startswith("execution_report_not_ready:") for item in packet.errors)
+
+
 def test_ready_packet_mentions_future_draft_schema_without_generating_draft() -> None:
     packet = build_recruiter_document_writer_input_packet(
         _execution_report(),
@@ -170,6 +213,17 @@ def test_ready_packet_mentions_future_draft_schema_without_generating_draft() ->
     assert writer_input["expected_future_output_schema"] == "recruiter_document_packet_v1"
     assert "draft" in writer_input["expected_future_output_fields"]
     assert "draft" not in writer_input
+
+
+def test_missing_audience_and_purpose_warn_but_do_not_block() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(),
+        document_type="linkedin_dm",
+    )
+
+    assert packet.status is RecruiterDocumentInputStatus.READY
+    assert "audience_missing" in packet.warnings
+    assert "purpose_missing" in packet.warnings
 
 
 def test_boundary_imports_are_safe() -> None:
