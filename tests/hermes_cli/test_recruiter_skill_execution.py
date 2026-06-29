@@ -176,6 +176,7 @@ def test_provider_enabled_executes_both_skills_with_fake_executor() -> None:
     assert [call[0] for call in executor.calls] == ["vacancy-evaluation", "positioning-and-evidence"]
     assert report.vacancy_evaluation_result["status"] == "SUCCESS"
     assert report.positioning_evidence_result["status"] == "SUCCESS"
+    assert "risks_and_mitigations" in report.positioning_evidence_result
     assert report.downstream_gates["document_writer"]["status"] == "POSITIONING_AVAILABLE"
     assert "call_provider_model" not in report.forbidden_actions
     assert "execute_recruiter_skill" not in report.forbidden_actions
@@ -305,7 +306,73 @@ def test_invalid_positioning_output_is_preserved_in_report() -> None:
     assert report.positioning_evidence_result is not None
     assert report.positioning_evidence_result["skill_id"] == "positioning-and-evidence"
     assert report.positioning_evidence_result["positioning_summary"] == "Missing the rest of the schema."
-    assert "missing_required_skill_output_fields:evidence_map,proven_facts,derived_positioning,gaps" in report.errors
+    assert (
+        "missing_required_skill_output_fields:"
+        "evidence_map,proven_facts,derived_positioning,gaps,risks_and_mitigations"
+    ) in report.errors
+    assert report.downstream_gates["document_writer"]["status"] == "POSITIONING_REQUIRED"
+
+
+def test_missing_risks_and_mitigations_blocks_document_writer_readiness() -> None:
+    class _MissingRisksExecutor(RecruiterSkillExecutor):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def execute(
+            self,
+            *,
+            skill_id: str,
+            skill_input: dict[str, object],
+            skill_markdown_path: str,
+            expected_schema: list[str],
+        ) -> SkillExecutionResult:
+            self.calls.append(skill_id)
+            if skill_id == "vacancy-evaluation":
+                return SkillExecutionResult(
+                    status="SUCCESS",
+                    skill_id=skill_id,
+                    output={
+                        "vacancy_evaluation_summary": "Strong fit with clear product leadership match.",
+                        "fit_interpretation": "High-confidence match for executive product scope.",
+                        "evidence_gaps": ["Exact team size not confirmed."],
+                        "recommendation_for_next_step": "Proceed to positioning synthesis.",
+                    },
+                    warnings=[],
+                    errors=[],
+                    provenance={},
+                    provider_called=False,
+                )
+            return SkillExecutionResult(
+                status="SUCCESS",
+                skill_id=skill_id,
+                output={
+                    "positioning_summary": "Lead with B2B product leadership and scaling evidence.",
+                    "evidence_map": {"leadership": ["Scaled B2B platform teams."]},
+                    "proven_facts": ["Built product orgs."],
+                    "derived_positioning": ["Position as operator-executive with marketplace depth."],
+                    "gaps": ["Need explicit domain depth proof for this company."],
+                },
+                warnings=[],
+                errors=[],
+                provenance={},
+                provider_called=False,
+            )
+
+    executor = _MissingRisksExecutor()
+    report = run_recruiter_skill_execution(
+        RecruiterSkillExecutionRequest(vacancy_id=101, repo_root=REPO_ROOT, allow_provider_execution=True),
+        context_builder=lambda request: _context_packet(),
+        executor=executor,
+    )
+
+    assert report.status is RecruiterSkillExecutionStatus.SKILL_OUTPUT_INVALID
+    assert report.execution_status == "invalid_skill_output"
+    assert executor.calls == ["vacancy-evaluation", "positioning-and-evidence"]
+    assert report.vacancy_evaluation_result is not None
+    assert report.positioning_evidence_result is not None
+    assert "risks_and_mitigations" not in report.positioning_evidence_result
+    assert "missing_required_skill_output_fields:risks_and_mitigations" in report.errors
+    assert report.downstream_gates["document_writer"]["status"] != "POSITIONING_AVAILABLE"
     assert report.downstream_gates["document_writer"]["status"] == "POSITIONING_REQUIRED"
 
 
@@ -322,4 +389,5 @@ def test_required_output_field_lists_are_stable() -> None:
         "proven_facts",
         "derived_positioning",
         "gaps",
+        "risks_and_mitigations",
     ]
