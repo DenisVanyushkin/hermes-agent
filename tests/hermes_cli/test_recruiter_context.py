@@ -333,6 +333,72 @@ class TestRecruiterContextPacket:
         assert packet.request["vacancy_url"] == "https://example.com/jobs/1"
         assert packet.vacancy["vacancy_id"] == 101
 
+    def test_supports_duplicate_vacancy_url_lookup(self, tmp_path: Path) -> None:
+        store = _seed_store(tmp_path)
+        with store.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO vacancies (
+                    id, vacancy_key, source, source_id, company, title, location, url, description,
+                    posted_at, scraped_at, salary, company_url, metadata_json, first_seen_at, last_seen_at, repost_count, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    202,
+                    "linkedin:example:2",
+                    "linkedin",
+                    "example-2",
+                    "Acme",
+                    "VP Product",
+                    "Remote",
+                    "https://example.com/jobs/1",
+                    "Older duplicate posting",
+                    "2026-06-18T00:00:00+00:00",
+                    "2026-06-18T00:00:00+00:00",
+                    "$180k-$220k",
+                    "https://example.com",
+                    json.dumps({"seniority": "executive"}),
+                    "2026-06-18T00:00:00+00:00",
+                    "2026-06-18T00:00:00+00:00",
+                    0,
+                    "rejected",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO vacancy_evaluations (
+                    vacancy_key, run_id, score, tier, recommendation, salary_tier,
+                    matched_signals_json, concerns_json, reasons_json, raw_breakdown_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "linkedin:example:2",
+                    55,
+                    72,
+                    "potential_fit",
+                    "potential_fit",
+                    "mid",
+                    json.dumps(["product_leadership"]),
+                    json.dumps([]),
+                    json.dumps(["older_duplicate"]),
+                    json.dumps({"product": 4}),
+                    "2026-06-18T00:04:00+00:00",
+                ),
+            )
+
+        packet = build_recruiter_context(
+            _request(
+                vacancy_url="https://example.com/jobs/1",
+                job_intel_db_path=store.db_path,
+                private_career_dir=tmp_path / "missing-career",
+                repo_root=REPO_ROOT,
+            )
+        )
+
+        assert packet.status is RecruiterContextStatus.READY
+        assert packet.vacancy["vacancy_id"] == 101
+        assert "multiple_vacancies_for_url_resolved" in packet.warnings
+
     def test_supports_opportunity_id_lookup(self, tmp_path: Path) -> None:
         store = _seed_store(tmp_path)
 

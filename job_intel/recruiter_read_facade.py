@@ -154,11 +154,56 @@ class RecruiterReadFacade:
         )
         return rows
 
-    def _serialize_vacancy(self, conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    def _opportunity_link_summary(self, conn: sqlite3.Connection, vacancy_id: int) -> dict[str, Any]:
+        if not self._has_tables({"opportunities"}):
+            return {"has_opportunity": False, "opportunity_id": None}
+        row = conn.execute(
+            "SELECT id FROM opportunities WHERE vacancy_id=? ORDER BY datetime(updated_at) DESC, id DESC LIMIT 1",
+            (vacancy_id,),
+        ).fetchone()
+        if not row:
+            return {"has_opportunity": False, "opportunity_id": None}
+        return {"has_opportunity": True, "opportunity_id": row[0]}
+
+    def _vacancy_freshness(self, raw: dict[str, Any], evaluation: dict[str, Any] | None) -> str | None:
+        candidates = [
+            raw.get("last_seen_at"),
+            raw.get("scraped_at"),
+            raw.get("posted_at"),
+            raw.get("first_seen_at"),
+            evaluation.get("created_at") if evaluation else None,
+        ]
+        parsed = [self._parse_dt(value) for value in candidates if value]
+        if not parsed:
+            return None
+        freshest = max(parsed)
+        return freshest.isoformat()
+
+    def _serialize_vacancy(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        duplicate_resolution: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         raw = dict(row)
         evaluation = self._latest_evaluation(conn, raw["vacancy_key"])
         company_context = self._company_context_rows(conn, raw["company"])
         warnings = self._stale_warning(raw.get("last_seen_at"), raw.get("scraped_at"), raw.get("posted_at"))
+        provenance = {
+            "read_mode": READ_ONLY_SOURCE,
+            "source_table": "vacancies",
+            "vacancy_id": raw["id"],
+            "source_kind": raw["source"],
+            "source_url": raw["url"],
+            "first_seen_at": raw.get("first_seen_at"),
+            "last_seen_at": raw.get("last_seen_at"),
+            "created_at": raw.get("first_seen_at"),
+            "updated_at": raw.get("last_seen_at"),
+            "run_id": evaluation["run_id"] if evaluation else None,
+            "evaluation_created_at": evaluation["created_at"] if evaluation else None,
+        }
+        if duplicate_resolution is not None:
+            provenance["duplicate_url_resolution"] = duplicate_resolution
         return {
             "vacancy_id": raw["id"],
             "vacancy_key": raw["vacancy_key"],
@@ -181,20 +226,56 @@ class RecruiterReadFacade:
             "evaluation": evaluation,
             "company_context": company_context,
             "warnings": warnings,
-            "provenance": {
-                "read_mode": READ_ONLY_SOURCE,
-                "source_table": "vacancies",
-                "vacancy_id": raw["id"],
-                "source_kind": raw["source"],
-                "source_url": raw["url"],
-                "first_seen_at": raw.get("first_seen_at"),
-                "last_seen_at": raw.get("last_seen_at"),
-                "created_at": raw.get("first_seen_at"),
-                "updated_at": raw.get("last_seen_at"),
-                "run_id": evaluation["run_id"] if evaluation else None,
-                "evaluation_created_at": evaluation["created_at"] if evaluation else None,
-            },
+            "provenance": provenance,
         }
+
+    def _resolve_duplicate_vacancy_rows(
+        self,
+        conn: sqlite3.Connection,
+        rows: list[sqlite3.Row],
+    ) -> tuple[sqlite3.Row, dict[str, Any]]:
+        selection_policy = [
+            "prefer_opportunity_link",
+            "prefer_machine_score",
+            "prefer_freshness",
+            "tie_break_highest_vacancy_id",
+        ]
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            raw = dict(row)
+            evaluation = self._latest_evaluation(conn, raw["vacancy_key"])
+            opportunity = self._opportunity_link_summary(conn, raw["id"])
+            candidates.append(
+                {
+                    "row": row,
+                    "vacancy_id": raw["id"],
+                    "has_opportunity": opportunity["has_opportunity"],
+                    "opportunity_id": opportunity["opportunity_id"],
+                    "has_machine_score": evaluation is not None,
+                    "freshness": self._vacancy_freshness(raw, evaluation),
+                }
+            )
+
+        with_opportunity = [candidate for candidate in candidates if candidate["has_opportunity"]]
+        if len(with_opportunity) == 1:
+            selected = with_opportunity[0]
+        else:
+            selected = max(
+                candidates,
+                key=lambda candidate: (
+                    1 if candidate["has_machine_score"] else 0,
+                    candidate["freshness"] or "",
+                    candidate["vacancy_id"],
+                ),
+            )
+
+        provenance = {
+            "duplicate_count": len(candidates),
+            "selected_vacancy_id": selected["vacancy_id"],
+            "candidate_vacancy_ids": sorted(candidate["vacancy_id"] for candidate in candidates),
+            "selection_policy": selection_policy,
+        }
+        return selected["row"], provenance
 
     def get_vacancy_by_id(self, vacancy_id: int) -> dict[str, Any]:
         with self._connect_read_only() as conn:
@@ -212,15 +293,18 @@ class RecruiterReadFacade:
             ).fetchall()
             if not rows:
                 return {"status": "not_found", "vacancy": None, "warnings": ["vacancy_not_found"]}
+            duplicate_resolution = None
+            warnings: list[str] = []
+            selected_row = rows[0]
             if len(rows) > 1:
-                return {
-                    "status": "ambiguous",
-                    "vacancy": None,
-                    "warnings": ["multiple_vacancies_for_url"],
-                    "matches": [self._serialize_vacancy(conn, row) for row in rows],
-                }
-            vacancy = self._serialize_vacancy(conn, rows[0])
-        return {"status": "found", "vacancy": vacancy, "warnings": vacancy["warnings"]}
+                selected_row, duplicate_resolution = self._resolve_duplicate_vacancy_rows(conn, rows)
+                warnings.append("multiple_vacancies_for_url_resolved")
+            vacancy = self._serialize_vacancy(conn, selected_row, duplicate_resolution=duplicate_resolution)
+            warnings.extend(vacancy["warnings"])
+        result = {"status": "found", "vacancy": vacancy, "warnings": warnings}
+        if duplicate_resolution is not None:
+            result["provenance"] = duplicate_resolution
+        return result
 
     def get_opportunity_by_id(self, opportunity_id: int) -> dict[str, Any]:
         if not self._has_tables({"opportunities"}):
