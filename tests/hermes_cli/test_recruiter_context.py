@@ -439,9 +439,15 @@ class TestRecruiterContextPacket:
 
     def test_private_context_missing_is_not_fatal(self, tmp_path: Path) -> None:
         store = _seed_store(tmp_path)
+        missing_private_dir = tmp_path / "missing-career"
 
         packet = build_recruiter_context(
-            _request(vacancy_id=101, job_intel_db_path=store.db_path, repo_root=REPO_ROOT)
+            _request(
+                vacancy_id=101,
+                job_intel_db_path=store.db_path,
+                private_career_dir=missing_private_dir,
+                repo_root=REPO_ROOT,
+            )
         )
 
         assert packet.status is RecruiterContextStatus.READY
