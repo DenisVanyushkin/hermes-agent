@@ -85,7 +85,22 @@ def _build_prompt(*, skill_id: str, skill_input: dict[str, Any], expected_schema
         "You are recruiter document-reviewer.\n"
         "Review the draft for hallucination risk, unsupported claims, genericness, tone/seniority, "
         "missing source references, invented facts, and any application submission implication.\n"
-        "Return structured JSON with verdict APPROVE, CHANGES_REQUESTED, or BLOCKED.\n"
+        "Return only one JSON object.\n"
+        "Reviewer output contract:\n"
+        "- status must be exactly SUCCESS\n"
+        "- skill_id must be exactly document-reviewer\n"
+        "- verdict must be exactly one of APPROVE, CHANGES_REQUESTED, or BLOCKED\n"
+        "- hallucination_risk must be a string or null\n"
+        "- unsupported_claims must be a list; use [] when there are none\n"
+        "- genericness_assessment must be a string or null\n"
+        "- tone_seniority_assessment must be a string or null\n"
+        "- missing_source_references must be a list; use [] when there are none\n"
+        "- required_changes must be a list; use [] when verdict is APPROVE\n"
+        "- warnings must be a list; use [] when there are no warnings\n"
+        "- errors must be a list; use [] when there are no errors\n"
+        "- include provenance as an object\n"
+        "Required minimal shape example:\n"
+        '{"status":"SUCCESS","skill_id":"document-reviewer","verdict":"APPROVE","hallucination_risk":"low","unsupported_claims":[],"genericness_assessment":"specific enough","tone_seniority_assessment":"appropriate","missing_source_references":[],"required_changes":[],"warnings":[],"errors":[],"provenance":{}}\n'
         f"Skill input JSON:\n{json.dumps(skill_input, ensure_ascii=True, sort_keys=True)}\n"
         f"Expected schema JSON:\n{json.dumps(expected_schema or {}, ensure_ascii=True, sort_keys=True)}"
     )
@@ -142,8 +157,8 @@ def _response_schema(name: str, schema: dict[str, Any] | None) -> dict[str, Any]
     return {
         "type": "object",
         "properties": {
-            "status": {"type": "string"},
-            "skill_id": {"type": "string"},
+            "status": {"type": "string", "enum": ["SUCCESS"]},
+            "skill_id": {"type": "string", "enum": ["document-reviewer"]},
             "verdict": {"type": "string", "enum": verdicts},
             "hallucination_risk": {"type": ["string", "null"]},
             "unsupported_claims": {"type": "array", "items": {}},

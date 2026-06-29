@@ -150,6 +150,28 @@ def test_reviewer_prompt_contains_review_checks() -> None:
     assert "tone/seniority" in prompt
     assert "missing source references" in prompt
     assert "application submission implication" in prompt
+    assert "status must be exactly SUCCESS" in prompt
+    assert "skill_id must be exactly document-reviewer" in prompt
+    assert "use [] when there are none" in prompt
+    assert '"warnings":[]' in prompt
+    assert '"errors":[]' in prompt
+
+
+def test_json_response_format_uses_reviewer_schema_shape() -> None:
+    payload = _json_response_format(
+        "recruiter_document_review_result_v1",
+        {"verdict": ["APPROVE", "CHANGES_REQUESTED", "BLOCKED"]},
+    )
+
+    assert payload["response_format"]["type"] == "json_schema"
+    assert payload["response_format"]["json_schema"]["name"] == "recruiter_document_review_result_v1"
+    schema = payload["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["status"]["enum"] == ["SUCCESS"]
+    assert schema["properties"]["skill_id"]["enum"] == ["document-reviewer"]
+    assert schema["properties"]["verdict"]["enum"] == ["APPROVE", "CHANGES_REQUESTED", "BLOCKED"]
+    assert "warnings" in schema["required"]
+    assert "errors" in schema["required"]
+    assert "provenance" in schema["required"]
 
 
 def test_invalid_json_output_raises_controlled_error() -> None:
