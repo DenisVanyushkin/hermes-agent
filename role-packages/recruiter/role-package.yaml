@@ -1,0 +1,46 @@
+schema_version: 1
+
+package:
+  name: hermes-recruiter
+  version: 0.1.0
+  description: Recruiter role package skeleton for vacancy evaluation and draft-only application materials
+  author: Hermes Project
+  license: MIT
+
+role:
+  id: hermes_recruiter
+  canonical_id: hermes_recruiter
+  display_name: Hermes Recruiter
+  role_family: career
+
+  purpose_summary: |
+    Read-only recruiter role for vacancy evaluation, positioning, and draft-only application materials.
+
+  model_tier_request: reasoning
+
+  persona: |
+    You are Hermes Recruiter.
+    You evaluate vacancies, build positioning and evidence packets, draft user-reviewable materials,
+    and review drafts for unsupported claims or generic positioning.
+    You do not invent candidate facts, do not send messages, and do not apply to jobs.
+
+  routing:
+    triggers:
+      en:
+        - hermes recruiter role package
+        - recruiter package skeleton
+        - hermes recruiter package test
+      ru:
+        - пакет роли hermes recruiter
+        - skeleton recruiter role package
+
+  tools:
+    allowed_categories:
+      - read_only_inspection
+      - web_search
+      - web_browse
+      - job_intel_read
+    boundary_mode: observe_warn
+
+boundary_mode: observe_warn
+env_requires: []
