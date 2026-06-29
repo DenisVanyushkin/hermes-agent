@@ -18,6 +18,7 @@ from hermes_cli.pipeline_router import (
     RouterDecision,
     build_pipeline_router,
 )
+from hermes_cli.recruiter_routing import build_recruiter_handoff_metadata
 from hermes_cli.pipeline_specs import load_pipeline_specs
 
 
@@ -93,6 +94,10 @@ def observe_pipeline_router_decision(
                 actual_provider=actual_provider,
                 actual_model=actual_model,
             )
+        recruiter_routing = build_recruiter_handoff_metadata(
+            user_message,
+            context={"repo_root": repo_root},
+        )
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
         log.info(
             "pipeline_router_observe %s",
@@ -140,6 +145,7 @@ def observe_pipeline_router_decision(
                     "chat_id": chat_id,
                     "thread_id": thread_id,
                     "user_id": user_id,
+                    "recruiter_routing": recruiter_routing,
                     "elapsed_ms": elapsed_ms,
                 },
                 ensure_ascii=False,
