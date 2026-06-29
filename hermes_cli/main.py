@@ -12238,7 +12238,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
         "project", "proxy",
         "prompt-size",
-        "recruiter-context", "recruiter-skill", "send", "sessions", "setup",
+        "recruiter-context", "recruiter-document", "recruiter-skill", "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -12992,6 +12992,12 @@ def main():
     # =========================================================================
     from hermes_cli.recruiter_dry_run_cli import register_recruiter_context_subparser
     register_recruiter_context_subparser(subparsers)
+
+    # =========================================================================
+    # recruiter-document command — controlled draft-only document execution CLI
+    # =========================================================================
+    from hermes_cli.recruiter_document_execution_cli import register_recruiter_document_subparser
+    register_recruiter_document_subparser(subparsers)
 
     # =========================================================================
     # recruiter-skill command — controlled CLI-only recruiter execution bridge

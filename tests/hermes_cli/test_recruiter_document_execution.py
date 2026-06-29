@@ -160,6 +160,9 @@ def test_allow_execution_without_executor_fails_closed() -> None:
     )
 
     assert report.status is RecruiterDocumentExecutionStatus.DOCUMENT_EXECUTOR_NOT_WIRED
+    assert report.writer_called is False
+    assert report.reviewer_called is False
+    assert report.provider_called is False
     assert report.document_packet is None
 
 
@@ -185,6 +188,7 @@ def test_happy_fake_execution_runs_writer_then_reviewer_and_stays_blocked_on_out
     assert report.downstream_gates["outbound_delivery"]["status"] == "BLOCKED_USER_REVIEW_REQUIRED"
     assert report.downstream_gates["crm_writeback"]["status"] == "BLOCKED_OUT_OF_SCOPE"
     assert "call_provider_model" in report.forbidden_actions
+    assert "read_private_file_contents" in report.forbidden_actions
     assert "create_gmail_draft" in report.forbidden_actions
     json.dumps(report.to_dict(), sort_keys=True)
 
