@@ -4,17 +4,17 @@ Status: draft SoT contract for Hermes Recruiter MVP
 Canonical host/repo: `ssh hermes-agent && cd /home/hermes/.hermes/hermes-agent`  
 Related documents:
 
-- `docs/hermes-recruiter-action-plan.md` (present locally during this slice; missing on host at inspection time)
-- `docs/hermes-recruiter-skill-package-architecture-sot.md` (present locally during this slice; missing on host at inspection time)
+- [`docs/hermes-recruiter-action-plan.md`](docs/hermes-recruiter-action-plan.md)
+- [`docs/hermes-recruiter-skill-package-architecture-sot.md`](docs/hermes-recruiter-skill-package-architecture-sot.md)
 - [`docs/job-intel-recruiter-read-facade.md`](docs/job-intel-recruiter-read-facade.md)
-- `docs/job-intel-source-of-truth.md` (present locally during this slice; missing on host at inspection time)
-- `docs/job-intel-audit-sot-plan.md` (present locally during this slice; missing on host at inspection time)
+- [`docs/job-intel-source-of-truth.md`](docs/job-intel-source-of-truth.md)
+- [`docs/job-intel-audit-sot-plan.md`](docs/job-intel-audit-sot-plan.md)
 - [`docs/hermes-role-package-runtime-slice-plan.md`](docs/hermes-role-package-runtime-slice-plan.md)
-- local reference inputs inspected for this slice:
-- `company_intelligence_architecture.md`
-- `denis_vanyushkin_structured_resume_v1_1.json`
-- `opportunity-thesis.md`
-- `scoring_v3.md`
+- private candidate/search inputs may be operator-provided under `~/.hermes/private/career/` and may be absent:
+- `~/.hermes/private/career/company_intelligence_architecture.md`
+- `~/.hermes/private/career/denis_vanyushkin_structured_resume_v1_1.json`
+- `~/.hermes/private/career/opportunity-thesis.md`
+- `~/.hermes/private/career/scoring_v3.md`
 
 ## 1. Purpose
 
@@ -23,6 +23,10 @@ This document defines the Source-of-Truth contract for the Hermes Recruiter MVP 
 The goal is to make Recruiter reuse existing sources correctly instead of inventing parallel facts, parallel scoring, or unauthorized write paths.
 
 This slice is documentation-only.
+
+Private candidate/search inputs are intentionally not stored in the main repository. When present on host, Hermes Recruiter may read them from `~/.hermes/private/career/` via explicit operator-managed provisioning. Absence of these files must not cause repo mutations, direct fallback to local ChatGPT attachments, or invented candidate facts.
+
+Repo documents define architecture and public contracts only; personal candidate materials remain out-of-repo unless separately approved.
 
 It does not introduce:
 
@@ -89,7 +93,7 @@ Generated outputs sit below all of the above and never become source of truth au
 
 Canonical source:
 
-- structured candidate profile / resume-derived JSON, such as `denis_vanyushkin_structured_resume_v1_1.json`;
+- structured candidate profile / resume-derived JSON, such as `~/.hermes/private/career/denis_vanyushkin_structured_resume_v1_1.json`, when explicitly provisioned on host;
 - explicit Denis-confirmed facts;
 - future approved career SoT artifacts when added to repo docs.
 
@@ -108,7 +112,8 @@ Candidate facts own:
 
 Canonical source:
 
-- `opportunity-thesis.md` and future repo-native SoT copies when added.
+- `~/.hermes/private/career/opportunity-thesis.md` when explicitly provisioned on host;
+- future repo-native SoT copies when added.
 
 Opportunity thesis owns:
 
@@ -123,7 +128,8 @@ Opportunity thesis owns:
 
 Canonical source:
 
-- `company_intelligence_architecture.md` and future repo-native SoT copies when added.
+- `~/.hermes/private/career/company_intelligence_architecture.md` when explicitly provisioned on host;
+- future repo-native SoT copies when added.
 
 Company intelligence thesis owns:
 
@@ -139,7 +145,7 @@ Canonical source:
 
 - [`job_intel/evaluator.py`](job_intel/evaluator.py)
 - [`job_intel/seed/scoring.yaml`](job_intel/seed/scoring.yaml)
-- local scoring references inspected for this slice, including `scoring_v3.md`
+- optional private scoring references under `~/.hermes/private/career/`, including `~/.hermes/private/career/scoring_v3.md`, when explicitly provisioned on host
 - future repo-native v3 scoring audit/readiness docs when present on host
 
 Operational scoring owns:
@@ -185,7 +191,7 @@ They remain drafts unless Denis explicitly confirms a claim or approves a state 
 
 The canonical candidate profile must come from resume-derived structured data and Denis-confirmed facts.
 
-For this slice, the inspected reference was `denis_vanyushkin_structured_resume_v1_1.json`.
+For this slice, the inspected reference was `~/.hermes/private/career/denis_vanyushkin_structured_resume_v1_1.json` when operator-provided on host.
 
 Important rule:
 
@@ -251,7 +257,7 @@ If a desired claim is plausible but unconfirmed, Recruiter must either:
 
 The opportunity thesis is the strategic filter above operational vacancy scoring.
 
-Based on the inspected `opportunity-thesis.md`, the thesis currently emphasizes:
+Based on the inspected `~/.hermes/private/career/opportunity-thesis.md` when operator-provided on host, the thesis currently emphasizes:
 
 - executive product and transformation leadership;
 - B2C digital ecosystems;
@@ -281,7 +287,7 @@ Operational score alone is not enough to answer those questions.
 
 The company intelligence layer is thesis-first, not source-first.
 
-Based on the inspected `company_intelligence_architecture.md`, company intelligence should answer:
+Based on the inspected `~/.hermes/private/career/company_intelligence_architecture.md` when operator-provided on host, company intelligence should answer:
 
 ```text
 Why is this company worth attention for Denis specifically?
@@ -588,24 +594,26 @@ This contract does not authorize implementation of:
 
 ## 15. Source Inventory for This Slice
 
-### 15.1 Present on hermes-agent during inspection
+### 15.1 Present on hermes-agent after repo-safe SoT sync
 
+- `docs/hermes-recruiter-action-plan.md`
+- `docs/hermes-recruiter-skill-package-architecture-sot.md`
 - `docs/job-intel-recruiter-read-facade.md`
+- `docs/job-intel-source-of-truth.md`
+- `docs/job-intel-audit-sot-plan.md`
 - `docs/hermes-role-package-runtime-slice-plan.md`
 - `job_intel/evaluator.py`
 - `job_intel/seed/scoring.yaml`
 - `job_intel/recruiter_read_facade.py`
 
-### 15.2 Present locally but missing on hermes-agent during inspection
+### 15.2 Private/operator-managed inputs expected outside the repo
 
-- `docs/hermes-recruiter-action-plan.md`
-- `docs/hermes-recruiter-skill-package-architecture-sot.md`
-- `docs/job-intel-source-of-truth.md`
-- `docs/job-intel-audit-sot-plan.md`
-- `company_intelligence_architecture.md`
-- `denis_vanyushkin_structured_resume_v1_1.json`
-- `opportunity-thesis.md`
-- `scoring_v3.md`
+- `~/.hermes/private/career/company_intelligence_architecture.md`
+- `~/.hermes/private/career/denis_vanyushkin_structured_resume_v1_1.json`
+- `~/.hermes/private/career/opportunity-thesis.md`
+- `~/.hermes/private/career/scoring_v3.md`
+
+These private inputs may be absent on host. Their absence must not trigger repo mutations, direct fallback to local ChatGPT attachments, or invented candidate facts.
 
 ## 16. Bottom Line
 
