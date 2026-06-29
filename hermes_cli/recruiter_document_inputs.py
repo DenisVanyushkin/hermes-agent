@@ -118,6 +118,11 @@ def build_recruiter_document_writer_input_packet(
             provenance=provenance,
         )
 
+    if audience is None:
+        warnings.append("audience_missing")
+    if purpose is None:
+        warnings.append("purpose_missing")
+
     if not vacancy_result:
         return _blocked_packet(
             RecruiterDocumentInputStatus.BLOCKED_MISSING_VACANCY_CONTEXT,
@@ -256,6 +261,16 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
 
 
 def _dedupe(values: list[str]) -> list[str]:
