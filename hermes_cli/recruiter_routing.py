@@ -22,6 +22,9 @@ _APPLICATION_MATERIALS_NEXT_ALLOWED_ACTIONS = [
     "recruiter-skill execute",
     "recruiter-document execute",
 ]
+_APPLICATION_MATERIALS_POSITIONING_WARNING = (
+    "application-materials requires POSITIONING_REQUIRED clearance via RecruiterPositioningPacket before document writing"
+)
 _FORBIDDEN_ACTIONS = [
     "call_provider_model",
     "send_outbound_message",
@@ -188,6 +191,7 @@ def route_recruiter_prompt(prompt: str, *, context: dict[str, Any] | None = None
     if application_signals:
         bundle_id = APPLICATION_MATERIALS_BUNDLE_ID
         reasoning = "Prompt asks for recruiter-facing application materials."
+        warnings.append(_APPLICATION_MATERIALS_POSITIONING_WARNING)
         next_actions = list(_APPLICATION_MATERIALS_NEXT_ALLOWED_ACTIONS)
     elif evaluation_signals:
         bundle_id = DEFAULT_BUNDLE_ID
@@ -221,19 +225,63 @@ def build_recruiter_handoff_metadata(
     payload = decision.to_dict()
     if decision.status is RecruiterRoutingStatus.SELECTED:
         payload["manual_handoff_reason"] = "controlled_recruiter_core_exists_but_provider_execution_stays_disabled"
+        payload["role_context"] = _build_role_context(decision)
     else:
         payload["manual_handoff_reason"] = None
+        payload["role_context"] = None
     return payload
+
+
+def _build_role_context(decision: RecruiterRoutingDecision) -> dict[str, Any]:
+    role_package_context = dict(decision.role_package_context)
+    bundle_id = decision.selected_bundle
+    bundle_ids = set(role_package_context.get("bundle_ids") or [])
+    bundle_payload = dict((role_package_context.get("bundles") or {}).get(bundle_id) or {})
+    bundle_skill_ids = list(bundle_payload.get("skills") or [])
+
+    bundle_required_inputs: list[str] = []
+    expected_output = bundle_payload.get("expected_output")
+    if bundle_id == APPLICATION_MATERIALS_BUNDLE_ID:
+        bundle_required_inputs = ["RecruiterPositioningPacket", "POSITIONING_REQUIRED"]
+    elif expected_output:
+        bundle_required_inputs = [str(expected_output)]
+
+    return {
+        "schema_version": "recruiter_role_context_v1",
+        "selected_role_id": decision.selected_role_id,
+        "selected_bundle": bundle_id,
+        "execution_mode": decision.execution_mode,
+        "provider_execution_enabled": decision.provider_execution_enabled,
+        "document_provider_execution_enabled": decision.document_provider_execution_enabled,
+        "next_allowed_actions": list(decision.next_allowed_actions),
+        "forbidden_actions": list(decision.forbidden_actions),
+        "warnings": list(decision.warnings),
+        "matched_signals": list(decision.matched_signals),
+        "reasoning_summary": decision.reasoning_summary,
+        "manual_handoff_reason": "controlled_recruiter_core_exists_but_provider_execution_stays_disabled",
+        "role_package_available": bool(role_package_context),
+        "selected_bundle_available": bundle_id in bundle_ids if bundle_id is not None else False,
+        "bundle_skill_ids": bundle_skill_ids,
+        "bundle_required_inputs": bundle_required_inputs,
+    }
 
 
 def _build_role_package_context(context: dict[str, Any] | None) -> dict[str, Any]:
     repo_root = _context_repo_root(context)
     payload = build_repo_role_package_skill_context(repo_root / _RECRUITER_PACKAGE_DIR, repo_root=repo_root)
+    bundles = {
+        bundle["id"]: {
+            "skills": list(bundle.get("skills") or []),
+            "expected_output": bundle.get("expected_output"),
+        }
+        for bundle in payload["bundles"]
+    }
     return {
         "package_id": payload["package_id"],
         "role_id": payload["role_id"],
         "bundle_ids": [bundle["id"] for bundle in payload["bundles"]],
         "skills": [skill["id"] for skill in payload["skills"]],
+        "bundles": bundles,
     }
 
 

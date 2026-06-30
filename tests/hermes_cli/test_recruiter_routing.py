@@ -7,6 +7,7 @@ from hermes_cli.recruiter_routing import (
     APPLICATION_MATERIALS_BUNDLE_ID,
     DEFAULT_BUNDLE_ID,
     RECRUITER_ROLE_ID,
+    build_recruiter_handoff_metadata,
     route_recruiter_prompt,
 )
 
@@ -39,7 +40,7 @@ def test_english_application_materials_prompt_selects_document_bundle() -> None:
     assert decision.status.value == "selected"
     assert decision.selected_bundle == APPLICATION_MATERIALS_BUNDLE_ID
     assert "recruiter-document execute" in decision.next_allowed_actions
-    assert decision.warnings == []
+    assert any("POSITIONING_REQUIRED" in warning for warning in decision.warnings)
 
 
 def test_ambiguous_recruiter_prompt_defaults_to_evaluate_vacancy() -> None:
@@ -82,6 +83,35 @@ def test_decision_is_json_serializable() -> None:
     encoded = json.dumps(decision.to_dict(), sort_keys=True)
     assert RECRUITER_ROLE_ID in encoded
     assert APPLICATION_MATERIALS_BUNDLE_ID in encoded
+
+
+def test_selected_recruiter_prompt_builds_compact_role_context() -> None:
+    metadata = build_recruiter_handoff_metadata(
+        "Evaluate this vacancy and tell me whether I should apply: https://example.com/jobs/42",
+        context={"repo_root": REPO_ROOT},
+    )
+
+    role_context = metadata["role_context"]
+    assert role_context["schema_version"] == "recruiter_role_context_v1"
+    assert role_context["selected_role_id"] == RECRUITER_ROLE_ID
+    assert role_context["selected_bundle"] == DEFAULT_BUNDLE_ID
+    assert role_context["execution_mode"] == "observe"
+    assert role_context["provider_execution_enabled"] is False
+    assert role_context["document_provider_execution_enabled"] is False
+    assert role_context["role_package_available"] is True
+    assert role_context["selected_bundle_available"] is True
+    assert "vacancy-evaluation" in role_context["bundle_skill_ids"]
+    assert "RecruiterPositioningPacket" in role_context["bundle_required_inputs"]
+
+
+def test_non_recruiter_prompt_has_no_role_context() -> None:
+    metadata = build_recruiter_handoff_metadata(
+        "Debug Hermes gateway for recruiter routing",
+        context={"repo_root": REPO_ROOT},
+    )
+
+    assert metadata["status"] == "not_selected"
+    assert metadata["role_context"] is None
 
 
 def test_routing_module_has_no_provider_or_db_imports() -> None:
