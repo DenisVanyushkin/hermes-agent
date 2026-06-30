@@ -228,6 +228,51 @@ def test_observe_logs_recruiter_handoff_metadata_without_changing_pipeline(monke
     assert '"POSITIONING_REQUIRED"' in log_message
 
 
+def test_observe_logs_evaluate_vacancy_flow_metadata(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    decision = RouterDecision(
+        pipeline_session_id="pipe-recruiter-flow",
+        router_subagent_id="hermes_pipeline_router",
+        status="no_specialized_pipeline",
+        selected_pipeline_id=None,
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.85,
+        reasoning_summary="ordinary conversation pipeline remains the safe fallback",
+        requires_clarification=False,
+        fallback_safe=True,
+        policy_block_reason=None,
+        routing_failure_reason=None,
+        alternatives=(),
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            assert "вакансию" in user_message
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={"pipelines": {"router": {"mode": "observe"}}},
+            user_message="Посмотри вот эту вакансию: https://example.com/jobs/123",
+            session_id="sess-recruiter-flow",
+            session_key="agent:main:telegram:dm",
+            platform="telegram",
+            repo_root=Path(__file__).resolve().parents[2],
+        )
+
+    assert result == decision
+    log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
+    assert '"recruiter_evaluation_flow": {' in log_message
+    assert '"schema_version": "recruiter_evaluation_flow_v1"' in log_message
+    assert '"flow_id": "evaluate-vacancy"' in log_message
+    assert '"status": "READY"' in log_message
+    assert '"vacancy_source_status": "AVAILABLE_URL"' in log_message
+
+
 def test_observe_engineering_prompt_does_not_inject_recruiter_role_context(monkeypatch, caplog):
     from hermes_cli import pipeline_observe
 
