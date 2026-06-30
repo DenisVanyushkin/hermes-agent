@@ -9,10 +9,14 @@ from .recruiter_dry_run import (
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
     run_recruiter_context_dry_run,
+    run_recruiter_evaluation_flow_dry_run,
 )
 
 
-_READY_STATUSES = {RecruiterDryRunStatus.READY_FOR_RECRUITER_SKILL_INPUT}
+_READY_STATUSES = {
+    RecruiterDryRunStatus.READY_FOR_RECRUITER_SKILL_INPUT,
+    RecruiterDryRunStatus.EVALUATION_READY,
+}
 
 
 def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -34,6 +38,13 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     dry_run.add_argument("--opportunity-id", type=int, default=None, help="CRM opportunity id")
     dry_run.add_argument("--flow", choices=["evaluate-vacancy"], default=None, help="Run a prompt-based recruiter flow dry-run")
     dry_run.add_argument("--prompt", default=None, help="Prompt text for prompt-driven recruiter flow dry-runs")
+    dry_run.add_argument("--allow-provider-execution", action="store_true", help="Explicitly allow provider-backed evaluation for READY evaluate-vacancy dry-runs")
+    dry_run.add_argument(
+        "--private-context-status",
+        choices=["PRIVATE_CONTEXT_AVAILABLE", "PRIVATE_CONTEXT_MISSING", "PRIVATE_CONTEXT_NOT_INSPECTED"],
+        default="PRIVATE_CONTEXT_NOT_INSPECTED",
+        help="Explicit private context readiness for evaluate-vacancy dry-runs",
+    )
     dry_run.add_argument("--job-intel-db-path", default=None, help="Override job-intel SQLite path")
     dry_run.add_argument("--private-career-dir", default=None, help="Override private career context directory")
     dry_run.add_argument("--repo-root", default=None, help="Override repo root used for recruiter package discovery")
@@ -49,6 +60,8 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
         report = run_recruiter_evaluation_flow_dry_run(
             prompt=getattr(args, "prompt", None) or "",
             repo_root=repo_root,
+            private_context_status=getattr(args, "private_context_status", "PRIVATE_CONTEXT_NOT_INSPECTED"),
+            allow_provider_execution=getattr(args, "allow_provider_execution", False),
         )
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if report.status in _READY_STATUSES else 1)

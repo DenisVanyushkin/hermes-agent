@@ -162,10 +162,13 @@ def test_evaluation_flow_dry_run_ready_for_url_prompt() -> None:
         private_context_status="PRIVATE_CONTEXT_AVAILABLE",
     )
 
-    assert report.status is RecruiterDryRunStatus.READY_FOR_RECRUITER_SKILL_INPUT
+    assert report.status is RecruiterDryRunStatus.PROVIDER_EXECUTION_BLOCKED
     assert report.readiness["ready"] is True
     assert report.evaluation_flow["status"] == "READY"
     assert report.evaluation_flow["vacancy_source_status"] == "AVAILABLE_URL"
+    assert report.provider_called is False
+    assert report.provider_execution_enabled is False
+    assert report.downstream_gates["document_generation"]["enabled"] is False
 
 
 def test_evaluation_flow_dry_run_blocks_missing_source() -> None:
@@ -175,6 +178,118 @@ def test_evaluation_flow_dry_run_blocks_missing_source() -> None:
         private_context_status="PRIVATE_CONTEXT_AVAILABLE",
     )
 
-    assert report.status is RecruiterDryRunStatus.CONTEXT_SOURCE_REQUIRED
+    assert report.status is RecruiterDryRunStatus.EVALUATION_FLOW_BLOCKED
     assert report.readiness["ready"] is False
     assert report.evaluation_flow["status"] == "BLOCKED_SOURCE_REQUIRED"
+
+
+def test_evaluation_flow_dry_run_allows_provider_only_with_explicit_flag() -> None:
+    class _FakeExecutor:
+        def execute(self, *, skill_input, expected_schema):
+            assert skill_input["skill_id"] == "vacancy-evaluation"
+            assert skill_input["prompt_text"] == "Посмотри вакансию https://example.com/jobs/123"
+            assert expected_schema["schema_version"] == "recruiter_vacancy_evaluation_packet_v1"
+            return {
+                "schema_version": "recruiter_vacancy_evaluation_packet_v1",
+                "skill_id": "vacancy-evaluation",
+                "status": "EVALUATION_READY",
+                "recommendation": "APPLY",
+                "fit_assessment": "Strong fit.",
+                "strengths": ["Executive product leadership match."],
+                "risks": ["Team size not confirmed."],
+                "evidence": ["Prompt contained a vacancy URL."],
+                "missing_information": [],
+                "next_step": "PROCEED_TO_POSITIONING",
+                "provenance": {},
+            }
+
+    report = run_recruiter_evaluation_flow_dry_run(
+        prompt="Посмотри вакансию https://example.com/jobs/123",
+        repo_root=REPO_ROOT,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: _FakeExecutor(),
+    )
+
+    assert report.status is RecruiterDryRunStatus.EVALUATION_READY
+    assert report.provider_called is True
+    assert report.executor_called is True
+    assert report.evaluation_result["schema_version"] == "recruiter_vacancy_evaluation_packet_v1"
+    assert report.evaluation_result["recommendation"] == "APPLY"
+
+
+def test_evaluation_flow_dry_run_blocks_provider_for_private_context_not_inspected() -> None:
+    report = run_recruiter_evaluation_flow_dry_run(
+        prompt="Посмотри вакансию https://example.com/jobs/123",
+        repo_root=REPO_ROOT,
+        private_context_status="PRIVATE_CONTEXT_NOT_INSPECTED",
+        allow_provider_execution=True,
+    )
+
+    assert report.status is RecruiterDryRunStatus.EVALUATION_FLOW_BLOCKED
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.errors == ["private_context_not_ready_for_provider_execution"]
+
+
+def test_evaluation_flow_dry_run_fails_closed_on_invalid_provider_json() -> None:
+    class _InvalidExecutor:
+        def execute(self, *, skill_input, expected_schema):
+            raise ValueError("evaluation_provider_output_invalid_json")
+
+    report = run_recruiter_evaluation_flow_dry_run(
+        prompt="Посмотри вакансию https://example.com/jobs/123",
+        repo_root=REPO_ROOT,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: _InvalidExecutor(),
+    )
+
+    assert report.status is RecruiterDryRunStatus.EVALUATION_OUTPUT_INVALID
+    assert report.provider_called is True
+    assert report.executor_called is True
+    assert report.errors == ["evaluation_provider_output_invalid_json"]
+
+
+def test_evaluation_flow_dry_run_fails_closed_on_missing_required_fields() -> None:
+    class _MissingFieldsExecutor:
+        def execute(self, *, skill_input, expected_schema):
+            return {
+                "schema_version": "recruiter_vacancy_evaluation_packet_v1",
+                "skill_id": "vacancy-evaluation",
+                "status": "EVALUATION_READY",
+                "recommendation": "APPLY",
+                "fit_assessment": "Strong fit.",
+                "strengths": [],
+                "risks": [],
+                "evidence": [],
+                "provenance": {},
+            }
+
+    report = run_recruiter_evaluation_flow_dry_run(
+        prompt="Посмотри вакансию https://example.com/jobs/123",
+        repo_root=REPO_ROOT,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: _MissingFieldsExecutor(),
+    )
+
+    assert report.status is RecruiterDryRunStatus.EVALUATION_OUTPUT_INVALID
+    assert "missing_required_evaluation_output_fields:missing_information,next_step" in report.errors
+
+
+def test_evaluation_flow_dry_run_sanitizes_provider_exception() -> None:
+    class _ExplodingExecutor:
+        def execute(self, *, skill_input, expected_schema):
+            raise RuntimeError("raw provider body should not leak")
+
+    report = run_recruiter_evaluation_flow_dry_run(
+        prompt="Посмотри вакансию https://example.com/jobs/123",
+        repo_root=REPO_ROOT,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: _ExplodingExecutor(),
+    )
+
+    assert report.status is RecruiterDryRunStatus.PROVIDER_EXECUTION_FAILED
+    assert report.errors == ["provider_execution_failed"]
