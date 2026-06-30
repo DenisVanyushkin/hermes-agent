@@ -221,8 +221,53 @@ def test_observe_logs_recruiter_handoff_metadata_without_changing_pipeline(monke
     assert '"fallback_pipeline_id": "default_conversation_pipeline"' in log_message
     assert '"selected_role_id": "hermes_recruiter"' in log_message
     assert '"selected_bundle": "application-materials"' in log_message
+    assert '"role_context": {' in log_message
+    assert '"schema_version": "recruiter_role_context_v1"' in log_message
     assert '"provider_execution_enabled": false' in log_message
     assert '"document_provider_execution_enabled": false' in log_message
+    assert '"POSITIONING_REQUIRED"' in log_message
+
+
+def test_observe_engineering_prompt_does_not_inject_recruiter_role_context(monkeypatch, caplog):
+    from hermes_cli import pipeline_observe
+
+    decision = RouterDecision(
+        pipeline_session_id="pipe-engineering-priority",
+        router_subagent_id="hermes_pipeline_router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.94,
+        reasoning_summary="engineering request",
+        requires_clarification=False,
+        fallback_safe=False,
+        policy_block_reason=None,
+        routing_failure_reason=None,
+        alternatives=(),
+    )
+
+    class _FakeRouter:
+        def route(self, user_message: str, *, pipeline_session_id: str, router_subagent_id: str = "hermes_pipeline_router"):
+            assert user_message == "Debug Hermes gateway for recruiter routing"
+            return decision
+
+    monkeypatch.setattr(pipeline_observe, "load_pipeline_specs", lambda **kwargs: object())
+    monkeypatch.setattr(pipeline_observe, "build_pipeline_router", lambda **kwargs: _FakeRouter())
+
+    with caplog.at_level(logging.INFO, logger="hermes_cli.pipeline_observe"):
+        result = pipeline_observe.observe_pipeline_router_decision(
+            config={"pipelines": {"router": {"mode": "observe"}}},
+            user_message="Debug Hermes gateway for recruiter routing",
+            session_id="sess-engineering-priority",
+            platform="telegram",
+            repo_root=Path(__file__).resolve().parents[2],
+        )
+
+    assert result == decision
+    log_message = next(record.message for record in caplog.records if "pipeline_router_observe_decision" in record.message)
+    assert '"selected_pipeline_id": "engineering_review_pipeline"' in log_message
+    assert '"status": "not_selected"' in log_message
+    assert '"role_context": null' in log_message
 
 
 def test_observe_failure_is_logged_and_swallowed(monkeypatch, caplog):
