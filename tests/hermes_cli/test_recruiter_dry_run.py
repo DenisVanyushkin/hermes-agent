@@ -14,6 +14,7 @@ from hermes_cli.recruiter_context import (
 from hermes_cli.recruiter_dry_run import (
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
+    run_recruiter_application_materials_flow_dry_run,
     run_recruiter_context_dry_run,
     run_recruiter_evaluation_flow_dry_run,
     run_recruiter_positioning_flow_dry_run,
@@ -317,6 +318,29 @@ def _ready_evaluation_packet(
     }
 
 
+def _ready_positioning_packet(
+    *,
+    status: str = "POSITIONING_READY",
+    next_step: str = "POSITIONING_READY_FOR_DOCUMENTS",
+) -> dict[str, object]:
+    return {
+        "schema_version": "recruiter_positioning_packet_v1",
+        "skill_id": "positioning-and-evidence",
+        "status": status,
+        "positioning_summary": "Lead with executive product leadership.",
+        "target_narrative": "Operator for scaling product organizations.",
+        "evidence": ["Scaled multi-team product orgs."],
+        "gaps": ["Exact industry adjacency not confirmed."],
+        "risks_and_mitigations": ["Do not overstate sector depth."],
+        "recommended_angle": "Scale-stage executive operator.",
+        "claims_to_use": ["Led product organizations."],
+        "claims_to_avoid": ["Direct ownership of unrelated sector."],
+        "missing_information": [],
+        "next_step": next_step,
+        "provenance": {},
+    }
+
+
 def test_positioning_flow_dry_run_blocks_provider_by_default() -> None:
     report = run_recruiter_positioning_flow_dry_run(
         evaluation_packet=_ready_evaluation_packet(),
@@ -413,3 +437,121 @@ def test_positioning_flow_dry_run_fails_closed_on_wrong_skill_id() -> None:
 
     assert report.status is RecruiterDryRunStatus.POSITIONING_OUTPUT_INVALID
     assert report.errors == ["positioning_output_skill_id_invalid"]
+
+
+class _ApplicationMaterialsExecutor:
+    provider_backed = False
+
+    def __init__(self, *, reviewer_verdict: str = "APPROVE", invalid_writer: bool = False) -> None:
+        self.calls: list[str] = []
+        self.reviewer_verdict = reviewer_verdict
+        self.invalid_writer = invalid_writer
+
+    def execute(self, *, skill_id, skill_input, expected_schema):
+        self.calls.append(skill_id)
+        if skill_id == "document-writer":
+            if self.invalid_writer:
+                return {"status": "DRAFT_READY"}
+            return {
+                "schema_version": "recruiter_document_packet_v1",
+                "document_type": skill_input["document_type"],
+                "audience": skill_input.get("audience"),
+                "purpose": skill_input.get("purpose"),
+                "source_positioning_packet_ref": skill_input["source_positioning_packet_ref"],
+                "draft": {
+                    "format": "text",
+                    "content": f"Draft for {skill_input['document_type']}.",
+                    "notes": ["Review before any outbound action."],
+                },
+                "review": {"status": "PENDING"},
+                "status": "DRAFT_READY",
+                "warnings": [],
+                "errors": [],
+                "provenance": {},
+            }
+        return {
+            "status": "SUCCESS",
+            "skill_id": "document-reviewer",
+            "verdict": self.reviewer_verdict,
+            "hallucination_risk": "low",
+            "unsupported_claims": [],
+            "genericness_assessment": "specific enough",
+            "tone_seniority_assessment": "appropriate",
+            "missing_source_references": [],
+            "required_changes": [] if self.reviewer_verdict == "APPROVE" else ["Tighten opening paragraph."],
+            "warnings": [],
+            "errors": [],
+            "provenance": {},
+        }
+
+
+def test_application_materials_flow_dry_run_blocks_provider_by_default() -> None:
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_PROVIDER_EXECUTION_BLOCKED
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.downstream_gates["document_generation"]["enabled"] is False
+    assert report.downstream_gates["gmail_draft"]["enabled"] is False
+    assert report.downstream_gates["linkedin_send"]["enabled"] is False
+
+
+def test_application_materials_flow_dry_run_requires_private_context_available() -> None:
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_NOT_INSPECTED",
+        allow_provider_execution=True,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_INPUT_BLOCKED
+    assert report.errors == ["private_context_not_ready_for_application_materials"]
+
+
+def test_application_materials_flow_dry_run_runs_writer_and_reviewer_when_ready() -> None:
+    executor = _ApplicationMaterialsExecutor()
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_READY
+    assert report.provider_called is True
+    assert report.executor_called is True
+    assert report.application_materials_result["schema_version"] == "recruiter_application_materials_packet_v1"
+    assert report.application_materials_result["materials"]["cover_letter_draft"]["content"] == "Draft for cover_letter."
+    assert report.application_materials_result["review"]["verdict"] == "APPROVE"
+    assert executor.calls == [
+        "document-writer",
+        "document-reviewer",
+        "document-writer",
+        "document-reviewer",
+        "document-writer",
+        "document-reviewer",
+    ]
+
+
+def test_application_materials_flow_dry_run_fails_closed_on_invalid_writer_output() -> None:
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: _ApplicationMaterialsExecutor(invalid_writer=True),
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_OUTPUT_INVALID
+
+
+def test_application_materials_flow_dry_run_blocks_when_reviewer_requests_changes() -> None:
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: _ApplicationMaterialsExecutor(reviewer_verdict="CHANGES_REQUESTED"),
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_REVIEW_BLOCKED

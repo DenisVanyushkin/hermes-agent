@@ -230,6 +230,23 @@ def test_parse_positioning_flow_and_evaluation_packet_json_option() -> None:
     assert args.evaluation_packet_json == "/tmp/evaluation-packet.json"
 
 
+def test_parse_application_materials_flow_and_positioning_packet_json_option() -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "application-materials",
+            "--positioning-packet-json",
+            "/tmp/positioning-packet.json",
+            "--json",
+        ]
+    )
+
+    assert args.flow == "application-materials"
+    assert args.positioning_packet_json == "/tmp/positioning-packet.json"
+
+
 def test_parse_allow_provider_execution_flag() -> None:
     args = _parse_direct(
         [
@@ -424,6 +441,89 @@ def test_evaluation_ready_report_exits_zero(monkeypatch: pytest.MonkeyPatch) -> 
         cmd_recruiter_context(args)
 
     assert exc.value.code == 0
+
+
+def test_application_materials_flow_cli_returns_controlled_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    packet_path = tmp_path / "positioning-packet.json"
+    packet_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "recruiter_positioning_packet_v1",
+                "skill_id": "positioning-and-evidence",
+                "status": "POSITIONING_READY",
+                "positioning_summary": "Lead with executive product leadership.",
+                "target_narrative": "Operator for scaling product organizations.",
+                "evidence": ["Scaled multi-team product orgs."],
+                "gaps": [],
+                "risks_and_mitigations": [],
+                "recommended_angle": "Scale-stage executive operator.",
+                "claims_to_use": ["Led product organizations."],
+                "claims_to_avoid": [],
+                "missing_information": [],
+                "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+                "provenance": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "hermes_cli.recruiter_dry_run_cli.run_recruiter_application_materials_flow_dry_run",
+        lambda **kwargs: RecruiterDryRunReport(
+            status=RecruiterDryRunStatus.APPLICATION_MATERIALS_READY,
+            context_status="READY",
+            input={"flow": "application-materials"},
+            readiness={"ready": True, "reason": "application_materials_ready"},
+            context_packet=None,
+            evaluation_flow=None,
+            evaluation_result=None,
+            positioning_result={"schema_version": "recruiter_positioning_packet_v1"},
+            application_materials_result={"schema_version": "recruiter_application_materials_packet_v1"},
+            missing_requirements=[],
+            warnings=[],
+            errors=[],
+            provenance={"writes_performed": False, "dry_run": True},
+            next_allowed_actions=["review_application_materials_packet_manually"],
+            provider_called=True,
+            provider_execution_enabled=True,
+            executor_called=True,
+            downstream_gates={
+                "outbound": {"enabled": False},
+                "db_write": {"enabled": False},
+                "crm_write": {"enabled": False},
+                "document_generation": {"enabled": False},
+                "gmail_draft": {"enabled": False},
+                "linkedin_send": {"enabled": False},
+                "controlled_document_dry_run": {"enabled": True},
+            },
+        ),
+    )
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "application-materials",
+            "--positioning-packet-json",
+            str(packet_path),
+            "--allow-provider-execution",
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.APPLICATION_MATERIALS_READY.value
+    assert payload["application_materials_result"]["schema_version"] == "recruiter_application_materials_packet_v1"
 
 
 def test_evaluation_flow_stdout_is_json_only(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
