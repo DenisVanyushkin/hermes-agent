@@ -6,16 +6,20 @@ import sys
 from pathlib import Path
 
 from .recruiter_dry_run import (
+    RecruiterDryRunReport,
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
+    _evaluation_downstream_gates,
     run_recruiter_context_dry_run,
     run_recruiter_evaluation_flow_dry_run,
+    run_recruiter_positioning_flow_dry_run,
 )
 
 
 _READY_STATUSES = {
     RecruiterDryRunStatus.READY_FOR_RECRUITER_SKILL_INPUT,
     RecruiterDryRunStatus.EVALUATION_READY,
+    RecruiterDryRunStatus.POSITIONING_READY,
 }
 
 
@@ -36,8 +40,9 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     dry_run.add_argument("--vacancy-id", type=int, default=None, help="Job-intel vacancy id")
     dry_run.add_argument("--vacancy-url", default=None, help="Job-intel vacancy URL")
     dry_run.add_argument("--opportunity-id", type=int, default=None, help="CRM opportunity id")
-    dry_run.add_argument("--flow", choices=["evaluate-vacancy"], default=None, help="Run a prompt-based recruiter flow dry-run")
+    dry_run.add_argument("--flow", choices=["evaluate-vacancy", "positioning-and-evidence"], default=None, help="Run a controlled recruiter flow dry-run")
     dry_run.add_argument("--prompt", default=None, help="Prompt text for prompt-driven recruiter flow dry-runs")
+    dry_run.add_argument("--evaluation-packet-json", default=None, help="Read only this evaluation packet JSON file for positioning-and-evidence dry-runs")
     dry_run.add_argument("--allow-provider-execution", action="store_true", help="Explicitly allow provider-backed evaluation for READY evaluate-vacancy dry-runs")
     dry_run.add_argument(
         "--private-context-status",
@@ -65,6 +70,26 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
         )
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if report.status in _READY_STATUSES else 1)
+    if getattr(args, "flow", None) == "positioning-and-evidence":
+        evaluation_packet_path = getattr(args, "evaluation_packet_json", None)
+        if not evaluation_packet_path:
+            report = _cli_error_report("evaluation_packet_json_required")
+        else:
+            try:
+                evaluation_packet = json.loads(Path(evaluation_packet_path).read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                report = _cli_error_report("evaluation_packet_json_missing")
+            except json.JSONDecodeError:
+                report = _cli_error_report("evaluation_packet_json_invalid")
+            else:
+                report = run_recruiter_positioning_flow_dry_run(
+                    evaluation_packet=evaluation_packet,
+                    repo_root=repo_root,
+                    private_context_status=getattr(args, "private_context_status", "PRIVATE_CONTEXT_NOT_INSPECTED"),
+                    allow_provider_execution=getattr(args, "allow_provider_execution", False),
+                )
+        sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
+        raise SystemExit(0 if report.status in _READY_STATUSES else 1)
 
     request = RecruiterDryRunRequest(
         vacancy_id=getattr(args, "vacancy_id", None),
@@ -84,3 +109,25 @@ def _optional_path(value: str | None) -> Path | None:
     if value is None:
         return None
     return Path(value)
+
+
+def _cli_error_report(error: str) -> RecruiterDryRunReport:
+    return RecruiterDryRunReport(
+        status=RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED,
+        context_status="POSITIONING_INPUT_REQUIRED",
+        input={},
+        readiness={"ready": False, "reason": error},
+        context_packet=None,
+        evaluation_flow=None,
+        evaluation_result=None,
+        positioning_result=None,
+        missing_requirements=[],
+        warnings=[],
+        errors=[error],
+        provenance={"writes_performed": False, "dry_run": True},
+        next_allowed_actions=[],
+        provider_called=False,
+        provider_execution_enabled=False,
+        executor_called=False,
+        downstream_gates=_evaluation_downstream_gates(),
+    )

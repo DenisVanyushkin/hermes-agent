@@ -12,12 +12,20 @@ from .recruiter_context import (
 )
 from .recruiter_evaluation_provider_executor import (
     REQUIRED_VACANCY_EVALUATION_PACKET_FIELDS,
+    VACANCY_EVALUATION_PACKET_SCHEMA_VERSION,
+    VACANCY_EVALUATION_SKILL_ID,
     vacancy_evaluation_expected_schema,
 )
 from .recruiter_evaluation_flow import (
     RecruiterEvaluationFlowRequest,
     RecruiterEvaluationFlowStatus,
     build_recruiter_evaluation_flow,
+)
+from .recruiter_positioning_provider_executor import (
+    POSITIONING_PACKET_SCHEMA_VERSION,
+    POSITIONING_SKILL_ID,
+    REQUIRED_POSITIONING_PACKET_FIELDS,
+    positioning_expected_schema,
 )
 from .recruiter_skill_inputs import build_recruiter_skill_input_packets
 
@@ -47,6 +55,10 @@ class RecruiterDryRunStatus(str, Enum):
     EVALUATION_READY = "EVALUATION_READY"
     EVALUATION_OUTPUT_INVALID = "EVALUATION_OUTPUT_INVALID"
     PROVIDER_EXECUTION_FAILED = "PROVIDER_EXECUTION_FAILED"
+    POSITIONING_INPUT_BLOCKED = "POSITIONING_INPUT_BLOCKED"
+    POSITIONING_READY = "POSITIONING_READY"
+    POSITIONING_OUTPUT_INVALID = "POSITIONING_OUTPUT_INVALID"
+    POSITIONING_PROVIDER_EXECUTION_FAILED = "POSITIONING_PROVIDER_EXECUTION_FAILED"
 
 
 @dataclass(slots=True)
@@ -83,6 +95,7 @@ class RecruiterDryRunReport:
     context_packet: dict[str, Any] | None
     evaluation_flow: dict[str, Any] | None = None
     evaluation_result: dict[str, Any] | None = None
+    positioning_result: dict[str, Any] | None = None
     missing_requirements: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -197,6 +210,7 @@ def run_recruiter_evaluation_flow_dry_run(
         context_packet=None,
         evaluation_flow=flow_report.to_dict(),
         evaluation_result=None,
+        positioning_result=None,
         missing_requirements=[] if ready else list(flow_report.required_inputs),
         warnings=list(flow_report.warnings),
         errors=[],
@@ -263,6 +277,91 @@ def run_recruiter_evaluation_flow_dry_run(
     return base_report
 
 
+def run_recruiter_positioning_flow_dry_run(
+    *,
+    evaluation_packet: dict[str, Any] | None,
+    repo_root: str | Path | None = None,
+    private_context_status: str = "PRIVATE_CONTEXT_NOT_INSPECTED",
+    allow_provider_execution: bool = False,
+    executor_factory: Callable[[], Any] | None = None,
+) -> RecruiterDryRunReport:
+    base_report = RecruiterDryRunReport(
+        status=RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED,
+        context_status="POSITIONING_INPUT_REQUIRED",
+        input={
+            "repo_root": str(repo_root) if repo_root is not None else None,
+            "private_context_status": private_context_status,
+            "allow_provider_execution": allow_provider_execution,
+        },
+        readiness={"ready": False, "reason": "positioning_input_not_ready"},
+        context_packet=None,
+        evaluation_flow=None,
+        evaluation_result=_sanitize_result(evaluation_packet or {}) if isinstance(evaluation_packet, dict) else None,
+        positioning_result=None,
+        missing_requirements=[],
+        warnings=[],
+        errors=[],
+        provenance={"writes_performed": False, "dry_run": True, "flow": "positioning-and-evidence"},
+        next_allowed_actions=[],
+        provider_called=False,
+        provider_execution_enabled=allow_provider_execution,
+        executor_called=False,
+        downstream_gates=_evaluation_downstream_gates(),
+    )
+    evaluation_error = _validate_positioning_input_gate(evaluation_packet, private_context_status)
+    if evaluation_error is not None:
+        base_report.errors = [evaluation_error]
+        base_report.readiness["reason"] = evaluation_error
+        return base_report
+
+    base_report.context_status = "READY"
+    base_report.readiness = {"ready": True, "reason": "positioning_input_ready"}
+    if not allow_provider_execution:
+        base_report.status = RecruiterDryRunStatus.PROVIDER_EXECUTION_BLOCKED
+        base_report.readiness["reason"] = "provider_execution_requires_explicit_opt_in"
+        base_report.next_allowed_actions = ["rerun_with_allow_provider_execution"]
+        return base_report
+
+    if executor_factory is None:
+        from .recruiter_positioning_provider_executor import build_recruiter_positioning_provider_executor
+
+        executor_factory = build_recruiter_positioning_provider_executor
+
+    try:
+        executor = executor_factory()
+        base_report.executor_called = True
+        base_report.provider_called = True
+        raw_result = executor.execute(
+            skill_input=_build_positioning_input(
+                evaluation_packet=dict(evaluation_packet or {}),
+                repo_root=repo_root,
+                private_context_status=private_context_status,
+            ),
+            expected_schema=positioning_expected_schema(),
+        )
+    except ValueError as exc:
+        base_report.status = RecruiterDryRunStatus.POSITIONING_OUTPUT_INVALID
+        base_report.errors = [str(exc)]
+        return base_report
+    except Exception:
+        base_report.status = RecruiterDryRunStatus.POSITIONING_PROVIDER_EXECUTION_FAILED
+        base_report.errors = ["positioning_provider_execution_failed"]
+        return base_report
+
+    output_error = _validate_positioning_output(raw_result)
+    if output_error is not None:
+        base_report.status = RecruiterDryRunStatus.POSITIONING_OUTPUT_INVALID
+        base_report.positioning_result = _sanitize_result(raw_result)
+        base_report.errors = [output_error]
+        return base_report
+
+    base_report.status = RecruiterDryRunStatus.POSITIONING_READY
+    base_report.positioning_result = _sanitize_result(raw_result)
+    base_report.readiness = {"ready": True, "reason": "provider_positioning_completed"}
+    base_report.next_allowed_actions = ["review_positioning_packet_manually"]
+    return base_report
+
+
 def _build_prompt_evaluation_input(*, prompt: str, repo_root: str | Path | None) -> dict[str, Any]:
     synthetic_context = {
         "status": RecruiterContextStatus.READY.value,
@@ -295,10 +394,64 @@ def _build_prompt_evaluation_input(*, prompt: str, repo_root: str | Path | None)
     return vacancy_input
 
 
+def _build_positioning_input(
+    *,
+    evaluation_packet: dict[str, Any],
+    repo_root: str | Path | None,
+    private_context_status: str,
+) -> dict[str, Any]:
+    return {
+        "skill_id": POSITIONING_SKILL_ID,
+        "evaluation_packet": evaluation_packet,
+        "private_context_status": private_context_status,
+        "repo_root": str(repo_root) if repo_root is not None else None,
+        "boundaries": {
+            "no_outbound": True,
+            "no_db_write": True,
+            "no_crm_write": True,
+            "no_document_generation": True,
+            "no_private_file_content_read": True,
+        },
+    }
+
+
 def _sanitize_result(raw_result: dict[str, Any]) -> dict[str, Any]:
     payload = dict(raw_result)
     payload["provenance"] = dict(payload.get("provenance") or {})
     return payload
+
+
+def _validate_positioning_input_gate(
+    evaluation_packet: dict[str, Any] | None,
+    private_context_status: str,
+) -> str | None:
+    if not isinstance(evaluation_packet, dict):
+        return "evaluation_packet_missing"
+    missing_fields = [field for field in REQUIRED_VACANCY_EVALUATION_PACKET_FIELDS if field not in evaluation_packet]
+    if missing_fields:
+        return f"missing_required_evaluation_output_fields:{','.join(missing_fields)}"
+    if evaluation_packet.get("schema_version") != VACANCY_EVALUATION_PACKET_SCHEMA_VERSION:
+        return "evaluation_packet_schema_version_invalid"
+    if evaluation_packet.get("skill_id") != VACANCY_EVALUATION_SKILL_ID:
+        return "evaluation_packet_skill_id_invalid"
+    if private_context_status != "PRIVATE_CONTEXT_AVAILABLE":
+        return "private_context_not_ready_for_positioning"
+    if evaluation_packet.get("recommendation") == "DO_NOT_APPLY" or evaluation_packet.get("next_step") == "DO_NOT_APPLY":
+        return "evaluation_recommendation_blocks_positioning"
+    if evaluation_packet.get("recommendation") == "NEED_MORE_INFO" or evaluation_packet.get("status") == "INSUFFICIENT_INPUT":
+        return "evaluation_requires_more_information"
+    return None
+
+
+def _validate_positioning_output(raw_result: dict[str, Any]) -> str | None:
+    missing_fields = [field for field in REQUIRED_POSITIONING_PACKET_FIELDS if field not in raw_result]
+    if missing_fields:
+        return f"missing_required_positioning_output_fields:{','.join(missing_fields)}"
+    if raw_result.get("schema_version") != POSITIONING_PACKET_SCHEMA_VERSION:
+        return "positioning_output_schema_version_invalid"
+    if raw_result.get("skill_id") != POSITIONING_SKILL_ID:
+        return "positioning_output_skill_id_invalid"
+    return None
 
 
 def _evaluation_downstream_gates() -> dict[str, Any]:
