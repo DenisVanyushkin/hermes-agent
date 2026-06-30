@@ -16,6 +16,7 @@ APPLICATION_MATERIALS_DOCUMENT_TYPES = {
     "cover_letter_draft": "cover_letter",
     "recruiter_message_draft": "recruiter_message",
 }
+APPLICATION_MATERIAL_TARGETS = tuple(APPLICATION_MATERIALS_DOCUMENT_TYPES)
 
 
 class RecruiterApplicationMaterialsStatus(str, Enum):
@@ -64,6 +65,7 @@ def run_recruiter_application_materials_flow(
     *,
     positioning_packet: dict[str, Any],
     allow_document_execution: bool = False,
+    document_target: str | None = None,
     executor: RecruiterApplicationMaterialsExecutor | None = None,
 ) -> RecruiterApplicationMaterialsReport:
     if not allow_document_execution:
@@ -94,7 +96,9 @@ def run_recruiter_application_materials_flow(
     reviewer_called = False
     provider_called = False
 
-    for output_key, document_type in APPLICATION_MATERIALS_DOCUMENT_TYPES.items():
+    target_keys = (document_target,) if document_target is not None else APPLICATION_MATERIAL_TARGETS
+    for output_key in target_keys:
+        document_type = APPLICATION_MATERIALS_DOCUMENT_TYPES[output_key]
         report = run_recruiter_document_execution(
             execution_report,
             document_type=document_type,
