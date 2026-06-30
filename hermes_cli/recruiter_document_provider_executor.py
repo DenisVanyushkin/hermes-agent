@@ -70,13 +70,14 @@ def _build_prompt(*, skill_id: str, skill_input: dict[str, Any], expected_schema
             "no job-intel DB writes.\n"
             "Writer output contract:\n"
             "- status must be exactly DRAFT_READY\n"
+            "- output.document_type must exactly equal requested_document_type from skill input\n"
             "- do not use draft_only as status\n"
             "- draft must be an object, not a string\n"
             "- draft.format must be text\n"
             "- draft.content must contain the generated draft text\n"
             "- draft.notes must be a list; use [] when there are no notes\n"
             "Required minimal shape example:\n"
-            '{"status": "DRAFT_READY", "draft": {"format": "text", "content": "<draft text>", "notes": []}}\n'
+            '{"schema_version": "recruiter_document_packet_v1", "document_type": "<requested_document_type>", "status": "DRAFT_READY", "draft": {"format": "text", "content": "<draft text>", "notes": []}}\n'
             f"Expected schema marker: {_schema_name(skill_id)}.\n"
             f"Skill input JSON:\n{json.dumps(skill_input, ensure_ascii=True, sort_keys=True)}\n"
             f"Expected schema JSON:\n{json.dumps(expected_schema or {}, ensure_ascii=True, sort_keys=True)}"
@@ -129,7 +130,12 @@ def _response_schema(name: str, schema: dict[str, Any] | None) -> dict[str, Any]
             "type": "object",
             "properties": {
                 "schema_version": {"type": "string", "enum": [str(schema.get("schema_version") or "recruiter_document_packet_v1")]},
-                "document_type": {"type": "string"},
+                "document_type": {
+                    "type": "string",
+                    "enum": list(schema.get("document_type") or []),
+                }
+                if schema.get("document_type")
+                else {"type": "string"},
                 "audience": {"type": ["string", "null"]},
                 "purpose": {"type": ["string", "null"]},
                 "source_positioning_packet_id": {"type": ["string", "null"]},
