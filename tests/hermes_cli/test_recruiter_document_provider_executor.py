@@ -110,6 +110,7 @@ def test_writer_prompt_requires_exact_draft_ready_schema() -> None:
 
     prompt = client.calls[0]["messages"][0]["content"]
     assert "status must be exactly DRAFT_READY" in prompt
+    assert "output.document_type must exactly equal requested_document_type" in prompt
     assert "do not use draft_only as status" in prompt
     assert '"format": "text"' in prompt
     assert '"content": "<draft text>"' in prompt
@@ -192,12 +193,13 @@ def test_invalid_json_output_raises_controlled_error() -> None:
 def test_json_response_format_uses_writer_schema_shape() -> None:
     payload = _json_response_format(
         "recruiter_document_packet_v1",
-        {"schema_version": "recruiter_document_packet_v1", "draft": "required"},
+        {"schema_version": "recruiter_document_packet_v1", "document_type": ["cover_letter"], "draft": "required"},
     )
     assert payload["response_format"]["type"] == "json_schema"
     assert payload["response_format"]["json_schema"]["name"] == "recruiter_document_packet_v1"
     schema = payload["response_format"]["json_schema"]["schema"]
     assert schema["type"] == "object"
+    assert schema["properties"]["document_type"]["enum"] == ["cover_letter"]
     assert schema["properties"]["status"]["enum"] == ["DRAFT_READY"]
     assert schema["properties"]["draft"]["type"] == "object"
     assert schema["properties"]["draft"]["properties"]["format"]["enum"] == ["text"]

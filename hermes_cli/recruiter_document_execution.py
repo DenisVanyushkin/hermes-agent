@@ -16,15 +16,18 @@ DOCUMENT_WRITER_SKILL_ID = "document-writer"
 DOCUMENT_REVIEWER_SKILL_ID = "document-reviewer"
 DOCUMENT_PACKET_SCHEMA_VERSION = "recruiter_document_packet_v1"
 DOCUMENT_REVIEWER_VERDICTS = {"APPROVE", "CHANGES_REQUESTED", "BLOCKED"}
-DOCUMENT_WRITER_EXPECTED_SCHEMA = {
-    "schema_version": DOCUMENT_PACKET_SCHEMA_VERSION,
-    "status": ["DRAFT_READY"],
-    "draft": {
-        "format": ["text"],
-        "content": "required",
-        "notes": "required_list",
-    },
-}
+def _document_writer_expected_schema(requested_document_type: str) -> dict[str, Any]:
+    return {
+        "schema_version": DOCUMENT_PACKET_SCHEMA_VERSION,
+        "document_type": [requested_document_type],
+        "status": ["DRAFT_READY"],
+        "draft": {
+            "format": ["text"],
+            "content": "required",
+            "notes": "required_list",
+        },
+    }
+
 FORBIDDEN_ACTIONS = [
     "call_provider_model",
     "send_outbound_message",
@@ -137,11 +140,12 @@ def run_recruiter_document_execution(
 
     provider_called = bool(getattr(executor, "provider_backed", False))
     writer_input = dict(input_packet.document_writer_input or {})
+    requested_document_type = str(writer_input.get("requested_document_type") or document_type)
     try:
         writer_result = executor.execute(
             skill_id=DOCUMENT_WRITER_SKILL_ID,
             skill_input=writer_input,
-            expected_schema=DOCUMENT_WRITER_EXPECTED_SCHEMA,
+            expected_schema=_document_writer_expected_schema(requested_document_type),
         )
     except Exception as exc:
         return RecruiterDocumentExecutionReport(
@@ -160,7 +164,7 @@ def run_recruiter_document_execution(
             errors=_dedupe([*input_packet.errors, f"document_writer_execution_failed:{type(exc).__name__}"]),
             provenance={**base_provenance, "provider_called": provider_called},
         )
-    writer_errors = _validate_writer_result(writer_result, document_type=document_type)
+    writer_errors = _validate_writer_result(writer_result, requested_document_type=requested_document_type)
     writer_warnings = _dedupe([*input_packet.warnings, *_string_list(writer_result.get("warnings"))])
     writer_provenance = {
         **base_provenance,
@@ -285,11 +289,11 @@ def run_recruiter_document_execution(
     )
 
 
-def _validate_writer_result(payload: dict[str, Any], *, document_type: str) -> list[str]:
+def _validate_writer_result(payload: dict[str, Any], *, requested_document_type: str) -> list[str]:
     errors: list[str] = []
     if payload.get("schema_version") != DOCUMENT_PACKET_SCHEMA_VERSION:
         errors.append("writer_schema_version_invalid")
-    if payload.get("document_type") != document_type:
+    if payload.get("document_type") != requested_document_type:
         errors.append("writer_document_type_mismatch")
     if str(payload.get("status") or "") not in {"READY", "DRAFT_READY", "SUCCESS"}:
         errors.append("writer_status_not_ready")
