@@ -96,7 +96,6 @@ def test_ready_happy_path_builds_json_serializable_writer_input() -> None:
     assert packet.document_writer_input is not None
     assert packet.document_writer_input["status"] == "READY"
     assert packet.document_writer_input["skill_id"] == "document-writer"
-    assert packet.document_writer_input["requested_document_type"] == "cover_letter"
     assert packet.document_writer_input["document_type"] == "cover_letter"
     assert packet.document_writer_input["audience"] == "HR recruiter"
     assert packet.document_writer_input["purpose"] == "First-pass tailored draft"
@@ -234,7 +233,10 @@ def test_cover_letter_constraints_require_submission_ready_grounded_letter() -> 
         document_type="cover_letter",
     )
 
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
     constraints = packet.document_writer_input["document_constraints"]
+    assert writer_input["requested_document_type"] == "cover_letter"
     assert constraints["document_type"] == "cover_letter"
     assert constraints["genre"] == "submission_ready_cover_letter"
     assert "a submission-ready letter structure" in constraints["must_include"]
@@ -247,7 +249,6 @@ def test_cover_letter_constraints_require_submission_ready_grounded_letter() -> 
     assert "Hermes" in constraints["must_avoid"]
     assert "Use only facts supported by the provided evidence." in constraints["grounding_rules"]
     assert "Do not invent employers, dates, metrics, team sizes, revenue numbers, product names, or outcomes." in constraints["grounding_rules"]
-    assert packet.document_writer_input["requested_document_type"] == constraints["document_type"]
 
 
 def test_recruiter_message_constraints_require_short_non_meta_message() -> None:
@@ -256,15 +257,57 @@ def test_recruiter_message_constraints_require_short_non_meta_message() -> None:
         document_type="recruiter_message",
     )
 
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
     constraints = packet.document_writer_input["document_constraints"]
+    assert writer_input["requested_document_type"] == "recruiter_message"
     assert constraints["document_type"] == "recruiter_message"
     assert constraints["genre"] == "concise_recruiter_message"
     assert "a concise recruiter-facing outreach or application message" in constraints["must_include"]
+    assert "2-4 short sentences maximum" in constraints["must_include"]
+    assert "one role-interest sentence" in constraints["must_include"]
+    assert "one evidence-backed fit sentence" in constraints["must_include"]
+    assert "optional soft call-to-action" in constraints["must_include"]
     assert "synthetic packet" in constraints["must_avoid"]
     assert "evidence packet" in constraints["must_avoid"]
     assert "reviewer" in constraints["must_avoid"]
     assert "Hermes" in constraints["must_avoid"]
-    assert "Keep the message short, concrete, and human." in constraints["grounding_rules"]
+    assert "product executive" in constraints["must_avoid"]
+    assert "payments leader" in constraints["must_avoid"]
+    assert "commercially sensitive environments" in constraints["must_avoid"]
+    assert "strategic bets" in constraints["must_avoid"]
+    assert "monetization launches" in constraints["must_avoid"]
+    assert "cross-functional launches" in constraints["must_avoid"]
+    assert "unsupported employer names" in constraints["must_avoid"]
+    assert "Use only 1-2 of the strongest supported claims from the provided evidence." in constraints["grounding_rules"]
+    assert "Keep the message to 2-4 short sentences with no cover-letter structure." in constraints["grounding_rules"]
+    assert "If a claim is only adjacent rather than exact, soften it with phrases like relevant adjacent experience, could be relevant, experience that may map well to, or background across." in constraints["grounding_rules"]
+    assert "Do not use broad executive-branding language or unsupported title/seniority claims." in constraints["grounding_rules"]
+    assert "Do not invent payments leadership, strategic bets, monetization launches, cross-functional launches, executive-level ownership, team size, metrics, revenue, product scale, employer names, dates, or outcomes." in constraints["grounding_rules"]
+    assert "Keep the message short, concrete, human, and naturally conservative." in constraints["grounding_rules"]
+    assert "is 2-4 short sentences, recruiter-facing, and concrete" in constraints["review_success_criteria"]
+    assert "uses only 1-2 supported claims without stacking unsupported claims" in constraints["review_success_criteria"]
+    assert "softens adjacent experience rather than overstating it" in constraints["review_success_criteria"]
+
+
+def test_recruiter_message_writer_input_preserves_tight_constraints() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(),
+        document_type="recruiter_message",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    constraints = writer_input["document_constraints"]
+    assert writer_input["requested_document_type"] == "recruiter_message"
+    assert writer_input["document_type"] == "recruiter_message"
+    assert constraints["document_type"] == "recruiter_message"
+    assert constraints["target_audience"] == "Recruiter"
+    assert constraints["tone"] == "short, concrete, human, and professional"
+    assert "no generic \"I am uniquely positioned\" style" in constraints["must_avoid"]
+    assert "no broad executive branding paragraph" in constraints["must_avoid"]
+    assert "\u201c" not in "".join(constraints["must_avoid"])
+    assert "\u201d" not in "".join(constraints["must_avoid"])
 
 
 def test_cv_tailoring_notes_constraints_preserve_analytical_language() -> None:
