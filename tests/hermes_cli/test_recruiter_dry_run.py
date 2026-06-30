@@ -16,6 +16,7 @@ from hermes_cli.recruiter_dry_run import (
     RecruiterDryRunStatus,
     run_recruiter_context_dry_run,
     run_recruiter_evaluation_flow_dry_run,
+    run_recruiter_positioning_flow_dry_run,
 )
 
 
@@ -293,3 +294,122 @@ def test_evaluation_flow_dry_run_sanitizes_provider_exception() -> None:
 
     assert report.status is RecruiterDryRunStatus.PROVIDER_EXECUTION_FAILED
     assert report.errors == ["provider_execution_failed"]
+
+
+def _ready_evaluation_packet(
+    *,
+    status: str = "EVALUATION_READY",
+    recommendation: str = "APPLY",
+    next_step: str = "PROCEED_TO_POSITIONING",
+) -> dict[str, object]:
+    return {
+        "schema_version": "recruiter_vacancy_evaluation_packet_v1",
+        "skill_id": "vacancy-evaluation",
+        "status": status,
+        "recommendation": recommendation,
+        "fit_assessment": "Strong fit.",
+        "strengths": ["Executive product leadership match."],
+        "risks": ["Team size not confirmed."],
+        "evidence": ["Prompt contained a vacancy URL."],
+        "missing_information": [],
+        "next_step": next_step,
+        "provenance": {},
+    }
+
+
+def test_positioning_flow_dry_run_blocks_provider_by_default() -> None:
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    assert report.status is RecruiterDryRunStatus.PROVIDER_EXECUTION_BLOCKED
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.readiness["reason"] == "provider_execution_requires_explicit_opt_in"
+
+
+def test_positioning_flow_dry_run_blocks_need_more_info_by_default() -> None:
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(
+            status="INSUFFICIENT_INPUT",
+            recommendation="NEED_MORE_INFO",
+            next_step="NEED_MORE_INFO",
+        ),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.errors == ["evaluation_requires_more_information"]
+
+
+def test_positioning_flow_dry_run_allows_provider_only_when_all_gates_are_ready() -> None:
+    class _FakeExecutor:
+        def execute(self, *, skill_input, expected_schema):
+            assert skill_input["skill_id"] == "positioning-and-evidence"
+            assert skill_input["evaluation_packet"]["schema_version"] == "recruiter_vacancy_evaluation_packet_v1"
+            assert expected_schema["schema_version"] == "recruiter_positioning_packet_v1"
+            return {
+                "schema_version": "recruiter_positioning_packet_v1",
+                "skill_id": "positioning-and-evidence",
+                "status": "POSITIONING_READY",
+                "positioning_summary": "Lead with executive B2B product leadership.",
+                "target_narrative": "Operator-executive for complex platform businesses.",
+                "evidence": ["Scaled product organizations.", "Worked in B2B SaaS."],
+                "gaps": ["Exact fintech depth not confirmed."],
+                "risks_and_mitigations": ["Avoid overstating regulated-market depth."],
+                "recommended_angle": "Scale-stage product operator.",
+                "claims_to_use": ["Built product orgs.", "Led platform strategy."],
+                "claims_to_avoid": ["Direct fintech turnaround ownership."],
+                "missing_information": [],
+                "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+                "provenance": {},
+            }
+
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: _FakeExecutor(),
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_READY
+    assert report.provider_called is True
+    assert report.executor_called is True
+    assert report.positioning_result["schema_version"] == "recruiter_positioning_packet_v1"
+    assert report.positioning_result["skill_id"] == "positioning-and-evidence"
+    assert report.downstream_gates["document_generation"]["enabled"] is False
+
+
+def test_positioning_flow_dry_run_fails_closed_on_wrong_skill_id() -> None:
+    class _WrongSkillExecutor:
+        def execute(self, *, skill_input, expected_schema):
+            return {
+                "schema_version": "recruiter_positioning_packet_v1",
+                "skill_id": "document-writer",
+                "status": "POSITIONING_READY",
+                "positioning_summary": "Wrong skill.",
+                "target_narrative": "Wrong skill.",
+                "evidence": [],
+                "gaps": [],
+                "risks_and_mitigations": [],
+                "recommended_angle": "Wrong skill.",
+                "claims_to_use": [],
+                "claims_to_avoid": [],
+                "missing_information": [],
+                "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+                "provenance": {},
+            }
+
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: _WrongSkillExecutor(),
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_OUTPUT_INVALID
+    assert report.errors == ["positioning_output_skill_id_invalid"]
