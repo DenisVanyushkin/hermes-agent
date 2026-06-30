@@ -48,6 +48,102 @@ _FORBIDDEN_ACTIONS = [
     "mutate_live_config",
     "restart_gateway",
 ]
+_DOCUMENT_TYPE_CONSTRAINTS = {
+    "cover_letter": {
+        "target_audience": "Hiring manager",
+        "genre": "submission_ready_cover_letter",
+        "tone": "professional, confident, concrete, and naturally evidence-grounded",
+        "must_include": [
+            "a submission-ready letter structure",
+            "role-relevant supported achievements from the provided evidence",
+            "natural language that connects evidence to likely role needs without overclaiming",
+        ],
+        "must_avoid": [
+            "synthetic packet",
+            "evidence packet",
+            "source-backed claims",
+            "conditional claims",
+            "reviewer",
+            "Hermes",
+            "disclaimer paragraph",
+            "unsupported employers",
+            "unsupported dates",
+            "unsupported metrics",
+            "unsupported team sizes",
+            "unsupported revenue numbers",
+            "unsupported product names",
+            "unsupported outcomes",
+        ],
+        "grounding_rules": [
+            "Use only facts supported by the provided evidence.",
+            "If a claim is not directly supported, omit it or phrase it as adjacent or transferable experience without unsupported specifics.",
+            "Do not invent employers, dates, metrics, team sizes, revenue numbers, product names, or outcomes.",
+            "Ground each paragraph in either role needs or provided evidence.",
+            "Do not mention internal artifacts, internal review, or evidence disclaimer language.",
+        ],
+        "review_success_criteria": [
+            "reads like a submission-ready cover letter rather than internal analysis",
+            "stays concrete without unsupported specifics",
+            "contains no internal or meta evidence language",
+        ],
+    },
+    "recruiter_message": {
+        "target_audience": "Recruiter",
+        "genre": "concise_recruiter_message",
+        "tone": "short, concrete, human, and professional",
+        "must_include": [
+            "a concise recruiter-facing outreach or application message",
+            "supported claims relevant to the role",
+        ],
+        "must_avoid": [
+            "synthetic packet",
+            "evidence packet",
+            "source-backed claims",
+            "conditional claims",
+            "reviewer",
+            "Hermes",
+            "unsupported metrics",
+            "unsupported team sizes",
+            "unsupported dates",
+            "unsupported employer names",
+        ],
+        "grounding_rules": [
+            "Use only supported claims from the provided evidence.",
+            "Avoid unsupported specifics and internal evidence disclaimers.",
+            "Keep the message short, concrete, and human.",
+        ],
+        "review_success_criteria": [
+            "is short and recruiter-facing",
+            "contains no internal or meta evidence language",
+            "avoids unsupported specifics",
+        ],
+    },
+    "cv_tailoring_notes": {
+        "target_audience": "Recruiter",
+        "genre": "analytical_cv_tailoring_notes",
+        "tone": "analytical, explicit, and evidence-aware",
+        "must_include": [
+            "supported claims to use",
+            "unsupported claims to avoid",
+            "gaps or missing information warnings when relevant",
+            "evidence-aware CV tailoring guidance",
+        ],
+        "must_avoid": [
+            "invented facts",
+            "outbound or submission language that implies the draft was sent",
+        ],
+        "grounding_rules": [
+            "It may explicitly list supported claims, unsupported claims to avoid, gaps, and evidence notes.",
+            "Separate use claims from avoid claims when practical.",
+            "Keep analytical language explicit rather than polishing it into a submission-ready letter.",
+        ],
+        "review_success_criteria": [
+            "clearly distinguishes use versus avoid claims",
+            "preserves analytical evidence and gap language",
+            "does not invent unsupported specifics",
+        ],
+    },
+}
 
 
 class RecruiterDocumentInputStatus(str, Enum):
@@ -187,6 +283,7 @@ def build_recruiter_document_writer_input_packet(
                 "review",
                 "status",
             ],
+            "document_constraints": _document_constraints(document_type, audience),
             "boundaries": {
                 "no_invented_facts": True,
                 "use_only_positioning_evidence": True,
@@ -255,6 +352,25 @@ def _report_dict(value: dict[str, Any] | RecruiterSkillExecutionReport) -> dict[
 
 def _dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _document_constraints(document_type: str, audience: str | None) -> dict[str, Any]:
+    constraints = dict(_DOCUMENT_TYPE_CONSTRAINTS.get(document_type) or {})
+    if not constraints:
+        return {
+            "document_type": document_type,
+            "target_audience": audience,
+        }
+    return {
+        "document_type": document_type,
+        "target_audience": audience or constraints.get("target_audience"),
+        "genre": constraints["genre"],
+        "tone": constraints["tone"],
+        "must_include": list(constraints["must_include"]),
+        "must_avoid": list(constraints["must_avoid"]),
+        "grounding_rules": list(constraints["grounding_rules"]),
+        "review_success_criteria": list(constraints["review_success_criteria"]),
+    }
 
 
 def _string_list(value: Any) -> list[str]:

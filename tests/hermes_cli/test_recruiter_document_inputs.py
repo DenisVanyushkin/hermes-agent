@@ -99,6 +99,7 @@ def test_ready_happy_path_builds_json_serializable_writer_input() -> None:
     assert packet.document_writer_input["document_type"] == "cover_letter"
     assert packet.document_writer_input["audience"] == "HR recruiter"
     assert packet.document_writer_input["purpose"] == "First-pass tailored draft"
+    assert packet.document_writer_input["document_constraints"]["genre"] == "submission_ready_cover_letter"
     assert "draft" not in packet.document_writer_input
     assert "generate_final_draft" in packet.forbidden_actions
     assert "execute_document_writer" in packet.forbidden_actions
@@ -224,6 +225,59 @@ def test_missing_audience_and_purpose_warn_but_do_not_block() -> None:
     assert packet.status is RecruiterDocumentInputStatus.READY
     assert "audience_missing" in packet.warnings
     assert "purpose_missing" in packet.warnings
+
+
+def test_cover_letter_constraints_require_submission_ready_grounded_letter() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(),
+        document_type="cover_letter",
+    )
+
+    constraints = packet.document_writer_input["document_constraints"]
+    assert constraints["document_type"] == "cover_letter"
+    assert constraints["genre"] == "submission_ready_cover_letter"
+    assert "a submission-ready letter structure" in constraints["must_include"]
+    assert "disclaimer paragraph" in constraints["must_avoid"]
+    assert "synthetic packet" in constraints["must_avoid"]
+    assert "evidence packet" in constraints["must_avoid"]
+    assert "source-backed claims" in constraints["must_avoid"]
+    assert "conditional claims" in constraints["must_avoid"]
+    assert "reviewer" in constraints["must_avoid"]
+    assert "Hermes" in constraints["must_avoid"]
+    assert "Use only facts supported by the provided evidence." in constraints["grounding_rules"]
+    assert "Do not invent employers, dates, metrics, team sizes, revenue numbers, product names, or outcomes." in constraints["grounding_rules"]
+
+
+def test_recruiter_message_constraints_require_short_non_meta_message() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(),
+        document_type="recruiter_message",
+    )
+
+    constraints = packet.document_writer_input["document_constraints"]
+    assert constraints["document_type"] == "recruiter_message"
+    assert constraints["genre"] == "concise_recruiter_message"
+    assert "a concise recruiter-facing outreach or application message" in constraints["must_include"]
+    assert "synthetic packet" in constraints["must_avoid"]
+    assert "evidence packet" in constraints["must_avoid"]
+    assert "reviewer" in constraints["must_avoid"]
+    assert "Hermes" in constraints["must_avoid"]
+    assert "Keep the message short, concrete, and human." in constraints["grounding_rules"]
+
+
+def test_cv_tailoring_notes_constraints_preserve_analytical_language() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(),
+        document_type="cv_tailoring_notes",
+    )
+
+    constraints = packet.document_writer_input["document_constraints"]
+    assert constraints["document_type"] == "cv_tailoring_notes"
+    assert constraints["genre"] == "analytical_cv_tailoring_notes"
+    assert "supported claims to use" in constraints["must_include"]
+    assert "unsupported claims to avoid" in constraints["must_include"]
+    assert "It may explicitly list supported claims, unsupported claims to avoid, gaps, and evidence notes." in constraints["grounding_rules"]
+    assert "Separate use claims from avoid claims when practical." in constraints["grounding_rules"]
 
 
 def test_boundary_imports_are_safe() -> None:
