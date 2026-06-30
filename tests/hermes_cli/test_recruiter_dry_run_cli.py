@@ -14,6 +14,15 @@ from hermes_cli.recruiter_dry_run_cli import cmd_recruiter_context, register_rec
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _assert_full_downstream_gates(payload: dict[str, object]) -> None:
+    assert payload["downstream_gates"] == {
+        "outbound": {"enabled": False},
+        "db_write": {"enabled": False},
+        "crm_write": {"enabled": False},
+        "document_generation": {"enabled": False},
+    }
+
+
 def _make_report(status: RecruiterDryRunStatus = RecruiterDryRunStatus.READY_FOR_RECRUITER_SKILL_INPUT) -> RecruiterDryRunReport:
     return RecruiterDryRunReport(
         status=status,
@@ -202,6 +211,23 @@ def test_parse_evaluation_flow_option() -> None:
 
     assert args.flow == "evaluate-vacancy"
     assert args.prompt == "Посмотри вакансию https://example.com/jobs/123"
+
+
+def test_parse_positioning_flow_and_evaluation_packet_json_option() -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "positioning-and-evidence",
+            "--evaluation-packet-json",
+            "/tmp/evaluation-packet.json",
+            "--json",
+        ]
+    )
+
+    assert args.flow == "positioning-and-evidence"
+    assert args.evaluation_packet_json == "/tmp/evaluation-packet.json"
 
 
 def test_parse_allow_provider_execution_flag() -> None:
@@ -442,3 +468,121 @@ def test_evaluation_flow_stdout_is_json_only(monkeypatch: pytest.MonkeyPatch, ca
     assert stdout.endswith("\n")
     payload = json.loads(stdout)
     assert payload["status"] == RecruiterDryRunStatus.EVALUATION_FLOW_BLOCKED.value
+
+
+def test_positioning_flow_cli_reads_only_the_provided_packet_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    packet_path = tmp_path / "evaluation-packet.json"
+    packet_path.write_text(json.dumps({"schema_version": "recruiter_vacancy_evaluation_packet_v1"}), encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _fake_run(*, evaluation_packet, repo_root, private_context_status, allow_provider_execution):
+        captured["evaluation_packet"] = evaluation_packet
+        captured["repo_root"] = repo_root
+        captured["private_context_status"] = private_context_status
+        captured["allow_provider_execution"] = allow_provider_execution
+        return RecruiterDryRunReport(
+            status=RecruiterDryRunStatus.PROVIDER_EXECUTION_BLOCKED,
+            context_status="READY",
+            input={"flow": "positioning-and-evidence"},
+            readiness={"ready": True, "reason": "provider_execution_requires_explicit_opt_in"},
+            context_packet=None,
+            evaluation_flow=None,
+            evaluation_result=None,
+            positioning_result=None,
+            missing_requirements=[],
+            warnings=[],
+            errors=[],
+            provenance={"writes_performed": False, "dry_run": True},
+            next_allowed_actions=["rerun_with_allow_provider_execution"],
+            provider_called=False,
+            provider_execution_enabled=False,
+            executor_called=False,
+            downstream_gates={
+                "outbound": {"enabled": False},
+                "db_write": {"enabled": False},
+                "crm_write": {"enabled": False},
+                "document_generation": {"enabled": False},
+            },
+        )
+
+    monkeypatch.setattr("hermes_cli.recruiter_dry_run_cli.run_recruiter_positioning_flow_dry_run", _fake_run)
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "positioning-and-evidence",
+            "--evaluation-packet-json",
+            str(packet_path),
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.PROVIDER_EXECUTION_BLOCKED.value
+    assert captured["evaluation_packet"] == {"schema_version": "recruiter_vacancy_evaluation_packet_v1"}
+    assert captured["private_context_status"] == "PRIVATE_CONTEXT_AVAILABLE"
+    _assert_full_downstream_gates(payload)
+
+
+def test_positioning_flow_cli_rejects_invalid_json_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    packet_path = tmp_path / "evaluation-packet.json"
+    packet_path.write_text("{not-json}", encoding="utf-8")
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "positioning-and-evidence",
+            "--evaluation-packet-json",
+            str(packet_path),
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED.value
+    assert payload["errors"] == ["evaluation_packet_json_invalid"]
+    _assert_full_downstream_gates(payload)
+
+
+def test_positioning_flow_cli_rejects_missing_json_file_with_full_gates(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "positioning-and-evidence",
+            "--evaluation-packet-json",
+            "/tmp/does-not-exist-evaluation-packet.json",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED.value
+    assert payload["errors"] == ["evaluation_packet_json_missing"]
+    _assert_full_downstream_gates(payload)
