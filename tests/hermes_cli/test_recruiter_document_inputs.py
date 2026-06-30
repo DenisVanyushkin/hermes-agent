@@ -96,6 +96,7 @@ def test_ready_happy_path_builds_json_serializable_writer_input() -> None:
     assert packet.document_writer_input is not None
     assert packet.document_writer_input["status"] == "READY"
     assert packet.document_writer_input["skill_id"] == "document-writer"
+    assert packet.document_writer_input["requested_document_type"] == "cover_letter"
     assert packet.document_writer_input["document_type"] == "cover_letter"
     assert packet.document_writer_input["audience"] == "HR recruiter"
     assert packet.document_writer_input["purpose"] == "First-pass tailored draft"
@@ -246,6 +247,7 @@ def test_cover_letter_constraints_require_submission_ready_grounded_letter() -> 
     assert "Hermes" in constraints["must_avoid"]
     assert "Use only facts supported by the provided evidence." in constraints["grounding_rules"]
     assert "Do not invent employers, dates, metrics, team sizes, revenue numbers, product names, or outcomes." in constraints["grounding_rules"]
+    assert packet.document_writer_input["requested_document_type"] == constraints["document_type"]
 
 
 def test_recruiter_message_constraints_require_short_non_meta_message() -> None:

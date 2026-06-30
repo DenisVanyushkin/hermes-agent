@@ -229,6 +229,7 @@ def test_writer_expected_schema_requests_draft_ready_object_shape() -> None:
     assert report.status is RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_APPROVED
     assert seen["expected_schema"] == {
         "schema_version": "recruiter_document_packet_v1",
+        "document_type": ["cover_letter"],
         "status": ["DRAFT_READY"],
         "draft": {
             "format": ["text"],
@@ -244,7 +245,23 @@ def test_invalid_writer_output_blocks_before_reviewer() -> None:
             skill_id = kwargs["skill_id"]
             self.calls.append(skill_id)
             if skill_id == "document-writer":
-                return {"status": "DRAFT_READY", "document_type": "cover_letter"}
+                return {
+                    "schema_version": "recruiter_document_packet_v1",
+                    "document_type": "recruiter_message",
+                    "audience": kwargs["skill_input"].get("audience"),
+                    "purpose": kwargs["skill_input"].get("purpose"),
+                    "source_positioning_packet_ref": kwargs["skill_input"]["source_positioning_packet_ref"],
+                    "draft": {
+                        "format": "text",
+                        "content": "Draft content for user review only.",
+                        "notes": [],
+                    },
+                    "review": {"status": "PENDING"},
+                    "status": "DRAFT_READY",
+                    "warnings": [],
+                    "errors": [],
+                    "provenance": {"expected_schema": kwargs.get("expected_schema")},
+                }
             return super().execute(**kwargs)
 
     executor = _InvalidWriterExecutor()
@@ -259,6 +276,7 @@ def test_invalid_writer_output_blocks_before_reviewer() -> None:
     assert report.reviewer_called is False
     assert executor.calls == ["document-writer"]
     assert report.document_packet is not None
+    assert "writer_document_type_mismatch" in report.errors
 
 
 def test_invalid_reviewer_output_preserves_draft_packet() -> None:

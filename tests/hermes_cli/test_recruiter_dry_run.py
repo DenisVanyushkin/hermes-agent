@@ -523,6 +523,9 @@ def test_application_materials_flow_dry_run_runs_writer_and_reviewer_when_ready(
     assert report.provider_called is True
     assert report.executor_called is True
     assert report.application_materials_result["schema_version"] == "recruiter_application_materials_packet_v1"
+    assert report.application_materials_result["document_runs"]["cv_tailoring_notes"]["document_type"] == "cv_tailoring_notes"
+    assert report.application_materials_result["document_runs"]["cover_letter_draft"]["document_type"] == "cover_letter"
+    assert report.application_materials_result["document_runs"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
     assert report.application_materials_result["materials"]["cover_letter_draft"]["content"] == "Draft for cover_letter."
     assert report.application_materials_result["review"]["verdict"] == "APPROVE"
     assert executor.calls == [

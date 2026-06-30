@@ -255,6 +255,7 @@ def build_recruiter_document_writer_input_packet(
         document_writer_input={
             "skill_id": "document-writer",
             "status": "READY",
+            "requested_document_type": document_type,
             "document_type": document_type,
             "audience": audience,
             "purpose": purpose,
