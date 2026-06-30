@@ -10,6 +10,10 @@ from .recruiter_context import (
     RecruiterContextStatus,
     build_recruiter_context,
 )
+from .recruiter_application_materials_flow import (
+    APPLICATION_MATERIALS_PACKET_SCHEMA_VERSION,
+    run_recruiter_application_materials_flow,
+)
 from .recruiter_evaluation_provider_executor import (
     REQUIRED_VACANCY_EVALUATION_PACKET_FIELDS,
     VACANCY_EVALUATION_PACKET_SCHEMA_VERSION,
@@ -59,6 +63,12 @@ class RecruiterDryRunStatus(str, Enum):
     POSITIONING_READY = "POSITIONING_READY"
     POSITIONING_OUTPUT_INVALID = "POSITIONING_OUTPUT_INVALID"
     POSITIONING_PROVIDER_EXECUTION_FAILED = "POSITIONING_PROVIDER_EXECUTION_FAILED"
+    APPLICATION_MATERIALS_INPUT_BLOCKED = "APPLICATION_MATERIALS_INPUT_BLOCKED"
+    APPLICATION_MATERIALS_PROVIDER_EXECUTION_BLOCKED = "APPLICATION_MATERIALS_PROVIDER_EXECUTION_BLOCKED"
+    APPLICATION_MATERIALS_OUTPUT_INVALID = "APPLICATION_MATERIALS_OUTPUT_INVALID"
+    APPLICATION_MATERIALS_PROVIDER_EXECUTION_FAILED = "APPLICATION_MATERIALS_PROVIDER_EXECUTION_FAILED"
+    APPLICATION_MATERIALS_REVIEW_BLOCKED = "APPLICATION_MATERIALS_REVIEW_BLOCKED"
+    APPLICATION_MATERIALS_READY = "APPLICATION_MATERIALS_READY"
 
 
 @dataclass(slots=True)
@@ -96,6 +106,7 @@ class RecruiterDryRunReport:
     evaluation_flow: dict[str, Any] | None = None
     evaluation_result: dict[str, Any] | None = None
     positioning_result: dict[str, Any] | None = None
+    application_materials_result: dict[str, Any] | None = None
     missing_requirements: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -362,6 +373,94 @@ def run_recruiter_positioning_flow_dry_run(
     return base_report
 
 
+def run_recruiter_application_materials_flow_dry_run(
+    *,
+    positioning_packet: dict[str, Any] | None,
+    repo_root: str | Path | None = None,
+    private_context_status: str = "PRIVATE_CONTEXT_NOT_INSPECTED",
+    allow_provider_execution: bool = False,
+    executor_factory: Callable[[], Any] | None = None,
+) -> RecruiterDryRunReport:
+    downstream_gates = _application_materials_downstream_gates(controlled_document_dry_run_enabled=False)
+    base_report = RecruiterDryRunReport(
+        status=RecruiterDryRunStatus.APPLICATION_MATERIALS_INPUT_BLOCKED,
+        context_status="APPLICATION_MATERIALS_INPUT_REQUIRED",
+        input={
+            "repo_root": str(repo_root) if repo_root is not None else None,
+            "private_context_status": private_context_status,
+            "allow_provider_execution": allow_provider_execution,
+        },
+        readiness={"ready": False, "reason": "application_materials_input_not_ready"},
+        context_packet=None,
+        evaluation_flow=None,
+        evaluation_result=None,
+        positioning_result=_sanitize_result(positioning_packet or {}) if isinstance(positioning_packet, dict) else None,
+        application_materials_result=None,
+        missing_requirements=[],
+        warnings=[],
+        errors=[],
+        provenance={"writes_performed": False, "dry_run": True, "flow": "application-materials"},
+        next_allowed_actions=[],
+        provider_called=False,
+        provider_execution_enabled=allow_provider_execution,
+        executor_called=False,
+        downstream_gates=downstream_gates,
+    )
+    input_error = _validate_application_materials_input_gate(positioning_packet, private_context_status)
+    if input_error is not None:
+        base_report.errors = [input_error]
+        base_report.readiness["reason"] = input_error
+        return base_report
+
+    base_report.context_status = "READY"
+    base_report.readiness = {"ready": True, "reason": "application_materials_input_ready"}
+    if not allow_provider_execution:
+        base_report.status = RecruiterDryRunStatus.APPLICATION_MATERIALS_PROVIDER_EXECUTION_BLOCKED
+        base_report.readiness["reason"] = "provider_execution_requires_explicit_opt_in"
+        base_report.next_allowed_actions = ["rerun_with_allow_provider_execution"]
+        return base_report
+
+    if executor_factory is None:
+        from .recruiter_document_provider_executor import build_recruiter_document_provider_executor
+
+        executor_factory = build_recruiter_document_provider_executor
+
+    try:
+        executor = executor_factory()
+        base_report.executor_called = True
+        base_report.provider_called = True
+        flow_report = run_recruiter_application_materials_flow(
+            positioning_packet=dict(positioning_packet or {}),
+            allow_document_execution=True,
+            executor=executor,
+        )
+    except ValueError as exc:
+        base_report.status = RecruiterDryRunStatus.APPLICATION_MATERIALS_OUTPUT_INVALID
+        base_report.errors = [str(exc)]
+        return base_report
+    except Exception:
+        base_report.status = RecruiterDryRunStatus.APPLICATION_MATERIALS_PROVIDER_EXECUTION_FAILED
+        base_report.errors = ["application_materials_provider_execution_failed"]
+        return base_report
+
+    base_report.application_materials_result = flow_report.to_dict()
+    base_report.downstream_gates = dict(flow_report.downstream_gates)
+    if flow_report.status == "APPLICATION_MATERIALS_READY":
+        base_report.status = RecruiterDryRunStatus.APPLICATION_MATERIALS_READY
+        base_report.readiness = {"ready": True, "reason": "application_materials_ready"}
+        base_report.next_allowed_actions = ["review_application_materials_packet_manually"]
+        return base_report
+    if flow_report.status == "APPLICATION_MATERIALS_REVIEW_BLOCKED":
+        base_report.status = RecruiterDryRunStatus.APPLICATION_MATERIALS_REVIEW_BLOCKED
+        base_report.readiness = {"ready": False, "reason": "application_materials_review_blocked"}
+        base_report.errors = list(flow_report.errors)
+        return base_report
+    base_report.status = RecruiterDryRunStatus.APPLICATION_MATERIALS_OUTPUT_INVALID
+    base_report.readiness = {"ready": False, "reason": "application_materials_output_invalid"}
+    base_report.errors = list(flow_report.errors)
+    return base_report
+
+
 def _build_prompt_evaluation_input(*, prompt: str, repo_root: str | Path | None) -> dict[str, Any]:
     synthetic_context = {
         "status": RecruiterContextStatus.READY.value,
@@ -461,6 +560,40 @@ def _evaluation_downstream_gates() -> dict[str, Any]:
         "crm_write": {"enabled": False},
         "document_generation": {"enabled": False},
     }
+
+
+def _application_materials_downstream_gates(*, controlled_document_dry_run_enabled: bool) -> dict[str, Any]:
+    return {
+        "outbound": {"enabled": False},
+        "db_write": {"enabled": False},
+        "crm_write": {"enabled": False},
+        "document_generation": {"enabled": False},
+        "gmail_draft": {"enabled": False},
+        "linkedin_send": {"enabled": False},
+        "controlled_document_dry_run": {"enabled": controlled_document_dry_run_enabled},
+    }
+
+
+def _validate_application_materials_input_gate(
+    positioning_packet: dict[str, Any] | None,
+    private_context_status: str,
+) -> str | None:
+    if not isinstance(positioning_packet, dict):
+        return "positioning_packet_missing"
+    missing_fields = [field for field in REQUIRED_POSITIONING_PACKET_FIELDS if field not in positioning_packet]
+    if missing_fields:
+        return f"missing_required_positioning_output_fields:{','.join(missing_fields)}"
+    if positioning_packet.get("schema_version") != POSITIONING_PACKET_SCHEMA_VERSION:
+        return "positioning_packet_schema_version_invalid"
+    if positioning_packet.get("skill_id") != POSITIONING_SKILL_ID:
+        return "positioning_packet_skill_id_invalid"
+    if private_context_status != "PRIVATE_CONTEXT_AVAILABLE":
+        return "private_context_not_ready_for_application_materials"
+    if positioning_packet.get("status") != "POSITIONING_READY":
+        return "positioning_packet_status_not_ready"
+    if positioning_packet.get("next_step") != "POSITIONING_READY_FOR_DOCUMENTS":
+        return "positioning_packet_next_step_invalid"
+    return None
 
 
 def _map_status(context_status: str) -> tuple[RecruiterDryRunStatus, bool, str]:
