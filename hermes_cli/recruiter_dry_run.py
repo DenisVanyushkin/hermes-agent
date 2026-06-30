@@ -3,18 +3,23 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .recruiter_context import (
     RecruiterContextRequest,
     RecruiterContextStatus,
     build_recruiter_context,
 )
+from .recruiter_evaluation_provider_executor import (
+    REQUIRED_VACANCY_EVALUATION_PACKET_FIELDS,
+    vacancy_evaluation_expected_schema,
+)
 from .recruiter_evaluation_flow import (
     RecruiterEvaluationFlowRequest,
     RecruiterEvaluationFlowStatus,
     build_recruiter_evaluation_flow,
 )
+from .recruiter_skill_inputs import build_recruiter_skill_input_packets
 
 
 _FORBIDDEN_ACTIONS = [
@@ -37,6 +42,11 @@ class RecruiterDryRunStatus(str, Enum):
     CONTEXT_PACKAGE_ERROR = "CONTEXT_PACKAGE_ERROR"
     CONTEXT_FACADE_ERROR = "CONTEXT_FACADE_ERROR"
     CONTEXT_INVALID_REQUEST = "CONTEXT_INVALID_REQUEST"
+    PROVIDER_EXECUTION_BLOCKED = "PROVIDER_EXECUTION_BLOCKED"
+    EVALUATION_FLOW_BLOCKED = "EVALUATION_FLOW_BLOCKED"
+    EVALUATION_READY = "EVALUATION_READY"
+    EVALUATION_OUTPUT_INVALID = "EVALUATION_OUTPUT_INVALID"
+    PROVIDER_EXECUTION_FAILED = "PROVIDER_EXECUTION_FAILED"
 
 
 @dataclass(slots=True)
@@ -72,12 +82,17 @@ class RecruiterDryRunReport:
     readiness: dict[str, Any]
     context_packet: dict[str, Any] | None
     evaluation_flow: dict[str, Any] | None = None
+    evaluation_result: dict[str, Any] | None = None
     missing_requirements: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
     next_allowed_actions: list[str] = field(default_factory=list)
     forbidden_actions: list[str] = field(default_factory=lambda: list(_FORBIDDEN_ACTIONS))
+    provider_called: bool = False
+    provider_execution_enabled: bool = False
+    executor_called: bool = False
+    downstream_gates: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -158,6 +173,8 @@ def run_recruiter_evaluation_flow_dry_run(
     prompt: str,
     repo_root: str | Path | None = None,
     private_context_status: str = "PRIVATE_CONTEXT_NOT_INSPECTED",
+    allow_provider_execution: bool = False,
+    executor_factory: Callable[[], Any] | None = None,
 ) -> RecruiterDryRunReport:
     flow_report = build_recruiter_evaluation_flow(
         RecruiterEvaluationFlowRequest(
@@ -167,26 +184,130 @@ def run_recruiter_evaluation_flow_dry_run(
         )
     )
     ready = flow_report.status is RecruiterEvaluationFlowStatus.READY
-    status = RecruiterDryRunStatus.READY_FOR_RECRUITER_SKILL_INPUT if ready else RecruiterDryRunStatus.CONTEXT_SOURCE_REQUIRED
-    reason = "evaluation_flow_ready" if ready else flow_report.status.value.casefold()
-    return RecruiterDryRunReport(
-        status=status,
+    base_report = RecruiterDryRunReport(
+        status=RecruiterDryRunStatus.READY_FOR_RECRUITER_SKILL_INPUT if ready else RecruiterDryRunStatus.EVALUATION_FLOW_BLOCKED,
         context_status=flow_report.status.value,
         input={
             "prompt": prompt,
             "repo_root": str(repo_root) if repo_root is not None else None,
             "private_context_status": private_context_status,
+            "allow_provider_execution": allow_provider_execution,
         },
-        readiness={"ready": ready, "reason": reason},
+        readiness={"ready": ready, "reason": "evaluation_flow_ready" if ready else flow_report.status.value.casefold()},
         context_packet=None,
         evaluation_flow=flow_report.to_dict(),
+        evaluation_result=None,
         missing_requirements=[] if ready else list(flow_report.required_inputs),
         warnings=list(flow_report.warnings),
         errors=[],
         provenance={"writes_performed": False, "dry_run": True, "flow": "evaluate-vacancy"},
         next_allowed_actions=list(flow_report.next_allowed_actions),
         forbidden_actions=list(flow_report.forbidden_actions),
+        provider_called=False,
+        provider_execution_enabled=allow_provider_execution,
+        executor_called=False,
+        downstream_gates=_evaluation_downstream_gates(),
     )
+    if not ready:
+        return base_report
+    if not allow_provider_execution:
+        base_report.status = RecruiterDryRunStatus.PROVIDER_EXECUTION_BLOCKED
+        base_report.readiness["reason"] = "provider_execution_requires_explicit_opt_in"
+        base_report.next_allowed_actions = _dedupe([*base_report.next_allowed_actions, "rerun_with_allow_provider_execution"])
+        return base_report
+
+    if private_context_status != "PRIVATE_CONTEXT_AVAILABLE":
+        base_report.status = RecruiterDryRunStatus.EVALUATION_FLOW_BLOCKED
+        base_report.readiness = {"ready": False, "reason": "provider_execution_requires_private_context_available"}
+        base_report.errors = ["private_context_not_ready_for_provider_execution"]
+        base_report.next_allowed_actions = ["provision_private_career_context"]
+        return base_report
+
+    evaluation_input = _build_prompt_evaluation_input(prompt=prompt, repo_root=repo_root)
+    base_report.provenance["skill_input_builder"] = "recruiter_skill_inputs"
+    base_report.provenance["skill_id"] = "vacancy-evaluation"
+
+    if executor_factory is None:
+        from .recruiter_evaluation_provider_executor import build_recruiter_evaluation_provider_executor
+
+        executor_factory = build_recruiter_evaluation_provider_executor
+
+    try:
+        executor = executor_factory()
+        base_report.executor_called = True
+        base_report.provider_called = True
+        raw_result = executor.execute(
+            skill_input=evaluation_input,
+            expected_schema=vacancy_evaluation_expected_schema(),
+        )
+    except ValueError as exc:
+        base_report.status = RecruiterDryRunStatus.EVALUATION_OUTPUT_INVALID
+        base_report.errors = [str(exc)]
+        return base_report
+    except Exception:
+        base_report.status = RecruiterDryRunStatus.PROVIDER_EXECUTION_FAILED
+        base_report.errors = ["provider_execution_failed"]
+        return base_report
+
+    missing_fields = [field for field in REQUIRED_VACANCY_EVALUATION_PACKET_FIELDS if field not in raw_result]
+    if missing_fields:
+        base_report.status = RecruiterDryRunStatus.EVALUATION_OUTPUT_INVALID
+        base_report.evaluation_result = _sanitize_result(raw_result)
+        base_report.errors = [f"missing_required_evaluation_output_fields:{','.join(missing_fields)}"]
+        return base_report
+
+    base_report.status = RecruiterDryRunStatus.EVALUATION_READY
+    base_report.evaluation_result = _sanitize_result(raw_result)
+    base_report.readiness = {"ready": True, "reason": "provider_evaluation_completed"}
+    base_report.next_allowed_actions = ["review_evaluation_packet_manually"]
+    return base_report
+
+
+def _build_prompt_evaluation_input(*, prompt: str, repo_root: str | Path | None) -> dict[str, Any]:
+    synthetic_context = {
+        "status": RecruiterContextStatus.READY.value,
+        "request": {"prompt": prompt, "repo_root": str(repo_root) if repo_root is not None else None},
+        "vacancy": {
+            "vacancy_id": None,
+            "vacancy_key": None,
+            "source_url": None,
+            "url": None,
+            "title": None,
+            "company": None,
+            "location": None,
+            "source_kind": "prompt_text",
+            "provenance": {"source": "recruiter_evaluation_flow_prompt"},
+        },
+        "opportunity": None,
+        "company_context": [],
+        "application_history": {"status": "not_requested", "history": [], "artifacts": [], "feedback": []},
+        "machine_score": {},
+        "role_package_context": {"package_id": "hermes-recruiter", "role_id": "hermes_recruiter"},
+        "private_context": {"status": "PRIVATE_CONTEXT_AVAILABLE", "dir": "", "files": {}},
+        "warnings": [],
+        "errors": [],
+        "provenance": {"writes_performed": False, "input_mode": "prompt_dry_run"},
+    }
+    packet = build_recruiter_skill_input_packets(synthetic_context).to_dict()
+    vacancy_input = dict(packet.get("vacancy_evaluation_input") or {})
+    vacancy_input["prompt_text"] = prompt
+    vacancy_input["expected_schema_version"] = vacancy_evaluation_expected_schema()["schema_version"]
+    return vacancy_input
+
+
+def _sanitize_result(raw_result: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(raw_result)
+    payload["provenance"] = dict(payload.get("provenance") or {})
+    return payload
+
+
+def _evaluation_downstream_gates() -> dict[str, Any]:
+    return {
+        "outbound": {"enabled": False},
+        "db_write": {"enabled": False},
+        "crm_write": {"enabled": False},
+        "document_generation": {"enabled": False},
+    }
 
 
 def _map_status(context_status: str) -> tuple[RecruiterDryRunStatus, bool, str]:

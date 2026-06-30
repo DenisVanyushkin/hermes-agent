@@ -18,6 +18,15 @@ _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 _TEXT_SOURCE_PATTERNS = (
     re.compile(r"\b(company|responsibilities|requirements|title)\s*:", re.IGNORECASE),
     re.compile(r"\b(head|director|vp|chief)\s+of\s+product\b", re.IGNORECASE),
+    re.compile(r"\babout the role\b", re.IGNORECASE),
+    re.compile(r"\bwhat you'll do\b", re.IGNORECASE),
+    re.compile(r"\bwhat you will do\b", re.IGNORECASE),
+    re.compile(r"\bqualifications\b", re.IGNORECASE),
+    re.compile(r"\brequirements\b", re.IGNORECASE),
+    re.compile(r"\bresponsibilities\b", re.IGNORECASE),
+    re.compile(r"\bexperience\b", re.IGNORECASE),
+    re.compile(r"\bcandidate profile\b", re.IGNORECASE),
+    re.compile(r"\brole overview\b", re.IGNORECASE),
 )
 _READY_PRIVATE_CONTEXT_STATUSES = {"PRIVATE_CONTEXT_AVAILABLE", "PARTIAL", "PRIVATE_CONTEXT_NOT_INSPECTED"}
 _FORBIDDEN_ACTIONS = [

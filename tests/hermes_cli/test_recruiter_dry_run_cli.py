@@ -202,3 +202,243 @@ def test_parse_evaluation_flow_option() -> None:
 
     assert args.flow == "evaluate-vacancy"
     assert args.prompt == "Посмотри вакансию https://example.com/jobs/123"
+
+
+def test_parse_allow_provider_execution_flag() -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "evaluate-vacancy",
+            "--prompt",
+            "Посмотри вакансию https://example.com/jobs/123",
+            "--allow-provider-execution",
+            "--json",
+        ]
+    )
+
+    assert args.allow_provider_execution is True
+
+
+def test_parse_private_context_status_option() -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "evaluate-vacancy",
+            "--prompt",
+            "Посмотри вакансию https://example.com/jobs/123",
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--json",
+        ]
+    )
+
+    assert args.private_context_status == "PRIVATE_CONTEXT_AVAILABLE"
+
+
+def test_evaluation_flow_cli_provider_blocked_without_private_context_available(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_run(*, prompt, repo_root, private_context_status, allow_provider_execution):
+        captured["prompt"] = prompt
+        captured["repo_root"] = repo_root
+        captured["private_context_status"] = private_context_status
+        captured["allow_provider_execution"] = allow_provider_execution
+        return RecruiterDryRunReport(
+            status=RecruiterDryRunStatus.EVALUATION_FLOW_BLOCKED,
+            context_status="READY",
+            input={"prompt": prompt},
+            readiness={"ready": False, "reason": "provider_execution_requires_private_context_available"},
+            context_packet=None,
+            evaluation_flow={"status": "READY"},
+            evaluation_result=None,
+            missing_requirements=[],
+            warnings=[],
+            errors=["private_context_not_ready_for_provider_execution"],
+            provenance={"writes_performed": False, "dry_run": True},
+            next_allowed_actions=["provision_private_career_context"],
+            provider_called=False,
+            provider_execution_enabled=True,
+            executor_called=False,
+            downstream_gates={"document_generation": {"enabled": False}},
+        )
+
+    monkeypatch.setattr("hermes_cli.recruiter_dry_run_cli.run_recruiter_evaluation_flow_dry_run", _fake_run)
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "evaluate-vacancy",
+            "--prompt",
+            "Посмотри вакансию https://example.com/jobs/123",
+            "--allow-provider-execution",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.EVALUATION_FLOW_BLOCKED.value
+    assert payload["provider_called"] is False
+    assert payload["executor_called"] is False
+    assert captured["private_context_status"] == "PRIVATE_CONTEXT_NOT_INSPECTED"
+    assert captured["allow_provider_execution"] is True
+
+
+def test_evaluation_flow_cli_provider_ready_with_private_context_available(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_run(*, prompt, repo_root, private_context_status, allow_provider_execution):
+        captured["prompt"] = prompt
+        captured["repo_root"] = repo_root
+        captured["private_context_status"] = private_context_status
+        captured["allow_provider_execution"] = allow_provider_execution
+        return RecruiterDryRunReport(
+            status=RecruiterDryRunStatus.EVALUATION_READY,
+            context_status="READY",
+            input={"prompt": prompt},
+            readiness={"ready": True, "reason": "provider_evaluation_completed"},
+            context_packet=None,
+            evaluation_flow={"status": "READY"},
+            evaluation_result={
+                "schema_version": "recruiter_vacancy_evaluation_packet_v1",
+                "skill_id": "vacancy-evaluation",
+                "status": "EVALUATION_READY",
+            },
+            missing_requirements=[],
+            warnings=[],
+            errors=[],
+            provenance={"writes_performed": False, "dry_run": True},
+            next_allowed_actions=["review_evaluation_packet_manually"],
+            provider_called=True,
+            provider_execution_enabled=True,
+            executor_called=True,
+            downstream_gates={"document_generation": {"enabled": False}},
+        )
+
+    monkeypatch.setattr("hermes_cli.recruiter_dry_run_cli.run_recruiter_evaluation_flow_dry_run", _fake_run)
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "evaluate-vacancy",
+            "--prompt",
+            "Посмотри вакансию https://example.com/jobs/123",
+            "--allow-provider-execution",
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.EVALUATION_READY.value
+    assert payload["provider_called"] is True
+    assert payload["executor_called"] is True
+    assert captured["private_context_status"] == "PRIVATE_CONTEXT_AVAILABLE"
+    assert captured["allow_provider_execution"] is True
+
+
+def test_evaluation_ready_report_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.recruiter_dry_run_cli.run_recruiter_evaluation_flow_dry_run",
+        lambda **kwargs: RecruiterDryRunReport(
+            status=RecruiterDryRunStatus.EVALUATION_READY,
+            context_status="READY",
+            input={"prompt": kwargs["prompt"]},
+            readiness={"ready": True, "reason": "provider_evaluation_completed"},
+            context_packet=None,
+            evaluation_flow={"status": "READY"},
+            evaluation_result={"schema_version": "recruiter_vacancy_evaluation_packet_v1"},
+            missing_requirements=[],
+            warnings=[],
+            errors=[],
+            provenance={"writes_performed": False, "dry_run": True},
+            next_allowed_actions=[],
+            provider_called=True,
+            provider_execution_enabled=True,
+            executor_called=True,
+            downstream_gates={"document_generation": {"enabled": False}},
+        ),
+    )
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "evaluate-vacancy",
+            "--prompt",
+            "Посмотри вакансию https://example.com/jobs/123",
+            "--allow-provider-execution",
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 0
+
+
+def test_evaluation_flow_stdout_is_json_only(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.recruiter_dry_run_cli.run_recruiter_evaluation_flow_dry_run",
+        lambda **kwargs: RecruiterDryRunReport(
+            status=RecruiterDryRunStatus.EVALUATION_FLOW_BLOCKED,
+            context_status="READY",
+            input={"prompt": kwargs["prompt"]},
+            readiness={"ready": False, "reason": "provider_execution_requires_private_context_available"},
+            context_packet=None,
+            evaluation_flow={"status": "READY"},
+            evaluation_result=None,
+            missing_requirements=[],
+            warnings=[],
+            errors=["private_context_not_ready_for_provider_execution"],
+            provenance={"writes_performed": False, "dry_run": True},
+            next_allowed_actions=["provision_private_career_context"],
+            provider_called=False,
+            provider_execution_enabled=True,
+            executor_called=False,
+            downstream_gates={"document_generation": {"enabled": False}},
+        ),
+    )
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "evaluate-vacancy",
+            "--prompt",
+            "Посмотри вакансию https://example.com/jobs/123",
+            "--allow-provider-execution",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit):
+        cmd_recruiter_context(args)
+
+    stdout = capsys.readouterr().out
+    assert stdout.endswith("\n")
+    payload = json.loads(stdout)
+    assert payload["status"] == RecruiterDryRunStatus.EVALUATION_FLOW_BLOCKED.value
