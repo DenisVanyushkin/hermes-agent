@@ -247,6 +247,24 @@ def test_parse_application_materials_flow_and_positioning_packet_json_option() -
     assert args.positioning_packet_json == "/tmp/positioning-packet.json"
 
 
+def test_parse_application_materials_document_target_option() -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "application-materials",
+            "--positioning-packet-json",
+            "/tmp/positioning-packet.json",
+            "--document-target",
+            "recruiter_message_draft",
+            "--json",
+        ]
+    )
+
+    assert args.document_target == "recruiter_message_draft"
+
+
 def test_parse_allow_provider_execution_flag() -> None:
     args = _parse_direct(
         [
@@ -524,6 +542,95 @@ def test_application_materials_flow_cli_returns_controlled_json(
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == RecruiterDryRunStatus.APPLICATION_MATERIALS_READY.value
     assert payload["application_materials_result"]["schema_version"] == "recruiter_application_materials_packet_v1"
+
+
+def test_application_materials_flow_cli_passes_document_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    packet_path = tmp_path / "positioning-packet.json"
+    packet_path.write_text(json.dumps({"schema_version": "recruiter_positioning_packet_v1"}), encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _fake_run(**kwargs):
+        captured.update(kwargs)
+        return RecruiterDryRunReport(
+            status=RecruiterDryRunStatus.APPLICATION_MATERIALS_PROVIDER_EXECUTION_BLOCKED,
+            context_status="READY",
+            input={"flow": "application-materials"},
+            readiness={"ready": True, "reason": "provider_execution_requires_explicit_opt_in"},
+            context_packet=None,
+            evaluation_flow=None,
+            evaluation_result=None,
+            positioning_result={"schema_version": "recruiter_positioning_packet_v1"},
+            application_materials_result=None,
+            missing_requirements=[],
+            warnings=[],
+            errors=[],
+            provenance={"writes_performed": False, "dry_run": True},
+            next_allowed_actions=["rerun_with_allow_provider_execution"],
+            provider_called=False,
+            provider_execution_enabled=False,
+            executor_called=False,
+            downstream_gates={"document_generation": {"enabled": False}},
+        )
+
+    monkeypatch.setattr("hermes_cli.recruiter_dry_run_cli.run_recruiter_application_materials_flow_dry_run", _fake_run)
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "application-materials",
+            "--positioning-packet-json",
+            str(packet_path),
+            "--document-target",
+            "recruiter_message_draft",
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit):
+        cmd_recruiter_context(args)
+
+    json.loads(capsys.readouterr().out)
+    assert captured["document_target"] == "recruiter_message_draft"
+
+
+def test_application_materials_flow_cli_invalid_document_target_is_parseable_json(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    packet_path = tmp_path / "positioning-packet.json"
+    packet_path.write_text(json.dumps({"schema_version": "recruiter_positioning_packet_v1"}), encoding="utf-8")
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "application-materials",
+            "--positioning-packet-json",
+            str(packet_path),
+            "--document-target",
+            "invalid_target",
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.APPLICATION_MATERIALS_INPUT_BLOCKED.value
+    assert payload["provider_called"] is False
+    assert payload["executor_called"] is False
+    assert payload["errors"] == ["invalid_document_target"]
 
 
 def test_evaluation_flow_stdout_is_json_only(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

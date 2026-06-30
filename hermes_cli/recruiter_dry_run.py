@@ -11,6 +11,7 @@ from .recruiter_context import (
     build_recruiter_context,
 )
 from .recruiter_application_materials_flow import (
+    APPLICATION_MATERIAL_TARGETS,
     APPLICATION_MATERIALS_PACKET_SCHEMA_VERSION,
     run_recruiter_application_materials_flow,
 )
@@ -379,6 +380,7 @@ def run_recruiter_application_materials_flow_dry_run(
     repo_root: str | Path | None = None,
     private_context_status: str = "PRIVATE_CONTEXT_NOT_INSPECTED",
     allow_provider_execution: bool = False,
+    document_target: str | None = None,
     executor_factory: Callable[[], Any] | None = None,
 ) -> RecruiterDryRunReport:
     downstream_gates = _application_materials_downstream_gates(controlled_document_dry_run_enabled=False)
@@ -389,6 +391,7 @@ def run_recruiter_application_materials_flow_dry_run(
             "repo_root": str(repo_root) if repo_root is not None else None,
             "private_context_status": private_context_status,
             "allow_provider_execution": allow_provider_execution,
+            "document_target": document_target,
         },
         readiness={"ready": False, "reason": "application_materials_input_not_ready"},
         context_packet=None,
@@ -406,6 +409,10 @@ def run_recruiter_application_materials_flow_dry_run(
         executor_called=False,
         downstream_gates=downstream_gates,
     )
+    if document_target is not None and document_target not in APPLICATION_MATERIAL_TARGETS:
+        base_report.errors = ["invalid_document_target"]
+        base_report.readiness["reason"] = "invalid_document_target"
+        return base_report
     input_error = _validate_application_materials_input_gate(positioning_packet, private_context_status)
     if input_error is not None:
         base_report.errors = [input_error]
@@ -432,6 +439,7 @@ def run_recruiter_application_materials_flow_dry_run(
         flow_report = run_recruiter_application_materials_flow(
             positioning_packet=dict(positioning_packet or {}),
             allow_document_execution=True,
+            document_target=document_target,
             executor=executor,
         )
     except ValueError as exc:

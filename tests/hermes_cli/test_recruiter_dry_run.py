@@ -538,6 +538,53 @@ def test_application_materials_flow_dry_run_runs_writer_and_reviewer_when_ready(
     ]
 
 
+def test_application_materials_flow_dry_run_processes_only_selected_target() -> None:
+    executor = _ApplicationMaterialsExecutor()
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        document_target="recruiter_message_draft",
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_READY
+    assert set(report.application_materials_result["document_runs"]) == {"recruiter_message_draft"}
+    assert set(report.application_materials_result["materials"]) == {"recruiter_message_draft", "application_summary"}
+    assert report.application_materials_result["document_runs"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
+    assert executor.calls == ["document-writer", "document-reviewer"]
+
+
+def test_application_materials_flow_dry_run_selected_target_blocks_independently() -> None:
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        document_target="recruiter_message_draft",
+        executor_factory=lambda: _ApplicationMaterialsExecutor(reviewer_verdict="CHANGES_REQUESTED"),
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_REVIEW_BLOCKED
+    assert set(report.application_materials_result["document_runs"]) == {"recruiter_message_draft"}
+    assert report.application_materials_result["review"]["document_type"] == "recruiter_message"
+    assert report.application_materials_result["materials"] == {}
+
+
+def test_application_materials_flow_dry_run_rejects_invalid_target_without_provider_call() -> None:
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        document_target="invalid_target",
+        executor_factory=lambda: _ApplicationMaterialsExecutor(),
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_INPUT_BLOCKED
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.errors == ["invalid_document_target"]
+
+
 def test_application_materials_flow_dry_run_fails_closed_on_invalid_writer_output() -> None:
     report = run_recruiter_application_materials_flow_dry_run(
         positioning_packet=_ready_positioning_packet(),
