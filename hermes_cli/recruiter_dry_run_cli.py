@@ -46,6 +46,7 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     dry_run.add_argument("--prompt", default=None, help="Prompt text for prompt-driven recruiter flow dry-runs")
     dry_run.add_argument("--evaluation-packet-json", default=None, help="Read only this evaluation packet JSON file for positioning-and-evidence dry-runs")
     dry_run.add_argument("--positioning-packet-json", default=None, help="Read only this positioning packet JSON file for application-materials dry-runs")
+    dry_run.add_argument("--document-target", default=None, help="Optional application-materials document target")
     dry_run.add_argument("--allow-provider-execution", action="store_true", help="Explicitly allow provider-backed evaluation for READY evaluate-vacancy dry-runs")
     dry_run.add_argument(
         "--private-context-status",
@@ -110,6 +111,7 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
                     repo_root=repo_root,
                     private_context_status=getattr(args, "private_context_status", "PRIVATE_CONTEXT_NOT_INSPECTED"),
                     allow_provider_execution=getattr(args, "allow_provider_execution", False),
+                    document_target=getattr(args, "document_target", None),
                 )
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if report.status in _READY_STATUSES else 1)
