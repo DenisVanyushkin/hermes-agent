@@ -15,6 +15,7 @@ from hermes_cli.recruiter_dry_run import (
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
     run_recruiter_context_dry_run,
+    run_recruiter_evaluation_flow_dry_run,
 )
 
 
@@ -152,3 +153,28 @@ def test_boundary_imports_are_safe() -> None:
     ]
     for needle in forbidden:
         assert needle not in source
+
+
+def test_evaluation_flow_dry_run_ready_for_url_prompt() -> None:
+    report = run_recruiter_evaluation_flow_dry_run(
+        prompt="Посмотри вот эту вакансию: https://example.com/jobs/123",
+        repo_root=REPO_ROOT,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    assert report.status is RecruiterDryRunStatus.READY_FOR_RECRUITER_SKILL_INPUT
+    assert report.readiness["ready"] is True
+    assert report.evaluation_flow["status"] == "READY"
+    assert report.evaluation_flow["vacancy_source_status"] == "AVAILABLE_URL"
+
+
+def test_evaluation_flow_dry_run_blocks_missing_source() -> None:
+    report = run_recruiter_evaluation_flow_dry_run(
+        prompt="Оцени вакансию",
+        repo_root=REPO_ROOT,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    assert report.status is RecruiterDryRunStatus.CONTEXT_SOURCE_REQUIRED
+    assert report.readiness["ready"] is False
+    assert report.evaluation_flow["status"] == "BLOCKED_SOURCE_REQUIRED"

@@ -102,6 +102,7 @@ def test_selected_recruiter_prompt_builds_compact_role_context() -> None:
     assert role_context["selected_bundle_available"] is True
     assert "vacancy-evaluation" in role_context["bundle_skill_ids"]
     assert "RecruiterPositioningPacket" in role_context["bundle_required_inputs"]
+    assert "bundle_expected_outputs" in role_context
 
 
 def test_non_recruiter_prompt_has_no_role_context() -> None:

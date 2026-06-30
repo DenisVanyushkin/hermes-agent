@@ -32,6 +32,8 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     dry_run.add_argument("--vacancy-id", type=int, default=None, help="Job-intel vacancy id")
     dry_run.add_argument("--vacancy-url", default=None, help="Job-intel vacancy URL")
     dry_run.add_argument("--opportunity-id", type=int, default=None, help="CRM opportunity id")
+    dry_run.add_argument("--flow", choices=["evaluate-vacancy"], default=None, help="Run a prompt-based recruiter flow dry-run")
+    dry_run.add_argument("--prompt", default=None, help="Prompt text for prompt-driven recruiter flow dry-runs")
     dry_run.add_argument("--job-intel-db-path", default=None, help="Override job-intel SQLite path")
     dry_run.add_argument("--private-career-dir", default=None, help="Override private career context directory")
     dry_run.add_argument("--repo-root", default=None, help="Override repo root used for recruiter package discovery")
@@ -42,13 +44,22 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
 
 
 def cmd_recruiter_context(args: argparse.Namespace) -> None:
+    repo_root = _optional_path(getattr(args, "repo_root", None))
+    if getattr(args, "flow", None) == "evaluate-vacancy":
+        report = run_recruiter_evaluation_flow_dry_run(
+            prompt=getattr(args, "prompt", None) or "",
+            repo_root=repo_root,
+        )
+        sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
+        raise SystemExit(0 if report.status in _READY_STATUSES else 1)
+
     request = RecruiterDryRunRequest(
         vacancy_id=getattr(args, "vacancy_id", None),
         vacancy_url=getattr(args, "vacancy_url", None),
         opportunity_id=getattr(args, "opportunity_id", None),
         job_intel_db_path=getattr(args, "job_intel_db_path", None),
         private_career_dir=getattr(args, "private_career_dir", None),
-        repo_root=_optional_path(getattr(args, "repo_root", None)),
+        repo_root=repo_root,
         stale_after_days=getattr(args, "stale_after_days", 14),
     )
     report = run_recruiter_context_dry_run(request)

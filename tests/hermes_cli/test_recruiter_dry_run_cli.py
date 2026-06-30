@@ -185,3 +185,20 @@ def test_boundary_imports_are_safe() -> None:
     ]
     for needle in forbidden:
         assert needle not in source
+
+
+def test_parse_evaluation_flow_option() -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "evaluate-vacancy",
+            "--prompt",
+            "Посмотри вакансию https://example.com/jobs/123",
+            "--json",
+        ]
+    )
+
+    assert args.flow == "evaluate-vacancy"
+    assert args.prompt == "Посмотри вакансию https://example.com/jobs/123"

@@ -13,6 +13,7 @@ RECRUITER_ROLE_ID = "hermes_recruiter"
 DEFAULT_BUNDLE_ID = "evaluate-vacancy"
 APPLICATION_MATERIALS_BUNDLE_ID = "application-materials"
 _RECRUITER_PACKAGE_DIR = Path("role-packages") / "recruiter"
+_MANUAL_HANDOFF_REASON = "controlled_recruiter_core_exists_but_provider_execution_stays_disabled"
 _DEFAULT_NEXT_ALLOWED_ACTIONS = [
     "recruiter-context dry-run",
     "recruiter-skill execute",
@@ -224,7 +225,7 @@ def build_recruiter_handoff_metadata(
     decision = route_recruiter_prompt(prompt, context=context)
     payload = decision.to_dict()
     if decision.status is RecruiterRoutingStatus.SELECTED:
-        payload["manual_handoff_reason"] = "controlled_recruiter_core_exists_but_provider_execution_stays_disabled"
+        payload["manual_handoff_reason"] = _MANUAL_HANDOFF_REASON
         payload["role_context"] = _build_role_context(decision)
     else:
         payload["manual_handoff_reason"] = None
@@ -240,11 +241,14 @@ def _build_role_context(decision: RecruiterRoutingDecision) -> dict[str, Any]:
     bundle_skill_ids = list(bundle_payload.get("skills") or [])
 
     bundle_required_inputs: list[str] = []
+    bundle_expected_outputs: list[str] = []
     expected_output = bundle_payload.get("expected_output")
     if bundle_id == APPLICATION_MATERIALS_BUNDLE_ID:
         bundle_required_inputs = ["RecruiterPositioningPacket", "POSITIONING_REQUIRED"]
     elif expected_output:
         bundle_required_inputs = [str(expected_output)]
+    if expected_output:
+        bundle_expected_outputs = [str(expected_output)]
 
     return {
         "schema_version": "recruiter_role_context_v1",
@@ -258,11 +262,12 @@ def _build_role_context(decision: RecruiterRoutingDecision) -> dict[str, Any]:
         "warnings": list(decision.warnings),
         "matched_signals": list(decision.matched_signals),
         "reasoning_summary": decision.reasoning_summary,
-        "manual_handoff_reason": "controlled_recruiter_core_exists_but_provider_execution_stays_disabled",
+        "manual_handoff_reason": _MANUAL_HANDOFF_REASON,
         "role_package_available": bool(role_package_context),
         "selected_bundle_available": bundle_id in bundle_ids if bundle_id is not None else False,
         "bundle_skill_ids": bundle_skill_ids,
         "bundle_required_inputs": bundle_required_inputs,
+        "bundle_expected_outputs": bundle_expected_outputs,
     }
 
 

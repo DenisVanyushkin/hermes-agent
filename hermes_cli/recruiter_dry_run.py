@@ -10,6 +10,11 @@ from .recruiter_context import (
     RecruiterContextStatus,
     build_recruiter_context,
 )
+from .recruiter_evaluation_flow import (
+    RecruiterEvaluationFlowRequest,
+    RecruiterEvaluationFlowStatus,
+    build_recruiter_evaluation_flow,
+)
 
 
 _FORBIDDEN_ACTIONS = [
@@ -66,6 +71,7 @@ class RecruiterDryRunReport:
     input: dict[str, Any]
     readiness: dict[str, Any]
     context_packet: dict[str, Any] | None
+    evaluation_flow: dict[str, Any] | None = None
     missing_requirements: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -89,6 +95,7 @@ def run_recruiter_context_dry_run(request: RecruiterDryRunRequest) -> RecruiterD
             input=request.to_dict(),
             readiness={"ready": False, "reason": "request_validation_failed"},
             context_packet=None,
+            evaluation_flow=None,
             errors=[str(exc)],
             missing_requirements=["request_source_identifier"],
             provenance={"writes_performed": False},
@@ -136,6 +143,7 @@ def _report_from_packet(request: RecruiterDryRunRequest, packet: dict[str, Any])
         input=request.to_dict(),
         readiness={"ready": ready, "reason": reason},
         context_packet=packet,
+        evaluation_flow=None,
         missing_requirements=_dedupe(missing_requirements),
         warnings=_dedupe(warnings),
         errors=_dedupe(errors),
@@ -143,6 +151,42 @@ def _report_from_packet(request: RecruiterDryRunRequest, packet: dict[str, Any])
         next_allowed_actions=_dedupe(next_allowed_actions),
     )
     return report
+
+
+def run_recruiter_evaluation_flow_dry_run(
+    *,
+    prompt: str,
+    repo_root: str | Path | None = None,
+    private_context_status: str = "PRIVATE_CONTEXT_NOT_INSPECTED",
+) -> RecruiterDryRunReport:
+    flow_report = build_recruiter_evaluation_flow(
+        RecruiterEvaluationFlowRequest(
+            prompt=prompt,
+            repo_root=repo_root,
+            private_context_status=private_context_status,
+        )
+    )
+    ready = flow_report.status is RecruiterEvaluationFlowStatus.READY
+    status = RecruiterDryRunStatus.READY_FOR_RECRUITER_SKILL_INPUT if ready else RecruiterDryRunStatus.CONTEXT_SOURCE_REQUIRED
+    reason = "evaluation_flow_ready" if ready else flow_report.status.value.casefold()
+    return RecruiterDryRunReport(
+        status=status,
+        context_status=flow_report.status.value,
+        input={
+            "prompt": prompt,
+            "repo_root": str(repo_root) if repo_root is not None else None,
+            "private_context_status": private_context_status,
+        },
+        readiness={"ready": ready, "reason": reason},
+        context_packet=None,
+        evaluation_flow=flow_report.to_dict(),
+        missing_requirements=[] if ready else list(flow_report.required_inputs),
+        warnings=list(flow_report.warnings),
+        errors=[],
+        provenance={"writes_performed": False, "dry_run": True, "flow": "evaluate-vacancy"},
+        next_allowed_actions=list(flow_report.next_allowed_actions),
+        forbidden_actions=list(flow_report.forbidden_actions),
+    )
 
 
 def _map_status(context_status: str) -> tuple[RecruiterDryRunStatus, bool, str]:
