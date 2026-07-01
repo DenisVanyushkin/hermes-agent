@@ -219,6 +219,59 @@ def test_evaluation_flow_dry_run_allows_provider_only_with_explicit_flag() -> No
     assert report.executor_called is True
     assert report.evaluation_result["schema_version"] == "recruiter_vacancy_evaluation_packet_v1"
     assert report.evaluation_result["recommendation"] == "APPLY"
+    assert report.evaluation_result["fit_assessment"] == "Strong fit."
+    assert report.evaluation_result["strengths"] == ["Executive product leadership match."]
+    assert report.evaluation_result["risks"] == ["Team size not confirmed."]
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert "provider_text" not in encoded
+    assert "/Users/" not in encoded
+
+
+def test_positioning_flow_dry_run_blocks_unsafe_evaluation_packet_without_echoing_raw_fields() -> None:
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet={
+            **_ready_evaluation_packet(),
+            "fit_assessment": "Unsafe /Users/testleak/private/career leaktest@example.com",
+        },
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED
+    assert report.errors == ["evaluation_packet_unsafe"]
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.evaluation_result is None
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert "/Users/testleak" not in encoded
+    assert "private/career" not in encoded
+    assert "leaktest@example.com" not in encoded
+    assert "raw unsafe field" not in encoded
+    assert "Traceback" not in encoded
+
+
+def test_positioning_flow_dry_run_blocks_invalid_schema_evaluation_packet_without_echoing_raw_fields() -> None:
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet={
+            "schema_version": "wrong_schema",
+            "status": "READY",
+            "fit_assessment": "Unsafe /Users/testleak/private/career leaktest@example.com",
+        },
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED
+    assert report.errors[0].startswith("missing_required_evaluation_output_fields:")
+    assert "recommendation" in report.errors[0]
+    assert "missing_information" in report.errors[0]
+    assert "next_step" in report.errors[0]
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.evaluation_result is None
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert "/Users/testleak" not in encoded
+    assert "private/career" not in encoded
+    assert "leaktest@example.com" not in encoded
+    assert "Traceback" not in encoded
 
 
 def test_evaluation_flow_dry_run_blocks_provider_for_private_context_not_inspected() -> None:
