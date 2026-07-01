@@ -899,6 +899,60 @@ def test_positioning_flow_cli_fake_output_path_returns_controlled_json(
     assert "/Users/" not in encoded
 
 
+def test_positioning_flow_cli_blocks_unsafe_evaluation_packet_without_echoing_raw_fields(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    evaluation_path = tmp_path / "evaluation-packet.json"
+    evaluation_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "recruiter_vacancy_evaluation_packet_v1",
+                "skill_id": "vacancy-evaluation",
+                "status": "EVALUATION_READY",
+                "recommendation": "APPLY",
+                "fit_assessment": "Unsafe /Users/testleak/private/career leaktest@example.com",
+                "strengths": ["Executive product leadership match."],
+                "risks": ["Team size not confirmed."],
+                "evidence": ["Prompt contained a vacancy URL."],
+                "missing_information": [],
+                "next_step": "PROCEED_TO_POSITIONING",
+                "provenance": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "positioning-and-evidence",
+            "--evaluation-packet-json",
+            str(evaluation_path),
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED.value
+    assert payload["errors"] == ["evaluation_packet_unsafe"]
+    assert payload["provider_called"] is False
+    assert payload["executor_called"] is False
+    assert payload["evaluation_result"] is None
+    encoded = json.dumps(payload, sort_keys=True)
+    assert "/Users/testleak" not in encoded
+    assert "private/career" not in encoded
+    assert "leaktest@example.com" not in encoded
+
+
 def test_application_materials_flow_cli_passes_document_target(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
