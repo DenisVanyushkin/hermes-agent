@@ -60,6 +60,74 @@ def test_prompt_contains_explicit_positioning_contract() -> None:
     assert "do not invent facts" in prompt
     assert "claims_to_avoid" in prompt
     assert "skill_id must be exactly positioning-and-evidence" in prompt
+    assert "allowed_claims must be a non-empty list when status is POSITIONING_READY" in prompt
+    assert "evidence_items must be a non-empty list when status is POSITIONING_READY" in prompt
+    assert "source_references must be a non-empty list when status is POSITIONING_READY" in prompt
+    assert "Every allowed claim must be backed by at least one evidence item" in prompt
+    assert "Do not return READY/success with empty allowed_claims, evidence_items, or source_references" in prompt
+
+
+def test_response_schema_requires_provenance_bearing_arrays() -> None:
+    client = _FakeClient(
+        json.dumps(
+            {
+                "schema_version": "recruiter_positioning_packet_v1",
+                "skill_id": "positioning-and-evidence",
+                "status": "POSITIONING_READY",
+                "positioning_summary": "Lead with executive B2B product leadership.",
+                "target_narrative": "Operator-executive for complex platform businesses.",
+                "evidence": ["Scaled multi-team product orgs."],
+                "gaps": [],
+                "risks_and_mitigations": [],
+                "recommended_angle": "Scale-stage operator.",
+                "claims_to_use": ["Led product organizations."],
+                "claims_to_avoid": [],
+                "missing_information": [],
+                "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+                "allowed_claims": [
+                    {
+                        "claim_id": "claim-1",
+                        "claim_text": "Led product organizations.",
+                        "source_fact_ids": ["fact-1"],
+                        "support_level": "explicit",
+                    }
+                ],
+                "evidence_items": [
+                    {
+                        "claim_text": "Led product organizations.",
+                        "source_fact_ids": ["fact-1"],
+                        "source_ref_ids": ["src-1"],
+                        "support_level": "explicit",
+                        "category": "leadership",
+                        "safe_summary": "Scaled multi-team product orgs.",
+                    }
+                ],
+                "source_references": [
+                    {
+                        "source_ref_id": "src-1",
+                        "source_label": "safe-fixture",
+                        "source_id_hash": "fixture-hash",
+                        "section_label": "safe-section",
+                        "support_level": "explicit",
+                        "category": "test_fixture",
+                    }
+                ],
+                "provenance": {},
+            }
+        )
+    )
+    executor = RecruiterPositioningProviderExecutor(client=client, model="gpt-5.4-mini", provider="openai-codex")
+
+    executor.execute(
+        skill_input={"skill_id": "positioning-and-evidence", "evaluation_packet": {"schema_version": "recruiter_vacancy_evaluation_packet_v1"}},
+        expected_schema=positioning_expected_schema(),
+    )
+
+    schema = client.calls[0]["extra_body"]["response_format"]["json_schema"]["schema"]
+    required = set(schema["required"])
+    assert "allowed_claims" in required
+    assert "evidence_items" in required
+    assert "source_references" in required
 
 
 def test_invalid_json_output_raises_controlled_error() -> None:

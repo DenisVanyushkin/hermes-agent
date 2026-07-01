@@ -776,6 +776,34 @@ def test_positioning_flow_dry_run_allows_provider_only_when_all_gates_are_ready(
                 "claims_to_avoid": ["Direct fintech turnaround ownership."],
                 "missing_information": [],
                 "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+                "allowed_claims": [
+                    {
+                        "claim_id": "claim-1",
+                        "claim_text": "Built product orgs.",
+                        "source_fact_ids": ["fact-1"],
+                        "support_level": "explicit",
+                    }
+                ],
+                "evidence_items": [
+                    {
+                        "claim_text": "Built product orgs.",
+                        "source_fact_ids": ["fact-1"],
+                        "source_ref_ids": ["src-1"],
+                        "support_level": "explicit",
+                        "category": "leadership",
+                        "safe_summary": "Scaled product organizations.",
+                    }
+                ],
+                "source_references": [
+                    {
+                        "source_ref_id": "src-1",
+                        "source_label": "safe-fixture",
+                        "source_id_hash": "fixture-hash",
+                        "section_label": "safe-section",
+                        "support_level": "explicit",
+                        "category": "test_fixture",
+                    }
+                ],
                 "provenance": {},
             }
 
@@ -811,6 +839,34 @@ def test_positioning_flow_dry_run_fails_closed_on_wrong_skill_id() -> None:
                 "claims_to_avoid": [],
                 "missing_information": [],
                 "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+                "allowed_claims": [
+                    {
+                        "claim_id": "claim-1",
+                        "claim_text": "Wrong skill claim.",
+                        "source_fact_ids": ["fact-1"],
+                        "support_level": "explicit",
+                    }
+                ],
+                "evidence_items": [
+                    {
+                        "claim_text": "Wrong skill claim.",
+                        "source_fact_ids": ["fact-1"],
+                        "source_ref_ids": ["src-1"],
+                        "support_level": "explicit",
+                        "category": "leadership",
+                        "safe_summary": "Wrong skill summary.",
+                    }
+                ],
+                "source_references": [
+                    {
+                        "source_ref_id": "src-1",
+                        "source_label": "safe-fixture",
+                        "source_id_hash": "fixture-hash",
+                        "section_label": "safe-section",
+                        "support_level": "explicit",
+                        "category": "test_fixture",
+                    }
+                ],
                 "provenance": {},
             }
 
@@ -1389,7 +1445,7 @@ def test_recruiter_e2e_harness_invalid_fake_positioning_output_fails_closed() ->
 
     assert report.status is RecruiterE2EApplicationMaterialsStatus.OUTPUT_INVALID
     assert report.errors == [
-        "missing_required_positioning_output_fields:schema_version,skill_id,status,positioning_summary,target_narrative,evidence,gaps,risks_and_mitigations,recommended_angle,claims_to_use,claims_to_avoid,missing_information,next_step,provenance"
+        "missing_required_positioning_output_fields:schema_version,skill_id,status,positioning_summary,target_narrative,evidence,gaps,risks_and_mitigations,recommended_angle,claims_to_use,claims_to_avoid,missing_information,next_step,allowed_claims,evidence_items,source_references,provenance"
     ]
     assert report.application_materials_executor_called is False
 
