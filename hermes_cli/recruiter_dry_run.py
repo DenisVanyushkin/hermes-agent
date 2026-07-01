@@ -312,7 +312,7 @@ def run_recruiter_positioning_flow_dry_run(
         readiness={"ready": False, "reason": "positioning_input_not_ready"},
         context_packet=None,
         evaluation_flow=None,
-        evaluation_result=_sanitize_result(evaluation_packet or {}) if isinstance(evaluation_packet, dict) else None,
+        evaluation_result=None,
         positioning_result=None,
         missing_requirements=[],
         warnings=[],
@@ -341,6 +341,7 @@ def run_recruiter_positioning_flow_dry_run(
         )
     base_report.context_status = "READY"
     base_report.readiness = {"ready": True, "reason": "positioning_input_ready"}
+    base_report.evaluation_result = _build_evaluation_packet_report_fields(evaluation_packet)
     positioning_input = _build_positioning_input(
         evaluation_packet=dict(evaluation_packet or {}),
         candidate_facts_packet=dict(candidate_facts_packet or {}) if isinstance(candidate_facts_packet, dict) else None,
@@ -637,6 +638,22 @@ def _sanitize_result(raw_result: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _build_evaluation_packet_report_fields(evaluation_packet: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(evaluation_packet, dict):
+        return None
+    return {
+        "schema_version": str(evaluation_packet.get("schema_version") or ""),
+        "status": str(evaluation_packet.get("status") or ""),
+        "fit_assessment": str(evaluation_packet.get("fit_assessment") or ""),
+        "recommendation": str(evaluation_packet.get("recommendation") or ""),
+        "missing_information": [item for item in _string_list(evaluation_packet.get("missing_information")) if item.strip()],
+        "next_step": str(evaluation_packet.get("next_step") or ""),
+        "strengths": [item for item in _string_list(evaluation_packet.get("strengths")) if item.strip()],
+        "risks": [item for item in _string_list(evaluation_packet.get("risks")) if item.strip()],
+        "provenance": dict(evaluation_packet.get("provenance") or {}),
+    }
+
+
 def _build_positioning_packet_report_fields(positioning_packet: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(positioning_packet, dict):
         return None
@@ -716,6 +733,8 @@ def _validate_positioning_input_gate(
         return "evaluation_recommendation_blocks_positioning"
     if evaluation_packet.get("recommendation") == "NEED_MORE_INFO" or evaluation_packet.get("status") == "INSUFFICIENT_INPUT":
         return "evaluation_requires_more_information"
+    if detect_unsafe_content(evaluation_packet):
+        return "evaluation_packet_unsafe"
     return None
 
 
