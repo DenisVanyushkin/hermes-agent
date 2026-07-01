@@ -20,6 +20,9 @@ REQUIRED_POSITIONING_PACKET_FIELDS = [
     "claims_to_avoid",
     "missing_information",
     "next_step",
+    "allowed_claims",
+    "evidence_items",
+    "source_references",
     "provenance",
 ]
 
@@ -94,6 +97,13 @@ def _build_prompt(*, skill_input: dict[str, Any], expected_schema: dict[str, Any
         "Return only one JSON object for recruiter_positioning_packet_v1.\n"
         "Rules: do not invent facts; use only the supplied vacancy-evaluation packet and safe context metadata; "
         "mark uncertainty as gaps; do not send outbound messages; do not write CRM, job-intel DB, or private files.\n"
+        "Every allowed claim must be backed by at least one evidence item and at least one source reference from the provided evaluation and candidate-facts inputs.\n"
+        "Do not invent candidate facts.\n"
+        "Do not invent vacancy facts.\n"
+        "Do not include claims without evidence.\n"
+        "If a claim is not supported, put it in claims_to_avoid or missing_information, not allowed_claims.\n"
+        "Do not return READY/success with empty allowed_claims, evidence_items, or source_references.\n"
+        "If the supplied evidence is insufficient to produce a valid source-backed positioning packet, return POSITIONING_INPUT_BLOCKED rather than empty READY arrays.\n"
         "Required contract:\n"
         "- schema_version must be exactly recruiter_positioning_packet_v1\n"
         "- skill_id must be exactly positioning-and-evidence\n"
@@ -108,6 +118,12 @@ def _build_prompt(*, skill_input: dict[str, Any], expected_schema: dict[str, Any
         "- claims_to_avoid must be a list; use [] when none\n"
         "- missing_information must be a list; use [] when none\n"
         "- next_step must be exactly one of POSITIONING_READY_FOR_DOCUMENTS, NEED_MORE_INFO, DO_NOT_PROCEED\n"
+        "- allowed_claims must be a non-empty list when status is POSITIONING_READY; use [] only when status is POSITIONING_INPUT_BLOCKED\n"
+        "- each allowed_claims item must include claim_id, claim_text, source_fact_ids, and support_level\n"
+        "- evidence_items must be a non-empty list when status is POSITIONING_READY; use [] only when status is POSITIONING_INPUT_BLOCKED\n"
+        "- each evidence_items item must include claim_text, source_fact_ids, source_ref_ids, support_level, category, and safe_summary\n"
+        "- source_references must be a non-empty list when status is POSITIONING_READY; use [] only when status is POSITIONING_INPUT_BLOCKED\n"
+        "- each source_references item must include source_ref_id, source_label, source_id_hash, section_label, support_level, and category\n"
         "- provenance must be an object\n"
         f"Skill input JSON:\n{json.dumps(skill_input, ensure_ascii=True, sort_keys=True)}\n"
         f"Expected schema JSON:\n{json.dumps(expected_schema or {}, ensure_ascii=True, sort_keys=True)}"
@@ -145,9 +161,72 @@ def _response_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
             "claims_to_avoid": {"type": "array", "items": {}},
             "missing_information": {"type": "array", "items": {}},
             "next_step": {"type": "string", "enum": list(schema.get("next_step") or ["POSITIONING_READY_FOR_DOCUMENTS", "NEED_MORE_INFO", "DO_NOT_PROCEED"])},
+            "allowed_claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim_id": {"type": "string"},
+                        "claim_text": {"type": "string"},
+                        "source_fact_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "support_level": {"type": "string"},
+                    },
+                    "required": ["claim_id", "claim_text", "source_fact_ids", "support_level"],
+                    "additionalProperties": True,
+                },
+            },
+            "evidence_items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim_text": {"type": "string"},
+                        "source_fact_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "source_ref_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "support_level": {"type": "string"},
+                        "category": {"type": "string"},
+                        "safe_summary": {"type": "string"},
+                    },
+                    "required": ["claim_text", "source_fact_ids", "source_ref_ids", "support_level", "category", "safe_summary"],
+                    "additionalProperties": True,
+                },
+            },
+            "source_references": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "source_ref_id": {"type": "string"},
+                        "source_label": {"type": "string"},
+                        "source_id_hash": {"type": "string"},
+                        "section_label": {"type": "string"},
+                        "support_level": {"type": "string"},
+                        "category": {"type": "string"},
+                    },
+                    "required": ["source_ref_id", "source_label", "source_id_hash", "section_label", "support_level", "category"],
+                    "additionalProperties": True,
+                },
+            },
             "provenance": {"type": "object"},
         },
         "required": list(REQUIRED_POSITIONING_PACKET_FIELDS),
+        "allOf": [
+            {
+                "if": {
+                    "properties": {
+                        "status": {"const": "POSITIONING_READY"},
+                    },
+                    "required": ["status"],
+                },
+                "then": {
+                    "properties": {
+                        "allowed_claims": {"minItems": 1},
+                        "evidence_items": {"minItems": 1},
+                        "source_references": {"minItems": 1},
+                    }
+                },
+            }
+        ],
         "additionalProperties": True,
     }
 
