@@ -14,6 +14,7 @@ from hermes_cli.recruiter_context import (
 from hermes_cli.recruiter_dry_run import (
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
+    build_fake_positioning_packet_from_candidate_facts,
     run_recruiter_application_materials_flow_dry_run,
     run_recruiter_context_dry_run,
     run_recruiter_evaluation_flow_dry_run,
@@ -552,40 +553,95 @@ def test_positioning_flow_dry_run_missing_optional_candidate_facts_keys_is_contr
 
 
 def test_positioning_flow_dry_run_supports_fake_no_provider_positioning_path() -> None:
-    captured: dict[str, object] = {}
-
-    def _fake_positioning_factory(skill_input: dict[str, object]) -> dict[str, object]:
-        captured["skill_input"] = skill_input
-        return {
-            "schema_version": "recruiter_positioning_packet_v1",
-            "skill_id": "positioning-and-evidence",
-            "status": "POSITIONING_READY",
-            "positioning_summary": "Lead with product and commercial leadership in digital services.",
-            "target_narrative": "Operator-executive for digital services businesses.",
-            "evidence": ["Product and commercial leadership experience"],
-            "gaps": ["Team size not confirmed."],
-            "risks_and_mitigations": ["Do not infer revenue ownership."],
-            "recommended_angle": "Scale-stage operator.",
-            "claims_to_use": ["Product and commercial leadership experience in digital services."],
-            "claims_to_avoid": ["Do not claim revenue ownership."],
-            "missing_information": [],
-            "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
-            "provenance": {"source": "fake_candidate_facts_fixture"},
-        }
-
     report = run_recruiter_positioning_flow_dry_run(
         evaluation_packet=_ready_evaluation_packet(),
         candidate_facts_packet=_ready_candidate_facts_packet(),
         private_context_status="PRIVATE_CONTEXT_AVAILABLE",
-        fake_positioning_result_factory=_fake_positioning_factory,
+        fake_positioning_result_factory=build_fake_positioning_packet_from_candidate_facts,
     )
 
     assert report.status is RecruiterDryRunStatus.POSITIONING_READY
     assert report.provider_called is False
     assert report.executor_called is True
     assert report.positioning_result["status"] == "POSITIONING_READY"
-    assert captured["skill_input"]["candidate_facts_status"] == "READY_PROVIDER_VISIBLE"
-    assert captured["skill_input"]["claims_to_avoid"] == ["Do not claim revenue ownership."]
+    assert report.positioning_result["generation_mode"] == "deterministic_fake"
+    assert report.positioning_result["source_kind"] == "fake_candidate_facts"
+    assert report.positioning_result["provider_called"] is False
+    assert report.positioning_result["executor_called"] is False
+    assert report.positioning_result["candidate_ref"] == "candidate-test"
+    assert report.positioning_result["claims_to_avoid"] == ["Do not claim revenue ownership."]
+    assert report.positioning_result["allowed_claims"][0]["source_fact_ids"] == ["fact-1"]
+    assert report.positioning_result["evidence_items"][0]["source_ref_ids"] == ["src-1"]
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert "provider_text" not in encoded
+    assert "\"candidate_facts_packet\"" not in encoded
+    assert "/home/" not in encoded
+    assert "/Users/" not in encoded
+
+
+def test_positioning_flow_dry_run_fake_path_requires_candidate_facts_packet() -> None:
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        fake_positioning_result_factory=lambda skill_input: {"unexpected": True},
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED
+    assert report.errors == ["candidate_facts_packet_missing"]
+    assert report.provider_called is False
+    assert report.executor_called is False
+
+
+def test_positioning_flow_dry_run_fake_path_fails_closed_when_claim_lacks_source_fact_ids() -> None:
+    candidate_facts_packet = _ready_candidate_facts_packet()
+    candidate_facts_packet["allowed_claims"] = [
+        {
+            "claim_id": "claim-1",
+            "claim_text": "Product and commercial leadership experience in digital services.",
+            "source_fact_ids": [],
+            "support_level": "explicit",
+        }
+    ]
+
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=candidate_facts_packet,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        fake_positioning_result_factory=build_fake_positioning_packet_from_candidate_facts,
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_OUTPUT_INVALID
+    assert report.errors == ["positioning_claim_without_source_fact"]
+
+
+def test_positioning_flow_dry_run_fake_path_fails_closed_when_source_reference_is_missing() -> None:
+    candidate_facts_packet = _ready_candidate_facts_packet()
+    candidate_facts_packet["facts"][0]["source_ref_ids"] = ["src-missing"]
+
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=candidate_facts_packet,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        fake_positioning_result_factory=build_fake_positioning_packet_from_candidate_facts,
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_OUTPUT_INVALID
+    assert report.errors == ["positioning_evidence_without_source"]
+
+
+def test_positioning_flow_dry_run_fake_path_blocks_unsafe_output() -> None:
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        fake_positioning_result_factory=lambda skill_input: {
+            **build_fake_positioning_packet_from_candidate_facts(skill_input),
+            "privacy_notes": ["Fixture path /home/hermes/.hermes/private must not leak."],
+        },
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_OUTPUT_INVALID
+    assert report.errors == ["positioning_unsafe_output_detected"]
 
 
 def test_positioning_flow_dry_run_blocks_need_more_info_by_default() -> None:

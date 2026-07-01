@@ -34,6 +34,7 @@ from .recruiter_positioning_provider_executor import (
     positioning_expected_schema,
 )
 from .recruiter_skill_inputs import build_recruiter_skill_input_packets
+from .recruiter_candidate_facts import detect_unsafe_content
 
 
 _FORBIDDEN_ACTIONS = [
@@ -347,9 +348,18 @@ def run_recruiter_positioning_flow_dry_run(
         private_context_status=private_context_status,
     )
     if fake_positioning_result_factory is not None:
+        if not isinstance(candidate_facts_packet, dict):
+            base_report.errors = ["candidate_facts_packet_missing"]
+            base_report.readiness["reason"] = "candidate_facts_packet_missing"
+            return base_report
         base_report.executor_called = True
-        raw_result = fake_positioning_result_factory(positioning_input)
-        output_error = _validate_positioning_output(raw_result)
+        try:
+            raw_result = fake_positioning_result_factory(positioning_input)
+        except ValueError as exc:
+            base_report.status = RecruiterDryRunStatus.POSITIONING_OUTPUT_INVALID
+            base_report.errors = [str(exc)]
+            return base_report
+        output_error = _validate_fake_positioning_output(raw_result)
         if output_error is not None:
             base_report.status = RecruiterDryRunStatus.POSITIONING_OUTPUT_INVALID
             base_report.positioning_result = _sanitize_result(raw_result)
@@ -668,6 +678,201 @@ def _validate_positioning_output(raw_result: dict[str, Any]) -> str | None:
         return "positioning_output_schema_version_invalid"
     if raw_result.get("skill_id") != POSITIONING_SKILL_ID:
         return "positioning_output_skill_id_invalid"
+    return None
+
+
+def build_fake_positioning_packet_from_candidate_facts(skill_input: dict[str, Any]) -> dict[str, Any]:
+    candidate_facts_packet = dict(skill_input.get("candidate_facts_packet") or {})
+    evaluation_packet = dict(skill_input.get("evaluation_packet") or {})
+    fact_items = _dict_list(candidate_facts_packet.get("facts"))
+    source_reference_items = _dict_list(candidate_facts_packet.get("source_references"))
+    claim_items = _dict_list(candidate_facts_packet.get("allowed_claims"))
+    if not claim_items:
+        raise ValueError("positioning_fake_output_unavailable")
+
+    fact_by_id = {
+        str(fact.get("fact_id") or ""): fact
+        for fact in fact_items
+        if str(fact.get("fact_id") or "").strip()
+    }
+    source_by_id = {
+        str(ref.get("source_ref_id") or ""): ref
+        for ref in source_reference_items
+        if str(ref.get("source_ref_id") or "").strip()
+    }
+    evidence_items: list[dict[str, Any]] = []
+    normalized_allowed_claims: list[dict[str, Any]] = []
+    source_references: list[dict[str, Any]] = []
+    seen_source_refs: set[str] = set()
+
+    for claim in claim_items:
+        claim_text = str(claim.get("claim_text") or "").strip()
+        if not claim_text:
+            continue
+        source_fact_ids = [str(item).strip() for item in _string_list(claim.get("source_fact_ids")) if str(item).strip()]
+        if not source_fact_ids:
+            raise ValueError("positioning_claim_without_source_fact")
+        fact_source_ref_ids: list[str] = []
+        categories: list[str] = []
+        support_levels: list[str] = []
+        safe_summaries: list[str] = []
+        for fact_id in source_fact_ids:
+            fact = fact_by_id.get(fact_id)
+            if fact is None:
+                raise ValueError("positioning_claim_without_source_fact")
+            categories.append(str(fact.get("category") or ""))
+            support_levels.append(str(fact.get("support_level") or ""))
+            safe_summary = str(fact.get("safe_summary") or "").strip()
+            if safe_summary:
+                safe_summaries.append(safe_summary)
+            ref_ids = [str(item).strip() for item in _string_list(fact.get("source_ref_ids")) if str(item).strip()]
+            if not ref_ids:
+                raise ValueError("positioning_evidence_without_source")
+            for ref_id in ref_ids:
+                if ref_id not in source_by_id:
+                    raise ValueError("positioning_evidence_without_source")
+                if ref_id not in fact_source_ref_ids:
+                    fact_source_ref_ids.append(ref_id)
+                if ref_id not in seen_source_refs:
+                    seen_source_refs.add(ref_id)
+                    ref = source_by_id[ref_id]
+                    source_references.append(
+                        {
+                            "source_ref_id": ref_id,
+                            "source_label": str(ref.get("source_label") or ""),
+                            "source_id_hash": str(ref.get("source_id_hash") or ""),
+                            "section_label": str(ref.get("section_label") or ""),
+                            "support_level": str(ref.get("support_level") or claim.get("support_level") or ""),
+                            "category": str(ref.get("source_type") or ""),
+                        }
+                    )
+        evidence_items.append(
+            {
+                "claim_text": claim_text,
+                "source_fact_ids": source_fact_ids,
+                "source_ref_ids": fact_source_ref_ids,
+                "support_level": str(claim.get("support_level") or support_levels[0] or ""),
+                "category": next((item for item in categories if item), ""),
+                "safe_summary": next((item for item in safe_summaries if item), claim_text),
+            }
+        )
+        normalized_allowed_claims.append(
+            {
+                "claim_id": str(claim.get("claim_id") or ""),
+                "claim_text": claim_text,
+                "source_fact_ids": source_fact_ids,
+                "support_level": str(claim.get("support_level") or support_levels[0] or ""),
+            }
+        )
+
+    unsupported_claims = [str(item).strip() for item in _string_list(candidate_facts_packet.get("unsupported_claims")) if str(item).strip()]
+    unsupported_lower = {item.casefold() for item in unsupported_claims}
+    normalized_allowed_claims = [
+        claim for claim in normalized_allowed_claims if claim["claim_text"].casefold() not in unsupported_lower
+    ]
+    evidence_items = [
+        item for item in evidence_items if item["claim_text"].casefold() not in unsupported_lower
+    ]
+    if not normalized_allowed_claims or not evidence_items:
+        raise ValueError("positioning_fake_output_unavailable")
+
+    evaluation_strengths = [str(item).strip() for item in _string_list(evaluation_packet.get("strengths")) if str(item).strip()]
+    evaluation_risks = [str(item).strip() for item in _string_list(evaluation_packet.get("risks")) if str(item).strip()]
+    fit_assessment = str(evaluation_packet.get("fit_assessment") or "").strip()
+    positioning_summary_parts = [claim["claim_text"] for claim in normalized_allowed_claims[:2]]
+    positioning_summary = " ".join(positioning_summary_parts) or "Use only source-backed candidate facts."
+    if fit_assessment:
+        positioning_summary = f"{positioning_summary} Fit assessment: {fit_assessment}"
+
+    recommended_angle = normalized_allowed_claims[0]["claim_text"]
+    support_summary = dict(candidate_facts_packet.get("support_summary") or {})
+    claim_categories = [item.get("category") for item in evidence_items if item.get("category")]
+    fake_packet = {
+        "schema_version": POSITIONING_PACKET_SCHEMA_VERSION,
+        "skill_id": POSITIONING_SKILL_ID,
+        "status": "POSITIONING_READY",
+        "positioning_summary": positioning_summary,
+        "target_narrative": fit_assessment or recommended_angle,
+        "evidence": [item["safe_summary"] for item in evidence_items],
+        "gaps": [item for item in evaluation_packet.get("missing_information") or [] if isinstance(item, str)],
+        "risks_and_mitigations": evaluation_risks,
+        "recommended_angle": recommended_angle,
+        "claims_to_use": [claim["claim_text"] for claim in normalized_allowed_claims],
+        "claims_to_avoid": [str(item).strip() for item in _string_list(candidate_facts_packet.get("claims_to_avoid")) if str(item).strip()],
+        "missing_information": [item for item in evaluation_packet.get("missing_information") or [] if isinstance(item, str)],
+        "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+        "candidate_ref": str(candidate_facts_packet.get("candidate_ref") or ""),
+        "evidence_items": evidence_items,
+        "allowed_claims": normalized_allowed_claims,
+        "unsupported_claims": unsupported_claims,
+        "source_references": source_references,
+        "support_summary": support_summary,
+        "privacy_notes": [str(item) for item in _string_list(candidate_facts_packet.get("privacy_notes")) if str(item).strip()],
+        "generation_mode": "deterministic_fake",
+        "source_kind": "fake_candidate_facts",
+        "provider_called": False,
+        "executor_called": False,
+        "provenance": {
+            "source": "candidate_facts_deterministic_fake",
+            "provider_called": False,
+            "executor_called": False,
+            "generation_mode": "deterministic_fake",
+            "source_kind": "fake_candidate_facts",
+            "candidate_fact_count": len(fact_items),
+            "allowed_claim_count": len(normalized_allowed_claims),
+            "strength_count": len(evaluation_strengths),
+            "category_counts": {category: claim_categories.count(category) for category in sorted(set(claim_categories))},
+        },
+    }
+    unsafe_code = detect_unsafe_content(fake_packet)
+    if unsafe_code:
+        raise ValueError("positioning_unsafe_output_detected")
+    return fake_packet
+
+
+def _validate_fake_positioning_output(raw_result: dict[str, Any]) -> str | None:
+    output_error = _validate_positioning_output(raw_result)
+    if output_error is not None:
+        return output_error
+    if raw_result.get("generation_mode") != "deterministic_fake":
+        return "positioning_fake_output_invalid"
+    if raw_result.get("source_kind") != "fake_candidate_facts":
+        return "positioning_fake_output_invalid"
+    if raw_result.get("provider_called") is not False:
+        return "positioning_fake_output_invalid"
+    if raw_result.get("executor_called") is not False:
+        return "positioning_fake_output_invalid"
+    if not isinstance(raw_result.get("candidate_ref"), str) or not str(raw_result.get("candidate_ref") or "").strip():
+        return "positioning_fake_output_invalid"
+    if not isinstance(raw_result.get("allowed_claims"), list) or not raw_result["allowed_claims"]:
+        return "positioning_fake_output_invalid"
+    if not isinstance(raw_result.get("evidence_items"), list) or not raw_result["evidence_items"]:
+        return "positioning_fake_output_invalid"
+    if not isinstance(raw_result.get("source_references"), list) or not raw_result["source_references"]:
+        return "positioning_fake_output_invalid"
+    if not isinstance(raw_result.get("support_summary"), dict):
+        return "positioning_fake_output_invalid"
+    for claim in _dict_list(raw_result.get("allowed_claims")):
+        source_fact_ids = [item for item in _string_list(claim.get("source_fact_ids")) if item.strip()]
+        if not source_fact_ids:
+            return "positioning_claim_without_source_fact"
+    source_ref_ids = {
+        str(ref.get("source_ref_id") or "").strip()
+        for ref in _dict_list(raw_result.get("source_references"))
+        if str(ref.get("source_ref_id") or "").strip()
+    }
+    for evidence in _dict_list(raw_result.get("evidence_items")):
+        fact_ids = [item for item in _string_list(evidence.get("source_fact_ids")) if item.strip()]
+        ref_ids = [item for item in _string_list(evidence.get("source_ref_ids")) if item.strip()]
+        if not fact_ids:
+            return "positioning_claim_without_source_fact"
+        if not ref_ids:
+            return "positioning_evidence_without_source"
+        if not set(ref_ids).issubset(source_ref_ids):
+            return "positioning_evidence_without_source"
+    unsafe_code = detect_unsafe_content(raw_result)
+    if unsafe_code:
+        return "positioning_unsafe_output_detected"
     return None
 
 

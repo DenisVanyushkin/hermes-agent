@@ -11,6 +11,7 @@ from .recruiter_dry_run import (
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
     _evaluation_downstream_gates,
+    build_fake_positioning_packet_from_candidate_facts,
     run_recruiter_application_materials_flow_dry_run,
     run_recruiter_context_dry_run,
     run_recruiter_evaluation_flow_dry_run,
@@ -48,6 +49,7 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     dry_run.add_argument("--prompt", default=None, help="Prompt text for prompt-driven recruiter flow dry-runs")
     dry_run.add_argument("--evaluation-packet-json", default=None, help="Read only this evaluation packet JSON file for positioning-and-evidence dry-runs")
     dry_run.add_argument("--candidate-facts-packet-json", default=None, help="Read only this candidate facts packet JSON file for positioning dry-runs")
+    dry_run.add_argument("--fake-positioning-output", action="store_true", help="Build deterministic no-provider positioning output from validated candidate facts")
     dry_run.add_argument("--positioning-packet-json", default=None, help="Read only this positioning packet JSON file for application-materials dry-runs")
     dry_run.add_argument("--document-target", default=None, help="Optional application-materials document target")
     dry_run.add_argument("--allow-provider-execution", action="store_true", help="Explicitly allow provider-backed evaluation for READY evaluate-vacancy dry-runs")
@@ -116,13 +118,16 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
                 except ValueError as exc:
                     report = _cli_error_report(str(exc))
                 else:
-                    report = run_recruiter_positioning_flow_dry_run(
+                    run_kwargs = dict(
                         evaluation_packet=evaluation_packet,
                         candidate_facts_packet=candidate_facts_packet,
                         repo_root=repo_root,
                         private_context_status=getattr(args, "private_context_status", "PRIVATE_CONTEXT_NOT_INSPECTED"),
                         allow_provider_execution=getattr(args, "allow_provider_execution", False),
                     )
+                    if getattr(args, "fake_positioning_output", False):
+                        run_kwargs["fake_positioning_result_factory"] = build_fake_positioning_packet_from_candidate_facts
+                    report = run_recruiter_positioning_flow_dry_run(**run_kwargs)
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if report.status in _READY_STATUSES else 1)
     if getattr(args, "flow", None) == "application-materials":
