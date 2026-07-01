@@ -104,6 +104,11 @@ def _build_prompt(*, skill_input: dict[str, Any], expected_schema: dict[str, Any
         "If a claim is not supported, put it in claims_to_avoid or missing_information, not allowed_claims.\n"
         "Do not return READY/success with empty allowed_claims, evidence_items, or source_references.\n"
         "If the supplied evidence is insufficient to produce a valid source-backed positioning packet, return POSITIONING_INPUT_BLOCKED rather than empty READY arrays.\n"
+        "Every evidence_items entry must include at least one source_ref_ids value.\n"
+        "Every source_ref_ids value must exactly match a source_references source_ref_id from the same output packet.\n"
+        "POSITIONING_READY is forbidden if any evidence_items entry has an empty source_ref_ids list.\n"
+        "If any evidence item cannot be source-backed, return POSITIONING_INPUT_BLOCKED.\n"
+        "Do not use placeholder, invented, or empty source reference ids.\n"
         "Required contract:\n"
         "- schema_version must be exactly recruiter_positioning_packet_v1\n"
         "- skill_id must be exactly positioning-and-evidence\n"
@@ -125,6 +130,13 @@ def _build_prompt(*, skill_input: dict[str, Any], expected_schema: dict[str, Any
         "- source_references must be a non-empty list when status is POSITIONING_READY; use [] only when status is POSITIONING_INPUT_BLOCKED\n"
         "- each source_references item must include source_ref_id, source_label, source_id_hash, section_label, support_level, and category\n"
         "- provenance must be an object\n"
+        "Concise valid JSON example:\n"
+        "{"
+        "\"status\":\"POSITIONING_READY\","
+        "\"allowed_claims\":[{\"claim_id\":\"claim-1\",\"claim_text\":\"...\",\"source_fact_ids\":[\"fact-1\"],\"support_level\":\"explicit\"}],"
+        "\"evidence_items\":[{\"claim_text\":\"...\",\"source_fact_ids\":[\"fact-1\"],\"source_ref_ids\":[\"src-1\"],\"support_level\":\"explicit\",\"category\":\"candidate_fact\",\"safe_summary\":\"...\"}],"
+        "\"source_references\":[{\"source_ref_id\":\"src-1\",\"source_label\":\"safe-fixture\",\"source_id_hash\":\"fixture-hash\",\"section_label\":\"safe-section\",\"support_level\":\"explicit\",\"category\":\"candidate_fact\"}]"
+        "}\n"
         f"Skill input JSON:\n{json.dumps(skill_input, ensure_ascii=True, sort_keys=True)}\n"
         f"Expected schema JSON:\n{json.dumps(expected_schema or {}, ensure_ascii=True, sort_keys=True)}"
     )
@@ -137,7 +149,7 @@ def _json_response_format(schema: dict[str, Any] | None) -> dict[str, Any]:
             "json_schema": {
                 "name": POSITIONING_PACKET_SCHEMA_VERSION,
                 "schema": _response_schema(schema),
-                "strict": False,
+                "strict": True,
             },
         }
     }

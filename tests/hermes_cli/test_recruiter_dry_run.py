@@ -1169,6 +1169,33 @@ def test_positioning_smoke_harness_invalid_output_fails_closed_without_leak() ->
     assert "provider_text" not in encoded
 
 
+def test_positioning_smoke_harness_rejects_ready_evidence_without_source_refs() -> None:
+    class _MissingEvidenceSourceExecutor:
+        provider_backed = True
+
+        def execute(self, *, skill_input, expected_schema):
+            packet = build_fake_positioning_packet_from_candidate_facts(skill_input)
+            packet["evidence_items"][0]["source_ref_ids"] = []
+            return packet
+
+    report = run_recruiter_positioning_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        allow_provider_execution=True,
+        executor_factory=lambda: _MissingEvidenceSourceExecutor(),
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterPositioningSmokeStatus.OUTPUT_INVALID
+    assert report.provider_called is True
+    assert report.executor_called is True
+    assert report.errors == ["positioning_packet_evidence_without_source"]
+    assert report.output_validation["status"] == "invalid"
+    assert "provider_text" not in encoded
+    assert "\"evaluation_packet\"" not in encoded
+    assert "\"candidate_facts_packet\"" not in encoded
+
+
 def test_positioning_smoke_harness_executor_exception_is_controlled() -> None:
     class _ExplodingSmokeExecutor:
         provider_backed = False
