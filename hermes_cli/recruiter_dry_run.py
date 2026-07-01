@@ -436,7 +436,7 @@ def run_recruiter_application_materials_flow_dry_run(
         context_packet=None,
         evaluation_flow=None,
         evaluation_result=None,
-        positioning_result=_sanitize_result(positioning_packet or {}) if isinstance(positioning_packet, dict) else None,
+        positioning_result=None,
         application_materials_result=None,
         missing_requirements=[],
         warnings=[],
@@ -460,6 +460,7 @@ def run_recruiter_application_materials_flow_dry_run(
 
     base_report.context_status = "READY"
     base_report.readiness = {"ready": True, "reason": "application_materials_input_ready"}
+    base_report.positioning_result = _build_positioning_packet_report_fields(positioning_packet)
     if not allow_provider_execution:
         base_report.status = RecruiterDryRunStatus.APPLICATION_MATERIALS_PROVIDER_EXECUTION_BLOCKED
         base_report.readiness["reason"] = "provider_execution_requires_explicit_opt_in"
@@ -634,6 +635,54 @@ def _sanitize_result(raw_result: dict[str, Any]) -> dict[str, Any]:
     payload = dict(raw_result)
     payload["provenance"] = dict(payload.get("provenance") or {})
     return payload
+
+
+def _build_positioning_packet_report_fields(positioning_packet: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(positioning_packet, dict):
+        return None
+    return {
+        "schema_version": str(positioning_packet.get("schema_version") or ""),
+        "status": str(positioning_packet.get("status") or ""),
+        "generation_mode": str(positioning_packet.get("generation_mode") or ""),
+        "source_kind": str(positioning_packet.get("source_kind") or ""),
+        "positioning_summary": str(positioning_packet.get("positioning_summary") or ""),
+        "recommended_angle": str(positioning_packet.get("recommended_angle") or ""),
+        "allowed_claims": [
+            {
+                "claim_id": str(item.get("claim_id") or ""),
+                "claim_text": str(item.get("claim_text") or ""),
+                "source_fact_ids": [ref for ref in _string_list(item.get("source_fact_ids")) if ref.strip()],
+                "support_level": str(item.get("support_level") or ""),
+            }
+            for item in _dict_list(positioning_packet.get("allowed_claims"))
+        ],
+        "evidence_items": [
+            {
+                "claim_text": str(item.get("claim_text") or ""),
+                "source_fact_ids": [ref for ref in _string_list(item.get("source_fact_ids")) if ref.strip()],
+                "source_ref_ids": [ref for ref in _string_list(item.get("source_ref_ids")) if ref.strip()],
+                "support_level": str(item.get("support_level") or ""),
+                "category": str(item.get("category") or ""),
+                "safe_summary": str(item.get("safe_summary") or ""),
+            }
+            for item in _dict_list(positioning_packet.get("evidence_items"))
+        ],
+        "source_references": [
+            {
+                "source_ref_id": str(item.get("source_ref_id") or ""),
+                "source_label": str(item.get("source_label") or ""),
+                "source_id_hash": str(item.get("source_id_hash") or ""),
+                "section_label": str(item.get("section_label") or ""),
+                "support_level": str(item.get("support_level") or ""),
+                "category": str(item.get("category") or ""),
+            }
+            for item in _dict_list(positioning_packet.get("source_references"))
+        ],
+        "claims_to_avoid": [item for item in _string_list(positioning_packet.get("claims_to_avoid")) if item.strip()],
+        "support_summary": dict(positioning_packet.get("support_summary") or {}),
+        "privacy_notes": [item for item in _string_list(positioning_packet.get("privacy_notes")) if item.strip()],
+        "next_step": str(positioning_packet.get("next_step") or ""),
+    }
 
 
 def _dict_list(value: Any) -> list[dict[str, Any]]:
@@ -916,6 +965,48 @@ def _validate_application_materials_input_gate(
         return "positioning_packet_status_not_ready"
     if positioning_packet.get("next_step") != "POSITIONING_READY_FOR_DOCUMENTS":
         return "positioning_packet_next_step_invalid"
+    if not isinstance(positioning_packet.get("allowed_claims"), list) or not positioning_packet["allowed_claims"]:
+        return "positioning_packet_invalid"
+    if not isinstance(positioning_packet.get("evidence_items"), list) or not positioning_packet["evidence_items"]:
+        return "positioning_packet_invalid"
+    if not isinstance(positioning_packet.get("source_references"), list) or not positioning_packet["source_references"]:
+        return "positioning_packet_invalid"
+    if not isinstance(positioning_packet.get("claims_to_avoid"), list):
+        return "positioning_packet_invalid"
+    source_ref_ids = {
+        str(ref.get("source_ref_id") or "").strip()
+        for ref in _dict_list(positioning_packet.get("source_references"))
+        if str(ref.get("source_ref_id") or "").strip()
+    }
+    if not source_ref_ids:
+        return "positioning_packet_source_ref_invalid"
+    unsupported_claims = {
+        item.casefold()
+        for item in _string_list(positioning_packet.get("unsupported_claims"))
+        if item.strip()
+    }
+    for claim in _dict_list(positioning_packet.get("allowed_claims")):
+        claim_text = str(claim.get("claim_text") or "").strip()
+        source_fact_ids = [item for item in _string_list(claim.get("source_fact_ids")) if item.strip()]
+        if not source_fact_ids:
+            return "positioning_packet_claim_without_source"
+        if claim_text and claim_text.casefold() in unsupported_claims:
+            return "positioning_packet_invalid"
+    for evidence in _dict_list(positioning_packet.get("evidence_items")):
+        claim_text = str(evidence.get("claim_text") or "").strip()
+        source_fact_ids = [item for item in _string_list(evidence.get("source_fact_ids")) if item.strip()]
+        evidence_ref_ids = [item for item in _string_list(evidence.get("source_ref_ids")) if item.strip()]
+        if not source_fact_ids:
+            return "positioning_packet_evidence_without_source"
+        if not evidence_ref_ids:
+            return "positioning_packet_evidence_without_source"
+        if not set(evidence_ref_ids).issubset(source_ref_ids):
+            return "positioning_packet_source_ref_invalid"
+        if claim_text and claim_text.casefold() in unsupported_claims:
+            return "positioning_packet_invalid"
+    unsafe_code = detect_unsafe_content(positioning_packet)
+    if unsafe_code:
+        return "positioning_packet_unsafe"
     return None
 
 

@@ -988,6 +988,170 @@ def test_application_materials_flow_cli_invalid_document_target_is_parseable_jso
     assert payload["errors"] == ["invalid_document_target"]
 
 
+def test_application_materials_flow_cli_rejects_positioning_claim_without_source(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    packet_path = tmp_path / "positioning-packet.json"
+    packet_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "recruiter_positioning_packet_v1",
+                "skill_id": "positioning-and-evidence",
+                "status": "POSITIONING_READY",
+                "positioning_summary": "Lead with executive product leadership.",
+                "target_narrative": "Operator for scaling product organizations.",
+                "evidence": ["Scaled multi-team product orgs."],
+                "gaps": [],
+                "risks_and_mitigations": [],
+                "recommended_angle": "Scale-stage executive operator.",
+                "claims_to_use": ["Led product organizations."],
+                "claims_to_avoid": [],
+                "missing_information": [],
+                "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+                "allowed_claims": [{"claim_id": "claim-1", "claim_text": "Led product organizations."}],
+                "evidence_items": [
+                    {
+                        "claim_text": "Led product organizations.",
+                        "source_fact_ids": ["fact-1"],
+                        "source_ref_ids": ["src-1"],
+                        "support_level": "explicit",
+                        "category": "leadership",
+                        "safe_summary": "Scaled multi-team product orgs.",
+                    }
+                ],
+                "unsupported_claims": [],
+                "source_references": [
+                    {
+                        "source_ref_id": "src-1",
+                        "source_label": "safe-fixture",
+                        "source_id_hash": "fixture-hash",
+                        "section_label": "safe-section",
+                        "support_level": "explicit",
+                        "category": "test_fixture",
+                    }
+                ],
+                "support_summary": {"explicit": 1, "derived_safe": 0, "weak": 0, "unsupported": 0},
+                "privacy_notes": ["sanitized fixture packet"],
+                "generation_mode": "deterministic_fake",
+                "source_kind": "fake_candidate_facts",
+                "provider_called": False,
+                "executor_called": False,
+                "provenance": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "application-materials",
+            "--positioning-packet-json",
+            str(packet_path),
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--allow-provider-execution",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.APPLICATION_MATERIALS_INPUT_BLOCKED.value
+    assert payload["errors"] == ["positioning_packet_claim_without_source"]
+
+
+def test_application_materials_flow_cli_blocks_unsafe_packet_without_echoing_raw_fields(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    packet_path = tmp_path / "positioning-packet.json"
+    packet = {
+        "schema_version": "recruiter_positioning_packet_v1",
+        "skill_id": "positioning-and-evidence",
+        "status": "POSITIONING_READY",
+        "positioning_summary": "Unsafe /Users/testleak/private/career leaktest@example.com",
+        "target_narrative": "Operator for scaling product organizations.",
+        "evidence": ["Scaled multi-team product orgs."],
+        "gaps": [],
+        "risks_and_mitigations": [],
+        "recommended_angle": "Scale-stage executive operator.",
+        "claims_to_use": ["Led product organizations."],
+        "claims_to_avoid": [],
+        "missing_information": [],
+        "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+        "allowed_claims": [
+            {
+                "claim_id": "claim-1",
+                "claim_text": "Led product organizations.",
+                "source_fact_ids": ["fact-1"],
+                "support_level": "explicit",
+            }
+        ],
+        "evidence_items": [
+            {
+                "claim_text": "Led product organizations.",
+                "source_fact_ids": ["fact-1"],
+                "source_ref_ids": ["src-1"],
+                "support_level": "explicit",
+                "category": "leadership",
+                "safe_summary": "Scaled multi-team product orgs.",
+            }
+        ],
+        "unsupported_claims": [],
+        "source_references": [
+            {
+                "source_ref_id": "src-1",
+                "source_label": "safe-fixture",
+                "source_id_hash": "fixture-hash",
+                "section_label": "safe-section",
+                "support_level": "explicit",
+                "category": "test_fixture",
+            }
+        ],
+        "support_summary": {"explicit": 1, "derived_safe": 0, "weak": 0, "unsupported": 0},
+        "privacy_notes": ["sanitized fixture packet"],
+        "generation_mode": "deterministic_fake",
+        "source_kind": "fake_candidate_facts",
+        "provider_called": False,
+        "executor_called": False,
+        "provenance": {},
+    }
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "application-materials",
+            "--positioning-packet-json",
+            str(packet_path),
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--allow-provider-execution",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.APPLICATION_MATERIALS_INPUT_BLOCKED.value
+    assert payload["errors"] == ["positioning_packet_unsafe"]
+    assert payload["positioning_result"] in (None, {})
+    encoded = json.dumps(payload, sort_keys=True)
+    assert "Unsafe /Users/testleak/private/career leaktest@example.com" not in encoded
+    assert "/Users/testleak/private/career" not in encoded
+    assert "leaktest@example.com" not in encoded
+
+
 def test_evaluation_flow_stdout_is_json_only(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(
         "hermes_cli.recruiter_dry_run_cli.run_recruiter_evaluation_flow_dry_run",
