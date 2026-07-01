@@ -65,6 +65,13 @@ def test_prompt_contains_explicit_positioning_contract() -> None:
     assert "source_references must be a non-empty list when status is POSITIONING_READY" in prompt
     assert "Every allowed claim must be backed by at least one evidence item" in prompt
     assert "Do not return READY/success with empty allowed_claims, evidence_items, or source_references" in prompt
+    assert "Every evidence_items entry must include at least one source_ref_ids value" in prompt
+    assert "Every source_ref_ids value must exactly match a source_references source_ref_id" in prompt
+    assert "POSITIONING_READY is forbidden if any evidence_items entry has an empty source_ref_ids list" in prompt
+    assert "If any evidence item cannot be source-backed, return POSITIONING_INPUT_BLOCKED" in prompt
+    assert "Do not use placeholder, invented, or empty source reference ids" in prompt
+    assert '"source_ref_id":"src-1"' in prompt
+    assert '"source_ref_ids":["src-1"]' in prompt
 
 
 def test_response_schema_requires_provenance_bearing_arrays() -> None:
@@ -128,6 +135,10 @@ def test_response_schema_requires_provenance_bearing_arrays() -> None:
     assert "allowed_claims" in required
     assert "evidence_items" in required
     assert "source_references" in required
+    assert client.calls[0]["extra_body"]["response_format"]["json_schema"]["strict"] is True
+
+    evidence_items_schema = schema["properties"]["evidence_items"]["items"]["properties"]["source_ref_ids"]
+    assert evidence_items_schema["minItems"] == 1
 
 
 def test_invalid_json_output_raises_controlled_error() -> None:
