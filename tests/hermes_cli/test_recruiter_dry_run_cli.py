@@ -61,6 +61,14 @@ def test_subparser_exists_in_main_tree() -> None:
     assert args.json is True
 
 
+def test_candidate_facts_subparser_exists_in_main_tree() -> None:
+    args = _parse_main(["recruiter-context", "candidate-facts", "--json"])
+
+    assert args.command == "recruiter-context"
+    assert args.recruiter_context_command == "candidate-facts"
+    assert args.json is True
+
+
 def test_parses_vacancy_url() -> None:
     args = _parse_direct(["recruiter-context", "dry-run", "--vacancy-url", "https://example.com/job", "--json"])
 
@@ -211,6 +219,196 @@ def test_parse_evaluation_flow_option() -> None:
 
     assert args.flow == "evaluate-vacancy"
     assert args.prompt == "Посмотри вакансию https://example.com/jobs/123"
+
+
+def test_parse_candidate_facts_fixture_option() -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "candidate-facts",
+            "--fixture-safe-facts-json",
+            "/tmp/recruiter-safe-facts-fixture.json",
+            "--json",
+        ]
+    )
+
+    assert args.fixture_safe_facts_json == "/tmp/recruiter-safe-facts-fixture.json"
+
+
+def test_candidate_facts_cli_outputs_json_only(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.recruiter_dry_run_cli.run_candidate_facts_cli",
+        lambda **kwargs: type(
+            "Packet",
+            (),
+            {
+                "status": "BLOCKED_PRIVATE_CONTEXT_MISSING",
+                "to_dict": lambda self: {
+                    "schema_version": "recruiter_candidate_facts_packet_v1",
+                    "status": "BLOCKED_PRIVATE_CONTEXT_MISSING",
+                    "provider_visibility_status": "BLOCKED_PRIVATE_CONTEXT_MISSING",
+                    "errors": ["private_context_missing"],
+                },
+            },
+        )(),
+    )
+    args = _parse_direct(["recruiter-context", "candidate-facts", "--json"])
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    stdout = capsys.readouterr().out
+    assert stdout.endswith("\n")
+    payload = json.loads(stdout)
+    assert payload["status"] == "BLOCKED_PRIVATE_CONTEXT_MISSING"
+
+
+def test_candidate_facts_cli_does_not_echo_fixture_path(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.recruiter_dry_run_cli.run_candidate_facts_cli",
+        lambda **kwargs: type(
+            "Packet",
+            (),
+            {
+                "status": "READY_PROVIDER_VISIBLE",
+                "to_dict": lambda self: {
+                    "schema_version": "recruiter_candidate_facts_packet_v1",
+                    "status": "READY_PROVIDER_VISIBLE",
+                    "provider_visibility_status": "READY_PROVIDER_VISIBLE",
+                    "source_references": [
+                        {
+                            "source_ref_id": "src-1",
+                            "source_label": "safe_fixture",
+                            "source_id_hash": "fixture-hash",
+                            "section_label": "safe_section",
+                        }
+                    ],
+                },
+            },
+        )(),
+    )
+    fixture_path = "/tmp/recruiter-safe-facts-fixture.json"
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "candidate-facts",
+            "--fixture-safe-facts-json",
+            fixture_path,
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 0
+    stdout = capsys.readouterr().out
+    assert fixture_path not in stdout
+
+
+def test_candidate_facts_cli_unsafe_fixture_output_redacts_raw_strings(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.recruiter_dry_run_cli.run_candidate_facts_cli",
+        lambda **kwargs: type(
+            "Packet",
+            (),
+            {
+                "status": "BLOCKED_UNSAFE_CONTENT",
+                "to_dict": lambda self: {
+                    "schema_version": "recruiter_candidate_facts_packet_v1",
+                    "status": "BLOCKED_UNSAFE_CONTENT",
+                    "provider_visibility_status": "BLOCKED_UNSAFE_CONTENT",
+                    "errors": ["unsafe_path_detected", "unsafe_contact_detected"],
+                    "facts": [],
+                    "source_references": [],
+                    "allowed_claims": [],
+                    "claims_to_avoid": [],
+                    "unsupported_claims": [],
+                    "next_step": "CANDIDATE_FACTS_UNSAFE_CONTENT_REDACTED",
+                },
+            },
+        )(),
+    )
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "candidate-facts",
+            "--fixture-safe-facts-json",
+            "/tmp/recruiter-unsafe-facts-review-fixture.json",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    stdout = capsys.readouterr().out
+    assert "/home/hermes" not in stdout
+    assert ".hermes/private" not in stdout
+    assert "candidate@example.com" not in stdout
+    assert "+7 701 110 2626" not in stdout
+    assert "~/" not in stdout
+
+
+def test_candidate_facts_cli_candidate_ref_redactions_bypass_output_is_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.recruiter_dry_run_cli.run_candidate_facts_cli",
+        lambda **kwargs: type(
+            "Packet",
+            (),
+            {
+                "status": "BLOCKED_UNSAFE_CONTENT",
+                "to_dict": lambda self: {
+                    "schema_version": "recruiter_candidate_facts_packet_v1",
+                    "status": "BLOCKED_UNSAFE_CONTENT",
+                    "provider_visibility_status": "BLOCKED_UNSAFE_CONTENT",
+                    "candidate_ref": "candidate-redacted",
+                    "errors": ["unsafe_path_detected", "unsafe_contact_detected"],
+                    "facts": [],
+                    "source_references": [],
+                    "allowed_claims": [],
+                    "claims_to_avoid": [],
+                    "unsupported_claims": [],
+                    "redactions": ["unsafe_fixture_content_redacted:fact_count=1"],
+                    "next_step": "CANDIDATE_FACTS_UNSAFE_CONTENT_REDACTED",
+                },
+            },
+        )(),
+    )
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "candidate-facts",
+            "--fixture-safe-facts-json",
+            "/tmp/recruiter-candidate-ref-redactions-bypass-fixture.json",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    stdout = capsys.readouterr().out
+    json.loads(stdout)
+    assert "/home/hermes" not in stdout
+    assert ".hermes/private" not in stdout
+    assert "candidate@example.com" not in stdout
+    assert "+7 701 110 2626" not in stdout
 
 
 def test_parse_positioning_flow_and_evaluation_packet_json_option() -> None:
