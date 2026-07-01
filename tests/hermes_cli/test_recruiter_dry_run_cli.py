@@ -446,6 +446,25 @@ def test_parse_positioning_flow_candidate_facts_packet_option() -> None:
     assert args.candidate_facts_packet_json == "/tmp/candidate-facts-packet.json"
 
 
+def test_parse_positioning_flow_fake_output_option() -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "positioning-and-evidence",
+            "--evaluation-packet-json",
+            "/tmp/evaluation-packet.json",
+            "--candidate-facts-packet-json",
+            "/tmp/candidate-facts-packet.json",
+            "--fake-positioning-output",
+            "--json",
+        ]
+    )
+
+    assert args.fake_positioning_output is True
+
+
 def test_parse_application_materials_flow_and_positioning_packet_json_option() -> None:
     args = _parse_direct(
         [
@@ -758,6 +777,126 @@ def test_application_materials_flow_cli_returns_controlled_json(
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == RecruiterDryRunStatus.APPLICATION_MATERIALS_READY.value
     assert payload["application_materials_result"]["schema_version"] == "recruiter_application_materials_packet_v1"
+
+
+def test_positioning_flow_cli_fake_output_path_returns_controlled_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    evaluation_path = tmp_path / "evaluation-packet.json"
+    candidate_facts_path = tmp_path / "candidate-facts-packet.json"
+    evaluation_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "recruiter_vacancy_evaluation_packet_v1",
+                "skill_id": "vacancy-evaluation",
+                "status": "EVALUATION_READY",
+                "recommendation": "APPLY",
+                "fit_assessment": "Strong fit.",
+                "strengths": ["Executive product leadership match."],
+                "risks": ["Team size not confirmed."],
+                "evidence": ["Prompt contained a vacancy URL."],
+                "missing_information": [],
+                "next_step": "PROCEED_TO_POSITIONING",
+                "provenance": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    candidate_facts_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "recruiter_candidate_facts_packet_v1",
+                "skill_id": "candidate-facts",
+                "status": "READY_PROVIDER_VISIBLE",
+                "candidate_ref": "candidate-test",
+                "generated_at": "2026-07-01T00:00:00+00:00",
+                "source_policy": {},
+                "requires_user_approval": False,
+                "provider_visibility_status": "READY_PROVIDER_VISIBLE",
+                "facts": [
+                    {
+                        "fact_id": "fact-1",
+                        "category": "domain",
+                        "safe_summary": "Product and commercial leadership experience",
+                        "provider_text": "Candidate has product and commercial leadership experience in digital services.",
+                        "support_level": "explicit",
+                        "source_ref_ids": ["src-1"],
+                        "forbidden_expansions": ["Do not infer revenue ownership"],
+                        "approval_required": False,
+                        "provider_visible": True,
+                        "log_visible": False,
+                    }
+                ],
+                "source_references": [
+                    {
+                        "source_ref_id": "src-1",
+                        "source_type": "test_fixture",
+                        "source_label": "safe-fixture",
+                        "source_id_hash": "fixture-hash",
+                        "section_label": "safe-section",
+                        "content_hash": "fixture-content-hash",
+                        "sensitivity": "private_sanitized",
+                        "provider_visible": True,
+                        "log_visible": True,
+                    }
+                ],
+                "allowed_claims": [
+                    {
+                        "claim_id": "claim-1",
+                        "claim_text": "Product and commercial leadership experience in digital services.",
+                        "source_fact_ids": ["fact-1"],
+                        "support_level": "explicit",
+                    }
+                ],
+                "claims_to_avoid": ["Do not claim revenue ownership."],
+                "unsupported_claims": [],
+                "redactions": [],
+                "support_summary": {"explicit": 1, "derived_safe": 0, "weak": 0, "unsupported": 0},
+                "role_target_context": {},
+                "privacy_notes": ["sanitized fixture packet"],
+                "next_step": "CANDIDATE_FACTS_READY_FOR_POSITIONING",
+                "errors": [],
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "positioning-and-evidence",
+            "--evaluation-packet-json",
+            str(evaluation_path),
+            "--candidate-facts-packet-json",
+            str(candidate_facts_path),
+            "--fake-positioning-output",
+            "--private-context-status",
+            "PRIVATE_CONTEXT_AVAILABLE",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterDryRunStatus.POSITIONING_READY.value
+    assert payload["provider_called"] is False
+    assert payload["executor_called"] is True
+    assert payload["positioning_result"]["generation_mode"] == "deterministic_fake"
+    assert payload["positioning_result"]["provider_called"] is False
+    assert payload["positioning_result"]["executor_called"] is False
+    encoded = json.dumps(payload, sort_keys=True)
+    assert "provider_text" not in encoded
+    assert "\"candidate_facts_packet\"" not in encoded
+    assert "/home/" not in encoded
+    assert "/Users/" not in encoded
 
 
 def test_application_materials_flow_cli_passes_document_target(
