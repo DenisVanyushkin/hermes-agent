@@ -13,9 +13,13 @@ from .recruiter_context import (
 from .recruiter_candidate_facts import validate_candidate_facts_ready_for_positioning
 from .recruiter_application_materials_flow import (
     APPLICATION_MATERIAL_TARGETS,
+    APPLICATION_MATERIALS_DOCUMENT_TYPES,
     APPLICATION_MATERIALS_PACKET_SCHEMA_VERSION,
+    RecruiterApplicationMaterialsReport,
+    RecruiterApplicationMaterialsStatus,
     run_recruiter_application_materials_flow,
 )
+from .recruiter_document_execution import DOCUMENT_PACKET_SCHEMA_VERSION, RecruiterDocumentExecutionStatus
 from .recruiter_evaluation_provider_executor import (
     REQUIRED_VACANCY_EVALUATION_PACKET_FIELDS,
     VACANCY_EVALUATION_PACKET_SCHEMA_VERSION,
@@ -79,6 +83,13 @@ class RecruiterPositioningSmokeStatus(str, Enum):
     INPUT_BLOCKED = "POSITIONING_SMOKE_INPUT_BLOCKED"
     OUTPUT_INVALID = "POSITIONING_SMOKE_OUTPUT_INVALID"
     READY = "POSITIONING_SMOKE_READY"
+
+
+class RecruiterApplicationMaterialsSmokeStatus(str, Enum):
+    READY_PROVIDER_BLOCKED = "APPLICATION_MATERIALS_SMOKE_READY_PROVIDER_BLOCKED"
+    INPUT_BLOCKED = "APPLICATION_MATERIALS_SMOKE_INPUT_BLOCKED"
+    OUTPUT_INVALID = "APPLICATION_MATERIALS_SMOKE_OUTPUT_INVALID"
+    READY = "APPLICATION_MATERIALS_SMOKE_READY"
 
 
 @dataclass(slots=True)
@@ -145,6 +156,32 @@ class RecruiterPositioningSmokeReport:
     input_validation: dict[str, Any]
     output_validation: dict[str, Any]
     positioning_packet_summary: dict[str, Any] | None = None
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    forbidden_actions: list[str] = field(default_factory=lambda: list(_FORBIDDEN_ACTIONS))
+    next_allowed_actions: list[str] = field(default_factory=list)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["status"] = self.status.value
+        return data
+
+
+@dataclass(slots=True)
+class RecruiterApplicationMaterialsSmokeReport:
+    schema_version: str
+    status: RecruiterApplicationMaterialsSmokeStatus
+    readiness_reason: str
+    document_target: str | None
+    provider_allowed: bool
+    provider_called: bool
+    executor_called: bool
+    reviewer_called: bool
+    input_validation: dict[str, Any]
+    output_validation: dict[str, Any]
+    document_summary: dict[str, Any] | None = None
+    review_summary: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     forbidden_actions: list[str] = field(default_factory=lambda: list(_FORBIDDEN_ACTIONS))
@@ -540,6 +577,112 @@ def run_recruiter_positioning_smoke_harness(
     base_report.errors = []
     base_report.output_validation = {"ready": True, "status": "valid", "errors": []}
     base_report.next_allowed_actions = ["review_positioning_packet_manually"]
+    return base_report
+
+
+def run_recruiter_application_materials_smoke_harness(
+    *,
+    positioning_packet: dict[str, Any] | None,
+    repo_root: str | Path | None = None,
+    private_context_status: str = "PRIVATE_CONTEXT_AVAILABLE",
+    allow_provider_execution: bool = False,
+    document_target: str | None = None,
+    executor_factory: Callable[[], Any] | None = None,
+) -> RecruiterApplicationMaterialsSmokeReport:
+    input_errors: list[str] = []
+    target_error = _validate_application_materials_target(document_target)
+    if target_error is not None:
+        input_errors.append(target_error)
+    positioning_error = _validate_application_materials_input_gate(positioning_packet, private_context_status)
+    if positioning_error is not None:
+        input_errors.append(positioning_error)
+
+    base_report = RecruiterApplicationMaterialsSmokeReport(
+        schema_version="recruiter_application_materials_smoke_report_v1",
+        status=RecruiterApplicationMaterialsSmokeStatus.INPUT_BLOCKED,
+        readiness_reason="application_materials_smoke_input_not_ready",
+        document_target=document_target,
+        provider_allowed=allow_provider_execution,
+        provider_called=False,
+        executor_called=False,
+        reviewer_called=False,
+        input_validation={
+            "ready": not input_errors,
+            "positioning_packet_ready": positioning_error is None,
+            "document_target_ready": target_error is None,
+            "errors": list(input_errors),
+        },
+        output_validation={"ready": False, "status": "not_run", "errors": []},
+        warnings=[],
+        errors=list(input_errors),
+        next_allowed_actions=[],
+        provenance={"writes_performed": False, "dry_run": True, "flow": "application-materials-smoke"},
+    )
+    if input_errors:
+        base_report.readiness_reason = input_errors[0]
+        return base_report
+
+    base_report.status = RecruiterApplicationMaterialsSmokeStatus.READY_PROVIDER_BLOCKED
+    base_report.readiness_reason = "provider_execution_requires_explicit_opt_in"
+    base_report.next_allowed_actions = ["rerun_with_allow_provider_execution"]
+    if not allow_provider_execution:
+        return base_report
+
+    if executor_factory is None:
+        from .recruiter_document_provider_executor import build_recruiter_document_provider_executor
+
+        executor_factory = build_recruiter_document_provider_executor
+
+    try:
+        executor = executor_factory()
+        base_report.executor_called = True
+        base_report.provider_called = bool(getattr(executor, "provider_backed", True))
+        flow_report = run_recruiter_application_materials_flow(
+            positioning_packet=dict(positioning_packet or {}),
+            allow_document_execution=True,
+            document_target=document_target,
+            executor=executor,
+        )
+    except ValueError as exc:
+        base_report.status = RecruiterApplicationMaterialsSmokeStatus.OUTPUT_INVALID
+        base_report.readiness_reason = str(exc)
+        base_report.errors = [str(exc)]
+        base_report.output_validation = {"ready": False, "status": "invalid", "errors": [str(exc)]}
+        return base_report
+    except Exception:
+        base_report.status = RecruiterApplicationMaterialsSmokeStatus.OUTPUT_INVALID
+        base_report.readiness_reason = "application_materials_executor_failed"
+        base_report.errors = ["application_materials_executor_failed"]
+        base_report.output_validation = {
+            "ready": False,
+            "status": "invalid",
+            "errors": ["application_materials_executor_failed"],
+        }
+        return base_report
+
+    base_report.reviewer_called = bool(flow_report.reviewer_called)
+    base_report.document_summary = _build_application_materials_document_summary(flow_report, document_target=document_target)
+    base_report.review_summary = _build_application_materials_review_summary(flow_report)
+    output_error = _validate_application_materials_smoke_output(flow_report, document_target=document_target)
+    report_safe_output = {
+        "document_summary": base_report.document_summary,
+        "review_summary": base_report.review_summary,
+    }
+    unsafe_output = detect_unsafe_content(report_safe_output)
+    if unsafe_output:
+        output_error = "application_materials_smoke_output_unsafe"
+    if output_error is not None:
+        base_report.status = RecruiterApplicationMaterialsSmokeStatus.OUTPUT_INVALID
+        base_report.readiness_reason = output_error
+        base_report.errors = [output_error]
+        base_report.output_validation = {"ready": False, "status": "invalid", "errors": [output_error]}
+        return base_report
+
+    base_report.status = RecruiterApplicationMaterialsSmokeStatus.READY
+    base_report.readiness_reason = "application_materials_smoke_ready"
+    base_report.errors = []
+    base_report.output_validation = {"ready": True, "status": "valid", "errors": []}
+    base_report.next_allowed_actions = ["review_application_materials_packet_manually"]
     return base_report
 
 
@@ -1121,6 +1264,14 @@ def _application_materials_downstream_gates(*, controlled_document_dry_run_enabl
     }
 
 
+def _validate_application_materials_target(document_target: str | None) -> str | None:
+    if document_target is None:
+        return None
+    if document_target not in APPLICATION_MATERIAL_TARGETS:
+        return "invalid_document_target"
+    return None
+
+
 def _validate_application_materials_input_gate(
     positioning_packet: dict[str, Any] | None,
     private_context_status: str,
@@ -1128,6 +1279,104 @@ def _validate_application_materials_input_gate(
     if private_context_status != "PRIVATE_CONTEXT_AVAILABLE":
         return "private_context_not_ready_for_application_materials"
     return _validate_positioning_packet_contract(positioning_packet)
+
+
+def _validate_application_materials_smoke_output(
+    flow_report: RecruiterApplicationMaterialsReport,
+    *,
+    document_target: str | None,
+) -> str | None:
+    if flow_report.schema_version != APPLICATION_MATERIALS_PACKET_SCHEMA_VERSION:
+        return "application_materials_schema_version_invalid"
+    if flow_report.status != RecruiterApplicationMaterialsStatus.READY.value:
+        if flow_report.errors:
+            first_error = str(flow_report.errors[0])
+            if first_error.startswith("document_writer_execution_failed:") or first_error.startswith(
+                "document_reviewer_execution_failed:"
+            ):
+                return "application_materials_executor_failed"
+            return first_error
+        return "application_materials_output_invalid"
+    if not flow_report.writer_called:
+        return "application_materials_writer_not_called"
+    if not flow_report.reviewer_called:
+        return "application_materials_reviewer_not_called"
+
+    expected_targets = [document_target] if document_target is not None else list(APPLICATION_MATERIAL_TARGETS)
+    document_runs = dict(flow_report.document_runs)
+    if sorted(document_runs) != sorted(expected_targets):
+        return "application_materials_document_target_mismatch"
+    for target in expected_targets:
+        run_payload = dict(document_runs.get(target) or {})
+        document_type = APPLICATION_MATERIALS_DOCUMENT_TYPES[target]
+        if run_payload.get("document_type") != document_type:
+            return "application_materials_document_target_mismatch"
+        if run_payload.get("status") != RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_APPROVED.value:
+            return "application_materials_output_invalid"
+        document_packet = dict(run_payload.get("document_packet") or {})
+        if document_packet.get("schema_version") != DOCUMENT_PACKET_SCHEMA_VERSION:
+            return "document_packet_schema_version_invalid"
+        if document_packet.get("document_type") != document_type:
+            return "application_materials_document_target_mismatch"
+        if document_packet.get("status") != "DRAFT_READY":
+            return "application_materials_output_invalid"
+        draft = dict(document_packet.get("draft") or {})
+        if draft.get("format") != "text":
+            return "application_materials_output_invalid"
+        if not isinstance(draft.get("content"), str) or not str(draft.get("content") or "").strip():
+            return "application_materials_output_invalid"
+        if not isinstance(draft.get("notes"), list):
+            return "application_materials_output_invalid"
+        review_result = dict(run_payload.get("review_result") or {})
+        if review_result.get("verdict") != "APPROVE":
+            return "application_materials_review_not_approved"
+        if review_result.get("status") not in {"SUCCESS", "REVIEW_REQUIRED"}:
+            return "application_materials_review_output_invalid"
+        if review_result.get("unsupported_claims"):
+            return "application_materials_review_output_invalid"
+    return None
+
+
+def _build_application_materials_document_summary(
+    flow_report: RecruiterApplicationMaterialsReport,
+    *,
+    document_target: str | None,
+) -> dict[str, Any]:
+    document_runs = dict(flow_report.document_runs)
+    target_keys = [document_target] if document_target is not None else list(document_runs)
+    documents: dict[str, Any] = {}
+    for target in target_keys:
+        run_payload = dict(document_runs.get(target) or {})
+        document_packet = dict(run_payload.get("document_packet") or {})
+        draft = dict(document_packet.get("draft") or {})
+        documents[target] = {
+            "document_type": str(run_payload.get("document_type") or ""),
+            "draft_status": str(document_packet.get("status") or ""),
+            "draft_format": str(draft.get("format") or ""),
+            "content_present": bool(str(draft.get("content") or "").strip()),
+            "note_count": len(_string_list(draft.get("notes"))),
+            "user_review_required": True,
+        }
+    return {
+        "generated_targets": list(documents),
+        "documents": documents,
+    }
+
+
+def _build_application_materials_review_summary(
+    flow_report: RecruiterApplicationMaterialsReport,
+) -> dict[str, Any]:
+    reviewer_verdicts: dict[str, str] = {}
+    unsupported_claims_present = False
+    for target, run_payload in dict(flow_report.document_runs).items():
+        review_result = dict((dict(run_payload).get("review_result")) or {})
+        reviewer_verdicts[str(target)] = str(review_result.get("verdict") or "")
+        unsupported_claims_present = unsupported_claims_present or bool(review_result.get("unsupported_claims"))
+    return {
+        "verdict": str((flow_report.review or {}).get("verdict") or ""),
+        "reviewer_verdicts": reviewer_verdicts,
+        "unsupported_claims_present": unsupported_claims_present,
+    }
 
 
 def _validate_positioning_packet_contract(positioning_packet: dict[str, Any] | None) -> str | None:

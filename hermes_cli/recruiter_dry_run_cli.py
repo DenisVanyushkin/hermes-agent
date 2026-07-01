@@ -7,6 +7,8 @@ from pathlib import Path
 
 from .recruiter_candidate_facts import load_candidate_facts_packet, run_candidate_facts_cli
 from .recruiter_dry_run import (
+    RecruiterApplicationMaterialsSmokeReport,
+    RecruiterApplicationMaterialsSmokeStatus,
     RecruiterDryRunReport,
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
@@ -14,6 +16,7 @@ from .recruiter_dry_run import (
     RecruiterPositioningSmokeStatus,
     _evaluation_downstream_gates,
     build_fake_positioning_packet_from_candidate_facts,
+    run_recruiter_application_materials_smoke_harness,
     run_recruiter_application_materials_flow_dry_run,
     run_recruiter_context_dry_run,
     run_recruiter_evaluation_flow_dry_run,
@@ -30,6 +33,7 @@ _READY_STATUSES = {
 }
 _READY_SMOKE_STATUSES = {
     RecruiterPositioningSmokeStatus.READY,
+    RecruiterApplicationMaterialsSmokeStatus.READY,
 }
 _READY_PACKET_STATUSES = {"READY_PROVIDER_VISIBLE"}
 
@@ -98,6 +102,22 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     smoke_positioning.add_argument("--repo-root", default=None, help="Override repo root used for recruiter package discovery")
     smoke_positioning.add_argument("--json", action="store_true", help="Print JSON output (default behavior)")
     smoke_positioning.set_defaults(func=cmd_recruiter_context)
+    smoke_application_materials = nested.add_parser(
+        "smoke-application-materials",
+        help="Print a JSON provider-ready application materials smoke report",
+    )
+    smoke_application_materials.add_argument("--positioning-packet-json", required=True, help="Read only this positioning packet JSON file")
+    smoke_application_materials.add_argument("--document-target", default=None, help="Optional application-materials document target")
+    smoke_application_materials.add_argument("--allow-provider-execution", action="store_true", help="Explicitly allow application-materials executor invocation")
+    smoke_application_materials.add_argument(
+        "--private-context-status",
+        choices=["PRIVATE_CONTEXT_AVAILABLE", "PRIVATE_CONTEXT_MISSING", "PRIVATE_CONTEXT_NOT_INSPECTED"],
+        default="PRIVATE_CONTEXT_AVAILABLE",
+        help="Optional private context readiness metadata forwarded to the executor seam",
+    )
+    smoke_application_materials.add_argument("--repo-root", default=None, help="Override repo root used for recruiter package discovery")
+    smoke_application_materials.add_argument("--json", action="store_true", help="Print JSON output (default behavior)")
+    smoke_application_materials.set_defaults(func=cmd_recruiter_context)
     return parser
 
 
@@ -111,6 +131,10 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
         raise SystemExit(0 if packet.status in _READY_PACKET_STATUSES else 1)
     if getattr(args, "recruiter_context_command", None) == "smoke-positioning":
         report = _run_positioning_smoke_report(args, repo_root)
+        sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
+        raise SystemExit(0 if report.status in _READY_SMOKE_STATUSES else 1)
+    if getattr(args, "recruiter_context_command", None) == "smoke-application-materials":
+        report = _run_application_materials_smoke_report(args, repo_root)
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if report.status in _READY_SMOKE_STATUSES else 1)
     if getattr(args, "flow", None) == "evaluate-vacancy":
@@ -270,4 +294,54 @@ def _positioning_smoke_cli_error_report(error: str) -> RecruiterPositioningSmoke
         warnings=[],
         next_allowed_actions=[],
         provenance={"writes_performed": False, "dry_run": True, "flow": "positioning-smoke"},
+    )
+
+
+def _run_application_materials_smoke_report(
+    args: argparse.Namespace,
+    repo_root: Path | None,
+) -> RecruiterApplicationMaterialsSmokeReport:
+    try:
+        positioning_packet = json.loads(Path(getattr(args, "positioning_packet_json")).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _application_materials_smoke_cli_error_report("positioning_packet_json_missing", document_target=getattr(args, "document_target", None))
+    except json.JSONDecodeError:
+        return _application_materials_smoke_cli_error_report("positioning_packet_json_invalid", document_target=getattr(args, "document_target", None))
+
+    return run_recruiter_application_materials_smoke_harness(
+        positioning_packet=positioning_packet,
+        repo_root=repo_root,
+        private_context_status=getattr(args, "private_context_status", "PRIVATE_CONTEXT_AVAILABLE"),
+        allow_provider_execution=getattr(args, "allow_provider_execution", False),
+        document_target=getattr(args, "document_target", None),
+    )
+
+
+def _application_materials_smoke_cli_error_report(
+    error: str,
+    *,
+    document_target: str | None,
+) -> RecruiterApplicationMaterialsSmokeReport:
+    return RecruiterApplicationMaterialsSmokeReport(
+        schema_version="recruiter_application_materials_smoke_report_v1",
+        status=RecruiterApplicationMaterialsSmokeStatus.INPUT_BLOCKED,
+        readiness_reason=error,
+        document_target=document_target,
+        provider_allowed=False,
+        provider_called=False,
+        executor_called=False,
+        reviewer_called=False,
+        input_validation={
+            "ready": False,
+            "positioning_packet_ready": False,
+            "document_target_ready": error != "invalid_document_target",
+            "errors": [error],
+        },
+        output_validation={"ready": False, "status": "not_run", "errors": []},
+        document_summary=None,
+        review_summary=None,
+        errors=[error],
+        warnings=[],
+        next_allowed_actions=[],
+        provenance={"writes_performed": False, "dry_run": True, "flow": "application-materials-smoke"},
     )

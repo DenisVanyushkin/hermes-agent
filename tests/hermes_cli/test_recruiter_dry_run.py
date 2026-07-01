@@ -14,8 +14,10 @@ from hermes_cli.recruiter_context import (
 from hermes_cli.recruiter_dry_run import (
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
+    RecruiterApplicationMaterialsSmokeStatus,
     RecruiterPositioningSmokeStatus,
     build_fake_positioning_packet_from_candidate_facts,
+    run_recruiter_application_materials_smoke_harness,
     run_recruiter_application_materials_flow_dry_run,
     run_recruiter_context_dry_run,
     run_recruiter_evaluation_flow_dry_run,
@@ -1125,4 +1127,81 @@ def test_positioning_smoke_harness_executor_exception_is_controlled() -> None:
     encoded = json.dumps(report.to_dict(), sort_keys=True)
     assert report.status is RecruiterPositioningSmokeStatus.OUTPUT_INVALID
     assert report.errors == ["positioning_executor_failed"]
+    assert "Traceback" not in encoded
+
+
+def test_application_materials_smoke_harness_blocks_provider_by_default() -> None:
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        document_target="recruiter_message_draft",
+    )
+
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.READY_PROVIDER_BLOCKED
+    assert report.provider_allowed is False
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.reviewer_called is False
+    assert report.document_target == "recruiter_message_draft"
+    assert report.output_validation["status"] == "not_run"
+    assert report.document_summary is None
+    assert report.review_summary is None
+
+
+def test_application_materials_smoke_harness_runs_fake_executor_when_opted_in() -> None:
+    executor = _ApplicationMaterialsExecutor()
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        allow_provider_execution=True,
+        document_target="recruiter_message_draft",
+        executor_factory=lambda: executor,
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.READY
+    assert report.provider_allowed is True
+    assert report.provider_called is False
+    assert report.executor_called is True
+    assert report.reviewer_called is True
+    assert report.output_validation["status"] == "valid"
+    assert report.document_summary["generated_targets"] == ["recruiter_message_draft"]
+    assert report.document_summary["documents"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
+    assert report.review_summary["reviewer_verdicts"]["recruiter_message_draft"] == "APPROVE"
+    assert "provider_text" not in encoded
+    assert "\"positioning_packet\"" not in encoded
+
+
+def test_application_materials_smoke_harness_invalid_output_fails_closed_without_leak() -> None:
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        allow_provider_execution=True,
+        document_target="recruiter_message_draft",
+        executor_factory=lambda: _ApplicationMaterialsExecutor(invalid_writer=True),
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.OUTPUT_INVALID
+    assert report.provider_called is False
+    assert report.executor_called is True
+    assert report.reviewer_called is False
+    assert report.errors == ["writer_schema_version_invalid"]
+    assert "provider_text" not in encoded
+
+
+def test_application_materials_smoke_harness_executor_exception_is_controlled() -> None:
+    class _ExplodingApplicationMaterialsExecutor:
+        provider_backed = False
+
+        def execute(self, *, skill_id, skill_input, expected_schema):
+            raise RuntimeError("boom")
+
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        allow_provider_execution=True,
+        document_target="recruiter_message_draft",
+        executor_factory=lambda: _ExplodingApplicationMaterialsExecutor(),
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.OUTPUT_INVALID
+    assert report.errors == ["application_materials_executor_failed"]
     assert "Traceback" not in encoded
