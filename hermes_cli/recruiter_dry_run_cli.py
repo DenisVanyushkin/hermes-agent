@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .recruiter_candidate_facts import load_candidate_facts_packet, run_candidate_facts_cli
 from .recruiter_dry_run import (
+    REQUIRED_APPLICATION_MATERIAL_TARGETS,
     RecruiterApplicationMaterialsSmokeReport,
     RecruiterApplicationMaterialsSmokeStatus,
     RecruiterDryRunReport,
@@ -107,6 +108,7 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
         help="Print a JSON provider-ready application materials smoke report",
     )
     smoke_application_materials.add_argument("--positioning-packet-json", required=True, help="Read only this positioning packet JSON file")
+    smoke_application_materials.add_argument("--all-required-targets", action="store_true", help="Verify exactly the required MVP application-material targets")
     smoke_application_materials.add_argument("--document-target", default=None, help="Optional application-materials document target")
     smoke_application_materials.add_argument("--allow-provider-execution", action="store_true", help="Explicitly allow application-materials executor invocation")
     smoke_application_materials.add_argument(
@@ -304,15 +306,24 @@ def _run_application_materials_smoke_report(
     try:
         positioning_packet = json.loads(Path(getattr(args, "positioning_packet_json")).read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return _application_materials_smoke_cli_error_report("positioning_packet_json_missing", document_target=getattr(args, "document_target", None))
+        return _application_materials_smoke_cli_error_report(
+            "positioning_packet_json_missing",
+            document_target=getattr(args, "document_target", None),
+            all_required_targets=getattr(args, "all_required_targets", False),
+        )
     except json.JSONDecodeError:
-        return _application_materials_smoke_cli_error_report("positioning_packet_json_invalid", document_target=getattr(args, "document_target", None))
+        return _application_materials_smoke_cli_error_report(
+            "positioning_packet_json_invalid",
+            document_target=getattr(args, "document_target", None),
+            all_required_targets=getattr(args, "all_required_targets", False),
+        )
 
     return run_recruiter_application_materials_smoke_harness(
         positioning_packet=positioning_packet,
         repo_root=repo_root,
         private_context_status=getattr(args, "private_context_status", "PRIVATE_CONTEXT_AVAILABLE"),
         allow_provider_execution=getattr(args, "allow_provider_execution", False),
+        all_required_targets=getattr(args, "all_required_targets", False),
         document_target=getattr(args, "document_target", None),
     )
 
@@ -321,12 +332,16 @@ def _application_materials_smoke_cli_error_report(
     error: str,
     *,
     document_target: str | None,
+    all_required_targets: bool,
 ) -> RecruiterApplicationMaterialsSmokeReport:
     return RecruiterApplicationMaterialsSmokeReport(
         schema_version="recruiter_application_materials_smoke_report_v1",
         status=RecruiterApplicationMaterialsSmokeStatus.INPUT_BLOCKED,
         readiness_reason=error,
+        target_mode="all_required_targets" if all_required_targets else "single_target",
         document_target=document_target,
+        required_targets=list(REQUIRED_APPLICATION_MATERIAL_TARGETS),
+        target_results={},
         provider_allowed=False,
         provider_called=False,
         executor_called=False,
@@ -335,6 +350,7 @@ def _application_materials_smoke_cli_error_report(
             "ready": False,
             "positioning_packet_ready": False,
             "document_target_ready": error != "invalid_document_target",
+            "target_mode_ready": error != "application_materials_target_mode_conflict",
             "errors": [error],
         },
         output_validation={"ready": False, "status": "not_run", "errors": []},

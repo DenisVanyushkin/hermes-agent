@@ -12,6 +12,7 @@ from hermes_cli.recruiter_context import (
     RecruiterContextStatus,
 )
 from hermes_cli.recruiter_dry_run import (
+    REQUIRED_APPLICATION_MATERIAL_TARGETS,
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
     RecruiterApplicationMaterialsSmokeStatus,
@@ -1205,3 +1206,76 @@ def test_application_materials_smoke_harness_executor_exception_is_controlled() 
     assert report.status is RecruiterApplicationMaterialsSmokeStatus.OUTPUT_INVALID
     assert report.errors == ["application_materials_executor_failed"]
     assert "Traceback" not in encoded
+
+
+def test_required_application_material_targets_are_exact_and_stable() -> None:
+    assert REQUIRED_APPLICATION_MATERIAL_TARGETS == (
+        "recruiter_message_draft",
+        "cover_letter_draft",
+        "cv_tailoring_notes",
+    )
+    assert len(REQUIRED_APPLICATION_MATERIAL_TARGETS) == len(set(REQUIRED_APPLICATION_MATERIAL_TARGETS))
+
+
+def test_application_materials_smoke_harness_all_required_targets_blocked_by_default() -> None:
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        all_required_targets=True,
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.READY_PROVIDER_BLOCKED
+    assert report.provider_allowed is False
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.reviewer_called is False
+    assert report.target_mode == "all_required_targets"
+    assert report.document_target is None
+    assert report.required_targets == list(REQUIRED_APPLICATION_MATERIAL_TARGETS)
+    assert sorted(report.target_results) == sorted(REQUIRED_APPLICATION_MATERIAL_TARGETS)
+    assert {payload["status"] for payload in report.target_results.values()} == {"provider_blocked"}
+    assert "provider_text" not in encoded
+    assert "\"positioning_packet\"" not in encoded
+
+
+def test_application_materials_smoke_harness_conflicting_target_modes_fail_closed() -> None:
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        all_required_targets=True,
+        document_target="recruiter_message_draft",
+    )
+
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.INPUT_BLOCKED
+    assert report.errors == ["application_materials_target_mode_conflict"]
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.reviewer_called is False
+
+
+def test_application_materials_smoke_harness_all_required_targets_runs_fake_executor() -> None:
+    executor = _ApplicationMaterialsExecutor()
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        allow_provider_execution=True,
+        all_required_targets=True,
+        executor_factory=lambda: executor,
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.READY
+    assert report.provider_allowed is True
+    assert report.provider_called is False
+    assert report.executor_called is True
+    assert report.reviewer_called is True
+    assert report.target_mode == "all_required_targets"
+    assert report.required_targets == list(REQUIRED_APPLICATION_MATERIAL_TARGETS)
+    assert sorted(report.target_results) == sorted(REQUIRED_APPLICATION_MATERIAL_TARGETS)
+    for target in REQUIRED_APPLICATION_MATERIAL_TARGETS:
+        target_result = report.target_results[target]
+        assert target_result["status"] == "ready"
+        assert target_result["draft_only"] is True
+        assert target_result["user_review_required"] is True
+        assert target_result["reviewer_verdict"] == "APPROVE"
+        assert target_result["reviewer_notes_present"] is True
+    assert "provider_text" not in encoded
+    assert "\"positioning_packet\"" not in encoded
