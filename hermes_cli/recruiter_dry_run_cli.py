@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .recruiter_candidate_facts import run_candidate_facts_cli
 from .recruiter_dry_run import (
     RecruiterDryRunReport,
     RecruiterDryRunRequest,
@@ -23,6 +24,7 @@ _READY_STATUSES = {
     RecruiterDryRunStatus.POSITIONING_READY,
     RecruiterDryRunStatus.APPLICATION_MATERIALS_READY,
 }
+_READY_PACKET_STATUSES = {"READY_PROVIDER_VISIBLE"}
 
 
 def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -60,11 +62,28 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     dry_run.add_argument("--stale-after-days", type=int, default=14, help="Age threshold for stale context warnings")
     dry_run.add_argument("--json", action="store_true", help="Print JSON output (default behavior)")
     dry_run.set_defaults(func=cmd_recruiter_context)
+    candidate_facts = nested.add_parser(
+        "candidate-facts",
+        help="Print a JSON safe candidate facts packet",
+    )
+    candidate_facts.add_argument(
+        "--fixture-safe-facts-json",
+        default=None,
+        help="Read only this sanitized fixture JSON file for candidate-facts testing",
+    )
+    candidate_facts.add_argument("--json", action="store_true", help="Print JSON output (default behavior)")
+    candidate_facts.set_defaults(func=cmd_recruiter_context)
     return parser
 
 
 def cmd_recruiter_context(args: argparse.Namespace) -> None:
     repo_root = _optional_path(getattr(args, "repo_root", None))
+    if getattr(args, "recruiter_context_command", None) == "candidate-facts":
+        packet = run_candidate_facts_cli(
+            fixture_safe_facts_json=getattr(args, "fixture_safe_facts_json", None),
+        )
+        sys.stdout.write(json.dumps(packet.to_dict(), sort_keys=True) + "\n")
+        raise SystemExit(0 if packet.status in _READY_PACKET_STATUSES else 1)
     if getattr(args, "flow", None) == "evaluate-vacancy":
         report = run_recruiter_evaluation_flow_dry_run(
             prompt=getattr(args, "prompt", None) or "",
