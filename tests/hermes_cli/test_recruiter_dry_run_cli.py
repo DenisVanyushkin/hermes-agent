@@ -428,6 +428,24 @@ def test_parse_positioning_flow_and_evaluation_packet_json_option() -> None:
     assert args.evaluation_packet_json == "/tmp/evaluation-packet.json"
 
 
+def test_parse_positioning_flow_candidate_facts_packet_option() -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "dry-run",
+            "--flow",
+            "positioning-and-evidence",
+            "--evaluation-packet-json",
+            "/tmp/evaluation-packet.json",
+            "--candidate-facts-packet-json",
+            "/tmp/candidate-facts-packet.json",
+            "--json",
+        ]
+    )
+
+    assert args.candidate_facts_packet_json == "/tmp/candidate-facts-packet.json"
+
+
 def test_parse_application_materials_flow_and_positioning_packet_json_option() -> None:
     args = _parse_direct(
         [
@@ -884,8 +902,9 @@ def test_positioning_flow_cli_reads_only_the_provided_packet_file(
     packet_path.write_text(json.dumps({"schema_version": "recruiter_vacancy_evaluation_packet_v1"}), encoding="utf-8")
     captured: dict[str, object] = {}
 
-    def _fake_run(*, evaluation_packet, repo_root, private_context_status, allow_provider_execution):
+    def _fake_run(*, evaluation_packet, candidate_facts_packet=None, repo_root, private_context_status, allow_provider_execution):
         captured["evaluation_packet"] = evaluation_packet
+        captured["candidate_facts_packet"] = candidate_facts_packet
         captured["repo_root"] = repo_root
         captured["private_context_status"] = private_context_status
         captured["allow_provider_execution"] = allow_provider_execution
@@ -936,6 +955,7 @@ def test_positioning_flow_cli_reads_only_the_provided_packet_file(
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == RecruiterDryRunStatus.PROVIDER_EXECUTION_BLOCKED.value
     assert captured["evaluation_packet"] == {"schema_version": "recruiter_vacancy_evaluation_packet_v1"}
+    assert captured["candidate_facts_packet"] is None
     assert captured["private_context_status"] == "PRIVATE_CONTEXT_AVAILABLE"
     _assert_full_downstream_gates(payload)
 

@@ -341,6 +341,67 @@ def _ready_positioning_packet(
     }
 
 
+def _ready_candidate_facts_packet() -> dict[str, object]:
+    return {
+        "schema_version": "recruiter_candidate_facts_packet_v1",
+        "skill_id": "candidate-facts",
+        "status": "READY_PROVIDER_VISIBLE",
+        "candidate_ref": "candidate-test",
+        "generated_at": "2026-07-01T00:00:00+00:00",
+        "source_policy": {
+            "raw_private_content_serialized": False,
+            "raw_private_paths_serialized": False,
+            "provider_visible_only_after_packet_scan": True,
+        },
+        "requires_user_approval": False,
+        "provider_visibility_status": "READY_PROVIDER_VISIBLE",
+        "facts": [
+            {
+                "fact_id": "fact-1",
+                "category": "domain",
+                "safe_summary": "Product and commercial leadership experience",
+                "provider_text": "Candidate has product and commercial leadership experience in digital services.",
+                "support_level": "explicit",
+                "source_ref_ids": ["src-1"],
+                "forbidden_expansions": ["Do not infer revenue ownership", "Do not infer team size"],
+                "approval_required": False,
+                "provider_visible": True,
+                "log_visible": False,
+            }
+        ],
+        "source_references": [
+            {
+                "source_ref_id": "src-1",
+                "source_type": "test_fixture",
+                "source_label": "safe-fixture",
+                "source_id_hash": "fixture-hash",
+                "section_label": "safe-section",
+                "content_hash": "fixture-content-hash",
+                "sensitivity": "private_sanitized",
+                "provider_visible": True,
+                "log_visible": True,
+            }
+        ],
+        "allowed_claims": [
+            {
+                "claim_id": "claim-1",
+                "claim_text": "Product and commercial leadership experience in digital services.",
+                "source_fact_ids": ["fact-1"],
+                "support_level": "explicit",
+            }
+        ],
+        "claims_to_avoid": ["Do not claim revenue ownership."],
+        "unsupported_claims": [],
+        "redactions": [],
+        "support_summary": {"explicit": 1, "derived_safe": 0, "weak": 0, "unsupported": 0},
+        "role_target_context": {},
+        "privacy_notes": ["sanitized fixture packet"],
+        "next_step": "CANDIDATE_FACTS_READY_FOR_POSITIONING",
+        "errors": [],
+        "warnings": [],
+    }
+
+
 def test_positioning_flow_dry_run_blocks_provider_by_default() -> None:
     report = run_recruiter_positioning_flow_dry_run(
         evaluation_packet=_ready_evaluation_packet(),
@@ -351,6 +412,180 @@ def test_positioning_flow_dry_run_blocks_provider_by_default() -> None:
     assert report.provider_called is False
     assert report.executor_called is False
     assert report.readiness["reason"] == "provider_execution_requires_explicit_opt_in"
+
+
+def test_positioning_flow_dry_run_accepts_candidate_facts_and_keeps_provider_blocked_by_default() -> None:
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    assert report.status is RecruiterDryRunStatus.PROVIDER_EXECUTION_BLOCKED
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.input["candidate_facts_status"] == "READY_PROVIDER_VISIBLE"
+    assert report.input["candidate_facts_provider_visibility_status"] == "READY_PROVIDER_VISIBLE"
+    assert report.input["candidate_fact_summaries"] == [
+        {
+            "fact_id": "fact-1",
+            "category": "domain",
+            "safe_summary": "Product and commercial leadership experience",
+            "support_level": "explicit",
+        }
+    ]
+    assert report.input["allowed_claims"] == [
+        "Product and commercial leadership experience in digital services."
+    ]
+    assert "candidate_facts_packet" not in report.input
+
+
+def test_positioning_flow_dry_run_report_does_not_serialize_provider_text_from_candidate_facts() -> None:
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert "candidate_facts_packet" not in encoded
+    assert "Candidate has product and commercial leadership experience in digital services." not in encoded
+
+
+def test_positioning_flow_dry_run_blocks_candidate_facts_before_provider_execution() -> None:
+    blocked_packet = _ready_candidate_facts_packet()
+    blocked_packet["status"] = "BLOCKED_UNSAFE_CONTENT"
+    blocked_packet["provider_visibility_status"] = "BLOCKED_UNSAFE_CONTENT"
+    blocked_packet["errors"] = ["unsafe_path_detected"]
+    blocked_packet["facts"] = []
+
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=blocked_packet,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.errors == ["candidate_facts_packet_not_provider_visible"]
+
+
+def test_positioning_flow_dry_run_unsafe_ready_candidate_facts_do_not_leak_into_blocked_report() -> None:
+    unsafe_packet = _ready_candidate_facts_packet()
+    unsafe_packet["facts"] = [
+        {
+            "fact_id": "fact-unsafe",
+            "category": "domain",
+            "safe_summary": "See /Users/testleak/private/career and email leaktest@example.com",
+            "provider_text": "Candidate has product leadership experience.",
+            "support_level": "explicit",
+            "source_ref_ids": ["src-safe"],
+            "forbidden_expansions": [],
+            "approval_required": False,
+            "provider_visible": True,
+            "log_visible": False,
+        }
+    ]
+
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=unsafe_packet,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED
+    assert report.errors == ["candidate_facts_packet_unsafe"]
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert "/Users/testleak" not in encoded
+    assert "private/career" not in encoded
+    assert "leaktest@example.com" not in encoded
+    assert "candidate_fact_summaries" not in encoded
+    assert "See /Users/testleak/private/career and email leaktest@example.com" not in encoded
+
+
+def test_positioning_flow_dry_run_wrong_schema_candidate_facts_is_controlled() -> None:
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet={
+            "schema_version": "wrong_schema",
+            "provider_visibility_status": "READY_PROVIDER_VISIBLE",
+            "facts": [{"fact_id": "x"}],
+        },
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED
+    assert report.errors == ["candidate_facts_packet_schema_invalid"]
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert "Traceback" not in encoded
+    assert "TypeError" not in encoded
+    assert "candidate_fact_summaries" not in encoded
+    assert "\"source_references\"" not in encoded
+    assert "\"allowed_claims\"" not in encoded
+
+
+def test_positioning_flow_dry_run_missing_optional_candidate_facts_keys_is_controlled() -> None:
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet={
+            "schema_version": "recruiter_candidate_facts_packet_v1",
+            "status": "READY_PROVIDER_VISIBLE",
+            "provider_visibility_status": "READY_PROVIDER_VISIBLE",
+            "facts": [{"fact_id": "x"}],
+        },
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED
+    assert report.errors == ["candidate_facts_packet_invalid"]
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert "Traceback" not in encoded
+    assert "TypeError" not in encoded
+
+
+def test_positioning_flow_dry_run_supports_fake_no_provider_positioning_path() -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_positioning_factory(skill_input: dict[str, object]) -> dict[str, object]:
+        captured["skill_input"] = skill_input
+        return {
+            "schema_version": "recruiter_positioning_packet_v1",
+            "skill_id": "positioning-and-evidence",
+            "status": "POSITIONING_READY",
+            "positioning_summary": "Lead with product and commercial leadership in digital services.",
+            "target_narrative": "Operator-executive for digital services businesses.",
+            "evidence": ["Product and commercial leadership experience"],
+            "gaps": ["Team size not confirmed."],
+            "risks_and_mitigations": ["Do not infer revenue ownership."],
+            "recommended_angle": "Scale-stage operator.",
+            "claims_to_use": ["Product and commercial leadership experience in digital services."],
+            "claims_to_avoid": ["Do not claim revenue ownership."],
+            "missing_information": [],
+            "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+            "provenance": {"source": "fake_candidate_facts_fixture"},
+        }
+
+    report = run_recruiter_positioning_flow_dry_run(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        fake_positioning_result_factory=_fake_positioning_factory,
+    )
+
+    assert report.status is RecruiterDryRunStatus.POSITIONING_READY
+    assert report.provider_called is False
+    assert report.executor_called is True
+    assert report.positioning_result["status"] == "POSITIONING_READY"
+    assert captured["skill_input"]["candidate_facts_status"] == "READY_PROVIDER_VISIBLE"
+    assert captured["skill_input"]["claims_to_avoid"] == ["Do not claim revenue ownership."]
 
 
 def test_positioning_flow_dry_run_blocks_need_more_info_by_default() -> None:

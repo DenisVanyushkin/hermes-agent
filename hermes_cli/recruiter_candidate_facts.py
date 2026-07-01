@@ -178,6 +178,44 @@ def run_candidate_facts_cli(*, fixture_safe_facts_json: str | None = None) -> Ca
     )
 
 
+def load_candidate_facts_packet(path: str | Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError("candidate_facts_packet_missing") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError("candidate_facts_packet_json_invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("candidate_facts_packet_json_invalid")
+    return payload
+
+
+def validate_candidate_facts_ready_for_positioning(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return "candidate_facts_packet_missing"
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        return "candidate_facts_packet_schema_invalid"
+    if payload.get("provider_visibility_status") != CandidateFactsStatus.READY_PROVIDER_VISIBLE.value:
+        return "candidate_facts_packet_not_provider_visible"
+    if payload.get("status") != CandidateFactsStatus.READY_PROVIDER_VISIBLE.value:
+        return "candidate_facts_packet_not_provider_visible"
+    facts = payload.get("facts")
+    if not isinstance(facts, list) or not facts:
+        return "candidate_facts_packet_empty_facts"
+    if not isinstance(payload.get("allowed_claims"), list):
+        return "candidate_facts_packet_invalid"
+    if not isinstance(payload.get("source_references"), list):
+        return "candidate_facts_packet_invalid"
+    if not isinstance(payload.get("claims_to_avoid"), list):
+        return "candidate_facts_packet_invalid"
+    if not isinstance(payload.get("unsupported_claims"), list):
+        return "candidate_facts_packet_invalid"
+    unsafe_codes = detect_unsafe_content(payload)
+    if unsafe_codes:
+        return "candidate_facts_packet_unsafe"
+    return None
+
+
 def discover_private_context_status() -> str:
     private_dir = _DEFAULT_PRIVATE_CAREER_DIR.expanduser()
     present_count = sum(1 for name in _PRIVATE_CAREER_FILES if (private_dir / name).exists())
