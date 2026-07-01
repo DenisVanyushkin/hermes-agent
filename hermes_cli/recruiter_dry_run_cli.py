@@ -13,10 +13,13 @@ from .recruiter_dry_run import (
     RecruiterDryRunReport,
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
+    RecruiterE2EApplicationMaterialsReport,
+    RecruiterE2EApplicationMaterialsStatus,
     RecruiterPositioningSmokeReport,
     RecruiterPositioningSmokeStatus,
     _evaluation_downstream_gates,
     build_fake_positioning_packet_from_candidate_facts,
+    run_recruiter_e2e_application_materials_smoke_harness,
     run_recruiter_application_materials_smoke_harness,
     run_recruiter_application_materials_flow_dry_run,
     run_recruiter_context_dry_run,
@@ -36,6 +39,7 @@ _READY_SMOKE_STATUSES = {
     RecruiterPositioningSmokeStatus.READY,
     RecruiterApplicationMaterialsSmokeStatus.READY,
 }
+_READY_E2E_SMOKE_STATUSES = {RecruiterE2EApplicationMaterialsStatus.READY}
 _READY_PACKET_STATUSES = {"READY_PROVIDER_VISIBLE"}
 
 
@@ -120,6 +124,23 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     smoke_application_materials.add_argument("--repo-root", default=None, help="Override repo root used for recruiter package discovery")
     smoke_application_materials.add_argument("--json", action="store_true", help="Print JSON output (default behavior)")
     smoke_application_materials.set_defaults(func=cmd_recruiter_context)
+    smoke_e2e_application_materials = nested.add_parser(
+        "smoke-e2e-application-materials",
+        help="Print a JSON no-provider recruiter e2e application materials report",
+    )
+    smoke_e2e_application_materials.add_argument("--evaluation-packet-json", required=True, help="Read only this evaluation packet JSON file")
+    smoke_e2e_application_materials.add_argument("--candidate-facts-packet-json", required=True, help="Read only this candidate facts packet JSON file")
+    smoke_e2e_application_materials.add_argument("--all-required-targets", action="store_true", help="Verify exactly the required MVP application-material targets")
+    smoke_e2e_application_materials.add_argument("--allow-provider-execution", action="store_true", help="Explicitly allow positioning and application-materials executor invocation")
+    smoke_e2e_application_materials.add_argument(
+        "--private-context-status",
+        choices=["PRIVATE_CONTEXT_AVAILABLE", "PRIVATE_CONTEXT_MISSING", "PRIVATE_CONTEXT_NOT_INSPECTED"],
+        default="PRIVATE_CONTEXT_AVAILABLE",
+        help="Optional private context readiness metadata forwarded to the e2e executor seams",
+    )
+    smoke_e2e_application_materials.add_argument("--repo-root", default=None, help="Override repo root used for recruiter package discovery")
+    smoke_e2e_application_materials.add_argument("--json", action="store_true", help="Print JSON output (default behavior)")
+    smoke_e2e_application_materials.set_defaults(func=cmd_recruiter_context)
     return parser
 
 
@@ -139,6 +160,10 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
         report = _run_application_materials_smoke_report(args, repo_root)
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if report.status in _READY_SMOKE_STATUSES else 1)
+    if getattr(args, "recruiter_context_command", None) == "smoke-e2e-application-materials":
+        report = _run_e2e_application_materials_smoke_report(args, repo_root)
+        sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
+        raise SystemExit(0 if report.status in _READY_E2E_SMOKE_STATUSES else 1)
     if getattr(args, "flow", None) == "evaluate-vacancy":
         report = run_recruiter_evaluation_flow_dry_run(
             prompt=getattr(args, "prompt", None) or "",
@@ -360,4 +385,61 @@ def _application_materials_smoke_cli_error_report(
         warnings=[],
         next_allowed_actions=[],
         provenance={"writes_performed": False, "dry_run": True, "flow": "application-materials-smoke"},
+    )
+
+
+def _run_e2e_application_materials_smoke_report(
+    args: argparse.Namespace,
+    repo_root: Path | None,
+) -> RecruiterE2EApplicationMaterialsReport:
+    try:
+        evaluation_packet = json.loads(Path(getattr(args, "evaluation_packet_json")).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _e2e_application_materials_smoke_cli_error_report("evaluation_packet_json_missing")
+    except json.JSONDecodeError:
+        return _e2e_application_materials_smoke_cli_error_report("evaluation_packet_json_invalid")
+
+    try:
+        candidate_facts_packet = load_candidate_facts_packet(getattr(args, "candidate_facts_packet_json"))
+    except ValueError as exc:
+        return _e2e_application_materials_smoke_cli_error_report(str(exc))
+
+    return run_recruiter_e2e_application_materials_smoke_harness(
+        evaluation_packet=evaluation_packet,
+        candidate_facts_packet=candidate_facts_packet,
+        repo_root=repo_root,
+        private_context_status=getattr(args, "private_context_status", "PRIVATE_CONTEXT_AVAILABLE"),
+        allow_provider_execution=getattr(args, "allow_provider_execution", False),
+        all_required_targets=getattr(args, "all_required_targets", False),
+    )
+
+
+def _e2e_application_materials_smoke_cli_error_report(
+    error: str,
+) -> RecruiterE2EApplicationMaterialsReport:
+    return RecruiterE2EApplicationMaterialsReport(
+        schema_version="recruiter_e2e_application_materials_report_v1",
+        status=RecruiterE2EApplicationMaterialsStatus.INPUT_BLOCKED,
+        readiness_reason=error,
+        provider_allowed=False,
+        provider_called=False,
+        positioning_provider_called=False,
+        positioning_executor_called=False,
+        application_materials_provider_called=False,
+        application_materials_executor_called=False,
+        reviewer_called=False,
+        input_validation={
+            "ready": False,
+            "evaluation_packet_ready": False,
+            "candidate_facts_packet_ready": False,
+            "errors": [error],
+        },
+        positioning_summary=None,
+        application_materials_summary=None,
+        required_targets=list(REQUIRED_APPLICATION_MATERIAL_TARGETS),
+        target_results={target: {"status": "readiness_blocked"} for target in REQUIRED_APPLICATION_MATERIAL_TARGETS},
+        errors=[error],
+        warnings=[],
+        next_allowed_actions=[],
+        provenance={"writes_performed": False, "dry_run": True, "flow": "application-materials-e2e"},
     )

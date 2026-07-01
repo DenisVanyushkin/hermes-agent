@@ -9,6 +9,8 @@ import pytest
 from hermes_cli._parser import build_top_level_parser
 from hermes_cli.recruiter_dry_run import (
     REQUIRED_APPLICATION_MATERIAL_TARGETS,
+    RecruiterE2EApplicationMaterialsStatus,
+    RecruiterE2EApplicationMaterialsReport,
     RecruiterApplicationMaterialsSmokeReport,
     RecruiterApplicationMaterialsSmokeStatus,
     RecruiterDryRunReport,
@@ -130,6 +132,40 @@ def test_smoke_application_materials_subparser_exists_in_main_tree() -> None:
     assert args.recruiter_context_command == "smoke-application-materials"
     assert args.document_target == "recruiter_message_draft"
     assert args.json is True
+
+
+def test_smoke_e2e_application_materials_subparser_exists_in_main_tree() -> None:
+    args = _parse_main(
+        [
+            "recruiter-context",
+            "smoke-e2e-application-materials",
+            "--evaluation-packet-json",
+            "/tmp/evaluation.json",
+            "--candidate-facts-packet-json",
+            "/tmp/candidate-facts.json",
+            "--all-required-targets",
+            "--json",
+        ]
+    )
+
+    assert args.command == "recruiter-context"
+    assert args.recruiter_context_command == "smoke-e2e-application-materials"
+    assert args.all_required_targets is True
+    assert args.json is True
+
+
+def test_smoke_e2e_application_materials_allow_provider_help_text_is_safety_aligned() -> None:
+    parser = argparse.ArgumentParser(prog="hermes")
+    subparsers = parser.add_subparsers(dest="command")
+    recruiter_context_parser = register_recruiter_context_subparser(subparsers)
+    nested_action = next(action for action in recruiter_context_parser._actions if isinstance(action, argparse._SubParsersAction))
+    smoke_e2e_parser = nested_action.choices["smoke-e2e-application-materials"]
+    allow_provider_action = next(
+        action for action in smoke_e2e_parser._actions if "--allow-provider-execution" in getattr(action, "option_strings", [])
+    )
+
+    assert allow_provider_action.help == "Explicitly allow positioning and application-materials executor invocation"
+    assert "fake executor-backed e2e harness execution" not in allow_provider_action.help
 
 
 def test_parses_vacancy_url() -> None:
@@ -1716,3 +1752,105 @@ def test_smoke_application_materials_cli_all_required_targets_provider_blocked_w
     assert payload["provider_called"] is False
     assert payload["executor_called"] is False
     assert payload["reviewer_called"] is False
+
+
+def test_smoke_e2e_application_materials_cli_provider_blocked_without_executor_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    evaluation_path = tmp_path / "evaluation-packet.json"
+    candidate_facts_path = tmp_path / "candidate-facts-packet.json"
+    evaluation_path.write_text(json.dumps({"schema_version": "recruiter_vacancy_evaluation_packet_v1"}), encoding="utf-8")
+    candidate_facts_path.write_text(json.dumps({"schema_version": "recruiter_candidate_facts_packet_v1"}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "hermes_cli.recruiter_dry_run_cli._run_e2e_application_materials_smoke_report",
+        lambda args, repo_root: RecruiterE2EApplicationMaterialsReport(
+            schema_version="recruiter_e2e_application_materials_report_v1",
+            status=RecruiterE2EApplicationMaterialsStatus.READY_PROVIDER_BLOCKED,
+            readiness_reason="provider_execution_requires_explicit_opt_in",
+            provider_allowed=False,
+            provider_called=False,
+            positioning_provider_called=False,
+            positioning_executor_called=False,
+            application_materials_provider_called=False,
+            application_materials_executor_called=False,
+            reviewer_called=False,
+            input_validation={
+                "ready": True,
+                "evaluation_packet_ready": True,
+                "candidate_facts_packet_ready": True,
+                "errors": [],
+            },
+            positioning_summary={"status": RecruiterPositioningSmokeStatus.READY_PROVIDER_BLOCKED.value},
+            application_materials_summary={"status": RecruiterApplicationMaterialsSmokeStatus.READY_PROVIDER_BLOCKED.value},
+            required_targets=list(REQUIRED_APPLICATION_MATERIAL_TARGETS),
+            target_results={target: {"status": "provider_blocked"} for target in REQUIRED_APPLICATION_MATERIAL_TARGETS},
+            errors=[],
+            warnings=[],
+            forbidden_actions=["call_provider_model"],
+            next_allowed_actions=["rerun_with_allow_provider_execution"],
+            provenance={"writes_performed": False, "dry_run": True},
+        ),
+    )
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "smoke-e2e-application-materials",
+            "--evaluation-packet-json",
+            str(evaluation_path),
+            "--candidate-facts-packet-json",
+            str(candidate_facts_path),
+            "--all-required-targets",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    encoded = json.dumps(payload, sort_keys=True)
+    assert payload["schema_version"] == "recruiter_e2e_application_materials_report_v1"
+    assert payload["status"] == RecruiterE2EApplicationMaterialsStatus.READY_PROVIDER_BLOCKED.value
+    assert payload["provider_called"] is False
+    assert payload["positioning_executor_called"] is False
+    assert payload["application_materials_executor_called"] is False
+    assert payload["reviewer_called"] is False
+    assert payload["required_targets"] == list(REQUIRED_APPLICATION_MATERIAL_TARGETS)
+    assert str(evaluation_path) not in encoded
+    assert str(candidate_facts_path) not in encoded
+
+
+def test_smoke_e2e_application_materials_cli_invalid_evaluation_does_not_echo_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    evaluation_path = tmp_path / "evaluation-packet.json"
+    candidate_facts_path = tmp_path / "candidate-facts-packet.json"
+    evaluation_path.write_text("{not-json}", encoding="utf-8")
+    candidate_facts_path.write_text(json.dumps({"schema_version": "recruiter_candidate_facts_packet_v1"}), encoding="utf-8")
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "smoke-e2e-application-materials",
+            "--evaluation-packet-json",
+            str(evaluation_path),
+            "--candidate-facts-packet-json",
+            str(candidate_facts_path),
+            "--all-required-targets",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    encoded = json.dumps(payload, sort_keys=True)
+    assert payload["status"] == RecruiterE2EApplicationMaterialsStatus.INPUT_BLOCKED.value
+    assert payload["errors"] == ["evaluation_packet_json_invalid"]
+    assert str(evaluation_path) not in encoded

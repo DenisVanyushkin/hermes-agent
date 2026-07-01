@@ -15,9 +15,11 @@ from hermes_cli.recruiter_dry_run import (
     REQUIRED_APPLICATION_MATERIAL_TARGETS,
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
+    RecruiterE2EApplicationMaterialsStatus,
     RecruiterApplicationMaterialsSmokeStatus,
     RecruiterPositioningSmokeStatus,
     build_fake_positioning_packet_from_candidate_facts,
+    run_recruiter_e2e_application_materials_smoke_harness,
     run_recruiter_application_materials_smoke_harness,
     run_recruiter_application_materials_flow_dry_run,
     run_recruiter_context_dry_run,
@@ -1279,3 +1281,201 @@ def test_application_materials_smoke_harness_all_required_targets_runs_fake_exec
         assert target_result["reviewer_notes_present"] is True
     assert "provider_text" not in encoded
     assert "\"positioning_packet\"" not in encoded
+
+
+def test_recruiter_e2e_harness_blocks_provider_by_default_without_executor_calls() -> None:
+    report = run_recruiter_e2e_application_materials_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        all_required_targets=True,
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.schema_version == "recruiter_e2e_application_materials_report_v1"
+    assert report.status is RecruiterE2EApplicationMaterialsStatus.READY_PROVIDER_BLOCKED
+    assert report.provider_allowed is False
+    assert report.provider_called is False
+    assert report.positioning_provider_called is False
+    assert report.positioning_executor_called is False
+    assert report.application_materials_provider_called is False
+    assert report.application_materials_executor_called is False
+    assert report.reviewer_called is False
+    assert report.required_targets == list(REQUIRED_APPLICATION_MATERIAL_TARGETS)
+    assert sorted(report.target_results) == sorted(REQUIRED_APPLICATION_MATERIAL_TARGETS)
+    assert report.positioning_summary["status"] == RecruiterPositioningSmokeStatus.READY_PROVIDER_BLOCKED.value
+    assert report.application_materials_summary["status"] == RecruiterApplicationMaterialsSmokeStatus.READY_PROVIDER_BLOCKED.value
+    assert "\"evaluation_packet\"" not in encoded
+    assert "\"candidate_facts_packet\"" not in encoded
+    assert "\"positioning_packet\"" not in encoded
+    assert "provider_text" not in encoded
+
+
+def test_recruiter_e2e_harness_blocks_unsafe_candidate_facts_without_leak() -> None:
+    report = run_recruiter_e2e_application_materials_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet={
+            **_ready_candidate_facts_packet(),
+            "privacy_notes": ["Unsafe /Users/testleak/private/career leaktest@example.com"],
+        },
+        all_required_targets=True,
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterE2EApplicationMaterialsStatus.INPUT_BLOCKED
+    assert report.errors == ["candidate_facts_packet_unsafe"]
+    assert report.provider_called is False
+    assert report.positioning_executor_called is False
+    assert report.application_materials_executor_called is False
+    assert "/Users/testleak" not in encoded
+    assert "private/career" not in encoded
+    assert "leaktest@example.com" not in encoded
+    assert "Traceback" not in encoded
+
+
+def test_recruiter_e2e_harness_runs_fake_full_chain_when_opted_in() -> None:
+    executor = _ApplicationMaterialsExecutor()
+
+    class _FakePositioningExecutor:
+        provider_backed = False
+
+        def execute(self, *, skill_input, expected_schema):
+            return build_fake_positioning_packet_from_candidate_facts(skill_input)
+
+    report = run_recruiter_e2e_application_materials_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        all_required_targets=True,
+        allow_provider_execution=True,
+        positioning_executor_factory=lambda: _FakePositioningExecutor(),
+        application_materials_executor_factory=lambda: executor,
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterE2EApplicationMaterialsStatus.READY
+    assert report.provider_allowed is True
+    assert report.provider_called is False
+    assert report.positioning_provider_called is False
+    assert report.positioning_executor_called is True
+    assert report.application_materials_provider_called is False
+    assert report.application_materials_executor_called is True
+    assert report.reviewer_called is True
+    assert report.positioning_summary["schema_version"] == "recruiter_positioning_packet_v1"
+    assert report.application_materials_summary["status"] == RecruiterApplicationMaterialsSmokeStatus.READY.value
+    for target in REQUIRED_APPLICATION_MATERIAL_TARGETS:
+        target_result = report.target_results[target]
+        assert target_result["status"] == "ready"
+        assert target_result["draft_only"] is True
+        assert target_result["user_review_required"] is True
+        assert target_result["reviewer_verdict"] == "APPROVE"
+        assert target_result["reviewer_notes_present"] is True
+    assert "provider_text" not in encoded
+
+
+def test_recruiter_e2e_harness_invalid_fake_positioning_output_fails_closed() -> None:
+    class _InvalidPositioningExecutor:
+        provider_backed = False
+
+        def execute(self, *, skill_input, expected_schema):
+            return {"unexpected": True}
+
+    report = run_recruiter_e2e_application_materials_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        all_required_targets=True,
+        allow_provider_execution=True,
+        positioning_executor_factory=lambda: _InvalidPositioningExecutor(),
+        application_materials_executor_factory=lambda: _ApplicationMaterialsExecutor(),
+    )
+
+    assert report.status is RecruiterE2EApplicationMaterialsStatus.OUTPUT_INVALID
+    assert report.errors == [
+        "missing_required_positioning_output_fields:schema_version,skill_id,status,positioning_summary,target_narrative,evidence,gaps,risks_and_mitigations,recommended_angle,claims_to_use,claims_to_avoid,missing_information,next_step,provenance"
+    ]
+    assert report.application_materials_executor_called is False
+
+
+def test_recruiter_e2e_harness_unsafe_fake_positioning_output_does_not_leak() -> None:
+    class _UnsafePositioningExecutor:
+        provider_backed = False
+
+        def execute(self, *, skill_input, expected_schema):
+            packet = build_fake_positioning_packet_from_candidate_facts(skill_input)
+            packet["positioning_summary"] = "Unsafe /Users/testleak/private/career leaktest@example.com"
+            packet["recommended_angle"] = "Unsafe /Users/testleak/private/career leaktest@example.com"
+            return packet
+
+    report = run_recruiter_e2e_application_materials_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        all_required_targets=True,
+        allow_provider_execution=True,
+        positioning_executor_factory=lambda: _UnsafePositioningExecutor(),
+        application_materials_executor_factory=lambda: _ApplicationMaterialsExecutor(),
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterE2EApplicationMaterialsStatus.OUTPUT_INVALID
+    assert report.errors == ["positioning_packet_unsafe"]
+    assert report.positioning_summary is None
+    assert report.application_materials_executor_called is False
+    assert report.reviewer_called is False
+    assert "/Users/testleak" not in encoded
+    assert "private/career" not in encoded
+    assert "leaktest@example.com" not in encoded
+    assert "provider_text" not in encoded
+    assert "\"positioning_packet\"" not in encoded
+    assert "Traceback" not in encoded
+
+
+def test_recruiter_e2e_harness_positioning_exception_is_controlled() -> None:
+    class _ExplodingPositioningExecutor:
+        provider_backed = False
+
+        def execute(self, *, skill_input, expected_schema):
+            raise Exception("boom")
+
+    report = run_recruiter_e2e_application_materials_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        all_required_targets=True,
+        allow_provider_execution=True,
+        positioning_executor_factory=lambda: _ExplodingPositioningExecutor(),
+        application_materials_executor_factory=lambda: _ApplicationMaterialsExecutor(),
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterE2EApplicationMaterialsStatus.OUTPUT_INVALID
+    assert report.errors == ["positioning_executor_failed"]
+    assert report.positioning_executor_called is True
+    assert report.application_materials_executor_called is False
+    assert report.reviewer_called is False
+    assert "Traceback" not in encoded
+    assert "boom" not in encoded
+
+
+def test_recruiter_e2e_harness_application_materials_exception_is_controlled() -> None:
+    class _FakePositioningExecutor:
+        provider_backed = False
+
+        def execute(self, *, skill_input, expected_schema):
+            return build_fake_positioning_packet_from_candidate_facts(skill_input)
+
+    class _ExplodingApplicationMaterialsExecutor:
+        provider_backed = False
+
+        def execute(self, *, skill_id, skill_input, expected_schema):
+            raise RuntimeError("boom")
+
+    report = run_recruiter_e2e_application_materials_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        all_required_targets=True,
+        allow_provider_execution=True,
+        positioning_executor_factory=lambda: _FakePositioningExecutor(),
+        application_materials_executor_factory=lambda: _ExplodingApplicationMaterialsExecutor(),
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterE2EApplicationMaterialsStatus.OUTPUT_INVALID
+    assert report.errors == ["application_materials_executor_failed"]
+    assert "Traceback" not in encoded
