@@ -92,6 +92,13 @@ class RecruiterApplicationMaterialsSmokeStatus(str, Enum):
     READY = "APPLICATION_MATERIALS_SMOKE_READY"
 
 
+class RecruiterE2EApplicationMaterialsStatus(str, Enum):
+    READY_PROVIDER_BLOCKED = "RECRUITER_E2E_READY_PROVIDER_BLOCKED"
+    INPUT_BLOCKED = "RECRUITER_E2E_INPUT_BLOCKED"
+    OUTPUT_INVALID = "RECRUITER_E2E_OUTPUT_INVALID"
+    READY = "RECRUITER_E2E_READY"
+
+
 REQUIRED_APPLICATION_MATERIAL_TARGETS = (
     "recruiter_message_draft",
     "cover_letter_draft",
@@ -194,6 +201,35 @@ class RecruiterApplicationMaterialsSmokeReport:
     review_summary: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    forbidden_actions: list[str] = field(default_factory=lambda: list(_FORBIDDEN_ACTIONS))
+    next_allowed_actions: list[str] = field(default_factory=list)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["status"] = self.status.value
+        return data
+
+
+@dataclass(slots=True)
+class RecruiterE2EApplicationMaterialsReport:
+    schema_version: str
+    status: RecruiterE2EApplicationMaterialsStatus
+    readiness_reason: str
+    provider_allowed: bool
+    provider_called: bool
+    positioning_provider_called: bool
+    positioning_executor_called: bool
+    application_materials_provider_called: bool
+    application_materials_executor_called: bool
+    reviewer_called: bool
+    input_validation: dict[str, Any]
+    positioning_summary: dict[str, Any] | None
+    application_materials_summary: dict[str, Any] | None
+    required_targets: list[str]
+    target_results: dict[str, dict[str, Any]]
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     forbidden_actions: list[str] = field(default_factory=lambda: list(_FORBIDDEN_ACTIONS))
     next_allowed_actions: list[str] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
@@ -816,6 +852,144 @@ def run_recruiter_application_materials_flow_dry_run(
     base_report.readiness = {"ready": False, "reason": "application_materials_output_invalid"}
     base_report.errors = list(flow_report.errors)
     return base_report
+
+
+def run_recruiter_e2e_application_materials_smoke_harness(
+    *,
+    evaluation_packet: dict[str, Any] | None,
+    candidate_facts_packet: dict[str, Any] | None,
+    repo_root: str | Path | None = None,
+    private_context_status: str = "PRIVATE_CONTEXT_AVAILABLE",
+    allow_provider_execution: bool = False,
+    all_required_targets: bool = False,
+    positioning_executor_factory: Callable[[], Any] | None = None,
+    application_materials_executor_factory: Callable[[], Any] | None = None,
+) -> RecruiterE2EApplicationMaterialsReport:
+    input_errors: list[str] = []
+    evaluation_error = _validate_positioning_smoke_evaluation_packet(evaluation_packet)
+    candidate_facts_error = _validate_candidate_facts_ready_for_positioning(candidate_facts_packet)
+    if evaluation_error is not None:
+        input_errors.append(evaluation_error)
+    if candidate_facts_error is not None:
+        input_errors.append(candidate_facts_error)
+
+    report = RecruiterE2EApplicationMaterialsReport(
+        schema_version="recruiter_e2e_application_materials_report_v1",
+        status=RecruiterE2EApplicationMaterialsStatus.INPUT_BLOCKED,
+        readiness_reason=input_errors[0] if input_errors else "recruiter_e2e_input_not_ready",
+        provider_allowed=allow_provider_execution,
+        provider_called=False,
+        positioning_provider_called=False,
+        positioning_executor_called=False,
+        application_materials_provider_called=False,
+        application_materials_executor_called=False,
+        reviewer_called=False,
+        input_validation={
+            "ready": not input_errors,
+            "evaluation_packet_ready": evaluation_error is None,
+            "candidate_facts_packet_ready": candidate_facts_error is None,
+            "errors": list(input_errors),
+        },
+        positioning_summary=None,
+        application_materials_summary=None,
+        required_targets=list(REQUIRED_APPLICATION_MATERIAL_TARGETS),
+        target_results=_build_application_material_target_results(
+            list(REQUIRED_APPLICATION_MATERIAL_TARGETS),
+            status="readiness_blocked",
+        ),
+        errors=list(input_errors),
+        warnings=[],
+        next_allowed_actions=[],
+        provenance={"writes_performed": False, "dry_run": True, "flow": "application-materials-e2e"},
+    )
+    if input_errors:
+        return report
+
+    if not allow_provider_execution:
+        positioning_smoke = run_recruiter_positioning_smoke_harness(
+            evaluation_packet=evaluation_packet,
+            candidate_facts_packet=candidate_facts_packet,
+            repo_root=repo_root,
+            private_context_status=private_context_status,
+            allow_provider_execution=False,
+        )
+        report.status = RecruiterE2EApplicationMaterialsStatus.READY_PROVIDER_BLOCKED
+        report.readiness_reason = "provider_execution_requires_explicit_opt_in"
+        report.positioning_summary = _build_e2e_positioning_summary(positioning_smoke)
+        report.application_materials_summary = _build_e2e_application_materials_summary_from_status(
+            RecruiterApplicationMaterialsSmokeStatus.READY_PROVIDER_BLOCKED,
+            "provider_execution_requires_explicit_opt_in",
+        )
+        report.target_results = _build_application_material_target_results(
+            list(REQUIRED_APPLICATION_MATERIAL_TARGETS),
+            status="provider_blocked",
+        )
+        report.next_allowed_actions = ["rerun_with_allow_provider_execution"]
+        return report
+
+    positioning_input = _build_positioning_input(
+        evaluation_packet=dict(evaluation_packet or {}),
+        candidate_facts_packet=dict(candidate_facts_packet or {}),
+        repo_root=repo_root,
+        private_context_status=private_context_status,
+    )
+    if positioning_executor_factory is None:
+        from .recruiter_positioning_provider_executor import build_recruiter_positioning_provider_executor
+
+        positioning_executor_factory = build_recruiter_positioning_provider_executor
+
+    try:
+        positioning_executor = positioning_executor_factory()
+        report.positioning_executor_called = True
+        report.positioning_provider_called = bool(getattr(positioning_executor, "provider_backed", True))
+        raw_positioning_result = positioning_executor.execute(
+            skill_input=positioning_input,
+            expected_schema=positioning_expected_schema(),
+        )
+    except ValueError as exc:
+        report.status = RecruiterE2EApplicationMaterialsStatus.OUTPUT_INVALID
+        report.readiness_reason = str(exc)
+        report.errors = [str(exc)]
+        return report
+    except Exception:
+        report.status = RecruiterE2EApplicationMaterialsStatus.OUTPUT_INVALID
+        report.readiness_reason = "positioning_executor_failed"
+        report.errors = ["positioning_executor_failed"]
+        return report
+
+    positioning_error = _validate_positioning_packet_contract(raw_positioning_result)
+    if positioning_error is not None:
+        report.status = RecruiterE2EApplicationMaterialsStatus.OUTPUT_INVALID
+        report.readiness_reason = positioning_error
+        report.errors = [positioning_error]
+        return report
+    report.positioning_summary = _build_positioning_packet_report_fields(raw_positioning_result)
+
+    application_materials_smoke = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=raw_positioning_result,
+        repo_root=repo_root,
+        private_context_status=private_context_status,
+        allow_provider_execution=True,
+        all_required_targets=all_required_targets,
+        executor_factory=application_materials_executor_factory,
+    )
+    report.application_materials_provider_called = application_materials_smoke.provider_called
+    report.application_materials_executor_called = application_materials_smoke.executor_called
+    report.reviewer_called = application_materials_smoke.reviewer_called
+    report.application_materials_summary = _build_e2e_application_materials_summary(application_materials_smoke)
+    report.target_results = dict(application_materials_smoke.target_results)
+    report.provider_called = report.positioning_provider_called or report.application_materials_provider_called
+    if application_materials_smoke.status is RecruiterApplicationMaterialsSmokeStatus.READY:
+        report.status = RecruiterE2EApplicationMaterialsStatus.READY
+        report.readiness_reason = "recruiter_e2e_ready"
+        report.errors = []
+        report.next_allowed_actions = ["review_application_materials_packet_manually"]
+        return report
+
+    report.status = RecruiterE2EApplicationMaterialsStatus.OUTPUT_INVALID
+    report.readiness_reason = application_materials_smoke.readiness_reason
+    report.errors = list(application_materials_smoke.errors)
+    return report
 
 
 def _build_prompt_evaluation_input(*, prompt: str, repo_root: str | Path | None) -> dict[str, Any]:
@@ -1478,6 +1652,46 @@ def _build_application_materials_review_summary(
         "verdict": str((flow_report.review or {}).get("verdict") or ""),
         "reviewer_verdicts": reviewer_verdicts,
         "unsupported_claims_present": unsupported_claims_present,
+    }
+
+
+def _build_e2e_positioning_summary(report: RecruiterPositioningSmokeReport) -> dict[str, Any]:
+    return {
+        "schema_version": report.schema_version,
+        "status": report.status.value,
+        "readiness_reason": report.readiness_reason,
+        "provider_called": report.provider_called,
+        "executor_called": report.executor_called,
+        "output_validation": dict(report.output_validation),
+    }
+
+
+def _build_e2e_application_materials_summary_from_status(
+    status: RecruiterApplicationMaterialsSmokeStatus,
+    readiness_reason: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "recruiter_application_materials_smoke_report_v1",
+        "status": status.value,
+        "readiness_reason": readiness_reason,
+        "provider_called": False,
+        "executor_called": False,
+        "reviewer_called": False,
+        "output_validation": {"ready": False, "status": "not_run", "errors": []},
+    }
+
+
+def _build_e2e_application_materials_summary(
+    report: RecruiterApplicationMaterialsSmokeReport,
+) -> dict[str, Any]:
+    return {
+        "schema_version": report.schema_version,
+        "status": report.status.value,
+        "readiness_reason": report.readiness_reason,
+        "provider_called": report.provider_called,
+        "executor_called": report.executor_called,
+        "reviewer_called": report.reviewer_called,
+        "output_validation": dict(report.output_validation),
     }
 
 
