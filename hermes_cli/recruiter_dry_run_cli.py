@@ -10,12 +10,15 @@ from .recruiter_dry_run import (
     RecruiterDryRunReport,
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
+    RecruiterPositioningSmokeReport,
+    RecruiterPositioningSmokeStatus,
     _evaluation_downstream_gates,
     build_fake_positioning_packet_from_candidate_facts,
     run_recruiter_application_materials_flow_dry_run,
     run_recruiter_context_dry_run,
     run_recruiter_evaluation_flow_dry_run,
     run_recruiter_positioning_flow_dry_run,
+    run_recruiter_positioning_smoke_harness,
 )
 
 
@@ -24,6 +27,9 @@ _READY_STATUSES = {
     RecruiterDryRunStatus.EVALUATION_READY,
     RecruiterDryRunStatus.POSITIONING_READY,
     RecruiterDryRunStatus.APPLICATION_MATERIALS_READY,
+}
+_READY_SMOKE_STATUSES = {
+    RecruiterPositioningSmokeStatus.READY,
 }
 _READY_PACKET_STATUSES = {"READY_PROVIDER_VISIBLE"}
 
@@ -76,6 +82,22 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     )
     candidate_facts.add_argument("--json", action="store_true", help="Print JSON output (default behavior)")
     candidate_facts.set_defaults(func=cmd_recruiter_context)
+    smoke_positioning = nested.add_parser(
+        "smoke-positioning",
+        help="Print a JSON provider-ready positioning smoke report",
+    )
+    smoke_positioning.add_argument("--evaluation-packet-json", required=True, help="Read only this evaluation packet JSON file")
+    smoke_positioning.add_argument("--candidate-facts-packet-json", required=True, help="Read only this candidate facts packet JSON file")
+    smoke_positioning.add_argument("--allow-provider-execution", action="store_true", help="Explicitly allow positioning executor invocation")
+    smoke_positioning.add_argument(
+        "--private-context-status",
+        choices=["PRIVATE_CONTEXT_AVAILABLE", "PRIVATE_CONTEXT_MISSING", "PRIVATE_CONTEXT_NOT_INSPECTED"],
+        default="PRIVATE_CONTEXT_NOT_INSPECTED",
+        help="Optional private context readiness metadata forwarded to the executor seam",
+    )
+    smoke_positioning.add_argument("--repo-root", default=None, help="Override repo root used for recruiter package discovery")
+    smoke_positioning.add_argument("--json", action="store_true", help="Print JSON output (default behavior)")
+    smoke_positioning.set_defaults(func=cmd_recruiter_context)
     return parser
 
 
@@ -87,6 +109,10 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
         )
         sys.stdout.write(json.dumps(packet.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if packet.status in _READY_PACKET_STATUSES else 1)
+    if getattr(args, "recruiter_context_command", None) == "smoke-positioning":
+        report = _run_positioning_smoke_report(args, repo_root)
+        sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
+        raise SystemExit(0 if report.status in _READY_SMOKE_STATUSES else 1)
     if getattr(args, "flow", None) == "evaluate-vacancy":
         report = run_recruiter_evaluation_flow_dry_run(
             prompt=getattr(args, "prompt", None) or "",
@@ -197,4 +223,51 @@ def _cli_error_report(error: str) -> RecruiterDryRunReport:
         provider_execution_enabled=False,
         executor_called=False,
         downstream_gates=_evaluation_downstream_gates(),
+    )
+
+
+def _run_positioning_smoke_report(
+    args: argparse.Namespace,
+    repo_root: Path | None,
+) -> RecruiterPositioningSmokeReport:
+    try:
+        evaluation_packet = json.loads(Path(getattr(args, "evaluation_packet_json")).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _positioning_smoke_cli_error_report("evaluation_packet_json_missing")
+    except json.JSONDecodeError:
+        return _positioning_smoke_cli_error_report("evaluation_packet_json_invalid")
+
+    try:
+        candidate_facts_packet = load_candidate_facts_packet(getattr(args, "candidate_facts_packet_json"))
+    except ValueError as exc:
+        return _positioning_smoke_cli_error_report(str(exc))
+
+    return run_recruiter_positioning_smoke_harness(
+        evaluation_packet=evaluation_packet,
+        candidate_facts_packet=candidate_facts_packet,
+        repo_root=repo_root,
+        private_context_status=getattr(args, "private_context_status", "PRIVATE_CONTEXT_NOT_INSPECTED"),
+        allow_provider_execution=getattr(args, "allow_provider_execution", False),
+    )
+
+
+def _positioning_smoke_cli_error_report(error: str) -> RecruiterPositioningSmokeReport:
+    return RecruiterPositioningSmokeReport(
+        schema_version="recruiter_positioning_smoke_report_v1",
+        status=RecruiterPositioningSmokeStatus.INPUT_BLOCKED,
+        readiness_reason=error,
+        provider_allowed=False,
+        provider_called=False,
+        executor_called=False,
+        input_validation={
+            "ready": False,
+            "evaluation_packet_ready": False,
+            "candidate_facts_packet_ready": False,
+            "errors": [error],
+        },
+        output_validation={"ready": False, "status": "not_run", "errors": []},
+        errors=[error],
+        warnings=[],
+        next_allowed_actions=[],
+        provenance={"writes_performed": False, "dry_run": True, "flow": "positioning-smoke"},
     )

@@ -14,11 +14,13 @@ from hermes_cli.recruiter_context import (
 from hermes_cli.recruiter_dry_run import (
     RecruiterDryRunRequest,
     RecruiterDryRunStatus,
+    RecruiterPositioningSmokeStatus,
     build_fake_positioning_packet_from_candidate_facts,
     run_recruiter_application_materials_flow_dry_run,
     run_recruiter_context_dry_run,
     run_recruiter_evaluation_flow_dry_run,
     run_recruiter_positioning_flow_dry_run,
+    run_recruiter_positioning_smoke_harness,
 )
 
 
@@ -1025,3 +1027,102 @@ def test_application_materials_flow_dry_run_blocks_when_reviewer_requests_change
     )
 
     assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_REVIEW_BLOCKED
+
+
+def test_positioning_smoke_harness_blocks_missing_candidate_facts_without_leak() -> None:
+    report = run_recruiter_positioning_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=None,
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterPositioningSmokeStatus.INPUT_BLOCKED
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.errors == ["candidate_facts_packet_missing"]
+    assert "\"positioning_packet_summary\": null" in encoded
+
+
+def test_positioning_smoke_harness_blocks_provider_by_default() -> None:
+    report = run_recruiter_positioning_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+    )
+
+    assert report.status is RecruiterPositioningSmokeStatus.READY_PROVIDER_BLOCKED
+    assert report.provider_allowed is False
+    assert report.provider_called is False
+    assert report.executor_called is False
+    assert report.output_validation["status"] == "not_run"
+    assert "call_provider_model" in report.forbidden_actions
+
+
+def test_positioning_smoke_harness_runs_fake_executor_when_opted_in() -> None:
+    class _FakeSmokeExecutor:
+        provider_backed = False
+
+        def execute(self, *, skill_input, expected_schema):
+            assert skill_input["skill_id"] == "positioning-and-evidence"
+            assert expected_schema["schema_version"] == "recruiter_positioning_packet_v1"
+            return build_fake_positioning_packet_from_candidate_facts(skill_input)
+
+    report = run_recruiter_positioning_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        allow_provider_execution=True,
+        executor_factory=lambda: _FakeSmokeExecutor(),
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterPositioningSmokeStatus.READY
+    assert report.provider_allowed is True
+    assert report.provider_called is False
+    assert report.executor_called is True
+    assert report.output_validation["status"] == "valid"
+    assert report.positioning_packet_summary["schema_version"] == "recruiter_positioning_packet_v1"
+    assert "provider_text" not in encoded
+    assert "\"candidate_facts_packet\"" not in encoded
+
+
+def test_positioning_smoke_harness_invalid_output_fails_closed_without_leak() -> None:
+    class _InvalidSmokeExecutor:
+        provider_backed = False
+
+        def execute(self, *, skill_input, expected_schema):
+            packet = build_fake_positioning_packet_from_candidate_facts(skill_input)
+            packet["allowed_claims"][0]["source_fact_ids"] = []
+            return packet
+
+    report = run_recruiter_positioning_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        allow_provider_execution=True,
+        executor_factory=lambda: _InvalidSmokeExecutor(),
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterPositioningSmokeStatus.OUTPUT_INVALID
+    assert report.provider_called is False
+    assert report.executor_called is True
+    assert report.errors == ["positioning_packet_claim_without_source"]
+    assert "provider_text" not in encoded
+
+
+def test_positioning_smoke_harness_executor_exception_is_controlled() -> None:
+    class _ExplodingSmokeExecutor:
+        provider_backed = False
+
+        def execute(self, *, skill_input, expected_schema):
+            raise RuntimeError("boom")
+
+    report = run_recruiter_positioning_smoke_harness(
+        evaluation_packet=_ready_evaluation_packet(),
+        candidate_facts_packet=_ready_candidate_facts_packet(),
+        allow_provider_execution=True,
+        executor_factory=lambda: _ExplodingSmokeExecutor(),
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert report.status is RecruiterPositioningSmokeStatus.OUTPUT_INVALID
+    assert report.errors == ["positioning_executor_failed"]
+    assert "Traceback" not in encoded

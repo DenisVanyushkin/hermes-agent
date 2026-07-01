@@ -74,6 +74,13 @@ class RecruiterDryRunStatus(str, Enum):
     APPLICATION_MATERIALS_READY = "APPLICATION_MATERIALS_READY"
 
 
+class RecruiterPositioningSmokeStatus(str, Enum):
+    READY_PROVIDER_BLOCKED = "POSITIONING_SMOKE_READY_PROVIDER_BLOCKED"
+    INPUT_BLOCKED = "POSITIONING_SMOKE_INPUT_BLOCKED"
+    OUTPUT_INVALID = "POSITIONING_SMOKE_OUTPUT_INVALID"
+    READY = "POSITIONING_SMOKE_READY"
+
+
 @dataclass(slots=True)
 class RecruiterDryRunRequest:
     vacancy_id: int | None = None
@@ -120,6 +127,29 @@ class RecruiterDryRunReport:
     provider_execution_enabled: bool = False
     executor_called: bool = False
     downstream_gates: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["status"] = self.status.value
+        return data
+
+
+@dataclass(slots=True)
+class RecruiterPositioningSmokeReport:
+    schema_version: str
+    status: RecruiterPositioningSmokeStatus
+    readiness_reason: str
+    provider_allowed: bool
+    provider_called: bool
+    executor_called: bool
+    input_validation: dict[str, Any]
+    output_validation: dict[str, Any]
+    positioning_packet_summary: dict[str, Any] | None = None
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    forbidden_actions: list[str] = field(default_factory=lambda: list(_FORBIDDEN_ACTIONS))
+    next_allowed_actions: list[str] = field(default_factory=list)
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -414,6 +444,105 @@ def run_recruiter_positioning_flow_dry_run(
     return base_report
 
 
+def run_recruiter_positioning_smoke_harness(
+    *,
+    evaluation_packet: dict[str, Any] | None,
+    candidate_facts_packet: dict[str, Any] | None,
+    repo_root: str | Path | None = None,
+    private_context_status: str = "PRIVATE_CONTEXT_NOT_INSPECTED",
+    allow_provider_execution: bool = False,
+    executor_factory: Callable[[], Any] | None = None,
+) -> RecruiterPositioningSmokeReport:
+    input_errors: list[str] = []
+    evaluation_error = _validate_positioning_smoke_evaluation_packet(evaluation_packet)
+    if evaluation_error is not None:
+        input_errors.append(evaluation_error)
+    candidate_facts_error = _validate_candidate_facts_ready_for_positioning(candidate_facts_packet)
+    if candidate_facts_error is not None:
+        input_errors.append(candidate_facts_error)
+
+    base_report = RecruiterPositioningSmokeReport(
+        schema_version="recruiter_positioning_smoke_report_v1",
+        status=RecruiterPositioningSmokeStatus.INPUT_BLOCKED,
+        readiness_reason="positioning_smoke_input_not_ready",
+        provider_allowed=allow_provider_execution,
+        provider_called=False,
+        executor_called=False,
+        input_validation={
+            "ready": not input_errors,
+            "evaluation_packet_ready": evaluation_error is None,
+            "candidate_facts_packet_ready": candidate_facts_error is None,
+            "errors": list(input_errors),
+        },
+        output_validation={
+            "ready": False,
+            "status": "not_run",
+            "errors": [],
+        },
+        warnings=[],
+        errors=list(input_errors),
+        next_allowed_actions=[],
+        provenance={"writes_performed": False, "dry_run": True, "flow": "positioning-smoke"},
+    )
+    if input_errors:
+        base_report.readiness_reason = input_errors[0]
+        return base_report
+
+    base_report.status = RecruiterPositioningSmokeStatus.READY_PROVIDER_BLOCKED
+    base_report.readiness_reason = "provider_execution_requires_explicit_opt_in"
+    base_report.next_allowed_actions = ["rerun_with_allow_provider_execution"]
+    if not allow_provider_execution:
+        return base_report
+
+    positioning_input = _build_positioning_input(
+        evaluation_packet=dict(evaluation_packet or {}),
+        candidate_facts_packet=dict(candidate_facts_packet or {}),
+        repo_root=repo_root,
+        private_context_status=private_context_status,
+    )
+    if executor_factory is None:
+        from .recruiter_positioning_provider_executor import build_recruiter_positioning_provider_executor
+
+        executor_factory = build_recruiter_positioning_provider_executor
+
+    try:
+        executor = executor_factory()
+        base_report.executor_called = True
+        base_report.provider_called = bool(getattr(executor, "provider_backed", True))
+        raw_result = executor.execute(
+            skill_input=positioning_input,
+            expected_schema=positioning_expected_schema(),
+        )
+    except ValueError as exc:
+        base_report.status = RecruiterPositioningSmokeStatus.OUTPUT_INVALID
+        base_report.readiness_reason = str(exc)
+        base_report.errors = [str(exc)]
+        base_report.output_validation = {"ready": False, "status": "invalid", "errors": [str(exc)]}
+        return base_report
+    except Exception:
+        base_report.status = RecruiterPositioningSmokeStatus.OUTPUT_INVALID
+        base_report.readiness_reason = "positioning_executor_failed"
+        base_report.errors = ["positioning_executor_failed"]
+        base_report.output_validation = {"ready": False, "status": "invalid", "errors": ["positioning_executor_failed"]}
+        return base_report
+
+    output_error = _validate_positioning_packet_contract(raw_result)
+    base_report.positioning_packet_summary = _build_positioning_packet_report_fields(raw_result)
+    if output_error is not None:
+        base_report.status = RecruiterPositioningSmokeStatus.OUTPUT_INVALID
+        base_report.readiness_reason = output_error
+        base_report.errors = [output_error]
+        base_report.output_validation = {"ready": False, "status": "invalid", "errors": [output_error]}
+        return base_report
+
+    base_report.status = RecruiterPositioningSmokeStatus.READY
+    base_report.readiness_reason = "positioning_smoke_ready"
+    base_report.errors = []
+    base_report.output_validation = {"ready": True, "status": "valid", "errors": []}
+    base_report.next_allowed_actions = ["review_positioning_packet_manually"]
+    return base_report
+
+
 def run_recruiter_application_materials_flow_dry_run(
     *,
     positioning_packet: dict[str, Any] | None,
@@ -632,6 +761,12 @@ def _validate_candidate_facts_input_gate(candidate_facts_packet: dict[str, Any] 
     return validate_candidate_facts_ready_for_positioning(candidate_facts_packet)
 
 
+def _validate_candidate_facts_ready_for_positioning(candidate_facts_packet: dict[str, Any] | None) -> str | None:
+    if not isinstance(candidate_facts_packet, dict):
+        return "candidate_facts_packet_missing"
+    return validate_candidate_facts_ready_for_positioning(candidate_facts_packet)
+
+
 def _sanitize_result(raw_result: dict[str, Any]) -> dict[str, Any]:
     payload = dict(raw_result)
     payload["provenance"] = dict(payload.get("provenance") or {})
@@ -746,6 +881,25 @@ def _validate_positioning_output(raw_result: dict[str, Any]) -> str | None:
         return "positioning_output_schema_version_invalid"
     if raw_result.get("skill_id") != POSITIONING_SKILL_ID:
         return "positioning_output_skill_id_invalid"
+    return None
+
+
+def _validate_positioning_smoke_evaluation_packet(evaluation_packet: dict[str, Any] | None) -> str | None:
+    if not isinstance(evaluation_packet, dict):
+        return "evaluation_packet_missing"
+    missing_fields = [field for field in REQUIRED_VACANCY_EVALUATION_PACKET_FIELDS if field not in evaluation_packet]
+    if missing_fields:
+        return f"missing_required_evaluation_output_fields:{','.join(missing_fields)}"
+    if evaluation_packet.get("schema_version") != VACANCY_EVALUATION_PACKET_SCHEMA_VERSION:
+        return "evaluation_packet_schema_version_invalid"
+    if evaluation_packet.get("skill_id") != VACANCY_EVALUATION_SKILL_ID:
+        return "evaluation_packet_skill_id_invalid"
+    if evaluation_packet.get("recommendation") == "DO_NOT_APPLY" or evaluation_packet.get("next_step") == "DO_NOT_APPLY":
+        return "evaluation_recommendation_blocks_positioning"
+    if evaluation_packet.get("recommendation") == "NEED_MORE_INFO" or evaluation_packet.get("status") == "INSUFFICIENT_INPUT":
+        return "evaluation_requires_more_information"
+    if detect_unsafe_content(evaluation_packet):
+        return "evaluation_packet_unsafe"
     return None
 
 
@@ -899,8 +1053,10 @@ def build_fake_positioning_packet_from_candidate_facts(skill_input: dict[str, An
 
 
 def _validate_fake_positioning_output(raw_result: dict[str, Any]) -> str | None:
-    output_error = _validate_positioning_output(raw_result)
+    output_error = _validate_positioning_packet_contract(raw_result)
     if output_error is not None:
+        if output_error == "positioning_packet_unsafe":
+            return "positioning_unsafe_output_detected"
         return output_error
     if raw_result.get("generation_mode") != "deterministic_fake":
         return "positioning_fake_output_invalid"
@@ -969,6 +1125,12 @@ def _validate_application_materials_input_gate(
     positioning_packet: dict[str, Any] | None,
     private_context_status: str,
 ) -> str | None:
+    if private_context_status != "PRIVATE_CONTEXT_AVAILABLE":
+        return "private_context_not_ready_for_application_materials"
+    return _validate_positioning_packet_contract(positioning_packet)
+
+
+def _validate_positioning_packet_contract(positioning_packet: dict[str, Any] | None) -> str | None:
     if not isinstance(positioning_packet, dict):
         return "positioning_packet_missing"
     missing_fields = [field for field in REQUIRED_POSITIONING_PACKET_FIELDS if field not in positioning_packet]
@@ -978,8 +1140,6 @@ def _validate_application_materials_input_gate(
         return "positioning_packet_schema_version_invalid"
     if positioning_packet.get("skill_id") != POSITIONING_SKILL_ID:
         return "positioning_packet_skill_id_invalid"
-    if private_context_status != "PRIVATE_CONTEXT_AVAILABLE":
-        return "private_context_not_ready_for_application_materials"
     if positioning_packet.get("status") != "POSITIONING_READY":
         return "positioning_packet_status_not_ready"
     if positioning_packet.get("next_step") != "POSITIONING_READY_FOR_DOCUMENTS":
