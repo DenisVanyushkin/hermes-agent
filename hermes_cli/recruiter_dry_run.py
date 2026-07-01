@@ -10,6 +10,7 @@ from .recruiter_context import (
     RecruiterContextStatus,
     build_recruiter_context,
 )
+from .recruiter_candidate_facts import validate_candidate_facts_ready_for_positioning
 from .recruiter_application_materials_flow import (
     APPLICATION_MATERIAL_TARGETS,
     APPLICATION_MATERIALS_PACKET_SCHEMA_VERSION,
@@ -292,19 +293,21 @@ def run_recruiter_evaluation_flow_dry_run(
 def run_recruiter_positioning_flow_dry_run(
     *,
     evaluation_packet: dict[str, Any] | None,
+    candidate_facts_packet: dict[str, Any] | None = None,
     repo_root: str | Path | None = None,
     private_context_status: str = "PRIVATE_CONTEXT_NOT_INSPECTED",
     allow_provider_execution: bool = False,
     executor_factory: Callable[[], Any] | None = None,
+    fake_positioning_result_factory: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> RecruiterDryRunReport:
     base_report = RecruiterDryRunReport(
         status=RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED,
         context_status="POSITIONING_INPUT_REQUIRED",
-        input={
-            "repo_root": str(repo_root) if repo_root is not None else None,
-            "private_context_status": private_context_status,
-            "allow_provider_execution": allow_provider_execution,
-        },
+        input=_build_positioning_report_input(
+            repo_root=repo_root,
+            private_context_status=private_context_status,
+            allow_provider_execution=allow_provider_execution,
+        ),
         readiness={"ready": False, "reason": "positioning_input_not_ready"},
         context_packet=None,
         evaluation_flow=None,
@@ -325,9 +328,39 @@ def run_recruiter_positioning_flow_dry_run(
         base_report.errors = [evaluation_error]
         base_report.readiness["reason"] = evaluation_error
         return base_report
+    candidate_facts_error = _validate_candidate_facts_input_gate(candidate_facts_packet)
+    if candidate_facts_error is not None:
+        base_report.errors = [candidate_facts_error]
+        base_report.readiness["reason"] = candidate_facts_error
+        return base_report
 
+    if isinstance(candidate_facts_packet, dict):
+        base_report.input.update(
+            _build_candidate_facts_report_fields(candidate_facts_packet)
+        )
     base_report.context_status = "READY"
     base_report.readiness = {"ready": True, "reason": "positioning_input_ready"}
+    positioning_input = _build_positioning_input(
+        evaluation_packet=dict(evaluation_packet or {}),
+        candidate_facts_packet=dict(candidate_facts_packet or {}) if isinstance(candidate_facts_packet, dict) else None,
+        repo_root=repo_root,
+        private_context_status=private_context_status,
+    )
+    if fake_positioning_result_factory is not None:
+        base_report.executor_called = True
+        raw_result = fake_positioning_result_factory(positioning_input)
+        output_error = _validate_positioning_output(raw_result)
+        if output_error is not None:
+            base_report.status = RecruiterDryRunStatus.POSITIONING_OUTPUT_INVALID
+            base_report.positioning_result = _sanitize_result(raw_result)
+            base_report.errors = [output_error]
+            return base_report
+        base_report.status = RecruiterDryRunStatus.POSITIONING_READY
+        base_report.positioning_result = _sanitize_result(raw_result)
+        base_report.readiness = {"ready": True, "reason": "fake_positioning_completed"}
+        base_report.next_allowed_actions = ["review_positioning_packet_manually"]
+        return base_report
+
     if not allow_provider_execution:
         base_report.status = RecruiterDryRunStatus.PROVIDER_EXECUTION_BLOCKED
         base_report.readiness["reason"] = "provider_execution_requires_explicit_opt_in"
@@ -344,11 +377,7 @@ def run_recruiter_positioning_flow_dry_run(
         base_report.executor_called = True
         base_report.provider_called = True
         raw_result = executor.execute(
-            skill_input=_build_positioning_input(
-                evaluation_packet=dict(evaluation_packet or {}),
-                repo_root=repo_root,
-                private_context_status=private_context_status,
-            ),
+            skill_input=positioning_input,
             expected_schema=positioning_expected_schema(),
         )
     except ValueError as exc:
@@ -504,10 +533,11 @@ def _build_prompt_evaluation_input(*, prompt: str, repo_root: str | Path | None)
 def _build_positioning_input(
     *,
     evaluation_packet: dict[str, Any],
+    candidate_facts_packet: dict[str, Any] | None,
     repo_root: str | Path | None,
     private_context_status: str,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "skill_id": POSITIONING_SKILL_ID,
         "evaluation_packet": evaluation_packet,
         "private_context_status": private_context_status,
@@ -520,12 +550,92 @@ def _build_positioning_input(
             "no_private_file_content_read": True,
         },
     }
+    if isinstance(candidate_facts_packet, dict):
+        payload.update(_build_candidate_facts_positioning_fields(candidate_facts_packet))
+    return payload
+
+
+def _build_positioning_report_input(
+    *,
+    repo_root: str | Path | None,
+    private_context_status: str,
+    allow_provider_execution: bool,
+) -> dict[str, Any]:
+    return {
+        "repo_root": str(repo_root) if repo_root is not None else None,
+        "private_context_status": private_context_status,
+        "allow_provider_execution": allow_provider_execution,
+    }
+
+
+def _build_candidate_facts_positioning_fields(candidate_facts_packet: dict[str, Any]) -> dict[str, Any]:
+    facts = _dict_list(candidate_facts_packet.get("facts"))
+    allowed_claims = _dict_list(candidate_facts_packet.get("allowed_claims"))
+    source_references = _dict_list(candidate_facts_packet.get("source_references"))
+    return {
+        "candidate_facts_packet": candidate_facts_packet,
+        "candidate_facts_status": str(candidate_facts_packet.get("status") or ""),
+        "candidate_fact_summaries": [
+            {
+                "fact_id": str(fact.get("fact_id") or ""),
+                "category": str(fact.get("category") or ""),
+                "safe_summary": str(fact.get("safe_summary") or ""),
+                "support_level": str(fact.get("support_level") or ""),
+            }
+            for fact in facts
+            if isinstance(fact, dict)
+        ],
+        "allowed_claims": [
+            str(claim.get("claim_text") or "")
+            for claim in allowed_claims
+            if isinstance(claim, dict) and str(claim.get("claim_text") or "").strip()
+        ],
+        "claims_to_avoid": [str(item) for item in _string_list(candidate_facts_packet.get("claims_to_avoid")) if str(item).strip()],
+        "source_references": [
+            {
+                "source_ref_id": str(ref.get("source_ref_id") or ""),
+                "source_type": str(ref.get("source_type") or ""),
+                "source_label": str(ref.get("source_label") or ""),
+                "source_id_hash": str(ref.get("source_id_hash") or ""),
+                "section_label": str(ref.get("section_label") or ""),
+                "content_hash": str(ref.get("content_hash") or ""),
+                "sensitivity": str(ref.get("sensitivity") or ""),
+            }
+            for ref in source_references
+            if isinstance(ref, dict)
+        ],
+        "candidate_facts_provider_visibility_status": str(candidate_facts_packet.get("provider_visibility_status") or ""),
+    }
+
+
+def _build_candidate_facts_report_fields(candidate_facts_packet: dict[str, Any]) -> dict[str, Any]:
+    payload = _build_candidate_facts_positioning_fields(candidate_facts_packet)
+    payload.pop("candidate_facts_packet", None)
+    return payload
+
+
+def _validate_candidate_facts_input_gate(candidate_facts_packet: dict[str, Any] | None) -> str | None:
+    if candidate_facts_packet is None:
+        return None
+    return validate_candidate_facts_ready_for_positioning(candidate_facts_packet)
 
 
 def _sanitize_result(raw_result: dict[str, Any]) -> dict[str, Any]:
     payload = dict(raw_result)
     payload["provenance"] = dict(payload.get("provenance") or {})
     return payload
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str)]
 
 
 def _validate_positioning_input_gate(

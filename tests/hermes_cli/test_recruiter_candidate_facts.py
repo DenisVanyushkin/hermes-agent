@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hermes_cli.recruiter_candidate_facts import (
     SCHEMA_VERSION,
     build_candidate_facts_packet,
     build_safe_source_id_hash,
+    load_candidate_facts_packet,
     validate_no_unsafe_leakage,
+    validate_candidate_facts_ready_for_positioning,
 )
 
 
@@ -177,6 +181,75 @@ def test_final_packet_privacy_scan_covers_all_serialized_fields() -> None:
     )
 
     assert packet.status == "BLOCKED_UNSAFE_CONTENT"
+
+
+def test_load_candidate_facts_packet_accepts_ready_fixture_packet(tmp_path) -> None:
+    packet = build_candidate_facts_packet(
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        fixture_payload=_safe_fixture(),
+        generated_at="2026-07-01T00:00:00+00:00",
+    )
+    path = tmp_path / "candidate-facts-ready.json"
+    path.write_text(json.dumps(packet.to_dict()), encoding="utf-8")
+
+    loaded = load_candidate_facts_packet(path)
+
+    assert loaded["schema_version"] == "recruiter_candidate_facts_packet_v1"
+    assert loaded["status"] == "READY_PROVIDER_VISIBLE"
+    assert loaded["provider_visibility_status"] == "READY_PROVIDER_VISIBLE"
+
+
+def test_validate_candidate_facts_ready_for_positioning_rejects_blocked_packet() -> None:
+    packet = build_candidate_facts_packet(private_context_status="PRIVATE_CONTEXT_MISSING").to_dict()
+
+    error = validate_candidate_facts_ready_for_positioning(packet)
+
+    assert error == "candidate_facts_packet_not_provider_visible"
+
+
+def test_validate_candidate_facts_ready_for_positioning_rejects_invalid_schema() -> None:
+    packet = build_candidate_facts_packet(
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        fixture_payload=_safe_fixture(),
+    ).to_dict()
+    packet["schema_version"] = "unknown"
+
+    error = validate_candidate_facts_ready_for_positioning(packet)
+
+    assert error == "candidate_facts_packet_schema_invalid"
+
+
+def test_validate_candidate_facts_ready_for_positioning_rejects_empty_facts() -> None:
+    packet = build_candidate_facts_packet(
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        fixture_payload=_safe_fixture(),
+    ).to_dict()
+    packet["facts"] = []
+
+    error = validate_candidate_facts_ready_for_positioning(packet)
+
+    assert error == "candidate_facts_packet_empty_facts"
+
+
+def test_validate_candidate_facts_ready_for_positioning_rejects_missing_optional_lists() -> None:
+    packet = {
+        "schema_version": "recruiter_candidate_facts_packet_v1",
+        "status": "READY_PROVIDER_VISIBLE",
+        "provider_visibility_status": "READY_PROVIDER_VISIBLE",
+        "facts": [{"fact_id": "x"}],
+    }
+
+    error = validate_candidate_facts_ready_for_positioning(packet)
+
+    assert error == "candidate_facts_packet_invalid"
+
+
+def test_load_candidate_facts_packet_invalid_json_fails_closed(tmp_path) -> None:
+    path = tmp_path / "candidate-facts-invalid.json"
+    path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="candidate_facts_packet_json_invalid"):
+        load_candidate_facts_packet(path)
 
 
 def test_bare_tilde_path_in_safe_summary_blocks_packet() -> None:

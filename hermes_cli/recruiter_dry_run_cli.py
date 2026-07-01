@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .recruiter_candidate_facts import run_candidate_facts_cli
+from .recruiter_candidate_facts import load_candidate_facts_packet, run_candidate_facts_cli
 from .recruiter_dry_run import (
     RecruiterDryRunReport,
     RecruiterDryRunRequest,
@@ -44,9 +44,10 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     dry_run.add_argument("--vacancy-id", type=int, default=None, help="Job-intel vacancy id")
     dry_run.add_argument("--vacancy-url", default=None, help="Job-intel vacancy URL")
     dry_run.add_argument("--opportunity-id", type=int, default=None, help="CRM opportunity id")
-    dry_run.add_argument("--flow", choices=["evaluate-vacancy", "positioning-and-evidence", "application-materials"], default=None, help="Run a controlled recruiter flow dry-run")
+    dry_run.add_argument("--flow", choices=["evaluate-vacancy", "positioning", "positioning-and-evidence", "application-materials"], default=None, help="Run a controlled recruiter flow dry-run")
     dry_run.add_argument("--prompt", default=None, help="Prompt text for prompt-driven recruiter flow dry-runs")
     dry_run.add_argument("--evaluation-packet-json", default=None, help="Read only this evaluation packet JSON file for positioning-and-evidence dry-runs")
+    dry_run.add_argument("--candidate-facts-packet-json", default=None, help="Read only this candidate facts packet JSON file for positioning dry-runs")
     dry_run.add_argument("--positioning-packet-json", default=None, help="Read only this positioning packet JSON file for application-materials dry-runs")
     dry_run.add_argument("--document-target", default=None, help="Optional application-materials document target")
     dry_run.add_argument("--allow-provider-execution", action="store_true", help="Explicitly allow provider-backed evaluation for READY evaluate-vacancy dry-runs")
@@ -93,7 +94,7 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
         )
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if report.status in _READY_STATUSES else 1)
-    if getattr(args, "flow", None) == "positioning-and-evidence":
+    if getattr(args, "flow", None) in {"positioning", "positioning-and-evidence"}:
         evaluation_packet_path = getattr(args, "evaluation_packet_json", None)
         if not evaluation_packet_path:
             report = _cli_error_report("evaluation_packet_json_required")
@@ -105,12 +106,23 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
             except json.JSONDecodeError:
                 report = _cli_error_report("evaluation_packet_json_invalid")
             else:
-                report = run_recruiter_positioning_flow_dry_run(
-                    evaluation_packet=evaluation_packet,
-                    repo_root=repo_root,
-                    private_context_status=getattr(args, "private_context_status", "PRIVATE_CONTEXT_NOT_INSPECTED"),
-                    allow_provider_execution=getattr(args, "allow_provider_execution", False),
-                )
+                candidate_facts_packet_path = getattr(args, "candidate_facts_packet_json", None)
+                try:
+                    candidate_facts_packet = (
+                        load_candidate_facts_packet(candidate_facts_packet_path)
+                        if candidate_facts_packet_path
+                        else None
+                    )
+                except ValueError as exc:
+                    report = _cli_error_report(str(exc))
+                else:
+                    report = run_recruiter_positioning_flow_dry_run(
+                        evaluation_packet=evaluation_packet,
+                        candidate_facts_packet=candidate_facts_packet,
+                        repo_root=repo_root,
+                        private_context_status=getattr(args, "private_context_status", "PRIVATE_CONTEXT_NOT_INSPECTED"),
+                        allow_provider_execution=getattr(args, "allow_provider_execution", False),
+                    )
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if report.status in _READY_STATUSES else 1)
     if getattr(args, "flow", None) == "application-materials":
@@ -156,7 +168,7 @@ def _optional_path(value: str | None) -> Path | None:
 
 
 def _cli_error_report(error: str) -> RecruiterDryRunReport:
-    if error.startswith("evaluation_packet_"):
+    if error.startswith("evaluation_packet_") or error.startswith("candidate_facts_packet_"):
         status = RecruiterDryRunStatus.POSITIONING_INPUT_BLOCKED
         context_status = "POSITIONING_INPUT_REQUIRED"
     else:
