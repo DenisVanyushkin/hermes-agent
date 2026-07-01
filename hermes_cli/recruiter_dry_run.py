@@ -92,6 +92,13 @@ class RecruiterApplicationMaterialsSmokeStatus(str, Enum):
     READY = "APPLICATION_MATERIALS_SMOKE_READY"
 
 
+REQUIRED_APPLICATION_MATERIAL_TARGETS = (
+    "recruiter_message_draft",
+    "cover_letter_draft",
+    "cv_tailoring_notes",
+)
+
+
 @dataclass(slots=True)
 class RecruiterDryRunRequest:
     vacancy_id: int | None = None
@@ -173,7 +180,10 @@ class RecruiterApplicationMaterialsSmokeReport:
     schema_version: str
     status: RecruiterApplicationMaterialsSmokeStatus
     readiness_reason: str
+    target_mode: str
     document_target: str | None
+    required_targets: list[str]
+    target_results: dict[str, dict[str, Any]]
     provider_allowed: bool
     provider_called: bool
     executor_called: bool
@@ -586,22 +596,37 @@ def run_recruiter_application_materials_smoke_harness(
     repo_root: str | Path | None = None,
     private_context_status: str = "PRIVATE_CONTEXT_AVAILABLE",
     allow_provider_execution: bool = False,
+    all_required_targets: bool = False,
     document_target: str | None = None,
     executor_factory: Callable[[], Any] | None = None,
 ) -> RecruiterApplicationMaterialsSmokeReport:
+    target_mode_error = _validate_application_materials_target_mode(
+        all_required_targets=all_required_targets,
+        document_target=document_target,
+    )
     input_errors: list[str] = []
     target_error = _validate_application_materials_target(document_target)
+    if target_mode_error is not None:
+        input_errors.append(target_mode_error)
     if target_error is not None:
         input_errors.append(target_error)
-    positioning_error = _validate_application_materials_input_gate(positioning_packet, private_context_status)
+    positioning_error = None if target_mode_error is not None else _validate_application_materials_input_gate(positioning_packet, private_context_status)
     if positioning_error is not None:
         input_errors.append(positioning_error)
+    target_mode = "all_required_targets" if all_required_targets else "single_target"
+    target_keys = _resolve_application_material_smoke_targets(
+        all_required_targets=all_required_targets,
+        document_target=document_target,
+    )
 
     base_report = RecruiterApplicationMaterialsSmokeReport(
         schema_version="recruiter_application_materials_smoke_report_v1",
         status=RecruiterApplicationMaterialsSmokeStatus.INPUT_BLOCKED,
         readiness_reason="application_materials_smoke_input_not_ready",
+        target_mode=target_mode,
         document_target=document_target,
+        required_targets=list(REQUIRED_APPLICATION_MATERIAL_TARGETS),
+        target_results=_build_application_material_target_results(target_keys, status="readiness_blocked"),
         provider_allowed=allow_provider_execution,
         provider_called=False,
         executor_called=False,
@@ -610,6 +635,7 @@ def run_recruiter_application_materials_smoke_harness(
             "ready": not input_errors,
             "positioning_packet_ready": positioning_error is None,
             "document_target_ready": target_error is None,
+            "target_mode_ready": target_mode_error is None,
             "errors": list(input_errors),
         },
         output_validation={"ready": False, "status": "not_run", "errors": []},
@@ -625,6 +651,7 @@ def run_recruiter_application_materials_smoke_harness(
     base_report.status = RecruiterApplicationMaterialsSmokeStatus.READY_PROVIDER_BLOCKED
     base_report.readiness_reason = "provider_execution_requires_explicit_opt_in"
     base_report.next_allowed_actions = ["rerun_with_allow_provider_execution"]
+    base_report.target_results = _build_application_material_target_results(target_keys, status="provider_blocked")
     if not allow_provider_execution:
         return base_report
 
@@ -640,7 +667,7 @@ def run_recruiter_application_materials_smoke_harness(
         flow_report = run_recruiter_application_materials_flow(
             positioning_packet=dict(positioning_packet or {}),
             allow_document_execution=True,
-            document_target=document_target,
+            document_target=None if all_required_targets else document_target,
             executor=executor,
         )
     except ValueError as exc:
@@ -663,7 +690,11 @@ def run_recruiter_application_materials_smoke_harness(
     base_report.reviewer_called = bool(flow_report.reviewer_called)
     base_report.document_summary = _build_application_materials_document_summary(flow_report, document_target=document_target)
     base_report.review_summary = _build_application_materials_review_summary(flow_report)
-    output_error = _validate_application_materials_smoke_output(flow_report, document_target=document_target)
+    output_error = _validate_application_materials_smoke_output(
+        flow_report,
+        all_required_targets=all_required_targets,
+        document_target=document_target,
+    )
     report_safe_output = {
         "document_summary": base_report.document_summary,
         "review_summary": base_report.review_summary,
@@ -683,6 +714,11 @@ def run_recruiter_application_materials_smoke_harness(
     base_report.errors = []
     base_report.output_validation = {"ready": True, "status": "valid", "errors": []}
     base_report.next_allowed_actions = ["review_application_materials_packet_manually"]
+    base_report.target_results = _build_application_material_target_results(
+        target_keys,
+        status="ready",
+        flow_report=flow_report,
+    )
     return base_report
 
 
@@ -1272,6 +1308,68 @@ def _validate_application_materials_target(document_target: str | None) -> str |
     return None
 
 
+def _validate_application_materials_target_mode(
+    *,
+    all_required_targets: bool,
+    document_target: str | None,
+) -> str | None:
+    if all_required_targets and document_target is not None:
+        return "application_materials_target_mode_conflict"
+    return None
+
+
+def _resolve_application_material_smoke_targets(
+    *,
+    all_required_targets: bool,
+    document_target: str | None,
+) -> list[str]:
+    if all_required_targets:
+        return list(REQUIRED_APPLICATION_MATERIAL_TARGETS)
+    if document_target is not None:
+        return [document_target]
+    return list(APPLICATION_MATERIAL_TARGETS)
+
+
+def _build_application_material_target_results(
+    target_keys: list[str],
+    *,
+    status: str,
+    flow_report: RecruiterApplicationMaterialsReport | None = None,
+) -> dict[str, dict[str, Any]]:
+    if flow_report is None:
+        return {
+            target: {
+                "status": status,
+                "draft_only": False,
+                "user_review_required": False,
+                "reviewer_verdict": None,
+                "reviewer_notes_present": False,
+            }
+            for target in target_keys
+        }
+
+    document_runs = dict(flow_report.document_runs)
+    target_results: dict[str, dict[str, Any]] = {}
+    for target in target_keys:
+        run_payload = dict(document_runs.get(target) or {})
+        document_packet = dict(run_payload.get("document_packet") or {})
+        review_result = dict(run_payload.get("review_result") or {})
+        notes = review_result.get("notes")
+        draft = dict(document_packet.get("draft") or {})
+        target_results[target] = {
+            "status": status,
+            "draft_only": document_packet.get("status") == "DRAFT_READY",
+            "user_review_required": True,
+            "reviewer_verdict": review_result.get("verdict"),
+            "reviewer_notes_present": bool(
+                isinstance(notes, list) and notes
+                or isinstance(notes, str) and notes.strip()
+                or isinstance(draft.get("notes"), list) and draft.get("notes")
+            ),
+        }
+    return target_results
+
+
 def _validate_application_materials_input_gate(
     positioning_packet: dict[str, Any] | None,
     private_context_status: str,
@@ -1284,6 +1382,7 @@ def _validate_application_materials_input_gate(
 def _validate_application_materials_smoke_output(
     flow_report: RecruiterApplicationMaterialsReport,
     *,
+    all_required_targets: bool,
     document_target: str | None,
 ) -> str | None:
     if flow_report.schema_version != APPLICATION_MATERIALS_PACKET_SCHEMA_VERSION:
@@ -1302,7 +1401,10 @@ def _validate_application_materials_smoke_output(
     if not flow_report.reviewer_called:
         return "application_materials_reviewer_not_called"
 
-    expected_targets = [document_target] if document_target is not None else list(APPLICATION_MATERIAL_TARGETS)
+    expected_targets = _resolve_application_material_smoke_targets(
+        all_required_targets=all_required_targets,
+        document_target=document_target,
+    )
     document_runs = dict(flow_report.document_runs)
     if sorted(document_runs) != sorted(expected_targets):
         return "application_materials_document_target_mismatch"
