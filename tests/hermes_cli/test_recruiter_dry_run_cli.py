@@ -8,6 +8,8 @@ import pytest
 
 from hermes_cli._parser import build_top_level_parser
 from hermes_cli.recruiter_dry_run import (
+    RecruiterApplicationMaterialsSmokeReport,
+    RecruiterApplicationMaterialsSmokeStatus,
     RecruiterDryRunReport,
     RecruiterDryRunStatus,
     RecruiterPositioningSmokeReport,
@@ -89,6 +91,25 @@ def test_smoke_positioning_subparser_exists_in_main_tree() -> None:
 
     assert args.command == "recruiter-context"
     assert args.recruiter_context_command == "smoke-positioning"
+    assert args.json is True
+
+
+def test_smoke_application_materials_subparser_exists_in_main_tree() -> None:
+    args = _parse_main(
+        [
+            "recruiter-context",
+            "smoke-application-materials",
+            "--positioning-packet-json",
+            "/tmp/positioning.json",
+            "--document-target",
+            "recruiter_message_draft",
+            "--json",
+        ]
+    )
+
+    assert args.command == "recruiter-context"
+    assert args.recruiter_context_command == "smoke-application-materials"
+    assert args.document_target == "recruiter_message_draft"
     assert args.json is True
 
 
@@ -1477,3 +1498,90 @@ def test_smoke_positioning_cli_invalid_evaluation_does_not_echo_path(
     assert payload["status"] == RecruiterPositioningSmokeStatus.INPUT_BLOCKED.value
     assert payload["errors"] == ["evaluation_packet_json_invalid"]
     assert str(evaluation_path) not in encoded
+
+
+def test_smoke_application_materials_cli_provider_blocked_without_executor_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    positioning_path = tmp_path / "positioning-packet.json"
+    positioning_path.write_text(json.dumps({"schema_version": "recruiter_positioning_packet_v1"}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "hermes_cli.recruiter_dry_run_cli._run_application_materials_smoke_report",
+        lambda args, repo_root: RecruiterApplicationMaterialsSmokeReport(
+            schema_version="recruiter_application_materials_smoke_report_v1",
+            status=RecruiterApplicationMaterialsSmokeStatus.READY_PROVIDER_BLOCKED,
+            readiness_reason="provider_execution_requires_explicit_opt_in",
+            document_target="recruiter_message_draft",
+            provider_allowed=False,
+            provider_called=False,
+            executor_called=False,
+            reviewer_called=False,
+            input_validation={
+                "ready": True,
+                "positioning_packet_ready": True,
+                "document_target_ready": True,
+                "errors": [],
+            },
+            output_validation={"ready": False, "status": "not_run", "errors": []},
+            document_summary=None,
+            review_summary=None,
+            errors=[],
+            warnings=[],
+            next_allowed_actions=["rerun_with_allow_provider_execution"],
+            provenance={"writes_performed": False, "dry_run": True},
+        ),
+    )
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "smoke-application-materials",
+            "--positioning-packet-json",
+            str(positioning_path),
+            "--document-target",
+            "recruiter_message_draft",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == RecruiterApplicationMaterialsSmokeStatus.READY_PROVIDER_BLOCKED.value
+    assert payload["provider_called"] is False
+    assert payload["executor_called"] is False
+    assert payload["reviewer_called"] is False
+    assert payload["output_validation"]["status"] == "not_run"
+
+
+def test_smoke_application_materials_cli_invalid_positioning_does_not_echo_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    positioning_path = tmp_path / "positioning-packet.json"
+    positioning_path.write_text("{not-json}", encoding="utf-8")
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "smoke-application-materials",
+            "--positioning-packet-json",
+            str(positioning_path),
+            "--document-target",
+            "recruiter_message_draft",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    encoded = json.dumps(payload, sort_keys=True)
+    assert payload["status"] == RecruiterApplicationMaterialsSmokeStatus.INPUT_BLOCKED.value
+    assert payload["errors"] == ["positioning_packet_json_invalid"]
+    assert str(positioning_path) not in encoded
