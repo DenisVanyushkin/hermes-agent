@@ -160,15 +160,60 @@ def run_recruiter_application_materials_flow(
 
 
 def _build_synthetic_execution_report(positioning_packet: dict[str, Any]) -> dict[str, Any]:
+    allowed_claims = [
+        {
+            "claim_id": str(item.get("claim_id") or ""),
+            "claim_text": str(item.get("claim_text") or ""),
+            "source_fact_ids": [str(ref) for ref in item.get("source_fact_ids") or [] if isinstance(ref, str)],
+            "support_level": str(item.get("support_level") or ""),
+        }
+        for item in positioning_packet.get("allowed_claims") or []
+        if isinstance(item, dict)
+    ]
+    evidence_items = [
+        {
+            "claim_text": str(item.get("claim_text") or ""),
+            "source_fact_ids": [str(ref) for ref in item.get("source_fact_ids") or [] if isinstance(ref, str)],
+            "source_ref_ids": [str(ref) for ref in item.get("source_ref_ids") or [] if isinstance(ref, str)],
+            "support_level": str(item.get("support_level") or ""),
+            "category": str(item.get("category") or ""),
+            "safe_summary": str(item.get("safe_summary") or ""),
+        }
+        for item in positioning_packet.get("evidence_items") or []
+        if isinstance(item, dict)
+    ]
+    source_references = [
+        {
+            "source_ref_id": str(item.get("source_ref_id") or ""),
+            "source_label": str(item.get("source_label") or ""),
+            "source_id_hash": str(item.get("source_id_hash") or ""),
+            "section_label": str(item.get("section_label") or ""),
+            "support_level": str(item.get("support_level") or ""),
+            "category": str(item.get("category") or ""),
+        }
+        for item in positioning_packet.get("source_references") or []
+        if isinstance(item, dict)
+    ]
     synthetic_positioning_result = {
         "status": "SUCCESS",
         "skill_id": "positioning-and-evidence",
         "positioning_summary": str(positioning_packet.get("positioning_summary") or ""),
-        "evidence_map": {"positioning_evidence": list(positioning_packet.get("evidence") or [])},
-        "proven_facts": list(positioning_packet.get("claims_to_use") or []),
+        "evidence_map": {
+            "positioning_evidence": [item["safe_summary"] for item in evidence_items if item.get("safe_summary")],
+            "source_references": source_references,
+        },
+        "proven_facts": [item["claim_text"] for item in allowed_claims if item.get("claim_text")],
         "derived_positioning": [str(positioning_packet.get("recommended_angle") or "")] if positioning_packet.get("recommended_angle") else [],
         "gaps": list(positioning_packet.get("gaps") or []),
         "risks_and_mitigations": list(positioning_packet.get("risks_and_mitigations") or []),
+        "allowed_claims": allowed_claims,
+        "evidence_items": evidence_items,
+        "source_references": source_references,
+        "claims_to_avoid": list(positioning_packet.get("claims_to_avoid") or []),
+        "support_summary": dict(positioning_packet.get("support_summary") or {}),
+        "privacy_notes": list(positioning_packet.get("privacy_notes") or []),
+        "generation_mode": str(positioning_packet.get("generation_mode") or ""),
+        "source_kind": str(positioning_packet.get("source_kind") or ""),
         "provenance": dict(positioning_packet.get("provenance") or {}),
     }
     return {

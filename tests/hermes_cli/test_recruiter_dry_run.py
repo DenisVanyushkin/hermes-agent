@@ -338,6 +338,41 @@ def _ready_positioning_packet(
         "claims_to_avoid": ["Direct ownership of unrelated sector."],
         "missing_information": [],
         "next_step": next_step,
+        "allowed_claims": [
+            {
+                "claim_id": "claim-1",
+                "claim_text": "Led product organizations.",
+                "source_fact_ids": ["fact-1"],
+                "support_level": "explicit",
+            }
+        ],
+        "evidence_items": [
+            {
+                "claim_text": "Led product organizations.",
+                "source_fact_ids": ["fact-1"],
+                "source_ref_ids": ["src-1"],
+                "support_level": "explicit",
+                "category": "leadership",
+                "safe_summary": "Scaled multi-team product orgs.",
+            }
+        ],
+        "unsupported_claims": [],
+        "source_references": [
+            {
+                "source_ref_id": "src-1",
+                "source_label": "safe-fixture",
+                "source_id_hash": "fixture-hash",
+                "section_label": "safe-section",
+                "support_level": "explicit",
+                "category": "test_fixture",
+            }
+        ],
+        "support_summary": {"explicit": 1, "derived_safe": 0, "weak": 0, "unsupported": 0},
+        "privacy_notes": ["sanitized fixture packet"],
+        "generation_mode": "deterministic_fake",
+        "source_kind": "fake_candidate_facts",
+        "provider_called": False,
+        "executor_called": False,
         "provenance": {},
     }
 
@@ -735,12 +770,14 @@ class _ApplicationMaterialsExecutor:
 
     def __init__(self, *, reviewer_verdict: str = "APPROVE", invalid_writer: bool = False) -> None:
         self.calls: list[str] = []
+        self.writer_inputs: list[dict[str, object]] = []
         self.reviewer_verdict = reviewer_verdict
         self.invalid_writer = invalid_writer
 
     def execute(self, *, skill_id, skill_input, expected_schema):
         self.calls.append(skill_id)
         if skill_id == "document-writer":
+            self.writer_inputs.append(dict(skill_input))
             if self.invalid_writer:
                 return {"status": "DRAFT_READY"}
             return {
@@ -801,6 +838,39 @@ def test_application_materials_flow_dry_run_requires_private_context_available()
     assert report.errors == ["private_context_not_ready_for_application_materials"]
 
 
+def test_application_materials_flow_dry_run_rejects_claim_without_source_backing() -> None:
+    packet = _ready_positioning_packet()
+    packet["allowed_claims"] = [{"claim_id": "claim-1", "claim_text": "Led product organizations."}]
+
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=packet,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_INPUT_BLOCKED
+    assert report.errors == ["positioning_packet_claim_without_source"]
+
+
+def test_application_materials_flow_dry_run_blocks_unsafe_packet_without_echoing_raw_fields() -> None:
+    packet = _ready_positioning_packet()
+    packet["positioning_summary"] = "Unsafe /Users/testleak/private/career leaktest@example.com"
+
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=packet,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_INPUT_BLOCKED
+    assert report.errors == ["positioning_packet_unsafe"]
+    assert report.positioning_result in (None, {})
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    assert "Unsafe /Users/testleak/private/career leaktest@example.com" not in encoded
+    assert "/Users/testleak/private/career" not in encoded
+    assert "leaktest@example.com" not in encoded
+
+
 def test_application_materials_flow_dry_run_runs_writer_and_reviewer_when_ready() -> None:
     executor = _ApplicationMaterialsExecutor()
     report = run_recruiter_application_materials_flow_dry_run(
@@ -818,6 +888,12 @@ def test_application_materials_flow_dry_run_runs_writer_and_reviewer_when_ready(
     assert report.application_materials_result["document_runs"]["cover_letter_draft"]["document_type"] == "cover_letter"
     assert report.application_materials_result["document_runs"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
     assert report.application_materials_result["materials"]["cover_letter_draft"]["content"] == "Draft for cover_letter."
+    first_writer_input = executor.writer_inputs[0]
+    positioning_result = first_writer_input["positioning_evidence_result"]
+    assert positioning_result["allowed_claims"][0]["source_fact_ids"] == ["fact-1"]
+    assert positioning_result["evidence_items"][0]["source_ref_ids"] == ["src-1"]
+    assert positioning_result["source_references"][0]["source_ref_id"] == "src-1"
+    assert positioning_result["claims_to_avoid"] == ["Direct ownership of unrelated sector."]
     assert report.application_materials_result["review"]["verdict"] == "APPROVE"
     assert executor.calls == [
         "document-writer",
