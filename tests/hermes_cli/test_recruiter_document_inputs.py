@@ -9,6 +9,7 @@ from hermes_cli.recruiter_document_inputs import (
     RecruiterDocumentInputStatus,
     build_recruiter_document_writer_input_packet,
 )
+from hermes_cli.recruiter_outward_drafts import compose_deterministic_outward_draft
 from hermes_cli.recruiter_candidate_facts import build_application_materials_ready_fixture_payload
 from hermes_cli.recruiter_skill_execution import RecruiterSkillExecutionReport, RecruiterSkillExecutionStatus
 
@@ -835,3 +836,86 @@ def test_supported_document_type_constants_match_sot() -> None:
         "gaps",
         "risks_and_mitigations",
     ]
+
+
+
+def test_compose_deterministic_recruiter_message_uses_only_one_locked_claim_sentence() -> None:
+    writer_input = {
+        "document_type": "recruiter_message",
+        "requested_document_type": "recruiter_message",
+        "audience": "Recruiter",
+        "purpose": "Draft application materials for user review",
+        "source_positioning_packet_ref": {"skill_id": "positioning-and-evidence", "status": "SUCCESS"},
+        "safe_claims_for_document": [
+            {
+                "claim_id": "claim-eligible-1",
+                "concrete_evidence_summary": "Improved conversion and reduced onboarding friction with measurable marketplace gains.",
+                "allowed_sentence_template": "Use one short sentence grounded in the concrete evidence summary.",
+            }
+        ],
+        "locked_claim_sentences": [
+            {
+                "sentence": "Generic locked sentence that should not be used verbatim.",
+                "source_ref_ids": ["src-1"],
+                "evidence_item_ids": ["fact-1"],
+                "support_level": "direct",
+                "ownership_scope": "direct",
+                "derived_from_safe_claim_id": "claim-eligible-1",
+            }
+        ],
+    }
+
+    draft = compose_deterministic_outward_draft(writer_input)
+
+    assert draft["status"] == "DRAFT_READY"
+    assert draft["document_type"] == "recruiter_message"
+    content = draft["draft"]["content"]
+    assert draft["claim_units"][0]["sentence"] in content
+    assert "Improved conversion and reduced onboarding friction with measurable marketplace gains." in content
+    assert "Generic locked sentence" not in content
+    assert content.count(".") <= 3
+    assert "growth, pricing, or partner activation inputs" not in content
+    assert "payment acceptance, checkout, or regulated-market execution" not in content
+    assert draft["claim_units"][0]["source_ref_ids"] == ["src-1"]
+
+
+def test_compose_deterministic_cover_letter_uses_only_locked_claim_sentences() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="cover_letter",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    draft = compose_deterministic_outward_draft(writer_input)
+
+    assert draft["status"] == "DRAFT_READY"
+    assert draft["document_type"] == "cover_letter"
+    content = draft["draft"]["content"]
+    for claim in draft["claim_units"]:
+        assert claim["sentence"] in content
+    assert "position as operator with platform depth" not in content.lower()
+    assert "broad executive operator" not in content.lower()
+    assert draft["draft_only"] is True
+    assert draft["user_review_required"] is True
+
+
+def test_compose_deterministic_outward_draft_falls_back_to_minimal_no_claim_text() -> None:
+    positioning_result = _application_materials_positioning_result()
+    positioning_result["allowed_claims"] = []
+
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=positioning_result),
+        document_type="recruiter_message",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+
+    draft = compose_deterministic_outward_draft(writer_input)
+
+    assert draft["draft"]["content"] == (
+        "This role looks relevant and I'd be interested in discussing it. "
+        "I can share more context if useful."
+    )
+    assert draft["claim_units"] == []

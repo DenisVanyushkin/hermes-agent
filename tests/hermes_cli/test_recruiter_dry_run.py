@@ -985,7 +985,7 @@ def test_application_materials_flow_dry_run_runs_writer_and_reviewer_when_ready(
     assert report.application_materials_result["document_runs"]["cv_tailoring_notes"]["document_type"] == "cv_tailoring_notes"
     assert report.application_materials_result["document_runs"]["cover_letter_draft"]["document_type"] == "cover_letter"
     assert report.application_materials_result["document_runs"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
-    assert report.application_materials_result["materials"]["cover_letter_draft"]["content"] == "Draft for cover_letter."
+    assert report.application_materials_result["materials"]["cover_letter_draft"]["content"] != "Draft for cover_letter."
     first_writer_input = executor.writer_inputs[0]
     positioning_result = first_writer_input["positioning_evidence_result"]
     assert positioning_result["allowed_claims"][0]["source_fact_ids"] == ["fact-1"]
@@ -996,9 +996,7 @@ def test_application_materials_flow_dry_run_runs_writer_and_reviewer_when_ready(
     assert executor.calls == [
         "document-writer",
         "document-reviewer",
-        "document-writer",
         "document-reviewer",
-        "document-writer",
         "document-reviewer",
     ]
 
@@ -1017,7 +1015,7 @@ def test_application_materials_flow_dry_run_processes_only_selected_target() -> 
     assert set(report.application_materials_result["document_runs"]) == {"recruiter_message_draft"}
     assert set(report.application_materials_result["materials"]) == {"recruiter_message_draft", "application_summary"}
     assert report.application_materials_result["document_runs"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
-    assert executor.calls == ["document-writer", "document-reviewer"]
+    assert executor.calls == ["document-reviewer"]
 
 
 def test_application_materials_flow_dry_run_selected_target_blocks_independently() -> None:
@@ -1238,7 +1236,7 @@ def test_application_materials_smoke_harness_runs_fake_executor_when_opted_in() 
     assert "\"positioning_packet\"" not in encoded
 
 
-def test_application_materials_smoke_harness_invalid_output_fails_closed_without_leak() -> None:
+def test_application_materials_smoke_harness_invalid_writer_flag_does_not_break_deterministic_outward_path() -> None:
     report = run_recruiter_application_materials_smoke_harness(
         positioning_packet=_ready_positioning_packet(),
         allow_provider_execution=True,
@@ -1247,11 +1245,11 @@ def test_application_materials_smoke_harness_invalid_output_fails_closed_without
     )
 
     encoded = json.dumps(report.to_dict(), sort_keys=True)
-    assert report.status is RecruiterApplicationMaterialsSmokeStatus.OUTPUT_INVALID
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.READY
     assert report.provider_called is False
     assert report.executor_called is True
-    assert report.reviewer_called is False
-    assert report.errors == ["writer_schema_version_invalid"]
+    assert report.reviewer_called is True
+    assert report.errors == []
     assert "provider_text" not in encoded
 
 
@@ -1658,3 +1656,43 @@ def test_recruiter_e2e_harness_application_materials_exception_is_controlled() -
     assert report.status is RecruiterE2EApplicationMaterialsStatus.OUTPUT_INVALID
     assert report.errors == ["application_materials_executor_failed"]
     assert "Traceback" not in encoded
+
+
+
+def test_application_materials_flow_dry_run_uses_deterministic_composer_for_recruiter_message() -> None:
+    executor = _ApplicationMaterialsExecutor()
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        document_target="recruiter_message_draft",
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_READY
+    assert executor.calls == ["document-reviewer"]
+    content = report.application_materials_result["materials"]["recruiter_message_draft"]["content"]
+    assert content != "Draft for recruiter_message."
+    assert "growth, pricing, or partner activation inputs" not in content
+    assert "payment acceptance, checkout, or regulated-market execution" not in content
+
+
+def test_application_materials_smoke_harness_keeps_cv_notes_on_writer_path() -> None:
+    executor = _ApplicationMaterialsExecutor()
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        allow_provider_execution=True,
+        all_required_targets=True,
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.READY
+    assert executor.calls == [
+        "document-writer",
+        "document-reviewer",
+        "document-reviewer",
+        "document-reviewer",
+    ]
+    assert report.document_summary["documents"]["cv_tailoring_notes"]["document_type"] == "cv_tailoring_notes"
+    assert report.document_summary["documents"]["cover_letter_draft"]["document_type"] == "cover_letter"
+    assert report.document_summary["documents"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
