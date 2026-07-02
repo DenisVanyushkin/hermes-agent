@@ -74,6 +74,73 @@ def test_prompt_contains_explicit_positioning_contract() -> None:
     assert '"source_ref_ids":["src-1"]' in prompt
 
 
+def test_prompt_calibrates_minimal_fully_supported_packet_as_ready() -> None:
+    client = _FakeClient(
+        json.dumps(
+            {
+                "schema_version": "recruiter_positioning_packet_v1",
+                "skill_id": "positioning-and-evidence",
+                "status": "POSITIONING_READY",
+                "positioning_summary": "Lead with executive B2B product leadership.",
+                "target_narrative": "Operator-executive for complex platform businesses.",
+                "evidence": [],
+                "gaps": [],
+                "risks_and_mitigations": [],
+                "recommended_angle": "Scale-stage operator.",
+                "claims_to_use": [],
+                "claims_to_avoid": [],
+                "missing_information": [],
+                "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+                "provenance": {},
+            }
+        )
+    )
+    executor = RecruiterPositioningProviderExecutor(client=client, model="gpt-5.4-mini", provider="openai-codex")
+
+    executor.execute(
+        skill_input={"skill_id": "positioning-and-evidence", "evaluation_packet": {"schema_version": "recruiter_vacancy_evaluation_packet_v1"}},
+        expected_schema=positioning_expected_schema(),
+    )
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "If the input packets provide enough source-backed information to create at least one allowed_claim, one evidence_item, and one source_reference, return POSITIONING_READY with next_step POSITIONING_READY_FOR_DOCUMENTS." in prompt
+    assert "A minimal one-claim packet is valid and must be POSITIONING_READY if it is fully source-backed." in prompt
+    assert "Prefer a small, conservative POSITIONING_READY packet over POSITIONING_INPUT_BLOCKED when at least one fully supported claim exists." in prompt
+
+
+def test_prompt_narrows_blocked_status_to_no_valid_packet_case() -> None:
+    client = _FakeClient(
+        json.dumps(
+            {
+                "schema_version": "recruiter_positioning_packet_v1",
+                "skill_id": "positioning-and-evidence",
+                "status": "POSITIONING_READY",
+                "positioning_summary": "Lead with executive B2B product leadership.",
+                "target_narrative": "Operator-executive for complex platform businesses.",
+                "evidence": [],
+                "gaps": [],
+                "risks_and_mitigations": [],
+                "recommended_angle": "Scale-stage operator.",
+                "claims_to_use": [],
+                "claims_to_avoid": [],
+                "missing_information": [],
+                "next_step": "POSITIONING_READY_FOR_DOCUMENTS",
+                "provenance": {},
+            }
+        )
+    )
+    executor = RecruiterPositioningProviderExecutor(client=client, model="gpt-5.4-mini", provider="openai-codex")
+
+    executor.execute(
+        skill_input={"skill_id": "positioning-and-evidence", "evaluation_packet": {"schema_version": "recruiter_vacancy_evaluation_packet_v1"}},
+        expected_schema=positioning_expected_schema(),
+    )
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "Do not return POSITIONING_INPUT_BLOCKED merely because the evidence is sparse, synthetic, smoke-oriented, limited to one usable claim, or missing non-essential context." in prompt
+    assert "Return POSITIONING_INPUT_BLOCKED only when no valid source-backed positioning packet can be produced without inventing facts, using unsupported claims, leaving allowed_claims/evidence_items/source_references empty, or emitting evidence without valid source_ref_ids." in prompt
+
+
 def test_response_schema_requires_provenance_bearing_arrays() -> None:
     client = _FakeClient(
         json.dumps(
