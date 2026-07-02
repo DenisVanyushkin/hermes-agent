@@ -1541,14 +1541,23 @@ def _build_application_material_target_results(
         if not run_payload:
             target_results[target] = {
                 "status": "not_requested",
+                "generated": False,
+                "ready": False,
                 "draft_only": False,
                 "user_review_required": False,
+                "writer_called": False,
+                "reviewer_called": False,
+                "document_writer_gate_status": None,
+                "document_reviewer_gate_status": None,
                 "reviewer_verdict": None,
                 "reviewer_notes_present": False,
             }
             continue
         document_packet = dict(run_payload.get("document_packet") or {})
         review_result = dict(run_payload.get("review_result") or {})
+        downstream_gates = dict(run_payload.get("downstream_gates") or {})
+        document_writer_gate = dict(downstream_gates.get("document_writer") or {})
+        document_review_gate = dict(downstream_gates.get("document_review") or {})
         notes = review_result.get("notes")
         draft = dict(document_packet.get("draft") or {})
         execution_status = str(run_payload.get("status") or "")
@@ -1557,10 +1566,24 @@ def _build_application_material_target_results(
             target_status = "review_blocked"
         elif execution_status != RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_APPROVED.value:
             target_status = "output_invalid"
+        writer_called = bool(run_payload.get("writer_called"))
+        reviewer_called = bool(run_payload.get("reviewer_called"))
+        writer_gate_status = document_writer_gate.get("status")
+        if writer_called and document_packet.get("status"):
+            writer_gate_status = document_packet.get("status")
+        reviewer_gate_status = document_review_gate.get("status")
+        if reviewer_called and review_result.get("verdict"):
+            reviewer_gate_status = review_result.get("verdict")
         target_results[target] = {
             "status": target_status,
+            "generated": bool(document_packet),
+            "ready": target_status == "ready",
             "draft_only": document_packet.get("status") == "DRAFT_READY",
             "user_review_required": True,
+            "writer_called": writer_called,
+            "reviewer_called": reviewer_called,
+            "document_writer_gate_status": writer_gate_status,
+            "document_reviewer_gate_status": reviewer_gate_status,
             "reviewer_verdict": review_result.get("verdict"),
             "reviewer_notes_present": bool(
                 isinstance(notes, list) and notes

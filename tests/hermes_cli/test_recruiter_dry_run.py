@@ -1229,7 +1229,19 @@ def test_application_materials_smoke_harness_runs_fake_executor_when_opted_in() 
     assert report.executor_called is True
     assert report.reviewer_called is True
     assert report.document_summary["documents"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
-    assert report.target_results["recruiter_message_draft"]["status"] == "ready"
+    assert report.target_results["recruiter_message_draft"] == {
+        "status": "ready",
+        "generated": True,
+        "ready": True,
+        "draft_only": True,
+        "user_review_required": True,
+        "writer_called": False,
+        "reviewer_called": True,
+        "document_writer_gate_status": "SKIPPED_DETERMINISTIC_OUTWARD_COMPOSER",
+        "document_reviewer_gate_status": "APPROVE",
+        "reviewer_verdict": "APPROVE",
+        "reviewer_notes_present": True,
+    }
     assert report.output_validation["status"] == "valid"
     assert report.document_summary["generated_targets"] == ["recruiter_message_draft"]
     assert report.review_summary["reviewer_verdicts"]["recruiter_message_draft"] == "APPROVE"
@@ -1288,8 +1300,14 @@ def test_application_materials_smoke_harness_selected_target_changes_requested_r
     assert report.target_results == {
         "recruiter_message_draft": {
             "status": "review_blocked",
+            "generated": True,
+            "ready": False,
             "draft_only": True,
             "user_review_required": True,
+            "writer_called": False,
+            "reviewer_called": True,
+            "document_writer_gate_status": "SKIPPED_DETERMINISTIC_OUTWARD_COMPOSER",
+            "document_reviewer_gate_status": "CHANGES_REQUESTED",
             "reviewer_verdict": "CHANGES_REQUESTED",
             "reviewer_notes_present": True,
         }
@@ -1452,8 +1470,14 @@ def test_application_materials_smoke_harness_all_required_targets_keeps_partial_
     assert report.review_summary["reviewer_verdicts"] == {"cv_tailoring_notes": "CHANGES_REQUESTED"}
     assert report.target_results["cv_tailoring_notes"] == {
         "status": "review_blocked",
+        "generated": True,
+        "ready": False,
         "draft_only": True,
         "user_review_required": True,
+        "writer_called": True,
+        "reviewer_called": True,
+        "document_writer_gate_status": "DRAFT_READY",
+        "document_reviewer_gate_status": "CHANGES_REQUESTED",
         "reviewer_verdict": "CHANGES_REQUESTED",
         "reviewer_notes_present": True,
     }
@@ -1744,6 +1768,42 @@ def test_application_materials_smoke_harness_keeps_cv_notes_on_writer_path() -> 
     assert report.document_summary["documents"]["cv_tailoring_notes"]["document_type"] == "cv_tailoring_notes"
     assert report.document_summary["documents"]["cover_letter_draft"]["document_type"] == "cover_letter"
     assert report.document_summary["documents"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
-    assert report.target_results["cv_tailoring_notes"]["status"] == "ready"
-    assert report.target_results["cover_letter_draft"]["status"] == "ready"
-    assert report.target_results["recruiter_message_draft"]["status"] == "ready"
+    assert report.target_results["cv_tailoring_notes"] == {
+        "status": "ready",
+        "generated": True,
+        "ready": True,
+        "draft_only": True,
+        "user_review_required": True,
+        "writer_called": True,
+        "reviewer_called": True,
+        "document_writer_gate_status": "DRAFT_READY",
+        "document_reviewer_gate_status": "APPROVE",
+        "reviewer_verdict": "APPROVE",
+        "reviewer_notes_present": True,
+    }
+    assert report.target_results["cover_letter_draft"] == {
+        "status": "ready",
+        "generated": True,
+        "ready": True,
+        "draft_only": True,
+        "user_review_required": True,
+        "writer_called": False,
+        "reviewer_called": True,
+        "document_writer_gate_status": "SKIPPED_DETERMINISTIC_OUTWARD_COMPOSER",
+        "document_reviewer_gate_status": "APPROVE",
+        "reviewer_verdict": "APPROVE",
+        "reviewer_notes_present": True,
+    }
+    assert report.target_results["recruiter_message_draft"] == {
+        "status": "ready",
+        "generated": True,
+        "ready": True,
+        "draft_only": True,
+        "user_review_required": True,
+        "writer_called": False,
+        "reviewer_called": True,
+        "document_writer_gate_status": "SKIPPED_DETERMINISTIC_OUTWARD_COMPOSER",
+        "document_reviewer_gate_status": "APPROVE",
+        "reviewer_verdict": "APPROVE",
+        "reviewer_notes_present": True,
+    }
