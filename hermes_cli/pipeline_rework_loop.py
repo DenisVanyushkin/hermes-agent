@@ -2026,6 +2026,19 @@ def _completion_allowed_final_response_text(
         "",
     ]
 
+    # reviewer_packet is the safe metadata wrapper built by _reviewer_packet_metadata
+    # ({present, packet_status, ..., safe_packet: {...}}); engineer_summary lives
+    # inside safe_packet, not at the top level (see _blocked_final_response_text for
+    # the same pattern). Without this, a fully successful controlled run (e.g. a
+    # read-only investigation with no file changes) reports back to the user with no
+    # trace of what the engineer actually found -- only pass/fail plumbing.
+    safe_packet = (reviewer_packet or {}).get("safe_packet")
+    if not isinstance(safe_packet, dict):
+        safe_packet = reviewer_packet or {}
+    engineer_summary = _safe_test_text(safe_packet.get("engineer_summary"))
+    if engineer_summary:
+        lines.extend(["Summary:", engineer_summary, ""])
+
     changed_files = [str(item).strip() for item in list((git_gate or {}).get("changed_files") or []) if str(item).strip()]
     if changed_files:
         lines.append("Changed files:")
@@ -2264,6 +2277,26 @@ def _merge_mutation_summaries(left: dict[str, Any], right: dict[str, Any]) -> di
     }
 
 
+# Matches an engineer "tests" entry that is actually a self-reported tool-call
+# log rather than a pytest invocation request, e.g.
+# "{name: git_status, result: passed, details: clean working tree}". The model
+# sometimes conflates "checks I ran" (git_status/git_diff/git_remote_status/...)
+# with "tests I ran". These entries can never be a real pytest command (they
+# don't start with a pytest executable), so routing them through the pytest
+# command validator only produces a false-negative "malformed_test_payload"
+# for a test that was never requested.
+_TOOL_CALL_LOG_ENTRY_RE = re.compile(
+    r"^\{\s*name\s*:\s*[^,{}]+,\s*result\s*:\s*[^,{}]+,\s*details\s*:\s*.*\}\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_tool_call_log_entry(item: Any) -> bool:
+    if not isinstance(item, str):
+        return False
+    return bool(_TOOL_CALL_LOG_ENTRY_RE.match(item.strip()))
+
+
 def _apply_step_tests(
     *,
     step_kind: str,
@@ -2275,7 +2308,8 @@ def _apply_step_tests(
     executed_summary = _machine_captured_test_summary(runner_result)
     if executed_summary is not None:
         return executed_summary
-    tests = list(structured_output.get("tests") or [])
+    raw_tests = list(structured_output.get("tests") or [])
+    tests = [item for item in raw_tests if not _is_tool_call_log_entry(item)]
     if not tests:
         return _test_summary_disabled(runtime_context)
     return run_controlled_tests(
