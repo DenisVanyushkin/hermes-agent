@@ -24,6 +24,16 @@ REQUIRED_POSITIONING_FIELDS = [
     "gaps",
     "risks_and_mitigations",
 ]
+_OUTWARD_FACING_DOCUMENT_TYPES = {"cover_letter", "recruiter_message"}
+_SAFE_CLAIM_LIMITS = {
+    "cover_letter": 3,
+    "recruiter_message": 2,
+}
+_SUPPORT_LEVEL_MAP = {
+    "explicit": "direct",
+    "derived_safe": "adjacent",
+    "weak": "limited",
+}
 _READY_EXECUTION_STATUSES = {"EXECUTION_READY", "SUCCESS", "READY"}
 _READY_POSITIONING_STATUSES = {"SUCCESS", "READY", "POSITIONING_AVAILABLE"}
 _POSITIONING_REQUIRED_REASON = "document-writer requires positioning-and-evidence output packet"
@@ -48,6 +58,35 @@ _FORBIDDEN_ACTIONS = [
     "mutate_live_config",
     "restart_gateway",
 ]
+_BROAD_OVERCLAIM_PHRASES = [
+    "product executive",
+    "senior executive",
+    "payments leader",
+    "fintech leader",
+    "product leadership across complex organizations",
+    "owning product strategy",
+    "strategy ownership",
+    "roadmap ownership",
+    "commercial ownership",
+    "pricing ownership",
+    "monetization ownership",
+    "multi-team leadership",
+    "executive-level ownership",
+    "p and l ownership",
+    "p&l ownership",
+]
+_ADJACENT_KEYWORDS = (
+    "payments",
+    "payment",
+    "platform",
+    "telecom",
+    "commercial",
+    "pricing",
+    "monetization",
+    "partner",
+    "growth",
+    "regulated",
+)
 _DOCUMENT_TYPE_CONSTRAINTS = {
     "cover_letter": {
         "target_audience": "Hiring manager",
@@ -331,6 +370,7 @@ def build_recruiter_document_writer_input_packet(
                 "status",
             ],
             "document_constraints": _document_constraints(document_type, audience),
+            **_outward_facing_claim_guidance(document_type, positioning_result),
             "boundaries": {
                 "no_invented_facts": True,
                 "use_only_positioning_evidence": True,
@@ -434,3 +474,154 @@ def _dedupe(items: list[str]) -> list[str]:
             seen.add(item)
             ordered.append(item)
     return ordered
+
+
+def _outward_facing_claim_guidance(document_type: str, positioning_result: dict[str, Any]) -> dict[str, Any]:
+    if document_type not in _OUTWARD_FACING_DOCUMENT_TYPES:
+        return {}
+    return {
+        "safe_claims_for_document": _select_safe_claims_for_document(document_type, positioning_result),
+        "claim_source_priority": {
+            "primary": "safe_claims_for_document",
+            "context_only": ["positioning_summary", "recommended_angle"],
+        },
+        "writer_guidance": {
+            "safe_claims_for_document_primary": True,
+            "positioning_summary_context_only": True,
+            "recommended_angle_context_only": True,
+        },
+    }
+
+
+def _select_safe_claims_for_document(document_type: str, positioning_result: dict[str, Any]) -> list[dict[str, Any]]:
+    limit = _SAFE_CLAIM_LIMITS[document_type]
+    evidence_items = [item for item in positioning_result.get("evidence_items") or [] if isinstance(item, dict)]
+    source_references = [item for item in positioning_result.get("source_references") or [] if isinstance(item, dict)]
+    source_ref_ids = {
+        str(item.get("source_ref_id") or "")
+        for item in source_references
+        if str(item.get("source_ref_id") or "")
+    }
+    evidence_by_fact_id = {
+        str(fact_id): item
+        for item in evidence_items
+        for fact_id in item.get("source_fact_ids") or []
+        if isinstance(fact_id, str)
+    }
+    blocked_phrases = {
+        phrase.lower()
+        for phrase in [
+            *_BROAD_OVERCLAIM_PHRASES,
+            *_string_list(positioning_result.get("claims_to_avoid")),
+            *_string_list(positioning_result.get("unsupported_claims")),
+            *_string_list(positioning_result.get("risks_and_mitigations")),
+        ]
+        if phrase
+    }
+
+    candidates: list[dict[str, Any]] = []
+    for claim in positioning_result.get("allowed_claims") or []:
+        if not isinstance(claim, dict):
+            continue
+        claim_text = str(claim.get("claim_text") or "").strip()
+        if not claim_text:
+            continue
+        normalized_claim = claim_text.lower()
+        if any(phrase in normalized_claim or normalized_claim in phrase for phrase in blocked_phrases):
+            continue
+        source_fact_ids = [str(item) for item in claim.get("source_fact_ids") or [] if isinstance(item, str)]
+        if not source_fact_ids:
+            continue
+        linked_evidence_items = [evidence_by_fact_id[fact_id] for fact_id in source_fact_ids if fact_id in evidence_by_fact_id]
+        linked_source_ref_ids = _dedupe(
+            [
+                str(source_ref_id)
+                for item in linked_evidence_items
+                for source_ref_id in item.get("source_ref_ids") or []
+                if isinstance(source_ref_id, str) and str(source_ref_id) in source_ref_ids
+            ]
+        )
+        if not linked_source_ref_ids:
+            continue
+        support_level = _normalized_support_level(
+            str(claim.get("support_level") or ""),
+            linked_evidence_items,
+        )
+        softening_required = support_level != "direct" or any(keyword in normalized_claim for keyword in _ADJACENT_KEYWORDS)
+        safe_wording = _safe_wording_for_claim(claim_text, support_level, softening_required)
+        do_not_say = _claim_do_not_say(claim_text)
+        candidates.append(
+            {
+                "claim_id": str(claim.get("claim_id") or ""),
+                "claim": claim_text,
+                "safe_wording": safe_wording,
+                "source_ref_ids": linked_source_ref_ids,
+                "evidence_item_ids": source_fact_ids,
+                "support_level": support_level,
+                "softening_required": softening_required,
+                "do_not_say": do_not_say,
+                "_priority": _claim_priority(claim_text, support_level),
+            }
+        )
+
+    candidates.sort(key=lambda item: item["_priority"], reverse=True)
+    selected = candidates[:limit]
+    return [{key: value for key, value in item.items() if not key.startswith("_")} for item in selected]
+
+
+def _normalized_support_level(raw_support_level: str, evidence_items: list[dict[str, Any]]) -> str:
+    if raw_support_level in _SUPPORT_LEVEL_MAP:
+        return _SUPPORT_LEVEL_MAP[raw_support_level]
+    for item in evidence_items:
+        level = str(item.get("support_level") or "")
+        if level in _SUPPORT_LEVEL_MAP:
+            return _SUPPORT_LEVEL_MAP[level]
+    return "limited"
+
+
+def _safe_wording_for_claim(claim_text: str, support_level: str, softening_required: bool) -> str:
+    text = claim_text.strip()
+    lowered = text.lower()
+    if not softening_required:
+        return text
+    if "payment" in lowered or "payments" in lowered:
+        return "Experience adjacent to payment acceptance, checkout, and regulated-market execution."
+    if "telecom" in lowered or "partner" in lowered:
+        return "Experience involving partner coordination and adjacent telecom or ecosystem execution."
+    if "pricing" in lowered or "commercial" in lowered or "growth" in lowered:
+        return "Commercially relevant product execution across growth, pricing, or partner activation inputs."
+    if "platform" in lowered:
+        return "Experience adjacent to platform scaling and operational product execution."
+    if support_level == "limited":
+        return f"Relevant adjacent experience related to {text.lower()}."
+    return text
+
+
+def _claim_do_not_say(claim_text: str) -> list[str]:
+    text = claim_text.lower()
+    blocked = [phrase for phrase in _BROAD_OVERCLAIM_PHRASES if phrase in text]
+    if "payment" in text or "payments" in text:
+        blocked.append("payments leader")
+    if "telecom" in text:
+        blocked.append("telecom category leadership")
+    if "pricing" in text or "commercial" in text or "growth" in text:
+        blocked.append("direct ownership")
+    return _dedupe(blocked)
+
+
+def _claim_priority(claim_text: str, support_level: str) -> int:
+    score = {
+        "direct": 30,
+        "adjacent": 20,
+        "limited": 10,
+    }.get(support_level, 0)
+    lowered = claim_text.lower()
+    if "growth" in lowered or "conversion" in lowered or "onboarding" in lowered:
+        score += 5
+    if "payment" in lowered or "payments" in lowered:
+        score += 4
+    if "partner" in lowered or "telecom" in lowered:
+        score += 3
+    if any(phrase in lowered for phrase in _BROAD_OVERCLAIM_PHRASES):
+        score -= 50
+    return score
