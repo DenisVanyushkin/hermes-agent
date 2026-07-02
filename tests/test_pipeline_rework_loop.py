@@ -228,7 +228,13 @@ def test_engineer_fail_closed_reason_distinguishes_max_iterations_plain_text_out
     assert module._engineer_fail_closed_reason(snapshot) == "max_iterations_plain_text_output"
 
 
-def test_engineer_fail_closed_reason_uses_invalid_engineer_output_for_valid_blocked_envelope() -> None:
+def test_engineer_fail_closed_reason_uses_engineer_reported_blocked_for_valid_blocked_envelope() -> None:
+    # A schema-valid envelope (validation_status == "valid") that self-reports
+    # status=blocked is a legitimate engineer outcome, not a malformed/invalid
+    # output. It must be classified distinctly from "invalid_engineer_output" so
+    # the final response text preserves the engineer's summary/blockers instead
+    # of collapsing to the generic "did not satisfy the controlled execution
+    # contract" message (2026-07-02 09:44-09:47 Slack incident).
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     snapshot = SimpleNamespace(
         planned_steps=[
@@ -252,6 +258,33 @@ def test_engineer_fail_closed_reason_uses_invalid_engineer_output_for_valid_bloc
                     },
                 },
                 evaluation_result={"status": "blocked"},
+            )
+        ]
+    )
+
+    reason = module._engineer_fail_closed_reason(snapshot)
+    assert reason == "engineer_reported_blocked"
+    assert reason != "invalid_engineer_output"
+
+
+def test_engineer_fail_closed_reason_keeps_invalid_engineer_output_for_malformed_envelope() -> None:
+    # Contrast case: an envelope that actually fails schema validation
+    # (validation_status != "valid") must still be classified as
+    # "invalid_engineer_output" -- only the valid-but-self-blocked case is
+    # reclassified.
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    snapshot = SimpleNamespace(
+        planned_steps=[
+            SimpleNamespace(
+                runner_result={
+                    "status": "succeeded",
+                    "structured_output": {
+                        "status": "approved",
+                        "summary": "plain text diagnostic summary",
+                        "validation_status": "invalid_structured_output",
+                    },
+                },
+                evaluation_result={"status": "invalid_structured_output"},
             )
         ]
     )
@@ -289,6 +322,139 @@ def test_blocked_final_response_text_preserves_max_iterations_plain_text_summary
     assert "iteration cap" in text
     assert "plain text diagnostic summary" in text
     assert "engineer_max_iterations_without_structured_output" in text
+
+
+def test_blocked_final_response_text_surfaces_evidence_for_invalid_engineer_output() -> None:
+    """Regression test for the 2026-07-02 09:44-09:47 (+05) Slack incident: a
+    controlled engineer run produced a schema-valid but self-reported "blocked"
+    envelope (real investigation blockers, tests not requested), the reviewer was
+    correctly skipped, but the final_response_text collapsed to the generic
+    "did not satisfy the controlled execution contract" line because
+    reviewer_packet.get("engineer_summary")/"blocked_reason_detail" read the wrong
+    dict level (those keys live under reviewer_packet["safe_packet"], not at the
+    top level of the metadata wrapper _reviewer_packet_metadata() returns)."""
+
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    reviewer_packet = {
+        "present": True,
+        "packet_status": "blocked",
+        "review_required": True,
+        "user_action_required": True,
+        "blocked_reason": "engineer_failed",
+        "safe_packet": {
+            "blocked_reason": "engineer_failed",
+            "blocked_reason_detail": None,
+            "engineer_status": "blocked",
+            "engineer_output_valid": True,
+            "engineer_output_validation_status": "valid",
+            "engineer_summary": (
+                "Investigated the local fallback-refresh implementation and found that the "
+                "command behavior has been changed from the old remote-refresh/mutate-runtime "
+                "flow to a new safe-mode local-state refresh flow."
+            ),
+            "engineer_sanitized_output": {
+                "status": "blocked",
+                "requires_review": True,
+                "next_action": "review",
+                "blockers": [
+                    "No tool in this session can fetch or diff against remote git origin, "
+                    "so I could not verify exactly what changed upstream versus local history."
+                ],
+            },
+            "git": {"changed_files": []},
+            "packet_status": "blocked",
+        },
+    }
+
+    text = module._blocked_final_response_text(
+        blocked_reason="invalid_engineer_output",
+        test_summary={"status": "not_requested"},
+        reviewer_packet=reviewer_packet,
+    )
+
+    assert text is not None
+    assert text != (
+        "Autonomous execution did not complete successfully.\n\n"
+        "What happened:\n"
+        "- Engineer output did not satisfy the controlled execution contract.\n"
+        "- Reviewer was not invoked because engineer output was invalid.\n"
+        "Test status: not_requested\n"
+        "Reviewer status: blocked"
+    )
+    assert "Investigated the local fallback-refresh implementation" in text
+    assert "No tool in this session can fetch or diff against remote git origin" in text
+    assert "Test status: not_requested" in text
+    assert "Reviewer status: blocked" in text
+
+
+def test_valid_blocked_engineer_envelope_never_reports_invalid_output() -> None:
+    """End-to-end regression for the incident: classification
+    (_engineer_fail_closed_reason) and final response rendering
+    (_blocked_final_response_text) must agree that a schema-valid,
+    self-reported "blocked" engineer envelope is NOT "invalid engineer output" --
+    neither in the machine-readable blocked_reason nor in the human-readable
+    final_response_text."""
+
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    snapshot = SimpleNamespace(
+        planned_steps=[
+            SimpleNamespace(
+                runner_result={
+                    "status": "succeeded",
+                    "structured_output": {
+                        "schema_version": "v1",
+                        "subagent_id": "hermes_engineer_core",
+                        "role": "engineer",
+                        "status": "blocked",
+                        "summary": "Investigated the fallback-refresh command; could not diff against remote origin.",
+                        "findings": [],
+                        "changes": [],
+                        "blockers": [
+                            "No tool in this session can fetch or diff against remote git origin."
+                        ],
+                        "artifacts": [],
+                        "confidence": 0.9,
+                        "requires_review": True,
+                        "next_action": "review",
+                        "validation_status": "valid",
+                    },
+                },
+                evaluation_result={"status": "blocked"},
+            )
+        ]
+    )
+
+    blocked_reason = module._engineer_fail_closed_reason(snapshot)
+    assert blocked_reason == "engineer_reported_blocked"
+
+    reviewer_packet = {
+        "present": True,
+        "packet_status": "blocked",
+        "blocked_reason": "engineer_failed",
+        "safe_packet": {
+            "engineer_summary": "Investigated the fallback-refresh command; could not diff against remote origin.",
+            "engineer_sanitized_output": {
+                "blockers": ["No tool in this session can fetch or diff against remote git origin."],
+                "next_action": "review",
+            },
+            "git": {"changed_files": []},
+            "packet_status": "blocked",
+        },
+    }
+
+    text = module._blocked_final_response_text(
+        blocked_reason=blocked_reason,
+        test_summary={"status": "not_requested"},
+        reviewer_packet=reviewer_packet,
+    )
+
+    assert text is not None
+    assert "invalid" not in text.lower()
+    assert "did not satisfy the controlled execution contract" not in text
+    assert "Investigated the fallback-refresh command" in text
+    assert "No tool in this session can fetch or diff against remote git origin" in text
 
 
 def test_finalize_loop_result_preserves_blocked_final_response_text(tmp_path: Path) -> None:

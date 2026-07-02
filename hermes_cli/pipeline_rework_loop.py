@@ -1814,6 +1814,7 @@ def _blocked_final_response_text(
         "test_command_denied",
         "invalid_engineer_output",
         "engineer_result_invalid",
+        "engineer_reported_blocked",
         "missing_structured_output",
         "max_iterations_plain_text_output",
         "reviewer_result_invalid",
@@ -1938,6 +1939,13 @@ def _blocked_final_response_text(
             }[blocked_reason]
         )
         lines.append("- The repository baseline must be clean and comparable before automatic completion can proceed.")
+    elif blocked_reason == "engineer_reported_blocked":
+        lines.extend(
+            [
+                "- The engineer produced a valid, schema-conformant result and self-reported it could not proceed further.",
+                "- Reviewer was not invoked because the engineer requested review instead of declaring completion.",
+            ]
+        )
     else:
         lines.extend(
             [
@@ -1945,9 +1953,45 @@ def _blocked_final_response_text(
                 "- Reviewer was not invoked because engineer output was invalid.",
             ]
         )
-    engineer_summary = _safe_test_text(reviewer_packet.get("engineer_summary"))
-    if blocked_reason == "max_iterations_plain_text_output" and engineer_summary:
+    # reviewer_packet is the safe metadata wrapper built by _reviewer_packet_metadata
+    # ({present, packet_status, ..., safe_packet: {...}}); engineer_summary and
+    # blocked_reason_detail live inside safe_packet, not at the top level. Tests that
+    # hand-build a flat reviewer_packet dict (no "safe_packet" key) still work because
+    # we fall back to the dict itself.
+    safe_packet = reviewer_packet.get("safe_packet")
+    if not isinstance(safe_packet, dict):
+        safe_packet = reviewer_packet
+    engineer_summary = _safe_test_text(safe_packet.get("engineer_summary"))
+    evidence_preserving_reasons = {
+        "max_iterations_plain_text_output",
+        "invalid_engineer_output",
+        "engineer_result_invalid",
+        "engineer_reported_blocked",
+        "missing_structured_output",
+    }
+    if blocked_reason in evidence_preserving_reasons and engineer_summary:
         lines.extend(["", "Preserved diagnostic summary:", engineer_summary])
+    engineer_sanitized_output = safe_packet.get("engineer_sanitized_output")
+    if not isinstance(engineer_sanitized_output, dict):
+        engineer_sanitized_output = {}
+    engineer_blockers = [
+        _safe_test_text(item) for item in list(engineer_sanitized_output.get("blockers") or [])
+    ]
+    engineer_blockers = [item for item in engineer_blockers if item]
+    if blocked_reason in evidence_preserving_reasons and engineer_blockers:
+        lines.extend(["", "Engineer-reported blockers:"])
+        for item in engineer_blockers:
+            lines.append(f"- {item}")
+    engineer_next_action = _safe_test_text(engineer_sanitized_output.get("next_action"))
+    if blocked_reason in evidence_preserving_reasons and engineer_next_action:
+        lines.append(f"Suggested next action: {engineer_next_action}")
+    changed_files = [
+        str(item).strip() for item in list((safe_packet.get("git") or {}).get("changed_files") or []) if str(item).strip()
+    ]
+    if blocked_reason in evidence_preserving_reasons and changed_files:
+        lines.extend(["", "Changed files:"])
+        for path in changed_files:
+            lines.append(f"- {path}")
     test_status = _safe_test_text((test_summary or {}).get("status"))
     test_command = _safe_test_text((test_summary or {}).get("command"))
     if test_status:
@@ -1959,8 +2003,8 @@ def _blocked_final_response_text(
         lines.append(f"Blocked reason: {safe_summary}")
     elif blocked_reason in git_gate_reasons | {"terminal_blocked"}:
         lines.append(f"Blocked reason: {blocked_reason}")
-    detail = _safe_test_text(reviewer_packet.get("blocked_reason_detail"))
-    raw_detail = str(reviewer_packet.get("blocked_reason_detail") or "").strip()
+    detail = _safe_test_text(safe_packet.get("blocked_reason_detail"))
+    raw_detail = str(safe_packet.get("blocked_reason_detail") or "").strip()
     if detail and detail not in {"missing_structured_output", "invalid_engineer_structured_output"}:
         lines.append(f"Blocked reason detail: {detail}")
     elif blocked_reason == "terminal_blocked" and raw_detail and re.fullmatch(r"[a-z0-9_:-]+", raw_detail):
@@ -3173,6 +3217,14 @@ def _engineer_fail_closed_reason(state_snapshot: Any, *, material_changes_presen
     if evaluation_status != REVIEWER_APPROVAL_STATUS:
         if material_changes_present:
             return None
+        # A schema-valid envelope that self-reports it cannot proceed (blocked /
+        # needs_review / needs_escalation) is not the same failure as a malformed
+        # or unparsable envelope. Conflating the two collapsed legitimate
+        # engineer-reported blockers into the generic "invalid_engineer_output"
+        # contract violation and discarded the engineer's evidence in the final
+        # response (see 2026-07-02 09:44-09:47 Slack incident).
+        if structured_output.get("validation_status") == "valid":
+            return "engineer_reported_blocked"
         return "invalid_engineer_output"
     return None
 
