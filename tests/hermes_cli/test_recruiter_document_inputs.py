@@ -251,6 +251,52 @@ def test_cover_letter_constraints_require_submission_ready_grounded_letter() -> 
     assert "Do not invent employers, dates, metrics, team sizes, revenue numbers, product names, or outcomes." in constraints["grounding_rules"]
 
 
+def test_cover_letter_constraints_guard_against_writer_overclaims() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(),
+        document_type="cover_letter",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    constraints = writer_input["document_constraints"]
+    assert (
+        "Do not convert broad positioning_summary or recommended_angle language into stronger ownership, seniority, or leadership claims."
+        in constraints["grounding_rules"]
+    )
+    assert (
+        "Do not claim product leadership, strategy ownership, roadmap ownership, commercial ownership, pricing ownership, monetization ownership, or multi-team leadership unless the evidence explicitly supports it."
+        in constraints["grounding_rules"]
+    )
+    assert (
+        "If a claim appears in claims_to_avoid, unsupported_claims, or risk notes, do not use it."
+        in constraints["grounding_rules"]
+    )
+    assert (
+        "If the evidence is adjacent rather than direct, soften payments, platform, telecom, or commercially sensitive experience instead of presenting it as direct ownership."
+        in constraints["grounding_rules"]
+    )
+    assert (
+        "Prefer specific supported examples over broad leadership or seniority branding."
+        in constraints["grounding_rules"]
+    )
+    assert (
+        "If concrete metrics, outcomes, or scope are unavailable, write a modest fit statement instead of inventing scale or impact."
+        in constraints["grounding_rules"]
+    )
+    assert "When in doubt, omit or soften the claim rather than overstate it." in constraints["grounding_rules"]
+    assert "unsupported product leadership" in constraints["must_avoid"]
+    assert "unsupported strategy ownership" in constraints["must_avoid"]
+    assert "unsupported roadmap ownership" in constraints["must_avoid"]
+    assert "unsupported commercial ownership" in constraints["must_avoid"]
+    assert "unsupported pricing ownership" in constraints["must_avoid"]
+    assert "unsupported monetization ownership" in constraints["must_avoid"]
+    assert "unsupported multi-team leadership" in constraints["must_avoid"]
+    assert "unsupported payments leadership" in constraints["must_avoid"]
+    assert "unsupported telecom category leadership" in constraints["must_avoid"]
+    assert "unsupported commercially sensitive product environments" in constraints["must_avoid"]
+
+
 def test_recruiter_message_constraints_require_short_non_meta_message() -> None:
     packet = build_recruiter_document_writer_input_packet(
         _execution_report(),
