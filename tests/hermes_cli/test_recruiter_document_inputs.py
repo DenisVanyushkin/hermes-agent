@@ -493,6 +493,50 @@ def test_recruiter_message_writer_input_uses_smaller_safe_claim_subset() -> None
     assert all(item["evidence_item_ids"] for item in safe_claims)
 
 
+def test_outward_facing_writer_input_includes_locked_claim_sentences() -> None:
+    for document_type, expected_max in (("cover_letter", 2), ("recruiter_message", 1)):
+        packet = build_recruiter_document_writer_input_packet(
+            _execution_report(positioning_result=_application_materials_positioning_result()),
+            document_type=document_type,
+        )
+
+        writer_input = packet.document_writer_input
+        assert writer_input is not None
+        locked_claim_sentences = writer_input["locked_claim_sentences"]
+        safe_claims = writer_input["safe_claims_for_document"]
+        assert 1 <= len(locked_claim_sentences) <= expected_max
+        assert len(locked_claim_sentences) <= len(safe_claims)
+        for item in locked_claim_sentences:
+            assert item["sentence"]
+            assert item["source_ref_ids"]
+            assert item["evidence_item_ids"]
+            assert item["support_level"] in {"direct", "adjacent", "limited"}
+            assert item["ownership_scope"] in {"direct", "collaborated", "adjacent", "exposed"}
+            assert item["derived_from_safe_claim_id"]
+            assert "allowed_claims" not in json.dumps(item, sort_keys=True)
+
+
+def test_locked_claim_sentences_are_derived_from_safe_claims_only() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="cover_letter",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    safe_claims = {
+        item["claim_id"]: item
+        for item in writer_input["safe_claims_for_document"]
+    }
+    for item in writer_input["locked_claim_sentences"]:
+        safe_claim = safe_claims[item["derived_from_safe_claim_id"]]
+        assert item["sentence"] == safe_claim["safe_wording"]
+        assert item["source_ref_ids"] == safe_claim["source_ref_ids"]
+        assert item["evidence_item_ids"] == safe_claim["evidence_item_ids"]
+        assert item["support_level"] == safe_claim["support_level"]
+        assert item["ownership_scope"] == safe_claim["ownership_scope"]
+
+
 def test_outward_facing_writer_input_marks_safe_claims_as_only_draftable_source() -> None:
     cover_letter_packet = build_recruiter_document_writer_input_packet(
         _execution_report(positioning_result=_application_materials_positioning_result()),
@@ -514,6 +558,23 @@ def test_outward_facing_writer_input_marks_safe_claims_as_only_draftable_source(
         assert writer_input["writer_guidance"]["every_outward_facing_claim_must_anchor_to_safe_claim"] is True
         assert writer_input["writer_guidance"]["ownership_scope_must_be_respected"] is True
         assert writer_input["writer_guidance"]["unsupported_broad_claims_must_be_omitted"] is True
+        assert writer_input["writer_guidance"]["locked_claim_sentences_only"] is True
+        assert writer_input["writer_guidance"]["forbid_freeform_claims"] is True
+
+
+def test_outward_facing_writer_guidance_forbids_freeform_claims_outside_locked_sentences() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="cover_letter",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    guidance = writer_input["writer_guidance"]
+    assert "You may only use claim sentences from locked_claim_sentences." in guidance["instructions"]
+    assert "Do not add new experience, impact, ownership, scope, domain, metrics, employer, project, timeframe, or fit claims." in guidance["instructions"]
+    assert "Opening and closing may be generic, but must not introduce claims." in guidance["instructions"]
+    assert "If a claim is not in locked_claim_sentences, omit it." in guidance["instructions"]
 
 
 def test_outward_facing_writer_guidance_requires_conservative_evidence_backed_structure() -> None:
@@ -531,16 +592,18 @@ def test_outward_facing_writer_guidance_requires_conservative_evidence_backed_st
     assert cover_writer_input is not None
     assert recruiter_writer_input is not None
     assert cover_writer_input["writer_guidance"]["required_conservative_structure"] == [
-        "one opening fit sentence tied to the role",
-        "one or two source-backed example sentences anchored to safe claims",
-        "one modest closing sentence without unsupported claims",
+        "short opening with no new claims",
+        "one or two locked claim sentences only",
+        "short closing with no new claims",
     ]
     assert recruiter_writer_input["writer_guidance"]["required_conservative_structure"] == [
-        "one role-interest sentence",
-        "one source-backed example sentence anchored to a safe claim",
-        "optional soft call-to-action",
+        "max three short sentences total",
+        "one interest or context sentence with no new claims",
+        "exactly one locked claim sentence",
+        "one soft call-to-action",
     ]
     assert "background across payments/platform services" in recruiter_writer_input["writer_guidance"]["forbidden_broad_claim_patterns"]
+    assert "leadership/impact/scope claims" in recruiter_writer_input["writer_guidance"]["forbidden_broad_claim_patterns"]
 
 
 def test_outward_facing_writer_input_keeps_broad_positioning_fields_context_only() -> None:
@@ -583,9 +646,27 @@ def test_cv_tailoring_notes_does_not_require_outward_safe_claim_subset() -> None
     writer_input = packet.document_writer_input
     assert writer_input is not None
     assert "safe_claims_for_document" not in writer_input
+    assert "locked_claim_sentences" not in writer_input
     assert "claim_source_priority" not in writer_input
     assert writer_input["positioning_evidence_result"]["proven_facts"]
     assert writer_input["positioning_evidence_result"]["derived_positioning"]
+
+
+def test_outward_facing_writer_input_keeps_minimal_draft_when_no_safe_claims_exist() -> None:
+    positioning_result = _application_materials_positioning_result()
+    positioning_result["allowed_claims"] = []
+
+    for document_type in ("cover_letter", "recruiter_message"):
+        packet = build_recruiter_document_writer_input_packet(
+            _execution_report(positioning_result=positioning_result),
+            document_type=document_type,
+        )
+        writer_input = packet.document_writer_input
+        assert writer_input is not None
+        assert writer_input["safe_claims_for_document"] == []
+        assert writer_input["locked_claim_sentences"] == []
+        assert writer_input["writer_guidance"]["omit_claims_when_no_locked_claims"] is True
+        assert writer_input["writer_guidance"]["minimal_draft_allowed_when_no_locked_claims"] is True
 
 
 def test_safe_claims_exclude_unsupported_and_broad_overclaim_language() -> None:

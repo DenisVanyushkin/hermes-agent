@@ -480,8 +480,10 @@ def _outward_facing_claim_guidance(document_type: str, positioning_result: dict[
     if document_type not in _OUTWARD_FACING_DOCUMENT_TYPES:
         return {}
     safe_claims = _select_safe_claims_for_document(document_type, positioning_result)
+    locked_claim_sentences = _build_locked_claim_sentences(document_type, safe_claims)
     return {
         "safe_claims_for_document": safe_claims,
+        "locked_claim_sentences": locked_claim_sentences,
         "claim_source_priority": {
             "primary": "safe_claims_for_document",
             "context_only": ["positioning_summary", "recommended_angle"],
@@ -501,6 +503,10 @@ def _outward_facing_claim_guidance(document_type: str, positioning_result: dict[
             "every_outward_facing_claim_must_include_concrete_evidence_summary_or_source_refs": True,
             "unsupported_broad_claims_must_be_omitted": True,
             "ownership_scope_must_be_respected": True,
+            "locked_claim_sentences_only": True,
+            "forbid_freeform_claims": True,
+            "omit_claims_when_no_locked_claims": True,
+            "minimal_draft_allowed_when_no_locked_claims": True,
             "required_conservative_structure": _conservative_structure_for_document(document_type),
             "required_softening_phrases_when_not_direct": [
                 "contributed to",
@@ -508,6 +514,12 @@ def _outward_facing_claim_guidance(document_type: str, positioning_result: dict[
                 "worked adjacent to",
                 "gained exposure to",
                 "relevant context for",
+            ],
+            "instructions": [
+                "You may only use claim sentences from locked_claim_sentences.",
+                "Do not add new experience, impact, ownership, scope, domain, metrics, employer, project, timeframe, or fit claims.",
+                "Opening and closing may be generic, but must not introduce claims.",
+                "If a claim is not in locked_claim_sentences, omit it.",
             ],
             "forbidden_broad_claim_patterns": [
                 "background across payments/platform services",
@@ -517,6 +529,7 @@ def _outward_facing_claim_guidance(document_type: str, positioning_result: dict[
                 "pricing and packaging iterations",
                 "telecom/merchant/ecosystem partnerships",
                 "multi-country launches",
+                "leadership/impact/scope claims",
             ],
         },
         "context_only_not_for_claims": {
@@ -700,6 +713,23 @@ def _allowed_sentence_template(
     )
 
 
+def _build_locked_claim_sentences(document_type: str, safe_claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sentence_limit = 1 if document_type == "recruiter_message" else 2
+    locked_claim_sentences: list[dict[str, Any]] = []
+    for item in safe_claims[:sentence_limit]:
+        locked_claim_sentences.append(
+            {
+                "sentence": str(item.get("safe_wording") or "").strip(),
+                "source_ref_ids": list(item.get("source_ref_ids") or []),
+                "evidence_item_ids": list(item.get("evidence_item_ids") or []),
+                "ownership_scope": str(item.get("ownership_scope") or ""),
+                "support_level": str(item.get("support_level") or ""),
+                "derived_from_safe_claim_id": str(item.get("claim_id") or ""),
+            }
+        )
+    return locked_claim_sentences
+
+
 def _forbidden_generalizations_for_claim(claim_text: str) -> list[str]:
     lowered = claim_text.lower()
     blocked = [
@@ -749,14 +779,15 @@ def _claim_priority(claim_text: str, support_level: str) -> int:
 def _conservative_structure_for_document(document_type: str) -> list[str]:
     if document_type == "recruiter_message":
         return [
-            "one role-interest sentence",
-            "one source-backed example sentence anchored to a safe claim",
-            "optional soft call-to-action",
+            "max three short sentences total",
+            "one interest or context sentence with no new claims",
+            "exactly one locked claim sentence",
+            "one soft call-to-action",
         ]
     return [
-        "one opening fit sentence tied to the role",
-        "one or two source-backed example sentences anchored to safe claims",
-        "one modest closing sentence without unsupported claims",
+        "short opening with no new claims",
+        "one or two locked claim sentences only",
+        "short closing with no new claims",
     ]
 
 
