@@ -1228,9 +1228,10 @@ def test_application_materials_smoke_harness_runs_fake_executor_when_opted_in() 
     assert report.provider_called is False
     assert report.executor_called is True
     assert report.reviewer_called is True
+    assert report.document_summary["documents"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
+    assert report.target_results["recruiter_message_draft"]["status"] == "ready"
     assert report.output_validation["status"] == "valid"
     assert report.document_summary["generated_targets"] == ["recruiter_message_draft"]
-    assert report.document_summary["documents"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
     assert report.review_summary["reviewer_verdicts"]["recruiter_message_draft"] == "APPROVE"
     assert "provider_text" not in encoded
     assert "\"positioning_packet\"" not in encoded
@@ -1671,10 +1672,57 @@ def test_application_materials_flow_dry_run_uses_deterministic_composer_for_recr
 
     assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_READY
     assert executor.calls == ["document-reviewer"]
+    assert report.application_materials_result["writer_called"] is False
+    assert report.application_materials_result["reviewer_called"] is True
+    assert (
+        report.application_materials_result["document_runs"]["recruiter_message_draft"]["downstream_gates"]["document_writer"]["status"]
+        == "SKIPPED_DETERMINISTIC_OUTWARD_COMPOSER"
+    )
+    assert report.application_materials_result["document_runs"]["recruiter_message_draft"]["writer_called"] is False
+    assert report.application_materials_result["document_runs"]["recruiter_message_draft"]["reviewer_called"] is True
     content = report.application_materials_result["materials"]["recruiter_message_draft"]["content"]
     assert content != "Draft for recruiter_message."
     assert "growth, pricing, or partner activation inputs" not in content
     assert "payment acceptance, checkout, or regulated-market execution" not in content
+
+
+def test_application_materials_flow_dry_run_uses_deterministic_composer_for_cover_letter_truthfully() -> None:
+    executor = _ApplicationMaterialsExecutor()
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        document_target="cover_letter_draft",
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_READY
+    assert executor.calls == ["document-reviewer"]
+    assert report.application_materials_result["writer_called"] is False
+    assert report.application_materials_result["reviewer_called"] is True
+    assert (
+        report.application_materials_result["document_runs"]["cover_letter_draft"]["downstream_gates"]["document_writer"]["status"]
+        == "SKIPPED_DETERMINISTIC_OUTWARD_COMPOSER"
+    )
+    assert report.application_materials_result["document_runs"]["cover_letter_draft"]["writer_called"] is False
+    assert report.application_materials_result["document_runs"]["cover_letter_draft"]["reviewer_called"] is True
+
+
+def test_application_materials_flow_dry_run_all_required_keeps_writer_called_truthful_when_only_cv_notes_use_writer() -> None:
+    executor = _ApplicationMaterialsExecutor()
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_READY
+    assert report.application_materials_result["writer_called"] is True
+    assert report.application_materials_result["reviewer_called"] is True
+    assert report.application_materials_result["document_runs"]["cv_tailoring_notes"]["writer_called"] is True
+    assert report.application_materials_result["document_runs"]["cover_letter_draft"]["writer_called"] is False
+    assert report.application_materials_result["document_runs"]["recruiter_message_draft"]["writer_called"] is False
 
 
 def test_application_materials_smoke_harness_keeps_cv_notes_on_writer_path() -> None:
@@ -1696,3 +1744,6 @@ def test_application_materials_smoke_harness_keeps_cv_notes_on_writer_path() -> 
     assert report.document_summary["documents"]["cv_tailoring_notes"]["document_type"] == "cv_tailoring_notes"
     assert report.document_summary["documents"]["cover_letter_draft"]["document_type"] == "cover_letter"
     assert report.document_summary["documents"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
+    assert report.target_results["cv_tailoring_notes"]["status"] == "ready"
+    assert report.target_results["cover_letter_draft"]["status"] == "ready"
+    assert report.target_results["recruiter_message_draft"]["status"] == "ready"

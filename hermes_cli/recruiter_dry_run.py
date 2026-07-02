@@ -38,6 +38,7 @@ from .recruiter_positioning_provider_executor import (
     REQUIRED_POSITIONING_PACKET_FIELDS,
     positioning_expected_schema,
 )
+from .recruiter_outward_drafts import is_deterministic_outward_document_type
 from .recruiter_skill_inputs import build_recruiter_skill_input_packets
 from .recruiter_candidate_facts import detect_unsafe_content
 
@@ -1585,6 +1586,10 @@ def _validate_application_materials_smoke_output(
     all_required_targets: bool,
     document_target: str | None,
 ) -> str | None:
+    expected_targets = _resolve_application_material_smoke_targets(
+        all_required_targets=all_required_targets,
+        document_target=document_target,
+    )
     if flow_report.schema_version != APPLICATION_MATERIALS_PACKET_SCHEMA_VERSION:
         return "application_materials_schema_version_invalid"
     if flow_report.status != RecruiterApplicationMaterialsStatus.READY.value:
@@ -1596,15 +1601,15 @@ def _validate_application_materials_smoke_output(
                 return "application_materials_executor_failed"
             return first_error
         return "application_materials_output_invalid"
-    if not flow_report.writer_called:
+    writer_required = any(
+        not is_deterministic_outward_document_type(APPLICATION_MATERIALS_DOCUMENT_TYPES[target])
+        for target in expected_targets
+    )
+    if writer_required and not flow_report.writer_called:
         return "application_materials_writer_not_called"
     if not flow_report.reviewer_called:
         return "application_materials_reviewer_not_called"
 
-    expected_targets = _resolve_application_material_smoke_targets(
-        all_required_targets=all_required_targets,
-        document_target=document_target,
-    )
     document_runs = dict(flow_report.document_runs)
     if sorted(document_runs) != sorted(expected_targets):
         return "application_materials_document_target_mismatch"
