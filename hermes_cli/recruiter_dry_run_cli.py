@@ -6,6 +6,13 @@ import sys
 from pathlib import Path
 
 from .recruiter_candidate_facts import load_candidate_facts_packet, run_candidate_facts_cli
+from .recruiter_real_data_privacy_gate import (
+    CareerSourceApproval,
+    RealDataPrivacyGateStatus,
+    RealDataPrivacyGateRequest,
+    build_invalid_career_source_spec_report,
+    evaluate_real_data_application_materials_privacy_gate,
+)
 from .recruiter_dry_run import (
     REQUIRED_APPLICATION_MATERIAL_TARGETS,
     RecruiterApplicationMaterialsSmokeReport,
@@ -41,6 +48,7 @@ _READY_SMOKE_STATUSES = {
 }
 _READY_E2E_SMOKE_STATUSES = {RecruiterE2EApplicationMaterialsStatus.READY}
 _READY_PACKET_STATUSES = {"READY_PROVIDER_VISIBLE"}
+_READY_PRIVACY_GATE_STATUSES = {RealDataPrivacyGateStatus.READY}
 
 
 def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -91,6 +99,33 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     )
     candidate_facts.add_argument("--json", action="store_true", help="Print JSON output (default behavior)")
     candidate_facts.set_defaults(func=cmd_recruiter_context)
+    real_data_preflight = nested.add_parser(
+        "preflight-real-application-materials",
+        help="Print a JSON metadata-only privacy gate report for future real-data application-materials dry-runs",
+    )
+    real_data_preflight.add_argument("--vacancy-source-type", required=True, help="Approved vacancy input source type metadata")
+    real_data_preflight.add_argument("--vacancy-source-approved", action="store_true", help="Mark vacancy source metadata as explicitly approved")
+    real_data_preflight.add_argument(
+        "--career-source-spec-json",
+        action="append",
+        default=[],
+        help="Append metadata-only career source JSON specs; no file content is read",
+    )
+    real_data_preflight.add_argument(
+        "--permitted-source-type",
+        action="append",
+        default=[],
+        help="Append an explicitly permitted source type for this future dry-run",
+    )
+    real_data_preflight.add_argument("--draft-only", action="store_true", help="Require draft-only output mode")
+    real_data_preflight.add_argument("--outbound-enabled", action="store_true", help="Unsafe: mark outbound actions as enabled")
+    real_data_preflight.add_argument("--crm-writes-enabled", action="store_true", help="Unsafe: mark CRM writes as enabled")
+    real_data_preflight.add_argument("--job-intel-writes-enabled", action="store_true", help="Unsafe: mark job-intel writes as enabled")
+    real_data_preflight.add_argument("--browser-automation-enabled", action="store_true", help="Unsafe: mark browser automation as enabled")
+    real_data_preflight.add_argument("--private-file-access-requested", action="store_true", help="Mark private file access as requested metadata")
+    real_data_preflight.add_argument("--private-file-access-approved", action="store_true", help="Mark private file access as explicitly approved metadata")
+    real_data_preflight.add_argument("--json", action="store_true", help="Print JSON output (default behavior)")
+    real_data_preflight.set_defaults(func=cmd_recruiter_context)
     smoke_positioning = nested.add_parser(
         "smoke-positioning",
         help="Print a JSON provider-ready positioning smoke report",
@@ -152,6 +187,10 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
         )
         sys.stdout.write(json.dumps(packet.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if packet.status in _READY_PACKET_STATUSES else 1)
+    if getattr(args, "recruiter_context_command", None) == "preflight-real-application-materials":
+        report = _run_real_data_application_materials_preflight(args)
+        sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
+        raise SystemExit(0 if report.status in _READY_PRIVACY_GATE_STATUSES else 1)
     if getattr(args, "recruiter_context_command", None) == "smoke-positioning":
         report = _run_positioning_smoke_report(args, repo_root)
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
@@ -247,6 +286,32 @@ def _optional_path(value: str | None) -> Path | None:
     if value is None:
         return None
     return Path(value)
+
+
+def _run_real_data_application_materials_preflight(args: argparse.Namespace):
+    try:
+        career_sources = [
+            CareerSourceApproval.from_dict(json.loads(item))
+            for item in getattr(args, "career_source_spec_json", [])
+        ]
+    except json.JSONDecodeError:
+        return build_invalid_career_source_spec_report("career_source_spec_json_invalid")
+    return evaluate_real_data_application_materials_privacy_gate(
+        RealDataPrivacyGateRequest(
+            vacancy_source_type=getattr(args, "vacancy_source_type", None),
+            vacancy_source_approved=getattr(args, "vacancy_source_approved", False),
+            career_sources=career_sources,
+            permitted_source_types=list(getattr(args, "permitted_source_type", [])),
+            output_mode="draft_only" if getattr(args, "draft_only", False) else "unspecified",
+            outbound_enabled=getattr(args, "outbound_enabled", False),
+            crm_writes_enabled=getattr(args, "crm_writes_enabled", False),
+            job_intel_writes_enabled=getattr(args, "job_intel_writes_enabled", False),
+            browser_automation_enabled=getattr(args, "browser_automation_enabled", False),
+            private_file_access_requested=getattr(args, "private_file_access_requested", False),
+            private_file_access_approved=getattr(args, "private_file_access_approved", False),
+            draft_only=getattr(args, "draft_only", False),
+        )
+    )
 
 
 def _cli_error_report(error: str) -> RecruiterDryRunReport:
