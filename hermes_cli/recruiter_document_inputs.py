@@ -130,10 +130,13 @@ _DOCUMENT_TYPE_CONSTRAINTS = {
             "Use only 1-2 of the strongest supported claims from the provided evidence.",
             "Keep the message to 2-4 short sentences with no cover-letter structure.",
             "Include one role-interest sentence, one evidence-backed fit sentence, and at most one soft call-to-action.",
+            "Do not import broad positioning_summary or recommended_angle branding blindly.",
             "If a claim is only adjacent rather than exact, soften it with phrases like relevant adjacent experience, could be relevant, experience that may map well to, or background across.",
+            "If a claim appears in claims_to_avoid, unsupported_claims, or risk notes, do not use it.",
             "Do not use broad executive-branding language or unsupported title/seniority claims.",
             "Do not invent payments leadership, strategic bets, monetization launches, cross-functional launches, executive-level ownership, team size, metrics, revenue, product scale, employer names, dates, or outcomes.",
             "Avoid unsupported specifics and internal evidence disclaimers.",
+            "When in doubt, omit the claim rather than overstate it.",
             "Keep the message short, concrete, human, and naturally conservative.",
         ],
         "review_success_criteria": [
