@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -52,6 +53,16 @@ _FORBIDDEN_ACTIONS = [
     "mutate_live_config",
     "restart_gateway",
 ]
+
+_REVIEWER_DIAGNOSTIC_FORBIDDEN_MARKERS = (
+    "provider_text",
+    "traceback",
+    "/tmp/",
+    "/users/",
+    "/home/",
+    ".hermes/private",
+)
+_REVIEWER_DIAGNOSTIC_DRAFT_RE = re.compile(r"\bdraft\s+for\s+\w+", re.IGNORECASE)
 
 
 class RecruiterDryRunStatus(str, Enum):
@@ -1658,16 +1669,52 @@ def _build_application_materials_review_summary(
     flow_report: RecruiterApplicationMaterialsReport,
 ) -> dict[str, Any]:
     reviewer_verdicts: dict[str, str] = {}
+    reviewer_diagnostics: dict[str, dict[str, Any]] = {}
     unsupported_claims_present = False
     for target, run_payload in dict(flow_report.document_runs).items():
         review_result = dict((dict(run_payload).get("review_result")) or {})
         reviewer_verdicts[str(target)] = str(review_result.get("verdict") or "")
         unsupported_claims_present = unsupported_claims_present or bool(review_result.get("unsupported_claims"))
+        reviewer_diagnostics[str(target)] = _build_report_safe_reviewer_diagnostics(review_result)
     return {
         "verdict": str((flow_report.review or {}).get("verdict") or ""),
         "reviewer_verdicts": reviewer_verdicts,
+        "reviewer_diagnostics": reviewer_diagnostics,
         "unsupported_claims_present": unsupported_claims_present,
     }
+
+
+def _build_report_safe_reviewer_diagnostics(review_result: dict[str, Any]) -> dict[str, Any]:
+    unsupported_claims = _string_list(review_result.get("unsupported_claims"))
+    missing_source_references = _string_list(review_result.get("missing_source_references"))
+    required_changes = _string_list(review_result.get("required_changes"))
+    return {
+        "verdict": str(review_result.get("verdict") or ""),
+        "hallucination_risk": str(review_result.get("hallucination_risk") or ""),
+        "unsupported_claims_count": len(unsupported_claims),
+        "missing_source_references_count": len(missing_source_references),
+        "required_changes_count": len(required_changes),
+        "unsupported_claim_summaries": _report_safe_summary_list(unsupported_claims),
+        "missing_source_reference_summaries": _report_safe_summary_list(missing_source_references),
+        "required_change_summaries": _report_safe_summary_list(required_changes),
+    }
+
+
+def _report_safe_summary_list(values: list[str]) -> list[str]:
+    safe_values: list[str] = []
+    for value in values:
+        normalized = " ".join(str(value).split()).strip()
+        if not normalized:
+            continue
+        lowered = normalized.casefold()
+        if any(marker in lowered for marker in _REVIEWER_DIAGNOSTIC_FORBIDDEN_MARKERS):
+            continue
+        if _REVIEWER_DIAGNOSTIC_DRAFT_RE.search(normalized):
+            continue
+        if detect_unsafe_content(normalized):
+            continue
+        safe_values.append(normalized)
+    return safe_values
 
 
 def _build_e2e_positioning_summary(report: RecruiterPositioningSmokeReport) -> dict[str, Any]:
