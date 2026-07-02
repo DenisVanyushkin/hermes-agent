@@ -9,6 +9,7 @@ from hermes_cli.recruiter_document_inputs import (
     RecruiterDocumentInputStatus,
     build_recruiter_document_writer_input_packet,
 )
+from hermes_cli.recruiter_candidate_facts import build_application_materials_ready_fixture_payload
 from hermes_cli.recruiter_skill_execution import RecruiterSkillExecutionReport, RecruiterSkillExecutionStatus
 
 
@@ -82,6 +83,67 @@ def _execution_report(
         ],
         planned_flow=["vacancy-evaluation", "positioning-and-evidence"],
     )
+
+
+def _application_materials_positioning_result() -> dict[str, object]:
+    fixture = build_application_materials_ready_fixture_payload()
+    facts_by_id = {
+        str(item["fact_id"]): item
+        for item in fixture["facts"]
+        if isinstance(item, dict) and item.get("fact_id")
+    }
+    return {
+        "status": "SUCCESS",
+        "skill_id": "positioning-and-evidence",
+        "positioning_summary": "Lead with broad executive product leadership across payments, pricing, and telecom ecosystems.",
+        "evidence_map": {
+            "positioning_evidence": [str(item["safe_summary"]) for item in fixture["facts"] if item.get("safe_summary")],
+            "source_references": fixture["source_references"],
+        },
+        "proven_facts": [str(item["claim_text"]) for item in fixture["allowed_claims"]],
+        "derived_positioning": ["Broad executive operator across product strategy, commercial ownership, and monetization."],
+        "gaps": ["Exact employer names and headcount should remain omitted."],
+        "risks_and_mitigations": [
+            "Do not claim direct bank or card-network ownership.",
+            "Do not present telecom adjacency as direct telecom category leadership.",
+            "Avoid broad executive seniority branding unsupported by evidence.",
+        ],
+        "allowed_claims": [
+            {
+                **dict(item),
+                "evidence_item_ids": list(item.get("source_fact_ids") or []),
+                "source_ref_ids": sorted(
+                    {
+                        str(source_ref_id)
+                        for fact_id in item.get("source_fact_ids") or []
+                        for source_ref_id in list(facts_by_id.get(str(fact_id), {}).get("source_ref_ids") or [])
+                        if isinstance(source_ref_id, str)
+                    }
+                ),
+            }
+            for item in fixture["allowed_claims"]
+        ],
+        "evidence_items": [
+            {
+                "evidence_item_id": str(item["fact_id"]),
+                "claim_text": str(item["safe_summary"]),
+                "source_fact_ids": [str(item["fact_id"])],
+                "source_ref_ids": [str(ref) for ref in item.get("source_ref_ids") or [] if isinstance(ref, str)],
+                "support_level": str(item.get("support_level") or "explicit"),
+                "category": str(item.get("category") or ""),
+                "safe_summary": str(item.get("safe_summary") or ""),
+            }
+            for item in fixture["facts"]
+        ],
+        "source_references": fixture["source_references"],
+        "claims_to_avoid": fixture["claims_to_avoid"],
+        "unsupported_claims": fixture["unsupported_claims"],
+        "support_summary": {"explicit": 4, "derived_safe": 2, "weak": 1, "unsupported": 0},
+        "privacy_notes": ["sanitized fixture packet"],
+        "generation_mode": "deterministic_fake",
+        "source_kind": "fake_candidate_facts",
+        "provenance": {"source": "fake-application-materials"},
+    }
 
 
 def test_ready_happy_path_builds_json_serializable_writer_input() -> None:
@@ -392,6 +454,126 @@ def test_cv_tailoring_notes_constraints_preserve_analytical_language() -> None:
     assert "unsupported claims to avoid" in constraints["must_include"]
     assert "It may explicitly list supported claims, unsupported claims to avoid, gaps, and evidence notes." in constraints["grounding_rules"]
     assert "Separate use claims from avoid claims when practical." in constraints["grounding_rules"]
+
+
+def test_cover_letter_writer_input_uses_safe_claims_subset_for_outward_facing_draft() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="cover_letter",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    safe_claims = writer_input["safe_claims_for_document"]
+    assert 1 <= len(safe_claims) <= 3
+    assert writer_input["claim_source_priority"]["primary"] == "safe_claims_for_document"
+    assert writer_input["claim_source_priority"]["context_only"] == [
+        "positioning_summary",
+        "recommended_angle",
+    ]
+    assert all(item["source_ref_ids"] for item in safe_claims)
+    assert all(item["evidence_item_ids"] for item in safe_claims)
+    assert "product executive" not in json.dumps(safe_claims, sort_keys=True)
+    assert "roadmap ownership" not in json.dumps(safe_claims, sort_keys=True)
+    assert "commercial ownership" not in json.dumps(safe_claims, sort_keys=True)
+
+
+def test_recruiter_message_writer_input_uses_smaller_safe_claim_subset() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="recruiter_message",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    safe_claims = writer_input["safe_claims_for_document"]
+    assert 1 <= len(safe_claims) <= 2
+    assert writer_input["claim_source_priority"]["primary"] == "safe_claims_for_document"
+    assert all(item["source_ref_ids"] for item in safe_claims)
+    assert all(item["evidence_item_ids"] for item in safe_claims)
+
+
+def test_cv_tailoring_notes_does_not_require_outward_safe_claim_subset() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="cv_tailoring_notes",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    assert "safe_claims_for_document" not in writer_input
+    assert "claim_source_priority" not in writer_input
+
+
+def test_safe_claims_exclude_unsupported_and_broad_overclaim_language() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="cover_letter",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    encoded = json.dumps(
+        [
+            {
+                "claim": item["claim"],
+                "safe_wording": item["safe_wording"],
+            }
+            for item in writer_input["safe_claims_for_document"]
+        ],
+        sort_keys=True,
+    ).lower()
+    assert "direct bank or card-network ownership" not in encoded
+    assert "telecom category leadership" not in encoded
+    assert "end-to-end p and l ownership" not in encoded
+    assert "product executive" not in encoded
+    assert "senior executive" not in encoded
+    assert "payments leader" not in encoded
+    assert "fintech leader" not in encoded
+    assert "roadmap ownership" not in encoded
+    assert "pricing ownership" not in encoded
+    assert "monetization ownership" not in encoded
+    assert "multi-team leadership" not in encoded
+
+
+def test_adjacent_claims_are_softened_for_outward_facing_documents() -> None:
+    cover_letter_packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="cover_letter",
+    )
+    recruiter_message_packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="recruiter_message",
+    )
+
+    cover_letter_input = cover_letter_packet.document_writer_input
+    recruiter_message_input = recruiter_message_packet.document_writer_input
+    assert cover_letter_input is not None
+    assert recruiter_message_input is not None
+    cover_letter_claims = json.dumps(
+        [
+            {
+                "claim": item["claim"],
+                "safe_wording": item["safe_wording"],
+            }
+            for item in cover_letter_input["safe_claims_for_document"]
+        ],
+        sort_keys=True,
+    ).lower()
+    recruiter_message_claims = json.dumps(
+        [
+            {
+                "claim": item["claim"],
+                "safe_wording": item["safe_wording"],
+            }
+            for item in recruiter_message_input["safe_claims_for_document"]
+        ],
+        sort_keys=True,
+    ).lower()
+    assert "adjacent" in cover_letter_claims or "commercially relevant" in cover_letter_claims
+    assert "adjacent" in recruiter_message_claims or "commercially relevant" in recruiter_message_claims
+    assert "direct ownership" not in cover_letter_claims
+    assert "direct ownership" not in recruiter_message_claims
 
 
 def test_boundary_imports_are_safe() -> None:
