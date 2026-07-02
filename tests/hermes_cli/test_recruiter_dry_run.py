@@ -11,6 +11,7 @@ from hermes_cli.recruiter_context import (
     RecruiterContextRequest,
     RecruiterContextStatus,
 )
+from hermes_cli.recruiter_candidate_facts import build_application_materials_ready_fixture_payload
 from hermes_cli.recruiter_dry_run import (
     REQUIRED_APPLICATION_MATERIAL_TARGETS,
     RecruiterDryRunRequest,
@@ -438,11 +439,12 @@ def _ready_positioning_packet(
 
 
 def _ready_candidate_facts_packet() -> dict[str, object]:
+    fixture = build_application_materials_ready_fixture_payload()
     return {
         "schema_version": "recruiter_candidate_facts_packet_v1",
         "skill_id": "candidate-facts",
         "status": "READY_PROVIDER_VISIBLE",
-        "candidate_ref": "candidate-test",
+        "candidate_ref": fixture["candidate_ref"],
         "generated_at": "2026-07-01T00:00:00+00:00",
         "source_policy": {
             "raw_private_content_serialized": False,
@@ -451,46 +453,14 @@ def _ready_candidate_facts_packet() -> dict[str, object]:
         },
         "requires_user_approval": False,
         "provider_visibility_status": "READY_PROVIDER_VISIBLE",
-        "facts": [
-            {
-                "fact_id": "fact-1",
-                "category": "domain",
-                "safe_summary": "Product and commercial leadership experience",
-                "provider_text": "Candidate has product and commercial leadership experience in digital services.",
-                "support_level": "explicit",
-                "source_ref_ids": ["src-1"],
-                "forbidden_expansions": ["Do not infer revenue ownership", "Do not infer team size"],
-                "approval_required": False,
-                "provider_visible": True,
-                "log_visible": False,
-            }
-        ],
-        "source_references": [
-            {
-                "source_ref_id": "src-1",
-                "source_type": "test_fixture",
-                "source_label": "safe-fixture",
-                "source_id_hash": "fixture-hash",
-                "section_label": "safe-section",
-                "content_hash": "fixture-content-hash",
-                "sensitivity": "private_sanitized",
-                "provider_visible": True,
-                "log_visible": True,
-            }
-        ],
-        "allowed_claims": [
-            {
-                "claim_id": "claim-1",
-                "claim_text": "Product and commercial leadership experience in digital services.",
-                "source_fact_ids": ["fact-1"],
-                "support_level": "explicit",
-            }
-        ],
-        "claims_to_avoid": ["Do not claim revenue ownership."],
-        "unsupported_claims": [],
+        "facts": fixture["facts"],
+        "source_references": fixture["source_references"],
+        "allowed_claims": fixture["allowed_claims"],
+        "claims_to_avoid": fixture["claims_to_avoid"],
+        "unsupported_claims": fixture["unsupported_claims"],
         "redactions": [],
-        "support_summary": {"explicit": 1, "derived_safe": 0, "weak": 0, "unsupported": 0},
-        "role_target_context": {},
+        "support_summary": {"explicit": 4, "derived_safe": 2, "weak": 1, "unsupported": 0},
+        "role_target_context": fixture.get("role_target_context", {}),
         "privacy_notes": ["sanitized fixture packet"],
         "next_step": "CANDIDATE_FACTS_READY_FOR_POSITIONING",
         "errors": [],
@@ -522,17 +492,11 @@ def test_positioning_flow_dry_run_accepts_candidate_facts_and_keeps_provider_blo
     assert report.executor_called is False
     assert report.input["candidate_facts_status"] == "READY_PROVIDER_VISIBLE"
     assert report.input["candidate_facts_provider_visibility_status"] == "READY_PROVIDER_VISIBLE"
-    assert report.input["candidate_fact_summaries"] == [
-        {
-            "fact_id": "fact-1",
-            "category": "domain",
-            "safe_summary": "Product and commercial leadership experience",
-            "support_level": "explicit",
-        }
-    ]
-    assert report.input["allowed_claims"] == [
-        "Product and commercial leadership experience in digital services."
-    ]
+    assert len(report.input["candidate_fact_summaries"]) >= 6
+    assert {"domain", "achievement", "role_history", "scope"} <= {
+        item["category"] for item in report.input["candidate_fact_summaries"]
+    }
+    assert len(report.input["allowed_claims"]) >= 4
     assert "candidate_facts_packet" not in report.input
 
 
@@ -663,15 +627,24 @@ def test_positioning_flow_dry_run_supports_fake_no_provider_positioning_path() -
     assert report.positioning_result["source_kind"] == "fake_candidate_facts"
     assert report.positioning_result["provider_called"] is False
     assert report.positioning_result["executor_called"] is False
-    assert report.positioning_result["candidate_ref"] == "candidate-test"
-    assert report.positioning_result["claims_to_avoid"] == ["Do not claim revenue ownership."]
-    assert report.positioning_result["allowed_claims"][0]["source_fact_ids"] == ["fact-1"]
-    assert report.positioning_result["evidence_items"][0]["source_ref_ids"] == ["src-1"]
+    assert report.positioning_result["candidate_ref"] == "candidate-application-materials-fixture"
+    assert len(report.positioning_result["allowed_claims"]) >= 4
+    assert len(report.positioning_result["evidence_items"]) >= 6
+    assert len(report.positioning_result["source_references"]) >= 4
+    assert len(report.positioning_result["claims_to_avoid"]) >= 2
+    assert len(report.positioning_result["unsupported_claims"]) >= 2
+    source_ref_ids = {item["source_ref_id"] for item in report.positioning_result["source_references"]}
+    categories = {item["category"] for item in report.positioning_result["evidence_items"]}
+    assert {"domain", "achievement", "role_history", "scope"} <= categories
+    assert all(item["source_fact_ids"] for item in report.positioning_result["allowed_claims"])
+    assert all(item["source_ref_ids"] for item in report.positioning_result["evidence_items"])
+    assert all(set(item["source_ref_ids"]) <= source_ref_ids for item in report.positioning_result["evidence_items"])
     encoded = json.dumps(report.to_dict(), sort_keys=True)
     assert "provider_text" not in encoded
     assert "\"candidate_facts_packet\"" not in encoded
     assert "/home/" not in encoded
     assert "/Users/" not in encoded
+    assert "@" not in encoded
 
 
 def test_positioning_flow_dry_run_fake_path_requires_candidate_facts_packet() -> None:
