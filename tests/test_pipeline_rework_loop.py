@@ -564,6 +564,150 @@ def test_completion_allowed_final_response_text_summarizes_commit_gate() -> None
     assert "No commit or push was performed. Waiting for user approval before commit." in text
 
 
+def test_completion_allowed_final_response_text_surfaces_engineer_summary() -> None:
+    """Regression test for the 2026-07-02 live "проверь, что изменилось, сверь
+    текущее состояние git с origin" run: the engineer correctly used the new
+    git_remote_status tool and reported "ahead 91, behind 0" in its structured
+    summary, but _completion_allowed_final_response_text never read
+    reviewer_packet["safe_packet"]["engineer_summary"] at all (not even a wrong
+    dict level -- the field was simply never surfaced), so the user-visible Slack
+    response never contained the actual answer, only pass/fail plumbing."""
+
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._completion_allowed_final_response_text(
+        git_gate={"changed_files": []},
+        test_summary={"status": "not_requested"},
+        reviewer_packet={
+            "packet_status": "review_not_required",
+            "safe_packet": {
+                "engineer_summary": (
+                    "Проверил текущее состояние git и сверил локальную ветку с origin: "
+                    "рабочее дерево чистое, локальных незакоммиченных изменений нет, "
+                    "локальная ветка опережает origin на 91 коммит и не отстает от него."
+                ),
+                "packet_status": "review_not_required",
+            },
+        },
+    )
+
+    assert "Summary:" in text
+    assert "опережает origin на 91 коммит" in text
+
+
+def test_apply_step_tests_ignores_tool_call_log_entries_when_no_test_requested() -> None:
+    # Direct unit coverage for the normalization boundary: the engineer's
+    # "tests" field getting populated with self-reported tool-call log strings
+    # (rather than pytest commands) must resolve to "not_requested", not be
+    # routed through the pytest validator and rejected as malformed.
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    structured_output = {
+        "tests": [
+            "{name: git_status, result: passed, details: clean working tree}",
+            "{name: git_diff, result: passed, details: no diff output}",
+            "{name: git_remote_status origin, result: passed, details: ahead 91, behind 0 vs origin/local/customizations}",
+        ]
+    }
+
+    summary = module._apply_step_tests(
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        structured_output=structured_output,
+        runner_result=None,
+        runtime_context=None,
+    )
+
+    assert summary["status"] == "not_requested"
+    assert summary["requested_count"] == 0
+    assert summary["results"] == []
+
+
+def test_apply_step_tests_still_validates_genuine_malformed_pytest_command(tmp_path: Path) -> None:
+    # Contrast case: a tests entry that IS an attempted pytest-shaped command
+    # (starts with an allowed executable but is otherwise malformed) must still
+    # go through validation -- only the tool-call-log shape is filtered out.
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    git_repo = _init_git_repo(tmp_path)
+
+    runtime_context = SimpleNamespace(allow_test_commands=True, test_workspace=str(git_repo))
+    structured_output = {"tests": ["pytest -q " + "x" * 500]}
+
+    summary = module._apply_step_tests(
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        structured_output=structured_output,
+        runner_result=None,
+        runtime_context=runtime_context,
+    )
+
+    assert summary["status"] == "invalid"
+
+
+def test_engineer_git_only_investigation_completes_without_test_payload_noise(tmp_path: Path) -> None:
+    """End-to-end regression for the 2026-07-02 live incident: an engineer run
+    that only performs read-only git inspection (git_status/git_remote_status/
+    git_diff, no code changes) and reports those tool calls in the "tests"
+    field must complete cleanly -- reviewer skipped (no material changes),
+    final response carries the engineer's actual summary, and the response
+    must NOT show "Tests: invalid" / "malformed_test_payload" for a test that
+    was never requested."""
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+
+    engineer_summary = (
+        "Checked current git state and compared local branch with origin: working "
+        "tree is clean, no local uncommitted changes, local branch is ahead of "
+        "origin by 91 commits and not behind."
+    )
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": _engineer_output(
+                    summary=engineer_summary,
+                    changes=[],
+                    tests=[
+                        "{name: git_status, result: passed, details: clean working tree}",
+                        "{name: git_diff, result: passed, details: no diff output}",
+                        (
+                            "{name: git_remote_status origin, result: passed, details: "
+                            "ahead 91, behind 0 vs origin/local/customizations}"
+                        ),
+                    ],
+                )
+            },
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="проверь, что изменилось, сверь текущее состояние git с origin",
+        repo_path=str(git_repo),
+    )
+
+    assert calls == ["hermes_engineer_core"]
+    assert result.completion_allowed is True
+    assert result.candidate_complete is True
+    assert result.blocked_reason is None
+    assert result.reviewer_packet["packet_status"] == "review_not_required"
+    assert result.test_summary["status"] == "not_requested"
+
+    final_text = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert engineer_summary in final_text
+    assert "invalid" not in final_text.lower()
+    assert "malformed_test_payload" not in final_text
+
+
 def test_finalize_loop_result_materializes_completion_allowed_final_response_text(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     session_module = importlib.import_module("hermes_cli.pipeline_session")
