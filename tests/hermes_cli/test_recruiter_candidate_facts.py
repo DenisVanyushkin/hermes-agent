@@ -6,6 +6,7 @@ import pytest
 
 from hermes_cli.recruiter_candidate_facts import (
     SCHEMA_VERSION,
+    build_application_materials_ready_fixture_payload,
     build_candidate_facts_packet,
     build_safe_source_id_hash,
     load_candidate_facts_packet,
@@ -109,6 +110,41 @@ def test_safe_fixture_facts_produce_ready_provider_visible_packet() -> None:
     assert packet.facts[0]["provider_text"].startswith("Candidate has product")
     assert "/home/" not in raw
     assert "/Users/" not in raw
+
+
+def test_application_materials_ready_fixture_payload_is_rich_and_resolvable() -> None:
+    fixture = build_application_materials_ready_fixture_payload()
+
+    assert fixture["candidate_ref"] == "candidate-application-materials-fixture"
+    assert len(fixture["facts"]) >= 6
+    assert len(fixture["source_references"]) >= 4
+    assert len(fixture["allowed_claims"]) >= 4
+    assert len(fixture["claims_to_avoid"]) >= 2
+    assert len(fixture["unsupported_claims"]) >= 2
+    source_ref_ids = {item["source_ref_id"] for item in fixture["source_references"]}
+    fact_ids = {item["fact_id"] for item in fixture["facts"]}
+    assert {"domain", "achievement", "role_history", "scope"} <= {item["category"] for item in fixture["facts"]}
+    assert all(item["source_ref_ids"] for item in fixture["facts"])
+    assert all(set(item["source_ref_ids"]) <= source_ref_ids for item in fixture["facts"])
+    assert all(set(item["source_fact_ids"]) <= fact_ids for item in fixture["allowed_claims"])
+
+
+def test_application_materials_ready_fixture_packet_stays_privacy_safe() -> None:
+    packet = build_candidate_facts_packet(
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        fixture_payload=build_application_materials_ready_fixture_payload(),
+        generated_at="2026-07-01T00:00:00+00:00",
+    )
+
+    raw = _raw(packet)
+    assert packet.status == "READY_PROVIDER_VISIBLE"
+    assert packet.provider_visibility_status == "READY_PROVIDER_VISIBLE"
+    assert len(packet.facts) >= 6
+    assert len(packet.source_references) >= 4
+    assert len(packet.allowed_claims) >= 4
+    assert "/home/" not in raw
+    assert "/Users/" not in raw
+    assert "@" not in raw
 
 
 def test_unsafe_candidate_ref_blocks_packet_and_is_not_serialized() -> None:

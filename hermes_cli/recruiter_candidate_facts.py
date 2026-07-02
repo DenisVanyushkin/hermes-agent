@@ -231,6 +231,159 @@ def validate_no_unsafe_leakage(payload: Any) -> str | None:
     return codes[0]
 
 
+def build_application_materials_ready_fixture_payload() -> dict[str, Any]:
+    source_references = [
+        _fixture_source_reference(
+            source_ref_id="src-candidate-role-1",
+            source_label="candidate_role",
+            section_label="role_scope",
+        ),
+        _fixture_source_reference(
+            source_ref_id="src-candidate-payments-1",
+            source_label="candidate_payments",
+            section_label="payments_programs",
+        ),
+        _fixture_source_reference(
+            source_ref_id="src-candidate-metric-1",
+            source_label="candidate_metrics",
+            section_label="growth_outcomes",
+        ),
+        _fixture_source_reference(
+            source_ref_id="src-candidate-partnerships-1",
+            source_label="candidate_partnerships",
+            section_label="partner_execution",
+        ),
+        _fixture_source_reference(
+            source_ref_id="src-vacancy-requirement-1",
+            source_label="vacancy_requirements",
+            section_label="role_expectations",
+        ),
+    ]
+    facts = [
+        _fixture_fact(
+            fact_id="fact-role-1",
+            category="role_history",
+            safe_summary="Led a regional product and commercial portfolio across digital payments and adjacent platform services.",
+            provider_text="Fictional candidate led a regional product and commercial portfolio spanning digital payments and platform services.",
+            source_ref_ids=["src-candidate-role-1"],
+            forbidden_expansions=["Do not infer employer names", "Do not infer exact headcount"],
+        ),
+        _fixture_fact(
+            fact_id="fact-payments-1",
+            category="domain",
+            safe_summary="Delivered payment acceptance, checkout, and recurring billing improvements in regulated markets.",
+            provider_text="Fictional candidate delivered payment acceptance, checkout, and recurring billing improvements in regulated markets.",
+            source_ref_ids=["src-candidate-payments-1", "src-vacancy-requirement-1"],
+            forbidden_expansions=["Do not infer banking licenses", "Do not infer card network ownership"],
+        ),
+        _fixture_fact(
+            fact_id="fact-growth-1",
+            category="achievement",
+            safe_summary="Improved conversion and reduced onboarding friction with measurable marketplace and payment funnel gains.",
+            provider_text="Fictional candidate improved conversion and reduced onboarding friction, producing measurable marketplace and payment funnel gains.",
+            source_ref_ids=["src-candidate-metric-1"],
+            forbidden_expansions=["Do not infer exact revenue", "Do not infer unsupported margin impact"],
+        ),
+        _fixture_fact(
+            fact_id="fact-partnerships-1",
+            category="scope",
+            safe_summary="Worked with telecom, merchant, and ecosystem partners on integrations and go-to-market execution.",
+            provider_text="Fictional candidate worked with telecom, merchant, and ecosystem partners on integrations and go-to-market execution.",
+            source_ref_ids=["src-candidate-partnerships-1", "src-vacancy-requirement-1"],
+            forbidden_expansions=["Do not infer exclusive partnerships", "Do not infer signed logos"],
+        ),
+        _fixture_fact(
+            fact_id="fact-market-1",
+            category="geography",
+            safe_summary="Operated across multi-country launches with region-specific compliance and localization constraints.",
+            provider_text="Fictional candidate operated across multi-country launches with region-specific compliance and localization constraints.",
+            source_ref_ids=["src-candidate-role-1", "src-vacancy-requirement-1"],
+            forbidden_expansions=["Do not infer specific regulators", "Do not infer unsupported jurisdictions"],
+            support_level="derived_safe",
+        ),
+        _fixture_fact(
+            fact_id="fact-pricing-1",
+            category="achievement",
+            safe_summary="Ran pricing and packaging iterations tied to adoption, retention, and partner activation.",
+            provider_text="Fictional candidate ran pricing and packaging iterations tied to adoption, retention, and partner activation.",
+            source_ref_ids=["src-candidate-metric-1", "src-candidate-payments-1"],
+            forbidden_expansions=["Do not infer exact ARPU", "Do not infer board ownership"],
+        ),
+        _fixture_fact(
+            fact_id="fact-risk-1",
+            category="constraint",
+            safe_summary="Telecom adjacency and executive seniority should be framed carefully unless directly supported in the draft.",
+            provider_text="Telecom adjacency and executive seniority should be framed carefully unless directly supported in the draft.",
+            source_ref_ids=["src-candidate-role-1", "src-vacancy-requirement-1"],
+            forbidden_expansions=["Do not present adjacency as direct category ownership"],
+            support_level="weak",
+        ),
+    ]
+    allowed_claims = [
+        _fixture_allowed_claim(
+            claim_id="claim-1",
+            claim_text="Regional product and commercial leadership across payments and platform services.",
+            source_fact_ids=["fact-role-1", "fact-payments-1"],
+        ),
+        _fixture_allowed_claim(
+            claim_id="claim-2",
+            claim_text="Hands-on payment, checkout, and recurring billing execution in regulated environments.",
+            source_fact_ids=["fact-payments-1", "fact-market-1"],
+        ),
+        _fixture_allowed_claim(
+            claim_id="claim-3",
+            claim_text="Evidence-backed growth, conversion, and onboarding optimization work.",
+            source_fact_ids=["fact-growth-1", "fact-pricing-1"],
+        ),
+        _fixture_allowed_claim(
+            claim_id="claim-4",
+            claim_text="Partner integration and cross-functional go-to-market execution with telecom and merchant ecosystems.",
+            source_fact_ids=["fact-partnerships-1"],
+            support_level="derived_safe",
+        ),
+        _fixture_allowed_claim(
+            claim_id="claim-5",
+            claim_text="Multi-country rollout judgment with localization and compliance awareness.",
+            source_fact_ids=["fact-market-1"],
+            support_level="derived_safe",
+        ),
+        _fixture_allowed_claim(
+            claim_id="claim-6",
+            claim_text="Pricing and packaging iteration tied to adoption, retention, and partner activation.",
+            source_fact_ids=["fact-pricing-1"],
+        ),
+    ]
+    return {
+        "candidate_ref": "candidate-application-materials-fixture",
+        "facts": facts,
+        "source_references": source_references,
+        "allowed_claims": allowed_claims,
+        "claims_to_avoid": [
+            "Do not claim direct bank or card-network ownership.",
+            "Do not present telecom adjacency as direct telecom category leadership.",
+            "Do not state exact employer names, revenue, or team size unless explicitly supported.",
+        ],
+        "unsupported_claims": [
+            "End-to-end P and L ownership across all markets.",
+            "Named tier-one telecom operator leadership without direct evidence.",
+        ],
+        "role_target_context": {
+            "role_family": "fictional_fintech_product_leadership",
+            "target_focus": [
+                "payments",
+                "platform_growth",
+                "partnerships",
+                "regional_scaling",
+            ],
+        },
+        "privacy_notes": [
+            "synthetic fictional fixture",
+            "no private career source content serialized",
+            "use softening language for adjacency and seniority where needed",
+        ],
+    }
+
+
 def detect_unsafe_content(payload: Any) -> list[str]:
     codes: set[str] = set()
     for value in _iter_strings(payload):
@@ -239,6 +392,64 @@ def detect_unsafe_content(payload: Any) -> list[str]:
         if _EMAIL_RE.search(value) or _PHONE_RE.search(value):
             codes.add("unsafe_contact_detected")
     return sorted(codes)
+
+
+def _fixture_fact(
+    *,
+    fact_id: str,
+    category: str,
+    safe_summary: str,
+    provider_text: str,
+    source_ref_ids: list[str],
+    forbidden_expansions: list[str],
+    support_level: str = "explicit",
+) -> dict[str, Any]:
+    return {
+        "fact_id": fact_id,
+        "category": category,
+        "safe_summary": safe_summary,
+        "provider_text": provider_text,
+        "support_level": support_level,
+        "source_ref_ids": list(source_ref_ids),
+        "forbidden_expansions": list(forbidden_expansions),
+        "approval_required": False,
+        "provider_visible": True,
+        "log_visible": True,
+    }
+
+
+def _fixture_source_reference(
+    *,
+    source_ref_id: str,
+    source_label: str,
+    section_label: str,
+) -> dict[str, Any]:
+    return {
+        "source_ref_id": source_ref_id,
+        "source_type": "test_fixture",
+        "source_label": source_label,
+        "source_id_hash": build_safe_source_id_hash(source_label, section_label),
+        "section_label": section_label,
+        "content_hash": build_safe_source_id_hash(source_ref_id, "content"),
+        "sensitivity": "private_sanitized",
+        "provider_visible": True,
+        "log_visible": True,
+    }
+
+
+def _fixture_allowed_claim(
+    *,
+    claim_id: str,
+    claim_text: str,
+    source_fact_ids: list[str],
+    support_level: str = "explicit",
+) -> dict[str, Any]:
+    return {
+        "claim_id": claim_id,
+        "claim_text": claim_text,
+        "source_fact_ids": list(source_fact_ids),
+        "support_level": support_level,
+    }
 
 
 def _validate_fixture_payload(
