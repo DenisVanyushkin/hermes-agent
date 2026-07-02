@@ -493,6 +493,57 @@ def test_recruiter_message_writer_input_uses_smaller_safe_claim_subset() -> None
     assert all(item["evidence_item_ids"] for item in safe_claims)
 
 
+def test_outward_facing_writer_input_marks_safe_claims_as_only_draftable_source() -> None:
+    cover_letter_packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="cover_letter",
+    )
+    recruiter_message_packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="recruiter_message",
+    )
+
+    for writer_input in (
+        cover_letter_packet.document_writer_input,
+        recruiter_message_packet.document_writer_input,
+    ):
+        assert writer_input is not None
+        assert writer_input["claim_source_priority"]["primary"] == "safe_claims_for_document"
+        assert writer_input["writer_guidance"]["safe_claims_for_document_primary"] is True
+        assert writer_input["writer_guidance"]["safe_claims_only_draftable_source"] is True
+
+
+def test_outward_facing_writer_input_keeps_broad_positioning_fields_context_only() -> None:
+    for document_type in ("cover_letter", "recruiter_message"):
+        packet = build_recruiter_document_writer_input_packet(
+            _execution_report(positioning_result=_application_materials_positioning_result()),
+            document_type=document_type,
+        )
+
+        writer_input = packet.document_writer_input
+        assert writer_input is not None
+        assert "positioning_summary" not in writer_input
+        assert "recommended_angle" not in writer_input
+        assert "allowed_claims" not in writer_input
+        assert "proven_facts" not in writer_input
+        assert "derived_positioning" not in writer_input
+
+        if "context_only_not_for_claims" in writer_input:
+            context_only = writer_input["context_only_not_for_claims"]
+            assert context_only["do_not_quote_or_paraphrase_as_claims"] is True
+            encoded = json.dumps(context_only, sort_keys=True).lower()
+            assert "product executive" not in encoded
+            assert "commercial ownership" not in encoded
+            assert "monetization ownership" not in encoded
+
+        positioning_context = writer_input["positioning_evidence_result"]
+        assert "allowed_claims" not in positioning_context
+        assert "proven_facts" not in positioning_context
+        assert "derived_positioning" not in positioning_context
+        assert "positioning_summary" not in positioning_context
+        assert "recommended_angle" not in positioning_context
+
+
 def test_cv_tailoring_notes_does_not_require_outward_safe_claim_subset() -> None:
     packet = build_recruiter_document_writer_input_packet(
         _execution_report(positioning_result=_application_materials_positioning_result()),
@@ -503,6 +554,8 @@ def test_cv_tailoring_notes_does_not_require_outward_safe_claim_subset() -> None
     assert writer_input is not None
     assert "safe_claims_for_document" not in writer_input
     assert "claim_source_priority" not in writer_input
+    assert writer_input["positioning_evidence_result"]["proven_facts"]
+    assert writer_input["positioning_evidence_result"]["derived_positioning"]
 
 
 def test_safe_claims_exclude_unsupported_and_broad_overclaim_language() -> None:

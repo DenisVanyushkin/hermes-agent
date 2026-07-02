@@ -353,7 +353,7 @@ def build_recruiter_document_writer_input_packet(
                 "status": positioning_status,
             },
             "vacancy_evaluation_result": vacancy_result,
-            "positioning_evidence_result": positioning_result,
+            "positioning_evidence_result": _positioning_result_for_document_writer(document_type, positioning_result),
             "required_source_fields": list(REQUIRED_POSITIONING_FIELDS),
             "allowed_document_types": list(ALLOWED_DOCUMENT_TYPES),
             "skill_references": list(_SKILL_REFERENCES),
@@ -484,11 +484,22 @@ def _outward_facing_claim_guidance(document_type: str, positioning_result: dict[
         "claim_source_priority": {
             "primary": "safe_claims_for_document",
             "context_only": ["positioning_summary", "recommended_angle"],
+            "non_draftable_claim_sources": [
+                "allowed_claims",
+                "proven_facts",
+                "derived_positioning",
+                "positioning_evidence_result",
+            ],
         },
         "writer_guidance": {
             "safe_claims_for_document_primary": True,
+            "safe_claims_only_draftable_source": True,
             "positioning_summary_context_only": True,
             "recommended_angle_context_only": True,
+        },
+        "context_only_not_for_claims": {
+            "do_not_quote_or_paraphrase_as_claims": True,
+            "broad_positioning_removed_for_outward_facing_draft": True,
         },
     }
 
@@ -625,3 +636,28 @@ def _claim_priority(claim_text: str, support_level: str) -> int:
     if any(phrase in lowered for phrase in _BROAD_OVERCLAIM_PHRASES):
         score -= 50
     return score
+
+
+def _positioning_result_for_document_writer(document_type: str, positioning_result: dict[str, Any]) -> dict[str, Any]:
+    if document_type not in _OUTWARD_FACING_DOCUMENT_TYPES:
+        return positioning_result
+    return {
+        "status": str(positioning_result.get("status") or ""),
+        "skill_id": str(positioning_result.get("skill_id") or ""),
+        "evidence_map": _dict(positioning_result.get("evidence_map")),
+        "evidence_items": [item for item in positioning_result.get("evidence_items") or [] if isinstance(item, dict)],
+        "source_references": [item for item in positioning_result.get("source_references") or [] if isinstance(item, dict)],
+        "claims_to_avoid": _string_list(positioning_result.get("claims_to_avoid")),
+        "unsupported_claims": _string_list(positioning_result.get("unsupported_claims")),
+        "gaps": _string_list(positioning_result.get("gaps")),
+        "risks_and_mitigations": _string_list(positioning_result.get("risks_and_mitigations")),
+        "support_summary": _dict(positioning_result.get("support_summary")),
+        "privacy_notes": _string_list(positioning_result.get("privacy_notes")),
+        "generation_mode": str(positioning_result.get("generation_mode") or ""),
+        "source_kind": str(positioning_result.get("source_kind") or ""),
+        "provenance": _dict(positioning_result.get("provenance")),
+        "context_only_not_for_claims": {
+            "do_not_quote_or_paraphrase_as_claims": True,
+            "broad_positioning_removed_for_outward_facing_draft": True,
+        },
+    }
