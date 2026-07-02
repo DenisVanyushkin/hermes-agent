@@ -310,6 +310,29 @@ def test_recruiter_message_writer_input_preserves_tight_constraints() -> None:
     assert "\u201d" not in "".join(constraints["must_avoid"])
 
 
+def test_recruiter_message_constraints_guard_against_blind_overclaim_imports() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(),
+        document_type="recruiter_message",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    constraints = writer_input["document_constraints"]
+    assert (
+        "Do not import broad positioning_summary or recommended_angle branding blindly."
+        in constraints["grounding_rules"]
+    )
+    assert (
+        "If a claim appears in claims_to_avoid, unsupported_claims, or risk notes, do not use it."
+        in constraints["grounding_rules"]
+    )
+    assert "When in doubt, omit the claim rather than overstate it." in constraints["grounding_rules"]
+    assert "fintech leader" in constraints["must_avoid"]
+    assert "senior executive" in constraints["must_avoid"]
+    assert "executive-level ownership" in constraints["must_avoid"]
+
+
 def test_cv_tailoring_notes_constraints_preserve_analytical_language() -> None:
     packet = build_recruiter_document_writer_input_packet(
         _execution_report(),
