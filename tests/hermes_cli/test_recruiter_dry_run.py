@@ -1266,6 +1266,28 @@ def test_application_materials_smoke_harness_executor_exception_is_controlled() 
     assert "Traceback" not in encoded
 
 
+def test_application_materials_smoke_harness_selected_target_changes_requested_reports_truthfully() -> None:
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        allow_provider_execution=True,
+        document_target="recruiter_message_draft",
+        executor_factory=lambda: _ApplicationMaterialsExecutor(reviewer_verdict="CHANGES_REQUESTED"),
+    )
+
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.OUTPUT_INVALID
+    assert report.document_summary["generated_targets"] == ["recruiter_message_draft"]
+    assert report.review_summary["reviewer_verdicts"]["recruiter_message_draft"] == "CHANGES_REQUESTED"
+    assert report.target_results == {
+        "recruiter_message_draft": {
+            "status": "review_blocked",
+            "draft_only": True,
+            "user_review_required": True,
+            "reviewer_verdict": "CHANGES_REQUESTED",
+            "reviewer_notes_present": True,
+        }
+    }
+
+
 def test_required_application_material_targets_are_exact_and_stable() -> None:
     assert REQUIRED_APPLICATION_MATERIAL_TARGETS == (
         "recruiter_message_draft",
@@ -1337,6 +1359,28 @@ def test_application_materials_smoke_harness_all_required_targets_runs_fake_exec
         assert target_result["reviewer_notes_present"] is True
     assert "provider_text" not in encoded
     assert "\"positioning_packet\"" not in encoded
+
+
+def test_application_materials_smoke_harness_all_required_targets_keeps_partial_progress_truthful() -> None:
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        allow_provider_execution=True,
+        all_required_targets=True,
+        executor_factory=lambda: _ApplicationMaterialsExecutor(reviewer_verdict="CHANGES_REQUESTED"),
+    )
+
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.OUTPUT_INVALID
+    assert report.document_summary["generated_targets"] == ["cv_tailoring_notes"]
+    assert report.review_summary["reviewer_verdicts"] == {"cv_tailoring_notes": "CHANGES_REQUESTED"}
+    assert report.target_results["cv_tailoring_notes"] == {
+        "status": "review_blocked",
+        "draft_only": True,
+        "user_review_required": True,
+        "reviewer_verdict": "CHANGES_REQUESTED",
+        "reviewer_notes_present": True,
+    }
+    assert report.target_results["cover_letter_draft"]["status"] == "not_requested"
+    assert report.target_results["recruiter_message_draft"]["status"] == "not_requested"
 
 
 def test_recruiter_e2e_harness_blocks_provider_by_default_without_executor_calls() -> None:

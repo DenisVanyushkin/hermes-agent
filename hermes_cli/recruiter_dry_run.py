@@ -726,6 +726,11 @@ def run_recruiter_application_materials_smoke_harness(
     base_report.reviewer_called = bool(flow_report.reviewer_called)
     base_report.document_summary = _build_application_materials_document_summary(flow_report, document_target=document_target)
     base_report.review_summary = _build_application_materials_review_summary(flow_report)
+    base_report.target_results = _build_application_material_target_results(
+        target_keys,
+        status="ready",
+        flow_report=flow_report,
+    )
     output_error = _validate_application_materials_smoke_output(
         flow_report,
         all_required_targets=all_required_targets,
@@ -750,11 +755,6 @@ def run_recruiter_application_materials_smoke_harness(
     base_report.errors = []
     base_report.output_validation = {"ready": True, "status": "valid", "errors": []}
     base_report.next_allowed_actions = ["review_application_materials_packet_manually"]
-    base_report.target_results = _build_application_material_target_results(
-        target_keys,
-        status="ready",
-        flow_report=flow_report,
-    )
     return base_report
 
 
@@ -1526,12 +1526,27 @@ def _build_application_material_target_results(
     target_results: dict[str, dict[str, Any]] = {}
     for target in target_keys:
         run_payload = dict(document_runs.get(target) or {})
+        if not run_payload:
+            target_results[target] = {
+                "status": "not_requested",
+                "draft_only": False,
+                "user_review_required": False,
+                "reviewer_verdict": None,
+                "reviewer_notes_present": False,
+            }
+            continue
         document_packet = dict(run_payload.get("document_packet") or {})
         review_result = dict(run_payload.get("review_result") or {})
         notes = review_result.get("notes")
         draft = dict(document_packet.get("draft") or {})
+        execution_status = str(run_payload.get("status") or "")
+        target_status = status
+        if execution_status == RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_CHANGES_REQUESTED.value:
+            target_status = "review_blocked"
+        elif execution_status != RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_APPROVED.value:
+            target_status = "output_invalid"
         target_results[target] = {
-            "status": status,
+            "status": target_status,
             "draft_only": document_packet.get("status") == "DRAFT_READY",
             "user_review_required": True,
             "reviewer_verdict": review_result.get("verdict"),
