@@ -857,11 +857,18 @@ def test_positioning_flow_dry_run_fails_closed_on_wrong_skill_id() -> None:
 class _ApplicationMaterialsExecutor:
     provider_backed = False
 
-    def __init__(self, *, reviewer_verdict: str = "APPROVE", invalid_writer: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        reviewer_verdict: str = "APPROVE",
+        invalid_writer: bool = False,
+        reviewer_result_overrides: dict[str, object] | None = None,
+    ) -> None:
         self.calls: list[str] = []
         self.writer_inputs: list[dict[str, object]] = []
         self.reviewer_verdict = reviewer_verdict
         self.invalid_writer = invalid_writer
+        self.reviewer_result_overrides = dict(reviewer_result_overrides or {})
 
     def execute(self, *, skill_id, skill_input, expected_schema):
         self.calls.append(skill_id)
@@ -886,7 +893,7 @@ class _ApplicationMaterialsExecutor:
                 "errors": [],
                 "provenance": {},
             }
-        return {
+        reviewer_result = {
             "status": "SUCCESS",
             "skill_id": "document-reviewer",
             "verdict": self.reviewer_verdict,
@@ -900,6 +907,8 @@ class _ApplicationMaterialsExecutor:
             "errors": [],
             "provenance": {},
         }
+        reviewer_result.update(self.reviewer_result_overrides)
+        return reviewer_result
 
 
 def test_application_materials_flow_dry_run_blocks_provider_by_default() -> None:
@@ -1285,6 +1294,76 @@ def test_application_materials_smoke_harness_selected_target_changes_requested_r
             "reviewer_verdict": "CHANGES_REQUESTED",
             "reviewer_notes_present": True,
         }
+    }
+
+
+def test_application_materials_smoke_harness_changes_requested_includes_report_safe_reviewer_diagnostics() -> None:
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        allow_provider_execution=True,
+        document_target="recruiter_message_draft",
+        executor_factory=lambda: _ApplicationMaterialsExecutor(
+            reviewer_verdict="CHANGES_REQUESTED",
+            reviewer_result_overrides={
+                "hallucination_risk": "moderate",
+                "unsupported_claims": [
+                    "Broad ownership claim without source grounding",
+                    "Draft says Jane Doe led /tmp migrations for /Users/denis accounts.",
+                ],
+                "missing_source_references": [
+                    "Claim about pricing/monetization lacks source_ref_ids",
+                    "/home/hermes/.hermes/private/source.md",
+                ],
+                "required_changes": [
+                    "Replace broad capability statements with source-backed examples",
+                    "Do not include provider_text or filesystem paths like /tmp/secret.txt",
+                ],
+            },
+        ),
+    )
+
+    encoded = json.dumps(report.to_dict(), sort_keys=True)
+    diagnostics = report.review_summary["reviewer_diagnostics"]["recruiter_message_draft"]
+
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.OUTPUT_INVALID
+    assert diagnostics == {
+        "verdict": "CHANGES_REQUESTED",
+        "hallucination_risk": "moderate",
+        "unsupported_claims_count": 2,
+        "missing_source_references_count": 2,
+        "required_changes_count": 2,
+        "unsupported_claim_summaries": ["Broad ownership claim without source grounding"],
+        "missing_source_reference_summaries": ["Claim about pricing/monetization lacks source_ref_ids"],
+        "required_change_summaries": ["Replace broad capability statements with source-backed examples"],
+    }
+    assert report.review_summary["unsupported_claims_present"] is True
+    assert "Draft for recruiter_message." not in encoded
+    assert "provider_text" not in encoded
+    assert "/tmp/" not in encoded
+    assert "/Users/" not in encoded
+    assert "/home/hermes/.hermes/private" not in encoded
+
+
+def test_application_materials_smoke_harness_approve_keeps_green_behavior_with_empty_diagnostics() -> None:
+    report = run_recruiter_application_materials_smoke_harness(
+        positioning_packet=_ready_positioning_packet(),
+        allow_provider_execution=True,
+        document_target="recruiter_message_draft",
+        executor_factory=lambda: _ApplicationMaterialsExecutor(),
+    )
+
+    diagnostics = report.review_summary["reviewer_diagnostics"]["recruiter_message_draft"]
+
+    assert report.status is RecruiterApplicationMaterialsSmokeStatus.READY
+    assert diagnostics == {
+        "verdict": "APPROVE",
+        "hallucination_risk": "low",
+        "unsupported_claims_count": 0,
+        "missing_source_references_count": 0,
+        "required_changes_count": 0,
+        "unsupported_claim_summaries": [],
+        "missing_source_reference_summaries": [],
+        "required_change_summaries": [],
     }
 
 
