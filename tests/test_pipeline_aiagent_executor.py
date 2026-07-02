@@ -340,6 +340,67 @@ def test_bridge_workspace_write_and_git_delta_succeed(tmp_path: Path) -> None:
     assert "notes.txt" in subprocess.run(["git", "-C", str(git_repo), "status", "--short", "--untracked-files=all"], check=True, text=True, capture_output=True).stdout
 
 
+def _init_git_repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
+    """Local-only clone/origin pair (file:// remote) so git_remote_status can be
+    exercised entirely offline -- no live network, no real remote."""
+    origin = _init_git_repo(tmp_path)
+    clone = tmp_path / "bridge-git-repo-clone"
+    subprocess.run(["git", "clone", "--quiet", str(origin), str(clone)], check=True, text=True, capture_output=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.name", "Test User"], check=True, text=True, capture_output=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.email", "test@example.com"], check=True, text=True, capture_output=True)
+    return origin, clone
+
+
+def test_git_remote_status_reports_commits_ahead_on_remote(tmp_path: Path) -> None:
+    origin, clone = _init_git_repo_with_origin(tmp_path)
+    (origin / "tracked.txt").write_text("baseline\nupdated on origin\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(origin), "commit", "-am", "origin-only change"], check=True, text=True, capture_output=True)
+
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=clone, agent_factory=_FakeAgent)
+    payload = json.loads(bridge.execute_tool("git_remote_status", {}))
+
+    assert payload["status"] == 0
+    assert payload["remote"] == "origin"
+    assert payload["comparison_available"] is True
+    assert payload["local_ahead_of_remote_count"] == 0
+    assert payload["local_behind_remote_count"] == 1
+    assert "origin-only change" in payload["commits_on_remote_not_local"]
+    # No merge, no local branch update, no push: the clone's working tree and
+    # HEAD are untouched by the read-only fetch.
+    assert (clone / "tracked.txt").read_text(encoding="utf-8") == "baseline\n"
+    status = subprocess.run(["git", "-C", str(clone), "status", "--short"], check=True, text=True, capture_output=True)
+    assert status.stdout.strip() == ""
+
+
+def test_git_remote_status_reports_up_to_date_when_no_divergence(tmp_path: Path) -> None:
+    _origin, clone = _init_git_repo_with_origin(tmp_path)
+
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=clone, agent_factory=_FakeAgent)
+    payload = json.loads(bridge.execute_tool("git_remote_status", {}))
+
+    assert payload["comparison_available"] is True
+    assert payload["local_ahead_of_remote_count"] == 0
+    assert payload["local_behind_remote_count"] == 0
+    assert payload["commits_on_remote_not_local"] == ""
+
+
+def test_git_remote_status_rejects_non_plain_remote_names(tmp_path: Path) -> None:
+    _origin, clone = _init_git_repo_with_origin(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=clone, agent_factory=_FakeAgent)
+
+    with pytest.raises(AIAgentExecutorBridgeError):
+        bridge.execute_tool("git_remote_status", {"remote": "https://example.com/evil.git"})
+
+
+def test_git_remote_status_is_available_to_reviewer_bridge(tmp_path: Path) -> None:
+    _origin, clone = _init_git_repo_with_origin(tmp_path)
+    bridge = AIAgentReviewerExecutorBridge(workspace_root=clone, agent_factory=_FakeAgent)
+
+    payload = json.loads(bridge.execute_tool("git_remote_status", {}))
+
+    assert payload["comparison_available"] is True
+
+
 def test_normalize_result_preserves_raw_metadata_structured_output(tmp_path: Path) -> None:
     repo_root, _runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)

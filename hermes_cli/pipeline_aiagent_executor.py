@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 from typing import Any, Callable, Mapping
 
@@ -24,6 +25,7 @@ _ENGINEER_ALLOWED_TOOL_NAMES = (
     "write_file",
     "git_status",
     "git_diff",
+    "git_remote_status",
     "pytest",
 )
 _REVIEWER_ALLOWED_TOOL_NAMES = (
@@ -31,7 +33,11 @@ _REVIEWER_ALLOWED_TOOL_NAMES = (
     "search_files",
     "git_status",
     "git_diff",
+    "git_remote_status",
 )
+
+_GIT_REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
+_GIT_REMOTE_STATUS_TIMEOUT_SECONDS = 30
 
 
 class AIAgentExecutorBridgeError(RuntimeError):
@@ -178,6 +184,8 @@ class AIAgentSubagentExecutorBridge:
                     check=False,
                 )
                 result = {"status": completed.returncode, "output": completed.stdout}
+            elif tool_name == "git_remote_status":
+                result = self._git_remote_status(args)
             elif tool_name == "pytest":
                 pytest_request: Any
                 if isinstance(args.get("command"), str) and str(args.get("command") or "").strip():
@@ -710,6 +718,17 @@ class AIAgentSubagentExecutorBridge:
             "write_file": self._tool_definition("write_file", "Write a file inside the controlled workspace.", {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
             "git_status": self._tool_definition("git_status", "Show git status for the controlled workspace.", {}, []),
             "git_diff": self._tool_definition("git_diff", "Show git diff for the controlled workspace.", {}, []),
+            "git_remote_status": self._tool_definition(
+                "git_remote_status",
+                (
+                    "Read-only comparison of local HEAD against a remote's tracking branch. "
+                    "Fetches the remote-tracking ref (no working-tree changes, no local branch update, "
+                    "no merge, no push) and reports ahead/behind counts plus a oneline log of commits "
+                    "present on the remote but not local. Use this to check what changed on origin."
+                ),
+                {"remote": {"type": "string"}},
+                [],
+            ),
             "pytest": self._tool_definition(
                 "pytest",
                 "Run allowed pytest targets inside the controlled workspace. The runtime chooses the executable.",
@@ -796,6 +815,86 @@ class AIAgentSubagentExecutorBridge:
                 break
         return {"status": "ok", "pattern": pattern, "files": files, "truncated": truncated}
 
+    def _git_remote_status(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        """Read-only comparison of the local HEAD against a remote's tracking branch.
+
+        Runs `git fetch <remote>` to refresh the remote-tracking ref (a standard,
+        non-destructive read of the remote), then reports ahead/behind counts and a
+        oneline log of what's on the remote that isn't local yet. Never touches the
+        working tree, never updates a local branch, never pushes or merges.
+        """
+        remote = str(arguments.get("remote") or "origin").strip()
+        if not _GIT_REMOTE_NAME_RE.fullmatch(remote):
+            raise AIAgentExecutorBridgeError("git_remote_status_invalid_remote")
+
+        try:
+            fetch_completed = self.subprocess_runner(
+                ["git", "fetch", "--quiet", remote],
+                cwd=str(self.workspace_root),
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=_GIT_REMOTE_STATUS_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AIAgentExecutorBridgeError("git_remote_status_timeout") from exc
+
+        if fetch_completed.returncode != 0:
+            return {
+                "status": fetch_completed.returncode,
+                "remote": remote,
+                "fetch_output": (fetch_completed.stderr or fetch_completed.stdout or "").strip(),
+                "comparison_available": False,
+            }
+
+        branch_completed = self.subprocess_runner(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(self.workspace_root),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        branch = (branch_completed.stdout or "").strip() or "HEAD"
+        remote_ref = f"{remote}/{branch}"
+
+        counts_completed = self.subprocess_runner(
+            ["git", "rev-list", "--left-right", "--count", f"HEAD...{remote_ref}"],
+            cwd=str(self.workspace_root),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if counts_completed.returncode != 0:
+            return {
+                "status": counts_completed.returncode,
+                "remote": remote,
+                "remote_ref": remote_ref,
+                "fetch_output": (fetch_completed.stderr or fetch_completed.stdout or "").strip(),
+                "comparison_available": False,
+                "comparison_error": (counts_completed.stderr or "").strip() or "unknown_ref",
+            }
+        ahead_str, _, behind_str = (counts_completed.stdout or "0\t0").strip().partition("\t")
+        ahead = int(ahead_str) if ahead_str.strip().isdigit() else 0
+        behind = int(behind_str) if behind_str.strip().isdigit() else 0
+
+        log_completed = self.subprocess_runner(
+            ["git", "log", "--oneline", f"HEAD..{remote_ref}"],
+            cwd=str(self.workspace_root),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return {
+            "status": 0,
+            "remote": remote,
+            "remote_ref": remote_ref,
+            "fetch_output": (fetch_completed.stderr or fetch_completed.stdout or "").strip(),
+            "comparison_available": True,
+            "local_ahead_of_remote_count": ahead,
+            "local_behind_remote_count": behind,
+            "commits_on_remote_not_local": (log_completed.stdout or "").strip(),
+        }
+
     def _record_tool_call(
         self,
         tool_name: str,
@@ -829,6 +928,10 @@ class AIAgentSubagentExecutorBridge:
             )
         if tool_name == "search_files" and reason == "invalid_search_pattern":
             return "search_files expects a non-empty content pattern. Use find_files for filename discovery."
+        if tool_name == "git_remote_status" and reason == "git_remote_status_invalid_remote":
+            return "git_remote_status expects a plain remote name like 'origin', not a URL or path."
+        if tool_name == "git_remote_status" and reason == "git_remote_status_timeout":
+            return "git_remote_status timed out fetching the remote. The remote may be unreachable from this workspace."
         del arguments
         return reason
 
