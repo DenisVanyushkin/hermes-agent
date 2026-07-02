@@ -154,6 +154,33 @@ def test_smoke_e2e_application_materials_subparser_exists_in_main_tree() -> None
     assert args.json is True
 
 
+def test_preflight_real_application_materials_subparser_exists_in_main_tree() -> None:
+    args = _parse_main(
+        [
+            "recruiter-context",
+            "preflight-real-application-materials",
+            "--vacancy-source-type",
+            "vacancy_payload",
+            "--vacancy-source-approved",
+            "--career-source-spec-json",
+            '{"source_id":"career-facts-1","source_kind":"career_fact","source_type":"career_fact_packet","approved":true}',
+            "--permitted-source-type",
+            "vacancy_payload",
+            "--permitted-source-type",
+            "career_fact_packet",
+            "--draft-only",
+            "--json",
+        ]
+    )
+
+    assert args.command == "recruiter-context"
+    assert args.recruiter_context_command == "preflight-real-application-materials"
+    assert args.vacancy_source_type == "vacancy_payload"
+    assert args.vacancy_source_approved is True
+    assert args.draft_only is True
+    assert args.json is True
+
+
 def test_smoke_e2e_application_materials_allow_provider_help_text_is_safety_aligned() -> None:
     parser = argparse.ArgumentParser(prog="hermes")
     subparsers = parser.add_subparsers(dest="command")
@@ -1319,6 +1346,98 @@ def test_application_materials_flow_cli_blocks_unsafe_packet_without_echoing_raw
     assert "Unsafe /Users/testleak/private/career leaktest@example.com" not in encoded
     assert "/Users/testleak/private/career" not in encoded
     assert "leaktest@example.com" not in encoded
+
+
+def test_preflight_real_application_materials_cli_outputs_report_safe_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from hermes_cli.recruiter_real_data_privacy_gate import RealDataPrivacyGateReport, RealDataPrivacyGateStatus
+
+    captured = {}
+
+    def _fake_run(request):
+        captured["request"] = request
+        return RealDataPrivacyGateReport(
+            status=RealDataPrivacyGateStatus.READY,
+            ready=True,
+            blocked_reason=None,
+            required_approvals=[],
+            safe_to_retry_after_user_approval=False,
+            approved_source_count=2,
+            approved_source_types=["career_fact_packet", "vacancy_payload"],
+            capability_flags={
+                "draft_only": True,
+                "outbound_disabled": True,
+                "crm_writes_disabled": True,
+                "job_intel_writes_disabled": True,
+                "browser_automation_disabled": True,
+                "private_file_access_disabled": True,
+            },
+            warnings=["metadata_only_preflight"],
+            errors=[],
+            provenance={"writes_performed": False, "flow": "application-materials-real-data-preflight"},
+        )
+
+    monkeypatch.setattr(
+        "hermes_cli.recruiter_dry_run_cli.evaluate_real_data_application_materials_privacy_gate",
+        _fake_run,
+    )
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "preflight-real-application-materials",
+            "--vacancy-source-type",
+            "vacancy_payload",
+            "--vacancy-source-approved",
+            "--career-source-spec-json",
+            '{"source_id":"career-facts-1","source_kind":"career_fact","source_type":"career_fact_packet","approved":true}',
+            "--permitted-source-type",
+            "vacancy_payload",
+            "--permitted-source-type",
+            "career_fact_packet",
+            "--draft-only",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "REAL_DATA_PRIVACY_GATE_READY"
+    assert payload["approved_source_count"] == 2
+    assert captured["request"].vacancy_source_type == "vacancy_payload"
+    assert captured["request"].draft_only is True
+
+
+def test_preflight_real_application_materials_cli_blocks_invalid_source_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    args = _parse_direct(
+        [
+            "recruiter-context",
+            "preflight-real-application-materials",
+            "--vacancy-source-type",
+            "vacancy_payload",
+            "--vacancy-source-approved",
+            "--career-source-spec-json",
+            '{"source_id":',
+            "--permitted-source-type",
+            "vacancy_payload",
+            "--draft-only",
+            "--json",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_recruiter_context(args)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "REAL_DATA_PRIVACY_GATE_BLOCKED"
+    assert payload["blocked_reason"] == "career_source_spec_json_invalid"
 
 
 def test_evaluation_flow_stdout_is_json_only(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
