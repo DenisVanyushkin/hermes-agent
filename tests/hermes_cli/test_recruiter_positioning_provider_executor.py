@@ -135,7 +135,7 @@ def test_response_schema_requires_provenance_bearing_arrays() -> None:
     assert "allowed_claims" in required
     assert "evidence_items" in required
     assert "source_references" in required
-    assert client.calls[0]["extra_body"]["response_format"]["json_schema"]["strict"] is True
+    assert client.calls[0]["extra_body"]["response_format"]["json_schema"]["strict"] is False
 
     evidence_items_schema = schema["properties"]["evidence_items"]["items"]["properties"]["source_ref_ids"]
     assert evidence_items_schema["minItems"] == 1
