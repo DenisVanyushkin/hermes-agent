@@ -511,6 +511,36 @@ def test_outward_facing_writer_input_marks_safe_claims_as_only_draftable_source(
         assert writer_input["claim_source_priority"]["primary"] == "safe_claims_for_document"
         assert writer_input["writer_guidance"]["safe_claims_for_document_primary"] is True
         assert writer_input["writer_guidance"]["safe_claims_only_draftable_source"] is True
+        assert writer_input["writer_guidance"]["every_outward_facing_claim_must_anchor_to_safe_claim"] is True
+        assert writer_input["writer_guidance"]["ownership_scope_must_be_respected"] is True
+        assert writer_input["writer_guidance"]["unsupported_broad_claims_must_be_omitted"] is True
+
+
+def test_outward_facing_writer_guidance_requires_conservative_evidence_backed_structure() -> None:
+    cover_letter_packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="cover_letter",
+    )
+    recruiter_message_packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="recruiter_message",
+    )
+
+    cover_writer_input = cover_letter_packet.document_writer_input
+    recruiter_writer_input = recruiter_message_packet.document_writer_input
+    assert cover_writer_input is not None
+    assert recruiter_writer_input is not None
+    assert cover_writer_input["writer_guidance"]["required_conservative_structure"] == [
+        "one opening fit sentence tied to the role",
+        "one or two source-backed example sentences anchored to safe claims",
+        "one modest closing sentence without unsupported claims",
+    ]
+    assert recruiter_writer_input["writer_guidance"]["required_conservative_structure"] == [
+        "one role-interest sentence",
+        "one source-backed example sentence anchored to a safe claim",
+        "optional soft call-to-action",
+    ]
+    assert "background across payments/platform services" in recruiter_writer_input["writer_guidance"]["forbidden_broad_claim_patterns"]
 
 
 def test_outward_facing_writer_input_keeps_broad_positioning_fields_context_only() -> None:
@@ -627,6 +657,54 @@ def test_adjacent_claims_are_softened_for_outward_facing_documents() -> None:
     assert "adjacent" in recruiter_message_claims or "commercially relevant" in recruiter_message_claims
     assert "direct ownership" not in cover_letter_claims
     assert "direct ownership" not in recruiter_message_claims
+
+
+def test_safe_claims_expose_concrete_evidence_and_conservative_sentence_templates() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="cover_letter",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    safe_claims = writer_input["safe_claims_for_document"]
+    assert safe_claims
+    for item in safe_claims:
+        assert item["ownership_scope"] in {"direct", "collaborated", "adjacent", "exposed"}
+        assert item["concrete_evidence_summary"]
+        assert item["allowed_sentence_template"]
+        assert item["forbidden_generalizations"]
+        assert item["do_not_say"]
+        lowered = item["allowed_sentence_template"].lower()
+        assert "refs " in lowered
+        assert "metrics" in lowered
+        assert "ownership" in lowered
+
+
+def test_recruiter_message_safe_claims_remain_single_sentence_ready_and_conservative() -> None:
+    packet = build_recruiter_document_writer_input_packet(
+        _execution_report(positioning_result=_application_materials_positioning_result()),
+        document_type="recruiter_message",
+    )
+
+    writer_input = packet.document_writer_input
+    assert writer_input is not None
+    safe_claims = writer_input["safe_claims_for_document"]
+    assert safe_claims
+    for item in safe_claims:
+        template = item["allowed_sentence_template"]
+        assert template.startswith("One short fit sentence only:")
+        assert item["ownership_scope"] != "direct" or item["support_level"] == "direct"
+        encoded = json.dumps(item, sort_keys=True).lower()
+        assert "multi-country launches" not in encoded
+        forbidden = json.dumps(item["forbidden_generalizations"], sort_keys=True).lower()
+        assert (
+            "pricing and packaging iterations" in forbidden
+            or "experience in payment acceptance, checkout, or recurring billing" in forbidden
+            or "telecom, merchant, or ecosystem partnerships" in forbidden
+        )
+        assert "pricing and packaging iterations" not in item["safe_wording"].lower()
+        assert "pricing and packaging iterations" not in template.lower()
 
 
 def test_boundary_imports_are_safe() -> None:
