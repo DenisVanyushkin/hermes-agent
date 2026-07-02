@@ -149,7 +149,7 @@ def _json_response_format(schema: dict[str, Any] | None) -> dict[str, Any]:
             "json_schema": {
                 "name": POSITIONING_PACKET_SCHEMA_VERSION,
                 "schema": _response_schema(schema),
-                "strict": True,
+                "strict": False,
             },
         }
     }
