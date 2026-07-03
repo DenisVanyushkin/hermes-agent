@@ -25,6 +25,8 @@ _FORBIDDEN_INTERNAL_LANGUAGE_PHRASES = (
     "positioning packet",
     "candidate facts packet",
     "provider-visible",
+    "provenance",
+    "source backed",
     "source references",
     "source_ref",
     "evidence packet",

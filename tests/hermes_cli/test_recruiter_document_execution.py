@@ -279,6 +279,46 @@ def test_invalid_writer_output_blocks_before_reviewer() -> None:
     assert "writer_document_type_mismatch" in report.errors
 
 
+def test_writer_output_with_natural_user_facing_prose_passes() -> None:
+    class _NaturalWriterExecutor(_FakeDocumentExecutor):
+        def execute(self, **kwargs: Any) -> dict[str, Any]:
+            skill_id = kwargs["skill_id"]
+            self.calls.append(skill_id)
+            if skill_id == "document-writer":
+                return {
+                    "schema_version": "recruiter_document_packet_v1",
+                    "document_type": kwargs["skill_input"]["document_type"],
+                    "audience": kwargs["skill_input"].get("audience"),
+                    "purpose": kwargs["skill_input"].get("purpose"),
+                    "source_positioning_packet_ref": kwargs["skill_input"]["source_positioning_packet_ref"],
+                    "draft": {
+                        "format": "text",
+                        "content": "Denis led a product organization. He launched an e-wallet product.",
+                        "notes": ["Review before any outbound action."],
+                    },
+                    "review": {"status": "PENDING"},
+                    "status": "DRAFT_READY",
+                    "warnings": [],
+                    "errors": [],
+                    "provenance": {},
+                }
+            return super().execute(**kwargs)
+
+    executor = _NaturalWriterExecutor()
+    report = run_recruiter_document_execution(
+        _execution_report(),
+        document_type="cv_tailoring_notes",
+        allow_document_execution=True,
+        executor=executor,
+    )
+
+    assert report.status is RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_APPROVED
+    assert report.errors == []
+    assert report.reviewer_called is True
+    assert executor.calls.count("document-writer") == 1
+    assert executor.calls.count("document-reviewer") >= 1
+
+
 def test_writer_output_with_internal_packet_language_fails_closed() -> None:
     class _InternalLanguageWriterExecutor(_FakeDocumentExecutor):
         def execute(self, **kwargs: Any) -> dict[str, Any]:
