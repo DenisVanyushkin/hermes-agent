@@ -2080,6 +2080,94 @@ def test_application_materials_flow_dry_run_blocks_generic_recruiter_message_pla
         flow_module.compose_deterministic_outward_draft = original_compose
 
 
+def test_application_materials_flow_dry_run_blocks_cover_letter_without_target_specificity() -> None:
+    from hermes_cli import recruiter_application_materials_flow as flow_module
+
+    original_compose = flow_module.compose_deterministic_outward_draft
+
+    def _non_specific_compose(writer_input):
+        packet = original_compose(writer_input)
+        packet["draft"]["content"] = (
+            "I am interested in this opportunity. "
+            "Improved onboarding conversion and reduced friction with measurable gains. "
+            "Drove pricing and packaging changes tied to adoption and retention improvements."
+        )
+        return packet
+
+    flow_module.compose_deterministic_outward_draft = _non_specific_compose
+    packet = _ready_positioning_packet()
+    packet.pop("target_company", None)
+    packet.pop("target_role", None)
+    executor = _ApplicationMaterialsExecutor()
+    try:
+        report = run_recruiter_application_materials_flow_dry_run(
+            positioning_packet=packet,
+            private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+            allow_provider_execution=True,
+            document_target="cover_letter_draft",
+            executor_factory=lambda: executor,
+        )
+    finally:
+        flow_module.compose_deterministic_outward_draft = original_compose
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_REVIEW_BLOCKED
+    assert report.application_materials_result["causing_target"] == "cover_letter_draft"
+    assert report.application_materials_result["block_reason"] == "DOCUMENT_DRAFT_INSUFFICIENT_ROLE_SPECIFICITY"
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["blocked"] is True
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["ready"] is False
+    assert (
+        report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_diagnostics_counts"][
+            "required_changes_count"
+        ]
+        >= 1
+    )
+    encoded = json.dumps(report.application_materials_result["target_results"], sort_keys=True)
+    assert "Improved onboarding conversion and reduced friction with measurable gains." not in encoded
+
+
+def test_application_materials_flow_dry_run_blocks_recruiter_message_without_target_specificity() -> None:
+    from hermes_cli import recruiter_application_materials_flow as flow_module
+
+    original_compose = flow_module.compose_deterministic_outward_draft
+
+    def _non_specific_compose(writer_input):
+        packet = original_compose(writer_input)
+        packet["draft"]["content"] = (
+            "Interested in this opportunity. "
+            "Improved onboarding conversion and reduced friction with measurable gains."
+        )
+        return packet
+
+    flow_module.compose_deterministic_outward_draft = _non_specific_compose
+    packet = _ready_positioning_packet()
+    packet.pop("target_company", None)
+    packet.pop("target_role", None)
+    executor = _ApplicationMaterialsExecutor()
+    try:
+        report = run_recruiter_application_materials_flow_dry_run(
+            positioning_packet=packet,
+            private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+            allow_provider_execution=True,
+            document_target="recruiter_message_draft",
+            executor_factory=lambda: executor,
+        )
+    finally:
+        flow_module.compose_deterministic_outward_draft = original_compose
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_REVIEW_BLOCKED
+    assert report.application_materials_result["causing_target"] == "recruiter_message_draft"
+    assert report.application_materials_result["block_reason"] == "DOCUMENT_DRAFT_INSUFFICIENT_ROLE_SPECIFICITY"
+    target_result = report.application_materials_result["target_results"]["recruiter_message_draft"]
+    assert target_result["blocked"] is True
+    assert target_result["ready"] is False
+    assert target_result["reviewer_verdict"] == "CHANGES_REQUESTED"
+    assert target_result["reviewer_diagnostics_counts"]["required_changes_count"] >= 1
+    assert target_result["sanitized_reviewer_diagnostics_summary"]
+    encoded = json.dumps(report.application_materials_result["target_results"], sort_keys=True)
+    assert "Improved onboarding conversion and reduced friction with measurable gains." not in encoded
+
+
+
 def test_application_materials_flow_dry_run_all_required_keeps_writer_called_truthful_when_only_cv_notes_use_writer() -> None:
     executor = _ApplicationMaterialsExecutor()
     report = run_recruiter_application_materials_flow_dry_run(
