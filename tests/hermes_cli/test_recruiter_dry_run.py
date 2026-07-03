@@ -911,6 +911,31 @@ class _ApplicationMaterialsExecutor:
         return reviewer_result
 
 
+class _PerDocumentApplicationMaterialsExecutor(_ApplicationMaterialsExecutor):
+    def __init__(
+        self,
+        *,
+        reviewer_by_document_type: dict[str, str] | None = None,
+        reviewer_overrides_by_document_type: dict[str, dict[str, object]] | None = None,
+    ) -> None:
+        super().__init__()
+        self.reviewer_by_document_type = dict(reviewer_by_document_type or {})
+        self.reviewer_overrides_by_document_type = {
+            key: dict(value) for key, value in (reviewer_overrides_by_document_type or {}).items()
+        }
+
+    def execute(self, *, skill_id, skill_input, expected_schema):
+        if skill_id != "document-reviewer":
+            return super().execute(skill_id=skill_id, skill_input=skill_input, expected_schema=expected_schema)
+
+        document_type = str(skill_input.get("document_type") or "")
+        verdict = self.reviewer_by_document_type.get(document_type, "APPROVE")
+        overrides = self.reviewer_overrides_by_document_type.get(document_type, {})
+        self.reviewer_verdict = verdict
+        self.reviewer_result_overrides = dict(overrides)
+        return super().execute(skill_id=skill_id, skill_input=skill_input, expected_schema=expected_schema)
+
+
 def test_application_materials_flow_dry_run_blocks_provider_by_default() -> None:
     report = run_recruiter_application_materials_flow_dry_run(
         positioning_packet=_ready_positioning_packet(),
@@ -1060,14 +1085,106 @@ def test_application_materials_flow_dry_run_fails_closed_on_invalid_writer_outpu
 
 
 def test_application_materials_flow_dry_run_blocks_when_reviewer_requests_changes() -> None:
+    executor = _PerDocumentApplicationMaterialsExecutor(
+        reviewer_by_document_type={
+            "cv_tailoring_notes": "APPROVE",
+            "cover_letter": "CHANGES_REQUESTED",
+        }
+    )
     report = run_recruiter_application_materials_flow_dry_run(
         positioning_packet=_ready_positioning_packet(),
         private_context_status="PRIVATE_CONTEXT_AVAILABLE",
         allow_provider_execution=True,
-        executor_factory=lambda: _ApplicationMaterialsExecutor(reviewer_verdict="CHANGES_REQUESTED"),
+        executor_factory=lambda: executor,
     )
 
     assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_REVIEW_BLOCKED
+    assert report.application_materials_result["causing_target"] == "cover_letter_draft"
+    assert report.application_materials_result["block_reason"] == "REQUIRED_CHANGES_REQUESTED"
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["ready"] is False
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["blocked"] is True
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_called"] is True
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_verdict"] == "CHANGES_REQUESTED"
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["block_reason"] == "REQUIRED_CHANGES_REQUESTED"
+    assert (
+        report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_diagnostics_counts"][
+            "required_changes_count"
+        ]
+        == 1
+    )
+    encoded = json.dumps(
+        {
+            "target_results": report.application_materials_result["target_results"],
+            "review_summary": report.application_materials_result["review_summary"],
+        },
+        sort_keys=True,
+    )
+    assert "Draft for cover_letter." not in encoded
+    assert "provider_text" not in encoded
+    assert "/home/hermes" not in encoded
+
+
+def test_application_materials_flow_dry_run_marks_pending_reviewer_result_invalid_and_blocking() -> None:
+    executor = _PerDocumentApplicationMaterialsExecutor(
+        reviewer_by_document_type={
+            "cv_tailoring_notes": "APPROVE",
+            "cover_letter": "APPROVE",
+        },
+        reviewer_overrides_by_document_type={
+            "cover_letter": {"verdict": "PENDING"},
+        },
+    )
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_OUTPUT_INVALID
+    assert report.application_materials_result["causing_target"] == "cover_letter_draft"
+    assert report.application_materials_result["block_reason"] == "DOCUMENT_REVIEW_PENDING_BLOCKING"
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["ready"] is False
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["blocked"] is True
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_called"] is True
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_verdict"] == "PENDING"
+    assert (
+        report.application_materials_result["target_results"]["cover_letter_draft"]["block_reason"]
+        == "DOCUMENT_REVIEW_PENDING_BLOCKING"
+    )
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_diagnostics_counts"] == {
+        "unsupported_claims_count": 0,
+        "missing_source_references_count": 0,
+        "required_changes_count": 0,
+    }
+
+
+def test_application_materials_flow_dry_run_surfaces_unsupported_claim_block_reason() -> None:
+    executor = _PerDocumentApplicationMaterialsExecutor(
+        reviewer_by_document_type={
+            "cv_tailoring_notes": "APPROVE",
+            "cover_letter": "CHANGES_REQUESTED",
+        },
+        reviewer_overrides_by_document_type={
+            "cover_letter": {"unsupported_claims": ["Unsupported payments infrastructure ownership claim."]},
+        },
+    )
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_REVIEW_BLOCKED
+    assert report.application_materials_result["block_reason"] == "UNSUPPORTED_CLAIMS_PRESENT"
+    assert report.application_materials_result["review_summary"]["unsupported_claims_present"] is True
+    assert (
+        report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_diagnostics_counts"][
+            "unsupported_claims_count"
+        ]
+        == 1
+    )
 
 
 def test_positioning_smoke_harness_blocks_missing_candidate_facts_without_leak() -> None:
@@ -1231,6 +1348,7 @@ def test_application_materials_smoke_harness_runs_fake_executor_when_opted_in() 
     assert report.document_summary["documents"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
     assert report.target_results["recruiter_message_draft"] == {
         "status": "ready",
+        "blocked": False,
         "generated": True,
         "ready": True,
         "draft_only": True,
@@ -1241,6 +1359,13 @@ def test_application_materials_smoke_harness_runs_fake_executor_when_opted_in() 
         "document_reviewer_gate_status": "APPROVE",
         "reviewer_verdict": "APPROVE",
         "reviewer_notes_present": True,
+        "block_reason": None,
+        "reviewer_diagnostics_counts": {
+            "unsupported_claims_count": 0,
+            "missing_source_references_count": 0,
+            "required_changes_count": 0,
+        },
+        "sanitized_reviewer_diagnostics_summary": [],
     }
     assert report.output_validation["status"] == "valid"
     assert report.document_summary["generated_targets"] == ["recruiter_message_draft"]
@@ -1300,6 +1425,7 @@ def test_application_materials_smoke_harness_selected_target_changes_requested_r
     assert report.target_results == {
         "recruiter_message_draft": {
             "status": "review_blocked",
+            "blocked": True,
             "generated": True,
             "ready": False,
             "draft_only": True,
@@ -1310,6 +1436,13 @@ def test_application_materials_smoke_harness_selected_target_changes_requested_r
             "document_reviewer_gate_status": "CHANGES_REQUESTED",
             "reviewer_verdict": "CHANGES_REQUESTED",
             "reviewer_notes_present": True,
+            "block_reason": "REQUIRED_CHANGES_REQUESTED",
+            "reviewer_diagnostics_counts": {
+                "unsupported_claims_count": 0,
+                "missing_source_references_count": 0,
+                "required_changes_count": 1,
+            },
+            "sanitized_reviewer_diagnostics_summary": ["Tighten opening paragraph."],
         }
     }
 
@@ -1470,6 +1603,7 @@ def test_application_materials_smoke_harness_all_required_targets_keeps_partial_
     assert report.review_summary["reviewer_verdicts"] == {"cv_tailoring_notes": "CHANGES_REQUESTED"}
     assert report.target_results["cv_tailoring_notes"] == {
         "status": "review_blocked",
+        "blocked": True,
         "generated": True,
         "ready": False,
         "draft_only": True,
@@ -1480,6 +1614,13 @@ def test_application_materials_smoke_harness_all_required_targets_keeps_partial_
         "document_reviewer_gate_status": "CHANGES_REQUESTED",
         "reviewer_verdict": "CHANGES_REQUESTED",
         "reviewer_notes_present": True,
+        "block_reason": "REQUIRED_CHANGES_REQUESTED",
+        "reviewer_diagnostics_counts": {
+            "unsupported_claims_count": 0,
+            "missing_source_references_count": 0,
+            "required_changes_count": 1,
+        },
+        "sanitized_reviewer_diagnostics_summary": ["Tighten opening paragraph."],
     }
     assert report.target_results["cover_letter_draft"]["status"] == "not_requested"
     assert report.target_results["recruiter_message_draft"]["status"] == "not_requested"
@@ -1832,6 +1973,7 @@ def test_application_materials_smoke_harness_keeps_cv_notes_on_writer_path() -> 
     assert report.document_summary["documents"]["recruiter_message_draft"]["document_type"] == "recruiter_message"
     assert report.target_results["cv_tailoring_notes"] == {
         "status": "ready",
+        "blocked": False,
         "generated": True,
         "ready": True,
         "draft_only": True,
@@ -1842,9 +1984,17 @@ def test_application_materials_smoke_harness_keeps_cv_notes_on_writer_path() -> 
         "document_reviewer_gate_status": "APPROVE",
         "reviewer_verdict": "APPROVE",
         "reviewer_notes_present": True,
+        "block_reason": None,
+        "reviewer_diagnostics_counts": {
+            "unsupported_claims_count": 0,
+            "missing_source_references_count": 0,
+            "required_changes_count": 0,
+        },
+        "sanitized_reviewer_diagnostics_summary": [],
     }
     assert report.target_results["cover_letter_draft"] == {
         "status": "ready",
+        "blocked": False,
         "generated": True,
         "ready": True,
         "draft_only": True,
@@ -1855,9 +2005,17 @@ def test_application_materials_smoke_harness_keeps_cv_notes_on_writer_path() -> 
         "document_reviewer_gate_status": "APPROVE",
         "reviewer_verdict": "APPROVE",
         "reviewer_notes_present": True,
+        "block_reason": None,
+        "reviewer_diagnostics_counts": {
+            "unsupported_claims_count": 0,
+            "missing_source_references_count": 0,
+            "required_changes_count": 0,
+        },
+        "sanitized_reviewer_diagnostics_summary": [],
     }
     assert report.target_results["recruiter_message_draft"] == {
         "status": "ready",
+        "blocked": False,
         "generated": True,
         "ready": True,
         "draft_only": True,
@@ -1868,4 +2026,11 @@ def test_application_materials_smoke_harness_keeps_cv_notes_on_writer_path() -> 
         "document_reviewer_gate_status": "APPROVE",
         "reviewer_verdict": "APPROVE",
         "reviewer_notes_present": True,
+        "block_reason": None,
+        "reviewer_diagnostics_counts": {
+            "unsupported_claims_count": 0,
+            "missing_source_references_count": 0,
+            "required_changes_count": 0,
+        },
+        "sanitized_reviewer_diagnostics_summary": [],
     }
