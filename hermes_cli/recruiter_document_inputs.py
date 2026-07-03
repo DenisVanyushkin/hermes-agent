@@ -26,8 +26,8 @@ REQUIRED_POSITIONING_FIELDS = [
 ]
 _OUTWARD_FACING_DOCUMENT_TYPES = {"cover_letter", "recruiter_message"}
 _SAFE_CLAIM_LIMITS = {
-    "cover_letter": 3,
-    "recruiter_message": 2,
+    "cover_letter": 2,
+    "recruiter_message": 1,
 }
 _SUPPORT_LEVEL_MAP = {
     "explicit": "direct",
@@ -344,6 +344,8 @@ def build_recruiter_document_writer_input_packet(
             "document_type": document_type,
             "audience": audience,
             "purpose": purpose,
+            "target_company": str(positioning_result.get("target_company") or vacancy_result.get("company") or "").strip(),
+            "target_role": str(positioning_result.get("target_role") or vacancy_result.get("title") or "").strip(),
             "source_execution_report_ref": {
                 "flow_id": report.get("flow_id"),
                 "execution_status": execution_status,
@@ -593,16 +595,8 @@ def _select_safe_claims_for_document(document_type: str, positioning_result: dic
             str(claim.get("support_level") or ""),
             linked_evidence_items,
         )
-        ownership_scope = _ownership_scope_for_claim(claim_text, linked_evidence_items, support_level)
         softening_required = support_level != "direct" or any(keyword in normalized_claim for keyword in _ADJACENT_KEYWORDS)
-        concrete_evidence_summary = _concrete_evidence_summary(claim_text, linked_evidence_items)
-        safe_wording = _safe_wording_for_claim(
-            claim_text,
-            support_level,
-            ownership_scope,
-            softening_required,
-            concrete_evidence_summary,
-        )
+        safe_wording = _safe_wording_for_claim(claim_text, support_level, softening_required)
         do_not_say = _claim_do_not_say(claim_text)
         candidates.append(
             {
@@ -612,16 +606,11 @@ def _select_safe_claims_for_document(document_type: str, positioning_result: dic
                 "source_ref_ids": linked_source_ref_ids,
                 "evidence_item_ids": source_fact_ids,
                 "support_level": support_level,
+                "ownership_scope": _ownership_scope(support_level, softening_required),
+                "concrete_evidence_summary": _concrete_evidence_summary(linked_evidence_items, claim_text),
+                "allowed_sentence_template": _allowed_sentence_template(document_type, safe_wording, linked_source_ref_ids),
+                "forbidden_generalizations": _forbidden_generalizations(claim_text),
                 "softening_required": softening_required,
-                "ownership_scope": ownership_scope,
-                "concrete_evidence_summary": concrete_evidence_summary,
-                "allowed_sentence_template": _allowed_sentence_template(
-                    document_type,
-                    safe_wording,
-                    ownership_scope,
-                    linked_source_ref_ids,
-                ),
-                "forbidden_generalizations": _forbidden_generalizations_for_claim(claim_text),
                 "do_not_say": do_not_say,
                 "_priority": _claim_priority(claim_text, support_level),
             }
@@ -642,108 +631,22 @@ def _normalized_support_level(raw_support_level: str, evidence_items: list[dict[
     return "limited"
 
 
-def _ownership_scope_for_claim(claim_text: str, evidence_items: list[dict[str, Any]], support_level: str) -> str:
-    if support_level == "direct" and not any(
-        keyword in claim_text.lower() for keyword in _ADJACENT_KEYWORDS
-    ):
-        return "direct"
-    for item in evidence_items:
-        category = str(item.get("category") or "").lower()
-        if category in {"partnership", "ecosystem", "telecom"}:
-            return "collaborated"
-        if category in {"pricing", "commercial", "growth", "payments", "platform"}:
-            return "adjacent"
-    if support_level == "adjacent":
-        return "adjacent"
-    return "exposed"
-
-
-def _concrete_evidence_summary(claim_text: str, evidence_items: list[dict[str, Any]]) -> str:
-    summaries = _dedupe(
-        [
-            str(item.get("safe_summary") or item.get("claim_text") or "").strip()
-            for item in evidence_items
-            if str(item.get("safe_summary") or item.get("claim_text") or "").strip()
-        ]
-    )
-    if summaries:
-        return "; ".join(summaries[:2])
-    return f"Only limited evidence is available for: {claim_text}."
-
-
-def _safe_wording_for_claim(
-    claim_text: str,
-    support_level: str,
-    ownership_scope: str,
-    softening_required: bool,
-    concrete_evidence_summary: str,
-) -> str:
-    _ = concrete_evidence_summary
+def _safe_wording_for_claim(claim_text: str, support_level: str, softening_required: bool) -> str:
     text = claim_text.strip()
     lowered = text.lower()
     if not softening_required:
         return text
     if "payment" in lowered or "payments" in lowered:
-        return "Relevant adjacent experience with payment acceptance, checkout, or regulated-market execution."
+        return "Payments-adjacent product work in regulated environments."
     if "telecom" in lowered or "partner" in lowered:
-        return "Partnered on or worked adjacent to ecosystem coordination work."
+        return "Partner coordination across telecom and merchant ecosystems."
     if "pricing" in lowered or "commercial" in lowered or "growth" in lowered:
-        return "Contributed to commercially relevant product work tied to growth, pricing, or partner activation inputs."
+        return "Commercially relevant product execution tied to growth, pricing, and partner activation."
     if "platform" in lowered:
-        return "Worked adjacent to platform scaling or operational product execution."
+        return "Platform-adjacent product execution with operational scaling exposure."
     if support_level == "limited":
-        return f"Relevant but limited adjacent experience related to {text.lower()}."
-    if ownership_scope == "collaborated":
-        return f"Contributed to work related to {text.lower()}."
-    return f"Relevant adjacent experience related to {text.lower()}."
-
-
-def _allowed_sentence_template(
-    document_type: str,
-    safe_wording: str,
-    ownership_scope: str,
-    source_ref_ids: list[str],
-) -> str:
-    source_refs = "/".join(source_ref_ids[:2]) if source_ref_ids else "available source references"
-    if document_type == "recruiter_message":
-        return f"One short fit sentence only: '{safe_wording}' (scope: {ownership_scope}; refs: {source_refs})."
-    return (
-        f"Use at most one sentence that states '{safe_wording}' and keeps scope as {ownership_scope}; "
-        f"anchor it to refs {source_refs} without adding new metrics, dates, employers, or ownership."
-    )
-
-
-def _build_locked_claim_sentences(document_type: str, safe_claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    sentence_limit = 1 if document_type == "recruiter_message" else 2
-    locked_claim_sentences: list[dict[str, Any]] = []
-    for item in safe_claims[:sentence_limit]:
-        locked_claim_sentences.append(
-            {
-                "sentence": str(item.get("safe_wording") or "").strip(),
-                "source_ref_ids": list(item.get("source_ref_ids") or []),
-                "evidence_item_ids": list(item.get("evidence_item_ids") or []),
-                "ownership_scope": str(item.get("ownership_scope") or ""),
-                "support_level": str(item.get("support_level") or ""),
-                "derived_from_safe_claim_id": str(item.get("claim_id") or ""),
-            }
-        )
-    return locked_claim_sentences
-
-
-def _forbidden_generalizations_for_claim(claim_text: str) -> list[str]:
-    lowered = claim_text.lower()
-    blocked = [
-        "broad background across payments/platform services",
-        "generic fit to growth, pricing, or partner activation",
-        "unsupported conversion or onboarding gains",
-    ]
-    if "payment" in lowered or "payments" in lowered:
-        blocked.append("experience in payment acceptance, checkout, or recurring billing")
-    if "pricing" in lowered or "growth" in lowered:
-        blocked.append("pricing and packaging iterations")
-    if "telecom" in lowered or "partner" in lowered or "ecosystem" in lowered:
-        blocked.append("telecom, merchant, or ecosystem partnerships")
-    return _dedupe(blocked)
+        return f"Relevant adjacent experience related to {text.lower()}."
+    return text
 
 
 def _claim_do_not_say(claim_text: str) -> list[str]:
@@ -776,18 +679,81 @@ def _claim_priority(claim_text: str, support_level: str) -> int:
     return score
 
 
-def _conservative_structure_for_document(document_type: str) -> list[str]:
+def _ownership_scope(support_level: str, softening_required: bool) -> str:
+    if support_level == "direct" and not softening_required:
+        return "direct"
+    if support_level == "direct":
+        return "adjacent"
+    if support_level == "adjacent":
+        return "collaborated"
+    return "exposed"
+
+
+def _concrete_evidence_summary(evidence_items: list[dict[str, Any]], claim_text: str) -> str:
+    for item in evidence_items:
+        summary = str(item.get("safe_summary") or "").strip()
+        if summary:
+            return summary
+    return claim_text
+
+
+def _allowed_sentence_template(document_type: str, safe_wording: str, source_ref_ids: list[str]) -> str:
+    refs = ",".join(source_ref_ids)
     if document_type == "recruiter_message":
+        return (
+            f"One short fit sentence only: {safe_wording} Keep refs {refs} implicit, avoid new metrics or ownership claims."
+        )
+    return (
+        f"Use one conservative sentence: {safe_wording} Keep refs {refs} implicit, avoid adding new metrics or ownership claims."
+    )
+
+
+def _forbidden_generalizations(claim_text: str) -> list[str]:
+    lowered = claim_text.lower()
+    forbidden = [
+        "background across payments/platform services",
+        "leadership/impact/scope claims",
+    ]
+    if "pricing" in lowered or "growth" in lowered:
+        forbidden.append("pricing and packaging iterations")
+    if "payment" in lowered or "checkout" in lowered or "billing" in lowered:
+        forbidden.append("experience in payment acceptance, checkout, or recurring billing")
+    if "telecom" in lowered or "partner" in lowered or "ecosystem" in lowered:
+        forbidden.append("telecom, merchant, or ecosystem partnerships")
+    if "market" in lowered or "country" in lowered:
+        forbidden.append("multi-country launches")
+    return _dedupe(forbidden)
+
+
+def _build_locked_claim_sentences(document_type: str, safe_claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    limit = _SAFE_CLAIM_LIMITS[document_type]
+    locked_claim_sentences: list[dict[str, Any]] = []
+    for item in safe_claims[:limit]:
+        locked_claim_sentences.append(
+            {
+                "sentence": item["safe_wording"],
+                "source_ref_ids": list(item["source_ref_ids"]),
+                "evidence_item_ids": list(item["evidence_item_ids"]),
+                "support_level": item["support_level"],
+                "ownership_scope": item["ownership_scope"],
+                "derived_from_safe_claim_id": item["claim_id"],
+            }
+        )
+    return locked_claim_sentences
+
+
+def _conservative_structure_for_document(document_type: str) -> list[str]:
+    if document_type == "cover_letter":
         return [
-            "max three short sentences total",
-            "one interest or context sentence with no new claims",
-            "exactly one locked claim sentence",
-            "one soft call-to-action",
+            "short opening with no new claims",
+            "one or two locked claim sentences only",
+            "short closing with no new claims",
         ]
     return [
-        "short opening with no new claims",
-        "one or two locked claim sentences only",
-        "short closing with no new claims",
+        "max three short sentences total",
+        "one interest or context sentence with no new claims",
+        "exactly one locked claim sentence",
+        "one soft call-to-action",
     ]
 
 

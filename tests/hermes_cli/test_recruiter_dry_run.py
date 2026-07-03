@@ -391,30 +391,49 @@ def _ready_positioning_packet(
         "status": status,
         "positioning_summary": "Lead with executive product leadership.",
         "target_narrative": "Operator for scaling product organizations.",
+        "target_company": "Acme Pay",
+        "target_role": "VP Product, Global Payments",
         "evidence": ["Scaled multi-team product orgs."],
         "gaps": ["Exact industry adjacency not confirmed."],
         "risks_and_mitigations": ["Do not overstate sector depth."],
         "recommended_angle": "Scale-stage executive operator.",
-        "claims_to_use": ["Led product organizations."],
+        "claims_to_use": [
+            "Improved onboarding conversion with measurable product execution gains.",
+            "Drove pricing and packaging iteration tied to adoption and retention.",
+        ],
         "claims_to_avoid": ["Direct ownership of unrelated sector."],
         "missing_information": [],
         "next_step": next_step,
         "allowed_claims": [
             {
                 "claim_id": "claim-1",
-                "claim_text": "Led product organizations.",
+                "claim_text": "Improved onboarding conversion with measurable product execution gains.",
                 "source_fact_ids": ["fact-1"],
+                "support_level": "explicit",
+            },
+            {
+                "claim_id": "claim-2",
+                "claim_text": "Drove pricing and packaging iteration tied to adoption and retention.",
+                "source_fact_ids": ["fact-2"],
                 "support_level": "explicit",
             }
         ],
         "evidence_items": [
             {
-                "claim_text": "Led product organizations.",
+                "claim_text": "Improved onboarding conversion with measurable product execution gains.",
                 "source_fact_ids": ["fact-1"],
                 "source_ref_ids": ["src-1"],
                 "support_level": "explicit",
-                "category": "leadership",
-                "safe_summary": "Scaled multi-team product orgs.",
+                "category": "achievement",
+                "safe_summary": "Improved onboarding conversion and reduced friction with measurable gains.",
+            },
+            {
+                "claim_text": "Drove pricing and packaging iteration tied to adoption and retention.",
+                "source_fact_ids": ["fact-2"],
+                "source_ref_ids": ["src-2"],
+                "support_level": "explicit",
+                "category": "achievement",
+                "safe_summary": "Drove pricing and packaging changes tied to adoption and retention improvements.",
             }
         ],
         "unsupported_claims": [],
@@ -426,9 +445,17 @@ def _ready_positioning_packet(
                 "section_label": "safe-section",
                 "support_level": "explicit",
                 "category": "test_fixture",
+            },
+            {
+                "source_ref_id": "src-2",
+                "source_label": "safe-fixture",
+                "source_id_hash": "fixture-hash-2",
+                "section_label": "safe-section",
+                "support_level": "explicit",
+                "category": "test_fixture",
             }
         ],
-        "support_summary": {"explicit": 1, "derived_safe": 0, "weak": 0, "unsupported": 0},
+        "support_summary": {"explicit": 2, "derived_safe": 0, "weak": 0, "unsupported": 0},
         "privacy_notes": ["sanitized fixture packet"],
         "generation_mode": "deterministic_fake",
         "source_kind": "fake_candidate_facts",
@@ -1888,6 +1915,10 @@ def test_application_materials_flow_dry_run_allows_natural_deterministic_recruit
     assert run_report["status"] == "DOCUMENT_REVIEW_APPROVED"
     assert run_report["errors"] == []
     assert run_report["reviewer_called"] is True
+    content = report.application_materials_result["materials"]["recruiter_message_draft"]["content"]
+    assert "Acme Pay" in content
+    assert "VP Product, Global Payments" in content
+    assert "Improved onboarding conversion and reduced friction with measurable gains." in content
 
 
 def test_application_materials_flow_dry_run_blocks_deterministic_draft_with_internal_packet_language(monkeypatch) -> None:
@@ -1933,6 +1964,120 @@ def test_application_materials_flow_dry_run_allows_natural_deterministic_cover_l
     assert run_report["status"] == "DOCUMENT_REVIEW_APPROVED"
     assert run_report["errors"] == []
     assert run_report["reviewer_called"] is True
+    content = report.application_materials_result["materials"]["cover_letter_draft"]["content"]
+    assert "Acme Pay" in content
+    assert "VP Product, Global Payments" in content
+    assert "Improved onboarding conversion and reduced friction with measurable gains." in content
+    assert "Drove pricing and packaging changes tied to adoption and retention improvements." in content
+
+
+def test_application_materials_flow_dry_run_blocks_generic_cover_letter_placeholder() -> None:
+    packet = _ready_positioning_packet()
+    packet["allowed_claims"] = [
+        {
+            "claim_id": "claim-generic-1",
+            "claim_text": "Relevant adjacent experience with payment acceptance.",
+            "source_fact_ids": ["fact-generic-1"],
+            "support_level": "derived_safe",
+        }
+    ]
+    packet["evidence_items"] = [
+        {
+            "claim_text": "Relevant adjacent experience with payment acceptance.",
+            "source_fact_ids": ["fact-generic-1"],
+            "source_ref_ids": ["src-generic-1"],
+            "support_level": "derived_safe",
+            "category": "domain",
+            "safe_summary": "Relevant adjacent experience with payment acceptance.",
+        }
+    ]
+    packet["source_references"] = [
+        {
+            "source_ref_id": "src-generic-1",
+            "source_label": "safe-fixture",
+            "source_id_hash": "fixture-generic-1",
+            "section_label": "safe-section",
+            "support_level": "derived_safe",
+            "category": "test_fixture",
+        }
+    ]
+    executor = _ApplicationMaterialsExecutor()
+
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=packet,
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        document_target="cover_letter_draft",
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_REVIEW_BLOCKED
+    assert report.application_materials_result["causing_target"] == "cover_letter_draft"
+    assert report.application_materials_result["block_reason"] == "DOCUMENT_DRAFT_INSUFFICIENT_GROUNDED_CLAIMS"
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["ready"] is False
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["blocked"] is True
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_called"] is True
+    assert report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_verdict"] == "CHANGES_REQUESTED"
+    assert (
+        report.application_materials_result["target_results"]["cover_letter_draft"]["block_reason"]
+        == "DOCUMENT_DRAFT_INSUFFICIENT_GROUNDED_CLAIMS"
+    )
+    assert (
+        report.application_materials_result["target_results"]["cover_letter_draft"]["reviewer_diagnostics_counts"][
+            "required_changes_count"
+        ]
+        >= 1
+    )
+    encoded = json.dumps(report.application_materials_result["target_results"], sort_keys=True)
+    assert "Thank you for considering my application." not in encoded
+
+
+def test_application_materials_flow_dry_run_blocks_generic_recruiter_message_placeholder() -> None:
+    from hermes_cli import recruiter_application_materials_flow as flow_module
+
+    original_compose = flow_module.compose_deterministic_outward_draft
+
+    def _placeholder_compose(writer_input):
+        packet = original_compose(writer_input)
+        packet["draft"]["content"] = (
+            "This role looks relevant and I'd be interested in discussing it. "
+            "I can share more context if useful."
+        )
+        packet["claim_units"] = []
+        return packet
+
+    flow_module.compose_deterministic_outward_draft = _placeholder_compose
+    executor = _ApplicationMaterialsExecutor()
+    try:
+        report = run_recruiter_application_materials_flow_dry_run(
+            positioning_packet=_ready_positioning_packet(),
+            private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+            allow_provider_execution=True,
+            document_target="recruiter_message_draft",
+            executor_factory=lambda: executor,
+        )
+
+        assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_REVIEW_BLOCKED
+        assert report.application_materials_result["causing_target"] == "recruiter_message_draft"
+        assert report.application_materials_result["block_reason"] == "DOCUMENT_DRAFT_PLACEHOLDER_OUTPUT"
+        assert report.application_materials_result["target_results"]["recruiter_message_draft"]["ready"] is False
+        assert report.application_materials_result["target_results"]["recruiter_message_draft"]["blocked"] is True
+        assert report.application_materials_result["target_results"]["recruiter_message_draft"]["reviewer_called"] is True
+        assert report.application_materials_result["target_results"]["recruiter_message_draft"]["reviewer_verdict"] == "CHANGES_REQUESTED"
+        assert (
+            report.application_materials_result["target_results"]["recruiter_message_draft"]["block_reason"]
+            == "DOCUMENT_DRAFT_PLACEHOLDER_OUTPUT"
+        )
+        assert (
+            report.application_materials_result["target_results"]["recruiter_message_draft"]["reviewer_diagnostics_counts"][
+                "required_changes_count"
+            ]
+            >= 1
+        )
+        encoded = json.dumps(report.application_materials_result["target_results"], sort_keys=True)
+        assert "This role looks relevant and I'd be interested in discussing it." not in encoded
+    finally:
+        flow_module.compose_deterministic_outward_draft = original_compose
 
 
 def test_application_materials_flow_dry_run_all_required_keeps_writer_called_truthful_when_only_cv_notes_use_writer() -> None:
