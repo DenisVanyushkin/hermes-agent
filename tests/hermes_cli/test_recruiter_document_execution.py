@@ -279,6 +279,45 @@ def test_invalid_writer_output_blocks_before_reviewer() -> None:
     assert "writer_document_type_mismatch" in report.errors
 
 
+def test_writer_output_with_internal_packet_language_fails_closed() -> None:
+    class _InternalLanguageWriterExecutor(_FakeDocumentExecutor):
+        def execute(self, **kwargs: Any) -> dict[str, Any]:
+            skill_id = kwargs["skill_id"]
+            self.calls.append(skill_id)
+            if skill_id == "document-writer":
+                return {
+                    "schema_version": "recruiter_document_packet_v1",
+                    "document_type": kwargs["skill_input"]["document_type"],
+                    "audience": kwargs["skill_input"].get("audience"),
+                    "purpose": kwargs["skill_input"].get("purpose"),
+                    "source_positioning_packet_ref": kwargs["skill_input"]["source_positioning_packet_ref"],
+                    "draft": {
+                        "format": "text",
+                        "content": "Approved evidence shows strong fit. Supported by resume facts.",
+                        "notes": ["Review before any outbound action."],
+                    },
+                    "review": {"status": "PENDING"},
+                    "status": "DRAFT_READY",
+                    "warnings": [],
+                    "errors": [],
+                    "provenance": {},
+                }
+            return super().execute(**kwargs)
+
+    executor = _InternalLanguageWriterExecutor()
+    report = run_recruiter_document_execution(
+        _execution_report(),
+        document_type="cv_tailoring_notes",
+        allow_document_execution=True,
+        executor=executor,
+    )
+
+    assert report.status is RecruiterDocumentExecutionStatus.DOCUMENT_OUTPUT_INVALID
+    assert report.errors == ["writer_internal_language_forbidden"]
+    assert report.reviewer_called is False
+    assert executor.calls == ["document-writer"]
+
+
 def test_invalid_reviewer_output_preserves_draft_packet() -> None:
     class _InvalidReviewerExecutor(_FakeDocumentExecutor):
         def execute(self, **kwargs: Any) -> dict[str, Any]:

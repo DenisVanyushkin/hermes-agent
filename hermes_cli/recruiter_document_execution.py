@@ -16,6 +16,22 @@ DOCUMENT_WRITER_SKILL_ID = "document-writer"
 DOCUMENT_REVIEWER_SKILL_ID = "document-reviewer"
 DOCUMENT_PACKET_SCHEMA_VERSION = "recruiter_document_packet_v1"
 DOCUMENT_REVIEWER_VERDICTS = {"APPROVE", "CHANGES_REQUESTED", "BLOCKED"}
+_FORBIDDEN_INTERNAL_LANGUAGE_PHRASES = (
+    "approved evidence shows",
+    "supported by resume facts",
+    "source-backed evidence",
+    "approved packet",
+    "resume facts",
+    "positioning packet",
+    "candidate facts packet",
+    "provider-visible",
+    "source references",
+    "source_ref",
+    "evidence packet",
+    "claim ids",
+    "fact ids",
+)
+
 def _document_writer_expected_schema(requested_document_type: str) -> dict[str, Any]:
     return {
         "schema_version": DOCUMENT_PACKET_SCHEMA_VERSION,
@@ -302,6 +318,8 @@ def _validate_writer_result(payload: dict[str, Any], *, requested_document_type:
     draft = payload.get("draft")
     if not isinstance(draft, dict) or not isinstance(draft.get("content"), str):
         errors.append("writer_draft_missing_or_invalid")
+    else:
+        errors.extend(_validate_document_packet_internal_language(payload))
     if any(payload.get(flag) for flag in ("send_outbound_message", "apply_to_job", "write_crm", "write_job_intel_db")):
         errors.append("writer_forbidden_action_flag_set")
     return errors
@@ -365,6 +383,24 @@ def _has_source_provenance(payload: dict[str, Any]) -> bool:
         key in payload and payload.get(key)
         for key in ("source_positioning_packet_id", "source_positioning_packet_ref", "provenance")
     )
+
+
+def validate_document_packet_internal_language(payload: dict[str, Any]) -> list[str]:
+    return _validate_document_packet_internal_language(payload)
+
+
+def _validate_document_packet_internal_language(payload: dict[str, Any]) -> list[str]:
+    draft = payload.get("draft")
+    if not isinstance(draft, dict):
+        return []
+    text_values = [draft.get("content"), *list(draft.get("notes") or [])]
+    lowered_values = [str(item).lower() for item in text_values if isinstance(item, str)]
+    errors: list[str] = []
+    for phrase in _FORBIDDEN_INTERNAL_LANGUAGE_PHRASES:
+        if any(phrase in value for value in lowered_values):
+            errors.append("writer_internal_language_forbidden")
+            break
+    return errors
 
 
 def _dict(value: Any) -> dict[str, Any]:
