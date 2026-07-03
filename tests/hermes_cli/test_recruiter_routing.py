@@ -5,7 +5,9 @@ from pathlib import Path
 
 from hermes_cli.recruiter_routing import (
     APPLICATION_MATERIALS_BUNDLE_ID,
+    DECISION_SUPPORT_BUNDLE_ID,
     DEFAULT_BUNDLE_ID,
+    EVALUATE_VACANCY_BUNDLE_ID,
     RECRUITER_ROLE_ID,
     build_recruiter_handoff_metadata,
     route_recruiter_prompt,
@@ -28,7 +30,40 @@ def test_russian_vacancy_prompt_selects_recruiter_evaluation_bundle() -> None:
     assert decision.document_provider_execution_enabled is False
     assert "recruiter-context dry-run" in decision.next_allowed_actions
     assert "recruiter-skill execute" in decision.next_allowed_actions
-    assert "evaluate-vacancy" in decision.role_package_context["bundle_ids"]
+    assert DECISION_SUPPORT_BUNDLE_ID in decision.role_package_context["bundle_ids"]
+    assert EVALUATE_VACANCY_BUNDLE_ID in decision.role_package_context["bundle_ids"]
+    assert decision.requested_outputs
+    assert "manual_review_warnings" in decision.requested_outputs
+
+
+def test_default_bundle_is_decision_support() -> None:
+    assert DEFAULT_BUNDLE_ID == DECISION_SUPPORT_BUNDLE_ID
+
+
+def test_company_diligence_prompt_requests_company_modules() -> None:
+    decision = route_recruiter_prompt(
+        "Расскажи про компанию Airwallex по этой вакансии, стоит ли связываться",
+        context={"repo_root": REPO_ROOT},
+    )
+
+    assert decision.status.value == "selected"
+    assert decision.selected_bundle == DECISION_SUPPORT_BUNDLE_ID
+    assert "company_assessment" in decision.requested_outputs
+    assert "company_risk_register" in decision.requested_outputs
+
+
+def test_explicit_requested_outputs_context_wins() -> None:
+    decision = route_recruiter_prompt(
+        "job vacancy analysis",
+        context={
+            "repo_root": REPO_ROOT,
+            "requested_outputs": ["questions_to_ask"],
+        },
+    )
+
+    assert decision.status.value == "selected"
+    assert "questions_to_ask" in decision.requested_outputs
+    assert "company_assessment" not in decision.requested_outputs
 
 
 def test_english_application_materials_prompt_selects_document_bundle() -> None:
@@ -51,7 +86,7 @@ def test_ambiguous_recruiter_prompt_defaults_to_evaluate_vacancy() -> None:
 
     assert decision.status.value == "selected"
     assert decision.selected_bundle == DEFAULT_BUNDLE_ID
-    assert any("defaulted to evaluate-vacancy" in warning for warning in decision.warnings)
+    assert any("decision-support" in warning for warning in decision.warnings)
 
 
 def test_engineering_prompt_does_not_get_stolen_by_recruiter_router() -> None:
@@ -101,8 +136,9 @@ def test_selected_recruiter_prompt_builds_compact_role_context() -> None:
     assert role_context["role_package_available"] is True
     assert role_context["selected_bundle_available"] is True
     assert "vacancy-evaluation" in role_context["bundle_skill_ids"]
-    assert "RecruiterPositioningPacket" in role_context["bundle_required_inputs"]
-    assert "bundle_expected_outputs" in role_context
+    assert "company-assessment" in role_context["bundle_skill_ids"]
+    assert role_context["bundle_expected_outputs"] == ["recruiter_decision_support_packet_v1"]
+    assert role_context["requested_outputs"] == list(metadata["requested_outputs"])
 
 
 def test_non_recruiter_prompt_has_no_role_context() -> None:

@@ -24,7 +24,7 @@ def test_vacancy_url_prompt_builds_ready_flow_report() -> None:
 
     assert report.status is RecruiterEvaluationFlowStatus.READY
     assert report.selected_role_id == "hermes_recruiter"
-    assert report.selected_bundle == "evaluate-vacancy"
+    assert report.selected_bundle == "company-vacancy-decision-support"
     assert report.flow_id == "evaluate-vacancy"
     assert report.role_context_schema_version == "recruiter_role_context_v1"
     assert report.vacancy_source_status == "AVAILABLE_URL"
