@@ -1,0 +1,82 @@
+schema_version: 1
+id: recruiter_decision_support_pipeline
+display_name: Recruiter Decision Support Pipeline
+version: 1
+purpose: Handles recruiter/HR requests — vacancy assessment, company diligence, fit recommendation, positioning, and interview preparation — through the modular draft-only decision-support bundle.
+entry_conditions:
+  any:
+    - task_classification.domain == career
+    - task_intent includes vacancy_or_company_analysis
+    - recruiter_routing.status == selected
+subagents:
+  primary: general_operator
+state_machine:
+  states:
+    - task_received
+    - pipeline_selected
+    - recruiter_routed
+    - privacy_gate_evaluated
+    - modules_executed
+    - gates_evaluated
+    - completion_allowed
+    - completion_blocked
+loop_policy:
+  max_iterations: 1
+  max_peer_discussion_rounds: 0
+  max_disagreement_rounds: 0
+  max_invalid_output_retries: 0
+  max_tool_retries: 0
+  max_model_escalations: 0
+  max_clarification_rounds: 1
+  on_limit_exceeded: block_and_escalate_to_user
+model_escalation_policy:
+  enabled: false
+  resets_loop_counters: false
+communication_policy:
+  subagents_may_exchange_messages: false
+  mediated_by_pipeline: true
+  max_rounds: 0
+disagreement_policy:
+  enabled: false
+  decisive_subagent: general_operator
+  arbitrator_subagent: null
+completion_rules:
+  can_say_done:
+    any:
+      - decision_bundle_status == COMPANY_VACANCY_DECISION_BUNDLE_READY
+      - decision_bundle_status == COMPANY_VACANCY_DECISION_BUNDLE_BLOCKED and blocked_reason_reported == true
+  cannot_say_done:
+    any:
+      - outbound_action_attempted
+      - crm_or_job_intel_write_attempted
+      - required_module_status_missing
+      - policy_blocked
+reclassification:
+  return_status: reclassification_required
+  cannot_mutate_files_without_reclassification: true
+reporting:
+  final_execution_report_required: true
+  include:
+    - pipeline_id
+    - pipeline_session_id
+    - router_subagent
+    - router_selected_provider_model
+    - router_actual_provider_model
+    - router_decision
+    - selected_subagent
+    - selected_provider_model_per_invocation
+    - actual_provider_model_per_invocation
+    - token_usage_per_invocation
+    - cache_usage_per_invocation
+    - tool_calls_summary
+    - peer_messages
+    - disagreements
+    - decisive_subagent
+    - model_escalations
+    - completion_allowed
+    - completion_blocked_reason
+    - final_verdict
+  empty_defaults:
+    peer_messages: []
+    disagreements: []
+    model_escalations: []

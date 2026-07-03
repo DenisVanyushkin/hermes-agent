@@ -16,6 +16,7 @@ from hermes_cli.pipeline_specs import (
 
 DEFAULT_PIPELINE_ID = "default_conversation_pipeline"
 ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
+RECRUITER_PIPELINE_ID = "recruiter_decision_support_pipeline"
 DEFAULT_ROUTER_SUBAGENT_ID = "hermes_pipeline_router"
 DEFAULT_CONFIDENCE = 0.2
 DEFAULT_ROUTER_STRATEGY = "llm"
@@ -44,11 +45,11 @@ _ROUTER_RESPONSE_FORMAT = {
                     },
                     "selected_pipeline_id": {
                         "type": ["string", "null"],
-                        "enum": [DEFAULT_PIPELINE_ID, ENGINEERING_PIPELINE_ID, None],
+                        "enum": [DEFAULT_PIPELINE_ID, ENGINEERING_PIPELINE_ID, RECRUITER_PIPELINE_ID, None],
                     },
                     "fallback_pipeline_id": {
                         "type": ["string", "null"],
-                        "enum": [DEFAULT_PIPELINE_ID, ENGINEERING_PIPELINE_ID, None],
+                        "enum": [DEFAULT_PIPELINE_ID, ENGINEERING_PIPELINE_ID, RECRUITER_PIPELINE_ID, None],
                     },
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "reasoning_summary": {"type": "string"},
@@ -65,7 +66,7 @@ _ROUTER_RESPONSE_FORMAT = {
                             "properties": {
                                 "pipeline_id": {
                                     "type": "string",
-                                    "enum": [DEFAULT_PIPELINE_ID, ENGINEERING_PIPELINE_ID],
+                                    "enum": [DEFAULT_PIPELINE_ID, ENGINEERING_PIPELINE_ID, RECRUITER_PIPELINE_ID],
                                 },
                                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                                 "reasoning_summary": {"type": ["string", "null"]},
@@ -308,6 +309,32 @@ _POLICY_BLOCK_PATTERNS = (
     "delete production data",
     "drop the database",
 )
+_RECRUITER_KEYWORDS = (
+    "vacancy",
+    "vacancies",
+    "job posting",
+    "job offer",
+    "should i apply",
+    "worth applying",
+    "cover letter",
+    "recruiter",
+    "hiring manager",
+    "interview prep",
+    "career move",
+    "cv review",
+    "resume review",
+    "ваканси",
+    "стоит ли податься",
+    "стоит ли подаваться",
+    "податься",
+    "рекрутер",
+    "сопроводительн",
+    "собеседовани",
+    "оффер",
+    "карьерн",
+    "резюме",
+)
+
 _ENGINEERING_PATH_PATTERN = re.compile(
     r"(?i)\b("
     r"agent/|gateway/|hermes_cli/|job_intel/|scripts/|tests/|config/|cron/|"
@@ -453,6 +480,25 @@ class HeuristicPipelineRouter(PipelineRouter):
                 matched_signals=self._engineering_matched_signals(normalized),
             )
 
+        recruiter_signals = self._recruiter_matched_signals(normalized)
+        if recruiter_signals and RECRUITER_PIPELINE_ID in self._registered_pipeline_ids:
+            return self._decision(
+                pipeline_session_id=pipeline_session_id,
+                router_subagent_id=router_subagent_id,
+                status="selected",
+                selected_pipeline_id=RECRUITER_PIPELINE_ID,
+                confidence=0.9,
+                reasoning_summary="The request matches recruiter/HR intent: vacancy, company, application, or interview analysis without repository mutation.",
+                matched_signals=recruiter_signals,
+                alternatives=(
+                    RouterAlternative(
+                        pipeline_id=DEFAULT_PIPELINE_ID,
+                        confidence=0.2,
+                        reasoning_summary="Fallback only if the request is re-scoped to generic conversation.",
+                    ),
+                ),
+            )
+
         return self._decision(
             pipeline_session_id=pipeline_session_id,
             router_subagent_id=router_subagent_id,
@@ -543,12 +589,20 @@ class HeuristicPipelineRouter(PipelineRouter):
 
         return tuple(matched_signals)
 
+    def _recruiter_matched_signals(self, normalized: str) -> tuple[str, ...]:
+        matched = [keyword for keyword in _RECRUITER_KEYWORDS if keyword in normalized]
+        if not matched:
+            return ()
+        return ("task_classification.domain == career", *(f"recruiter_keyword:{item}" for item in matched[:5]))
+
     def candidate_hints(self, user_message: str) -> dict[str, Any]:
         normalized = _normalize_text(user_message.strip())
         matched_signals = self._engineering_matched_signals(normalized)
+        recruiter_signals = () if matched_signals else self._recruiter_matched_signals(normalized)
         return {
             "matched_signals": list(matched_signals),
             "engineering_candidate_pipeline_id": ENGINEERING_PIPELINE_ID if matched_signals else None,
+            "recruiter_candidate_pipeline_id": RECRUITER_PIPELINE_ID if recruiter_signals else None,
             "default_fallback_pipeline_id": DEFAULT_PIPELINE_ID,
             "architecture_only": _matches_any(normalized, _ARCHITECTURE_ONLY_KEYWORDS),
             "ambiguous_mutation_request": _looks_ambiguous(normalized),
@@ -1633,7 +1687,7 @@ def _looks_like_pipeline_id(raw: Any) -> bool:
     normalized = raw.strip().lower()
     if not normalized:
         return False
-    return normalized in {DEFAULT_PIPELINE_ID, ENGINEERING_PIPELINE_ID} or normalized.endswith("_pipeline")
+    return normalized in {DEFAULT_PIPELINE_ID, ENGINEERING_PIPELINE_ID, RECRUITER_PIPELINE_ID} or normalized.endswith("_pipeline")
 
 
 def _summarize_confidence_value(raw: Any) -> str:
