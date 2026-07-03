@@ -115,10 +115,16 @@ def validate_outward_draft_usefulness(
         required_changes.append(
             "Replace the placeholder with a user-reviewable draft that connects grounded evidence to the target."
         )
-    if role_or_company_hint and role_or_company_hint.casefold() not in lowered:
+    if role_or_company_hint:
+        if role_or_company_hint.casefold() not in lowered:
+            quality_codes.append(_QUALITY_BLOCK_REASONS["insufficient_role_specificity"])
+            required_changes.append(
+                "Mention the target company or role explicitly so the draft reads as tailored application material."
+            )
+    else:
         quality_codes.append(_QUALITY_BLOCK_REASONS["insufficient_role_specificity"])
         required_changes.append(
-            "Mention the target company or role explicitly so the draft reads as tailored application material."
+            "Add explicit target company or role context before treating the outward draft as user-reviewable application material."
         )
 
     minimum_claims = 2 if document_type == "cover_letter" else 1
