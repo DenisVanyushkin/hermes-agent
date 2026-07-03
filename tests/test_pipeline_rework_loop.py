@@ -708,6 +708,113 @@ def test_engineer_git_only_investigation_completes_without_test_payload_noise(tm
     assert "malformed_test_payload" not in final_text
 
 
+def test_is_tool_call_log_entry_recognizes_dict_form_but_not_other_malformed_dicts() -> None:
+    # Unit coverage for the classifier itself: the model can emit the
+    # tool-call-log shape either as a plain string or, when structured-output
+    # enforcement is active, as an actual JSON object with the same
+    # name/result/details keys. Only that specific shape is noise; any other
+    # malformed dict (e.g. missing the real pytest schema's "targets"/"quiet"
+    # keys, but also not matching the tool-call-log shape) must still be
+    # treated as a genuine (if malformed) test request.
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    assert module._is_tool_call_log_entry(
+        {"name": "git_status", "result": "passed", "details": "No output; repository is clean."}
+    )
+    assert module._is_tool_call_log_entry(
+        "{name: git_status, result: passed, details: No output; repository is clean.}"
+    )
+    assert not module._is_tool_call_log_entry(
+        {"status": "observed", "summary": "workspace only contains tracked.txt"}
+    )
+    assert not module._is_tool_call_log_entry({"targets": ["tests/test_x.py"], "quiet": True})
+    assert not module._is_tool_call_log_entry("pytest -q tests/test_x.py")
+    assert not module._is_tool_call_log_entry(None)
+    assert not module._is_tool_call_log_entry(42)
+
+
+def test_engineer_git_only_investigation_with_dict_shaped_tool_logs_completes_cleanly(tmp_path: Path) -> None:
+    """Regression test for the 2026-07-03 06:20 (+05) live incident: this time
+    the engineer's structured output emitted "tests" as JSON objects (dicts)
+    rather than strings -- {"name": "git_status", "result": "passed",
+    "details": "..."} -- which the earlier string-only _is_tool_call_log_entry
+    did not recognize, so the entries reached the pytest command validator and
+    were denied with blocked_reason="test_command_denied", producing the exact
+    "Denied payload: {name: git_status, result: passed, details: No output;
+    repository is clean.}" text seen in Slack. The dict form must be
+    normalized away the same as the string form: reviewer skipped (no
+    material changes), completion allowed, tests not_requested, and the
+    engineer's actual summary reaches the final response."""
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+
+    engineer_summary = (
+        "Checked current git state and compared local branch with origin: working "
+        "tree is clean, no local uncommitted changes, local branch is ahead of "
+        "origin by 92 commits and not behind."
+    )
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": _engineer_output(
+                    summary=engineer_summary,
+                    changes=[],
+                    tests=[
+                        {
+                            "name": "git_status",
+                            "result": "passed",
+                            "details": "No output; repository is clean.",
+                        },
+                        {
+                            "name": "git_diff",
+                            "result": "passed",
+                            "details": "No diff output.",
+                        },
+                        {
+                            "name": "git_remote_status origin",
+                            "result": "passed",
+                            "details": (
+                                "comparison_available=true; ahead=92; behind=0; "
+                                "no remote-only commits."
+                            ),
+                        },
+                    ],
+                )
+            },
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="проверь, что изменилось, сверь текущее состояние git с origin",
+        repo_path=str(git_repo),
+    )
+
+    assert calls == ["hermes_engineer_core"]
+    assert result.completion_allowed is True
+    assert result.candidate_complete is True
+    assert result.blocked_reason is None
+    assert result.reviewer_packet["packet_status"] == "review_not_required"
+    assert result.test_summary["status"] == "not_requested"
+
+    final_text = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert engineer_summary in final_text
+    assert "invalid" not in final_text.lower()
+    assert "malformed_test_payload" not in final_text
+    assert "test_command_denied" not in final_text
+    assert "Denied payload" not in final_text
+
+
 def test_finalize_loop_result_materializes_completion_allowed_final_response_text(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     session_module = importlib.import_module("hermes_cli.pipeline_session")

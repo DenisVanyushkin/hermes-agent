@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from hermes_cli.pipeline_control_channel import resolve_loop_limit_policy
 from hermes_cli.pipeline_evaluation import PipelineEvaluationRequest, evaluate_pipeline_step
@@ -2283,18 +2283,36 @@ def _merge_mutation_summaries(left: dict[str, Any], right: dict[str, Any]) -> di
 # sometimes conflates "checks I ran" (git_status/git_diff/git_remote_status/...)
 # with "tests I ran". These entries can never be a real pytest command (they
 # don't start with a pytest executable), so routing them through the pytest
-# command validator only produces a false-negative "malformed_test_payload"
-# for a test that was never requested.
+# command validator only produces a false-negative "malformed_test_payload" /
+# "test_command_denied" for a test that was never requested.
+#
+# The model can emit this shape as a plain string, or as an actual JSON object
+# (a dict with exactly the name/result/details keys) when function-calling /
+# structured-output enforcement is active. Either way, by the time this code
+# runs the value has already passed through StructuredOutputEnvelope parsing
+# (subagent_runner.py), which coerces every "tests" item via `str(item)` --
+# so a dict entry arrives here as Python's quoted repr, e.g.
+# "{'name': 'git_status', 'result': 'passed', 'details': 'clean working tree'}",
+# not as a Mapping. The regex therefore tolerates optional quotes around the
+# name/result keys so both the bare and repr-quoted forms match; the Mapping
+# branch below is kept as defense in depth for any caller that hands this
+# function an unconverted dict directly. Only this specific tool-call-log key
+# set is treated as noise: other malformed dict/string shapes (e.g. missing
+# "targets"/"quiet" for the real structured pytest schema) still fall through
+# to the existing "malformed_test_payload" path.
 _TOOL_CALL_LOG_ENTRY_RE = re.compile(
-    r"^\{\s*name\s*:\s*[^,{}]+,\s*result\s*:\s*[^,{}]+,\s*details\s*:\s*.*\}\s*$",
+    r"^\{\s*['\"]?name['\"]?\s*:\s*[^,{}]+,\s*['\"]?result['\"]?\s*:\s*[^,{}]+,\s*['\"]?details['\"]?\s*:\s*.*\}\s*$",
     re.IGNORECASE,
 )
+_TOOL_CALL_LOG_MAPPING_KEYS = {"name", "result", "details"}
 
 
 def _is_tool_call_log_entry(item: Any) -> bool:
-    if not isinstance(item, str):
-        return False
-    return bool(_TOOL_CALL_LOG_ENTRY_RE.match(item.strip()))
+    if isinstance(item, Mapping):
+        return _TOOL_CALL_LOG_MAPPING_KEYS.issubset(set(item.keys())) and "targets" not in item
+    if isinstance(item, str):
+        return bool(_TOOL_CALL_LOG_ENTRY_RE.match(item.strip()))
+    return False
 
 
 def _apply_step_tests(
