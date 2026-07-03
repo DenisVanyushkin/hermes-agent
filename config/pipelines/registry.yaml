@@ -48,3 +48,27 @@ registry:
       - hermes_engineer_core
       - hermes_code_reviewer
     config_path: config/pipelines/engineering_review_pipeline.yaml
+  - id: recruiter_decision_support_pipeline
+    display_name: Recruiter Decision Support Pipeline
+    description: Handles recruiter/HR requests — vacancy assessment, company diligence, fit recommendation, positioning, claims, and interview questions — via draft-only modular analysis with manual review.
+    entry_examples:
+      - Evaluate this vacancy and tell me whether I should apply.
+      - Research the company behind this job posting and list its risks.
+      - Оцени вакансию и скажи, стоит ли податься.
+      - Подготовь вопросы к рекрутеру перед скринингом.
+    exclusion_examples:
+      - Fix the recruiter routing code and update tests.
+      - Explain how the recruiter pipeline works without running it.
+      - Draft a thank-you email for a dinner invitation.
+    risk_notes:
+      - no repository mutation allowed
+      - no outbound messages, no application submission
+      - no CRM or job-intel writes
+      - draft-only outputs with manual review required
+    allowed_router_statuses:
+      - selected
+    fallback_eligible: false
+    mutation_risk: none
+    required_subagents:
+      - general_operator
+    config_path: config/pipelines/recruiter_decision_support_pipeline.yaml

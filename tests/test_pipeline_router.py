@@ -145,8 +145,6 @@ def test_russian_engineering_requests_select_engineering_pipeline(tmp_path: Path
     "prompt",
     [
         "обычный вопрос: что дальше?",
-        "подготовь письмо рекрутеру",
-        "оцени вакансию",
         "что такое nootropics?",
         "расскажи про рынок труда",
     ],
