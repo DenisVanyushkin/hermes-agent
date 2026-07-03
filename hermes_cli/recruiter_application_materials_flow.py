@@ -11,7 +11,11 @@ from .recruiter_document_execution import (
     validate_document_packet_internal_language,
 )
 from .recruiter_document_inputs import RecruiterDocumentInputStatus, build_recruiter_document_writer_input_packet
-from .recruiter_outward_drafts import compose_deterministic_outward_draft, is_deterministic_outward_document_type
+from .recruiter_outward_drafts import (
+    compose_deterministic_outward_draft,
+    is_deterministic_outward_document_type,
+    validate_outward_draft_usefulness,
+)
 
 
 APPLICATION_MATERIALS_PACKET_SCHEMA_VERSION = "recruiter_application_materials_packet_v1"
@@ -257,6 +261,7 @@ def _run_deterministic_outward_document_review(
             "provenance": {"writes_performed": False, "builder": "recruiter_application_materials_flow"},
         }
     provider_called = bool(getattr(executor, "provider_backed", False))
+    writer_input = dict(input_packet.document_writer_input or {})
     reviewer_input = {
         "skill_id": DOCUMENT_REVIEWER_SKILL_ID,
         "status": "REVIEW_REQUIRED",
@@ -316,7 +321,24 @@ def _run_deterministic_outward_document_review(
             "provenance": {"writes_performed": False, "builder": "recruiter_application_materials_flow"},
         }
 
-    verdict = str(reviewer_result.get("verdict") or "")
+    usefulness = validate_outward_draft_usefulness(writer_input, document_packet)
+    final_review_result = dict(reviewer_result)
+    if verdict := str(reviewer_result.get("verdict") or ""):
+        pass
+    else:
+        verdict = ""
+    if verdict == "APPROVE" and not usefulness["passed"]:
+        final_review_result["verdict"] = "CHANGES_REQUESTED"
+        final_review_result["genericness_assessment"] = "insufficiently useful"
+        final_review_result["required_changes"] = _dedupe(
+            [
+                *_string_list(final_review_result.get("required_changes")),
+                *_string_list(usefulness.get("required_changes")),
+            ]
+        )
+        final_review_result["quality_block_reason"] = usefulness["block_reason"]
+        final_review_result["quality_diagnostics_summary"] = _string_list(usefulness.get("quality_diagnostics_summary"))
+        verdict = "CHANGES_REQUESTED"
     status = (
         RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_APPROVED.value
         if verdict == "APPROVE"
@@ -326,15 +348,19 @@ def _run_deterministic_outward_document_review(
         "status": status,
         "document_type": document_type,
         "writer_input_status": input_packet.status.value,
-        "execution_status": "document_review_approved" if verdict == "APPROVE" else "document_review_changes_requested",
+        "execution_status": (
+            "document_review_approved"
+            if verdict == "APPROVE"
+            else "document_review_changes_requested"
+        ),
         "writer_called": False,
         "reviewer_called": True,
         "provider_called": provider_called,
         "document_writer_input_packet": input_packet.to_dict(),
         "document_packet": document_packet,
-        "review_result": reviewer_result,
+        "review_result": final_review_result,
         "downstream_gates": _deterministic_outward_downstream_gates("APPROVED" if verdict == "APPROVE" else "REVIEW_CHANGES_REQUESTED"),
-        "warnings": _dedupe([*input_packet.warnings, *_string_list(reviewer_result.get("warnings"))]),
+        "warnings": _dedupe([*input_packet.warnings, *_string_list(final_review_result.get("warnings"))]),
         "errors": list(input_packet.errors),
         "provenance": {"writes_performed": False, "builder": "recruiter_application_materials_flow"},
     }
@@ -448,6 +474,8 @@ def _build_synthetic_execution_report(positioning_packet: dict[str, Any]) -> dic
         "privacy_notes": list(positioning_packet.get("privacy_notes") or []),
         "generation_mode": str(positioning_packet.get("generation_mode") or ""),
         "source_kind": str(positioning_packet.get("source_kind") or ""),
+        "target_company": str(positioning_packet.get("target_company") or ""),
+        "target_role": str(positioning_packet.get("target_role") or ""),
         "provenance": dict(positioning_packet.get("provenance") or {}),
     }
     return {
@@ -465,6 +493,8 @@ def _build_synthetic_execution_report(positioning_packet: dict[str, Any]) -> dic
             "fit_interpretation": str(positioning_packet.get("positioning_summary") or ""),
             "evidence_gaps": list(positioning_packet.get("gaps") or []),
             "recommendation_for_next_step": "Proceed to draft preparation.",
+            "company": str(positioning_packet.get("target_company") or ""),
+            "title": str(positioning_packet.get("target_role") or ""),
             "provenance": dict(positioning_packet.get("provenance") or {}),
         },
         "positioning_evidence_result": synthetic_positioning_result,

@@ -1287,6 +1287,7 @@ def _validate_positioning_smoke_evaluation_packet(evaluation_packet: dict[str, A
 def build_fake_positioning_packet_from_candidate_facts(skill_input: dict[str, Any]) -> dict[str, Any]:
     candidate_facts_packet = dict(skill_input.get("candidate_facts_packet") or {})
     evaluation_packet = dict(skill_input.get("evaluation_packet") or {})
+    role_target_context = dict(candidate_facts_packet.get("role_target_context") or {})
     fact_items = _dict_list(candidate_facts_packet.get("facts"))
     source_reference_items = _dict_list(candidate_facts_packet.get("source_references"))
     claim_items = _dict_list(candidate_facts_packet.get("allowed_claims"))
@@ -1396,6 +1397,8 @@ def build_fake_positioning_packet_from_candidate_facts(skill_input: dict[str, An
         "status": "POSITIONING_READY",
         "positioning_summary": positioning_summary,
         "target_narrative": fit_assessment or recommended_angle,
+        "target_company": str(role_target_context.get("target_company") or "").strip(),
+        "target_role": _fake_target_role_label(role_target_context),
         "evidence": [item["safe_summary"] for item in evidence_items],
         "gaps": [item for item in evaluation_packet.get("missing_information") or [] if isinstance(item, str)],
         "risks_and_mitigations": evaluation_risks,
@@ -1431,6 +1434,19 @@ def build_fake_positioning_packet_from_candidate_facts(skill_input: dict[str, An
     if unsafe_code:
         raise ValueError("positioning_unsafe_output_detected")
     return fake_packet
+
+
+def _fake_target_role_label(role_target_context: dict[str, Any]) -> str:
+    target_role = str(role_target_context.get("target_role") or "").strip()
+    if target_role:
+        return target_role
+    role_family = str(role_target_context.get("role_family") or "").strip().replace("_", " ")
+    if role_family:
+        return role_family
+    target_focus = [str(item).strip().replace("_", " ") for item in role_target_context.get("target_focus") or [] if str(item).strip()]
+    if target_focus:
+        return f"{target_focus[0]} role"
+    return ""
 
 
 def _validate_fake_positioning_output(raw_result: dict[str, Any]) -> str | None:
@@ -1654,6 +1670,9 @@ def _application_material_target_block_reason(
     if execution_status == RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_CHANGES_REQUESTED.value:
         if not reviewer_called or not review_result:
             return "DOCUMENT_REVIEW_RESULT_MISSING"
+        quality_block_reason = str(review_result.get("quality_block_reason") or "").strip()
+        if quality_block_reason:
+            return quality_block_reason
         if verdict == "CHANGES_REQUESTED":
             if diagnostics["unsupported_claims_count"] > 0:
                 return "UNSUPPORTED_CLAIMS_PRESENT"
