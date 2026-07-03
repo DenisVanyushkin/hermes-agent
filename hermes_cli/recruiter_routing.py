@@ -314,8 +314,17 @@ def _build_role_package_context(context: dict[str, Any] | None) -> dict[str, Any
 def _context_repo_root(context: dict[str, Any] | None) -> Path:
     repo_root = (context or {}).get("repo_root")
     if repo_root is None:
-        return Path.cwd()
+        return _module_repo_root()
     return Path(repo_root)
+
+
+def _module_repo_root() -> Path:
+    # The gateway's cwd is ~/.hermes, not the source repo — resolve from this file.
+    current = Path(__file__).resolve()
+    for candidate in current.parents:
+        if (candidate / ".git").exists() or (candidate / _RECRUITER_PACKAGE_DIR / "role-package.yaml").exists():
+            return candidate
+    return current.parents[1]
 
 
 def _match_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:

@@ -98,16 +98,25 @@ def observe_pipeline_router_decision(
                 actual_provider=actual_provider,
                 actual_model=actual_model,
             )
-        recruiter_routing = build_recruiter_handoff_metadata(
-            user_message,
-            context={"repo_root": repo_root},
-        )
-        recruiter_evaluation_flow = build_recruiter_evaluation_flow(
-            RecruiterEvaluationFlowRequest(
-                prompt=user_message,
-                repo_root=repo_root,
+        # Recruiter metadata is advisory; its failure must not discard the routing decision.
+        try:
+            recruiter_routing = build_recruiter_handoff_metadata(
+                user_message,
+                context={"repo_root": repo_root},
             )
-        ).to_dict()
+        except Exception as exc:
+            log.warning("recruiter handoff metadata failed: %s", exc)
+            recruiter_routing = {"error": str(exc)}
+        try:
+            recruiter_evaluation_flow = build_recruiter_evaluation_flow(
+                RecruiterEvaluationFlowRequest(
+                    prompt=user_message,
+                    repo_root=repo_root,
+                )
+            ).to_dict()
+        except Exception as exc:
+            log.warning("recruiter evaluation flow metadata failed: %s", exc)
+            recruiter_evaluation_flow = {"error": str(exc)}
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
         log.info(
             "pipeline_router_observe %s",
