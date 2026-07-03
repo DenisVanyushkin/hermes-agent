@@ -8,6 +8,7 @@ from .recruiter_document_execution import (
     DOCUMENT_REVIEWER_SKILL_ID,
     RecruiterDocumentExecutionStatus,
     run_recruiter_document_execution,
+    validate_document_packet_internal_language,
 )
 from .recruiter_document_inputs import RecruiterDocumentInputStatus, build_recruiter_document_writer_input_packet
 from .recruiter_outward_drafts import compose_deterministic_outward_draft, is_deterministic_outward_document_type
@@ -237,6 +238,24 @@ def _run_deterministic_outward_document_review(
         }
 
     document_packet = compose_deterministic_outward_draft(dict(input_packet.document_writer_input or {}))
+    internal_language_errors = validate_document_packet_internal_language(document_packet)
+    if internal_language_errors:
+        return {
+            "status": RecruiterDocumentExecutionStatus.DOCUMENT_OUTPUT_INVALID.value,
+            "document_type": document_type,
+            "writer_input_status": input_packet.status.value,
+            "execution_status": "document_output_internal_language_forbidden",
+            "writer_called": False,
+            "reviewer_called": False,
+            "provider_called": False,
+            "document_writer_input_packet": input_packet.to_dict(),
+            "document_packet": document_packet,
+            "review_result": None,
+            "downstream_gates": _deterministic_outward_downstream_gates("WRITER_OUTPUT_INVALID"),
+            "warnings": list(input_packet.warnings),
+            "errors": internal_language_errors,
+            "provenance": {"writes_performed": False, "builder": "recruiter_application_materials_flow"},
+        }
     provider_called = bool(getattr(executor, "provider_backed", False))
     reviewer_input = {
         "skill_id": DOCUMENT_REVIEWER_SKILL_ID,
