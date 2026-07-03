@@ -13,6 +13,10 @@ from .recruiter_real_data_privacy_gate import (
     build_invalid_career_source_spec_report,
     evaluate_real_data_application_materials_privacy_gate,
 )
+from .recruiter_real_data_run_ledger import (
+    check_and_record_attempt,
+    finalize_attempt,
+)
 from .recruiter_dry_run import (
     REQUIRED_APPLICATION_MATERIAL_TARGETS,
     RecruiterApplicationMaterialsSmokeReport,
@@ -76,6 +80,9 @@ def register_recruiter_context_subparser(subparsers: argparse._SubParsersAction)
     dry_run.add_argument("--positioning-packet-json", default=None, help="Read only this positioning packet JSON file for application-materials dry-runs")
     dry_run.add_argument("--document-target", default=None, help="Optional application-materials document target")
     dry_run.add_argument("--allow-provider-execution", action="store_true", help="Explicitly allow provider-backed evaluation for READY evaluate-vacancy dry-runs")
+    dry_run.add_argument("--real-data-attempt-ledger-path", default=None, help="Optional metadata-only /tmp ledger path for single-pass real-data provider attempt guarding")
+    dry_run.add_argument("--real-data-attempt-override", action="store_true", help="Explicitly override duplicate-stage or target-followup real-data attempt guard")
+    dry_run.add_argument("--real-data-report-path", default=None, help="Optional report path metadata recorded in the real-data attempt ledger")
     dry_run.add_argument(
         "--private-context-status",
         choices=["PRIVATE_CONTEXT_AVAILABLE", "PRIVATE_CONTEXT_MISSING", "PRIVATE_CONTEXT_NOT_INSPECTED"],
@@ -243,7 +250,35 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
                     )
                     if getattr(args, "fake_positioning_output", False):
                         run_kwargs["fake_positioning_result_factory"] = build_fake_positioning_packet_from_candidate_facts
+                    ledger_decision = None
+                    if getattr(args, "allow_provider_execution", False) and getattr(args, "real_data_attempt_ledger_path", None):
+                        ledger_decision = check_and_record_attempt(
+                            flow="positioning-and-evidence",
+                            vacancy_source_ref=_real_data_vacancy_source_marker(evaluation_packet),
+                            career_fact_source_refs=_real_data_career_source_markers(candidate_facts_packet),
+                            provider_execution_allowed=True,
+                            ledger_path=getattr(args, "real_data_attempt_ledger_path", None),
+                            explicit_override=getattr(args, "real_data_attempt_override", False),
+                            report_path=getattr(args, "real_data_report_path", None),
+                        )
+                        if not ledger_decision.ready:
+                            sys.stdout.write(json.dumps(ledger_decision.to_dict(), sort_keys=True) + "\n")
+                            raise SystemExit(1)
                     report = run_recruiter_positioning_flow_dry_run(**run_kwargs)
+                    if ledger_decision is not None:
+                        finalize_attempt(
+                            run_id=str(ledger_decision.run_id),
+                            attempt_status="completed" if report.status in _READY_STATUSES else "failed",
+                            ledger_path=getattr(args, "real_data_attempt_ledger_path", None),
+                            report_path=getattr(args, "real_data_report_path", None),
+                            exit_status=0 if report.status in _READY_STATUSES else 1,
+                        )
+                        report.provenance["real_data_attempt"] = {
+                            "run_id": ledger_decision.run_id,
+                            "stage": ledger_decision.stage,
+                            "source_set_hash": ledger_decision.source_set_hash,
+                            "attempt_index": ledger_decision.attempt_index,
+                        }
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if report.status in _READY_STATUSES else 1)
     if getattr(args, "flow", None) == "application-materials":
@@ -258,6 +293,21 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
             except json.JSONDecodeError:
                 report = _cli_error_report("positioning_packet_json_invalid")
             else:
+                ledger_decision = None
+                if getattr(args, "allow_provider_execution", False) and getattr(args, "real_data_attempt_ledger_path", None):
+                    ledger_decision = check_and_record_attempt(
+                        flow="application-materials",
+                        vacancy_source_ref=_real_data_vacancy_source_marker(positioning_packet),
+                        career_fact_source_refs=_real_data_career_source_markers(positioning_packet),
+                        provider_execution_allowed=True,
+                        document_target=getattr(args, "document_target", None),
+                        ledger_path=getattr(args, "real_data_attempt_ledger_path", None),
+                        explicit_override=getattr(args, "real_data_attempt_override", False),
+                        report_path=getattr(args, "real_data_report_path", None),
+                    )
+                    if not ledger_decision.ready:
+                        sys.stdout.write(json.dumps(ledger_decision.to_dict(), sort_keys=True) + "\n")
+                        raise SystemExit(1)
                 report = run_recruiter_application_materials_flow_dry_run(
                     positioning_packet=positioning_packet,
                     repo_root=repo_root,
@@ -265,6 +315,20 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
                     allow_provider_execution=getattr(args, "allow_provider_execution", False),
                     document_target=getattr(args, "document_target", None),
                 )
+                if ledger_decision is not None:
+                    finalize_attempt(
+                        run_id=str(ledger_decision.run_id),
+                        attempt_status="completed" if report.status in _READY_STATUSES else "failed",
+                        ledger_path=getattr(args, "real_data_attempt_ledger_path", None),
+                        report_path=getattr(args, "real_data_report_path", None),
+                        exit_status=0 if report.status in _READY_STATUSES else 1,
+                    )
+                    report.provenance["real_data_attempt"] = {
+                        "run_id": ledger_decision.run_id,
+                        "stage": ledger_decision.stage,
+                        "source_set_hash": ledger_decision.source_set_hash,
+                        "attempt_index": ledger_decision.attempt_index,
+                    }
         sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
         raise SystemExit(0 if report.status in _READY_STATUSES else 1)
 
@@ -280,6 +344,39 @@ def cmd_recruiter_context(args: argparse.Namespace) -> None:
     report = run_recruiter_context_dry_run(request)
     sys.stdout.write(json.dumps(report.to_dict(), sort_keys=True) + "\n")
     raise SystemExit(0 if report.status in _READY_STATUSES else 1)
+
+
+def _real_data_vacancy_source_marker(packet: dict[str, object] | None) -> str:
+    payload = packet or {}
+    marker = {
+        "schema_version": payload.get("schema_version"),
+        "skill_id": payload.get("skill_id"),
+        "status": payload.get("status"),
+        "provenance": payload.get("provenance"),
+        "source_references": payload.get("source_references"),
+    }
+    return json.dumps(marker, sort_keys=True)
+
+
+def _real_data_career_source_markers(packet: dict[str, object] | None) -> list[str]:
+    payload = packet or {}
+    source_references = payload.get("source_references")
+    markers: list[str] = []
+    if isinstance(source_references, list):
+        for item in source_references:
+            if not isinstance(item, dict):
+                continue
+            marker = {
+                "source_ref_id": item.get("source_ref_id"),
+                "source_id_hash": item.get("source_id_hash"),
+                "content_hash": item.get("content_hash"),
+                "section_label": item.get("section_label"),
+                "category": item.get("category"),
+            }
+            markers.append(json.dumps(marker, sort_keys=True))
+    if markers:
+        return sorted(set(markers))
+    return [json.dumps({"provenance": payload.get("provenance"), "candidate_ref": payload.get("candidate_ref")}, sort_keys=True)]
 
 
 def _optional_path(value: str | None) -> Path | None:
