@@ -1732,6 +1732,23 @@ def test_application_materials_flow_dry_run_uses_deterministic_composer_for_cove
     assert report.application_materials_result["document_runs"]["cover_letter_draft"]["reviewer_called"] is True
 
 
+def test_application_materials_flow_dry_run_allows_natural_deterministic_recruiter_message() -> None:
+    executor = _ApplicationMaterialsExecutor()
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        document_target="recruiter_message_draft",
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_READY
+    run_report = report.application_materials_result["document_runs"]["recruiter_message_draft"]
+    assert run_report["status"] == "DOCUMENT_REVIEW_APPROVED"
+    assert run_report["errors"] == []
+    assert run_report["reviewer_called"] is True
+
+
 def test_application_materials_flow_dry_run_blocks_deterministic_draft_with_internal_packet_language(monkeypatch) -> None:
     from hermes_cli import recruiter_application_materials_flow as flow_module
 
@@ -1758,6 +1775,23 @@ def test_application_materials_flow_dry_run_blocks_deterministic_draft_with_inte
     assert run_report["errors"] == ["writer_internal_language_forbidden"]
     assert run_report["reviewer_called"] is False
     assert report.application_materials_result["reviewer_called"] is False
+
+
+def test_application_materials_flow_dry_run_allows_natural_deterministic_cover_letter() -> None:
+    executor = _ApplicationMaterialsExecutor()
+    report = run_recruiter_application_materials_flow_dry_run(
+        positioning_packet=_ready_positioning_packet(),
+        private_context_status="PRIVATE_CONTEXT_AVAILABLE",
+        allow_provider_execution=True,
+        document_target="cover_letter_draft",
+        executor_factory=lambda: executor,
+    )
+
+    assert report.status is RecruiterDryRunStatus.APPLICATION_MATERIALS_READY
+    run_report = report.application_materials_result["document_runs"]["cover_letter_draft"]
+    assert run_report["status"] == "DOCUMENT_REVIEW_APPROVED"
+    assert run_report["errors"] == []
+    assert run_report["reviewer_called"] is True
 
 
 def test_application_materials_flow_dry_run_all_required_keeps_writer_called_truthful_when_only_cv_notes_use_writer() -> None:
