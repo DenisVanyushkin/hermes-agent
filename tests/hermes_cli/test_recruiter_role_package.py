@@ -14,6 +14,12 @@ REQUIRED_SKILLS = {
     "positioning-and-evidence",
     "document-writer",
     "document-reviewer",
+    "company-research",
+    "company-assessment",
+    "company-risk-register",
+    "fit-recommendation",
+    "questions-to-ask",
+    "manual-review-warnings",
 }
 REQUIRED_BUNDLES = {
     "evaluate-vacancy.yaml": ["vacancy-evaluation", "positioning-and-evidence"],
@@ -22,6 +28,16 @@ REQUIRED_BUNDLES = {
         "positioning-and-evidence",
         "document-writer",
         "document-reviewer",
+    ],
+    "company-vacancy-decision-support.yaml": [
+        "vacancy-evaluation",
+        "company-research",
+        "company-assessment",
+        "company-risk-register",
+        "fit-recommendation",
+        "positioning-and-evidence",
+        "questions-to-ask",
+        "manual-review-warnings",
     ],
 }
 
