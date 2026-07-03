@@ -104,13 +104,20 @@ class TestRecruiterRolePackageDiscovery:
         assert payload["package_id"] == "hermes-recruiter"
         assert payload["role_id"] == "hermes_recruiter"
         assert [item["id"] for item in payload["skills"]] == [
+            "company-assessment",
+            "company-research",
+            "company-risk-register",
             "document-reviewer",
             "document-writer",
+            "fit-recommendation",
+            "manual-review-warnings",
             "positioning-and-evidence",
+            "questions-to-ask",
             "vacancy-evaluation",
         ]
         assert [item["id"] for item in payload["bundles"]] == [
             "application-materials",
+            "company-vacancy-decision-support",
             "evaluate-vacancy",
         ]
         assert payload["bundles_by_id"]["evaluate-vacancy"]["skills"] == [

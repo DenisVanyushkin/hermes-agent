@@ -6,17 +6,21 @@ from pathlib import Path
 import re
 from typing import Any
 
+from .recruiter_decision_modules import DECISION_BUNDLE_ID, parse_requested_outputs
 from .role_packages import build_repo_role_package_skill_context
 
 
 RECRUITER_ROLE_ID = "hermes_recruiter"
-DEFAULT_BUNDLE_ID = "evaluate-vacancy"
+EVALUATE_VACANCY_BUNDLE_ID = "evaluate-vacancy"
+DECISION_SUPPORT_BUNDLE_ID = DECISION_BUNDLE_ID
+DEFAULT_BUNDLE_ID = DECISION_SUPPORT_BUNDLE_ID
 APPLICATION_MATERIALS_BUNDLE_ID = "application-materials"
 _RECRUITER_PACKAGE_DIR = Path("role-packages") / "recruiter"
 _MANUAL_HANDOFF_REASON = "controlled_recruiter_core_exists_but_provider_execution_stays_disabled"
 _DEFAULT_NEXT_ALLOWED_ACTIONS = [
     "recruiter-context dry-run",
     "recruiter-skill execute",
+    "recruiter-decision run",
 ]
 _APPLICATION_MATERIALS_NEXT_ALLOWED_ACTIONS = [
     "recruiter-context dry-run",
@@ -151,6 +155,8 @@ class RecruiterRoutingDecision:
     provider_execution_enabled: bool = False
     document_provider_execution_enabled: bool = False
     role_package_context: dict[str, Any] = field(default_factory=dict)
+    requested_outputs: list[str] = field(default_factory=list)
+    requested_outputs_preset: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -189,20 +195,31 @@ def route_recruiter_prompt(prompt: str, *, context: dict[str, Any] | None = None
         recruiter_signals.append("job_url")
 
     warnings: list[str] = []
+    requested_outputs: list[str] = []
+    requested_outputs_preset: str | None = None
     if application_signals:
         bundle_id = APPLICATION_MATERIALS_BUNDLE_ID
         reasoning = "Prompt asks for recruiter-facing application materials."
         warnings.append(_APPLICATION_MATERIALS_POSITIONING_WARNING)
         next_actions = list(_APPLICATION_MATERIALS_NEXT_ALLOWED_ACTIONS)
-    elif evaluation_signals:
-        bundle_id = DEFAULT_BUNDLE_ID
-        reasoning = "Prompt asks for vacancy evaluation or apply/no-apply guidance."
-        next_actions = list(_DEFAULT_NEXT_ALLOWED_ACTIONS)
     else:
-        bundle_id = DEFAULT_BUNDLE_ID
-        reasoning = "Prompt is recruiter-related but ambiguous, so the safe default is vacancy evaluation."
-        warnings.append("application-materials requires a positioning packet; defaulted to evaluate-vacancy")
+        bundle_id = DECISION_SUPPORT_BUNDLE_ID
         next_actions = list(_DEFAULT_NEXT_ALLOWED_ACTIONS)
+        parsed = parse_requested_outputs(text, context=context)
+        requested_outputs = list(parsed.requested)
+        requested_outputs_preset = parsed.preset_id
+        warnings.extend(parsed.warnings)
+        if evaluation_signals:
+            reasoning = "Prompt asks for vacancy/company decision support."
+        else:
+            reasoning = (
+                "Prompt is recruiter-related but ambiguous, so the safe default is the "
+                "decision-support bundle with a targeted module subset."
+            )
+            warnings.append(
+                "ambiguous recruiter request; defaulted to decision-support modules "
+                f"{requested_outputs_preset or 'quick_vacancy_screen'}"
+            )
 
     role_package_context = _build_role_package_context(context)
     return RecruiterRoutingDecision(
@@ -214,6 +231,8 @@ def route_recruiter_prompt(prompt: str, *, context: dict[str, Any] | None = None
         warnings=warnings,
         next_allowed_actions=next_actions,
         role_package_context=role_package_context,
+        requested_outputs=requested_outputs,
+        requested_outputs_preset=requested_outputs_preset,
     )
 
 
@@ -268,6 +287,8 @@ def _build_role_context(decision: RecruiterRoutingDecision) -> dict[str, Any]:
         "bundle_skill_ids": bundle_skill_ids,
         "bundle_required_inputs": bundle_required_inputs,
         "bundle_expected_outputs": bundle_expected_outputs,
+        "requested_outputs": list(decision.requested_outputs),
+        "requested_outputs_preset": decision.requested_outputs_preset,
     }
 
 

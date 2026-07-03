@@ -8,12 +8,14 @@ from typing import Any
 
 from .recruiter_routing import (
     APPLICATION_MATERIALS_BUNDLE_ID,
+    DECISION_SUPPORT_BUNDLE_ID,
     RECRUITER_ROLE_ID,
     build_recruiter_handoff_metadata,
 )
 
 
 _EVALUATE_VACANCY_FLOW_ID = "evaluate-vacancy"
+_SUPPORTED_EVALUATION_BUNDLES = {_EVALUATE_VACANCY_FLOW_ID, DECISION_SUPPORT_BUNDLE_ID}
 _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 _TEXT_SOURCE_PATTERNS = (
     re.compile(r"\b(company|responsibilities|requirements|title)\s*:", re.IGNORECASE),
@@ -130,7 +132,7 @@ def build_recruiter_evaluation_flow(request: RecruiterEvaluationFlowRequest) -> 
         report.status_reason = "selected role is not recruiter"
         report.next_allowed_actions = []
         return report
-    if selected_bundle != _EVALUATE_VACANCY_FLOW_ID:
+    if selected_bundle not in _SUPPORTED_EVALUATION_BUNDLES:
         report.status = RecruiterEvaluationFlowStatus.BLOCKED_UNSUPPORTED_BUNDLE
         report.status_reason = "selected recruiter bundle is not supported by evaluate-vacancy flow"
         report.next_allowed_actions = []

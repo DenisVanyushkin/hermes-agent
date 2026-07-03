@@ -1,0 +1,12 @@
+name: company-vacancy-decision-support
+description: Modular company and vacancy decision-support bundle; any subset of analysis modules can be requested.
+skills:
+  - vacancy-evaluation
+  - company-research
+  - company-assessment
+  - company-risk-register
+  - fit-recommendation
+  - positioning-and-evidence
+  - questions-to-ask
+  - manual-review-warnings
+expected_output: recruiter_decision_support_packet_v1
