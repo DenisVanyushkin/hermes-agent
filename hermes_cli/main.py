@@ -12238,7 +12238,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
         "project", "proxy",
         "prompt-size",
-        "recruiter-context", "recruiter-document", "recruiter-skill", "send", "sessions", "setup",
+        "recruiter-context", "recruiter-decision", "recruiter-document", "recruiter-skill", "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -13004,6 +13004,12 @@ def main():
     # =========================================================================
     from hermes_cli.recruiter_skill_execution_cli import register_recruiter_skill_subparser
     register_recruiter_skill_subparser(subparsers)
+
+    # =========================================================================
+    # recruiter-decision command — modular decision-support bundle (draft-only)
+    # =========================================================================
+    from hermes_cli.recruiter_decision_cli import register_recruiter_decision_subparser
+    register_recruiter_decision_subparser(subparsers)
 
     # =========================================================================
     # login command  (parser built in hermes_cli/subcommands/login.py)
