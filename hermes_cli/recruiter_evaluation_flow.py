@@ -169,7 +169,12 @@ def _detect_vacancy_source_status(prompt: str) -> str:
 
 def _resolve_repo_root(repo_root: str | Path | None) -> Path:
     if repo_root is None:
-        return Path.cwd()
+        # The gateway's cwd is ~/.hermes, not the source repo — resolve from this file.
+        current = Path(__file__).resolve()
+        for candidate in current.parents:
+            if (candidate / ".git").exists() or (candidate / "role-packages").is_dir():
+                return candidate
+        return current.parents[1]
     return Path(repo_root)
 
 
