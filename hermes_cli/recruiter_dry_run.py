@@ -848,7 +848,23 @@ def run_recruiter_application_materials_flow_dry_run(
         base_report.errors = ["application_materials_provider_execution_failed"]
         return base_report
 
-    base_report.application_materials_result = flow_report.to_dict()
+    result_payload = flow_report.to_dict()
+    target_keys = _resolve_application_material_smoke_targets(
+        all_required_targets=document_target is None,
+        document_target=document_target,
+    )
+    result_payload["review_summary"] = _build_application_materials_review_summary(flow_report)
+    result_payload["target_results"] = _build_application_material_target_results(
+        target_keys,
+        status="ready",
+        flow_report=flow_report,
+    )
+    result_payload["causing_target"] = _find_application_materials_causing_target(result_payload["target_results"], target_keys)
+    result_payload["block_reason"] = _find_application_materials_block_reason(
+        result_payload["target_results"],
+        result_payload["causing_target"],
+    )
+    base_report.application_materials_result = result_payload
     base_report.downstream_gates = dict(flow_report.downstream_gates)
     if flow_report.status == "APPLICATION_MATERIALS_READY":
         base_report.status = RecruiterDryRunStatus.APPLICATION_MATERIALS_READY
@@ -1554,7 +1570,7 @@ def _build_application_material_target_results(
             }
             continue
         document_packet = dict(run_payload.get("document_packet") or {})
-        review_result = dict(run_payload.get("review_result") or {})
+        review_result = _review_result_payload(run_payload)
         downstream_gates = dict(run_payload.get("downstream_gates") or {})
         document_writer_gate = dict(downstream_gates.get("document_writer") or {})
         document_review_gate = dict(downstream_gates.get("document_review") or {})
@@ -1574,10 +1590,19 @@ def _build_application_material_target_results(
         reviewer_gate_status = document_review_gate.get("status")
         if reviewer_called and review_result.get("verdict"):
             reviewer_gate_status = review_result.get("verdict")
+        diagnostics = _build_report_safe_reviewer_diagnostics(review_result)
+        block_reason = _application_material_target_block_reason(
+            execution_status=execution_status,
+            reviewer_called=reviewer_called,
+            review_result=review_result,
+            diagnostics=diagnostics,
+            errors=_string_list(run_payload.get("errors")),
+        )
         target_results[target] = {
             "status": target_status,
+            "blocked": target_status != "ready",
             "generated": bool(document_packet),
-            "ready": target_status == "ready",
+            "ready": False if target_status != "ready" else True,
             "draft_only": document_packet.get("status") == "DRAFT_READY",
             "user_review_required": True,
             "writer_called": writer_called,
@@ -1590,8 +1615,98 @@ def _build_application_material_target_results(
                 or isinstance(notes, str) and notes.strip()
                 or isinstance(draft.get("notes"), list) and draft.get("notes")
             ),
+            "block_reason": block_reason,
+            "reviewer_diagnostics_counts": {
+                "unsupported_claims_count": diagnostics["unsupported_claims_count"],
+                "missing_source_references_count": diagnostics["missing_source_references_count"],
+                "required_changes_count": diagnostics["required_changes_count"],
+            },
+            "sanitized_reviewer_diagnostics_summary": _dedupe(
+                [
+                    *diagnostics["unsupported_claim_summaries"],
+                    *diagnostics["missing_source_reference_summaries"],
+                    *diagnostics["required_change_summaries"],
+                ]
+            ),
         }
     return target_results
+
+
+def _review_result_payload(run_payload: dict[str, Any]) -> dict[str, Any]:
+    review_result = dict(run_payload.get("review_result") or {})
+    invalid_payload = review_result.get("invalid_payload")
+    if isinstance(invalid_payload, dict):
+        return dict(invalid_payload)
+    return review_result
+
+
+def _application_material_target_block_reason(
+    *,
+    execution_status: str,
+    reviewer_called: bool,
+    review_result: dict[str, Any],
+    diagnostics: dict[str, Any],
+    errors: list[str],
+) -> str | None:
+    if execution_status == RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_APPROVED.value:
+        return None
+    verdict = str(review_result.get("verdict") or "")
+    if execution_status == RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_CHANGES_REQUESTED.value:
+        if not reviewer_called or not review_result:
+            return "DOCUMENT_REVIEW_RESULT_MISSING"
+        if verdict == "CHANGES_REQUESTED":
+            if diagnostics["unsupported_claims_count"] > 0:
+                return "UNSUPPORTED_CLAIMS_PRESENT"
+            if diagnostics["missing_source_references_count"] > 0:
+                return "MISSING_SOURCE_REFERENCES_PRESENT"
+            if diagnostics["required_changes_count"] > 0:
+                return "REQUIRED_CHANGES_REQUESTED"
+            return "DOCUMENT_REVIEW_DIAGNOSTICS_UNAVAILABLE"
+        if verdict == "BLOCKED":
+            return "DOCUMENT_REVIEW_BLOCKED"
+        if verdict == "PENDING":
+            return "DOCUMENT_REVIEW_PENDING_BLOCKING"
+        if verdict:
+            return "DOCUMENT_REVIEW_RESULT_INVALID"
+        return "DOCUMENT_REVIEW_RESULT_MISSING"
+    if execution_status == RecruiterDocumentExecutionStatus.DOCUMENT_REVIEW_INVALID.value:
+        if verdict == "PENDING":
+            return "DOCUMENT_REVIEW_PENDING_BLOCKING"
+        if review_result:
+            return "DOCUMENT_REVIEW_RESULT_INVALID"
+        return "DOCUMENT_REVIEW_RESULT_MISSING"
+    if execution_status == RecruiterDocumentExecutionStatus.DOCUMENT_OUTPUT_INVALID.value:
+        if any("internal_language" in item for item in errors):
+            return "DOCUMENT_OUTPUT_INTERNAL_LANGUAGE_FORBIDDEN"
+        return "DOCUMENT_OUTPUT_INVALID"
+    if execution_status == RecruiterDocumentExecutionStatus.DOCUMENT_INPUT_NOT_READY.value:
+        return "DOCUMENT_WRITER_INPUT_NOT_READY"
+    if execution_status == RecruiterDocumentExecutionStatus.DOCUMENT_EXECUTOR_NOT_WIRED.value:
+        return "DOCUMENT_EXECUTOR_NOT_WIRED"
+    if execution_status == RecruiterDocumentExecutionStatus.DOCUMENT_EXECUTION_BLOCKED.value:
+        return "DOCUMENT_EXECUTION_BLOCKED"
+    return execution_status or "DOCUMENT_REVIEW_DIAGNOSTICS_UNAVAILABLE"
+
+
+def _find_application_materials_causing_target(
+    target_results: dict[str, dict[str, Any]],
+    target_keys: list[str],
+) -> str | None:
+    for target in target_keys:
+        payload = dict(target_results.get(target) or {})
+        if payload and payload.get("blocked") and payload.get("status") != "not_requested":
+            return target
+    return None
+
+
+def _find_application_materials_block_reason(
+    target_results: dict[str, dict[str, Any]],
+    causing_target: str | None,
+) -> str | None:
+    if causing_target is None:
+        return None
+    payload = dict(target_results.get(causing_target) or {})
+    return str(payload.get("block_reason") or "") or None
 
 
 def _validate_application_materials_input_gate(
