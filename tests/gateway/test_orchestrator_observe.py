@@ -414,8 +414,8 @@ def test_gateway_orchestrator_observe_engineering_pipeline_adds_plan_only_report
     engineer_runtime_plan = payload["pipeline_plan"]["step_records"][0]["runtime_factory_plan"]
     reviewer_runtime_plan = payload["pipeline_plan"]["step_records"][1]["runtime_factory_plan"]
     assert engineer_runtime_plan["status"] == "plan_only"
-    assert engineer_runtime_plan["provider"] == "openrouter"
-    assert engineer_runtime_plan["model"] == "xiaomi/mimo-v2.5-pro"
+    assert engineer_runtime_plan["provider"] == "openai-codex"
+    assert engineer_runtime_plan["model"] == "gpt-5.4"
     assert engineer_runtime_plan["tool_policy"]["write"] == ["patch", "write_file"]
     assert engineer_runtime_plan["environment_policy"]["can_mutate_files"] is True
     assert reviewer_runtime_plan["status"] == "plan_only"
