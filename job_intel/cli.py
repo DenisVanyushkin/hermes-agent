@@ -49,7 +49,7 @@ from .digest import (
 )
 from .evaluator import classify_vacancy, score_vacancy, score_vacancy_with_version, score_vacancy_v3_shadow
 from .enrichment import detect_high_value_questions
-from .observability import JobIntelObservabilityExporter, record_daily_observability
+from .observability import JobIntelObservabilityExporter, derive_source_reason, record_daily_observability
 from .performance import (
     PerformanceSpan,
     RunPerformanceRecorder,
@@ -376,7 +376,8 @@ def _skipped_source_status(source: str, *, acquisition: str | None = None) -> di
         acquisition=acquisition or source,
         runtime_seconds=0.0,
     )
-    payload["reason"] = "disabled by JOB_INTEL_ENABLED_SOURCES"
+    payload["reason"] = "disabled_by_config"
+    payload["reason_detail"] = "disabled by JOB_INTEL_ENABLED_SOURCES"
     return payload
 
 
@@ -401,6 +402,17 @@ def _collect_vacancies(
             target_runtime_seconds = perf_counter() - target_started
             vacancies.extend(target_result.vacancies)
             company_ok = any(status.get("status") == "ok" for status in target_result.company_statuses.values())
+            target_outcomes = [str(s.get("outcome") or "") for s in target_result.company_statuses.values()]
+            if target_result.vacancies:
+                target_reason = "ok_non_empty"
+            elif target_result.browser.get("requested") and not target_result.browser.get("available"):
+                target_reason = str(target_result.browser.get("reason") or "browser_unavailable")
+            elif any(o == "ats_seeds_discovered_only" for o in target_outcomes) and not any(o == "js_render_required" for o in target_outcomes):
+                target_reason = "ats_seeds_discovered_only"
+            elif any(o == "js_render_required" for o in target_outcomes):
+                target_reason = "js_render_required"
+            else:
+                target_reason = "real_empty"
             statuses["target_companies"] = _source_status_template(
                 "target-companies",
                 status="ok" if company_ok or target_result.vacancies else ("error" if target_result.company_statuses else "empty"),
@@ -408,6 +420,8 @@ def _collect_vacancies(
                 companies=len(target_result.company_statuses),
                 company_statuses=target_result.company_statuses,
                 runtime_seconds=target_runtime_seconds,
+                reason=target_reason,
+                browser=target_result.browser,
             )
             perf_span.set_counts(
                 found_count=len(target_result.vacancies),
@@ -615,6 +629,10 @@ def _collect_vacancies(
                 errors = list(all_errors)
                 status = status_from_hits_errors(hits, errors)
                 payload = _source_status_template(source, status=status, hits=hits, errors=errors, acquisition=acquisition)
+                seeds_present = bool(registry_entries or env_seed_companies or discovery_companies)
+                payload["seeds_present"] = seeds_present
+                if not seeds_present and hits == 0 and not errors:
+                    payload["reason"] = "missing_seeds"
                 payload["discovered_companies"] = int(discovered_companies or 0)
                 payload["pages_fetched"] = int(pages_fetched or 0)
                 payload["runtime_seconds"] = perf_counter() - started
@@ -2540,6 +2558,8 @@ def run_daily() -> str:
                     source,
                     {
                         "source_status": src_status.get("status"),
+                        "skip_reason": derive_source_reason(src_status),
+                        "enabled": 0 if str(src_status.get("status") or "") == "skipped" else 1,
                         "acquisition_mode": src_status.get("acquisition"),
                         "runtime_seconds": float(src_status.get("runtime_seconds") or 0.0),
                         "attempts": None,
@@ -3525,6 +3545,20 @@ def _check_health_conditions(store: "JobIntelStore") -> list[str]:
             ).fetchall()
             for src, walls in login_walls:
                 problems.append(f"Login wall: {src} ({walls} events)")
+
+            # 4b. LinkedIn session lost: login wall on every one of the last 3
+            # daily runs means the browser profile needs manual re-auth.
+            recent_walls = conn.execute(
+                "SELECT k.login_walls FROM source_kpi_run k "
+                "JOIN runs r ON r.id = k.run_id "
+                "WHERE k.source='linkedin' AND r.mode='daily' "
+                "ORDER BY k.run_id DESC LIMIT 3",
+            ).fetchall()
+            if len(recent_walls) >= 3 and all(int(r[0] or 0) > 0 for r in recent_walls):
+                problems.append(
+                    "LinkedIn re-auth required: login wall on 3+ consecutive daily runs "
+                    "(browser profile session lost). Runbook: docs/runbooks/linkedin-reauth.md"
+                )
 
             # 5. Daily digest delivery failure
             fail = conn.execute(

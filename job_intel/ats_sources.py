@@ -724,6 +724,33 @@ def fetch_smartrecruiters(
     return AtsSourceResult(vacancies=vacancies, errors=errors, discovered_companies=len(companies), pages_fetched=pages)
 
 
+def extract_teamtailor_job_urls(html: str, base_url: str, *, limit: int = 80) -> list[str]:
+    """Extract job posting URLs from a Teamtailor listing page.
+
+    Handles both relative hrefs (`/jobs/123-title`) and absolute URLs used by
+    tenants on custom career domains (e.g. career.instabee.com). Links pointing
+    to other hosts are ignored so external boards never masquerade as jobs.
+    """
+    base_host = urlparse(base_url).netloc.lower()
+    href_re = re.compile(r"href=['\"](?P<href>[^'\"#?]*/jobs/[^'\"#?]+)['\"]", flags=re.I)
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in href_re.finditer(html or ""):
+        absolute = urljoin(base_url, match.group("href"))
+        parsed = urlparse(absolute)
+        if parsed.netloc.lower() != base_host:
+            continue
+        if not re.search(r"(^|/)jobs/[^/]", parsed.path):
+            continue
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        urls.append(absolute)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
 def fetch_teamtailor(
     queries: list[str],
     *,
@@ -742,8 +769,6 @@ def fetch_teamtailor(
     vacancies: list[Vacancy] = []
     errors: list[str] = []
     pages = 0
-
-    href_re = re.compile(r"href=['\"](?P<href>/jobs/[^'\"#?]+)['\"]", flags=re.I)
 
     for company in companies:
         base = f"https://{company}.teamtailor.com/jobs"
@@ -765,9 +790,8 @@ def fetch_teamtailor(
                 if resp.status_code != 200:
                     break
                 found = 0
-                for match in href_re.finditer(resp.text or ""):
-                    href = match.group("href")
-                    absolute = urljoin(url, href)
+                # resp.url reflects redirects to tenant custom career domains.
+                for absolute in extract_teamtailor_job_urls(resp.text or "", str(resp.url or url), limit=max_jobs_per_company):
                     if absolute in seen_jobs:
                         continue
                     seen_jobs.add(absolute)

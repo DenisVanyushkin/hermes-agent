@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -11,7 +12,6 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
-from .browser_sourcing import BrowserAcquisitionConfig, BrowserNativeUnavailable, BrowserSourceClient, browser_native_available, resolve_browser_config
 from .config import DEFAULT_CONFIG, load_config_bundle
 from .models import Vacancy
 from .runtime import retry_with_backoff, sha256_text
@@ -74,6 +74,43 @@ class TargetCompany:
 class CompanyMonitoringResult:
     vacancies: list[Vacancy] = field(default_factory=list)
     company_statuses: dict[str, dict[str, Any]] = field(default_factory=dict)
+    browser: dict[str, Any] = field(default_factory=dict)
+
+
+_ATS_REF_RE = re.compile(
+    r"(greenhouse\.io|lever\.co|ashbyhq\.com|smartrecruiters\.com|teamtailor\.com|personio|recruitee\.com|workable\.com|bamboohr)",
+    flags=re.I,
+)
+
+
+def classify_target_company_outcome(
+    *,
+    openings: int,
+    errors: list[str],
+    career_urls: list[str],
+    ats_refs: list[str],
+    job_link_count: int,
+    browser_used: bool,
+) -> str:
+    """Explain what a target-company crawl actually produced this run."""
+    if openings > 0:
+        return "ok_non_empty"
+    # ATS references beat partial fetch errors: probing several candidate
+    # career paths routinely 404s on some of them.
+    if ats_refs:
+        return "ats_seeds_discovered_only"
+    joined = " ".join(errors)
+    if "403" in joined:
+        return "blocked_403"
+    if "404" in joined:
+        return "wrong_path"
+    if errors:
+        return "collection_error"
+    if career_urls and job_link_count > 0 and not browser_used:
+        return "js_render_required"
+    if career_urls and not browser_used:
+        return "js_render_required"
+    return "real_empty"
 
 
 class _LinkParser(HTMLParser):
@@ -169,15 +206,97 @@ def load_target_companies() -> list[_TargetCompanyRecord]:
     return companies
 
 
-def _fetch_html(url: str) -> str:
-    use_browser = os.getenv("JOB_INTEL_TARGET_COMPANY_BROWSER", "0").strip().lower() in {"1", "true", "yes"}
-    if use_browser and browser_native_available():
-        config = resolve_browser_config("company_career")
-        try:
-            with BrowserSourceClient(config) as client:
-                return client.fetch_html(url)
-        except BrowserNativeUnavailable:
-            pass
+class BrowserFetchUnavailable(RuntimeError):
+    """Browser-rendered fetch was requested but could not be performed."""
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(detail or reason)
+        self.reason = reason
+        self.detail = detail
+
+
+_BROWSER_PREFLIGHT: tuple[bool, str] | None = None
+
+
+def _reset_browser_preflight_cache() -> None:
+    global _BROWSER_PREFLIGHT
+    _BROWSER_PREFLIGHT = None
+
+
+def _browser_preflight() -> tuple[bool, str]:
+    """Check once per process whether the browser-worker runtime is usable.
+
+    Target-company pages must be fetched through the `job_intel.browser_worker`
+    subprocess (playwright lives in the browser runtime venv, not in the main
+    venv), so availability means: worker python exists and has playwright.
+    """
+    global _BROWSER_PREFLIGHT
+    if _BROWSER_PREFLIGHT is not None:
+        return _BROWSER_PREFLIGHT
+    from .browser_sourcing import _browser_python_has_playwright, _browser_runtime_python
+
+    python_path = _browser_runtime_python()
+    if not python_path.exists() or not _browser_python_has_playwright():
+        _BROWSER_PREFLIGHT = (False, "browser_unavailable")
+    else:
+        _BROWSER_PREFLIGHT = (True, "")
+    return _BROWSER_PREFLIGHT
+
+
+def _browser_fetch_html(url: str, *, timeout_seconds: int = 120) -> str:
+    """Fetch a page rendered by the browser worker subprocess.
+
+    Raises BrowserFetchUnavailable with an explicit reason instead of failing
+    silently — callers surface the reason in source diagnostics.
+    """
+    from .browser_sourcing import _browser_runtime_python
+
+    cmd = [
+        str(_browser_runtime_python()),
+        "-m",
+        "job_intel.browser_worker",
+        "fetch",
+        url,
+        "--source",
+        "company_career",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise BrowserFetchUnavailable("browser_worker_failed", f"worker timeout after {timeout_seconds}s") from exc
+    except OSError as exc:
+        raise BrowserFetchUnavailable("browser_unavailable", str(exc)) from exc
+    payload: dict[str, Any] | None = None
+    for line in reversed((proc.stdout or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                payload = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+    if proc.returncode != 0 or not isinstance(payload, dict) or not payload.get("ok"):
+        detail = ""
+        if isinstance(payload, dict):
+            detail = str(payload.get("error") or "")
+        detail = detail or (proc.stderr or "").strip()[:500]
+        raise BrowserFetchUnavailable("browser_worker_failed", detail)
+    return str(payload.get("html") or "")
+
+
+def _fetch_html(url: str, *, use_browser: bool | None = None) -> str:
+    if use_browser is None:
+        use_browser = os.getenv("JOB_INTEL_TARGET_COMPANY_BROWSER", "0").strip().lower() in {"1", "true", "yes"}
+    if use_browser:
+        ok, _reason = _browser_preflight()
+        if ok:
+            global _BROWSER_PREFLIGHT
+            try:
+                return _browser_fetch_html(url)
+            except BrowserFetchUnavailable as exc:
+                # Fail visible (reason lands in source diagnostics) but keep the
+                # run alive on the HTTP path; don't retry the worker this run.
+                _BROWSER_PREFLIGHT = (False, exc.reason)
 
     timeout = float(os.getenv("JOB_INTEL_TARGET_HTTP_TIMEOUT_SECONDS", "8"))
 
@@ -415,8 +534,13 @@ def monitor_target_companies(store: JobIntelStore) -> CompanyMonitoringResult:
     companies = load_target_companies()
     vacancies: list[Vacancy] = []
     company_statuses: dict[str, dict[str, Any]] = {}
+    browser_requested = os.getenv("JOB_INTEL_TARGET_COMPANY_BROWSER", "0").strip().lower() in {"1", "true", "yes"}
+    browser_ok, browser_reason = _browser_preflight() if browser_requested else (False, "")
     for company in companies:
         company_key = company.name.lower()
+        career_errors: list[str] = []
+        ats_refs: list[str] = []
+        job_link_count = 0
         try:
             homepage = _fetch_html(company.website)
             homepage_signals = _derive_signals(homepage)
@@ -427,6 +551,8 @@ def monitor_target_companies(store: JobIntelStore) -> CompanyMonitoringResult:
             for career_url in career_urls[:2]:
                 try:
                     page_html = _fetch_html(career_url)
+                    ats_refs.extend(sorted(set(m.group(0).lower() for m in _ATS_REF_RE.finditer(page_html))))
+                    job_link_count += len(re.findall(r"href=[\"'][^\"']*(job|position|opening)[^\"']*[\"']", page_html, re.I))
                     company_body_samples.append(_normalize_text(_strip_tags(page_html))[:2000])
                     vacancy = _normalize_job_page(career_url, page_html, company=company, source=source)
                     if vacancy:
@@ -443,7 +569,8 @@ def monitor_target_companies(store: JobIntelStore) -> CompanyMonitoringResult:
                                 company_vacancies.append(vacancy)
                         except Exception:
                             continue
-                except Exception:
+                except Exception as exc:
+                    career_errors.append(f"{career_url}: {exc}")
                     continue
             unique_vacancies: list[Vacancy] = []
             seen_urls: set[str] = set()
@@ -474,15 +601,41 @@ def monitor_target_companies(store: JobIntelStore) -> CompanyMonitoringResult:
                 "career_urls": career_urls,
                 "openings": openings,
                 "signals": sorted(signals),
+                "outcome": classify_target_company_outcome(
+                    openings=openings,
+                    errors=career_errors,
+                    career_urls=career_urls,
+                    ats_refs=sorted(set(ats_refs)),
+                    job_link_count=job_link_count,
+                    browser_used=browser_requested and browser_ok,
+                ),
+                "ats_refs": sorted(set(ats_refs)),
             }
+            if career_errors:
+                company_statuses[company_key]["errors"] = career_errors
         except Exception as exc:
             company_statuses[company_key] = {
                 "source": "target-company",
                 "status": "error",
                 "website": company.website,
                 "errors": [str(exc)],
+                "outcome": classify_target_company_outcome(
+                    openings=0,
+                    errors=[str(exc)],
+                    career_urls=[],
+                    ats_refs=[],
+                    job_link_count=0,
+                    browser_used=browser_requested and browser_ok,
+                ),
             }
-    return CompanyMonitoringResult(vacancies=vacancies, company_statuses=company_statuses)
+    # Preflight state may have been demoted by a mid-run worker failure.
+    browser_ok_final, browser_reason_final = _browser_preflight() if browser_requested else (browser_ok, browser_reason)
+    browser_status = {
+        "requested": browser_requested,
+        "available": bool(browser_requested and browser_ok_final),
+        "reason": (browser_reason_final or None) if browser_requested else None,
+    }
+    return CompanyMonitoringResult(vacancies=vacancies, company_statuses=company_statuses, browser=browser_status)
 
 
 def build_market_report(store: JobIntelStore, *, limit: int = 10) -> str:

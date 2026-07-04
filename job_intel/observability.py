@@ -100,6 +100,59 @@ def classify_rejection_reason(reason: str) -> tuple[str, str]:
     """Returns (reason_type, severity). Unknown reasons default to ('unknown', 'low')."""
     return _REASON_TYPES.get(reason, ("unknown", "low"))
 
+
+# Source acquisition outcome taxonomy — why a source produced (or didn't
+# produce) vacancies this run. Persisted to source_kpi_run.skip_reason so
+# "0 vacancies" is never ambiguous in dashboards or audits.
+SOURCE_REASONS = (
+    "disabled_by_config",
+    "missing_seeds",
+    "auth_required",
+    "login_wall",
+    "anti_bot",
+    "blocked_403",
+    "js_render_required",
+    "browser_unavailable",
+    "parser_empty",
+    "real_empty",
+    "ok_non_empty",
+    "ats_seeds_discovered_only",
+    "wrong_path",
+    "collection_error",
+)
+
+
+def derive_source_reason(payload: dict[str, Any]) -> str:
+    """Map a source status payload (run metadata shape) to a taxonomy reason.
+
+    An explicit `reason` set by the collector wins; otherwise the reason is
+    derived from status, session health counters and seed availability.
+    """
+    explicit = str(payload.get("reason") or "").strip()
+    if explicit in SOURCE_REASONS:
+        return explicit
+    status = str(payload.get("status") or "").strip().lower()
+    if status == "skipped":
+        return "disabled_by_config"
+    hits = int(payload.get("hits") or 0)
+    if hits > 0:
+        return "ok_non_empty"
+    session = payload.get("session_health") or {}
+    if int(session.get("login_walls") or 0) > 0:
+        return "login_wall"
+    if int(session.get("auth_redirects") or 0) > 0:
+        return "auth_required"
+    if int(session.get("anti_bot_events") or 0) > 0:
+        return "anti_bot"
+    errors = [str(e) for e in (payload.get("errors") or [])]
+    if any("403" in e for e in errors):
+        return "blocked_403"
+    if status == "error" or errors:
+        return "collection_error"
+    if payload.get("seeds_present") is False:
+        return "missing_seeds"
+    return "real_empty"
+
 logger = logging.getLogger(__name__)
 _COUNTRY_HINTS: list[tuple[str, str]] = [
     ("usa", "USA"),

@@ -372,6 +372,14 @@ def _probe(source: str) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     return _with_browser_source(source, _run)
 
 
+def _fetch_page(url: str, *, source: str) -> str:
+    """Render one page and return its HTML (for target-company career pages)."""
+    _prepare_browser_runtime_env()
+    config = resolve_browser_config(source)
+    with BrowserSourceClient(config) as client:
+        return client.fetch_html(url)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -387,7 +395,20 @@ def main(argv: list[str] | None = None) -> int:
     probe = sub.add_parser("probe")
     probe.add_argument("source", choices=("linkedin", "headhunter"))
 
+    fetch = sub.add_parser("fetch")
+    fetch.add_argument("url")
+    fetch.add_argument("--source", default="company_career")
+
     args = parser.parse_args(argv)
+    if args.cmd == "fetch":
+        try:
+            html = _fetch_page(args.url, source=args.source)
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": str(exc), "error_type": type(exc).__name__}))
+            traceback.print_exc(file=sys.stderr)
+            return 1
+        print(json.dumps({"ok": True, "html": html, "html_len": len(html)}))
+        return 0
     try:
         if args.cmd == "linkedin":
             vacancies, session_health, search_trace = _run_linkedin(args.query, max_pages=args.max_pages)
