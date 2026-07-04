@@ -27,6 +27,55 @@ _ROLE_INTENTS = {
     "general_operator": "personal/admin",
 }
 
+_ARTIST_VERB_TERMS = (
+    "сгенерируй",
+    "сгенерируйте",
+    "сгенерировать",
+    "создай",
+    "создайте",
+    "сделай",
+    "сделайте",
+    "переделай",
+    "преврати",
+    "generate",
+    "create",
+    "make",
+    "turn",
+    "convert",
+    "redraw",
+)
+
+_ARTIST_NOUN_TERMS = (
+    "картинку",
+    "картинка",
+    "картинки",
+    "изображение",
+    "изображения",
+    "фото",
+    "фотографию",
+    "фотку",
+    "аниме",
+    "акварель",
+    "акварелью",
+    "иллюстрацию",
+    "иллюстрация",
+    "логотип",
+    "обои",
+    "аватарку",
+    "стикер",
+    "image",
+    "picture",
+    "photo",
+    "illustration",
+    "anime",
+    "watercolor",
+    "wallpaper",
+    "logo",
+    "sketch",
+    "sticker",
+    "avatar",
+)
+
 _ARTIST_TERMS = (
     "нарисуй",
     "нарисуйте",
@@ -928,9 +977,13 @@ def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, 
         # win over the built-in keyword cascade below — see bd2124fe6.
         return route_decision.primary_profile, False, "routing selected specialized role"
 
-    if _contains_any(normalized, _ARTIST_TERMS):
+    if _contains_any(normalized, _ARTIST_TERMS) or (
+        _contains(normalized, _ARTIST_VERB_TERMS) and _contains(normalized, _ARTIST_NOUN_TERMS)
+    ):
         # Image-generation intent must win over the engineer cascade: words
         # like "generate"/"сгенерируй" also appear in engineering phrasing.
+        # Fixed phrases alone are brittle ("сгенерируй МНЕ изображение"), so a
+        # generation verb combined with an image noun also selects the artist.
         return "artist", False, "image generation/editing intent detected"
 
     if _contains_any(normalized, _ENGINEER_TERMS):
