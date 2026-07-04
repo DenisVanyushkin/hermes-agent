@@ -12,6 +12,9 @@ from hermes_cli.pipeline_router import RouterDecision
 
 
 ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
+RECRUITER_PIPELINE_ID = "recruiter_decision_support_pipeline"
+# Pipelines with a registered execution helper in the controller.
+_EXECUTABLE_PIPELINE_IDS = (ENGINEERING_PIPELINE_ID, RECRUITER_PIPELINE_ID)
 EXPECTED_SUBAGENT_IDS = ("hermes_engineer_core", "hermes_code_reviewer")
 REVIEWER_CONDITION = "code_changes_require_review"
 
@@ -148,10 +151,14 @@ def evaluate_pipeline_gate(request: PipelineGateRequest) -> PipelineGateDecision
         return deny("router_not_selected", "Router did not select a pipeline id.")
     requirements_met.append("known_pipeline_selected")
 
-    if selected_pipeline_id != ENGINEERING_PIPELINE_ID or selected_pipeline_id not in policy.allow_pipelines:
+    if (
+        selected_pipeline_id not in _EXECUTABLE_PIPELINE_IDS
+        or selected_pipeline_id not in policy.allow_pipelines
+    ):
         requirements_failed.append("supported_pipeline_selected")
-        return deny("unsupported_pipeline", "Only engineering_review_pipeline is eligible for future execution.")
+        return deny("unsupported_pipeline", "Selected pipeline is not eligible for execution.")
     requirements_met.append("supported_pipeline_selected")
+    is_engineering = selected_pipeline_id == ENGINEERING_PIPELINE_ID
 
     if pipeline_session_id is None:
         requirements_failed.append("pipeline_session_present")
@@ -173,36 +180,41 @@ def evaluate_pipeline_gate(request: PipelineGateRequest) -> PipelineGateDecision
         return deny("plan_error", "Pipeline planning returned an explicit error payload.")
     requirements_met.append("plan_error_absent")
 
-    if payload.get("pipeline_plan_status") != "planned" or payload.get("pipeline_plan_completion_reason") != "plan_only":
-        requirements_failed.append("plan_ready")
-        return deny("plan_not_ready", "Pipeline plan must be in planned/plan_only state before execution can be allowed.")
-    requirements_met.append("plan_ready")
+    if is_engineering:
+        # Structural checks below are specific to the engineer/reviewer loop;
+        # the recruiter flow is a read-only single-operator pipeline.
+        if payload.get("pipeline_plan_status") != "planned" or payload.get("pipeline_plan_completion_reason") != "plan_only":
+            requirements_failed.append("plan_ready")
+            return deny("plan_not_ready", "Pipeline plan must be in planned/plan_only state before execution can be allowed.")
+        requirements_met.append("plan_ready")
 
-    planned_subagent_ids = list(payload.get("planned_subagent_ids") or [])
-    step_records = list(((payload.get("pipeline_plan") or {}).get("step_records")) or [])
-    planned_step_subagents = [str(step.get("subagent_id")) for step in step_records if isinstance(step, Mapping)]
-    if not _contains_expected_steps(planned_subagent_ids, planned_step_subagents):
-        requirements_failed.append("expected_steps_present")
-        return deny("missing_expected_steps", "Planned engineer/reviewer steps are missing from the pipeline plan.")
-    requirements_met.append("expected_steps_present")
+        planned_subagent_ids = list(payload.get("planned_subagent_ids") or [])
+        step_records = list(((payload.get("pipeline_plan") or {}).get("step_records")) or [])
+        planned_step_subagents = [str(step.get("subagent_id")) for step in step_records if isinstance(step, Mapping)]
+        if not _contains_expected_steps(planned_subagent_ids, planned_step_subagents):
+            requirements_failed.append("expected_steps_present")
+            return deny("missing_expected_steps", "Planned engineer/reviewer steps are missing from the pipeline plan.")
+        requirements_met.append("expected_steps_present")
 
-    reviewer_step = next(
-        (step for step in step_records if isinstance(step, Mapping) and step.get("step_kind") == "reviewer"),
-        None,
-    )
-    if not isinstance(reviewer_step, Mapping) or reviewer_step.get("condition") != REVIEWER_CONDITION:
-        requirements_failed.append("reviewer_conditional")
-        return deny("reviewer_not_conditional", "Reviewer must remain conditional on code changes.")
-    requirements_met.append("reviewer_conditional")
+        reviewer_step = next(
+            (step for step in step_records if isinstance(step, Mapping) and step.get("step_kind") == "reviewer"),
+            None,
+        )
+        if not isinstance(reviewer_step, Mapping) or reviewer_step.get("condition") != REVIEWER_CONDITION:
+            requirements_failed.append("reviewer_conditional")
+            return deny("reviewer_not_conditional", "Reviewer must remain conditional on code changes.")
+        requirements_met.append("reviewer_conditional")
 
-    engineer_step = next(
-        (step for step in step_records if isinstance(step, Mapping) and step.get("step_kind") == "engineer"),
-        None,
-    )
-    if not isinstance(engineer_step, Mapping):
-        requirements_failed.append("engineer_step_present")
-        return deny("missing_engineer_step", "Engineering pipeline must include an engineer step.")
-    requirements_met.append("engineer_step_present")
+        engineer_step = next(
+            (step for step in step_records if isinstance(step, Mapping) and step.get("step_kind") == "engineer"),
+            None,
+        )
+        if not isinstance(engineer_step, Mapping):
+            requirements_failed.append("engineer_step_present")
+            return deny("missing_engineer_step", "Engineering pipeline must include an engineer step.")
+        requirements_met.append("engineer_step_present")
+    else:
+        step_records = list(((payload.get("pipeline_plan") or {}).get("step_records")) or [])
 
     if policy.mode == PipelineGateMode.OBSERVE:
         requirements_failed.append("execute_mode_required")
@@ -212,10 +224,11 @@ def evaluate_pipeline_gate(request: PipelineGateRequest) -> PipelineGateDecision
         requirements_failed.append("execute_mode_required")
         return deny("plan_only", "Plan-only mode may build a dry-run plan but must deny execution.", risk_level="medium")
 
-    if not _constructors_verified(step_records):
-        requirements_failed.append("runtime_constructor_verified")
-        return deny("runtime_constructor_unverified", "Runtime constructors must be verified before future execution.")
-    requirements_met.append("runtime_constructor_verified")
+    if is_engineering:
+        if not _constructors_verified(step_records):
+            requirements_failed.append("runtime_constructor_verified")
+            return deny("runtime_constructor_unverified", "Runtime constructors must be verified before future execution.")
+        requirements_met.append("runtime_constructor_verified")
 
     if request.platform_allowed is False:
         requirements_failed.append("platform_allowed")
