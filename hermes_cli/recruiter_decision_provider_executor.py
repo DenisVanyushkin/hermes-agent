@@ -116,7 +116,8 @@ class RecruiterDecisionProviderExecutor:
                 payload={},
                 errors=["decision_provider_output_not_object"],
             )
-        confidence = str(payload.pop("confidence", "medium") or "medium")
+        # Copy, don't pop: downstream output validation checks payload fields too.
+        confidence = str(payload.get("confidence", "medium") or "medium")
         sources_raw = payload.get("sources")
         sources = [str(item) for item in sources_raw] if isinstance(sources_raw, list) else []
         return DecisionModuleExecution(

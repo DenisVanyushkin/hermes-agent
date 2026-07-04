@@ -224,6 +224,7 @@ def run_recruiter_decision_support_flow(
             research_gate_report=research_gate_report,
             module_executor=module_executor,
             executed=executed,
+            requested=requested,
         )
 
     if "manual_review_warnings" in requested:
@@ -332,11 +333,26 @@ def _run_module(
     research_gate_report: CompanyResearchQualityGateReport | None,
     module_executor: DecisionModuleExecutor | None,
     executed: dict[str, DecisionModuleExecution],
+    requested: list[str] | None = None,
 ) -> DecisionModuleResult:
     spec = DECISION_MODULE_REGISTRY[module_id]
 
+    include_career_facts = spec.uses_candidate_facts
     if spec.uses_candidate_facts and privacy_gate_report is not None:
         if privacy_gate_report.status is not RealDataPrivacyGateStatus.READY:
+            if spec.degraded_allowed:
+                # Run without candidate facts rather than blocking synthesis modules.
+                include_career_facts = False
+                return _execute_module(
+                    module_id,
+                    spec.skill_id,
+                    request,
+                    module_executor,
+                    executed,
+                    degraded=True,
+                    extra_warnings=["career facts unavailable; ran without candidate-specific evidence"],
+                    include_career_facts=False,
+                )
             # Distinguish "no source at all" from "source present but not approved".
             if request.career_fact_sources or request.vacancy_source:
                 has_any_career = bool(request.career_fact_sources)
@@ -366,6 +382,7 @@ def _run_module(
                 executed,
                 degraded=True,
                 extra_warnings=degraded_warnings,
+                include_career_facts=include_career_facts,
             )
         return DecisionModuleResult(
             module_id=module_id,
@@ -381,11 +398,23 @@ def _run_module(
             warnings=list(research_gate_report.warnings),
         )
 
-    upstream_missing = [m for m in spec.upstream_modules if m not in executed]
+    # Only upstream modules that were requested but failed degrade this run;
+    # deliberately-unrequested upstreams (e.g. quick screen without company
+    # assessment) narrow the scope without lowering confidence.
+    requested_set = set(requested or DECISION_MODULE_IDS)
+    upstream_missing = [
+        m for m in spec.upstream_modules if m in requested_set and m not in executed
+    ]
+    upstream_unrequested = [m for m in spec.upstream_modules if m not in requested_set]
     degraded = bool(upstream_missing) and spec.degraded_allowed
     extra_warnings = (
         [f"upstream module not available: {item}" for item in upstream_missing] if degraded else []
     )
+    if upstream_unrequested:
+        extra_warnings = [
+            *extra_warnings,
+            f"scope note: assessed without {', '.join(m.replace('_', ' ') for m in upstream_unrequested)} (not requested)",
+        ]
     return _execute_module(
         module_id,
         spec.skill_id,
@@ -394,6 +423,7 @@ def _run_module(
         executed,
         degraded=degraded,
         extra_warnings=extra_warnings,
+        include_career_facts=include_career_facts,
     )
 
 
@@ -422,6 +452,7 @@ def _execute_module(
     *,
     degraded: bool,
     extra_warnings: list[str],
+    include_career_facts: bool = True,
 ) -> DecisionModuleResult:
     if module_executor is None:
         return DecisionModuleResult(
@@ -437,9 +468,9 @@ def _execute_module(
         "vacancy_source": request.vacancy_source,
         "company_identity": request.company_identity,
         "company_research_claims": request.company_research_claims,
-        # Candidate facts reach a module only if it declares candidate-fact use;
-        # the privacy gate has already approved the sources by this point.
-        "career_facts": request.career_facts if spec.uses_candidate_facts else None,
+        # Candidate facts reach a module only if it declares candidate-fact use
+        # and the privacy gate approved the sources (include_career_facts).
+        "career_facts": request.career_facts if (spec.uses_candidate_facts and include_career_facts) else None,
         "candidate_preferences": request.candidate_preferences,
         "role_context": request.role_context,
         "upstream_results": {name: execution.payload for name, execution in executed.items()},
