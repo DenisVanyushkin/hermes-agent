@@ -35,7 +35,7 @@ def test_report_quota_ok_without_warning():
 def test_report_rejected_summary():
     c = _mk("SpamCo", "reject", ["d7_cooccurrence"], ["low_relevance"], dry=-1)
     text = format_universe_report([c], week_label="2026-W27")
-    assert "Rejected this run: 1" in text
+    assert "Rejected/suppressed this run: 1" in text
     assert "low_relevance: 1" in text
 
 
