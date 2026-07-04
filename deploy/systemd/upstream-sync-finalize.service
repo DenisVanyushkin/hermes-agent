@@ -1,0 +1,9 @@
+[Unit]
+Description=Execute upstream-sync finalize request (rebase/smoketest/rollback on host)
+
+[Service]
+Type=oneshot
+User=hermes
+Environment=HOME=/home/hermes
+ExecStart=/usr/bin/bash /home/hermes/.hermes/scripts/upstream-sync-finalize.sh
+TimeoutStartSec=900
