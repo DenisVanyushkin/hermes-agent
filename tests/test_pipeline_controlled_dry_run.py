@@ -173,7 +173,7 @@ def test_build_controlled_manual_helper_context_fails_closed_when_engineer_runti
     repo_root = _copy_spec_tree(tmp_path)
     engineer_spec = repo_root / "config" / "subagents" / "hermes_engineer_core.yaml"
     engineer_spec.write_text(
-        engineer_spec.read_text(encoding="utf-8").replace("model: xiaomi/mimo-v2.5-pro", "model: "),
+        engineer_spec.read_text(encoding="utf-8").replace("model: gpt-5.4\n", "model: \n"),
         encoding="utf-8",
     )
 
