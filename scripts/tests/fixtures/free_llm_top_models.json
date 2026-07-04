@@ -1,0 +1,542 @@
+{
+  "updatedAt": "2026-07-04T03:17:44.884Z",
+  "source": "openrouter-models-api",
+  "rankingVersion": "2026-07-04.v1",
+  "probeMode": "active",
+  "refreshMode": "fullEval",
+  "liteEvalMode": "active",
+  "liteEvalSuite": "lite-agent-eval-v1",
+  "rankingConfidence": "high",
+  "rankingConfidenceReason": "No unevaluated candidate can overtake the primary even with a perfect lite eval score.",
+  "evalCoverage": {
+    "evaluated": 7,
+    "completedToday": 1,
+    "attemptedToday": 2,
+    "totalRanked": 20,
+    "candidatePool": 20,
+    "unevaluatedCanStillWin": false,
+    "unevaluatedThreatCount": 0,
+    "topUnevaluatedThreat": null,
+    "maxUnevaluatedPossibleScore": null
+  },
+  "baseUrl": "https://openrouter.ai/api/v1",
+  "createKeyUrl": "https://openrouter.ai/settings/keys",
+  "fallback": {
+    "id": "openrouter/free",
+    "reason": "OpenRouter-managed free model router"
+  },
+  "count": 6,
+  "models": [
+    {
+      "rank": 1,
+      "id": "nvidia/nemotron-3-super-120b-a12b:free",
+      "name": "NVIDIA: Nemotron 3 Super (free)",
+      "score": 1415,
+      "metadataScore": 570,
+      "healthScore": 250,
+      "latencyScore": 75,
+      "liteEvalScore": 520,
+      "contextLength": 262144,
+      "maxCompletionTokens": 262144,
+      "supportsTools": true,
+      "supportsToolChoice": true,
+      "supportsStructuredOutputs": true,
+      "supportsResponseFormat": true,
+      "supportsReasoning": true,
+      "supportsIncludeReasoning": true,
+      "supportsSeed": true,
+      "supportsStop": false,
+      "latencyMs": 462,
+      "healthStatus": "imperfect",
+      "evalSuite": "lite-agent-eval-v1",
+      "evalSummary": {
+        "suite": "lite-agent-eval-v1",
+        "status": "completed",
+        "passed": 1,
+        "total": 3,
+        "updatedAt": "2026-07-04T03:17:44.884Z",
+        "tasks": [
+          {
+            "id": "task_files_lite",
+            "source": "pinchbench/task_files",
+            "points": 220,
+            "maxPoints": 350,
+            "score": 0.629,
+            "status": "partial",
+            "details": {
+              "usedTool": true,
+              "mainPyCreated": true,
+              "helloPython": true,
+              "readmeCreated": false,
+              "readmeHasTitle": false,
+              "gitignoreCreated": false,
+              "gitignoreHasPycache": false,
+              "noUnsafePaths": true
+            }
+          },
+          {
+            "id": "task_shell_command_lite",
+            "source": "pinchbench/task_shell_command_generator",
+            "points": 300,
+            "maxPoints": 300,
+            "score": 1,
+            "status": "passed",
+            "details": {
+              "command": "find . -type f -name \"*.log\" -exec grep -l \"FATAL:\" {} +",
+              "wroteCommandFile": true,
+              "shellOnly": true,
+              "recursiveSearch": true,
+              "restrictsToLogFiles": true,
+              "matchesFatalExactly": true,
+              "printsEachFileOnce": true,
+              "plausiblyExecutable": true
+            }
+          },
+          {
+            "id": "babylonian_clock_lite",
+            "source": "shir-man/custom",
+            "points": 0,
+            "maxPoints": 100,
+            "score": 0,
+            "status": "failed",
+            "details": {
+              "expected": "02:12:48",
+              "received": "We need to decode the time after the em dash. Input: \"𒌚𒁹𒁹𒁹𒁹 𒌓𒌋𒌋𒁹𒁹𒁹𒁹\ud808"
+            }
+          }
+        ]
+      },
+      "reason": "Tools, structured outputs, reasoning; lite eval 1/3",
+      "instabilityPenalty": 0
+    },
+    {
+      "rank": 2,
+      "id": "cohere/north-mini-code:free",
+      "name": "Cohere: North Mini Code (free)",
+      "score": 1122,
+      "metadataScore": 529,
+      "healthScore": 100,
+      "latencyScore": 25,
+      "liteEvalScore": 468,
+      "contextLength": 256000,
+      "maxCompletionTokens": 64000,
+      "supportsTools": true,
+      "supportsToolChoice": true,
+      "supportsStructuredOutputs": false,
+      "supportsResponseFormat": false,
+      "supportsReasoning": true,
+      "supportsIncludeReasoning": true,
+      "supportsSeed": true,
+      "supportsStop": true,
+      "latencyMs": null,
+      "healthStatus": "not_probed",
+      "evalSuite": "lite-agent-eval-v1",
+      "evalSummary": {
+        "suite": "lite-agent-eval-v1",
+        "status": "cached_recent",
+        "passed": 1,
+        "total": 3,
+        "updatedAt": "2026-07-03T03:17:45.064Z",
+        "tasks": [
+          {
+            "id": "task_files_lite",
+            "source": "pinchbench/task_files",
+            "points": 220,
+            "maxPoints": 350,
+            "score": 0.629,
+            "status": "partial",
+            "details": {
+              "usedTool": true,
+              "mainPyCreated": true,
+              "helloPython": true,
+              "readmeCreated": false,
+              "readmeHasTitle": false,
+              "gitignoreCreated": false,
+              "gitignoreHasPycache": false,
+              "noUnsafePaths": true
+            }
+          },
+          {
+            "id": "task_shell_command_lite",
+            "source": "pinchbench/task_shell_command_generator",
+            "points": 300,
+            "maxPoints": 300,
+            "score": 1,
+            "status": "passed",
+            "details": {
+              "command": "find . -name \"*.log\" -exec grep -l \"FATAL:\" {} \\; -print",
+              "wroteCommandFile": true,
+              "shellOnly": true,
+              "recursiveSearch": true,
+              "restrictsToLogFiles": true,
+              "matchesFatalExactly": true,
+              "printsEachFileOnce": true,
+              "plausiblyExecutable": true
+            }
+          },
+          {
+            "id": "babylonian_clock_lite",
+            "source": "shir-man/custom",
+            "points": 0,
+            "maxPoints": 100,
+            "score": 0,
+            "status": "failed",
+            "details": {
+              "expected": "02:12:48",
+              "received": ""
+            }
+          }
+        ],
+        "cachedFromUpdatedAt": "2026-07-03T03:17:45.064Z",
+        "cacheAgeDays": 1,
+        "cacheMultiplier": 0.9
+      },
+      "reason": "Tools, reasoning, 128k+ context; lite eval 1/3",
+      "instabilityPenalty": 0
+    },
+    {
+      "rank": 3,
+      "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "name": "NVIDIA: Nemotron 3 Nano Omni (free)",
+      "score": 934,
+      "metadataScore": 494,
+      "healthScore": 100,
+      "latencyScore": 25,
+      "liteEvalScore": 315,
+      "contextLength": 256000,
+      "maxCompletionTokens": 65536,
+      "supportsTools": true,
+      "supportsToolChoice": true,
+      "supportsStructuredOutputs": false,
+      "supportsResponseFormat": false,
+      "supportsReasoning": true,
+      "supportsIncludeReasoning": true,
+      "supportsSeed": true,
+      "supportsStop": false,
+      "latencyMs": null,
+      "healthStatus": "not_probed",
+      "evalSuite": "lite-agent-eval-v1",
+      "evalSummary": {
+        "suite": "lite-agent-eval-v1",
+        "status": "cached_recent",
+        "passed": 1,
+        "total": 3,
+        "updatedAt": "2026-07-03T03:17:45.064Z",
+        "tasks": [
+          {
+            "id": "task_files_lite",
+            "source": "pinchbench/task_files",
+            "points": 350,
+            "maxPoints": 350,
+            "score": 1,
+            "status": "passed",
+            "details": {
+              "usedTool": true,
+              "mainPyCreated": true,
+              "helloPython": true,
+              "readmeCreated": true,
+              "readmeHasTitle": true,
+              "gitignoreCreated": true,
+              "gitignoreHasPycache": true,
+              "noUnsafePaths": true
+            }
+          },
+          {
+            "id": "task_shell_command_lite",
+            "source": "pinchbench/task_shell_command_generator",
+            "points": 0,
+            "maxPoints": 300,
+            "score": 0,
+            "status": "failed",
+            "details": {
+              "command": "",
+              "wroteCommandFile": false,
+              "shellOnly": false,
+              "recursiveSearch": false,
+              "restrictsToLogFiles": false,
+              "matchesFatalExactly": false,
+              "printsEachFileOnce": false,
+              "plausiblyExecutable": false
+            }
+          },
+          {
+            "id": "babylonian_clock_lite",
+            "source": "shir-man/custom",
+            "points": 0,
+            "maxPoints": 100,
+            "score": 0,
+            "status": "failed",
+            "details": {
+              "expected": "02:12:48",
+              "received": "We need to decode only the time after the em dash. The input includes a long str"
+            }
+          }
+        ],
+        "cachedFromUpdatedAt": "2026-07-03T03:17:45.064Z",
+        "cacheAgeDays": 1,
+        "cacheMultiplier": 0.9
+      },
+      "reason": "Tools, reasoning, 128k+ context; lite eval 1/3",
+      "instabilityPenalty": 0
+    },
+    {
+      "rank": 4,
+      "id": "openai/gpt-oss-20b:free",
+      "name": "OpenAI: gpt-oss-20b (free)",
+      "score": 925,
+      "metadataScore": 530,
+      "healthScore": 100,
+      "latencyScore": 25,
+      "liteEvalScore": 270,
+      "contextLength": 131072,
+      "maxCompletionTokens": 32768,
+      "supportsTools": true,
+      "supportsToolChoice": true,
+      "supportsStructuredOutputs": true,
+      "supportsResponseFormat": true,
+      "supportsReasoning": true,
+      "supportsIncludeReasoning": true,
+      "supportsSeed": true,
+      "supportsStop": true,
+      "latencyMs": null,
+      "healthStatus": "not_probed",
+      "evalSuite": "lite-agent-eval-v1",
+      "evalSummary": {
+        "suite": "lite-agent-eval-v1",
+        "status": "cached_recent",
+        "passed": 1,
+        "total": 3,
+        "updatedAt": "2026-07-03T03:17:45.064Z",
+        "tasks": [
+          {
+            "id": "task_files_lite",
+            "source": "pinchbench/task_files",
+            "points": 0,
+            "maxPoints": 350,
+            "score": 0,
+            "status": "failed",
+            "details": {
+              "usedTool": false,
+              "mainPyCreated": false,
+              "helloPython": false,
+              "readmeCreated": false,
+              "readmeHasTitle": false,
+              "gitignoreCreated": false,
+              "gitignoreHasPycache": false,
+              "noUnsafePaths": false
+            }
+          },
+          {
+            "id": "task_shell_command_lite",
+            "source": "pinchbench/task_shell_command_generator",
+            "points": 300,
+            "maxPoints": 300,
+            "score": 1,
+            "status": "passed",
+            "details": {
+              "command": "find . -type f -name '*.log' -exec grep -l 'FATAL:' {} +",
+              "wroteCommandFile": true,
+              "shellOnly": true,
+              "recursiveSearch": true,
+              "restrictsToLogFiles": true,
+              "matchesFatalExactly": true,
+              "printsEachFileOnce": true,
+              "plausiblyExecutable": true
+            }
+          },
+          {
+            "id": "babylonian_clock_lite",
+            "source": "shir-man/custom",
+            "points": 0,
+            "maxPoints": 100,
+            "score": 0,
+            "status": "failed",
+            "details": {
+              "expected": "02:12:48",
+              "received": ""
+            }
+          }
+        ],
+        "cachedFromUpdatedAt": "2026-07-03T03:17:45.064Z",
+        "cacheAgeDays": 1,
+        "cacheMultiplier": 0.9
+      },
+      "reason": "Tools, structured outputs, reasoning; lite eval 1/3",
+      "instabilityPenalty": 0
+    },
+    {
+      "rank": 5,
+      "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "name": "NVIDIA: Nemotron 3 Ultra (free)",
+      "score": 883,
+      "metadataScore": 510,
+      "healthScore": 100,
+      "latencyScore": 25,
+      "liteEvalScore": 248,
+      "contextLength": 1000000,
+      "maxCompletionTokens": 65536,
+      "supportsTools": true,
+      "supportsToolChoice": true,
+      "supportsStructuredOutputs": false,
+      "supportsResponseFormat": false,
+      "supportsReasoning": true,
+      "supportsIncludeReasoning": true,
+      "supportsSeed": true,
+      "supportsStop": false,
+      "latencyMs": null,
+      "healthStatus": "not_probed",
+      "evalSuite": "lite-agent-eval-v1",
+      "evalSummary": {
+        "suite": "lite-agent-eval-v1",
+        "status": "cached_recent",
+        "passed": 1,
+        "total": 3,
+        "updatedAt": "2026-07-03T03:17:45.064Z",
+        "tasks": [
+          {
+            "id": "task_files_lite",
+            "source": "pinchbench/task_files",
+            "points": 0,
+            "maxPoints": 350,
+            "score": 0,
+            "status": "http_timeout_or_error",
+            "details": {
+              "responseStatus": "timeout_or_error",
+              "rateLimitKind": "none",
+              "providerName": null,
+              "rateLimitLimit": null,
+              "rateLimitRemaining": null,
+              "rateLimitResetAt": null,
+              "responsePreview": "The operation was aborted"
+            }
+          },
+          {
+            "id": "task_shell_command_lite",
+            "source": "pinchbench/task_shell_command_generator",
+            "points": 275,
+            "maxPoints": 300,
+            "score": 0.917,
+            "status": "passed",
+            "details": {
+              "command": "grep -rl \"FATAL:\" --include=\"*.log\" .",
+              "wroteCommandFile": true,
+              "shellOnly": true,
+              "recursiveSearch": true,
+              "restrictsToLogFiles": true,
+              "matchesFatalExactly": true,
+              "printsEachFileOnce": false,
+              "plausiblyExecutable": true
+            }
+          },
+          {
+            "id": "babylonian_clock_lite",
+            "source": "shir-man/custom",
+            "points": 0,
+            "maxPoints": 100,
+            "score": 0,
+            "status": "failed",
+            "details": {
+              "expected": "02:12:48",
+              "received": "The user wants me to decode only the time after the em dash (—) in a Babylonian-"
+            }
+          }
+        ],
+        "cachedFromUpdatedAt": "2026-07-03T03:17:45.064Z",
+        "cacheAgeDays": 1,
+        "cacheMultiplier": 0.9
+      },
+      "reason": "Tools, reasoning, 262k context; lite eval 1/3",
+      "instabilityPenalty": 0
+    },
+    {
+      "rank": 6,
+      "id": "poolside/laguna-m.1:free",
+      "name": "Poolside: Laguna M.1 (free)",
+      "score": 754,
+      "metadataScore": 475,
+      "healthScore": 100,
+      "latencyScore": 25,
+      "liteEvalScore": 154,
+      "contextLength": 262144,
+      "maxCompletionTokens": 32768,
+      "supportsTools": true,
+      "supportsToolChoice": true,
+      "supportsStructuredOutputs": false,
+      "supportsResponseFormat": false,
+      "supportsReasoning": true,
+      "supportsIncludeReasoning": true,
+      "supportsSeed": false,
+      "supportsStop": false,
+      "latencyMs": null,
+      "healthStatus": "not_probed",
+      "evalSuite": "lite-agent-eval-v1",
+      "evalSummary": {
+        "suite": "lite-agent-eval-v1",
+        "status": "cached_recent",
+        "passed": 0,
+        "total": 3,
+        "updatedAt": "2026-07-01T03:17:53.474Z",
+        "tasks": [
+          {
+            "id": "task_files_lite",
+            "source": "pinchbench/task_files",
+            "points": 220,
+            "maxPoints": 350,
+            "score": 0.629,
+            "status": "partial",
+            "details": {
+              "usedTool": true,
+              "mainPyCreated": true,
+              "helloPython": true,
+              "readmeCreated": false,
+              "readmeHasTitle": false,
+              "gitignoreCreated": false,
+              "gitignoreHasPycache": false,
+              "noUnsafePaths": true
+            }
+          },
+          {
+            "id": "task_shell_command_lite",
+            "source": "pinchbench/task_shell_command_generator",
+            "points": 0,
+            "maxPoints": 300,
+            "score": 0,
+            "status": "http_timeout_or_error",
+            "details": {
+              "responseStatus": "timeout_or_error",
+              "rateLimitKind": "none",
+              "providerName": null,
+              "rateLimitLimit": null,
+              "rateLimitRemaining": null,
+              "rateLimitResetAt": null,
+              "responsePreview": "The operation was aborted"
+            }
+          },
+          {
+            "id": "babylonian_clock_lite",
+            "source": "shir-man/custom",
+            "points": 0,
+            "maxPoints": 100,
+            "score": 0,
+            "status": "failed",
+            "details": {
+              "expected": "02:12:48",
+              "received": ""
+            }
+          }
+        ],
+        "cachedFromUpdatedAt": "2026-07-01T03:17:53.474Z",
+        "cacheAgeDays": 3,
+        "cacheMultiplier": 0.7
+      },
+      "reason": "Tools, reasoning, 262k context; lite eval 0/3",
+      "instabilityPenalty": 0
+    }
+  ],
+  "notes": [
+    "Free model availability and rate limits can vary.",
+    "Top candidates also received a lite agent eval for small file-writing, shell-command, and symbolic decoding tasks.",
+    "The lite eval is a practical heuristic, not an official PinchBench result.",
+    "Use openrouter/free if the recommended model is temporarily unavailable."
+  ]
+}
