@@ -28,6 +28,7 @@ class MutationRequest:
     operation: str
     path: str
     content: str
+    size_limit_exempt: bool = False
 
 
 @dataclass(frozen=True)
@@ -105,7 +106,12 @@ class MutationExecutor:
         if mutation.operation != ALLOWED_MUTATION_OPERATION:
             raise MutationDenied("unsupported_operation", mutation.operation, mutation.path)
         relative_path = _validate_relative_path(mutation.path)
-        _validate_content(mutation.content, mutation.operation, mutation.path)
+        _validate_content(
+            mutation.content,
+            mutation.operation,
+            mutation.path,
+            size_limit_exempt=mutation.size_limit_exempt,
+        )
         _validate_sensitive_path(relative_path, mutation.operation, mutation.path)
 
         destination = self.workspace / relative_path
@@ -199,7 +205,14 @@ def _coerce_mutations(payload: Any) -> list[MutationRequest]:
         content = item.get("content")
         if not isinstance(content, str):
             raise MutationDenied("invalid_mutation_content", operation or "unknown", path or "<invalid>")
-        requests.append(MutationRequest(operation=operation, path=path, content=content))
+        requests.append(
+            MutationRequest(
+                operation=operation,
+                path=path,
+                content=content,
+                size_limit_exempt=bool(item.get("size_limit_exempt")),
+            )
+        )
     return requests
 
 
@@ -225,9 +238,9 @@ def _validate_relative_path(path_value: str) -> PurePosixPath:
     return raw
 
 
-def _validate_content(content: str, operation: str, path: str) -> None:
+def _validate_content(content: str, operation: str, path: str, *, size_limit_exempt: bool = False) -> None:
     content_bytes = content.encode("utf-8")
-    if len(content_bytes) > MAX_CONTENT_BYTES:
+    if not size_limit_exempt and len(content_bytes) > MAX_CONTENT_BYTES:
         raise MutationDenied("content_too_large", operation, path)
     if "\x00" in content:
         raise MutationDenied("binary_content_denied", operation, path)

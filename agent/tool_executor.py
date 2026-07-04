@@ -111,6 +111,9 @@ def _flush_session_db_after_tool_progress(
         logger.warning("Incremental tool-call persistence failed after %s: %s", stage, exc)
 
 
+from agent.tool_dispatch_context import dispatch_function_call
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so patches like ``run_agent._set_interrupt`` work."""
     import run_agent
@@ -1418,7 +1421,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 spinner.start()
             _spinner_result = None
             try:
-                function_result = _ra().handle_function_call(
+                function_result = dispatch_function_call(
                     function_name, function_args, effective_task_id,
                     tool_call_id=tool_call.id,
                     session_id=agent.session_id or "",
@@ -1460,7 +1463,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     agent._vprint(f"  {cute_msg}")
         else:
             try:
-                function_result = _ra().handle_function_call(
+                function_result = dispatch_function_call(
                     function_name, function_args, effective_task_id,
                     tool_call_id=tool_call.id,
                     session_id=agent.session_id or "",

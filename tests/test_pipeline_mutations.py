@@ -120,3 +120,53 @@ def test_apply_controlled_mutations_mixed_batch_top_level_symlink_no_partial_wri
     assert summary.denied_count >= 1
     assert not (repo / "safe.txt").exists()
     assert outside.read_text(encoding="utf-8") == "external\n"
+
+
+def test_apply_controlled_mutations_denies_oversized_content_by_default(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    summary = apply_controlled_mutations(
+        allow_mutations=True,
+        mutation_workspace=repo,
+        mutations_payload=[
+            {"operation": "write_text", "path": "big.txt", "content": "x" * 150_000}
+        ],
+    )
+    assert summary.denied_count == 1
+    assert summary.results[0]["reason"] == "content_too_large"
+
+
+def test_apply_controlled_mutations_allows_oversized_content_when_exempt(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    summary = apply_controlled_mutations(
+        allow_mutations=True,
+        mutation_workspace=repo,
+        mutations_payload=[
+            {
+                "operation": "write_text",
+                "path": "big.txt",
+                "content": "x" * 150_000,
+                "size_limit_exempt": True,
+            }
+        ],
+    )
+    assert summary.applied_count == 1
+    assert summary.denied_count == 0
+    assert len((repo / "big.txt").read_text(encoding="utf-8")) == 150_000
+
+
+def test_apply_controlled_mutations_exempt_still_denies_binary_content(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    summary = apply_controlled_mutations(
+        allow_mutations=True,
+        mutation_workspace=repo,
+        mutations_payload=[
+            {
+                "operation": "write_text",
+                "path": "big.bin",
+                "content": "x\x00y",
+                "size_limit_exempt": True,
+            }
+        ],
+    )
+    assert summary.denied_count == 1
+    assert summary.results[0]["reason"] == "binary_content_denied"
