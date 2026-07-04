@@ -93,3 +93,31 @@ def test_cache_probe_attempts_increment_only_without_ats(conn):
     save_cache(conn, [c])
     save_cache(conn, [c])
     assert load_cache(conn)["ghost"]["probe_attempts"] == 1
+
+
+def test_d7_sets_hh_only_flag(conn):
+    conn.executemany("INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?)", [
+        ("HHTwice", "Head of Product", "headhunter", "product", "eu", "fintech", 1, "2026-07-01"),
+        ("HHTwice", "VP Product", "headhunter", "product", "eu", "fintech", 1, "2026-07-01"),
+    ])
+    out = discover_d7(conn, exclude_slugs={"wise"})
+    hh = next(c for c in out if c.name == "HHTwice")
+    assert hh.hh_only is True
+    nium = next(c for c in out if c.name == "Nium")
+    assert nium.hh_only is False
+
+
+def test_discovery_noise_detection():
+    from job_intel.universe.discover import is_discovery_noise
+    unknown = CandidateCompany(name="Unknown")
+    assert is_discovery_noise(unknown) is True
+    too = CandidateCompany(name="ТОО Bilim Land (Bilim Group)")
+    assert is_discovery_noise(too) is True
+    hh_only = CandidateCompany(name="MAREE", hh_only=True)
+    assert is_discovery_noise(hh_only) is True
+    # a supported ATS endpoint always rescues a candidate from noise suppression
+    rescued = CandidateCompany(name="Unknown", hh_only=True)
+    rescued.add_reason("supported_ats")
+    assert is_discovery_noise(rescued) is False
+    normal = CandidateCompany(name="Nium")
+    assert is_discovery_noise(normal) is False
