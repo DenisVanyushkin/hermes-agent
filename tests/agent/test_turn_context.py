@@ -484,7 +484,7 @@ def test_preflight_compression_rebases_current_turn_user_idx():
 
     agent._compress_context = lambda *a, **k: (compressed_messages, "SYSTEM")
 
-    with patch("agent.turn_context.estimate_request_tokens_rough", side_effect=[150, 50]):
+    with patch("agent.turn_context.estimate_request_tokens_rough", side_effect=[150, 50, 50]):
         ctx = _build(agent, conversation_history=history)
 
     assert ctx.messages == compressed_messages
