@@ -107,10 +107,17 @@ categories:
       - delegate_task
       - cronjob
       - ha_call_service
-      - image_generate
       - video_generate
       - text_to_speech
       - mixture_of_agents
+
+  image_generation:
+    description: >-
+      Image generation and editing via the unified image_generate tool
+      (text-to-image and image-to-image). Split out of shell_general so the
+      artist role can allow image work without broad shell access.
+    tools:
+      - image_generate
 
   # [PLACEHOLDER] — observe-only; enforcement not yet possible.
   # See header comment above for resolution path.

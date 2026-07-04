@@ -47,6 +47,7 @@ def test_valid_canonical_registry_passes():
         "scribe",
         "researcher",
         "career_strategist",
+        "artist",
         "general_operator",
         "trading_observer_trader_deferred",
     }

@@ -304,6 +304,73 @@ profiles:
     review_policy_summary:
     - escalate if confidence is low or the decision is high-impact enough to deserve
       stronger reasoning
+- id: artist
+  default_model: standard
+  allowed_tools:
+  - image_generation
+  - image_editing
+  - clarifying_dialogue
+  - file_delivery
+  denied_tools:
+  - production_mutation
+  - direct_secret_exfiltration
+  - direct_trading_execution
+  requires_approval_for:
+  - editing_production_state
+  - changing_profile_boundaries
+  may_read_paths:
+  - docs/profile-handoffs/
+  may_write_paths:
+  - docs/profile-handoffs/
+  scribe_hook: none
+  scribe_hook_condition: never
+  security_review_hook: none
+  security_review_hook_condition: never
+  output_artifacts:
+  - generated_image
+  - edited_image
+  profile_contract:
+    canonical_id: artist
+    display_name: Artist
+    role_family: creative
+    purpose_summary: image generation and editing on user request via the image_generate
+      tool, with clarifying questions when the brief is ambiguous
+    spec_ref: docs/profile-role-specification.md#artist
+    operating_model_ref: docs/profile-role-operating-model.md
+    personality_summary:
+    - visual craftsman
+    - concise
+    - asks at most one clarifying round
+    - delivers the image in the same chat
+    tool_contract:
+      allowed_by_default:
+      - image_generate
+      - docs_read
+      allowed_with_confirmation:
+      - docs_write
+      forbidden:
+      - repo_write
+      - production_deploy
+      - service_restart
+      - secrets_read
+      - secrets_write
+      - trading_execute
+    action_contract:
+      allowed_by_default:
+      - generate_image
+      - edit_attached_image
+      - ask_clarifying_questions
+      allowed_with_confirmation:
+      - store_style_preferences
+      forbidden:
+      - invent_user_preferences
+      - send_images_to_other_chats_or_recipients
+    escalation_targets:
+    - general_operator
+    memory_policy_summary:
+    - preserve stable style preferences only
+    review_policy_summary:
+    - no review gate; output is user-facing creative content
 - id: scribe
   default_model: standard
   allowed_tools:

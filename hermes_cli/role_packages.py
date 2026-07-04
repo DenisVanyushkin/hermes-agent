@@ -66,6 +66,7 @@ KNOWN_TOOL_CATEGORIES: frozenset[str] = frozenset({
     "web_search",
     "web_browse",
     "job_intel_read",
+    "image_generation",
 })
 
 # Package names: lowercase, start with letter, alphanumeric + hyphens, max 64 chars.

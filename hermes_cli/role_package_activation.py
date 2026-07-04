@@ -31,6 +31,7 @@ _ROLE_TO_PACKAGE_DIR: dict[str, str] = {
     "engineer": "hermes-engineer-core",
     "security_auditor": "hermes-security-auditor-core",
     "career_strategist": "hermes-career-strategist-core",
+    "artist": "hermes-artist-core",
 }
 
 # Package directory name → expected role.id in manifest (must match exactly)
@@ -40,6 +41,7 @@ _PACKAGE_DIR_TO_EXPECTED_ROLE_ID: dict[str, str] = {
     "hermes-engineer-core": "hermes_engineer_core",
     "hermes-security-auditor-core": "hermes_security_auditor_core",
     "hermes-career-strategist-core": "hermes_career_strategist_core",
+    "hermes-artist-core": "hermes_artist_core",
 }
 
 
