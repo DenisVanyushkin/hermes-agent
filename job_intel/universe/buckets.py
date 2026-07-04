@@ -26,7 +26,9 @@ def classify(c: CandidateCompany) -> Bucket:
                 and ("thesis_fit" in r or "fintech_payments_fit" in r)):
             c.bucket = "strong_candidate"
             return c.bucket
-        if len(det) >= 2:
+        # candidate requires a thesis/domain signal, not just ATS+geo+titles
+        # (keeps udacity-like non-fintech companies down in `maybe`)
+        if len(det) >= 2 and ("thesis_fit" in r or "fintech_payments_fit" in r):
             c.bucket = "candidate"
             return c.bucket
     if det or "positive_anchor_similarity" in r or "supported_ats" in r:
