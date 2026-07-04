@@ -14,8 +14,8 @@ from pathlib import Path
 from . import dry_run, endpoints
 from .anchors import BEHAVIORAL_ANCHORS, load_editorial_anchors
 from .buckets import classify
-from .discover import (discover_d1, discover_d7, ensure_cache_table, load_cache,
-                       merge_candidates, save_cache)
+from .discover import (discover_d1, discover_d7, ensure_cache_table,
+                       is_discovery_noise, load_cache, merge_candidates, save_cache)
 from .models import CandidateCompany
 from .report import format_universe_report
 
@@ -110,6 +110,12 @@ def run_universe_discovery(*, deliver: bool = True, probe_budget: int = 40) -> s
             continue
         c.ats_type, c.endpoint_url = hit
         c.add_reason("supported_ats", f"{c.ats_type}: {c.endpoint_url}")
+
+    # HH/local-only noise never reaches the report body — suppressed into the
+    # rejected summary unless a supported ATS endpoint rescued it above.
+    for c in candidates:
+        if is_discovery_noise(c) and "low_relevance" not in c.reasons:
+            c.add_reason("low_relevance", "hh/local-only entity without supported ATS")
 
     for c in candidates:
         if "supported_ats" in c.reasons and c.dry_run_vacancies < 0:

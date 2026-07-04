@@ -1,6 +1,7 @@
 """Discoverers for the company universe (MVP-0: D7 co-occurrence, D1a curated)."""
 from __future__ import annotations
 
+import re
 import sqlite3
 
 from .anchors import NEGATIVE_ROLE_BUCKETS, NEGATIVE_TITLE_RE, load_anchor_similar
@@ -49,12 +50,27 @@ def discover_d7(conn: sqlite3.Connection, *, days: int = 90,
     for slug, c in grouped.items():
         # HH low-quality negative anchor: HH-only companies need >=2 distinct titles
         titles = all_titles.get(slug, set())
-        hh_only = titles and all(src == "headhunter" for _, src in titles)
+        hh_only = bool(titles) and all(src == "headhunter" for _, src in titles)
         if hh_only and len(hh_titles.get(slug, set())) < 2:
             continue
+        c.hh_only = hh_only
         out.append(c)
     out.sort(key=lambda c: len(set(c.senior_titles)), reverse=True)
     return out[:limit]
+
+
+# Aggregator junk and local low-signal entities: placeholder names, local legal
+# prefixes, agencies/schools. A supported ATS endpoint always rescues a candidate.
+_NOISE_NAME_RE = re.compile(
+    r"^unknown$|^discovered\b|(^|\s)(тоо|ао|ип)\s|\b(hr|school|learning|center|centre|agency|recruitment)\b",
+    re.IGNORECASE,
+)
+
+
+def is_discovery_noise(c: CandidateCompany) -> bool:
+    if "supported_ats" in c.reasons:
+        return False
+    return c.hh_only or bool(_NOISE_NAME_RE.search(c.name.strip()))
 
 
 def discover_d1(*, exclude_slugs: set[str] | None = None) -> list[CandidateCompany]:
