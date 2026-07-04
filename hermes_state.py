@@ -793,6 +793,35 @@ CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
+
+CREATE TABLE IF NOT EXISTS controlled_execution_reports (
+    report_run_id TEXT PRIMARY KEY,
+    pipeline_session_id TEXT,
+    trace_id TEXT,
+    status TEXT,
+    pipeline_id TEXT,
+    execution_mode TEXT,
+    final_verdict TEXT,
+    controller_executed INTEGER,
+    report_execution_invoked INTEGER,
+    reviewer_invoked INTEGER,
+    changed_files_json TEXT,
+    models_used_json TEXT,
+    providers_used_json TEXT,
+    tests_status TEXT,
+    tests_summary TEXT,
+    workspace_path TEXT,
+    durable_report_path TEXT,
+    workspace_report_path TEXT,
+    report_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cer_session_id
+    ON controlled_execution_reports(pipeline_session_id);
+CREATE INDEX IF NOT EXISTS idx_cer_created
+    ON controlled_execution_reports(created_at DESC);
 """
 
 # Indexes that reference columns added in later schema versions must be
@@ -6390,6 +6419,157 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
+
+    # ── Controlled Execution Reports ────────────────────────────────────
+
+    def persist_controlled_execution_report(
+        self,
+        *,
+        report_run_id: str,
+        payload: Dict[str, Any],
+        workspace_path: str | None = None,
+        durable_report_path: str | None = None,
+        workspace_report_path: str | None = None,
+    ) -> None:
+        """Upsert a controlled execution report by report_run_id.
+
+        Idempotent: repeated writes for the same report_run_id update the
+        existing row rather than creating duplicates.  The latest payload
+        and metadata wins.
+        """
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+        exec_section = payload.get("execution") or {}
+        review_section = payload.get("review") or {}
+        tests_section = payload.get("tests") or {}
+        usage_section = payload.get("usage") or {}
+
+        changed_files = exec_section.get("files_changed_in_workspace") or []
+        models_used = usage_section.get("models_used") or []
+        providers_used = usage_section.get("providers_used") or []
+
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO controlled_execution_reports (
+                       report_run_id, pipeline_session_id, trace_id,
+                       status, pipeline_id, execution_mode, final_verdict,
+                       controller_executed, report_execution_invoked,
+                       reviewer_invoked,
+                       changed_files_json, models_used_json, providers_used_json,
+                       tests_status, tests_summary,
+                       workspace_path, durable_report_path, workspace_report_path,
+                       report_json, created_at, updated_at
+                   ) VALUES (
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                   )
+                   ON CONFLICT(report_run_id) DO UPDATE SET
+                       pipeline_session_id = excluded.pipeline_session_id,
+                       trace_id = excluded.trace_id,
+                       status = excluded.status,
+                       pipeline_id = excluded.pipeline_id,
+                       execution_mode = excluded.execution_mode,
+                       final_verdict = excluded.final_verdict,
+                       controller_executed = excluded.controller_executed,
+                       report_execution_invoked = excluded.report_execution_invoked,
+                       reviewer_invoked = excluded.reviewer_invoked,
+                       changed_files_json = excluded.changed_files_json,
+                       models_used_json = excluded.models_used_json,
+                       providers_used_json = excluded.providers_used_json,
+                       tests_status = excluded.tests_status,
+                       tests_summary = excluded.tests_summary,
+                       workspace_path = excluded.workspace_path,
+                       durable_report_path = excluded.durable_report_path,
+                       workspace_report_path = excluded.workspace_report_path,
+                       report_json = excluded.report_json,
+                       updated_at = excluded.updated_at
+                """,
+                (
+                    report_run_id,
+                    payload.get("pipeline_session_id"),
+                    payload.get("trace_id"),
+                    payload.get("status"),
+                    (payload.get("routing") or {}).get("selected_pipeline_id"),
+                    exec_section.get("execution_mode"),
+                    exec_section.get("final_verdict"),
+                    _int_bool(exec_section.get("actual_execution_invoked")),
+                    _int_bool(exec_section.get("actual_execution_invoked")),
+                    _int_bool(review_section.get("reviewer_invoked")),
+                    json.dumps(changed_files, ensure_ascii=False),
+                    json.dumps(models_used, ensure_ascii=False),
+                    json.dumps(providers_used, ensure_ascii=False),
+                    tests_section.get("status"),
+                    tests_section.get("summary"),
+                    (payload.get("workspace") or {}).get("path"),
+                    durable_report_path,
+                    workspace_report_path,
+                    json.dumps(payload, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        try:
+            self._execute_write(_do)
+        except Exception as exc:
+            logger.warning(
+                "controlled_execution_report DB persist failed: "
+                "report_run_id=%s error_type=%s",
+                report_run_id,
+                type(exc).__name__,
+            )
+
+    def get_controlled_execution_report(
+        self,
+        report_run_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a controlled execution report by report_run_id, or None."""
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM controlled_execution_reports "
+                "WHERE report_run_id = ?",
+                (report_run_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return _cer_row_to_dict(row)
+        except Exception:
+            return None
+
+    def list_controlled_execution_reports(
+        self,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Return recent controlled execution reports, newest first."""
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM controlled_execution_reports "
+                "ORDER BY created_at DESC LIMIT ?",
+                (min(limit, 200),),
+            )
+            return [_cer_row_to_dict(row) for row in cur.fetchall()]
+        except Exception:
+            return []
+
+
+def _int_bool(value: Any) -> int | None:
+    if value is None:
+        return None
+    return 1 if value else 0
+
+
+def _cer_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    """Convert a controlled_execution_reports row to a summary dict."""
+    result = dict(row)
+    # Parse JSON fields for convenience
+    for field in ("changed_files_json", "models_used_json", "providers_used_json"):
+        raw = result.get(field)
+        if raw:
+            try:
+                result[field.replace("_json", "")] = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                result[field.replace("_json", "")] = []
+    return result
 
 
 class AsyncSessionDB:

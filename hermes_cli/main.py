@@ -284,6 +284,7 @@ from hermes_cli.subcommands.doctor import build_doctor_parser
 from hermes_cli.subcommands.security import build_security_parser
 from hermes_cli.subcommands.dump import build_dump_parser
 from hermes_cli.subcommands.debug import build_debug_parser
+from hermes_cli.subcommands.controlled_report import build_controlled_report_parser
 from hermes_cli.subcommands.backup import build_backup_parser
 from hermes_cli.subcommands.import_cmd import build_import_cmd_parser
 from hermes_cli.subcommands.config import build_config_parser
@@ -4301,6 +4302,99 @@ def cmd_debug(args):
     from hermes_cli.debug import run_debug
 
     run_debug(args)
+
+
+def cmd_controlled_report(args):
+    """Controlled execution report lookup."""
+    import json as _json
+    from hermes_state import SessionDB
+
+    action = getattr(args, "cr_action", None)
+    if action not in ("get", "list"):
+        print(
+            "usage: hermes controlled-report <get|list> ...\n"
+            "\n"
+            "subcommands:\n"
+            "  get    Fetch a report by run ID\n"
+            "  list   List recent reports\n"
+            "\n"
+            "Run `hermes controlled-report get -h` for details.",
+            file=sys.stderr,
+        )
+        return 1
+
+    db = SessionDB()
+    if action == "get":
+        report_run_id = getattr(args, "report_run_id", None)
+        if not report_run_id:
+            print("error: report_run_id is required", file=sys.stderr)
+            return 1
+        row = db.get_controlled_execution_report(report_run_id)
+        if row is None:
+            print(f"No report found for run ID: {report_run_id}")
+            return 1
+
+        if getattr(args, "output_json", False):
+            # Print full sanitized report JSON
+            raw_json = row.get("report_json", "{}")
+            try:
+                parsed = _json.loads(raw_json)
+                print(_json.dumps(parsed, indent=2, sort_keys=True))
+            except (_json.JSONDecodeError, TypeError):
+                print(raw_json)
+            return 0
+
+        if getattr(args, "output_path", False):
+            print(f"report_run_id: {row.get('report_run_id')}")
+            print(f"workspace_path: {row.get('workspace_path') or '(none)'}")
+            print(f"durable_report_path: {row.get('durable_report_path') or '(none)'}")
+            print(f"workspace_report_path: {row.get('workspace_report_path') or '(none)'}")
+            return 0
+
+        # Default: summary view
+        print(f"Report: {row.get('report_run_id')}")
+        print(f"  Status:       {row.get('status')}")
+        print(f"  Pipeline:     {row.get('pipeline_id')}")
+        print(f"  Mode:         {row.get('execution_mode')}")
+        print(f"  Verdict:      {row.get('final_verdict')}")
+        print(f"  Tests:        {row.get('tests_status')}")
+        print(f"  Tests summary:{row.get('tests_summary') or ' (none)'}")
+        print(f"  Created:      {row.get('created_at')}")
+        print(f"  Updated:      {row.get('updated_at')}")
+        return 0
+
+    if action == "list":
+        limit = getattr(args, "limit", 20)
+        reports = db.list_controlled_execution_reports(limit=limit)
+        if not reports:
+            print("No controlled execution reports found.")
+            return 0
+
+        if getattr(args, "output_json", False):
+            summary = []
+            for r in reports:
+                summary.append({
+                    "report_run_id": r.get("report_run_id"),
+                    "status": r.get("status"),
+                    "pipeline_id": r.get("pipeline_id"),
+                    "execution_mode": r.get("execution_mode"),
+                    "final_verdict": r.get("final_verdict"),
+                    "tests_status": r.get("tests_status"),
+                    "created_at": r.get("created_at"),
+                })
+            print(_json.dumps(summary, indent=2, sort_keys=True))
+            return 0
+
+        print(f"{'Run ID':<45} {'Status':<20} {'Pipeline':<30} {'Created':<26}")
+        print("-" * 121)
+        for r in reports:
+            print(
+                f"{r.get('report_run_id', ''):<45} "
+                f"{r.get('status', ''):<20} "
+                f"{r.get('pipeline_id', ''):<30} "
+                f"{r.get('created_at', ''):<26}"
+            )
+        return 0
 
 
 def cmd_config(args):
@@ -13091,6 +13185,11 @@ def main():
     # debug command  (parser built in hermes_cli/subcommands/debug.py)
     # =========================================================================
     build_debug_parser(subparsers, cmd_debug=cmd_debug)
+
+    # =========================================================================
+    # controlled-report command  (parser built in hermes_cli/subcommands/controlled_report.py)
+    # =========================================================================
+    build_controlled_report_parser(subparsers, cmd_controlled_report=cmd_controlled_report)
 
     # =========================================================================
     # backup command  (parser built in hermes_cli/subcommands/backup.py)

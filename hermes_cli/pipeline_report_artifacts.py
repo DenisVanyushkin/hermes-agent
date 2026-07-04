@@ -6,11 +6,14 @@ import json
 import logging
 from pathlib import Path
 import re
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 import uuid
 
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSession
+
+if TYPE_CHECKING:
+    from hermes_state import SessionDB
 
 
 CONTROLLED_EXECUTION_REPORT_SCHEMA_VERSION = "controlled_execution_report.v1"
@@ -30,6 +33,7 @@ def persist_controlled_execution_report_artifacts(
     router_decision: RouterDecision | None = None,
     workspace_path: str | Path | None = None,
     durable_root: str | Path | None = DEFAULT_DURABLE_ROOT,
+    db: SessionDB | None = None,
 ) -> dict[str, Any]:
     workspace = Path(workspace_path).expanduser() if workspace_path is not None else None
     durable_base = Path(durable_root).expanduser() if durable_root is not None else None
@@ -66,6 +70,26 @@ def persist_controlled_execution_report_artifacts(
         run_id=session.pipeline_session_id,
     )
 
+    # Best-effort DB persistence (non-fatal on failure)
+    db_persisted = False
+    if db is not None:
+        try:
+            db.persist_controlled_execution_report(
+                report_run_id=durable_run_id,
+                payload=payload,
+                workspace_path=str(workspace_path) if workspace_path is not None else None,
+                durable_report_path=str(durable_report_path) if durable_written and durable_report_path is not None else None,
+                workspace_report_path=str(workspace_report_path) if workspace_written and workspace_report_path is not None else None,
+            )
+            db_persisted = True
+        except Exception as exc:
+            logger.warning(
+                "controlled execution report DB persist failed: "
+                "run_id=%s error_type=%s",
+                session.pipeline_session_id,
+                type(exc).__name__,
+            )
+
     return {
         "run_id": session.pipeline_session_id,
         "workspace_report_path": str(workspace_report_path) if workspace_written and workspace_report_path is not None else None,
@@ -75,6 +99,7 @@ def persist_controlled_execution_report_artifacts(
         "durable_report_written": durable_written,
         "report_workspace_filename": CONTROLLED_EXECUTION_REPORT_FILENAME,
         "durable_report_available": durable_report_path is not None,
+        "db_persisted": db_persisted,
     }
 
 

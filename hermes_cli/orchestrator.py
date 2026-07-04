@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from dataclasses import asdict, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hermes_cli.config import cfg_get
 from hermes_cli.pipeline_execution_controller import evaluate_pipeline_execution_controller
@@ -14,6 +14,8 @@ from hermes_cli.pipeline_autonomous_execution import AUTONOMOUS_MODE, build_auto
 from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode, PipelineGateRequest, evaluate_pipeline_gate
 from hermes_cli.pipeline_router import DEFAULT_PIPELINE_ID, RouterDecision
 from hermes_cli.pipeline_report import build_pipeline_execution_report
+from hermes_cli.pipeline_report_artifacts import DEFAULT_DURABLE_ROOT, persist_controlled_execution_report_artifacts
+from hermes_cli.pipeline_controlled_dry_run import format_controlled_manual_summary
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_state import (
     ExecutionReport,
@@ -22,6 +24,9 @@ from hermes_cli.pipeline_state import (
     PipelineState,
 )
 from hermes_cli.pipeline_state_machine import PipelineStateSnapshot, build_pipeline_state_snapshot
+
+if TYPE_CHECKING:
+    from hermes_state import SessionDB
 
 
 logger = logging.getLogger(__name__)
@@ -46,6 +51,7 @@ def observe_gateway_turn(
     selected_model: str | None = None,
     logger: logging.Logger | None = None,
     conversation_context: str | None = None,
+    db: SessionDB | None = None,
 ) -> OrchestratorObserveReport | None:
     del selected_provider, selected_model
 
@@ -188,7 +194,27 @@ def observe_gateway_turn(
                     controller_payload["execution_mode"] = mode
         if helper_report is not None:
             pipeline_execution_report_payload = helper_report
-        pipeline_execution_controller = replace(pipeline_execution_controller, report_artifacts=None)
+        report_artifacts = persist_controlled_execution_report_artifacts(
+            session=session,
+            state_snapshot=state_snapshot,
+            controller_payload=pipeline_execution_controller.to_safe_dict(),
+            pipeline_execution_report_payload=pipeline_execution_report_payload,
+            router_decision=router_decision,
+            workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, dict) else None,
+            durable_root=DEFAULT_DURABLE_ROOT,
+            db=db,
+        )
+        response_helper_result = dict(pipeline_execution_controller.helper_result or {})
+        response_helper_result["report"] = pipeline_execution_report_payload
+        response_helper_result["report_artifacts"] = report_artifacts
+        pipeline_execution_controller = replace(
+            pipeline_execution_controller,
+            final_response_text=format_controlled_manual_summary(
+                response_helper_result,
+                workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, dict) else None,
+            ),
+            report_artifacts=report_artifacts,
+        )
     report = OrchestratorObserveReport(
         session=session,
         state=state,

@@ -17176,6 +17176,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     selected_provider=str(cfg_get(user_config, "model", "provider", default="") or "").strip() or None,
                     selected_model=_resolve_gateway_model(user_config) or None,
                     logger=logger,
+                    db=getattr(self, "_session_db", None),
                 )
             except Exception:
                 logger.warning("pipeline orchestrator observe hook import/invocation failed", exc_info=True)
