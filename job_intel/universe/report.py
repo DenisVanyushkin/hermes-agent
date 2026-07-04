@@ -11,12 +11,12 @@ _ACTIONS = {
     "candidate": "review manually; not auto-added",
     "maybe": "needs stronger evidence",
 }
-_RESEARCH_SIGNALS = ("positive_anchor_similarity", "thesis_fit", "fintech_payments_fit")
+# Aggregator-derived fintech_payments_fit alone is weak evidence and does NOT
+# qualify a hold for endpoint research — only anchor similarity or thesis fit do.
+_RESEARCH_SIGNALS = ("positive_anchor_similarity", "thesis_fit")
 
 
 def _hold_subgroup(c: CandidateCompany) -> str:
-    # anchor-similar or thesis-fit holds are worth endpoint research (slug
-    # variants, careers-page ATS); the rest are low-quality holds.
     if any(r in c.reasons for r in _RESEARCH_SIGNALS):
         return "needs_endpoint_research"
     return "low_quality_hold"
