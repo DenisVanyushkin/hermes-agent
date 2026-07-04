@@ -35,6 +35,8 @@ class CandidateCompany:
     endpoint_url: Optional[str] = None
     dry_run_vacancies: int = -1  # -1 = not attempted
     dry_run_sample_titles: list[str] = field(default_factory=list)
+    dry_run_product_sample: bool = False  # sample titles include a product-leadership role
+    hh_only: bool = False                 # all D7 evidence came from headhunter
     bucket: Optional[Bucket] = None
 
     def __post_init__(self) -> None:

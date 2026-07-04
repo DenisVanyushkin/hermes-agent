@@ -32,3 +32,21 @@ def test_dry_run_fetcher_error_is_zero():
     c = CandidateCompany(name="Nium", ats_type="greenhouse")
     dry_run_candidate(c, fetchers={"greenhouse": boom})
     assert c.dry_run_vacancies == 0
+
+
+def test_dry_run_prefers_product_leadership_sample():
+    c = CandidateCompany(name="Nium", ats_type="greenhouse")
+    vacs = [SimpleNamespace(title=t) for t in
+            ["Sales Executive", "Account Manager", "Director of Product",
+             "Support Agent", "VP Product, Payments"]]
+    dry_run_candidate(c, fetchers={"greenhouse": _fake_fetcher(vacs)})
+    assert c.dry_run_sample_titles[0] == "Director of Product"
+    assert c.dry_run_product_sample is True
+
+
+def test_dry_run_flags_missing_product_sample():
+    c = CandidateCompany(name="Nium", ats_type="greenhouse")
+    vacs = [SimpleNamespace(title="Sales Executive"), SimpleNamespace(title="Recruiter")]
+    dry_run_candidate(c, fetchers={"greenhouse": _fake_fetcher(vacs)})
+    assert c.dry_run_product_sample is False
+    assert c.dry_run_sample_titles == ["Sales Executive", "Recruiter"]
