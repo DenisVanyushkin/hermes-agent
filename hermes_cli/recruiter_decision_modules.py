@@ -148,7 +148,12 @@ FULL_BUNDLE_PRESET_ID = "full_bundle"
 
 DECISION_PRESETS: dict[str, tuple[str, ...]] = {
     FULL_BUNDLE_PRESET_ID: DECISION_MODULE_IDS,
-    "quick_vacancy_screen": ("vacancy_assessment", "recommendation", "manual_review_warnings"),
+    "quick_vacancy_screen": (
+        "vacancy_assessment",
+        "company_assessment",
+        "recommendation",
+        "manual_review_warnings",
+    ),
     "company_diligence": ("company_assessment", "company_risk_register", "manual_review_warnings"),
     "role_fit_only": ("vacancy_assessment", "manual_review_warnings"),
     "positioning_only": (

@@ -16,6 +16,20 @@ from .recruiter_decision_modules import DECISION_PACKET_SCHEMA
 
 
 _MODULE_CONTRACTS: dict[str, str] = {
+    "company_research": (
+        "Fields: claims — a list where each item has claim, category (business/funding/momentum/"
+        "reputation/culture/product/role/compensation), source (the actual URL or label of where the "
+        "statement comes from), source_type (one of company_website/official_blog/press_release/"
+        "funding_announcement/annual_report/regulatory_filing/news/employee_reviews/public_interview/"
+        "podcast/founder_material/product_documentation/developer_docs/customer_case_study/"
+        "layoff_tracker/hiring_signal), date_or_access_timestamp (ISO date; use the provided "
+        "access_date for statements read from the posting), confidence (low/medium/high), "
+        "fact_vs_inference (fact/recent_public_signal/inference/unknown). Extract ONLY statements "
+        "actually present in the provided posting/context (company description, scale, funding, "
+        "products, market, employment model). Use source_type company_website for the about-company "
+        "section and hiring_signal for the vacancy itself. Never invent numbers or facts not present "
+        "in the input; omit what is not stated."
+    ),
     "vacancy_assessment": (
         "Fields: company, role, location_and_relocation, seniority, function, domain, "
         "key_responsibilities (list), must_have_requirements (list), nice_to_have_requirements (list), "

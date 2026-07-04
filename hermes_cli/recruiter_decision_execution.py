@@ -110,11 +110,15 @@ def execute_recruiter_decision_support_helper(
         except Exception as exc:
             executor_error = f"{type(exc).__name__}: {exc}"
 
+    research_warnings: list[str] = []
+    if module_executor is not None:
+        research_warnings = _maybe_generate_company_research(request, module_executor)
+
     report = run_recruiter_decision_support_flow(request, module_executor=module_executor)
     text = format_decision_report_text(
         report,
         executor_error=executor_error,
-        extra_notes=list(facts_bundle.warnings) + fetch_warnings,
+        extra_notes=list(facts_bundle.warnings) + fetch_warnings + research_warnings,
     )
 
     status = "executed"
@@ -167,6 +171,61 @@ def _enrich_vacancy_source(request: DecisionSupportRequest) -> list[str]:
                 source.setdefault(key, value)
         return []
     return ["vacancy page could not be fetched; assessment is limited to the link and thread context"]
+
+
+_COMPANY_RESEARCH_MODULE_IDS = ("company_assessment", "company_risk_register")
+
+
+def _maybe_generate_company_research(request: DecisionSupportRequest, module_executor: Any) -> list[str]:
+    """Produce sourced research claims from the posting when company modules are requested."""
+    if request.company_research_claims:
+        return []
+    from hermes_cli.recruiter_decision_modules import parse_requested_outputs
+
+    parsed = parse_requested_outputs(
+        request.prompt,
+        context={"requested_outputs": request.requested_outputs} if request.requested_outputs else None,
+    )
+    if not any(module_id in parsed.requested for module_id in _COMPANY_RESEARCH_MODULE_IDS):
+        return []
+
+    source = request.vacancy_source if isinstance(request.vacancy_source, dict) else {}
+    company = request.company_identity or source.get("company")
+    if not company and not source.get("description_text"):
+        return ["company research skipped: no company identity or posting content available"]
+    if not request.company_identity and company:
+        request.company_identity = str(company)
+
+    from datetime import date
+
+    try:
+        execution = module_executor.execute(
+            module_id="company_research",
+            skill_id="company-research",
+            module_input={
+                "module_id": "company_research",
+                "company_identity": company,
+                "vacancy_source": request.vacancy_source,
+                "role_context": request.role_context,
+                "access_date": date.today().isoformat(),
+            },
+        )
+    except Exception as exc:
+        return [f"company research generation failed ({type(exc).__name__}); company analysis is limited"]
+
+    from hermes_cli.recruiter_company_research import validate_company_research_claim
+
+    raw_claims = execution.payload.get("claims") if isinstance(execution.payload, dict) else None
+    valid_claims = [
+        claim
+        for claim in (raw_claims or [])
+        if isinstance(claim, dict) and not validate_company_research_claim(claim)
+    ]
+    request.company_research_claims = valid_claims
+    if not valid_claims:
+        return ["no verifiable company research claims could be produced; company analysis is limited"]
+    dropped = len(list(raw_claims or [])) - len(valid_claims)
+    return [f"{dropped} unverifiable company research claims were discarded"] if dropped else []
 
 
 def format_decision_report_text(
