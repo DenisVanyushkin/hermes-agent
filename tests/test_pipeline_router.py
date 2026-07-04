@@ -243,6 +243,54 @@ def test_llm_router_selects_engineering_pipeline_for_russian_mutation_prompt(tmp
     assert captured["timeout_seconds"] == 9
 
 
+def test_llm_router_prompt_routes_infrastructure_diagnostics_to_engineering(tmp_path: Path) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    def _fake_llm_call(
+        *,
+        provider: str,
+        model: str,
+        timeout_seconds: float,
+        messages: list[dict[str, str]],
+    ) -> dict:
+        prompt = "\n".join(message["content"] for message in messages)
+        if "diagnose or investigate code or infrastructure" in prompt:
+            return {
+                "status": "selected",
+                "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+                "fallback_pipeline_id": None,
+                "confidence": 0.92,
+                "reasoning_summary": "The request asks for infrastructure diagnosis.",
+                "requires_clarification": False,
+                "fallback_safe": False,
+            }
+        return {
+            "status": "no_specialized_pipeline",
+            "selected_pipeline_id": None,
+            "fallback_pipeline_id": DEFAULT_PIPELINE_ID,
+            "confidence": 0.92,
+            "reasoning_summary": "No diagnostic routing rule was supplied.",
+            "requires_clarification": False,
+            "fallback_safe": True,
+        }
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        timeout_seconds=10,
+        llm_call=_fake_llm_call,
+    )
+
+    decision = router.route(
+        "почему cron-джоб ушёл на OpenRouter, а не на базовую модель?",
+        pipeline_session_id="sess-llm-infrastructure-diagnostic",
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+
+
 def test_build_pipeline_router_defaults_to_llm_strategy(tmp_path: Path) -> None:
     router = build_pipeline_router(
         config={"pipelines": {"router": {}}},
