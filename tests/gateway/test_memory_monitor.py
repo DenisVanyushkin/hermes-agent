@@ -120,3 +120,22 @@ def test_unavailable_rss_warns_and_does_not_start(caplog, monkeypatch):
     assert started is False
     assert mm.is_running() is False
     assert any("Memory monitoring unavailable" in r.getMessage() for r in caplog.records)
+
+
+class TestGatewayWiring:
+    """Regression guard: commit 51c68d4ab (desktop app) accidentally dropped
+    the start/stop wiring from gateway/run.py, silencing [MEMORY] lines for
+    weeks. Assert at source level that start_gateway still wires the monitor.
+    """
+
+    def _run_py_source(self) -> str:
+        from pathlib import Path
+
+        run_py = Path(__file__).resolve().parents[2] / "gateway" / "run.py"
+        return run_py.read_text(encoding="utf-8")
+
+    def test_start_gateway_starts_monitor(self) -> None:
+        assert "start_memory_monitoring(" in self._run_py_source()
+
+    def test_start_gateway_stops_monitor_on_shutdown(self) -> None:
+        assert "stop_memory_monitoring(" in self._run_py_source()
