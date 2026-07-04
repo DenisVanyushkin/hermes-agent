@@ -1,5 +1,15 @@
 # LinkedIn Re-auth Runbook
 
+> **STATUS (2026-07-04): RETIRED as daily production source** — reason:
+> `retired_auth_instability`. Re-auth was validated on 2026-07-04: the session
+> authenticated correctly, but LinkedIn invalidated the `li_at` cookie within
+> ~30 minutes of the first automated CDP jobs-search from this VPS (same
+> pattern as the 2026-06-06 session loss). Decision: do not run LinkedIn as an
+> automated daily source; no anti-detection work. The profile and this
+> procedure remain available for **manual-only** use. In env:
+> `JOB_INTEL_ENABLED_SOURCES` excludes `linkedin` → source reports
+> `disabled_by_config`.
+
 Symptom: `source_kpi_run` shows `linkedin` with `login_walls > 0` on consecutive daily
 runs, `found_count = 0`, `skip_reason = login_wall`. The health report emits
 "LinkedIn re-auth required". Root cause: the persistent Chromium profile at
