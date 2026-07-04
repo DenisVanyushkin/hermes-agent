@@ -252,3 +252,53 @@ class TestConversationContext:
         assert result["status"] == "executed"
         ds = result["report"]["decision_support"]
         assert ds["modules"]["vacancy_assessment"]["status"] != "SKIPPED_NOT_REQUESTED"
+
+
+class TestCompanyResearchGeneration:
+    class _StubExecutor:
+        def __init__(self, claims):
+            self._claims = claims
+            self.calls = []
+
+        def execute(self, *, module_id, skill_id, module_input):
+            from hermes_cli.recruiter_decision_flow import DecisionModuleExecution
+
+            self.calls.append(module_id)
+            return DecisionModuleExecution(payload={"claims": self._claims})
+
+    def test_generates_and_validates_claims(self) -> None:
+        from hermes_cli.recruiter_decision_execution import _maybe_generate_company_research
+
+        good = {
+            "claim": "GitLab is a remote-first DevOps platform company",
+            "category": "business",
+            "source": "https://job-boards.greenhouse.io/gitlab/jobs/8592823002",
+            "source_type": "company_website",
+            "date_or_access_timestamp": "2026-07-04",
+            "confidence": "medium",
+            "fact_vs_inference": "fact",
+        }
+        bad = {"claim": "made up", "source": "", "source_type": "gossip"}
+        request = build_decision_request_from_message("оцени вакансию https://x.com/j/1")
+        request.vacancy_source["company"] = "gitlab"
+        request.vacancy_source["description_text"] = "about..."
+        executor = self._StubExecutor([good, bad])
+        warnings = _maybe_generate_company_research(request, executor)
+        assert executor.calls == ["company_research"]
+        assert request.company_research_claims == [good]
+        assert request.company_identity == "gitlab"
+        assert any("discarded" in w for w in warnings)
+
+    def test_skipped_when_company_modules_not_requested(self) -> None:
+        from hermes_cli.recruiter_decision_execution import _maybe_generate_company_research
+
+        request = build_decision_request_from_message("подготовь вопросы для интервью")
+        request.requested_outputs = ["questions_to_ask"]
+        executor = self._StubExecutor([])
+        assert _maybe_generate_company_research(request, executor) == []
+        assert executor.calls == []
+
+    def test_default_quick_screen_includes_company_assessment(self) -> None:
+        from hermes_cli.recruiter_decision_modules import DECISION_PRESETS
+
+        assert "company_assessment" in DECISION_PRESETS["quick_vacancy_screen"]
