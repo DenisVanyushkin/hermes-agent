@@ -31,7 +31,7 @@ fi
 
 BRANCH="${HERMES_LOCAL_BRANCH:-local/customizations}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-STATE_DIR="$HERMES_HOME/state/upstream-sync"
+STATE_DIR="${HERMES_SYNC_STATE_DIR:-$HERMES_HOME/sandboxes/docker/default/home/.hermes/state/upstream-sync}"
 
 # If root, repair ownership and re-exec as the repo owner (mirror of the
 # rebase script's guard).
