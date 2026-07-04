@@ -931,6 +931,29 @@ _OBSERVED_GROUP_CONTEXT_HEADER = "[Observed Telegram group context - context onl
 _CURRENT_ADDRESSED_MESSAGE_HEADER = "[Current addressed message - answer only this unless it explicitly asks you to use the observed context]"
 
 
+def _pipeline_conversation_context(history):
+    """Compact recent-thread context for pipeline execution helpers.
+
+    Lets a bare follow-up like "оцени вакансию" (replying under a job alert)
+    reach the recruiter pipeline together with the alert text and URL.
+    """
+    parts = []
+    for msg in (history or [])[-8:]:
+        role = str(msg.get("role") or "")
+        if role not in {"user", "assistant"}:
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            content = " ".join(
+                str(item.get("text") or "") for item in content if isinstance(item, dict)
+            )
+        text = str(content or "").strip()
+        if text:
+            parts.append(f"{role}: {text[:1500]}")
+    joined = "\n".join(parts).strip()
+    return joined[-6000:] or None if joined else None
+
+
 def _uses_telegram_observed_group_context(channel_prompt: Optional[str]) -> bool:
     """Return True for Telegram group turns that may include observed chatter.
 
@@ -19292,6 +19315,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pipeline_orchestrator_report = observe_gateway_turn(
                     config=user_config,
                     user_message=message,
+                    conversation_context=_pipeline_conversation_context(history),
                     session_id=session_id,
                     session_key=session_key,
                     platform=platform_key,

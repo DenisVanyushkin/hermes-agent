@@ -42,10 +42,21 @@ _MODULE_TITLES = {
 def build_decision_request_from_message(
     user_message: str,
     career_facts: CareerFactsBundle | None = None,
+    conversation_context: str | None = None,
 ) -> DecisionSupportRequest:
-    """Build a safe draft-only decision request from a raw chat message."""
+    """Build a safe draft-only decision request from a raw chat message.
+
+    A bare follow-up ("оцени вакансию" replying under a job alert) carries no
+    URL itself, so the vacancy link falls back to the most recent URL in the
+    thread context, and the trimmed context is exposed to modules as
+    role_context.
+    """
     text = str(user_message or "").strip()
+    context = str(conversation_context or "").strip()
     urls = _URL_PATTERN.findall(text)
+    if not urls and context:
+        # Most recent thread URL first.
+        urls = list(reversed(_URL_PATTERN.findall(context)))
     vacancy_source = None
     if urls:
         vacancy_source = {
@@ -60,6 +71,7 @@ def build_decision_request_from_message(
         career_fact_sources=list(bundle.sources),
         career_facts=bundle.facts,
         candidate_preferences=bundle.preferences,
+        role_context=(f"Recent conversation context:\n{context[-2500:]}" if context else None),
     )
 
 
@@ -68,6 +80,7 @@ def execute_recruiter_decision_support_helper(
     config: Mapping[str, Any] | None = None,
     user_message: str = "",
     executor_factory: Any = None,
+    conversation_context: str | None = None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
     """Registered controller helper for the recruiter pipeline."""
@@ -75,7 +88,11 @@ def execute_recruiter_decision_support_helper(
         facts_bundle = load_career_facts()
     except Exception as exc:
         facts_bundle = CareerFactsBundle(warnings=[f"career facts loader failed: {type(exc).__name__}"])
-    request = build_decision_request_from_message(user_message, career_facts=facts_bundle)
+    request = build_decision_request_from_message(
+        user_message,
+        career_facts=facts_bundle,
+        conversation_context=conversation_context,
+    )
 
     module_executor = None
     executor_error: str | None = None
