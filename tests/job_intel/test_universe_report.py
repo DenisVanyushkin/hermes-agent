@@ -37,3 +37,36 @@ def test_report_rejected_summary():
     text = format_universe_report([c], week_label="2026-W27")
     assert "Rejected this run: 1" in text
     assert "low_relevance: 1" in text
+
+
+def test_run_universe_discovery_end_to_end(monkeypatch):
+    import sqlite3
+    from job_intel import universe
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+    CREATE TABLE vacancy_observability (
+      company TEXT, title TEXT, source TEXT, role_bucket TEXT, geo_bucket TEXT,
+      industry_bucket TEXT, executive_detected INTEGER, created_at TEXT
+    );
+    INSERT INTO vacancy_observability VALUES
+      ('Nium','VP Product, Payments','greenhouse','product','apac','payments',1,'2026-07-01');
+    """)
+    monkeypatch.setattr(universe, "_open_ro_conn", lambda: conn)
+    monkeypatch.setattr(universe, "_open_cache_conn", lambda: conn)
+    monkeypatch.setattr(universe, "_exclude_slugs", lambda: {"wise", "airwallex"})
+    monkeypatch.setattr(universe, "_PROBE_DELAY", 0)
+    monkeypatch.setattr(universe.endpoints, "probe_ats",
+                        lambda slug, session=None: (
+                            "greenhouse",
+                            f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs")
+                        if slug == "nium" else None)
+    monkeypatch.setattr(universe.dry_run, "dry_run_candidate",
+                        lambda c, fetchers=None: setattr(c, "dry_run_vacancies", 4))
+    text = universe.run_universe_discovery(deliver=False)
+    assert "Company Discovery Report" in text
+    assert "Nium" in text
+    assert "read-only" in text
+    # cache row persisted for probed slug
+    cached = universe.load_cache(conn)
+    assert cached["nium"]["ats_type"] == "greenhouse"

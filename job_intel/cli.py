@@ -4049,6 +4049,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("strategic")
     sub.add_parser("health")
     sub.add_parser("weekly-kpi")
+    universe_parser = sub.add_parser("universe-discovery")
+    universe_parser.add_argument("--no-deliver", action="store_true")
     performance_report = sub.add_parser("performance-report")
     performance_report.add_argument("--last", type=int, default=7)
     performance_report.set_defaults(cmd="performance-report")
@@ -4123,6 +4125,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "weekly-kpi":
         print(run_weekly_kpi_report())
+        return 0
+    if args.cmd == "universe-discovery":
+        from job_intel.universe import run_universe_discovery
+        print(run_universe_discovery(deliver=not args.no_deliver))
         return 0
     if args.cmd == "performance-report":
         print(run_performance_report(args.last))
