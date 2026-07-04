@@ -80,3 +80,10 @@ def test_empty_rejects_with_low_relevance():
     c = CandidateCompany(name="Y")
     assert classify(c) == "reject"
     assert "low_relevance" in c.reasons
+
+
+def test_candidate_requires_thesis_or_domain_signal():
+    # udacity-like case: ATS + geo + senior titles but no thesis/domain -> maybe
+    assert classify(_c("supported_ats", "geo_fit", "senior_product_titles")) == "maybe"
+    assert classify(_c("supported_ats", "senior_product_titles",
+                       "fintech_payments_fit")) == "candidate"
