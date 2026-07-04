@@ -856,6 +856,19 @@ def classify_external_commitment(task: str) -> bool:
     return False
 
 
+_BUILTIN_ROUTING_PROFILES = frozenset(
+    {
+        "chief_hermes",
+        "general_operator",
+        "engineer",
+        "security_auditor",
+        "career_strategist",
+        "scribe",
+        "researcher",
+    }
+)
+
+
 def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, bool, str]:
     routing_task = routing_request_text(task)
     normalized = _normalize(routing_task)
@@ -872,9 +885,13 @@ def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, 
     if _contains_any(normalized, _DOCS_TERMS) and any(marker in normalized for marker in docs_first_markers):
         return "scribe", False, "documentation/status capture intent detected"
 
-    if route_decision is not None and route_decision.primary_profile and route_decision.primary_profile != "chief_hermes":
-        if route_decision.primary_profile == "general_operator":
-            return "general_operator", True, "ordinary safe personal/admin fallback from routing"
+    if (
+        route_decision is not None
+        and route_decision.primary_profile
+        and route_decision.primary_profile not in _BUILTIN_ROUTING_PROFILES
+    ):
+        # Package roles (e.g. hermes_engineer_core) selected by routing must
+        # win over the built-in keyword cascade below — see bd2124fe6.
         return route_decision.primary_profile, False, "routing selected specialized role"
 
     if _contains_any(normalized, _ENGINEER_TERMS):
@@ -901,6 +918,11 @@ def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, 
         return "researcher", False, "external research intent detected"
     if _contains_any(normalized, _PERSONAL_ADMIN_TERMS):
         return "general_operator", True, "ordinary personal/admin fallback"
+
+    if route_decision is not None and route_decision.primary_profile and route_decision.primary_profile != "chief_hermes":
+        if route_decision.primary_profile == "general_operator":
+            return "general_operator", True, "ordinary safe personal/admin fallback from routing"
+        return route_decision.primary_profile, False, "routing selected specialized role"
 
     return "general_operator", True, "no specialized role matched; safe fallback to General Operator"
 
