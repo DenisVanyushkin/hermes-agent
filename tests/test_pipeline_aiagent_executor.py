@@ -122,7 +122,9 @@ class _DispatchingFakeAgent(_FakeAgent):
         self.tool_args = dict(tool_args)
 
     def run_conversation(self, _message: str):
-        tool_result = run_agent.handle_function_call(self.tool_name, self.tool_args)
+        from agent.tool_dispatch_context import dispatch_function_call
+
+        tool_result = dispatch_function_call(self.tool_name, self.tool_args)
         return {
             "final_response": "tool call completed",
             "raw_metadata": {
@@ -1101,7 +1103,9 @@ def test_bridge_context_manager_routes_tool_dispatch(tmp_path: Path) -> None:
     bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent, conversation_runner=lambda *_args: {"output_text": "ok"})
 
     with bridge.patched_tool_dispatch():
-        payload = json.loads(run_agent.handle_function_call("write_file", {"path": "via-dispatch.txt", "content": "ok\n"}))
+        from agent.tool_dispatch_context import dispatch_function_call
+
+        payload = json.loads(dispatch_function_call("write_file", {"path": "via-dispatch.txt", "content": "ok\n"}))
     assert payload["applied_count"] == 1
     assert (git_repo / "via-dispatch.txt").exists()
 
@@ -2549,3 +2553,146 @@ def test_guard_fail_closed_for_bad_known_host_path(tmp_path: Path) -> None:
     )
     with pytest.raises(RuntimeError, match="controlled_subagent_identity_mismatch"):
         build_api_kwargs(agent, [])
+
+
+def _tolerant_envelope_payload() -> dict[str, object]:
+    return {
+        "schema_version": "v1",
+        "subagent_id": "hermes_engineer_core",
+        "role": "engineer",
+        "status": "needs_review",
+        "summary": "investigated flow",
+        "findings": [],
+        "changes": [],
+        "blockers": [],
+        "artifacts": [],
+        "confidence": 0.7,
+        "requires_review": True,
+        "next_action": "review",
+    }
+
+
+def test_normalize_result_extracts_envelope_from_fenced_json(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    text = "```json\n" + json.dumps(_tolerant_envelope_payload()) + "\n```"
+    normalized = bridge._normalize_result({"output_text": text, "completion_reason": "text_response(finish_reason=stop)"})
+    structured = normalized["raw_metadata"]["structured_output"]
+    assert structured["status"] == "needs_review"
+    assert normalized["raw_metadata"].get("synthesized_envelope") is None
+
+
+def test_normalize_result_extracts_envelope_with_prose_prefix(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    text = "Here is my structured result:\n" + json.dumps(_tolerant_envelope_payload())
+    normalized = bridge._normalize_result({"output_text": text, "completion_reason": "text_response(finish_reason=stop)"})
+    structured = normalized["raw_metadata"]["structured_output"]
+    assert structured["status"] == "needs_review"
+    assert normalized["raw_metadata"]["structured_output_source"] == "output_text_json_embedded"
+
+
+def test_normalize_result_extracts_envelope_with_trailing_text(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    text = json.dumps(_tolerant_envelope_payload()) + "\nLet me know if you need more detail."
+    normalized = bridge._normalize_result({"output_text": text, "completion_reason": "text_response(finish_reason=stop)"})
+    structured = normalized["raw_metadata"]["structured_output"]
+    assert structured["status"] == "needs_review"
+
+
+def test_normalize_result_ignores_non_envelope_json_in_prose(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    text = 'I looked at config {"key": "value"} and found nothing.'
+    normalized = bridge._normalize_result({"output_text": text, "completion_reason": "text_response(finish_reason=stop)"})
+    structured = normalized["raw_metadata"]["structured_output"]
+    assert structured["blockers"] == ["missing_structured_output"]
+    assert normalized["raw_metadata"]["synthesized_envelope"] is True
+
+
+def test_bridge_patch_edits_large_file_with_small_diff(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    big_file = git_repo / "large_module.py"
+    big_file.write_text("# header MARKER_OLD\n" + ("filler = 1\n" * 15_000), encoding="utf-8")
+    payload = json.loads(bridge.execute_tool("patch", {"path": "large_module.py", "old": "MARKER_OLD", "new": "MARKER_NEW"}))
+    assert payload["applied_count"] == 1
+    assert "MARKER_NEW" in big_file.read_text(encoding="utf-8").splitlines()[0]
+
+
+def test_bridge_patch_denies_oversized_fragment(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    target = git_repo / "small.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    with pytest.raises(AIAgentExecutorBridgeError, match="content_too_large"):
+        bridge.execute_tool("patch", {"path": "small.py", "old": "value = 1\n", "new": "x" * 150_000})
+
+
+def test_bridge_patch_full_content_replacement_keeps_size_limit(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    target = git_repo / "small.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    with pytest.raises(AIAgentExecutorBridgeError, match="content_too_large"):
+        bridge.execute_tool("patch", {"path": "small.py", "content": "x" * 150_000})
+
+
+def test_bridge_write_file_keeps_size_limit(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+    with pytest.raises(AIAgentExecutorBridgeError, match="content_too_large"):
+        bridge.execute_tool("write_file", {"path": "big.txt", "content": "x" * 150_000})
+
+
+def test_bridge_dispatch_is_context_local_and_leaves_globals_untouched(tmp_path: Path) -> None:
+    import threading
+
+    import run_agent
+    from agent.tool_dispatch_context import dispatch_function_call
+
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
+
+    original_handle = run_agent.handle_function_call
+    calls: list[str] = []
+
+    def _fake_handle(function_name, function_args, *args, **kwargs):
+        calls.append(function_name)
+        return "original_dispatch"
+
+    run_agent.handle_function_call = _fake_handle
+    try:
+        with bridge.patched_tool_dispatch():
+            # Global dispatch must stay untouched while the bridge is active.
+            assert run_agent.handle_function_call is _fake_handle
+
+            # Same context: routed into the restricted bridge executor.
+            payload = json.loads(dispatch_function_call("git_status", {}))
+            assert payload["status"] == 0
+
+            # Fresh thread (empty contextvars context) simulates a concurrent
+            # session: it must reach the original dispatcher, not the bridge.
+            other: dict[str, object] = {}
+            thread = threading.Thread(
+                target=lambda: other.setdefault("result", dispatch_function_call("terminal", {"cmd": "echo hi"}))
+            )
+            thread.start()
+            thread.join()
+            assert other["result"] == "original_dispatch"
+            assert calls == ["terminal"]
+
+        # After the bridge exits, the same context reaches the original again.
+        assert dispatch_function_call("read_file", {"path": "x"}) == "original_dispatch"
+    finally:
+        run_agent.handle_function_call = original_handle

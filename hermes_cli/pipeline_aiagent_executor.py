@@ -11,7 +11,7 @@ from typing import Any, Callable, Mapping
 
 import model_tools
 import run_agent
-from hermes_cli.pipeline_mutations import apply_controlled_mutations
+from hermes_cli.pipeline_mutations import MAX_CONTENT_BYTES, apply_controlled_mutations
 from hermes_cli.runtime_factory import RuntimeFactory
 from agent.chat_completion_helpers import _normalize_base_url_family
 from hermes_cli.pipeline_test_runner import run_controlled_tests
@@ -53,7 +53,7 @@ class AIAgentSubagentExecutorBridge:
         agent_factory: Callable[..., Any] | None = None,
         conversation_runner: Callable[["AIAgentSubagentExecutorBridge", Any, Any, Any], Mapping[str, Any]] | None = None,
         subprocess_runner: Callable[..., Any] = subprocess.run,
-        max_iterations: int = 12,
+        max_iterations: int = 24,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
         self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
@@ -148,6 +148,7 @@ class AIAgentSubagentExecutorBridge:
             elif tool_name == "patch":
                 path = self._resolve_workspace_path(str(args.get("path") or ""), allow_missing=False)
                 original = path.read_text(encoding="utf-8")
+                size_limit_exempt = False
                 if "content" in args:
                     new_content = str(args.get("content") or "")
                 else:
@@ -155,13 +156,29 @@ class AIAgentSubagentExecutorBridge:
                     new = str(args.get("new") or "")
                     if not old:
                         raise AIAgentExecutorBridgeError("patch_old_missing")
+                    if (
+                        len(old.encode("utf-8")) > MAX_CONTENT_BYTES
+                        or len(new.encode("utf-8")) > MAX_CONTENT_BYTES
+                    ):
+                        raise AIAgentExecutorBridgeError("content_too_large")
                     if old not in original:
                         raise AIAgentExecutorBridgeError("patch_old_not_found")
                     new_content = original.replace(old, new, 1)
+                    # Fragment sizes are bounded above; the full-file rewrite is a
+                    # mechanical consequence of a small edit, so it bypasses the
+                    # whole-file size limit that still applies to write_file.
+                    size_limit_exempt = True
                 summary = apply_controlled_mutations(
                     allow_mutations=True,
                     mutation_workspace=self.workspace_root,
-                    mutations_payload=[{"operation": "write_text", "path": self._relative_path(path), "content": new_content}],
+                    mutations_payload=[
+                        {
+                            "operation": "write_text",
+                            "path": self._relative_path(path),
+                            "content": new_content,
+                            "size_limit_exempt": size_limit_exempt,
+                        }
+                    ],
                 )
                 result = summary.to_safe_dict()
                 if summary.denied_count:
@@ -424,15 +441,48 @@ class AIAgentSubagentExecutorBridge:
         text = output_text.strip()
         if not text:
             return None, "none", None
+        text = self._strip_code_fences(text)
         if not text.startswith(("{", "[")):
+            embedded = self._extract_embedded_envelope(text)
+            if embedded is not None:
+                return embedded, "output_text_json_embedded", None
             return None, "none", None
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as exc:
+            embedded = self._extract_embedded_envelope(text)
+            if embedded is not None:
+                return embedded, "output_text_json_embedded", None
             return None, "none", f"json_decode_error:{exc.msg}"
         if isinstance(parsed, Mapping):
             return dict(parsed), "output_text_json", None
         return None, "none", f"json_not_mapping:{type(parsed).__name__}"
+
+    def _strip_code_fences(self, text: str) -> str:
+        if not text.startswith("```"):
+            return text
+        first_newline = text.find("\n")
+        if first_newline == -1:
+            return text
+        body = text[first_newline + 1 :]
+        stripped_body = body.rstrip()
+        if stripped_body.endswith("```"):
+            stripped_body = stripped_body[:-3]
+        return stripped_body.strip()
+
+    def _extract_embedded_envelope(self, text: str) -> dict[str, Any] | None:
+        decoder = json.JSONDecoder()
+        index = text.find("{")
+        while index != -1:
+            try:
+                parsed, _end = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                index = text.find("{", index + 1)
+                continue
+            if isinstance(parsed, Mapping) and self._looks_like_structured_output_mapping(parsed):
+                return dict(parsed)
+            index = text.find("{", index + 1)
+        return None
 
     def _legacy_string_parse_error(self, output_text: str) -> str | None:
         text = output_text.strip()
@@ -946,23 +996,20 @@ class AIAgentSubagentExecutorBridge:
 
     @contextmanager
     def patched_tool_dispatch(self):
-        # This mutates module-level dispatch globals. That is acceptable for the
-        # current controlled/manual single-threaded execution path, but
-        # concurrent bridge invocations would require explicit synchronization
-        # or a per-invocation dispatch context.
-        original_run_agent = run_agent.handle_function_call
-        original_model_tools = model_tools.handle_function_call
+        # Context-local override: only this execution context (and worker
+        # threads that explicitly copy it) sees the restricted bridge
+        # dispatcher. Concurrent sessions in other threads keep the global
+        # dispatch untouched.
+        from agent.tool_dispatch_context import reset_bridge_dispatch, set_bridge_dispatch
 
         def _dispatch(function_name: str, function_args: Mapping[str, Any] | None = None, *_args: Any, **_kwargs: Any) -> str:
             return self.execute_tool(function_name, function_args)
 
-        run_agent.handle_function_call = _dispatch
-        model_tools.handle_function_call = _dispatch
+        token = set_bridge_dispatch(_dispatch)
         try:
             yield
         finally:
-            run_agent.handle_function_call = original_run_agent
-            model_tools.handle_function_call = original_model_tools
+            reset_bridge_dispatch(token)
 
 
 class AIAgentReviewerExecutorBridge(AIAgentSubagentExecutorBridge):
