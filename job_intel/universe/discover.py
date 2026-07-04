@@ -86,3 +86,50 @@ def merge_candidates(*lists: list[CandidateCompany]) -> list[CandidateCompany]:
             for r in c.reasons:
                 m.add_reason(r)
     return list(merged.values())
+
+
+def ensure_cache_table(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS company_candidate_cache (
+            slug TEXT PRIMARY KEY, name TEXT, ats_type TEXT, endpoint_url TEXT,
+            bucket TEXT, reasons TEXT, sources TEXT,
+            first_seen_at TEXT DEFAULT (datetime('now')),
+            last_seen_at TEXT DEFAULT (datetime('now')),
+            probe_attempts INTEGER NOT NULL DEFAULT 0
+        )""")
+    conn.commit()
+
+
+def save_cache(conn: sqlite3.Connection, candidates: list[CandidateCompany]) -> None:
+    import json
+    for c in candidates:
+        conn.execute(
+            """INSERT INTO company_candidate_cache
+               (slug, name, ats_type, endpoint_url, bucket, reasons, sources)
+               VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(slug) DO UPDATE SET
+                 last_seen_at = datetime('now'), bucket = excluded.bucket,
+                 reasons = excluded.reasons,
+                 ats_type = COALESCE(excluded.ats_type, company_candidate_cache.ats_type),
+                 endpoint_url = COALESCE(excluded.endpoint_url, company_candidate_cache.endpoint_url),
+                 probe_attempts = company_candidate_cache.probe_attempts
+                                  + (excluded.ats_type IS NULL)""",
+            (c.slug, c.name, c.ats_type, c.endpoint_url, c.bucket,
+             json.dumps(c.reasons), json.dumps(c.sources)))
+    conn.commit()
+
+
+def load_cache(conn: sqlite3.Connection) -> dict[str, dict]:
+    import json
+    rows = conn.execute("SELECT slug, name, ats_type, endpoint_url, bucket, reasons,"
+                        " sources, first_seen_at, last_seen_at, probe_attempts"
+                        " FROM company_candidate_cache").fetchall()
+    keys = ["slug", "name", "ats_type", "endpoint_url", "bucket", "reasons",
+            "sources", "first_seen_at", "last_seen_at", "probe_attempts"]
+    out = {}
+    for row in rows:
+        d = dict(zip(keys, row))
+        d["reasons"] = json.loads(d["reasons"] or "[]")
+        d["sources"] = json.loads(d["sources"] or "[]")
+        out[d["slug"]] = d
+    return out

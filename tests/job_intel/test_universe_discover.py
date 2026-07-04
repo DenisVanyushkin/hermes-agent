@@ -73,3 +73,23 @@ def test_merge_unions_sources_and_reasons():
     m = merged[0]
     assert set(m.sources) == {"d7_cooccurrence", "d1_anchor_similar"}
     assert set(m.reasons) == {"senior_product_titles", "positive_anchor_similarity"}
+
+
+def test_cache_roundtrip(conn):
+    from job_intel.universe.discover import ensure_cache_table, save_cache, load_cache
+    ensure_cache_table(conn)
+    c = CandidateCompany(name="Nium", ats_type="greenhouse", bucket="candidate")
+    c.add_reason("supported_ats")
+    save_cache(conn, [c])
+    cached = load_cache(conn)
+    assert cached["nium"]["ats_type"] == "greenhouse"
+    assert cached["nium"]["reasons"] == ["supported_ats"]
+
+
+def test_cache_probe_attempts_increment_only_without_ats(conn):
+    from job_intel.universe.discover import ensure_cache_table, save_cache, load_cache
+    ensure_cache_table(conn)
+    c = CandidateCompany(name="Ghost")
+    save_cache(conn, [c])
+    save_cache(conn, [c])
+    assert load_cache(conn)["ghost"]["probe_attempts"] == 1
