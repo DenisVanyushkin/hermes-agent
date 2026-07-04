@@ -751,14 +751,21 @@ def _ensure_hermes_env_loaded_for_outbound_delivery() -> None:
     return None
 
 
+_LOGICAL_SLACK_CHANNEL_ALIASES: dict[str, str] = {
+    "executive_search_report": "C0B4MM6D52A",
+}
+
+
 def _resolve_logical_slack_channel_id(channel: str | None) -> str | None:
     if not channel:
         return None
     if channel.startswith(("C", "G", "D")):
         return channel
-    if channel == "executive_search_report":
-        return "C0B4MM6D52A"
-    return None
+    return _LOGICAL_SLACK_CHANNEL_ALIASES.get(channel)
+
+
+def _logical_aliases_for_channel_id(channel_id: str | None) -> list[str]:
+    return [alias for alias, cid in _LOGICAL_SLACK_CHANNEL_ALIASES.items() if channel_id and cid == channel_id]
 
 
 
@@ -836,6 +843,20 @@ def _resolve_delivery_channel_id(channel: str | None, delivery: SlackDeliveryRes
     if delivery.channel_id:
         return str(delivery.channel_id)
     return _resolve_logical_slack_channel_id(channel)
+
+
+def _delivery_tracking_identity(channel: str | None, delivery: SlackDeliveryResult) -> tuple[str | None, str | None]:
+    """Real Slack (channel_id, message_ts) for reaction tracking.
+
+    Reaction events carry the real message identity; a guessed channel alias or a
+    locally fabricated timestamp makes the card permanently untrackable, so this
+    returns None instead of inventing values.
+    """
+    channel_id = _resolve_delivery_channel_id(channel, delivery)
+    if channel_id and not channel_id.startswith(("C", "G", "D")):
+        channel_id = None
+    message_ts = str(delivery.message_ts) if delivery.message_ts else None
+    return channel_id, message_ts
 
 
 def _notification_payload_json(row: dict[str, Any] | None) -> dict[str, Any]:
@@ -1226,24 +1247,30 @@ def _deliver_vacancy_messages(
             delivery_error=delivery.error,
         )
         if delivery.success:
-            message_ts = str(delivery.message_ts or f"{datetime.now(timezone.utc).timestamp():.6f}")
-            store.insert_vacancy_slack_message(
-                vacancy_id=vacancy_id,
-                run_id=run_id,
-                vacancy_key=payload.get("vacancy_key"),
-                canonical_url=payload.get("canonical_url"),
-                card_key=payload.get("card_key"),
-                notification_id=notification_id,
-                slack_channel=channel,
-                slack_message_ts=message_ts,
-                message_type="vacancy_card",
-                company=vacancy.company,
-                title=vacancy.title,
-                score=int(getattr(evaluation, "score", 0) or 0),
-                recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
-                url=vacancy.url,
-                sent_at=datetime.now(timezone.utc).isoformat(),
-            )
+            tracked_channel_id, tracked_message_ts = _delivery_tracking_identity(channel, delivery)
+            if not (tracked_channel_id and tracked_message_ts):
+                logger.warning(
+                    "vacancy_card_tracking_untrackable vacancy_id=%s channel=%r delivery_ts=%r delivery_channel_id=%r",
+                    vacancy_id, channel, delivery.message_ts, delivery.channel_id,
+                )
+            else:
+                store.insert_vacancy_slack_message(
+                    vacancy_id=vacancy_id,
+                    run_id=run_id,
+                    vacancy_key=payload.get("vacancy_key"),
+                    canonical_url=payload.get("canonical_url"),
+                    card_key=payload.get("card_key"),
+                    notification_id=notification_id,
+                    slack_channel=tracked_channel_id,
+                    slack_message_ts=tracked_message_ts,
+                    message_type="vacancy_card",
+                    company=vacancy.company,
+                    title=vacancy.title,
+                    score=int(getattr(evaluation, "score", 0) or 0),
+                    recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
+                    url=vacancy.url,
+                    sent_at=datetime.now(timezone.utc).isoformat(),
+                )
             store.set_vacancy_status(vacancy_id, "notified")
         else:
             store.set_vacancy_status(vacancy_id, "active")
@@ -1562,26 +1589,31 @@ def _deliver_vacancy_notifications(
         )
         delivery = _deliver_to_slack(body, channel, prefer_gateway=True)
         _finalize_notifications(store, [notification_id], delivery)
-        message_ts = str(delivery.message_ts or f"{datetime.now(timezone.utc).timestamp():.6f}")
-        resolved_channel_id = _resolve_delivery_channel_id(channel, delivery)
+        resolved_channel_id, tracked_message_ts = _delivery_tracking_identity(channel, delivery)
         if delivery.success:
-            store.record_vacancy_slack_message(
-                vacancy_id=vacancy_id,
-                run_id=run_id,
-                vacancy_key=payload.get("vacancy_key"),
-                canonical_url=payload.get("canonical_url"),
-                card_key=payload.get("card_key"),
-                notification_id=notification_id,
-                slack_channel=resolved_channel_id or channel or "slack",
-                slack_message_ts=message_ts,
-                message_type="vacancy_card",
-                company=vacancy.company,
-                title=vacancy.title,
-                score=int(getattr(evaluation, "score", 0) or 0),
-                recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
-                url=vacancy.url,
-                sent_at=datetime.now(timezone.utc).isoformat(),
-            )
+            if not (resolved_channel_id and tracked_message_ts):
+                logger.warning(
+                    "vacancy_card_tracking_untrackable vacancy_id=%s channel=%r delivery_ts=%r delivery_channel_id=%r",
+                    vacancy_id, channel, delivery.message_ts, delivery.channel_id,
+                )
+            else:
+                store.record_vacancy_slack_message(
+                    vacancy_id=vacancy_id,
+                    run_id=run_id,
+                    vacancy_key=payload.get("vacancy_key"),
+                    canonical_url=payload.get("canonical_url"),
+                    card_key=payload.get("card_key"),
+                    notification_id=notification_id,
+                    slack_channel=resolved_channel_id,
+                    slack_message_ts=tracked_message_ts,
+                    message_type="vacancy_card",
+                    company=vacancy.company,
+                    title=vacancy.title,
+                    score=int(getattr(evaluation, "score", 0) or 0),
+                    recommendation=str(getattr(evaluation, "recommendation", "reject") or "reject"),
+                    url=vacancy.url,
+                    sent_at=datetime.now(timezone.utc).isoformat(),
+                )
             store.set_vacancy_status(vacancy_id, "notified")
             if delivery.message_ts and resolved_channel_id:
                 try:
@@ -1615,7 +1647,7 @@ def _deliver_vacancy_notifications(
                 "notification_id": notification_id,
                 "card_key": payload.get("card_key"),
                 "delivery": delivery,
-                "message_ts": message_ts if delivery.success else None,
+                "message_ts": tracked_message_ts if delivery.success else None,
             }
         )
     return deliveries
@@ -3911,6 +3943,11 @@ def run_feedback_event(payload: dict[str, Any]) -> str:
     event_timestamp = str(payload.get("event_ts") or payload.get("event_timestamp") or datetime.now(timezone.utc).isoformat())
     store = _store()
     message = store.find_vacancy_message(slack_channel=channel, slack_message_ts=message_ts)
+    if not message:
+        for alias in _logical_aliases_for_channel_id(channel):
+            message = store.find_vacancy_message(slack_channel=alias, slack_message_ts=message_ts)
+            if message:
+                break
     if not message:
         return json.dumps({"status": "ignored", "reason": "message_not_tracked", "channel": channel, "slack_message_ts": message_ts})
 
