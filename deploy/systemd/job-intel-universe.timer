@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule job-intel weekly company universe discovery report
+
+[Timer]
+OnCalendar=Tue *-*-* 09:40:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=job-intel-universe.service
+
+[Install]
+WantedBy=timers.target

@@ -105,7 +105,7 @@ should_skip_enrichment() {
 
 command="${1:-}"
 shift || true
-[[ -n "$command" ]] || fail "usage: $0 <daily|alert|health|enrichment|market|strategic|doctor|browser-health|weekly-kpi|metrics-exporter> [args...]"
+[[ -n "$command" ]] || fail "usage: $0 <daily|alert|health|enrichment|market|strategic|doctor|browser-health|weekly-kpi|universe-discovery|metrics-exporter> [args...]"
 
 maybe_source_env_file
 export HERMES_HOME="${HERMES_HOME:-/home/hermes/.hermes}"
@@ -167,7 +167,7 @@ python_bin="$(resolve_python "$workdir")"
 cd "$workdir"
 
 case "$command" in
-  bootstrap|daily|alert|health|market|strategic|doctor|browser-health|weekly-kpi|metrics-exporter)
+  bootstrap|daily|alert|health|market|strategic|doctor|browser-health|weekly-kpi|universe-discovery|metrics-exporter)
     ;;
   enrichment)
     enrichment_marker="$state_dir/job_intel_enrichment.last_success"
