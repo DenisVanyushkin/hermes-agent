@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from hermes_cli.profile_execution import RoleExecutionPlan, build_role_execution_plan
+from hermes_cli.role_llm_router import (
+    RoleRoutingConfig,
+    load_role_routing_config,
+    select_role_via_llm,
+)
 from hermes_cli.profile_request_context import classification_request_text
 from hermes_cli.profile_routing import RouteDecision, route_task, load_profile_registry, DEFAULT_PROFILE_REGISTRY_PATH
 from hermes_cli.profile_validation import PROFILE_ID_ALIASES
@@ -100,6 +105,22 @@ def _compact_list(values: Any) -> str:
         return ""
     items = [str(item).strip() for item in values if isinstance(item, str) and item.strip()]
     return ", ".join(items)
+
+
+_role_routing_config_cache: RoleRoutingConfig | None = None
+
+
+def _load_role_routing_config_cached() -> RoleRoutingConfig:
+    """Load role_routing config once per process (config is read from disk)."""
+    global _role_routing_config_cache
+    if _role_routing_config_cache is None:
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            _role_routing_config_cache = load_role_routing_config(load_config_readonly())
+        except Exception:
+            _role_routing_config_cache = RoleRoutingConfig()
+    return _role_routing_config_cache
 
 
 def render_role_context(
@@ -324,8 +345,30 @@ def build_role_context_for_task(
             operation_category="",
         )
 
+    llm_role_decision = None
+    if execution_plan is None:
+        try:
+            _rr_cfg = _load_role_routing_config_cached()
+            if _rr_cfg.strategy == "llm":
+                llm_role_decision = select_role_via_llm(task, _rr_cfg)
+        except Exception:
+            llm_role_decision = None
+
     try:
-        resolved_plan = execution_plan if isinstance(execution_plan, RoleExecutionPlan) else build_role_execution_plan(task, route_decision=resolved_route)
+        if isinstance(execution_plan, RoleExecutionPlan):
+            resolved_plan = execution_plan
+        elif llm_role_decision is not None:
+            resolved_plan = build_role_execution_plan(
+                task,
+                route_decision=resolved_route,
+                selected_role_override=llm_role_decision.role,
+                selected_role_override_reason=(
+                    f"llm role router selected {llm_role_decision.role} "
+                    f"(confidence {llm_role_decision.confidence:.2f})"
+                ),
+            )
+        else:
+            resolved_plan = build_role_execution_plan(task, route_decision=resolved_route)
     except Exception as exc:
         return RoleContextResult(
             task=task.strip(),

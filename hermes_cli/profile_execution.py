@@ -1130,12 +1130,21 @@ def build_role_execution_plan(
     route_decision: RouteDecision | dict[str, Any] | None = None,
     approval_preview: ApprovalPreview | dict[str, Any] | None = None,
     changed_paths: list[str] | None = None,
+    selected_role_override: str | None = None,
+    selected_role_override_reason: str | None = None,
 ) -> RoleExecutionPlan:
     if not isinstance(task, str) or not task.strip():
         raise RoleExecutionError("task must be a non-empty string")
 
     route_obj = _coerce_route_decision(route_decision, task)
-    selected_role, fallback_used, fallback_reason = _select_role(task, route_obj)
+    # An explicit override (e.g. the LLM role router in profile_context) wins
+    # over the keyword cascade; this module stays pure — no LLM calls here.
+    if selected_role_override:
+        selected_role = selected_role_override
+        fallback_used = False
+        fallback_reason = selected_role_override_reason or "role selected by caller override"
+    else:
+        selected_role, fallback_used, fallback_reason = _select_role(task, route_obj)
     if route_obj is not None and route_obj.primary_profile == "general_operator" and selected_role == "general_operator":
         selected_role = "general_operator"
         fallback_used = True
