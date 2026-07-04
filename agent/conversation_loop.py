@@ -309,10 +309,6 @@ def _compose_turn_user_message_content(user_message: str, *, role_context: str =
     return f"{user_message}\n\n{role_context}"
 
 
-def _should_preflight_block_for_profile_context(_result: Any) -> bool:
-    return False
-
-
 
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
