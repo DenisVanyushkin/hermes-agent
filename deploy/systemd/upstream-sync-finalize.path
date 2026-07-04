@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for upstream-sync finalize requests from the sandboxed cron agent
+
+[Path]
+PathExists=/home/hermes/.hermes/sandboxes/docker/default/home/.hermes/state/upstream-sync/finalize-request.json
+Unit=upstream-sync-finalize.service
+
+[Install]
+WantedBy=multi-user.target
