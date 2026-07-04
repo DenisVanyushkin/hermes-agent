@@ -93,6 +93,7 @@ def execute_recruiter_decision_support_helper(
         career_facts=facts_bundle,
         conversation_context=conversation_context,
     )
+    fetch_warnings = _enrich_vacancy_source(request)
 
     module_executor = None
     executor_error: str | None = None
@@ -113,7 +114,7 @@ def execute_recruiter_decision_support_helper(
     text = format_decision_report_text(
         report,
         executor_error=executor_error,
-        extra_notes=list(facts_bundle.warnings),
+        extra_notes=list(facts_bundle.warnings) + fetch_warnings,
     )
 
     status = "executed"
@@ -146,6 +147,26 @@ def execute_recruiter_decision_support_helper(
             "subagent_runs": _subagent_runs(module_executor),
         },
     }
+
+
+def _enrich_vacancy_source(request: DecisionSupportRequest) -> list[str]:
+    """Fetch the actual posting content into the vacancy source (read-only)."""
+    source = request.vacancy_source
+    if not isinstance(source, dict) or not source.get("source_id"):
+        return []
+    try:
+        from hermes_cli.recruiter_vacancy_fetch import fetch_vacancy_details
+
+        details = fetch_vacancy_details(str(source["source_id"]))
+    except Exception as exc:
+        return [f"vacancy page could not be fetched ({type(exc).__name__}); assessment is limited"]
+    status = str(details.get("fetch_status") or "")
+    if status.startswith("ok"):
+        for key, value in details.items():
+            if key != "fetch_status":
+                source.setdefault(key, value)
+        return []
+    return ["vacancy page could not be fetched; assessment is limited to the link and thread context"]
 
 
 def format_decision_report_text(
