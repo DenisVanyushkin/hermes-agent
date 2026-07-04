@@ -234,7 +234,95 @@ cleanup_autostash() {
   if [ "$status" -eq 0 ] && [ "$AUTOSTASH_RESTORE_FAILED" -eq 1 ]; then
     exit 1
   fi
+  if [ "$status" -eq 0 ]; then
+    local popped_files
+    popped_files="$(git -C "$REPO" status --porcelain 2>/dev/null | awk '{print $2}')"
+    if ! verify_no_duplicate_defs "$popped_files"; then
+      echo "Stash pop left broken python files (see above); fix them before the next run." >&2
+      exit 1
+    fi
+  fi
 }
+
+resolve_repo_python() {
+  if [ -x "$REPO/venv/bin/python" ]; then
+    printf '%s\n' "$REPO/venv/bin/python"
+  else
+    command -v python3 || true
+  fi
+}
+
+# Whole-tree syntax check. Auto-resolved merges can leave byte-valid but
+# unparsable files; catch that before we push and restart the gateway.
+# AST-based (no .pyc writes) so root-owned __pycache__ dirs left behind by
+# sandbox containers cannot fail the check spuriously.
+verify_tree_compiles() {
+  local py
+  py="$(resolve_repo_python)"
+  [ -n "$py" ] || return 0
+  if ! (cd "$REPO" && git ls-files -z -- 'agent/*.py' 'gateway/*.py' 'hermes_cli/*.py' 'tools/*.py' 'cron/*.py' 'plugins/*.py' 'job_intel/*.py' 'run_agent.py' 'hermes_state.py' \
+      | "$py" - <<'PYEOF'
+import ast, sys
+failed = 0
+for path in sys.stdin.buffer.read().split(b"\0"):
+    if not path:
+        continue
+    name = path.decode()
+    try:
+        with open(name, "rb") as fh:
+            ast.parse(fh.read(), filename=name)
+    except SyntaxError as e:
+        print(f"SYNTAX ERROR: {name}: {e}", file=sys.stderr)
+        failed = 1
+    except OSError:
+        pass
+sys.exit(failed)
+PYEOF
+  ); then
+    echo "Post-rebase syntax check FAILED — see errors above. Not pushing, not restarting." >&2
+    return 1
+  fi
+}
+
+# Duplicate-definition scan for files touched by a stash pop. The
+# take-HEAD conflict strategy can silently leave the same function twice
+# in one file when hunks land apart — syntactically valid, broken at
+# runtime. Scans only the given files, so it is cheap.
+verify_no_duplicate_defs() {
+  local py files="$1"
+  [ -n "$files" ] || return 0
+  py="$(resolve_repo_python)"
+  [ -n "$py" ] || return 0
+  local failed=0 f
+  while IFS= read -r f; do
+    case "$f" in *.py) ;; *) continue;; esac
+    [ -f "$REPO/$f" ] || continue
+    if ! "$py" - "$REPO/$f" <<'PYEOF'
+import ast, sys
+path = sys.argv[1]
+try:
+    tree = ast.parse(open(path).read())
+except SyntaxError as e:
+    print(f"SYNTAX ERROR after stash pop: {path}: {e}")
+    sys.exit(1)
+seen = {}
+for node in tree.body:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if node.name in seen:
+            print(f"DUPLICATE top-level definition after stash pop: {path}: "
+                  f"{node.name} at lines {seen[node.name]} and {node.lineno}")
+            sys.exit(1)
+        seen[node.name] = node.lineno
+PYEOF
+    then
+      failed=1
+    fi
+  done <<EOF_FILES
+$files
+EOF_FILES
+  return "$failed"
+}
+# end-verify-helpers
 
 STATUS_BEFORE="$(git -C "$REPO" status --porcelain --untracked-files=all)"
 if [ -n "$STATUS_BEFORE" ]; then
@@ -292,6 +380,11 @@ if [ "$AFTER_HEAD" = "$BEFORE_HEAD" ]; then
   push_personal_branch
   report_noop "$BEFORE_HEAD"
   exit 0
+fi
+
+if ! verify_tree_compiles; then
+  report_post_update "$BEFORE_HEAD" "$AFTER_HEAD" "no"
+  exit 1
 fi
 
 SYNC_HELPER="$REPO/scripts/sync-runtime-scripts.sh"
