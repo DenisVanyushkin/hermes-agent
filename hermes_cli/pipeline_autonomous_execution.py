@@ -138,7 +138,15 @@ def _validate_repo_root_workspace(*, repo_root: Path, expected_repo_root: Path |
     except ValueError as exc:
         raise ValueError("workspace_not_git_repo") from exc
     status = _git_stdout(repo_root, "status", "--short", "--untracked-files=all")
-    if status.strip():
+    # The pipeline writes its own controlled_execution_report.json into the
+    # workspace root after every run; that artifact must not poison the next
+    # run's clean-baseline check.
+    meaningful_lines = [
+        line
+        for line in status.splitlines()
+        if line.strip() and line.split(maxsplit=1)[-1] != "controlled_execution_report.json"
+    ]
+    if meaningful_lines:
         raise ValueError("workspace_dirty_baseline")
 
 
