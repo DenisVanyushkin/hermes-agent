@@ -19,6 +19,9 @@ from hermes_cli.pipeline_specs import load_pipeline_specs
 
 AUTONOMOUS_MODE = "autonomous"
 _VALID_EXECUTION_MODES = {"disabled", "observe", AUTONOMOUS_MODE}
+RECRUITER_PIPELINE_ID = "recruiter_decision_support_pipeline"
+RECRUITER_DECISION_HELPER = "recruiter_decision_support_flow"
+RECRUITER_PRIMARY_SUBAGENT_ID = "general_operator"
 
 
 @dataclass(frozen=True)
@@ -122,6 +125,26 @@ def evaluate_pipeline_execution_controller(
     ):
         return replace(base, blocked_reason=_context_block_reason(session=session, state_snapshot=state_snapshot, pipeline_id=pipeline_id))
 
+    if pipeline_id == RECRUITER_PIPELINE_ID:
+        # The recruiter flow has no engineer/reviewer loop; its only fuse is
+        # the allowed-subagents list for its primary operator.
+        if RECRUITER_PRIMARY_SUBAGENT_ID not in _string_list(
+            cfg_get(config, "pipelines", "execution", "allowed_subagents", default=[])
+        ):
+            return replace(base, blocked_reason="required_subagents_not_allowed")
+        return _invoke_resolved_helper(
+            base=base,
+            config=config,
+            session=session,
+            state_snapshot=state_snapshot,
+            loaded_specs=loaded_specs,
+            pipeline_spec=pipeline_spec,
+            pipeline_id=pipeline_id,
+            execution_helper=execution_helper,
+            allow_registered_helper_selection=allow_registered_helper_selection,
+            helper_execution_context=helper_execution_context,
+        )
+
     engineer_fuse = evaluate_pipeline_execution_fuse(
         config=config,
         session=session,
@@ -150,6 +173,33 @@ def evaluate_pipeline_execution_controller(
     if not _required_loop_subagents_allowed(config):
         return replace(base, blocked_reason="required_subagents_not_allowed")
 
+    return _invoke_resolved_helper(
+        base=base,
+        config=config,
+        session=session,
+        state_snapshot=state_snapshot,
+        loaded_specs=loaded_specs,
+        pipeline_spec=pipeline_spec,
+        pipeline_id=pipeline_id,
+        execution_helper=execution_helper,
+        allow_registered_helper_selection=allow_registered_helper_selection,
+        helper_execution_context=helper_execution_context,
+    )
+
+
+def _invoke_resolved_helper(
+    *,
+    base: PipelineExecutionControllerResult,
+    config: Mapping[str, Any] | None,
+    session: Any,
+    state_snapshot: Any,
+    loaded_specs: Any,
+    pipeline_spec: Mapping[str, Any] | None,
+    pipeline_id: str | None,
+    execution_helper: Callable[..., Any] | None,
+    allow_registered_helper_selection: bool,
+    helper_execution_context: Mapping[str, Any] | None,
+) -> PipelineExecutionControllerResult:
     helper_resolution = pipeline_execution_helpers.resolve_pipeline_execution_helper(
         pipeline_id=pipeline_id,
         execution_helper=execution_helper,
@@ -236,6 +286,8 @@ def _actual_gateway_execution_enabled(config: Mapping[str, Any] | None) -> bool:
 def _would_call_for_pipeline(pipeline_id: str | None) -> str | None:
     if pipeline_id == "engineering_review_pipeline":
         return "bounded_rework_loop"
+    if pipeline_id == RECRUITER_PIPELINE_ID:
+        return RECRUITER_DECISION_HELPER
     return None
 
 
@@ -254,6 +306,9 @@ def _eligible_pipeline_execution_context(
         return False
     if getattr(session, "router_status", None) != "selected":
         return False
+    if pipeline_id == RECRUITER_PIPELINE_ID:
+        # No engineer/reviewer loop to verify; session/router consistency above suffices.
+        return True
     planned_steps = list(getattr(state_snapshot, "planned_steps", []) or [])
     if len(planned_steps) < 2:
         return False
