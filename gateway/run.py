@@ -18939,6 +18939,57 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "I can only provide a read-only plan for this request."
         )
 
+    def _pipeline_autonomous_preflight_block_response(self, report: Any, *, orchestrator_mode: str) -> str | None:
+        """Fail closed when the selected autonomous pipeline blocked before execution.
+
+        The router chose the controlled engineering path for this request, so a
+        preflight block (e.g. workspace_dirty_baseline) must terminate the turn
+        instead of silently handing a mutation-flavored task to the normal
+        conversational agent with full tools.
+        """
+        if str(orchestrator_mode or "").strip().lower() != "autonomous":
+            return None
+        if report is None:
+            return None
+
+        state = getattr(report, "state", None)
+        if str(getattr(state, "router_status", "") or "").strip().lower() != "selected":
+            return None
+
+        controller = getattr(report, "pipeline_execution_controller", None)
+        if controller is None:
+            return None
+        invoked = any(
+            bool(getattr(controller, field, False))
+            for field in (
+                "actual_execution_invoked",
+                "subagent_execution_invoked",
+                "real_provider_bridge_invoked",
+            )
+        )
+        if invoked:
+            return None
+
+        blocked_reason = self._pipeline_controlled_block_value(
+            getattr(controller, "blocked_reason", None),
+        )
+        if blocked_reason is None:
+            return None
+
+        return (
+            "The autonomous engineering pipeline was selected for this request but "
+            "blocked before execution started, so I did not make any changes.\n\n"
+            "status: not_executed\n"
+            "execution_mode: autonomous\n"
+            "final_verdict: autonomous_preflight_blocked\n"
+            f"blocked_reason: {blocked_reason}\n"
+            "normal_agent_fallback_blocked: true\n"
+            "tools_enabled: false\n"
+            "mutation: none\n"
+            "tests: not_run\n\n"
+            "Resolve the blocker (e.g. clean the workspace) and retry the request."
+        )
+
     def _pipeline_autonomous_fail_closed_response(self, report: Any, *, orchestrator_mode: str, user_message: str) -> str | None:
         if str(orchestrator_mode or "").strip().lower() != "autonomous":
             return None
@@ -19403,6 +19454,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": autonomous_terminal_response},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
+        autonomous_preflight_block_response = self._pipeline_autonomous_preflight_block_response(
+            pipeline_orchestrator_report,
+            orchestrator_mode=_orchestrator_mode,
+        )
+        if autonomous_preflight_block_response is not None:
+            logger.info(
+                "pipeline autonomous preflight guard blocked normal agent fallback: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": autonomous_preflight_block_response,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": autonomous_preflight_block_response},
                 ],
                 "api_calls": 0,
                 "tools": [],
