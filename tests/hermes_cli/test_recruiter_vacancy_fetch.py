@@ -116,3 +116,25 @@ class TestHelperEnrichment:
         request = exec_mod.build_decision_request_from_message("оцени https://hh.ru/vacancy/5")
         warnings = exec_mod._enrich_vacancy_source(request)
         assert warnings and "could not be fetched" in warnings[0]
+
+
+class TestDeadPostingDetection:
+    def test_redirect_to_board_detected(self, monkeypatch) -> None:
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            fetch_mod,
+            "_get",
+            lambda url: SimpleNamespace(
+                url="https://job-boards.greenhouse.io/gitlab?error=true", text="<html>board</html>", json=lambda: {}
+            ),
+        )
+        details = fetch_mod._fetch_generic("https://job-boards.greenhouse.io/gitlab/jobs/1")
+        assert details["fetch_status"] == "posting_unavailable"
+
+    def test_company_from_url(self) -> None:
+        from hermes_cli.recruiter_vacancy_fetch import company_from_vacancy_url
+
+        assert company_from_vacancy_url("https://job-boards.greenhouse.io/gitlab/jobs/1") == "gitlab"
+        assert company_from_vacancy_url("https://jobs.ashbyhq.com/airwallex/16b7b0fd-a514-4c3a-802a-15dcf3b6fb64") == "airwallex"
+        assert company_from_vacancy_url("https://hh.ru/vacancy/1") is None

@@ -170,6 +170,11 @@ def _enrich_vacancy_source(request: DecisionSupportRequest) -> list[str]:
             if key != "fetch_status":
                 source.setdefault(key, value)
         return []
+    if status in {"posting_unavailable", "posting_removed", "not_found_on_board"}:
+        source["posting_unavailable"] = True
+        return [
+            "the vacancy posting appears to be removed or no longer published — verify whether the role is still open"
+        ]
     return ["vacancy page could not be fetched; assessment is limited to the link and thread context"]
 
 
@@ -191,12 +196,20 @@ def _maybe_generate_company_research(request: DecisionSupportRequest, module_exe
 
     source = request.vacancy_source if isinstance(request.vacancy_source, dict) else {}
     company = request.company_identity or source.get("company")
+    if not company and source.get("source_id"):
+        from hermes_cli.recruiter_vacancy_fetch import company_from_vacancy_url
+
+        company = company_from_vacancy_url(str(source["source_id"]))
     if not company and not source.get("description_text"):
         return ["company research skipped: no company identity or posting content available"]
     if not request.company_identity and company:
         request.company_identity = str(company)
 
     from datetime import date
+
+    from hermes_cli.recruiter_company_web_research import gather_company_web_research
+
+    web_results, notes = gather_company_web_research(str(company or ""))
 
     try:
         execution = module_executor.execute(
@@ -207,11 +220,12 @@ def _maybe_generate_company_research(request: DecisionSupportRequest, module_exe
                 "company_identity": company,
                 "vacancy_source": request.vacancy_source,
                 "role_context": request.role_context,
+                "web_search_results": web_results,
                 "access_date": date.today().isoformat(),
             },
         )
     except Exception as exc:
-        return [f"company research generation failed ({type(exc).__name__}); company analysis is limited"]
+        return notes + [f"company research generation failed ({type(exc).__name__}); company analysis is limited"]
 
     from hermes_cli.recruiter_company_research import validate_company_research_claim
 
@@ -223,9 +237,11 @@ def _maybe_generate_company_research(request: DecisionSupportRequest, module_exe
     ]
     request.company_research_claims = valid_claims
     if not valid_claims:
-        return ["no verifiable company research claims could be produced; company analysis is limited"]
+        return notes + ["no verifiable company research claims could be produced; company analysis is limited"]
     dropped = len(list(raw_claims or [])) - len(valid_claims)
-    return [f"{dropped} unverifiable company research claims were discarded"] if dropped else []
+    if dropped:
+        notes.append(f"{dropped} unverifiable company research claims were discarded")
+    return notes
 
 
 def format_decision_report_text(
