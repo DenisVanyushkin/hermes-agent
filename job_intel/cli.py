@@ -3530,7 +3530,8 @@ def _check_health_conditions(store: "JobIntelStore") -> list[str]:
             tier1_failures = conn.execute(
                 "SELECT source, source_status FROM source_kpi_run "
                 "WHERE run_id=? AND source IN ('linkedin','headhunter','target_companies') "
-                "AND source_status NOT IN ('ok','empty')",
+                "AND source_status NOT IN ('ok','empty','skipped') "
+                "AND COALESCE(enabled, 1) = 1",
                 (last_run_id,)
             ).fetchall()
             for src, status in tier1_failures:
@@ -3543,18 +3544,35 @@ def _check_health_conditions(store: "JobIntelStore") -> list[str]:
                 "AND login_walls > 0",
                 (last_run_id,)
             ).fetchall()
+            enabled_sources_env_raw = os.getenv("JOB_INTEL_ENABLED_SOURCES", "").strip().lower()
+            def _disabled_by_env(src: str) -> bool:
+                return bool(enabled_sources_env_raw) and src.strip().lower() not in enabled_sources_env_raw
+
             for src, walls in login_walls:
+                if _disabled_by_env(src):
+                    continue
                 problems.append(f"Login wall: {src} ({walls} events)")
 
             # 4b. LinkedIn session lost: login wall on every one of the last 3
             # daily runs means the browser profile needs manual re-auth.
+            # Intentionally disabled (retired) linkedin must stay silent.
+            linkedin_latest = conn.execute(
+                "SELECT COALESCE(k.enabled, 1), k.skip_reason FROM source_kpi_run k "
+                "JOIN runs r ON r.id = k.run_id "
+                "WHERE k.source='linkedin' AND r.mode='daily' "
+                "ORDER BY k.run_id DESC LIMIT 1",
+            ).fetchone()
+            linkedin_disabled = _disabled_by_env("linkedin") or bool(
+                linkedin_latest
+                and (int(linkedin_latest[0] or 0) == 0 or str(linkedin_latest[1] or "") == "disabled_by_config")
+            )
             recent_walls = conn.execute(
                 "SELECT k.login_walls FROM source_kpi_run k "
                 "JOIN runs r ON r.id = k.run_id "
                 "WHERE k.source='linkedin' AND r.mode='daily' "
                 "ORDER BY k.run_id DESC LIMIT 3",
             ).fetchall()
-            if len(recent_walls) >= 3 and all(int(r[0] or 0) > 0 for r in recent_walls):
+            if not linkedin_disabled and len(recent_walls) >= 3 and all(int(r[0] or 0) > 0 for r in recent_walls):
                 problems.append(
                     "LinkedIn re-auth required: login wall on 3+ consecutive daily runs "
                     "(browser profile session lost). Runbook: docs/runbooks/linkedin-reauth.md"
