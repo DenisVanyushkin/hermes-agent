@@ -1,0 +1,4 @@
+{
+  "wise": ["remitly", "ofx", "currencycloud", "zepz"],
+  "airwallex": ["payoneer", "thunes", "dlocal", "ebury"]
+}
