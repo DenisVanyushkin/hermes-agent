@@ -238,8 +238,20 @@ def _builtin_reserved_ids() -> frozenset[str]:
         PROFILE_ID_ALIASES,
     )
 
+    from hermes_cli.role_package_activation import (  # late import avoids circular
+        _PACKAGE_DIR_TO_EXPECTED_ROLE_ID,
+    )
+
     aliases: set[str] = set(PROFILE_ID_ALIASES.keys()) | set(PROFILE_ID_ALIASES.values())
-    return frozenset(ACTIVE_PROFILE_IDS | DEFERRED_PROFILE_IDS | CANONICAL_PROFILE_IDS | aliases)
+    # Shadow role packages must be able to claim their own role IDs even
+    # when one of them (e.g. hermes_engineer_core) is also registered in
+    # PROFILE_ID_ALIASES as a pipeline-subagent alias for model-policy
+    # resolution.
+    shadow_role_ids = frozenset(_PACKAGE_DIR_TO_EXPECTED_ROLE_ID.values())
+    return frozenset(
+        (ACTIVE_PROFILE_IDS | DEFERRED_PROFILE_IDS | CANONICAL_PROFILE_IDS | aliases)
+        - shadow_role_ids
+    )
 
 
 def _validate_env_requires(

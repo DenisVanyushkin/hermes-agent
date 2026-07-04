@@ -1,8 +1,8 @@
 version: '1'
 schema_version: '1'
 generated_by: tests/fixtures/role_packages/generate_corpus.py
-note: 'DO NOT edit by hand. Corpus updates require explicit golden approval: run the generator, review the diff, commit alongside
-  the routing change.'
+note: 'DO NOT edit by hand. Corpus updates require explicit golden approval: run the
+  generator, review the diff, commit alongside the routing change.'
 entries:
 - id: benign_en_admin_task
   description: safe admin task with no domain triggers → general_operator
@@ -15,7 +15,8 @@ entries:
     - general_operator
     confidence: low
     ambiguity_reasons:
-    - no specific domain trigger matched; defaulting to general_operator metadata only
+    - no specific domain trigger matched; defaulting to general_operator metadata
+      only
     max_chain_limit_applied: false
 - id: benign_en_haircut
   description: personal errand with no domain triggers → general_operator
@@ -28,7 +29,8 @@ entries:
     - general_operator
     confidence: low
     ambiguity_reasons:
-    - no specific domain trigger matched; defaulting to general_operator metadata only
+    - no specific domain trigger matched; defaulting to general_operator metadata
+      only
     max_chain_limit_applied: false
 - id: benign_en_reminder
   description: timer/reminder prompt with no domain triggers → general_operator
@@ -41,7 +43,8 @@ entries:
     - general_operator
     confidence: low
     ambiguity_reasons:
-    - no specific domain trigger matched; defaulting to general_operator metadata only
+    - no specific domain trigger matched; defaulting to general_operator metadata
+      only
     max_chain_limit_applied: false
 - id: benign_ru_help
   description: Russian personal errand with no domain triggers → general_operator
@@ -54,7 +57,8 @@ entries:
     - general_operator
     confidence: low
     ambiguity_reasons:
-    - no specific domain trigger matched; defaulting to general_operator metadata only
+    - no specific domain trigger matched; defaulting to general_operator metadata
+      only
     max_chain_limit_applied: false
 - id: benign_ru_reminder
   description: Russian reminder prompt with no domain triggers → general_operator
@@ -67,7 +71,8 @@ entries:
     - general_operator
     confidence: low
     ambiguity_reasons:
-    - no specific domain trigger matched; defaulting to general_operator metadata only
+    - no specific domain trigger matched; defaulting to general_operator metadata
+      only
     max_chain_limit_applied: false
 - id: career_en_cv_cover_letter
   description: cv + cover letter trigger career_strategist
@@ -709,7 +714,8 @@ entries:
     ambiguity_reasons: []
     max_chain_limit_applied: false
 - id: strip_cronjob_response_hot_infra_terms
-  description: infra hot terms inside cronjob response block are stripped; weather drives routing
+  description: infra hot terms inside cronjob response block are stripped; weather
+    drives routing
   category: stripping
   lang: en
   prompt: 'Cronjob response: hermes-rebase-local-customizations result
@@ -726,7 +732,8 @@ entries:
     ambiguity_reasons: []
     max_chain_limit_applied: false
 - id: strip_replying_to_no_hot_terms_benign
-  description: replying-to line passes through routing but contains no trigger terms; prompt is benign
+  description: replying-to line passes through routing but contains no trigger terms;
+    prompt is benign
   category: stripping
   lang: en
   prompt: '[Replying to: morning-greeting-note]
@@ -738,10 +745,12 @@ entries:
     - general_operator
     confidence: low
     ambiguity_reasons:
-    - no specific domain trigger matched; defaulting to general_operator metadata only
+    - no specific domain trigger matched; defaulting to general_operator metadata
+      only
     max_chain_limit_applied: false
 - id: strip_thread_context_hot_security_terms
-  description: security hot terms inside thread context block are stripped; weather drives routing
+  description: security hot terms inside thread context block are stripped; weather
+    drives routing
   category: stripping
   lang: en
   prompt: '[Thread context from Slack]
@@ -760,7 +769,8 @@ entries:
     ambiguity_reasons: []
     max_chain_limit_applied: false
 - id: strip_thread_context_replying_to_engineer_no_security_overlay
-  description: security terms in thread body stripped; replying-to line with rebase keeps engineer primary; no security overlay
+  description: security terms in thread body stripped; replying-to line with rebase
+    keeps engineer primary; no security overlay
   category: stripping
   lang: en
   prompt: '[Replying to: hermes-rebase-local-customizations]
@@ -772,11 +782,112 @@ entries:
     [End of thread context]
 
 
-    отчет вызывает у меня двоякое ощущение. давай его полностью переделаем. сделай план и покажи мне'
+    отчет вызывает у меня двоякое ощущение. давай его полностью переделаем. сделай
+    план и покажи мне'
   expected:
     primary_profile: engineer
     route_chain:
     - engineer
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: infra_ru_fallback_deploy
+  description: Russian infra deploy prompt has no RU infra triggers; falls back to
+    general_operator (documented limitation)
+  category: infra
+  lang: ru
+  prompt: Задеплой сервис на прод хост
+  expected:
+    primary_profile: general_operator
+    route_chain:
+    - general_operator
+    confidence: low
+    ambiguity_reasons:
+    - no specific domain trigger matched; defaulting to general_operator metadata
+      only
+    max_chain_limit_applied: false
+- id: infra_ru_fallback_docker
+  description: Russian docker-logs prompt has no RU infra triggers; falls back to
+    general_operator (documented limitation)
+  category: infra
+  lang: ru
+  prompt: Проверь докер логи на ошибки
+  expected:
+    primary_profile: general_operator
+    route_chain:
+    - general_operator
+    confidence: low
+    ambiguity_reasons:
+    - no specific domain trigger matched; defaulting to general_operator metadata
+      only
+    max_chain_limit_applied: false
+- id: docs_first_ru_zafiksiruy_reshenie
+  description: Russian docs-first trigger (зафиксируй) routes to scribe
+  category: docs_first
+  lang: ru
+  prompt: Зафиксируй решение о деплое
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_first_ru_obnovit_state_handoff
+  description: Russian update-state + handoff signal routes to scribe via docs-first
+    rule
+  category: docs_first
+  lang: ru
+  prompt: Обнови state и сделай handoff после изменения
+  expected:
+    primary_profile: scribe
+    route_chain:
+    - scribe
+    confidence: high
+    ambiguity_reasons: []
+    max_chain_limit_applied: false
+- id: docs_infra_no_docs_first
+  description: update runbook + deploy → engineer primary with scribe overlay; docs
+    signal not strong enough for docs-first
+  category: overlay
+  lang: en
+  prompt: update the runbook after the deploy
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: infra, docs'
+    - 'route chain includes follow-up hops: scribe'
+    max_chain_limit_applied: false
+- id: security_infra_change
+  description: security audit required for a change → engineer primary + security_auditor
+    + scribe chain
+  category: overlay
+  lang: en
+  prompt: security audit is required for this change
+  expected:
+    primary_profile: engineer
+    route_chain:
+    - engineer
+    - security_auditor
+    - scribe
+    confidence: medium
+    ambiguity_reasons:
+    - 'multiple domain signals detected: security, infra'
+    - 'route chain includes follow-up hops: security_auditor, scribe'
+    max_chain_limit_applied: false
+- id: research_pure_due_diligence
+  description: pure research prompt (due diligence) routes to researcher
+  category: research
+  lang: en
+  prompt: Review this company for due diligence
+  expected:
+    primary_profile: researcher
+    route_chain:
+    - researcher
     confidence: high
     ambiguity_reasons: []
     max_chain_limit_applied: false
