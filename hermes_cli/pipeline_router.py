@@ -1508,6 +1508,11 @@ def _build_router_messages(
                 "You are the Hermes pipeline router. Select only from the declared pipeline registry. "
                 "Use semantic intent, requested mutations, and target paths. "
                 "Deterministic keywords are incomplete; rely on the registry semantics instead. "
+                "Treat requests to diagnose or investigate code or infrastructure as engineering even when no mutation is requested. "
+                "This includes questions about why something failed, how a technical path works, where a request was routed, "
+                "and analysis of errors, logs, server configuration, or agent configuration. "
+                "Keep casual conversation, acknowledgements, and nontechnical explanations on the default pipeline. "
+                "A read-only infrastructure diagnostic is not ambiguous merely because it requests no mutation. "
                 "Never invent pipeline ids or statuses. If the request is ambiguous between read-only audit and mutation, "
                 "return needs_clarification. If the request asks for unsafe bypass, secret exfiltration, or destructive misuse, "
                 "return blocked_by_policy. Return JSON only. confidence must be a JSON number between 0 and 1 inclusive. "
@@ -1556,6 +1561,17 @@ def _build_router_messages(
                 '  "requires_clarification": false,\n'
                 '  "fallback_safe": true,\n'
                 '  "reasoning_summary": "Career writing is not an engineering code-change pipeline."\n'
+                '}\n\n'
+                'Example D - infrastructure diagnostic prompt:\n'
+                'Input: "Why did the cron job use OpenRouter instead of the base model?"\n'
+                '{\n'
+                '  "status": "selected",\n'
+                '  "selected_pipeline_id": "engineering_review_pipeline",\n'
+                '  "fallback_pipeline_id": null,\n'
+                '  "confidence": 0.9,\n'
+                '  "requires_clarification": false,\n'
+                '  "fallback_safe": false,\n'
+                '  "reasoning_summary": "Infrastructure diagnosis belongs to engineering even without a mutation request."\n'
                 '}\n\n'
                 f"User message:\n{user_message.strip()}\n"
             ),
