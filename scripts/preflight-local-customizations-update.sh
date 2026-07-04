@@ -44,6 +44,37 @@ BASE="$(git -C "$REPO" merge-base HEAD "$UPSTREAM_REF")"
 UPSTREAM_AHEAD="$(git -C "$REPO" rev-list --count "$BASE..$UPSTREAM_REF")"
 LOCAL_AHEAD="$(git -C "$REPO" rev-list --count "$BASE..HEAD")"
 
+# Upstream-sync state: skip the agent entirely when there is nothing new.
+STATE_DIR="${HERMES_HOME:-$HOME/.hermes}/state/upstream-sync"
+STATE_FILE="$STATE_DIR/last-synced.json"
+PENDING_FILE="$STATE_DIR/pending.json"
+LAST_SYNCED_SHA=""
+if [ -r "$STATE_FILE" ]; then
+  LAST_SYNCED_SHA="$(sed -n 's/.*"upstream_sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{7,40\}\)".*/\1/p' "$STATE_FILE" | head -n1)"
+fi
+if [ -z "${UPSTREAM_SYNC_FORCE:-}" ] && [ ! -e "$PENDING_FILE" ]; then
+  if [ "$UPSTREAM_AHEAD" -eq 0 ] || [ "$UPSTREAM_HEAD" = "$LAST_SYNCED_SHA" ]; then
+    echo "Upstream-sync preflight: no new upstream commits (upstream ${UPSTREAM_HEAD:0:12} already synced)."
+    echo '{"wakeAgent": false}'
+    exit 0
+  fi
+fi
+PENDING_PRESENT="no"
+[ -e "$PENDING_FILE" ] && PENDING_PRESENT="yes"
+
+# Dry-run merge to find real textual conflicts (writes objects only, never
+# touches the worktree or refs). Requires git >= 2.38.
+conflicts_file="$tmpdir/conflicts.txt"
+: >"$conflicts_file"
+if [ "$UPSTREAM_AHEAD" -gt 0 ]; then
+  merge_tree_out="$tmpdir/merge_tree.txt"
+  if ! git -C "$REPO" merge-tree --write-tree --name-only \
+      --merge-base="$BASE" HEAD "$UPSTREAM_REF" >"$merge_tree_out" 2>/dev/null; then
+    # On conflict, output is: tree OID line, then conflicted paths.
+    tail -n +2 "$merge_tree_out" | sed '/^$/d' >"$conflicts_file"
+  fi
+fi
+
 if [ -n "${REPORT_BRANCH_ONLY:-}" ]; then
   git -C "$REPO" status --porcelain=v1 --untracked-files=all >"$status_file"
 else
@@ -75,17 +106,36 @@ if [ -z "$PYTHON_BIN" ]; then
   exit 127
 fi
 
-"$PYTHON_BIN" - "$REPO" "$BRANCH" "$UPSTREAM_REF" "$HEAD" "$UPSTREAM_HEAD" "$BASE" "$UPSTREAM_AHEAD" "$LOCAL_AHEAD" "$status_file" "$upstream_commits_file" "$upstream_files_file" "$local_commits_file" "$local_files_file" <<'PY'
+"$PYTHON_BIN" - "$REPO" "$BRANCH" "$UPSTREAM_REF" "$HEAD" "$UPSTREAM_HEAD" "$BASE" "$UPSTREAM_AHEAD" "$LOCAL_AHEAD" "$status_file" "$upstream_commits_file" "$upstream_files_file" "$local_commits_file" "$local_files_file" "$conflicts_file" "$LAST_SYNCED_SHA" "$PENDING_PRESENT" <<'PY'
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
 
-repo, branch, upstream_ref, head, upstream_head, base, upstream_ahead, local_ahead, status_file, upstream_commits_file, upstream_files_file, local_commits_file, local_files_file = sys.argv[1:14]
+repo, branch, upstream_ref, head, upstream_head, base, upstream_ahead, local_ahead, status_file, upstream_commits_file, upstream_files_file, local_commits_file, local_files_file, conflicts_file, last_synced_sha, pending_present = sys.argv[1:17]
 upstream_ahead = int(upstream_ahead)
 local_ahead = int(local_ahead)
+
+
+def git_commits_for_file(rev_range: str, path: str, limit: int = 15) -> list[dict]:
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo, "log", "--no-merges", f"--max-count={limit}",
+             "--format=%h\t%s", rev_range, "--", path],
+            capture_output=True, text=True, timeout=30, check=False,
+        ).stdout
+    except Exception:
+        return []
+    commits = []
+    for line in out.splitlines():
+        if "\t" in line:
+            sha, subject = line.split("\t", 1)
+            commits.append({"sha": sha, "subject": subject})
+    return commits
 
 
 def read_lines(path: str) -> list[str]:
@@ -132,6 +182,7 @@ upstream_commits = read_lines(upstream_commits_file)
 upstream_files = read_lines(upstream_files_file)
 local_commits = read_lines(local_commits_file)
 local_files = read_lines(local_files_file)
+conflict_paths = read_lines(conflicts_file)
 
 # Overlap detection between local worktree/local branch and upstream changes.
 upstream_set = set(upstream_files)
@@ -151,6 +202,8 @@ critical_patterns = {
 }
 
 risk_flags: list[str] = []
+if conflict_paths:
+    risk_flags.append(f"merge dry-run found real textual conflicts ({len(conflict_paths)} paths)")
 if status_paths:
     risk_flags.append(f"local uncommitted changes present ({len(status_paths)} files)")
 if conflict_overlap:
@@ -216,6 +269,15 @@ if local_ahead:
 
 print()
 print("### Conflict / breaking-change analysis")
+if conflict_paths:
+    print(f"Merge dry-run (git merge-tree): {len(conflict_paths)} conflicted file(s):")
+    for p in conflict_paths[:30]:
+        print(f"- {p}")
+    if len(conflict_paths) > 30:
+        print(f"- … {len(conflict_paths) - 30} more")
+else:
+    print("Merge dry-run (git merge-tree): no textual conflicts.")
+print()
 if conflict_overlap:
     print("Direct overlap between local changes and upstream files:")
     for p in conflict_overlap[:25]:
@@ -245,8 +307,57 @@ else:
     for flag in risk_flags:
         print(f"- {flag}")
 
+if conflict_paths:
+    risk = "conflicts"
+elif conflict_overlap:
+    risk = "overlap_only"
+else:
+    risk = "clean"
+
+conflicts_json = []
+for p in conflict_paths[:60]:
+    conflicts_json.append({
+        "file": p,
+        "local_commits": git_commits_for_file(f"{base}..{head}", p),
+        "upstream_commits": git_commits_for_file(f"{base}..{upstream_ref}", p, limit=8),
+    })
+
+overlap_json = []
+for p in conflict_overlap[:60]:
+    if p in conflict_paths:
+        continue
+    overlap_json.append({
+        "file": p,
+        "local_commits": git_commits_for_file(f"{base}..{head}", p),
+        "upstream_commits": git_commits_for_file(f"{base}..{upstream_ref}", p, limit=8),
+    })
+
+payload = {
+    "schema": "upstream-sync-preflight/v1",
+    "repo": repo,
+    "branch": branch,
+    "head": head,
+    "upstream_head": upstream_head,
+    "merge_base": base,
+    "upstream_ahead": upstream_ahead,
+    "local_ahead": local_ahead,
+    "last_synced_upstream_sha": last_synced_sha or None,
+    "pending_decision_present": pending_present == "yes",
+    "worktree_dirty": bool(status_paths),
+    "dirty_files": status_paths[:50],
+    "conflicts": conflicts_json,
+    "overlap_files": overlap_json,
+    "upstream_commit_count_by_area": dict(upstream_counts),
+    "upstream_commits_sample": [
+        {"sha": s, "subject": subj}
+        for s, subj in (split_subject(line) for line in upstream_commits[:200])
+    ],
+    "risk": risk,
+}
+
 print()
-print("### Approval gate")
-print("Reply with approval only after you are satisfied with this report. Do not run the update until then.")
-print(f"Planned apply command: scripts/rebase-local-customizations.sh")
+print("### Machine-readable preflight data")
+print("```json")
+print(json.dumps(payload, indent=1, ensure_ascii=False))
+print("```")
 PY
