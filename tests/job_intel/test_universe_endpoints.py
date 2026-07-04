@@ -50,3 +50,22 @@ def test_apply_probe_success_sets_supported_ats():
     c = CandidateCompany(name="Nium")
     apply_probe(c, session=session)
     assert c.ats_type == "greenhouse" and "supported_ats" in c.reasons
+
+
+def test_probe_smartrecruiters_empty_tenant_is_not_a_hit():
+    # SR API returns 200 + valid JSON with totalFound=0 for ANY slug —
+    # an empty tenant must not count as a supported ATS endpoint.
+    session = MagicMock()
+    session.get.side_effect = lambda url, **kw: (
+        _resp(200, json_data={"offset": 0, "totalFound": 0, "content": []})
+        if "smartrecruiters" in url else _resp(404))
+    assert probe_ats("ghost-co", session=session) is None
+
+
+def test_probe_smartrecruiters_real_tenant_hits():
+    session = MagicMock()
+    session.get.side_effect = lambda url, **kw: (
+        _resp(200, json_data={"offset": 0, "totalFound": 3, "content": [{}]})
+        if "smartrecruiters" in url else _resp(404))
+    assert probe_ats("realco", session=session) == (
+        "smartrecruiters", "https://api.smartrecruiters.com/v1/companies/realco/postings")

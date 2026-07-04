@@ -18,7 +18,9 @@ _PATTERNS: list[tuple[str, str, str]] = [
     ("greenhouse", "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs", "json"),
     ("lever", "https://api.lever.co/v0/postings/{slug}?mode=json", "json"),
     ("ashby", "https://api.ashbyhq.com/posting-api/job-board/{slug}", "json"),
-    ("smartrecruiters", "https://api.smartrecruiters.com/v1/companies/{slug}/postings", "json"),
+    # SR answers 200 + valid JSON with totalFound=0 for ANY slug, so an empty
+    # tenant must not count as a hit.
+    ("smartrecruiters", "https://api.smartrecruiters.com/v1/companies/{slug}/postings", "sr_nonempty"),
     ("recruitee", "https://{slug}.recruitee.com/api/offers/", "json"),
     ("teamtailor", "https://{slug}.teamtailor.com/jobs", "teamtailor"),
 ]
@@ -38,6 +40,13 @@ def probe_ats(slug: str, *, session: requests.Session | None = None) -> tuple[st
             try:
                 resp.json()
             except ValueError:
+                continue
+        elif validation == "sr_nonempty":
+            try:
+                payload = resp.json()
+            except ValueError:
+                continue
+            if not (isinstance(payload, dict) and payload.get("totalFound", 0) >= 1):
                 continue
         elif validation not in resp.text.lower():
             continue
