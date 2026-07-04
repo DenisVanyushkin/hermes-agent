@@ -22,6 +22,7 @@ ACTIVE_PROFILE_IDS = {
     "chief_hermes",
     "engineer",
     "career_strategist",
+    "artist",
     "scribe",
     "researcher",
     "security_auditor",
@@ -33,6 +34,7 @@ CANONICAL_ACTIVE_PROFILE_IDS = {
     "chief_coordinator",
     "engineer",
     "career_strategist",
+    "artist",
     "scribe",
     "researcher",
     "security_auditor",
@@ -45,6 +47,7 @@ PROFILE_ID_ALIASES = {
     "chief_hermes": "chief_coordinator",
     "trading_observer_trader": "trading_observer_trader_deferred",
     "hermes_engineer_core": "engineer",
+    "hermes_artist_core": "artist",
 }
 
 MODEL_TIERS = {"standard", "reasoning", "coding", "critical", "code_review"}
@@ -65,6 +68,7 @@ CANONICAL_TOOL_CATEGORIES = {
     "db_migration",
     "web_search",
     "browser",
+    "image_generate",
     "calendar",
     "contacts",
     "email_draft",
