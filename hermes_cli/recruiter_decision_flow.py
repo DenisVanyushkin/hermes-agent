@@ -122,6 +122,8 @@ class DecisionSupportRequest:
     career_fact_sources: list[dict[str, Any]] = field(default_factory=list)
     company_identity: str | None = None
     company_research_claims: list[dict[str, Any]] = field(default_factory=list)
+    career_facts: dict[str, Any] | None = None
+    candidate_preferences: dict[str, Any] | None = None
     role_context: str | None = None
     permitted_source_types: list[str] | None = None
     output_mode: str = "draft_only"
@@ -429,11 +431,16 @@ def _execute_module(
             warnings=["module executor not wired; run again with provider execution enabled"],
         )
 
+    spec = DECISION_MODULE_REGISTRY[module_id]
     module_input = {
         "module_id": module_id,
         "vacancy_source": request.vacancy_source,
         "company_identity": request.company_identity,
         "company_research_claims": request.company_research_claims,
+        # Candidate facts reach a module only if it declares candidate-fact use;
+        # the privacy gate has already approved the sources by this point.
+        "career_facts": request.career_facts if spec.uses_candidate_facts else None,
+        "candidate_preferences": request.candidate_preferences,
         "role_context": request.role_context,
         "upstream_results": {name: execution.payload for name, execution in executed.items()},
         "degraded": degraded,
