@@ -105,8 +105,21 @@ def _fetch_ashby(org: str, job_id: str) -> dict[str, Any]:
     return {"fetch_status": "not_found_on_board"}
 
 
+def company_from_vacancy_url(url: str) -> str | None:
+    """Best-effort company slug from known ATS URL shapes."""
+    url = str(url or "")
+    match = _GREENHOUSE_RE.match(url) or _ASHBY_RE.match(url)
+    if match:
+        return match.group(1)
+    return None
+
+
 def _fetch_generic(url: str) -> dict[str, Any]:
-    text = _get(url).text
+    response = _get(url)
+    final_url = str(getattr(response, "url", url) or url)
+    if _looks_like_dead_posting_redirect(url, final_url):
+        return {"fetch_status": "posting_unavailable"}
+    text = response.text
     for jobposting in _jobposting_objects(text):
         return _details(
             title=jobposting.get("title"),
@@ -120,6 +133,19 @@ def _fetch_generic(url: str) -> dict[str, Any]:
     if len(stripped) < 200:
         return {"fetch_status": "page_content_too_thin"}
     return {"fetch_status": "ok_page_text", "description_text": stripped[:_MAX_TEXT]}
+
+
+def _looks_like_dead_posting_redirect(requested_url: str, final_url: str) -> bool:
+    """True when the site redirected the posting away (removed vacancy trap)."""
+    if "error=true" in final_url:
+        return True
+    from urllib.parse import urlparse
+
+    requested_path = urlparse(requested_url).path.rstrip("/")
+    final_path = urlparse(final_url).path.rstrip("/")
+    # A job URL usually has a distinct terminal segment (id/slug); losing it
+    # means we landed on a listing/board page, not the posting.
+    return bool(requested_path) and final_path != requested_path and not final_path.startswith(requested_path)
 
 
 def _jobposting_objects(html_text: str) -> list[dict[str, Any]]:
