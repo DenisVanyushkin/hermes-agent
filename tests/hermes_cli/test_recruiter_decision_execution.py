@@ -151,3 +151,65 @@ class TestControllerRecruiterPath:
         )
         assert result.blocked_reason == "required_subagents_not_allowed"
         assert result.actual_execution_invoked is False
+
+
+class TestPipelineGateRecruiter:
+    @staticmethod
+    def _router(**overrides):
+        from types import SimpleNamespace
+
+        base = dict(
+            status="selected",
+            selected_pipeline_id=RECRUITER_PIPELINE_ID,
+            fallback_pipeline_id=None,
+            pipeline_session_id="ps-gate",
+            confidence=0.95,
+            routing_fallback_used=False,
+            router_strategy="heuristic",
+            routing_confidence_source="heuristic",
+        )
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    @staticmethod
+    def _config(mode: str = "autonomous"):
+        return {
+            "pipelines": {
+                "enabled": True,
+                "execution": {
+                    "mode": mode,
+                    "allow_pipelines": ["engineering_review_pipeline", RECRUITER_PIPELINE_ID],
+                },
+            }
+        }
+
+    def test_gate_allows_recruiter_pipeline(self) -> None:
+        from hermes_cli.pipeline_gate import PipelineGateRequest, evaluate_pipeline_gate
+
+        decision = evaluate_pipeline_gate(
+            PipelineGateRequest(
+                config=self._config(),
+                router_decision=self._router(),
+                pipeline_plan_payload={"planned_steps_count": 1},
+                platform="slack",
+                user_message="оцени вакансию",
+            )
+        )
+        assert decision.allowed, (decision.reason_code, decision.reason)
+
+    def test_gate_denies_recruiter_when_not_allowlisted(self) -> None:
+        from hermes_cli.pipeline_gate import PipelineGateRequest, evaluate_pipeline_gate
+
+        config = self._config()
+        config["pipelines"]["execution"]["allow_pipelines"] = ["engineering_review_pipeline"]
+        decision = evaluate_pipeline_gate(
+            PipelineGateRequest(
+                config=config,
+                router_decision=self._router(),
+                pipeline_plan_payload={"planned_steps_count": 1},
+                platform="slack",
+                user_message="оцени вакансию",
+            )
+        )
+        assert not decision.allowed
+        assert decision.reason_code == "unsupported_pipeline"
