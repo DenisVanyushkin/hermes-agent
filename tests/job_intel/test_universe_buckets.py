@@ -40,3 +40,43 @@ def test_anchor_files_load():
     similar = load_anchor_similar()
     assert isinstance(similar, dict)
     assert all(isinstance(v, list) for v in similar.values())
+
+
+from job_intel.universe.buckets import classify
+
+
+def _c(*reasons):
+    c = CandidateCompany(name="X")
+    for r in reasons:
+        c.add_reason(r)
+    return c
+
+
+def test_reputation_risk_always_rejects():
+    assert classify(_c("reputation_risk", "supported_ats", "thesis_fit",
+                       "geo_fit", "senior_product_titles")) == "reject"
+
+
+def test_no_endpoint_holds():
+    assert classify(_c("thesis_fit", "geo_fit", "no_endpoint")) == "hold"
+    assert classify(_c("thesis_fit", "browser_required")) == "hold"
+
+
+def test_strong_candidate_requires_full_deterministic_stack():
+    assert classify(_c("supported_ats", "geo_fit", "fintech_payments_fit",
+                       "senior_product_titles")) == "strong_candidate"
+
+
+def test_anchor_similarity_alone_caps_at_maybe():
+    assert classify(_c("positive_anchor_similarity")) == "maybe"
+    assert classify(_c("positive_anchor_similarity", "supported_ats")) == "maybe"
+
+
+def test_candidate_needs_ats_plus_two_signals():
+    assert classify(_c("supported_ats", "thesis_fit", "geo_fit")) == "candidate"
+
+
+def test_empty_rejects_with_low_relevance():
+    c = CandidateCompany(name="Y")
+    assert classify(c) == "reject"
+    assert "low_relevance" in c.reasons
