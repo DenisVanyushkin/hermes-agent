@@ -27,6 +27,7 @@ profile_tiers:
   chief_hermes: reasoning
   engineer: coding
   career_strategist: standard
+  artist: standard
   scribe: standard
   researcher: standard
   general_operator: standard
@@ -191,6 +192,26 @@ role_policies:
       - document
       - handoff
       - state_capture
+      not_final_authority_for:
+      - mutate_runtime_systems
+      - deploy_or_rollback
+      role_filters:
+        require:
+          supportsTools: true
+        prefer:
+          supportsStructuredOutputs: true
+          supportsResponseFormat: true
+          latencyMs: low
+  artist:
+    base_model: gpt-5.4-mini
+    escalation:
+      model_family: none
+      example_model: null
+      conditions: []
+    free_fallback:
+      allowed_for:
+      - clarifying_dialogue
+      - image_prompt_drafting
       not_final_authority_for:
       - mutate_runtime_systems
       - deploy_or_rollback

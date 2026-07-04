@@ -23,8 +23,41 @@ _ROLE_INTENTS = {
     "scribe": "documentation/memory",
     "researcher": "external research",
     "career_strategist": "career/job",
+    "artist": "image generation",
     "general_operator": "personal/admin",
 }
+
+_ARTIST_TERMS = (
+    "нарисуй",
+    "нарисуйте",
+    "нарисовать",
+    "дорисуй",
+    "перерисуй",
+    "сгенерируй картинку",
+    "сгенерируй изображение",
+    "сгенерируйте картинку",
+    "сгенерировать картинку",
+    "сгенерировать изображение",
+    "создай картинку",
+    "создай изображение",
+    "обработай картинку",
+    "обработай фото",
+    "измени картинку",
+    "измени фото",
+    "draw",
+    "generate an image",
+    "generate a picture",
+    "generate image",
+    "create an image",
+    "create a picture",
+    "make an image",
+    "illustrate",
+    "illustration",
+    "edit this image",
+    "edit this photo",
+    "edit the image",
+    "edit the photo",
+)
 
 _ENGINEER_TERMS = (
     "engineer",
@@ -863,6 +896,7 @@ _BUILTIN_ROUTING_PROFILES = frozenset(
         "engineer",
         "security_auditor",
         "career_strategist",
+        "artist",
         "scribe",
         "researcher",
     }
@@ -893,6 +927,11 @@ def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, 
         # Package roles (e.g. hermes_engineer_core) selected by routing must
         # win over the built-in keyword cascade below — see bd2124fe6.
         return route_decision.primary_profile, False, "routing selected specialized role"
+
+    if _contains_any(normalized, _ARTIST_TERMS):
+        # Image-generation intent must win over the engineer cascade: words
+        # like "generate"/"сгенерируй" also appear in engineering phrasing.
+        return "artist", False, "image generation/editing intent detected"
 
     if _contains_any(normalized, _ENGINEER_TERMS):
         if _contains_any(normalized, _SECURITY_REVIEW_TERMS):
