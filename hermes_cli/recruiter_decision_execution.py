@@ -12,6 +12,7 @@ import re
 from typing import Any, Mapping
 
 from hermes_cli.config import cfg_get
+from hermes_cli.recruiter_career_facts import CareerFactsBundle, load_career_facts
 from hermes_cli.recruiter_decision_flow import (
     DecisionSupportReport,
     DecisionSupportRequest,
@@ -38,7 +39,10 @@ _MODULE_TITLES = {
 }
 
 
-def build_decision_request_from_message(user_message: str) -> DecisionSupportRequest:
+def build_decision_request_from_message(
+    user_message: str,
+    career_facts: CareerFactsBundle | None = None,
+) -> DecisionSupportRequest:
     """Build a safe draft-only decision request from a raw chat message."""
     text = str(user_message or "").strip()
     urls = _URL_PATTERN.findall(text)
@@ -49,7 +53,14 @@ def build_decision_request_from_message(user_message: str) -> DecisionSupportReq
             "source_id": urls[0].rstrip(".,;)"),
             "approved": True,
         }
-    return DecisionSupportRequest(prompt=text, vacancy_source=vacancy_source)
+    bundle = career_facts if career_facts is not None else CareerFactsBundle()
+    return DecisionSupportRequest(
+        prompt=text,
+        vacancy_source=vacancy_source,
+        career_fact_sources=list(bundle.sources),
+        career_facts=bundle.facts,
+        candidate_preferences=bundle.preferences,
+    )
 
 
 def execute_recruiter_decision_support_helper(
@@ -60,7 +71,11 @@ def execute_recruiter_decision_support_helper(
     **_kwargs: Any,
 ) -> dict[str, Any]:
     """Registered controller helper for the recruiter pipeline."""
-    request = build_decision_request_from_message(user_message)
+    try:
+        facts_bundle = load_career_facts()
+    except Exception as exc:
+        facts_bundle = CareerFactsBundle(warnings=[f"career facts loader failed: {type(exc).__name__}"])
+    request = build_decision_request_from_message(user_message, career_facts=facts_bundle)
 
     module_executor = None
     executor_error: str | None = None
@@ -78,7 +93,11 @@ def execute_recruiter_decision_support_helper(
             executor_error = f"{type(exc).__name__}: {exc}"
 
     report = run_recruiter_decision_support_flow(request, module_executor=module_executor)
-    text = format_decision_report_text(report, executor_error=executor_error)
+    text = format_decision_report_text(
+        report,
+        executor_error=executor_error,
+        extra_notes=list(facts_bundle.warnings),
+    )
 
     status = "executed"
     blocked_reason = None
@@ -116,6 +135,7 @@ def format_decision_report_text(
     report: DecisionSupportReport,
     *,
     executor_error: str | None = None,
+    extra_notes: list[str] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append(f"*Company & Vacancy Decision Support* — {_status_label(report.status)}")
@@ -143,7 +163,7 @@ def format_decision_report_text(
 
     if executor_error:
         lines.append("⚠ Automated analysis was unavailable for this run; results are limited.")
-    for warning in _sanitize_notes(report.warnings):
+    for warning in _sanitize_notes(list(report.warnings) + list(extra_notes or [])):
         lines.append(f"⚠ {warning}")
     for error in _sanitize_notes(report.errors):
         lines.append(f"✖ {error}")
