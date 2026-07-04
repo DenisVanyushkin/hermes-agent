@@ -11,6 +11,8 @@ from hermes_cli.pipeline_rework_loop import execute_bounded_rework_loop
 
 ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
 BOUNDED_REWORK_LOOP_HELPER = "bounded_rework_loop"
+RECRUITER_PIPELINE_ID = "recruiter_decision_support_pipeline"
+RECRUITER_DECISION_HELPER = "recruiter_decision_support_flow"
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,16 @@ def resolve_pipeline_execution_helper(
             helper_name=BOUNDED_REWORK_LOOP_HELPER,
             blocked_reason=None,
             helper=execute_engineering_review_helper,
+        )
+
+    if pipeline_id == RECRUITER_PIPELINE_ID:
+        from hermes_cli.recruiter_decision_execution import execute_recruiter_decision_support_helper
+
+        return PipelineExecutionHelperResolution(
+            status="resolved",
+            helper_name=RECRUITER_DECISION_HELPER,
+            blocked_reason=None,
+            helper=execute_recruiter_decision_support_helper,
         )
 
     return PipelineExecutionHelperResolution(
@@ -192,4 +204,6 @@ def _has_real_executor_path(controlled_runtime_context: dict[str, Any]) -> bool:
 def _helper_name_for_pipeline(pipeline_id: str | None) -> str | None:
     if pipeline_id == ENGINEERING_PIPELINE_ID:
         return BOUNDED_REWORK_LOOP_HELPER
+    if pipeline_id == RECRUITER_PIPELINE_ID:
+        return RECRUITER_DECISION_HELPER
     return None
