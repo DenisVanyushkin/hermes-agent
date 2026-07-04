@@ -107,3 +107,13 @@ def test_report_product_sample_has_no_flag():
     c.dry_run_product_sample = True
     text = format_universe_report([c], week_label="2026-W27")
     assert "no product-leadership sample found" not in text
+
+
+def test_report_aggregator_fintech_hold_is_low_quality():
+    # aggregator-derived fintech_payments_fit alone is weak evidence — such
+    # holds are low quality, not endpoint-research targets
+    c = _mk("MAREE", "hold", ["d7_cooccurrence"],
+            ["senior_product_titles", "fintech_payments_fit", "no_endpoint"], dry=-1)
+    text = format_universe_report([c], week_label="2026-W27")
+    assert "low_quality_hold (1)" in text
+    assert "needs_endpoint_research" not in text
