@@ -772,6 +772,14 @@ class LlmPipelineRouter(PipelineRouter):
             )
             if fallback_selection is not None:
                 return fallback_selection
+            fallback_selection = self._heuristic_recruiter_timeout_fallback(
+                user_message,
+                pipeline_session_id=pipeline_session_id,
+                router_subagent_id=router_subagent_id,
+                failure_reason=failure_reason,
+            )
+            if fallback_selection is not None:
+                return fallback_selection
             fallback_selection = self._heuristic_default_timeout_fallback(
                 user_message,
                 pipeline_session_id=pipeline_session_id,
@@ -824,6 +832,19 @@ class LlmPipelineRouter(PipelineRouter):
         elif invalid_confidence_summary:
             fallback_failure_reason = f"{reason}: {invalid_confidence_summary}"
         fallback_selection = self._heuristic_engineering_timeout_fallback(
+            user_message,
+            pipeline_session_id=pipeline_session_id,
+            router_subagent_id=router_subagent_id,
+            failure_reason=fallback_failure_reason,
+            failure_code=reason,
+            invalid_confidence_kind=invalid_confidence_kind,
+            invalid_confidence_summary=invalid_confidence_summary,
+            invalid_router_contract_kind=invalid_router_contract_kind,
+            invalid_router_contract_summary=invalid_router_contract_summary,
+        )
+        if fallback_selection is not None:
+            return fallback_selection
+        fallback_selection = self._heuristic_recruiter_timeout_fallback(
             user_message,
             pipeline_session_id=pipeline_session_id,
             router_subagent_id=router_subagent_id,
@@ -1022,6 +1043,69 @@ class LlmPipelineRouter(PipelineRouter):
                 "fallback_pipeline_id": None,
                 "confidence": max(self._min_confidence, 0.74),
                 "reasoning_summary": "The LLM router failed, but the request matched a narrow deterministic engineering smoke signature, so Hermes selected the engineering pipeline without opening the normal fallback path.",
+                "requires_clarification": False,
+                "policy_block_reason": base.policy_block_reason,
+                "routing_failure_reason": failure_reason,
+                "matched_signals": list(base.matched_signals),
+                "alternatives": [alternative.__dict__ for alternative in base.alternatives],
+                "fallback_safe": False,
+                "selected_provider": self._provider,
+                "selected_model": self._model,
+                "actual_provider": self._provider,
+                "actual_model": self._model,
+                "invalid_confidence_kind": invalid_confidence_kind,
+                "invalid_confidence_summary": invalid_confidence_summary,
+                "invalid_router_contract_kind": invalid_router_contract_kind,
+                "invalid_router_contract_summary": invalid_router_contract_summary,
+                "routing_fallback_used": True,
+                "routing_fallback_reason": failure_reason,
+                "router_strategy": "heuristic_timeout_fallback",
+                "routing_confidence_source": "heuristic_strict",
+            },
+            loaded_specs=self._loaded_specs,
+        )
+
+
+    def _heuristic_recruiter_timeout_fallback(
+        self,
+        user_message: str,
+        *,
+        pipeline_session_id: str,
+        router_subagent_id: str,
+        failure_reason: str,
+        failure_code: str | None = None,
+        invalid_confidence_kind: str | None = None,
+        invalid_confidence_summary: str | None = None,
+        invalid_router_contract_kind: str | None = None,
+        invalid_router_contract_summary: str | None = None,
+    ) -> RouterDecision | None:
+        if not self._is_heuristic_engineering_fallback_failure(
+            failure_reason,
+            failure_code=failure_code,
+            invalid_confidence_kind=invalid_confidence_kind,
+            invalid_router_contract_kind=invalid_router_contract_kind,
+        ):
+            return None
+
+        base = self._deterministic_router.route(
+            user_message,
+            pipeline_session_id=pipeline_session_id,
+            router_subagent_id=router_subagent_id,
+        )
+        # Deterministic router already gives engineering signals precedence,
+        # so a recruiter selection here is a clean read-only recruiter intent.
+        if base.status != "selected" or base.selected_pipeline_id != RECRUITER_PIPELINE_ID:
+            return None
+
+        return parse_router_decision(
+            {
+                "pipeline_session_id": base.pipeline_session_id,
+                "router_subagent_id": base.router_subagent_id,
+                "status": "selected",
+                "selected_pipeline_id": RECRUITER_PIPELINE_ID,
+                "fallback_pipeline_id": None,
+                "confidence": max(self._min_confidence, 0.9),
+                "reasoning_summary": "The LLM router failed, but the request matched deterministic recruiter/vacancy signals, so Hermes selected the read-only recruiter decision-support pipeline.",
                 "requires_clarification": False,
                 "policy_block_reason": base.policy_block_reason,
                 "routing_failure_reason": failure_reason,
