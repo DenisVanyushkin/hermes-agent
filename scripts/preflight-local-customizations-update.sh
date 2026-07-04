@@ -45,7 +45,10 @@ UPSTREAM_AHEAD="$(git -C "$REPO" rev-list --count "$BASE..$UPSTREAM_REF")"
 LOCAL_AHEAD="$(git -C "$REPO" rev-list --count "$BASE..HEAD")"
 
 # Upstream-sync state: skip the agent entirely when there is nothing new.
-STATE_DIR="${HERMES_HOME:-$HOME/.hermes}/state/upstream-sync"
+# The state dir is the sandbox home mount so both the host scripts and the
+# sandboxed cron agent (which sees it as /root/.hermes/state/upstream-sync)
+# read and write the same files.
+STATE_DIR="${HERMES_SYNC_STATE_DIR:-${HERMES_HOME:-$HOME/.hermes}/sandboxes/docker/default/home/.hermes/state/upstream-sync}"
 STATE_FILE="$STATE_DIR/last-synced.json"
 PENDING_FILE="$STATE_DIR/pending.json"
 LAST_SYNCED_SHA=""

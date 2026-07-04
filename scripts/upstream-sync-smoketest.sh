@@ -16,7 +16,7 @@ else
 fi
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-STATE_DIR="$HERMES_HOME/state/upstream-sync"
+STATE_DIR="${HERMES_SYNC_STATE_DIR:-$HERMES_HOME/sandboxes/docker/default/home/.hermes/state/upstream-sync}"
 GATEWAY_LOG="$HERMES_HOME/logs/gateway.log"
 RECORD_SHA="${1:-}"
 
