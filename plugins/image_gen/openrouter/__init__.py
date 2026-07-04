@@ -347,6 +347,9 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
                 "modalities": ["image", "text"],
                 "messages": [{"role": "user", "content": content}],
                 "image_config": {"aspect_ratio": or_aspect},
+                # Ask OpenRouter to report the request cost inline so the agent
+                # can surface it to the user next to the image.
+                "usage": {"include": True},
             }
             is_last = i == len(model_chain) - 1
             try:
@@ -464,12 +467,19 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
                     aspect_ratio=aspect,
                 )
 
+            extra: Dict[str, Any] = {}
+            usage = result.get("usage")
+            if isinstance(usage, dict) and isinstance(usage.get("cost"), (int, float)):
+                extra["cost_usd"] = round(float(usage["cost"]), 6)
+
             return success_response(
                 image=str(saved_path),
                 model=model_id,
                 prompt=prompt,
                 aspect_ratio=aspect,
                 provider=self._name,
+                modality="image" if references else "text",
+                extra=extra or None,
             )
 
         return last_error or error_response(
