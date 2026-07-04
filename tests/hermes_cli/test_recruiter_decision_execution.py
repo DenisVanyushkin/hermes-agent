@@ -213,3 +213,42 @@ class TestPipelineGateRecruiter:
         )
         assert not decision.allowed
         assert decision.reason_code == "unsupported_pipeline"
+
+
+class TestConversationContext:
+    def test_url_falls_back_to_thread_context(self) -> None:
+        context = (
+            "assistant: adyen — Head of Product | Score: 85\n"
+            "URL: https://job-boards.greenhouse.io/adyen/jobs/7077880"
+        )
+        request = build_decision_request_from_message(
+            "оцени вакансию", conversation_context=context
+        )
+        assert request.vacancy_source == {
+            "source_type": "vacancy_url",
+            "source_id": "https://job-boards.greenhouse.io/adyen/jobs/7077880",
+            "approved": True,
+        }
+        assert "Recent conversation context" in request.role_context
+
+    def test_message_url_wins_over_context(self) -> None:
+        request = build_decision_request_from_message(
+            "оцени https://hh.ru/vacancy/1",
+            conversation_context="assistant: старое https://hh.ru/vacancy/999",
+        )
+        assert request.vacancy_source["source_id"] == "https://hh.ru/vacancy/1"
+
+    def test_latest_context_url_wins(self) -> None:
+        context = "assistant: a https://x.com/old\nassistant: b https://x.com/new"
+        request = build_decision_request_from_message("оцени вакансию", conversation_context=context)
+        assert request.vacancy_source["source_id"] == "https://x.com/new"
+
+    def test_helper_accepts_conversation_context(self) -> None:
+        result = execute_recruiter_decision_support_helper(
+            config={"pipelines": {"execution": {"allow_real_provider_execution": False}}},
+            user_message="оцени вакансию",
+            conversation_context="assistant: alert https://hh.ru/vacancy/42",
+        )
+        assert result["status"] == "executed"
+        ds = result["report"]["decision_support"]
+        assert ds["modules"]["vacancy_assessment"]["status"] != "SKIPPED_NOT_REQUESTED"
