@@ -611,6 +611,75 @@ CREATE TABLE IF NOT EXISTS strategic_predictions (
     outcome_text TEXT,
     observed_openings INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS feedback_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opportunity_id INTEGER,
+    vacancy_id INTEGER,
+    company TEXT,
+    slack_channel_id TEXT,
+    slack_message_ts TEXT,
+    slack_thread_ts TEXT,
+    prompt_message_ts TEXT,
+    user_id TEXT,
+    reaction_type TEXT,
+    polarity TEXT NOT NULL DEFAULT 'negative',
+    status TEXT NOT NULL DEFAULT 'awaiting_reply',
+    reason_category_codes_json TEXT,
+    reason_detail_codes_json TEXT,
+    attribution_targets_json TEXT,
+    free_text TEXT,
+    classifier_version TEXT,
+    classifier_confidence REAL,
+    hard_blocker INTEGER,
+    soft_preference INTEGER,
+    applies_to_company INTEGER,
+    applies_to_role INTEGER,
+    applies_to_location INTEGER,
+    applies_to_industry INTEGER,
+    applies_to_parser_quality INTEGER,
+    scoring_features_impacted_json TEXT,
+    user_confirmed INTEGER,
+    needs_followup INTEGER NOT NULL DEFAULT 0,
+    followup_question_sent_at TEXT,
+    followup_answer_received_at TEXT,
+    needs_manual_review INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'slack_reaction_thread',
+    raw_payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE SET NULL,
+    FOREIGN KEY(vacancy_id) REFERENCES vacancies(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_events_opportunity ON feedback_events(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_message ON feedback_events(slack_channel_id, slack_message_ts, user_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_created ON feedback_events(created_at);
+
+CREATE TABLE IF NOT EXISTS scoring_calibration_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL DEFAULT 'proposed',
+    evidence_window_days INTEGER,
+    evidence_json TEXT,
+    proposed_changes_json TEXT,
+    dry_run_result_json TEXT,
+    risk_level TEXT,
+    created_at TEXT NOT NULL,
+    approved_at TEXT,
+    applied_at TEXT,
+    rejected_at TEXT,
+    rollback_ref TEXT
+);
+
+CREATE TABLE IF NOT EXISTS scoring_calibration_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposal_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT,
+    event_payload_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(proposal_id) REFERENCES scoring_calibration_proposals(id) ON DELETE CASCADE
+);
 """
 
 
@@ -2435,3 +2504,304 @@ PRAGMA foreign_keys=ON;
                     observed_openings,
                 ),
             )
+
+    # --- Negative feedback loop (feedback_events) -------------------------
+
+    _FEEDBACK_EVENT_JSON_FIELDS = {
+        "reason_category_codes_json",
+        "reason_detail_codes_json",
+        "attribution_targets_json",
+        "scoring_features_impacted_json",
+        "raw_payload_json",
+    }
+
+    _FEEDBACK_EVENT_MUTABLE_FIELDS = {
+        "opportunity_id",
+        "vacancy_id",
+        "company",
+        "slack_thread_ts",
+        "prompt_message_ts",
+        "reaction_type",
+        "status",
+        "reason_category_codes_json",
+        "reason_detail_codes_json",
+        "attribution_targets_json",
+        "free_text",
+        "classifier_version",
+        "classifier_confidence",
+        "hard_blocker",
+        "soft_preference",
+        "applies_to_company",
+        "applies_to_role",
+        "applies_to_location",
+        "applies_to_industry",
+        "applies_to_parser_quality",
+        "scoring_features_impacted_json",
+        "user_confirmed",
+        "needs_followup",
+        "followup_question_sent_at",
+        "followup_answer_received_at",
+        "needs_manual_review",
+        "raw_payload_json",
+    }
+
+    @staticmethod
+    def _feedback_json_value(field: str, value: Any) -> Any:
+        if field.endswith("_json") and value is not None and not isinstance(value, str):
+            return json.dumps(value, ensure_ascii=False, default=_json_safe_default)
+        if isinstance(value, bool):
+            return int(value)
+        return value
+
+    def create_feedback_event(
+        self,
+        *,
+        slack_channel_id: str | None,
+        slack_message_ts: str | None,
+        user_id: str | None,
+        reaction_type: str | None,
+        opportunity_id: int | None = None,
+        vacancy_id: int | None = None,
+        company: str | None = None,
+        polarity: str = "negative",
+        status: str = "awaiting_reply",
+        source: str = "slack_reaction_thread",
+        **fields: Any,
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        columns = [
+            "opportunity_id", "vacancy_id", "company", "slack_channel_id", "slack_message_ts",
+            "user_id", "reaction_type", "polarity", "status", "source", "created_at", "updated_at",
+        ]
+        values: list[Any] = [
+            opportunity_id, vacancy_id, company, slack_channel_id, slack_message_ts,
+            user_id, reaction_type, polarity, status, source, now, now,
+        ]
+        for field, value in fields.items():
+            if field not in self._FEEDBACK_EVENT_MUTABLE_FIELDS:
+                raise ValueError(f"Unsupported feedback_events field: {field}")
+            columns.append(field)
+            values.append(self._feedback_json_value(field, value))
+        placeholders = ", ".join("?" for _ in columns)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"INSERT INTO feedback_events ({', '.join(columns)}) VALUES ({placeholders})",
+                values,
+            )
+            return int(cursor.lastrowid)
+
+    def update_feedback_event(self, event_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        assignments: list[str] = []
+        values: list[Any] = []
+        for field, value in fields.items():
+            if field not in self._FEEDBACK_EVENT_MUTABLE_FIELDS:
+                raise ValueError(f"Unsupported feedback_events field: {field}")
+            assignments.append(f"{field}=?")
+            values.append(self._feedback_json_value(field, value))
+        assignments.append("updated_at=?")
+        values.append(datetime.now(timezone.utc).isoformat())
+        values.append(event_id)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE feedback_events SET {', '.join(assignments)} WHERE id=?", values)
+
+    @staticmethod
+    def _feedback_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        record = dict(row)
+        for field in ("reason_category_codes_json", "reason_detail_codes_json",
+                      "attribution_targets_json", "scoring_features_impacted_json"):
+            raw = record.get(field)
+            key = field.removesuffix("_json")
+            try:
+                record[key] = json.loads(raw) if raw else []
+            except (TypeError, ValueError):
+                record[key] = []
+        return record
+
+    def get_feedback_event(self, event_id: int) -> dict[str, Any] | None:
+        with self.connect(read_only=True) as conn:
+            row = conn.execute("SELECT * FROM feedback_events WHERE id=?", (event_id,)).fetchone()
+        return self._feedback_event_row_to_dict(row) if row else None
+
+    def find_feedback_event_by_message(
+        self, *, slack_channel_id: str, slack_message_ts: str, user_id: str | None = None
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM feedback_events WHERE slack_channel_id=? AND slack_message_ts=?"
+        params: list[Any] = [slack_channel_id, slack_message_ts]
+        if user_id is not None:
+            query += " AND user_id=?"
+            params.append(user_id)
+        query += " ORDER BY id DESC LIMIT 1"
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(query, params).fetchone()
+        return self._feedback_event_row_to_dict(row) if row else None
+
+    def find_feedback_event_awaiting_reply(
+        self, *, slack_channel_id: str, slack_thread_ts: str
+    ) -> dict[str, Any] | None:
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM feedback_events
+                WHERE slack_channel_id=? AND slack_thread_ts=?
+                  AND status IN ('awaiting_reply', 'awaiting_followup')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (slack_channel_id, slack_thread_ts),
+            ).fetchone()
+        return self._feedback_event_row_to_dict(row) if row else None
+
+    def fetch_feedback_events(
+        self,
+        *,
+        opportunity_id: int | None = None,
+        vacancy_id: int | None = None,
+        company: str | None = None,
+        days: int | None = None,
+        status: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM feedback_events WHERE 1=1"
+        params: list[Any] = []
+        if opportunity_id is not None:
+            query += " AND opportunity_id=?"
+            params.append(opportunity_id)
+        if vacancy_id is not None:
+            query += " AND vacancy_id=?"
+            params.append(vacancy_id)
+        if company is not None:
+            query += " AND company=?"
+            params.append(company)
+        if days is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            query += " AND created_at>=?"
+            params.append(cutoff)
+        if status is not None:
+            query += " AND status=?"
+            params.append(status)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._feedback_event_row_to_dict(row) for row in rows]
+
+    # --- Scoring calibration proposals ------------------------------------
+
+    def create_scoring_proposal(
+        self,
+        *,
+        evidence_window_days: int,
+        evidence: dict[str, Any],
+        proposed_changes: list[dict[str, Any]],
+        risk_level: str = "medium",
+        status: str = "proposed",
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO scoring_calibration_proposals (
+                    status, evidence_window_days, evidence_json, proposed_changes_json, risk_level, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    status,
+                    evidence_window_days,
+                    json.dumps(evidence, ensure_ascii=False, default=_json_safe_default),
+                    json.dumps(proposed_changes, ensure_ascii=False, default=_json_safe_default),
+                    risk_level,
+                    now,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    @staticmethod
+    def _proposal_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        record = dict(row)
+        for field, default in (
+            ("evidence_json", {}),
+            ("proposed_changes_json", []),
+            ("dry_run_result_json", None),
+        ):
+            raw = record.get(field)
+            key = field.removesuffix("_json")
+            try:
+                record[key] = json.loads(raw) if raw else default
+            except (TypeError, ValueError):
+                record[key] = default
+        return record
+
+    def get_scoring_proposal(self, proposal_id: int) -> dict[str, Any] | None:
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                "SELECT * FROM scoring_calibration_proposals WHERE id=?", (proposal_id,)
+            ).fetchone()
+        return self._proposal_row_to_dict(row) if row else None
+
+    def fetch_scoring_proposals(self, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = "SELECT * FROM scoring_calibration_proposals"
+        params: list[Any] = []
+        if status is not None:
+            query += " WHERE status=?"
+            params.append(status)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._proposal_row_to_dict(row) for row in rows]
+
+    def update_scoring_proposal(self, proposal_id: int, **fields: Any) -> None:
+        allowed = {
+            "status", "dry_run_result_json", "risk_level",
+            "approved_at", "applied_at", "rejected_at", "rollback_ref",
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        for field, value in fields.items():
+            if field not in allowed:
+                raise ValueError(f"Unsupported scoring_calibration_proposals field: {field}")
+            if field.endswith("_json") and value is not None and not isinstance(value, str):
+                value = json.dumps(value, ensure_ascii=False, default=_json_safe_default)
+            assignments.append(f"{field}=?")
+            values.append(value)
+        if not assignments:
+            return
+        values.append(proposal_id)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE scoring_calibration_proposals SET {', '.join(assignments)} WHERE id=?",
+                values,
+            )
+
+    def add_scoring_calibration_event(
+        self,
+        *,
+        proposal_id: int,
+        event_type: str,
+        actor: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO scoring_calibration_events (proposal_id, event_type, actor, event_payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    event_type,
+                    actor,
+                    json.dumps(payload or {}, ensure_ascii=False, default=_json_safe_default),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def fetch_scoring_calibration_events(self, proposal_id: int) -> list[dict[str, Any]]:
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT * FROM scoring_calibration_events WHERE proposal_id=? ORDER BY id ASC",
+                (proposal_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
