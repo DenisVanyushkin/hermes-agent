@@ -103,6 +103,44 @@ def test_apply_selection_writes_openrouter_blocks_and_keeps_timeout():
     assert we["base_url"] == "https://chatgpt.com/backend-api/codex"
 
 
+def test_title_not_probed_requires_tools_metadata():
+    models = [
+        _model(rank=1, id="np-no-tools:free", healthStatus="not_probed",
+               latencyMs=None, contextLength=8000, supportsTools=False,
+               supportsResponseFormat=False),
+    ]
+    sel = u.select_models({"models": models})
+    assert sel["title_generation"] is None
+
+    models = [
+        _model(rank=1, id="np-tools:free", healthStatus="not_probed",
+               latencyMs=None, contextLength=8000, supportsTools=True,
+               supportsResponseFormat=False),
+    ]
+    sel = u.select_models({"models": models})
+    assert sel["title_generation"] == "np-tools:free"
+
+
+def test_apply_selection_title_generation_reverts_to_primary():
+    cfg = {
+        "fallback_providers": [],
+        "auxiliary": {
+            "title_generation": {
+                "provider": "openrouter", "model": "old:free",
+                "base_url": "", "timeout": 45,
+            },
+        },
+    }
+    sel = {"fallback": [], "compression": None,
+           "web_extract": None, "title_generation": None}
+    out = u.apply_selection(copy.deepcopy(cfg), sel)
+    tg = out["auxiliary"]["title_generation"]
+    assert tg["provider"] == "openai-codex"
+    assert tg["model"] == "gpt-5.4-mini"
+    assert tg["base_url"] == "https://chatgpt.com/backend-api/codex"
+    assert tg["timeout"] == 45
+
+
 def test_apply_selection_empty_fallback_clears_chain():
     out = u.apply_selection({"fallback_providers": [{"provider": "openrouter", "model": "x"}]},
                             {"fallback": [], "compression": None,

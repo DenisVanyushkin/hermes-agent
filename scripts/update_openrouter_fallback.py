@@ -70,7 +70,9 @@ def select_models(data: dict) -> dict:
     big.sort(key=_rank)
     big_id = big[0]["id"] if big else None
 
-    title = [m for m in models if _is_healthy(m) or _health(m) == "not_probed"]
+    title = [m for m in models
+             if _is_healthy(m)
+             or (_health(m) == "not_probed" and m.get("supportsTools"))]
     title.sort(key=lambda m: (
         0 if _is_healthy(m) else 1,
         m["latencyMs"] if isinstance(m.get("latencyMs"), (int, float)) else 10**9,
@@ -135,9 +137,30 @@ def update_config(config_path: Path, sel: dict) -> None:
 
     try:
         reparsed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if not isinstance(reparsed, dict):
+            raise RuntimeError("post-write validation failed: not a mapping")
+
         expected = [{"provider": "openrouter", "model": mid} for mid in sel["fallback"]]
-        if not isinstance(reparsed, dict) or reparsed.get("fallback_providers") != expected:
-            raise RuntimeError("post-write validation failed")
+        if reparsed.get("fallback_providers") != expected:
+            raise RuntimeError("post-write validation failed: fallback_providers mismatch")
+
+        aux = reparsed.get("auxiliary")
+        if not isinstance(aux, dict):
+            raise RuntimeError("post-write validation failed: auxiliary missing")
+        for task in AUX_TASKS:
+            block = aux.get(task)
+            if not isinstance(block, dict):
+                raise RuntimeError(f"post-write validation failed: auxiliary.{task} missing")
+            if sel[task]:
+                if block.get("provider") != "openrouter" or block.get("model") != sel[task]:
+                    raise RuntimeError(
+                        f"post-write validation failed: auxiliary.{task} mismatch")
+            else:
+                if (block.get("provider") != PRIMARY["provider"]
+                        or block.get("model") != PRIMARY["model"]
+                        or block.get("base_url") != PRIMARY["base_url"]):
+                    raise RuntimeError(
+                        f"post-write validation failed: auxiliary.{task} mismatch")
     except Exception:
         shutil.copy2(backup, config_path)
         raise RuntimeError(f"config validation failed; restored backup {backup}")
