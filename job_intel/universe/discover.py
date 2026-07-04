@@ -55,3 +55,34 @@ def discover_d7(conn: sqlite3.Connection, *, days: int = 90,
         out.append(c)
     out.sort(key=lambda c: len(set(c.senior_titles)), reverse=True)
     return out[:limit]
+
+
+def discover_d1(*, exclude_slugs: set[str] | None = None) -> list[CandidateCompany]:
+    exclude = {normalize_slug(s) for s in (exclude_slugs or set())}
+    out: list[CandidateCompany] = []
+    for anchor, names in load_anchor_similar().items():
+        for name in names:
+            slug = normalize_slug(name)
+            if slug in exclude:
+                continue
+            c = CandidateCompany(name=name, slug=slug, sources=["d1_anchor_similar"])
+            c.add_reason("positive_anchor_similarity", f"similar to {anchor}")
+            out.append(c)
+    return out
+
+
+def merge_candidates(*lists: list[CandidateCompany]) -> list[CandidateCompany]:
+    merged: dict[str, CandidateCompany] = {}
+    for lst in lists:
+        for c in lst:
+            key = c.domain or c.slug
+            if key not in merged:
+                merged[key] = c
+                continue
+            m = merged[key]
+            m.sources = list(dict.fromkeys(m.sources + c.sources))
+            m.evidence = list(dict.fromkeys(m.evidence + c.evidence))
+            m.senior_titles = list(dict.fromkeys(m.senior_titles + c.senior_titles))
+            for r in c.reasons:
+                m.add_reason(r)
+    return list(merged.values())

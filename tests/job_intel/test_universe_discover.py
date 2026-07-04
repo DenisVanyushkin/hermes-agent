@@ -44,3 +44,32 @@ def test_d7_negative_anchors_and_exclusions(conn):
     assert "HHOnly" not in names         # single HH-only title
     assert "Old" not in names            # outside window
     assert "Wise" not in names           # excluded (already a seed/anchor)
+
+
+from job_intel.universe.discover import discover_d1, merge_candidates
+from job_intel.universe.models import CandidateCompany
+
+
+def test_d1_only_emits_anchor_similarity():
+    out = discover_d1(exclude_slugs=set())
+    assert out, "anchor_similar.json should yield candidates"
+    assert all(c.reasons == ["positive_anchor_similarity"] for c in out)
+    assert all(c.sources == ["d1_anchor_similar"] for c in out)
+
+
+def test_d1_respects_exclusions():
+    all_slugs = {c.slug for c in discover_d1(exclude_slugs=set())}
+    excluded = next(iter(all_slugs))
+    assert excluded not in {c.slug for c in discover_d1(exclude_slugs={excluded})}
+
+
+def test_merge_unions_sources_and_reasons():
+    a = CandidateCompany(name="Nium", sources=["d7_cooccurrence"])
+    a.add_reason("senior_product_titles", "VP Product")
+    b = CandidateCompany(name="Nium", sources=["d1_anchor_similar"])
+    b.add_reason("positive_anchor_similarity", "similar to wise")
+    merged = merge_candidates([a], [b])
+    assert len(merged) == 1
+    m = merged[0]
+    assert set(m.sources) == {"d7_cooccurrence", "d1_anchor_similar"}
+    assert set(m.reasons) == {"senior_product_titles", "positive_anchor_similarity"}
