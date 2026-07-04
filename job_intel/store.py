@@ -1623,9 +1623,11 @@ PRAGMA foreign_keys=ON;
             "pct_company_known","pct_location_known","pct_salary_known","pct_seniority_confident",
             "company_score_avg","company_score_p90","industry_fit_avg","tier1_company_count","tier2_company_count","interview_generated_count",
             "error_class","error_fingerprint","error_message_truncated",
+            "enabled","skip_reason",
         ]
         payload: dict[str, Any] = {"run_id": run_id, "source": source, "created_at": now}
         payload.update(kpi or {})
+        payload.setdefault("enabled", 1)
         values = [payload.get(c) for c in columns]
         placeholders = ",".join(["?"] * len(columns))
         col_sql = ",".join(columns)
