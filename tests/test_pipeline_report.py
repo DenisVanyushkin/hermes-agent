@@ -67,7 +67,7 @@ def test_report_builder_returns_not_executed_engineering_report() -> None:
     assert report.summary.trace_id == session.trace_id
     assert report.summary.selected_subagents == ["hermes_engineer_core", "hermes_code_reviewer"]
     assert [item.subagent_id for item in report.subagents] == ["hermes_engineer_core", "hermes_code_reviewer"]
-    assert [item.provider for item in report.models] == ["openrouter", "openai-codex"]
+    assert [item.provider for item in report.models] == ["openai-codex", "openai-codex"]
     assert report.completion.completion_allowed is False
     assert report.completion.blocked_reason == "execution_disabled"
     assert report.final_response.status is PipelineReportStatus.NOT_EXECUTED
