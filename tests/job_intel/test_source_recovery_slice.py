@@ -268,3 +268,44 @@ def test_target_company_ats_seeds_win_over_partial_404() -> None:
         job_link_count=5, browser_used=False,
     )
     assert outcome == "ats_seeds_discovered_only"
+
+
+def test_health_no_linkedin_problems_when_intentionally_disabled(tmp_path) -> None:
+    """Retired-by-decision LinkedIn (disabled_by_config) must not page the
+    operator about re-auth or tier-1 failure."""
+    from job_intel.cli import _check_health_conditions
+
+    store = JobIntelStore(tmp_path / "job_intel.sqlite3")
+    store.bootstrap()
+    # History: 3 login-wall runs before the retirement decision...
+    for _ in range(3):
+        run_id = store.start_run("daily", metadata={})
+        store.upsert_source_kpi_run(run_id, "linkedin", _kpi(1))
+        store.finish_run(run_id, status="ok", notes="test")
+    # ...then the source is disabled via JOB_INTEL_ENABLED_SOURCES.
+    run_id = store.start_run("daily", metadata={})
+    store.upsert_source_kpi_run(
+        run_id,
+        "linkedin",
+        {"source_status": "skipped", "skip_reason": "disabled_by_config", "enabled": 0, "found_count": 0},
+    )
+    store.finish_run(run_id, status="ok", notes="test")
+
+    problems = _check_health_conditions(store)
+    linkedin_problems = [p for p in problems if "linkedin" in p.lower()]
+    assert not linkedin_problems, f"disabled linkedin must be silent, got: {linkedin_problems}"
+
+
+def test_health_reauth_suppressed_when_linkedin_excluded_from_env(tmp_path, monkeypatch) -> None:
+    from job_intel.cli import _check_health_conditions
+
+    monkeypatch.setenv("JOB_INTEL_ENABLED_SOURCES", "target_companies,headhunter,greenhouse")
+    store = JobIntelStore(tmp_path / "job_intel.sqlite3")
+    store.bootstrap()
+    for _ in range(3):
+        run_id = store.start_run("daily", metadata={})
+        store.upsert_source_kpi_run(run_id, "linkedin", _kpi(1))
+        store.finish_run(run_id, status="ok", notes="test")
+
+    problems = _check_health_conditions(store)
+    assert not [p for p in problems if "re-auth" in p.lower()]
