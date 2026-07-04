@@ -79,3 +79,34 @@ def test_candidate_hints_include_recruiter_candidate() -> None:
     hints = _router().candidate_hints("Оцени вакансию, стоит ли податься")
     assert hints["recruiter_candidate_pipeline_id"] == RECRUITER_PIPELINE_ID
     assert hints["engineering_candidate_pipeline_id"] is None
+
+
+class TestRecruiterTimeoutFallback:
+    def test_llm_timeout_falls_back_to_recruiter_heuristic(self) -> None:
+        from hermes_cli.pipeline_router import LlmPipelineRouter
+
+        def _timeout_llm(**_kwargs):
+            raise TimeoutError("Codex auxiliary Responses stream exceeded 10.0s total timeout")
+
+        router = LlmPipelineRouter(provider="test", model="test", llm_call=_timeout_llm)
+        decision = router.route(
+            "оцени вакансию https://job-boards.greenhouse.io/gitlab/jobs/8592823002",
+            pipeline_session_id="fallback-smoke",
+        )
+        assert decision.status == "selected"
+        assert decision.selected_pipeline_id == "recruiter_decision_support_pipeline"
+        assert decision.router_strategy == "heuristic_timeout_fallback"
+        assert decision.routing_fallback_used is True
+
+    def test_llm_timeout_non_recruiter_prompt_still_fails_closed(self) -> None:
+        from hermes_cli.pipeline_router import LlmPipelineRouter
+
+        def _timeout_llm(**_kwargs):
+            raise TimeoutError("stream exceeded timeout")
+
+        router = LlmPipelineRouter(provider="test", model="test", llm_call=_timeout_llm)
+        decision = router.route(
+            "расскажи про квартальные результаты Tesla",
+            pipeline_session_id="fallback-smoke-2",
+        )
+        assert decision.selected_pipeline_id != "recruiter_decision_support_pipeline"
