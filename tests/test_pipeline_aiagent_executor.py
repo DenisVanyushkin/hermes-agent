@@ -174,11 +174,11 @@ def test_bridge_constructs_aiagent_from_runtime_kwargs(tmp_path: Path) -> None:
         runtime_result,
     )
 
-    assert captured["provider"] == "openrouter"
-    assert captured["model"] == "xiaomi/mimo-v2.5-pro"
+    assert captured["provider"] == "openai-codex"
+    assert captured["model"] == "gpt-5.4"
     assert captured["fallback_model"] == {
         "provider": "openai-codex",
-        "model": "gpt-5.4",
+        "model": "gpt-5.4-mini",
     }
     assert captured["api_mode"] == runtime_result.constructor_api_mode
     assert captured["quiet_mode"] is True
@@ -676,7 +676,7 @@ def test_bridge_exposes_effective_fallback_metadata_when_fallback_activates(tmp_
         conversation_runner=lambda _bridge, _agent, _request, _runtime: {
             "output_text": "fallback ok",
             "provider": "openai-codex",
-            "model": "gpt-5.4",
+            "model": "gpt-5.4-mini",
             "base_url": "https://chatgpt.com/backend-api/codex/",
             "raw_metadata": {
                 "fallback_activated": True,
@@ -711,16 +711,16 @@ def test_bridge_exposes_effective_fallback_metadata_when_fallback_activates(tmp_
     )
 
     raw_metadata = result["raw_metadata"]
-    assert raw_metadata["initial_provider"] == "openrouter"
-    assert raw_metadata["initial_model"] == "xiaomi/mimo-v2.5-pro"
+    assert raw_metadata["initial_provider"] == "openai-codex"
+    assert raw_metadata["initial_model"] == "gpt-5.4"
     assert raw_metadata["effective_provider"] == "openai-codex"
-    assert raw_metadata["effective_model"] == "gpt-5.4"
+    assert raw_metadata["effective_model"] == "gpt-5.4-mini"
     assert raw_metadata["fallback_attempted"] is True
     assert raw_metadata["fallback_activated"] is True
     assert raw_metadata["fallback_provider"] == "openai-codex"
-    assert raw_metadata["fallback_model"] == "gpt-5.4"
+    assert raw_metadata["fallback_model"] == "gpt-5.4-mini"
     assert raw_metadata["fallback_base_url"] == "https://chatgpt.com/backend-api/codex/"
-    assert raw_metadata["providers_used_effective"] == ["openrouter", "openai-codex"]
+    assert raw_metadata["providers_used_effective"] == ["openai-codex"]
 
 
 def test_bridge_ignores_non_string_providers_used_effective_entries(tmp_path: Path) -> None:
@@ -772,7 +772,7 @@ def test_bridge_ignores_non_string_providers_used_effective_entries(tmp_path: Pa
         runtime_result,
     )
 
-    assert result["raw_metadata"]["providers_used_effective"] == ["openrouter", "openai-codex"]
+    assert result["raw_metadata"]["providers_used_effective"] == ["openai-codex"]
 
 
 def test_bridge_exposes_fallback_failure_metadata_without_masquerading_constructor_provider(tmp_path: Path) -> None:
@@ -785,8 +785,8 @@ def test_bridge_exposes_fallback_failure_metadata_without_masquerading_construct
         agent_factory=_FakeAgent,
         conversation_runner=lambda _bridge, _agent, _request, _runtime: {
             "turn_exit_reason": "fallback_exhausted",
-            "provider": "openrouter",
-            "model": "xiaomi/mimo-v2.5-pro",
+            "provider": "openai-codex",
+            "model": "gpt-5.4",
             "raw_metadata": {
                 "real_provider_bridge_invoked": True,
                 "fallback_status": "exhausted",
@@ -807,13 +807,13 @@ def test_bridge_exposes_fallback_failure_metadata_without_masquerading_construct
     )
 
     raw_metadata = result["raw_metadata"]
-    assert raw_metadata["initial_provider"] == "openrouter"
-    assert raw_metadata["effective_provider"] == "openrouter"
+    assert raw_metadata["initial_provider"] == "openai-codex"
+    assert raw_metadata["effective_provider"] == "openai-codex"
     assert raw_metadata["fallback_attempted"] is True
     assert raw_metadata["fallback_activated"] is False
     assert raw_metadata["fallback_error"] == "HTTP 402 Payment Required"
     assert raw_metadata["fallback_result"] == "exhausted"
-    assert raw_metadata["providers_used_effective"] == ["openrouter"]
+    assert raw_metadata["providers_used_effective"] == ["openai-codex"]
 
 
 def test_normalize_result_turn_exit_reason_max_iterations_synthesizes_blocked_envelope(tmp_path: Path) -> None:
@@ -1253,7 +1253,7 @@ def test_bridge_integrates_with_bounded_rework_loop_and_observed_git_delta(tmp_p
     assert result.git_gate["changed_files"] == ["bridge_loop.txt"]
     assert result.reviewer_packet["safe_packet"]["git"]["changed_files"] == ["bridge_loop.txt"]
     assert (git_repo / "bridge_loop.txt").read_text(encoding="utf-8") == "loop mutation\n"
-    assert result.subagent_runs[0]["actual_provider"] == "openrouter"
+    assert result.subagent_runs[0]["actual_provider"] == "openai-codex"
     assert result.subagent_runs[0]["tool_call_summaries"][0]["tool_name"] == "write_file"
 
 
@@ -1489,8 +1489,8 @@ def test_build_agent_sets_controlled_flags_for_engineer(tmp_path: Path) -> None:
     assert len(captured_agents) == 1
     agent = captured_agents[0]
     assert getattr(agent, "_skip_role_model_selection", False) is True
-    assert getattr(agent, "_constructor_provider", None) == "openrouter"
-    assert getattr(agent, "_constructor_model", None) == "xiaomi/mimo-v2.5-pro"
+    assert getattr(agent, "_constructor_provider", None) == "openai-codex"
+    assert getattr(agent, "_constructor_model", None) == "gpt-5.4"
 
 
 # --- F: mismatch fail-closed ---
@@ -1604,8 +1604,8 @@ def test_reviewer_bridge_agent_has_independent_constructor_identity(tmp_path: Pa
     eng_agent = captured["agents"][0]
     rev_agent = captured["agents"][1]
 
-    assert eng_agent._constructor_provider == "openrouter"
-    assert eng_agent._constructor_model == "xiaomi/mimo-v2.5-pro"
+    assert eng_agent._constructor_provider == "openai-codex"
+    assert eng_agent._constructor_model == "gpt-5.4"
     assert rev_agent._constructor_provider == "openai-codex"
     assert rev_agent._constructor_model == "gpt-5.5"
     assert rev_agent._constructor_model != eng_agent._constructor_model
@@ -1628,11 +1628,11 @@ def test_reviewer_identity_independent_of_engineer_fallback_model(tmp_path: Path
     )
     git_repo = _init_git_repo(tmp_path)
 
-    # Engineer agent simulates fallback: model mutates to gpt-5.4 during run
+    # Engineer agent simulates fallback: model mutates to gpt-5.4-mini during run
     def _eng_factory(**kwargs):
         agent = _FakeAgent(**kwargs)
         agent.provider = "openai-codex"
-        agent.model = "gpt-5.4"
+        agent.model = "gpt-5.4-mini"
         return agent
 
     captured_rev: dict[str, object] = {"kwargs_model": None, "kwargs_provider": None, "agent": None}
@@ -1667,8 +1667,8 @@ def test_reviewer_identity_independent_of_engineer_fallback_model(tmp_path: Path
     assert captured_rev["kwargs_model"] == "gpt-5.5"
     assert getattr(rev_agent, "_constructor_provider", None) == "openai-codex"
     assert getattr(rev_agent, "_constructor_model", None) == "gpt-5.5"
-    assert getattr(rev_agent, "_constructor_model", None) != "gpt-5.4"
-    assert captured_rev["kwargs_model"] != "xiaomi/mimo-v2.5-pro"
+    assert getattr(rev_agent, "_constructor_model", None) != "gpt-5.4-mini"
+    assert captured_rev["kwargs_model"] != "gpt-5.4"
 
 
 # --- E: request dump truth via build_api_kwargs model field ---
@@ -1906,7 +1906,7 @@ def test_build_api_kwargs_allows_configured_fallback_identity(tmp_path: Path) ->
 
 def test_build_agent_allowed_ids_includes_fallback_identity(tmp_path: Path) -> None:
     """After _build_agent, _controlled_allowed_request_identities must include both
-    primary (openrouter/xiaomi) and fallback (openai-codex/gpt-5.4) identities."""
+    primary (openai-codex/gpt-5.4) and fallback (openai-codex/gpt-5.4-mini) identities."""
     repo_root, runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)
 
@@ -1933,23 +1933,17 @@ def test_build_agent_allowed_ids_includes_fallback_identity(tmp_path: Path) -> N
 
     models = {_id["model"] for _id in allowed}
     api_modes = {_id["api_mode"] for _id in allowed}
-    assert "xiaomi/mimo-v2.5-pro" in models, f"Primary model missing from allowed: {allowed}"
-    assert "gpt-5.4" in models, f"Fallback model missing from allowed: {allowed}"
-    assert "chat_completions" in api_modes
-    assert "codex_responses" in api_modes
+    assert "gpt-5.4" in models, f"Primary model missing from allowed: {allowed}"
+    assert "gpt-5.4-mini" in models, f"Fallback model missing from allowed: {allowed}"
+    assert api_modes == {"codex_responses"}
 
     # Each entry must have provider and base_url_family
     for _id in allowed:
         assert "provider" in _id, f"Entry missing provider: {_id}"
         assert "base_url_family" in _id, f"Entry missing base_url_family: {_id}"
-        if _id["model"] == "xiaomi/mimo-v2.5-pro":
-            assert _id["api_mode"] == "chat_completions", f"Primary api_mode wrong: {_id}"
-            assert _id["provider"] == "openrouter", f"Primary provider wrong: {_id}"
-            assert _id["base_url_family"] == "openrouter", f"Primary base_url_family wrong: {_id}"
-        if _id["model"] == "gpt-5.4":
-            assert _id["api_mode"] == "codex_responses", f"Fallback api_mode wrong: {_id}"
-            assert _id["provider"] == "openai-codex", f"Fallback provider wrong: {_id}"
-            assert _id["base_url_family"] == "codex", f"Fallback base_url_family wrong: {_id}"
+        assert _id["api_mode"] == "codex_responses", f"api_mode wrong: {_id}"
+        assert _id["provider"] == "openai-codex", f"provider wrong: {_id}"
+        assert _id["base_url_family"] == "codex", f"base_url_family wrong: {_id}"
 
 
 # --- 3. Reviewer stale primary still blocked ---

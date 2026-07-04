@@ -54,21 +54,21 @@ def run_controlled_engineering_e2e_dry_run(*, task: str, workspace: Path | None)
             "allow_real_provider_execution": True,
             "request_real_provider_execution": True,
             "allowed_real_providers": ("openrouter", "openai-codex"),
-            "allowed_real_models": ("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
+            "allowed_real_models": ("gpt-5.4", "gpt-5.5"),
             "allowed_real_providers_by_role": {
-                "engineer": ("openrouter",),
+                "engineer": ("openai-codex",),
                 "reviewer": ("openai-codex",),
             },
             "allowed_real_models_by_role": {
-                "engineer": ("xiaomi/mimo-v2.5-pro",),
+                "engineer": ("gpt-5.4",),
                 "reviewer": ("gpt-5.5",),
             },
             "allowed_real_providers_by_subagent": {
-                ENGINEER_SUBAGENT_ID: ("openrouter",),
+                ENGINEER_SUBAGENT_ID: ("openai-codex",),
                 REVIEWER_SUBAGENT_ID: ("openai-codex",),
             },
             "allowed_real_models_by_subagent": {
-                ENGINEER_SUBAGENT_ID: ("xiaomi/mimo-v2.5-pro",),
+                ENGINEER_SUBAGENT_ID: ("gpt-5.4",),
                 REVIEWER_SUBAGENT_ID: ("gpt-5.5",),
             },
             "real_provider_client_factory": _manual_dry_run_provider_factory,

@@ -13,11 +13,11 @@ from typing import Any
 
 
 _DEFAULT_PROVIDER = "openai-codex"
-_CODING_PROVIDER = "openrouter"
+_CODING_PROVIDER = "openai-codex"
 _DEFAULT_MODEL = "gpt-5.4-mini"
 _REASONING_MODEL = "gpt-5.4"
 _CRITICAL_MODEL = "gpt-5.5"
-_CODING_MODEL = "xiaomi/mimo-v2.5-pro"
+_CODING_MODEL = "gpt-5.4"
 
 _TRADING_ROLES = {"trading_observer_trader", "trading_observer_trader_deferred"}
 _SIMPLE_RESEARCH_HINTS = {

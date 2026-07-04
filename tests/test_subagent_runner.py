@@ -157,8 +157,8 @@ def test_runs_engineer_subagent_with_fake_executor(tmp_path: Path) -> None:
     )
 
     assert result.ok is True
-    assert result.record.constructor_provider == "openrouter"
-    assert result.record.constructor_model == "xiaomi/mimo-v2.5-pro"
+    assert result.record.constructor_provider == "openai-codex"
+    assert result.record.constructor_model == "gpt-5.4"
     assert result.record.selected_model_class == "base_coding"
 
 
@@ -677,8 +677,8 @@ def test_controlled_runtime_runner_returns_structured_telemetry(tmp_path: Path) 
     )
 
     assert result.status.value == "succeeded"
-    assert result.actual_provider == "openrouter"
-    assert result.actual_model == "xiaomi/mimo-v2.5-pro"
+    assert result.actual_provider == "openai-codex"
+    assert result.actual_model == "gpt-5.4"
     assert result.input_hash
     assert result.prompt_hash
     assert result.response_output_hash
@@ -790,8 +790,8 @@ def test_controlled_runtime_runner_executes_real_provider_only_when_explicitly_a
         def _client(request):
             client_calls["count"] += 1
             assert request.runtime.subagent_id == runtime.subagent_id
-            assert request.provider == "openrouter"
-            assert request.model == "xiaomi/mimo-v2.5-pro"
+            assert request.provider == "openai-codex"
+            assert request.model == "gpt-5.4"
             return {
                 "provider": request.provider,
                 "model": request.model,
@@ -820,8 +820,8 @@ def test_controlled_runtime_runner_executes_real_provider_only_when_explicitly_a
         invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake"}},
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
-        allowed_real_providers=("openrouter",),
-        allowed_real_models=("xiaomi/mimo-v2.5-pro",),
+        allowed_real_providers=("openai-codex",),
+        allowed_real_models=("gpt-5.4",),
         real_provider_client_factory=_factory,
     )
     result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Implement change"}])
@@ -832,8 +832,8 @@ def test_controlled_runtime_runner_executes_real_provider_only_when_explicitly_a
     assert result.runtime_mode == "real_provider"
     assert result.real_provider_allowed is True
     assert result.provider_policy_status == "allowed"
-    assert result.actual_provider == "openrouter"
-    assert result.actual_model == "xiaomi/mimo-v2.5-pro"
+    assert result.actual_provider == "openai-codex"
+    assert result.actual_model == "gpt-5.4"
     assert result.usage_summary.total_tokens == 20
 
 
@@ -854,8 +854,8 @@ def test_controlled_runtime_runner_real_provider_allowlist_mismatch_fails_closed
         invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake"}},
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
-        allowed_real_providers=("openrouter",),
-        allowed_real_models=("xiaomi/mimo-v2.5-pro",),
+        allowed_real_providers=("openai-codex",),
+        allowed_real_models=("gpt-5.4",),
         real_provider_client_factory=lambda _runtime: factory_calls.__setitem__("count", factory_calls["count"] + 1),
     )
     result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Review"}])
@@ -886,7 +886,7 @@ def test_controlled_runtime_runner_real_provider_invalid_input_messages_fail_clo
 
         def _client(_request):
             client_calls["count"] += 1
-            return {"provider": "openrouter", "model": "xiaomi/mimo-v2.5-pro"}
+            return {"provider": "openai-codex", "model": "gpt-5.4"}
 
         return _client
 
@@ -895,10 +895,10 @@ def test_controlled_runtime_runner_real_provider_invalid_input_messages_fail_clo
         invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake"}},
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
-        allowed_real_providers=("openrouter",),
-        allowed_real_models=("xiaomi/mimo-v2.5-pro",),
-        allowed_real_providers_by_role={"engineer": ("openrouter",)},
-        allowed_real_models_by_role={"engineer": ("xiaomi/mimo-v2.5-pro",)},
+        allowed_real_providers=("openai-codex",),
+        allowed_real_models=("gpt-5.4",),
+        allowed_real_providers_by_role={"engineer": ("openai-codex",)},
+        allowed_real_models_by_role={"engineer": ("gpt-5.4",)},
         real_provider_client_factory=_factory,
     )
     result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "ok"}, "bad-message"])
@@ -950,8 +950,8 @@ def test_controlled_runtime_runner_real_provider_reviewer_allowed_separately(tmp
         invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake"}},
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
-        allowed_real_providers=("openrouter", "openai-codex"),
-        allowed_real_models=("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
+        allowed_real_providers=("openai-codex",),
+        allowed_real_models=("gpt-5.4", "gpt-5.5"),
         allowed_real_providers_by_role={"reviewer": ("openai-codex",)},
         allowed_real_models_by_role={"reviewer": ("gpt-5.5",)},
         real_provider_client_factory=_factory,

@@ -89,7 +89,7 @@ def test_builds_planned_runtime_for_general_operator(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("step_kind", "subagent_id", "provider", "model", "can_mutate"),
     [
-        ("engineer", "hermes_engineer_core", "openrouter", "xiaomi/mimo-v2.5-pro", True),
+        ("engineer", "hermes_engineer_core", "openai-codex", "gpt-5.4", True),
         ("reviewer", "hermes_code_reviewer", "openai-codex", "gpt-5.5", False),
     ],
 )
@@ -204,7 +204,7 @@ def test_runtime_factory_plan_missing_provider_or_model_fails_closed(
 @pytest.mark.parametrize(
     ("subagent_id", "provider", "model"),
     [
-        ("hermes_engineer_core", "openrouter", "xiaomi/mimo-v2.5-pro"),
+        ("hermes_engineer_core", "openai-codex", "gpt-5.4"),
         ("hermes_code_reviewer", "openai-codex", "gpt-5.5"),
     ],
 )
@@ -248,7 +248,7 @@ def test_records_session_default_separately_and_marks_mismatch(tmp_path: Path) -
 
     assert result.current_session_provider == "openai-codex"
     assert result.current_session_model == "gpt-5.4-mini"
-    assert result.selection.selected_provider == "openrouter"
+    assert result.selection.selected_provider == "openai-codex"
     assert result.selected_runtime_differs_from_session_default is True
     assert result.to_safe_dict()["session_default_mismatch"] is True
 
@@ -288,8 +288,8 @@ def test_safe_dict_omits_full_prompt_text_and_sensitive_runtime_fields(tmp_path:
 
     payload = result.to_safe_dict()
 
-    assert payload["constructor_provider"] == "openrouter"
-    assert payload["constructor_model"] == "xiaomi/mimo-v2.5-pro"
+    assert payload["constructor_provider"] == "openai-codex"
+    assert payload["constructor_model"] == "gpt-5.4"
     assert "prompt_text" not in payload
     assert payload["prompt"]["full_text_loaded"] is False
     assert payload["constructor_base_url"] is None
@@ -498,8 +498,8 @@ def test_build_controlled_runtime_preserves_runtime_contract_metadata(tmp_path: 
     assert runtime.runtime_status == "ready"
     assert runtime.subagent_id == "hermes_engineer_core"
     assert runtime.role_id == "engineer"
-    assert runtime.provider == "openrouter"
-    assert runtime.model == "xiaomi/mimo-v2.5-pro"
+    assert runtime.provider == "openai-codex"
+    assert runtime.model == "gpt-5.4"
     assert runtime.system_prompt_path == "prompts/subagents/hermes_engineer_core.md"
     assert runtime.tool_policy.write == ["patch", "write_file"]
     assert runtime.environment_policy.can_mutate_files is True
@@ -508,8 +508,8 @@ def test_build_controlled_runtime_preserves_runtime_contract_metadata(tmp_path: 
     assert runtime.invocation_client is not None
 
     payload = runtime.to_safe_dict()
-    assert payload["provider"] == "openrouter"
-    assert payload["model"] == "xiaomi/mimo-v2.5-pro"
+    assert payload["provider"] == "openai-codex"
+    assert payload["model"] == "gpt-5.4"
     assert payload["working_directory"] == str(repo_root)
     assert "invocation_client" not in json.dumps(payload, sort_keys=True)
     assert payload["environment_policy"]["secrets_env_access"] == "not_granted"
@@ -698,10 +698,10 @@ def test_build_controlled_runtime_real_provider_rejects_non_callable_factory(tmp
         invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake ok"}},
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
-        allowed_real_providers=("openrouter",),
-        allowed_real_models=("xiaomi/mimo-v2.5-pro",),
-        allowed_real_providers_by_role={"engineer": ("openrouter",)},
-        allowed_real_models_by_role={"engineer": ("xiaomi/mimo-v2.5-pro",)},
+        allowed_real_providers=("openai-codex",),
+        allowed_real_models=("gpt-5.4",),
+        allowed_real_providers_by_role={"engineer": ("openai-codex",)},
+        allowed_real_models_by_role={"engineer": ("gpt-5.4",)},
         real_provider_client_factory="not-callable",
     )
 
