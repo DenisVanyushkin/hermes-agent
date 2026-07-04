@@ -101,6 +101,7 @@ DECISION_MODULE_REGISTRY: dict[str, DecisionModuleSpec] = {
             skill_id="fit-recommendation",
             upstream_modules=("vacancy_assessment", "company_assessment"),
             degraded_allowed=True,
+            uses_candidate_facts=True,
         ),
         DecisionModuleSpec(
             module_id="positioning_summary",

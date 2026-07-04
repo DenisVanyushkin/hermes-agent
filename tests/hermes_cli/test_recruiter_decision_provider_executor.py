@@ -73,7 +73,7 @@ def test_executes_module_and_extracts_confidence_and_sources(monkeypatch) -> Non
     assert execution.confidence == "high"
     assert execution.sources == ["https://example.com/press"]
     assert execution.payload["recommendation"] == "worth_engaging"
-    assert "confidence" not in execution.payload  # promoted to metadata
+    assert execution.payload["confidence"] == "high"  # kept in payload for output validation
 
     call = client.chat.completions.calls[0]
     prompt = call["messages"][0]["content"]
