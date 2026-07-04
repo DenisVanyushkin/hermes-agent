@@ -14,12 +14,12 @@ selection:
     - task is security review without implementation request
 models:
   default:
-    provider: openrouter
-    model: xiaomi/mimo-v2.5-pro
+    provider: openai-codex
+    model: gpt-5.4
     class: base_coding
   allowed:
-    - provider: openrouter
-      model: xiaomi/mimo-v2.5-pro
+    - provider: openai-codex
+      model: gpt-5.4
       class: base_coding
     - provider: openai-codex
       model: gpt-5.5
@@ -41,8 +41,8 @@ models:
     mode: explicit_model
     reason: preserve engineering capability without using a global free fallback
     provider: openai-codex
-    model: gpt-5.4
-    class: senior_coding_fallback
+    model: gpt-5.4-mini
+    class: coding_fallback
     max_tokens: 16384
 tools:
   read:

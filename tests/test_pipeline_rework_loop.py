@@ -2452,8 +2452,8 @@ def test_controlled_runtime_context_invokes_engineer_backend_and_exposes_safe_te
     payload = result.to_safe_dict()
     assert result.iteration_history[0].engineer_runner_status == "succeeded"
     assert payload["subagent_runs"][0]["role_id"] == "engineer"
-    assert payload["subagent_runs"][0]["actual_provider"] == "openrouter"
-    assert payload["subagent_runs"][0]["actual_model"] == "xiaomi/mimo-v2.5-pro"
+    assert payload["subagent_runs"][0]["actual_provider"] == "openai-codex"
+    assert payload["subagent_runs"][0]["actual_model"] == "gpt-5.4"
     assert payload["subagent_runs"][0]["input_hash"]
     assert payload["subagent_runs"][0]["prompt_hash"]
     assert payload["subagent_runs"][0]["response_output_hash"]
@@ -2464,8 +2464,8 @@ def test_controlled_runtime_context_invokes_engineer_backend_and_exposes_safe_te
     assert payload["usage_summary"]["subagent_run_instance_count"] == 2
     assert payload["usage_summary"]["execution_round_count"] == 1
     assert payload["usage_summary"]["subagent_count"] == 2
-    assert payload["usage_summary"]["providers_used"] == ["openrouter", "openai-codex"]
-    assert set(payload["usage_summary"]["models_used"]) == {"xiaomi/mimo-v2.5-pro", "gpt-5.5"}
+    assert payload["usage_summary"]["providers_used"] == ["openai-codex"]
+    assert set(payload["usage_summary"]["models_used"]) == {"gpt-5.4", "gpt-5.5"}
     assert payload["original_task"] == "[redacted]"
     assert payload["appended_rework_context"] == []
     assert payload["original_task_hash"]
@@ -2511,9 +2511,9 @@ def test_controlled_runtime_context_preserves_distinct_engineer_and_reviewer_mod
 
     payload = result.to_safe_dict()
     assert [item["role_id"] for item in payload["subagent_runs"]] == ["engineer", "reviewer"]
-    assert payload["subagent_runs"][0]["actual_provider"] == "openrouter"
+    assert payload["subagent_runs"][0]["actual_provider"] == "openai-codex"
     assert payload["subagent_runs"][1]["actual_provider"] == "openai-codex"
-    assert payload["subagent_runs"][0]["actual_model"] == "xiaomi/mimo-v2.5-pro"
+    assert payload["subagent_runs"][0]["actual_model"] == "gpt-5.4"
     assert payload["subagent_runs"][1]["actual_model"] == "gpt-5.5"
     assert result.execution_report.to_safe_dict()["usage"]["total_tokens"] == 21
 
@@ -2528,8 +2528,8 @@ def test_controlled_runtime_context_reports_effective_fallback_provider_separate
         "runtime_mode": "autonomous",
         "real_provider_allowed": True,
         "provider_policy_status": "requested",
-        "actual_provider": "openrouter",
-        "actual_model": "xiaomi/mimo-v2.5-pro",
+        "actual_provider": "openai-codex",
+        "actual_model": "gpt-5.4",
         "effective_provider": "openai-codex",
         "effective_model": "gpt-5.4",
         "fallback_attempted": True,
@@ -2546,13 +2546,13 @@ def test_controlled_runtime_context_reports_effective_fallback_provider_separate
 
     payload = module._usage_summary_from_subagent_runs([engineer_run], planned_subagent_count=1)
 
-    assert engineer_run["actual_provider"] == "openrouter"
+    assert engineer_run["actual_provider"] == "openai-codex"
     assert engineer_run["effective_provider"] == "openai-codex"
     assert engineer_run["effective_model"] == "gpt-5.4"
     assert engineer_run["fallback_attempted"] is True
     assert engineer_run["fallback_activated"] is True
     assert engineer_run["providers_used_effective"] == ["openrouter", "openai-codex"]
-    assert payload["providers_used"] == ["openrouter"]
+    assert payload["providers_used"] == ["openai-codex"]
     assert payload["providers_used_effective"] == ["openrouter", "openai-codex"]
 
 
@@ -2629,8 +2629,8 @@ def test_controlled_runtime_context_real_provider_path_respects_mutation_gate(tm
             "controlled_runner": module.ControlledRuntimeRunner(),
             "allow_real_provider_execution": True,
             "request_real_provider_execution": True,
-            "allowed_real_providers": ("openrouter", "openai-codex"),
-            "allowed_real_models": ("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
+            "allowed_real_providers": ("openai-codex",),
+            "allowed_real_models": ("gpt-5.4", "gpt-5.5"),
             "real_provider_client_factory": _real_provider_factory,
             "allow_mutations": True,
             "mutation_workspace": str(repo),
@@ -2675,10 +2675,10 @@ def test_escalated_reviewer_subagent_policy_can_be_distinct_from_engineer(tmp_pa
         invocation_client=lambda *_args, **_kwargs: {"structured_output": {"summary": "fake"}},
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
-        allowed_real_providers=("openrouter", "openai-codex"),
-        allowed_real_models=("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
-        allowed_real_providers_by_role={"engineer": ("openrouter",), "reviewer": ("openai-codex",)},
-        allowed_real_models_by_role={"engineer": ("xiaomi/mimo-v2.5-pro",), "reviewer": ("gpt-5.5",)},
+        allowed_real_providers=("openai-codex",),
+        allowed_real_models=("gpt-5.4", "gpt-5.5"),
+        allowed_real_providers_by_role={"engineer": ("openai-codex",), "reviewer": ("openai-codex",)},
+        allowed_real_models_by_role={"engineer": ("gpt-5.4",), "reviewer": ("gpt-5.5",)},
         allowed_real_providers_by_subagent={"hermes_code_reviewer": ("openai-codex",)},
         allowed_real_models_by_subagent={"hermes_code_reviewer": ("gpt-5.5",)},
         real_provider_client_factory=lambda _runtime: factory_calls.__setitem__("count", factory_calls["count"] + 1),
@@ -3135,7 +3135,7 @@ def test_usage_summary_from_subagent_runs_computes_totals_and_executed_counts() 
     payload = module._usage_summary_from_subagent_runs([
         {
             "status": "succeeded",
-            "actual_provider": "openrouter",
+            "actual_provider": "openai-codex",
             "actual_model": "qwen/qwen3-coder",
             "token_usage": {
                 "input_tokens": 11,
@@ -3166,7 +3166,7 @@ def test_usage_summary_from_subagent_runs_computes_totals_and_executed_counts() 
     assert payload["planned_subagent_count"] == 2
     assert payload["executed_subagent_count"] == 1
     assert payload["subagent_count"] == 2
-    assert payload["providers_used"] == ["openrouter"]
+    assert payload["providers_used"] == ["openai-codex"]
     assert payload["models_used"] == ["qwen/qwen3-coder"]
 
 
@@ -3269,8 +3269,8 @@ def test_usage_summary_from_subagent_runs_keeps_plan_size_separate_from_instance
         [
             {
                 "status": "succeeded",
-                "actual_provider": "openrouter",
-                "actual_model": "xiaomi/mimo-v2.5-pro",
+                "actual_provider": "openai-codex",
+                "actual_model": "gpt-5.4",
                 "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
                 "cache": {"source": "reported"},
             },
@@ -3283,8 +3283,8 @@ def test_usage_summary_from_subagent_runs_keeps_plan_size_separate_from_instance
             },
             {
                 "status": "succeeded",
-                "actual_provider": "openrouter",
-                "actual_model": "xiaomi/mimo-v2.5-pro",
+                "actual_provider": "openai-codex",
+                "actual_model": "gpt-5.4",
                 "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
                 "cache": {"source": "reported"},
             },
