@@ -4019,6 +4019,23 @@ def run_feedback_event(payload: dict[str, Any]) -> str:
         user_id=user_id,
         raw_event_json=payload,
     )
+
+    feedback_prompt: dict[str, Any] | None = None
+    if feedback_type == "not_interesting" and event_type == "reaction_added":
+        try:
+            service = _feedback_loop_service(store)
+            feedback_prompt = service.handle_negative_reaction(
+                slack_channel_id=channel,
+                slack_message_ts=message_ts,
+                user_id=user_id,
+                reaction=reaction,
+                vacancy_id=vacancy_id,
+                raw_payload=payload,
+            )
+        except Exception as exc:
+            logger.exception("negative feedback prompt failed: %s", exc)
+            feedback_prompt = {"status": "error", "error": str(exc)}
+
     return json.dumps(
         {
             "status": "ok",
@@ -4028,9 +4045,54 @@ def run_feedback_event(payload: dict[str, Any]) -> str:
             "channel": channel,
             "slack_message_ts": message_ts,
             "user_id": user_id,
+            "feedback_prompt": feedback_prompt,
         },
         ensure_ascii=False,
     )
+
+
+def _feedback_loop_service(store: JobIntelStore | None = None) -> "FeedbackLoopService":
+    from job_intel.crm_service import CRMService
+    from job_intel.feedback_service import FeedbackLoopService
+
+    store = store or _store()
+
+    def _deliver(message: str, channel: str, thread_ts: str | None) -> str | None:
+        delivery = _deliver_to_slack(message, channel, prefer_gateway=True, thread_ts=thread_ts)
+        if not delivery.success:
+            logger.warning("feedback loop delivery failed: %s", delivery.error)
+            return None
+        return delivery.message_ts or thread_ts
+
+    return FeedbackLoopService(store=store, crm=CRMService.from_store(store), deliver=_deliver)
+
+
+def run_feedback_thread_reply(payload: dict[str, Any]) -> str:
+    """Route a Slack thread message into the negative feedback loop.
+
+    Called by the Slack adapter for ordinary messages that reply in a
+    thread. Returns ``not_feedback_thread`` when the thread is not an open
+    feedback prompt, so the caller can fall through to normal handling.
+    """
+    channel = str(payload.get("channel") or "").strip()
+    thread_ts = str(payload.get("thread_ts") or "").strip()
+    user_id = str(payload.get("user") or payload.get("user_id") or "unknown").strip() or "unknown"
+    text = str(payload.get("text") or "")
+    if not channel or not thread_ts:
+        return json.dumps({"status": "not_feedback_thread"})
+    try:
+        service = _feedback_loop_service()
+        result = service.handle_thread_reply(
+            slack_channel_id=channel,
+            slack_thread_ts=thread_ts,
+            user_id=user_id,
+            text=text,
+        )
+    except Exception as exc:
+        logger.exception("feedback thread reply handling failed: %s", exc)
+        return json.dumps({"status": "error", "error": str(exc)})
+    result.pop("classification", None)
+    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 def run_crm_reconcile(days: int, dry_run: bool, apply: bool, vacancy_id: int | None, limit: int | None) -> str:
