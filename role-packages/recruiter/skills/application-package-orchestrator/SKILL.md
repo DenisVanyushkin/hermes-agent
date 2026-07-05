@@ -55,9 +55,20 @@ Drive end-to-end preparation of application materials for one vacancy: build the
    8. Usage notes (recommended order of use).
    File naming: `denis_vanyushkin_<cv|cl|recruiter_message|questionnaire|application_package>_[company]_[role]`, lowercase snake_case.
 
-   **Where to save files:** write deliverables ONLY to `/output/<company>_<role>/` (host path: `~/.hermes/cache/documents/<company>_<role>/`). NEVER write package files into the repo mount (`/workspace/live-hermes/`) — stray files there dirty the git baseline and block other pipelines. When delivering, reference the host path (`/home/hermes/.hermes/cache/documents/...`) in the final message so the platform layer can attach the files to the chat. If the user asks for MS Word, produce `.docx` (python-docx in the sandbox, or clean Markdown ready for conversion if the library is unavailable — say which one you delivered).
+   **Where to save files:** write deliverables ONLY to `/output/<company>_<role>/` (this sandbox directory is the host's `~/.hermes/cache/documents/<company>_<role>/`). NEVER write package files into the repo mount (`/workspace/live-hermes/`) — stray files there dirty the git baseline and block other pipelines.
+
+   **How to deliver files to the chat:** in your FINAL message include one `MEDIA:` line per file with the HOST path, e.g.:
+
+   ```
+   MEDIA:/home/hermes/.hermes/cache/documents/acme_head_of_product/denis_vanyushkin_cv_acme_head_of_product.docx
+   ```
+
+   The gateway converts each `MEDIA:` tag into a native file attachment on every platform (Slack included). Container path `/output/X` = host path `/home/hermes/.hermes/cache/documents/X` — always translate to the host path in `MEDIA:` tags. A file that is only mentioned as a path on disk is NOT delivered; every deliverable must have a `MEDIA:` line.
+
+   **MS Word:** when the user asks for Word files, produce real `.docx` with python-docx (`pip install python-docx` in the sandbox if missing). Fall back to Markdown only if installation fails, and say so explicitly.
 8. **Report** per the delivery standard: what was prepared, positioning angle, review iterations used, key risks/confirmations. No unnecessary explanation when materials are self-contained.
-   The delivery message MUST state the package-reviewer `final_status` and the number of review iterations. If package-reviewer was not run, the package is not deliverable — go back to step 5. Skipping review is never acceptable, including for regenerated or "small" packages.
+
+   **Review is a hard gate.** The package-reviewer step (5–6) MUST write its report to `/output/<company>_<role>/package_qa_report.md` (findings, final_status, iteration count). The delivery message MUST (a) state `final_status` and iteration count, and (b) attach `package_qa_report.md` via its own `MEDIA:` line alongside the materials. **A package whose output directory contains no `package_qa_report.md` is not deliverable — go back to step 5.** Skipping review is never acceptable, including for regenerated, subset, or "small" packages, and including runs where materials were drafted in an earlier session.
 
 ## Required Inputs
 
