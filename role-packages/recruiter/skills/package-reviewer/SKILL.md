@@ -60,7 +60,9 @@ Run every check against every material in the package:
 
 - `findings[]`: materials affected, quoted claim/passage, issue_type (`unsupported` | `inconsistent` | `tone` | `format` | `risk`), severity (`high` | `medium` | `low`), suggested_fix (concrete replacement phrasing or "remove"), source_check (what was searched in the facts and what was/wasn't found).
 - `missing_confirmations[]`: items requiring user input before submission.
-- `final_status`: `pass` (no findings) | `pass_with_notes` (only low/medium tone-format-risk notes) | `blocked` (any high-severity unsupported/inconsistent finding, or a forced answer that cannot be safely generated).
+- `final_status`: `pass` (no findings) | `pass_with_notes` | `blocked`. **The finding TYPE decides the status, not its severity:**
+  - `unsupported` or `inconsistent` findings of ANY severity → `blocked`. Invented, inflated, or conflicting facts are never deliverable as "notes" — they must be fixed or removed first.
+  - `risk` / `tone` / `format` findings, including user-decision items (relocation willingness, salary posture, channel choice, disclosure decisions) → `pass_with_notes`. These are the user's calls to make; do not block on them and do not trigger regeneration for them — surface them clearly in `missing_confirmations` / notes.
 - Reminder that all materials are draft only.
 
 **Persist the report:** always write the full report to `package_qa_report.md` in the package output directory (`/home/hermes/.hermes/cache/documents/<company>_<role>/` — same path in sandbox and on host). The orchestrator refuses to deliver a package without this file, and it is attached to the chat together with the materials — so the report must be readable on its own: quote the checked claims and name the source of each verdict.

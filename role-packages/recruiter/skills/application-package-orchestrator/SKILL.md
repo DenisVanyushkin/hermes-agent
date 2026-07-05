@@ -39,11 +39,11 @@ Drive end-to-end preparation of application materials for one vacancy: build the
 3. **Ensure thesis.** If no current `role_thesis_packet_v1` exists for this vacancy, invoke `positioning-and-evidence`. If its `application_recommendation` is negative, tell the user before generating materials and confirm they want to proceed.
 4. **Generate materials.** Invoke each requested material skill with the thesis packet and the facts-verification result.
 5. **Review.** Invoke `package-reviewer` on all drafts.
-6. **Fix loop.** While `final_status` is `blocked` or there are findings of severity medium or higher, and fewer than **3 review iterations** have run:
+6. **Fix loop.** Regeneration is triggered by finding TYPE, not severity: loop while `final_status` is `blocked` (i.e. any `unsupported` or `inconsistent` finding exists), and fewer than **3 review iterations** have run. `risk`/`tone`/`format` notes — including user decisions like relocation, salary, channel — do NOT trigger regeneration; they are delivered as notes for the user to decide. While looping:
    - regenerate ONLY the affected materials, passing the relevant findings and suggested fixes to the material skill;
    - re-run `package-reviewer` on the full package (fixes can introduce new inconsistencies);
    - count the iteration.
-   If findings remain after 3 iterations, stop fixing and mark the package `REVIEW_LIMIT_REACHED`: deliver with unresolved findings listed prominently as risk notes. Never silently drop findings; never claim the package is clean.
+   If `unsupported`/`inconsistent` findings still remain after 3 iterations, do NOT deliver the affected claims: REMOVE the offending sentences/claims from the materials outright (removal is always a valid fix), note each removal in the delivery message, and mark the package `REVIEW_LIMIT_REACHED`. Invented or conflicting facts are never delivered, not even flagged as notes. Never silently drop findings; never claim the package is clean.
 7. **Deliver** in this order (full-package format; collapse for subsets):
    1. Recommendation and positioning (angle, strongest 3 claims, likely concern and how materials handle it).
    2. Targeted CV.
