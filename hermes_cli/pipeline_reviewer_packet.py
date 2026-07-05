@@ -400,9 +400,35 @@ def _sanitize_engineer_output_payload(payload: Mapping[str, Any]) -> dict[str, A
         "next_action": _clean_optional_text(payload.get("next_action"), max_length=128),
         "blockers": _sorted_strings(payload.get("blockers")) if isinstance(payload.get("blockers"), list) else [],
         "changes": _sanitize_changes(payload.get("changes")),
+        "findings": _sanitize_findings(payload.get("findings")),
         "validation_errors": _sanitize_validation_errors(payload.get("validation_errors")),
     }
     return {key: value for key, value in safe_payload.items() if value not in (None, [], {})}
+
+
+def _sanitize_findings(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    sanitized: list[dict[str, str]] = []
+    for item in value[:12]:
+        if not isinstance(item, Mapping):
+            continue
+        safe_item: dict[str, str] = {}
+        code = _clean_optional_text(item.get("code"), max_length=128)
+        summary = _clean_optional_text(item.get("summary"))
+        detail = _clean_optional_text(item.get("detail"))
+        severity = _clean_optional_text(item.get("severity"), max_length=32)
+        if code:
+            safe_item["code"] = code
+        if summary:
+            safe_item["summary"] = summary
+        if detail:
+            safe_item["detail"] = detail
+        if severity:
+            safe_item["severity"] = severity
+        if safe_item.get("summary") or safe_item.get("detail"):
+            sanitized.append(safe_item)
+    return sanitized
 
 
 def _sanitize_changes(value: Any) -> list[dict[str, str]]:
