@@ -7,9 +7,41 @@ import ``main`` (cycle avoidance).
 
 from __future__ import annotations
 
+import argparse
+
 from typing import Callable
 
 from hermes_cli.subcommands._shared import add_accept_hooks_flag
+
+
+class _TrailingPositionalParser(argparse.ArgumentParser):
+    """ArgumentParser that tolerates one optional positional given last.
+
+    argparse matches positionals in groups split around optionals, so for
+    ``create <schedule> --name x <prompt>`` the ``prompt`` (nargs="?")
+    pattern greedily matches zero tokens in the first group and the trailing
+    prompt token becomes an unrecognized argument (bpo-14191;
+    ``parse_intermixed_args`` cannot help -- it rejects subparsers).
+
+    Parsers that set ``trailing_positional`` fold exactly one leftover
+    non-flag token into that dest when it is still unset. Anything else
+    stays in the extras list and errors at the top level as before.
+    """
+
+    trailing_positional: str | None = None
+
+    def parse_known_args(self, args=None, namespace=None):
+        namespace, extras = super().parse_known_args(args, namespace)
+        dest = self.trailing_positional
+        if (
+            dest
+            and len(extras) == 1
+            and not extras[0].startswith("-")
+            and getattr(namespace, dest, None) is None
+        ):
+            setattr(namespace, dest, extras[0])
+            extras = []
+        return namespace, extras
 
 
 def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
@@ -17,7 +49,9 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_parser = subparsers.add_parser(
         "cron", help="Cron job management", description="Manage scheduled tasks"
     )
-    cron_subparsers = cron_parser.add_subparsers(dest="cron_command")
+    cron_subparsers = cron_parser.add_subparsers(
+        dest="cron_command", parser_class=_TrailingPositionalParser
+    )
 
     # cron list
     cron_list = cron_subparsers.add_parser("list", help="List scheduled jobs")
@@ -33,6 +67,7 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_create.add_argument(
         "prompt", nargs="?", help="Optional self-contained prompt or task instruction"
     )
+    cron_create.trailing_positional = "prompt"
     cron_create.add_argument("--name", help="Optional human-friendly job name")
     cron_create.add_argument(
         "--deliver",
