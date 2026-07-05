@@ -41,14 +41,15 @@ Nothing was deleted. To re-enable, reverse the steps below.
 | hermes cron `trading-autopilot-live-read-producer` (c6d8e3f765ba) | already paused 2026-05-28 |
 | Docker `monitoring-trading-autopilot-exporter` | stopped + removed; service gated behind `profiles: ["retired"]` in `~/.hermes/monitoring/docker-compose.yml` |
 | Prometheus scrape job `trading-autopilot` | commented out in `~/.hermes/monitoring/prometheus/prometheus.yml` |
+| Grafana dashboard "Trading Autopilot" | provisioning JSON moved to `~/.hermes/monitoring/grafana/dashboards-retired/`; auto-pruned from Grafana (source kept at `deploy/grafana/trading-autopilot-dashboard.json`) |
 
 Config backups from before the closure edits:
 `~/.hermes/monitoring/docker-compose.yml.bak-mvp-closure-20260705`,
 `~/.hermes/monitoring/prometheus/prometheus.yml.bak-mvp-closure-20260705`.
 
 Left in place intentionally (inert without the jobs above):
-`~/.hermes/scripts/trading_autopilot_*.py` wrapper scripts, the Grafana
-dashboard `deploy/grafana/trading-autopilot-dashboard.json`, the paper-trading
+`~/.hermes/scripts/trading_autopilot_*.py` wrapper scripts, the dashboard
+source JSON `deploy/grafana/trading-autopilot-dashboard.json`, the paper-trading
 journal `~/.hermes/cron/journals/paper_trading_mvp.sqlite3` (historical data),
 and the `trading_autopilot/` package + tests (reusable infrastructure).
 
