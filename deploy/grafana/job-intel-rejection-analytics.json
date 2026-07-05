@@ -1,1 +1,176 @@
-{"title":"Job Intel - Rejection Analytics","uid":"job-intel-rejection-analytics","schemaVersion":38,"version":1,"refresh":"30s","time":{"from":"now-7d","to":"now"},"tags":["job-intel","observability"],"panels":[{"id":1,"type":"row","title":"Rejection Analytics","gridPos":{"h":1,"w":24,"x":0,"y":0},"collapsed":false},{"id":2,"type":"timeseries","title":"Top Rejection Reasons (7d)","gridPos":{"h":8,"w":24,"x":0,"y":1},"datasource":"Prometheus","fieldConfig":{"defaults":{"unit":"short"}},"options":{"legend":{"displayMode":"table","placement":"bottom"}},"targets":[{"expr":"job_intel_rejections_7d{reason=\"wrong_geography\"}","refId":"A","legendFormat":"wrong geography"},{"expr":"job_intel_rejections_7d{reason=\"wrong_industry\"}","refId":"B","legendFormat":"wrong industry"},{"expr":"job_intel_rejections_7d{reason=\"low_seniority\"}","refId":"C","legendFormat":"low seniority"},{"expr":"job_intel_rejections_7d{reason=\"missing_executive_responsibility\"}","refId":"D","legendFormat":"missing exec responsibility"},{"expr":"job_intel_rejections_7d{reason=\"missing_p_and_l\"}","refId":"E","legendFormat":"missing P&L"},{"expr":"job_intel_rejections_7d{reason=\"missing_product_ownership\"}","refId":"F","legendFormat":"missing product ownership"},{"expr":"job_intel_rejections_7d{reason=\"low_company_score\"}","refId":"G","legendFormat":"low company score"},{"expr":"job_intel_rejections_7d{reason=\"low_hiring_likelihood\"}","refId":"H","legendFormat":"low hiring likelihood"},{"expr":"job_intel_rejections_7d{reason=\"low_confidence\"}","refId":"I","legendFormat":"low confidence"},{"expr":"job_intel_rejections_7d{reason=\"duplicate\"}","refId":"J","legendFormat":"duplicate"}]},{"id":3,"type":"timeseries","title":"Near Miss Count by Score Band (7d)","gridPos":{"h":8,"w":12,"x":0,"y":10},"datasource":"Prometheus","fieldConfig":{"defaults":{"unit":"short"}},"options":{"legend":{"displayMode":"table","placement":"bottom"}},"targets":[{"expr":"job_intel_near_miss_count_7d{score_band=\"60_74\"}","refId":"A","legendFormat":"60-74"},{"expr":"job_intel_near_miss_count_7d{score_band=\"75_89\"}","refId":"B","legendFormat":"75-89"},{"expr":"job_intel_near_miss_count_7d{score_band=\"90_100\"}","refId":"C","legendFormat":"90-100"}]},{"id":4,"type":"timeseries","title":"Highest Scoring Rejected Opportunities","gridPos":{"h":8,"w":12,"x":12,"y":10},"datasource":"Prometheus","fieldConfig":{"defaults":{"unit":"short"}},"options":{"legend":{"displayMode":"table","placement":"bottom"}},"targets":[{"expr":"job_intel_vacancy_score_top_7d{scope=\"rejected\"}","refId":"A","legendFormat":"top rejected score"},{"expr":"job_intel_vacancy_score_p90_7d{scope=\"rejected\"}","refId":"B","legendFormat":"p90 rejected score"}]},{"id":5,"type":"timeseries","title":"Rejection by Source (7d)","gridPos":{"h":8,"w":24,"x":0,"y":19},"datasource":"Prometheus","fieldConfig":{"defaults":{"unit":"short"}},"options":{"legend":{"displayMode":"table","placement":"bottom"}},"targets":[{"expr":"job_intel_rejections_by_source_7d{source=\"LinkedIn\",reason=\"wrong_geography\"}","refId":"A","legendFormat":"LinkedIn geography"},{"expr":"job_intel_rejections_by_source_7d{source=\"LinkedIn\",reason=\"low_seniority\"}","refId":"B","legendFormat":"LinkedIn seniority"},{"expr":"job_intel_rejections_by_source_7d{source=\"LinkedIn\",reason=\"low_confidence\"}","refId":"C","legendFormat":"LinkedIn confidence"},{"expr":"job_intel_rejections_by_source_7d{source=\"Greenhouse\",reason=\"wrong_industry\"}","refId":"D","legendFormat":"Greenhouse industry"},{"expr":"job_intel_rejections_by_source_7d{source=\"Greenhouse\",reason=\"wrong_geography\"}","refId":"E","legendFormat":"Greenhouse geography"},{"expr":"job_intel_rejections_by_source_7d{source=\"Greenhouse\",reason=\"low_seniority\"}","refId":"F","legendFormat":"Greenhouse seniority"}]}]}
+{
+  "title": "Job Intel - Rejection Analytics",
+  "uid": "job-intel-rejection-analytics",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "tags": [
+    "job-intel",
+    "observability"
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Rejection Analytics",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Top Rejection Reasons (7d)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(12, job_intel_rejections_7d)",
+          "legendFormat": "{{reason}}",
+          "instant": false,
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Near Miss Count by Score Band (7d)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "job_intel_near_miss_count_7d{score_band=\"60_74\"}",
+          "refId": "A",
+          "legendFormat": "60-74"
+        },
+        {
+          "expr": "job_intel_near_miss_count_7d{score_band=\"75_89\"}",
+          "refId": "B",
+          "legendFormat": "75-89"
+        },
+        {
+          "expr": "job_intel_near_miss_count_7d{score_band=\"90_100\"}",
+          "refId": "C",
+          "legendFormat": "90-100"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Highest Scoring Rejected Opportunities",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "job_intel_vacancy_score_top_7d{scope=\"rejected\"}",
+          "refId": "A",
+          "legendFormat": "top rejected score"
+        },
+        {
+          "expr": "job_intel_vacancy_score_p90_7d{scope=\"rejected\"}",
+          "refId": "B",
+          "legendFormat": "p90 rejected score"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Rejection by Source (7d)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(15, job_intel_rejections_by_source_7d)",
+          "legendFormat": "{{source}}: {{reason}}",
+          "instant": false,
+          "range": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    }
+  ]
+}
