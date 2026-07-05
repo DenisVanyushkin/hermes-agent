@@ -144,3 +144,35 @@ def diff_known_issues(state: dict, findings: list[dict], now: datetime) -> tuple
         if sig not in new_state
     ]
     return annotated, resolved, new_state
+
+
+def job_intel_summary(db_path: Path) -> dict:
+    if not db_path.exists():
+        return {"error": f"db not found: {db_path}"}
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
+    try:
+        conn.row_factory = sqlite3.Row
+        run = conn.execute(
+            "SELECT run_id, MAX(created_at) AS run_at, COUNT(*) AS found,"
+            " SUM(accepted) AS accepted, SUM(notified) AS notified"
+            " FROM vacancy_observability WHERE run_id = ("
+            "  SELECT run_id FROM vacancy_observability ORDER BY created_at DESC LIMIT 1)"
+        ).fetchone()
+        if run is None or run["run_id"] is None:
+            return {"error": "no runs recorded"}
+        reasons = conn.execute(
+            "SELECT rejection_reason AS reason, COUNT(*) AS count"
+            " FROM vacancy_rejection_events WHERE run_id = ?"
+            " GROUP BY rejection_reason ORDER BY count DESC LIMIT 5",
+            (run["run_id"],),
+        ).fetchall()
+        return {
+            "run_id": run["run_id"],
+            "run_at": run["run_at"],
+            "found": run["found"],
+            "accepted": run["accepted"] or 0,
+            "notified": run["notified"] or 0,
+            "top_rejections": [dict(r) for r in reasons],
+        }
+    finally:
+        conn.close()

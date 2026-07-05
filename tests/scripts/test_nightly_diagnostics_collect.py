@@ -1,4 +1,5 @@
 import importlib.util
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -116,3 +117,48 @@ def test_diff_known_issues_marks_new_known_resolved():
     assert set(new_state) == {"old sig", "fresh sig"}
     assert new_state["old sig"]["last_seen"] == "2026-07-05T06:40:00"
     assert new_state["fresh sig"]["first_seen"] == "2026-07-05T06:40:00"
+
+
+def _make_job_intel_db(path):
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE vacancy_observability (run_id TEXT, vacancy_key TEXT,"
+        " accepted INTEGER, notified INTEGER, created_at TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE vacancy_rejection_events (run_id TEXT, rejection_reason TEXT,"
+        " reason_type TEXT, severity TEXT)"
+    )
+    rows = [
+        ("run-old", "v1", 1, 1, "2026-07-03T10:00:00"),
+        ("run-new", "v2", 1, 0, "2026-07-04T10:00:00"),
+        ("run-new", "v3", 0, 0, "2026-07-04T10:00:01"),
+        ("run-new", "v4", 0, 0, "2026-07-04T10:00:02"),
+    ]
+    conn.executemany("INSERT INTO vacancy_observability VALUES (?,?,?,?,?)", rows)
+    conn.executemany(
+        "INSERT INTO vacancy_rejection_events VALUES (?,?,?,?)",
+        [
+            ("run-new", "low_seniority", "blocker", "high"),
+            ("run-new", "low_seniority", "blocker", "high"),
+            ("run-new", "salary_unknown", "unknown", "low"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_job_intel_summary_reads_latest_run(tmp_path):
+    db = tmp_path / "job_intel.sqlite3"
+    _make_job_intel_db(db)
+    summary = collect.job_intel_summary(db)
+    assert summary["run_id"] == "run-new"
+    assert summary["found"] == 3
+    assert summary["accepted"] == 1
+    assert summary["notified"] == 0
+    assert summary["top_rejections"][0] == {"reason": "low_seniority", "count": 2}
+
+
+def test_job_intel_summary_missing_db_reports_error(tmp_path):
+    summary = collect.job_intel_summary(tmp_path / "absent.sqlite3")
+    assert "error" in summary
