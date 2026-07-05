@@ -21,6 +21,7 @@ def test_render_stale_digest(tmp_path):
     out = ctx.render(path, datetime(2026, 7, 5, 7, 10))
     assert out.startswith("DIGEST STALE")
     assert '"generated_at"' in out  # stale digest is still included
+    assert len(out) <= ctx.MAX_CHARS
 
 
 def test_render_fresh_digest(tmp_path):
