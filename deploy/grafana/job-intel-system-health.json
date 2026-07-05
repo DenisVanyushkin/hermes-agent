@@ -1,1 +1,581 @@
-{"title":"Job Intel - System Health","uid":"job-intel-system-health","schemaVersion":38,"version":1,"refresh":"30s","time":{"from":"now-7d","to":"now"},"tags":["job-intel","observability"],"panels":[{"id":1,"type":"row","title":"System Health","gridPos":{"h":1,"w":24,"x":0,"y":0},"collapsed":false},{"id":2,"type":"stat","title":"Daily Run Success 7d","gridPos":{"h":4,"w":4,"x":0,"y":1},"datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},"fieldConfig":{"defaults":{"unit":"percentunit","min":0,"max":1}},"targets":[{"expr":"job_intel_daily_run_success_rate_7d","refId":"A"}]},{"id":3,"type":"stat","title":"LinkedIn Healthy","gridPos":{"h":4,"w":4,"x":4,"y":1},"datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},"fieldConfig":{"defaults":{"unit":"short","min":0,"max":1}},"targets":[{"expr":"job_intel_source_healthy{source=\"LinkedIn\"}","refId":"A"}]},{"id":4,"type":"stat","title":"LinkedIn Login Walls 7d","gridPos":{"h":4,"w":4,"x":8,"y":1},"datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},"fieldConfig":{"defaults":{"unit":"short"}},"targets":[{"expr":"job_intel_source_login_walls_7d{source=\"LinkedIn\"}","refId":"A"}]},{"id":5,"type":"stat","title":"LinkedIn Auth Redirects 7d","gridPos":{"h":4,"w":4,"x":12,"y":1},"datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},"fieldConfig":{"defaults":{"unit":"short"}},"targets":[{"expr":"job_intel_source_auth_redirects_7d{source=\"LinkedIn\"}","refId":"A"}]},{"id":6,"type":"stat","title":"LinkedIn Anti-bot 7d","gridPos":{"h":4,"w":4,"x":16,"y":1},"datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},"fieldConfig":{"defaults":{"unit":"short"}},"targets":[{"expr":"job_intel_source_anti_bot_events_7d{source=\"LinkedIn\"}","refId":"A"}]},{"id":7,"type":"stat","title":"LinkedIn Extraction Failures 7d","gridPos":{"h":4,"w":4,"x":20,"y":1},"datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},"fieldConfig":{"defaults":{"unit":"short"}},"targets":[{"expr":"job_intel_source_extraction_failures_7d{source=\"LinkedIn\"}","refId":"A"}]},{"id":8,"type":"timeseries","title":"Daily Run Success Rate","gridPos":{"h":8,"w":12,"x":0,"y":5},"datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},"fieldConfig":{"defaults":{"unit":"percentunit"}},"options":{"legend":{"displayMode":"table","placement":"bottom"}},"targets":[{"expr":"job_intel_daily_run_success_rate_24h","refId":"A","legendFormat":"24h"},{"expr":"job_intel_daily_run_success_rate_7d","refId":"B","legendFormat":"7d"},{"expr":"job_intel_daily_run_success_rate_30d","refId":"C","legendFormat":"30d"}]},{"id":9,"type":"timeseries","title":"Source Health","gridPos":{"h":8,"w":12,"x":12,"y":5},"datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},"fieldConfig":{"defaults":{"unit":"short"}},"options":{"legend":{"displayMode":"table","placement":"bottom"}},"targets":[{"expr":"job_intel_source_healthy{source=\"LinkedIn\"}","refId":"A","legendFormat":"LinkedIn"},{"expr":"job_intel_source_healthy{source=\"HeadHunter\"}","refId":"B","legendFormat":"HeadHunter"},{"expr":"job_intel_source_healthy{source=\"Greenhouse\"}","refId":"C","legendFormat":"Greenhouse"},{"expr":"job_intel_source_healthy{source=\"Lever\"}","refId":"D","legendFormat":"Lever"}]}]}
+{
+  "uid": "job-intel-system-health",
+  "title": "Job Intel - System Health",
+  "tags": [
+    "job-intel"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1000,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "5m",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Daily Run Success 7d",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.7
+              },
+              {
+                "color": "green",
+                "value": 0.95
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "job_intel_daily_run_success_rate_7d",
+          "instant": true,
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Hours Since Last Run",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "h",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 26
+              },
+              {
+                "color": "red",
+                "value": 48
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(time() - job_intel_run_last_success_timestamp{mode=\"daily\"}) / 3600",
+          "instant": true,
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Login Walls 7d",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(job_intel_login_walls_7d)",
+          "instant": true,
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Auth Redirects 7d",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(job_intel_auth_redirects_7d)",
+          "instant": true,
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Anti-bot Events 7d",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(job_intel_anti_bot_events_7d)",
+          "instant": true,
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Extraction Failures 7d",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(job_intel_extraction_failures_7d)",
+          "instant": true,
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Daily Run Success Rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "spanNulls": true
+          },
+          "unit": "percentunit",
+          "max": 1,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "job_intel_daily_run_success_rate_24h",
+          "legendFormat": "24h",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "job_intel_daily_run_success_rate_7d",
+          "legendFormat": "7d",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "job_intel_daily_run_success_rate_30d",
+          "legendFormat": "30d",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Source Health (1 = healthy)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "spanNulls": true
+          },
+          "max": 1.2,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "job_intel_source_healthy",
+          "legendFormat": "{{source}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Acquisition Problems by Type (7d window)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(job_intel_login_walls_7d)",
+          "legendFormat": "login walls",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(job_intel_auth_redirects_7d)",
+          "legendFormat": "auth redirects",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum(job_intel_anti_bot_events_7d)",
+          "legendFormat": "anti-bot",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "sum(job_intel_extraction_failures_7d)",
+          "legendFormat": "extraction failures",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Per-source Problems (7d window)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "job_intel_source_login_walls_7d > 0",
+          "legendFormat": "{{source}} login walls",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "job_intel_source_anti_bot_events_7d > 0",
+          "legendFormat": "{{source}} anti-bot",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "job_intel_source_extraction_failures_7d > 0",
+          "legendFormat": "{{source}} extraction failures",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ]
+    }
+  ]
+}
