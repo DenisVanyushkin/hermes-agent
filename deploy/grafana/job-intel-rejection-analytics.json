@@ -35,7 +35,7 @@
         "x": 0,
         "y": 1
       },
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -71,7 +71,7 @@
         "x": 0,
         "y": 10
       },
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -111,7 +111,7 @@
         "x": 12,
         "y": 10
       },
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -146,7 +146,7 @@
         "x": 0,
         "y": 19
       },
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short"
