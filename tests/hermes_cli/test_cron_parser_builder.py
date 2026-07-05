@@ -83,3 +83,40 @@ def test_cron_accept_hooks_flag_on_run_and_tick():
     assert ns.accept_hooks is True
     ns2 = parser.parse_args(["cron", "tick", "--accept-hooks"])
     assert ns2.accept_hooks is True
+
+
+def test_cron_create_prompt_after_flags():
+    """Regression: prompt positional given after optional flags must parse.
+
+    argparse groups positionals around optionals, so with ``schedule`` alone
+    before the flags the ``prompt`` (nargs=?) pattern matched zero tokens and
+    the trailing prompt token became an unrecognized argument.
+    """
+    parser = _build()
+    ns = parser.parse_args([
+        "cron", "create", "30m",
+        "--name", "x", "--deliver", "origin",
+        "daily task prompt",
+    ])
+    assert ns.schedule == "30m"
+    assert ns.prompt == "daily task prompt"
+    assert ns.name == "x"
+    assert ns.deliver == "origin"
+
+
+def test_cron_create_prompt_before_flags_still_works():
+    parser = _build()
+    ns = parser.parse_args([
+        "cron", "create", "30m", "daily task prompt", "--name", "x",
+    ])
+    assert ns.prompt == "daily task prompt"
+    assert ns.name == "x"
+
+
+def test_cron_create_truly_unrecognized_arg_still_errors():
+    import pytest
+    parser = _build()
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "cron", "create", "30m", "prompt one", "--name", "x", "stray extra",
+        ])
