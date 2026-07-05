@@ -7,6 +7,8 @@ registry:
       - Explain a general nontechnical concept in plain language.
       - Summarize the last run and ask one clarification question.
       - Draft a plan without changing repository files.
+      - Prepare application materials for a vacancy — tailored CV, cover letter, recruiter message, or questionnaire answers — via the career-strategist role and recruiter material skills.
+      - Подготовь пакет отклика на вакансию (резюме, сопроводительное письмо, сообщение рекрутеру, ответы на анкету).
     exclusion_examples:
       - Fix the bug in gateway routing.
       - Modify tests and patch the repo.
@@ -52,7 +54,7 @@ registry:
     config_path: config/pipelines/engineering_review_pipeline.yaml
   - id: recruiter_decision_support_pipeline
     display_name: Recruiter Decision Support Pipeline
-    description: Handles recruiter/HR requests — vacancy assessment, company diligence, fit recommendation, positioning, claims, and interview questions — via draft-only modular analysis with manual review.
+    description: Handles recruiter/HR analysis requests — vacancy assessment, company diligence, fit recommendation, positioning, claims, and interview questions — via draft-only modular analysis with manual review. Does NOT prepare application materials (CV, cover letter, recruiter message, questionnaire answers); those go to the default conversation pipeline with the career-strategist role.
     entry_examples:
       - Evaluate this vacancy and tell me whether I should apply.
       - Research the company behind this job posting and list its risks.
@@ -62,6 +64,8 @@ registry:
       - Fix the recruiter routing code and update tests.
       - Explain how the recruiter pipeline works without running it.
       - Draft a thank-you email for a dinner invitation.
+      - Prepare application materials for this vacancy (tailored CV, cover letter, recruiter message, questionnaire answers).
+      - Подготовь пакет отклика на вакансию / подготовь резюме и сопроводительное письмо под вакансию.
     risk_notes:
       - no repository mutation allowed
       - no outbound messages, no application submission

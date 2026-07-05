@@ -2,10 +2,10 @@ schema_version: 1
 id: recruiter_decision_support_pipeline
 display_name: Recruiter Decision Support Pipeline
 version: 1
-purpose: Handles recruiter/HR requests — vacancy assessment, company diligence, fit recommendation, positioning, and interview preparation — through the modular draft-only decision-support bundle.
+purpose: Handles recruiter/HR analysis requests — vacancy assessment, company diligence, fit recommendation, positioning, and interview preparation — through the modular draft-only decision-support bundle. Application-material preparation (CV, cover letter, recruiter message, questionnaire answers) is out of scope and belongs to the default conversation pipeline with the career-strategist role.
 entry_conditions:
   any:
-    - task_classification.domain == career
+    - task_classification.domain == career and task_intent excludes application_material_preparation
     - task_intent includes vacancy_or_company_analysis
     - recruiter_routing.status == selected
 subagents:
