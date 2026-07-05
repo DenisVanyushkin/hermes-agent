@@ -89,10 +89,12 @@ def render(digest_path: Path, now: datetime) -> str:
     try:
         generated = datetime.fromisoformat(generated_raw)
     except ValueError:
-        return f"DIGEST STALE (generated_at unparseable: {generated_raw!r})\n{body}"
+        out = f"DIGEST STALE (generated_at unparseable: {generated_raw!r})\n{body}"
+        return out[:MAX_CHARS]
     age_hours = (now - generated).total_seconds() / 3600
     if age_hours > STALE_HOURS:
-        return f"DIGEST STALE (generated_at={generated_raw}, age={age_hours:.0f}h)\n{body}"
+        out = f"DIGEST STALE (generated_at={generated_raw}, age={age_hours:.0f}h)\n{body}"
+        return out[:MAX_CHARS]
     return body
 
 
