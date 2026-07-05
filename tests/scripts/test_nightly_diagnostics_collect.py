@@ -86,3 +86,10 @@ def test_summarize_cron_jobs_splits_ok_failed_paused(tmp_path):
 
 def test_latest_output_tail_missing_dir_returns_none(tmp_path):
     assert collect.latest_output_tail(tmp_path / "nope") is None
+
+
+def test_summarize_cron_jobs_never_ran_job_counts_as_ok(tmp_path):
+    jobs = [{"id": "newjob01", "name": "brand-new", "enabled": True}]
+    summary = collect.summarize_cron_jobs(jobs, tmp_path / "output")
+    assert summary["failed"] == [] and summary["paused"] == []
+    assert summary["ok"][0]["last_status"] == "never-ran"
