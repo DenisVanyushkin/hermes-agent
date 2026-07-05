@@ -2021,8 +2021,17 @@ def _completion_allowed_final_response_text(
     test_summary: dict[str, Any] | None,
     reviewer_packet: dict[str, Any] | None,
 ) -> str:
+    # A run with no material repo changes is an investigation/Q&A, not a code
+    # change waiting at the commit gate -- the commit-gate framing is misleading
+    # there, so use a read-only header and skip the commit/reviewer boilerplate.
+    gate = git_gate or {}
+    read_only_run = not bool(gate.get("material_changes_present")) and not [
+        item for item in list(gate.get("changed_files") or []) if str(item).strip()
+    ]
     lines = [
-        "Controlled engineering execution completed and stopped at the commit gate.",
+        "Read-only investigation completed. No repository changes were made."
+        if read_only_run
+        else "Controlled engineering execution completed and stopped at the commit gate.",
         "",
     ]
 
@@ -2066,9 +2075,11 @@ def _completion_allowed_final_response_text(
             lines.append(f"- {path}")
         lines.append("")
 
-    lines.append("Tests:")
     test_status = _safe_test_text((test_summary or {}).get("status")) or "unavailable"
-    lines.append(f"- status: {test_status}")
+    skip_test_block = read_only_run and test_status in {"not_requested", "unavailable"}
+    if not skip_test_block:
+        lines.append("Tests:")
+        lines.append(f"- status: {test_status}")
 
     executed_command = _safe_test_text((test_summary or {}).get("executed_command"))
     requested_command = _safe_test_text((test_summary or {}).get("requested_command"))
@@ -2087,20 +2098,24 @@ def _completion_allowed_final_response_text(
     if summary:
         lines.append(f"- summary: {summary}")
 
-    lines.extend(
-        [
-            "",
-            "Reviewer:",
-            "- approved: yes",
-            "- decision: candidate_complete",
-            "",
-            "No commit or push was performed. Waiting for user approval before commit.",
-        ]
-    )
+    if not read_only_run:
+        lines.extend(
+            [
+                "",
+                "Reviewer:",
+                "- approved: yes",
+                "- decision: candidate_complete",
+                "",
+                "No commit or push was performed. Waiting for user approval before commit.",
+            ]
+        )
 
-    packet_status = str((reviewer_packet or {}).get("packet_status") or "").strip()
-    if packet_status and packet_status not in {"", "disabled", "not_built"}:
-        lines.insert(-2, f"- status: {packet_status}")
+        packet_status = str((reviewer_packet or {}).get("packet_status") or "").strip()
+        if packet_status and packet_status not in {"", "disabled", "not_built"}:
+            lines.insert(-2, f"- status: {packet_status}")
+
+    while lines and lines[-1] == "":
+        lines.pop()
 
     return "\n".join(lines)
 
