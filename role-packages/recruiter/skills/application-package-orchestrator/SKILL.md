@@ -54,7 +54,10 @@ Drive end-to-end preparation of application materials for one vacancy: build the
    7. Risks and confirmations needed (including `missing_confirmations` and any unresolved findings).
    8. Usage notes (recommended order of use).
    File naming: `denis_vanyushkin_<cv|cl|recruiter_message|questionnaire|application_package>_[company]_[role]`, lowercase snake_case.
+
+   **Where to save files:** write deliverables ONLY to `/output/<company>_<role>/` (host path: `~/.hermes/cache/documents/<company>_<role>/`). NEVER write package files into the repo mount (`/workspace/live-hermes/`) — stray files there dirty the git baseline and block other pipelines. When delivering, reference the host path (`/home/hermes/.hermes/cache/documents/...`) in the final message so the platform layer can attach the files to the chat. If the user asks for MS Word, produce `.docx` (python-docx in the sandbox, or clean Markdown ready for conversion if the library is unavailable — say which one you delivered).
 8. **Report** per the delivery standard: what was prepared, positioning angle, review iterations used, key risks/confirmations. No unnecessary explanation when materials are self-contained.
+   The delivery message MUST state the package-reviewer `final_status` and the number of review iterations. If package-reviewer was not run, the package is not deliverable — go back to step 5. Skipping review is never acceptable, including for regenerated or "small" packages.
 
 ## Required Inputs
 
