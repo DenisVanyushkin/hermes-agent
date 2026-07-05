@@ -4138,6 +4138,45 @@ def build_parser() -> argparse.ArgumentParser:
     feedback_event.add_argument("--payload-file", default="-", help="JSON payload file, or - for stdin")
     feedback_event.set_defaults(cmd="feedback-event")
 
+    feedback_analyze = sub.add_parser("feedback-analyze")
+    feedback_analyze.add_argument("--days", type=int, default=30)
+    feedback_analyze.add_argument("--company", default=None)
+    feedback_analyze.set_defaults(cmd="feedback-analyze")
+
+    feedback_weekly = sub.add_parser("feedback-weekly")
+    feedback_weekly.add_argument("--days", type=int, default=7)
+    feedback_weekly.add_argument("--send", action="store_true", help="deliver digest to Slack (default: print only)")
+    feedback_weekly.add_argument("--channel", default=None)
+    feedback_weekly.set_defaults(cmd="feedback-weekly")
+
+    calibration_propose = sub.add_parser("calibration-propose")
+    calibration_propose.add_argument("--days", type=int, default=30)
+    calibration_propose.set_defaults(cmd="calibration-propose")
+
+    calibration_show = sub.add_parser("calibration-show")
+    calibration_show.add_argument("--id", type=int, default=None)
+    calibration_show.set_defaults(cmd="calibration-show")
+
+    calibration_dry_run = sub.add_parser("calibration-dry-run")
+    calibration_dry_run.add_argument("--id", type=int, required=True)
+    calibration_dry_run.set_defaults(cmd="calibration-dry-run")
+
+    calibration_apply = sub.add_parser("calibration-apply")
+    calibration_apply.add_argument("--id", type=int, required=True)
+    calibration_apply.add_argument("--actor", default="cli")
+    calibration_apply.add_argument("--force", action="store_true", help="apply even a high-risk proposal")
+    calibration_apply.set_defaults(cmd="calibration-apply")
+
+    calibration_reject = sub.add_parser("calibration-reject")
+    calibration_reject.add_argument("--id", type=int, required=True)
+    calibration_reject.add_argument("--actor", default="cli")
+    calibration_reject.set_defaults(cmd="calibration-reject")
+
+    calibration_rollback = sub.add_parser("calibration-rollback")
+    calibration_rollback.add_argument("--id", type=int, required=True)
+    calibration_rollback.add_argument("--actor", default="cli")
+    calibration_rollback.set_defaults(cmd="calibration-rollback")
+
     crm_reconcile = sub.add_parser("crm-reconcile")
     crm_reconcile.add_argument("--days", type=int, default=14)
     mode_group = crm_reconcile.add_mutually_exclusive_group(required=True)
@@ -4215,6 +4254,55 @@ def main(argv: list[str] | None = None) -> int:
             raw = Path(args.payload_file).read_text(encoding="utf-8")
         payload = json.loads(raw or "{}")
         print(run_feedback_event(payload))
+        return 0
+    if args.cmd == "feedback-analyze":
+        from job_intel import calibration
+
+        summary = calibration.aggregate_feedback(_store(), days=args.days, company=args.company)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == "feedback-weekly":
+        from job_intel import calibration
+
+        digest = calibration.build_weekly_digest(_store(), days=args.days)
+        if args.send:
+            channel = args.channel or load_config_bundle()["runtime"]["slack"]["channel"]
+            delivery = _deliver_to_slack(digest["text"], channel, prefer_gateway=True)
+            print(json.dumps({"mode": digest["mode"], "delivery": delivery.status, "error": delivery.error}, ensure_ascii=False))
+        else:
+            print(digest["text"])
+        return 0
+    if args.cmd == "calibration-propose":
+        from job_intel import calibration
+
+        print(json.dumps(calibration.generate_proposal(_store(), window_days=args.days), ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == "calibration-show":
+        store = _store()
+        if args.id is not None:
+            print(json.dumps(store.get_scoring_proposal(args.id), ensure_ascii=False, indent=2, default=str))
+        else:
+            print(json.dumps(store.fetch_scoring_proposals(), ensure_ascii=False, indent=2, default=str))
+        return 0
+    if args.cmd == "calibration-dry-run":
+        from job_intel import calibration
+
+        print(json.dumps(calibration.dry_run_proposal(_store(), args.id), ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == "calibration-apply":
+        from job_intel import calibration
+
+        print(json.dumps(calibration.apply_proposal(_store(), args.id, actor=args.actor, force=args.force), ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == "calibration-reject":
+        from job_intel import calibration
+
+        print(json.dumps(calibration.reject_proposal(_store(), args.id, actor=args.actor), ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == "calibration-rollback":
+        from job_intel import calibration
+
+        print(json.dumps(calibration.rollback_proposal(_store(), args.id, actor=args.actor), ensure_ascii=False, indent=2))
         return 0
     if args.cmd == "crm-reconcile":
         print(run_crm_reconcile(args.days, args.dry_run, args.apply, args.vacancy_id, args.limit))
