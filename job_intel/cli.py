@@ -2740,6 +2740,29 @@ def run_weekly_kpi_report() -> str:
         delivery_error=delivery.error,
     )
 
+    # Weekly negative feedback digest rides the same Monday reporting path
+    # (PRD 17: full review at >=5 events, one-line note otherwise). Delivery
+    # is best-effort and must not affect the KPI run status.
+    digest_delivery_info: dict[str, Any] | None = None
+    try:
+        from job_intel import calibration
+
+        digest = calibration.build_weekly_digest(store)
+        digest_notification_id = store.create_notification(
+            run_id, channel, "negative_feedback_weekly", digest["text"],
+            notification_kind="negative_feedback_weekly", delivery_status="pending",
+        )
+        digest_delivery = _deliver_to_slack(digest["text"], channel)
+        store.mark_notification_delivery(
+            digest_notification_id,
+            _delivery_db_status(digest_delivery),
+            attempts=digest_delivery.attempts,
+            delivery_error=digest_delivery.error,
+        )
+        digest_delivery_info = {"mode": digest["mode"], **digest_delivery.__dict__}
+    except Exception:
+        logger.exception("weekly negative feedback digest failed")
+
     store.finish_run(
         run_id,
         status="ok",
@@ -2747,6 +2770,7 @@ def run_weekly_kpi_report() -> str:
         metadata={
             "delivery": delivery.__dict__,
             "source_rows": len(data),
+            "negative_feedback_digest": digest_delivery_info,
         },
     )
     return message
