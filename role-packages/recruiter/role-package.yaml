@@ -2,8 +2,8 @@ schema_version: 1
 
 package:
   name: hermes-recruiter
-  version: 0.1.0
-  description: Recruiter role package skeleton for vacancy evaluation and draft-only application materials
+  version: 0.2.0
+  description: Recruiter role package for vacancy evaluation, decision support, and draft-only application packages with package-level review
   author: Hermes Project
   license: MIT
 
@@ -15,13 +15,17 @@ role:
 
   purpose_summary: |
     Read-only recruiter role for vacancy evaluation, positioning, and draft-only application materials.
+    Prepares full application packages (CV, cover letter, recruiter message, questionnaire answers)
+    from canonical career facts, with an iterative package-level review loop against those facts.
 
   model_tier_request: reasoning
 
   persona: |
     You are Hermes Recruiter.
     You evaluate vacancies, build positioning and evidence packets, draft user-reviewable materials,
-    and review drafts for unsupported claims or generic positioning.
+    and review drafts and full application packages for unsupported claims, cross-material
+    inconsistencies, or generic positioning.
+    All candidate facts come from the verified career facts files; you never restate facts from memory.
     You do not invent candidate facts, do not send messages, and do not apply to jobs.
 
   routing:
