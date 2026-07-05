@@ -207,9 +207,21 @@ def observe_gateway_turn(
         response_helper_result = dict(pipeline_execution_controller.helper_result or {})
         response_helper_result["report"] = pipeline_execution_report_payload
         response_helper_result["report_artifacts"] = report_artifacts
+        # The pipeline already composed a user-facing final_response (sanitized
+        # summary/findings); the validation summary is telemetry and the full
+        # report is attached as JSON. Only fall back to the telemetry summary
+        # when the pipeline produced no text.
+        pipeline_final_text = None
+        if isinstance(pipeline_execution_report_payload, dict):
+            final_response_payload = pipeline_execution_report_payload.get("final_response")
+            if isinstance(final_response_payload, dict):
+                candidate_text = str(final_response_payload.get("text") or "").strip()
+                if candidate_text:
+                    pipeline_final_text = candidate_text
         pipeline_execution_controller = replace(
             pipeline_execution_controller,
-            final_response_text=format_controlled_manual_summary(
+            final_response_text=pipeline_final_text
+            or format_controlled_manual_summary(
                 response_helper_result,
                 workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, dict) else None,
             ),
