@@ -58,3 +58,31 @@ def test_memory_trend_computes_min_max_delta():
 
 def test_memory_trend_returns_none_without_samples():
     assert collect.memory_trend([], datetime(2026, 7, 4)) is None
+
+
+def test_summarize_cron_jobs_splits_ok_failed_paused(tmp_path):
+    out_root = tmp_path / "output"
+    failed_dir = out_root / "badjob01"
+    failed_dir.mkdir(parents=True)
+    (failed_dir / "2026-07-01_10-00-00.md").write_text("older run", encoding="utf-8")
+    (failed_dir / "2026-07-04_10-00-00.md").write_text("boom: module not found", encoding="utf-8")
+    jobs = [
+        {"id": "okjob001", "name": "weather", "enabled": True, "last_status": "ok",
+         "last_run_at": "2026-07-04T10:00:00", "schedule_display": "0 4 * * *"},
+        {"id": "badjob01", "name": "enrichment", "enabled": True,
+         "last_status": "error: Script exited with code 1",
+         "last_error": "No module named job_intel.__main__",
+         "last_run_at": "2026-07-01T10:00:28", "schedule_display": "0 10 */14 * *"},
+        {"id": "paused01", "name": "old-thing", "enabled": False},
+    ]
+    summary = collect.summarize_cron_jobs(jobs, out_root)
+    assert [j["name"] for j in summary["ok"]] == ["weather"]
+    assert [j["name"] for j in summary["paused"]] == ["old-thing"]
+    failed = summary["failed"]
+    assert len(failed) == 1
+    assert failed[0]["last_error"] == "No module named job_intel.__main__"
+    assert "boom: module not found" in failed[0]["output_tail"]
+
+
+def test_latest_output_tail_missing_dir_returns_none(tmp_path):
+    assert collect.latest_output_tail(tmp_path / "nope") is None

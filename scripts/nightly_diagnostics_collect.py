@@ -82,3 +82,39 @@ def memory_trend(lines, since: datetime) -> dict | None:
         "delta_mb": values[-1] - values[0],
         "samples": len(values),
     }
+
+
+def latest_output_tail(job_dir: Path) -> str | None:
+    if not job_dir.is_dir():
+        return None
+    files = sorted(job_dir.glob("*.md"))
+    if not files:
+        return None
+    text = files[-1].read_text(encoding="utf-8", errors="replace")
+    return text[-MAX_TAIL_CHARS:]
+
+
+def summarize_cron_jobs(jobs: list[dict], output_root: Path) -> dict:
+    ok: list[dict] = []
+    failed: list[dict] = []
+    paused: list[dict] = []
+    for job in jobs:
+        entry = {
+            "name": job.get("name") or job.get("id", "?"),
+            "id": job.get("id"),
+            "last_run_at": job.get("last_run_at"),
+            "schedule": job.get("schedule_display"),
+        }
+        if not job.get("enabled", True):
+            paused.append(entry)
+            continue
+        status = (job.get("last_status") or "").lower()
+        if status and status != "ok":
+            entry["last_status"] = job.get("last_status")
+            entry["last_error"] = job.get("last_error")
+            entry["output_tail"] = latest_output_tail(output_root / str(job.get("id")))
+            failed.append(entry)
+        else:
+            entry["last_status"] = status or "never-ran"
+            ok.append(entry)
+    return {"ok": ok, "failed": failed, "paused": paused}
