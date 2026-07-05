@@ -176,3 +176,180 @@ def job_intel_summary(db_path: Path) -> dict:
         }
     finally:
         conn.close()
+
+
+INTERESTING_RE = re.compile(
+    r"(error|warn|fail|missing|not found|permission denied|unhealthy|outdated|broken|invalid|timeout)",
+    re.IGNORECASE,
+)
+
+
+def interesting_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip() and INTERESTING_RE.search(line)]
+
+
+def run_command(cmd: list[str], cwd=None, env=None, timeout: int = DOCTOR_TIMEOUT) -> tuple[int, str]:
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=timeout, check=False,
+        )
+        return proc.returncode, proc.stdout or ""
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout or ""
+        if isinstance(out, bytes):
+            out = out.decode(errors="replace")
+        return 124, out + "\nTIMEOUT"
+    except OSError as exc:
+        return 127, str(exc)
+
+
+def _read_log_lines(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    return path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+
+def collect_logs(hermes_home: Path, since: datetime, now: datetime) -> dict:
+    gateway_lines = _read_log_lines(hermes_home / "logs" / "gateway.log")
+    error_lines = _read_log_lines(hermes_home / "logs" / "errors.log")
+    findings = extract_log_findings(gateway_lines + error_lines, since)
+    diagnostics_dir = hermes_home / "diagnostics"
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    state_path = diagnostics_dir / "known-issues.json"
+    state = {}
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            state = {}
+    annotated, resolved, new_state = diff_known_issues(state, findings, now)
+    state_path.write_text(json.dumps(new_state, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {
+        "findings": annotated,
+        "resolved": resolved,
+        "memory": memory_trend(gateway_lines, since),
+    }
+
+
+def collect_cron_jobs(hermes_home: Path) -> dict:
+    jobs_path = hermes_home / "cron" / "jobs.json"
+    raw = json.loads(jobs_path.read_text(encoding="utf-8"))
+    jobs = raw if isinstance(raw, list) else raw.get("jobs", [])
+    return summarize_cron_jobs(jobs, hermes_home / "cron" / "output")
+
+
+def collect_systemd() -> dict:
+    units: dict[str, dict] = {}
+    for unit in ("job-intel-daily.service", "job-intel-weekly-kpi.service"):
+        code, out = run_command(
+            ["systemctl", "show", unit, "--property=Result,ExecMainStatus,ExecMainExitTimestamp"]
+        )
+        units[unit] = {"exit_code": code, "detail": out.strip()[:400]}
+    return units
+
+
+def collect_system_health(paths: list[str]) -> dict:
+    load = None
+    try:
+        one, five, fifteen = os.getloadavg()
+        load = f"{one:.2f}/{five:.2f}/{fifteen:.2f}"
+    except OSError:
+        pass
+    _, free_out = run_command(["free", "-h"])
+    existing = [p for p in dict.fromkeys(paths) if Path(p).exists()]
+    disks: list[str] = []
+    if existing:
+        _, df_out = run_command(["df", "-hP", *existing])
+        disks = [line.strip() for line in df_out.splitlines()[1:] if line.strip()]
+    return {"load": load, "free": free_out.strip()[:400], "disks": disks}
+
+
+def collect_docker() -> dict:
+    code, out = run_command(["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"])
+    if code != 0:
+        return {"error": out.strip()[:300]}
+    lines = [line for line in out.splitlines() if line.strip()]
+    exited = [line for line in lines if "\tExited" in line]
+    monitoring_down = [
+        line for line in exited
+        if any(name in line for name in ("prometheus", "grafana", "loki", "promtail", "alertmanager", "cadvisor", "job-intel-exporter"))
+    ]
+    return {"total": len(lines), "exited": len(exited), "monitoring_down": monitoring_down[:10]}
+
+
+def collect_doctors(workdir: Path, hermes_home: Path, db_path: Path) -> dict:
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(hermes_home)
+    env["PYTHONPATH"] = str(workdir)
+    result: dict[str, dict] = {}
+    code, out = run_command([sys.executable, "-m", "hermes_cli.main", "doctor"], cwd=workdir, env=env)
+    result["hermes_doctor"] = {"exit_code": code, "issues": interesting_lines(out)[:10]}
+    ji_env = env.copy()
+    ji_env["JOB_INTEL_DB_PATH"] = str(db_path)
+    ji_env["JOB_INTEL_DOCTOR_SKIP_LIVE_COLLECTION"] = "1"
+    code, out = run_command([sys.executable, "-m", "job_intel", "doctor"], cwd=workdir, env=ji_env)
+    result["job_intel_doctor"] = {"exit_code": code, "issues": interesting_lines(out)[:10]}
+    return result
+
+
+def build_digest(hermes_home: Path, workdir: Path, db_path: Path, now: datetime) -> dict:
+    since = now - timedelta(hours=WINDOW_HOURS)
+    digest: dict = {
+        "generated_at": now.isoformat(timespec="seconds"),
+        "window_hours": WINDOW_HOURS,
+        "sections": {},
+        "section_errors": {},
+    }
+
+    def section(name, fn):
+        try:
+            digest["sections"][name] = fn()
+        except Exception as exc:  # noqa: BLE001 — one bad section must not kill the digest
+            digest["section_errors"][name] = f"{type(exc).__name__}: {exc}"
+
+    section("logs", lambda: collect_logs(hermes_home, since, now))
+    section("cron_jobs", lambda: collect_cron_jobs(hermes_home))
+    section("systemd", collect_systemd)
+    section("job_intel", lambda: job_intel_summary(db_path))
+    section("system", lambda: collect_system_health([str(hermes_home), str(workdir), "/", "/var/lib/browser-desktop"]))
+    section("docker", collect_docker)
+    section("doctors", lambda: collect_doctors(workdir, hermes_home, db_path))
+    return digest
+
+
+def write_digest(digest: dict, diagnostics_dir: Path, now: datetime) -> None:
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(digest, ensure_ascii=False, indent=1, default=str)
+    (diagnostics_dir / "digest-latest.json").write_text(payload, encoding="utf-8")
+    dated = diagnostics_dir / f"digest-{now.date().isoformat()}.json"
+    dated.write_text(payload, encoding="utf-8")
+    cutoff = now - timedelta(days=ROTATE_DAYS)
+    for old in diagnostics_dir.glob("digest-????-??-??.json"):
+        try:
+            stamp = datetime.strptime(old.stem, "digest-%Y-%m-%d")
+        except ValueError:
+            continue
+        if stamp < cutoff:
+            old.unlink(missing_ok=True)
+
+
+def resolve_hermes_home() -> Path:
+    env_home = os.environ.get("HERMES_HOME", "").strip()
+    if env_home:
+        return Path(env_home)
+    return Path("/home/hermes/.hermes")
+
+
+def main() -> int:
+    hermes_home = resolve_hermes_home()
+    workdir = Path(os.environ.get("DIAG_WORKDIR", "") or hermes_home / "hermes-agent")
+    db_path = Path(os.environ.get("JOB_INTEL_DB_PATH", "") or "/var/lib/job-intel/state/job_intel.sqlite3")
+    now = datetime.now()
+    digest = build_digest(hermes_home, workdir, db_path, now)
+    write_digest(digest, hermes_home / "diagnostics", now)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
