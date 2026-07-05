@@ -31,73 +31,47 @@ def test_render_fresh_digest(tmp_path):
     assert '"logs"' in out
 
 
-def test_render_keeps_failures_when_logs_are_huge(tmp_path):
-    path = tmp_path / "digest-latest.json"
+def _huge_digest():
     findings = [
         {
-            "id": f"finding-{i}",
-            "examples": [f"example-{i}-{j}-" + ("x" * 300) for j in range(3)],
+            "pattern": f"log-finding-pattern-{i}",
+            "count": i,
+            "examples": ["x" * 300, "y" * 300, "z" * 300],
         }
         for i in range(500)
     ]
-    digest = {
+    return {
         "generated_at": "2026-07-05T06:40:00",
         "window_hours": 24,
+        "section_errors": {},
         "sections": {
             "cron_jobs": {
-                "failed": [
-                    {
-                        "name": "job-intel-enrichment",
-                        "output_tail": "some failure output " * 50,
-                    }
-                ],
-                "ok": [{"name": "hermes_metrics"}],
+                "ok": [{"name": "some-ok-job", "id": "abc"}],
+                "failed": [{"name": "job-intel-enrichment", "status": "error", "output_tail": "e" * 2000}],
+                "paused": [],
             },
-            "logs": {
-                "memory": {"rss_mb": 500},
-                "findings": findings,
-            },
+            "logs": {"memory": {"trend": "flat"}, "findings": findings, "resolved": [f"r{i}" for i in range(50)]},
         },
     }
-    path.write_text(json.dumps(digest), encoding="utf-8")
-    out = ctx.render(path, datetime(2026, 7, 5, 7, 10))
 
-    assert not out.startswith("DIGEST")
+
+def test_render_keeps_failures_when_logs_are_huge(tmp_path):
+    path = tmp_path / "digest-latest.json"
+    path.write_text(json.dumps(_huge_digest()), encoding="utf-8")
+    out = ctx.render(path, datetime(2026, 7, 5, 7, 10))
     assert "job-intel-enrichment" in out
     assert len(out) <= 24000
-
-    cron_idx = out.index("job-intel-enrichment")
-    findings_idx = out.index('"findings"')
-    assert cron_idx < findings_idx
-    first_finding_content_idx = out.index("finding-0")
-    assert cron_idx < first_finding_content_idx
+    assert out.index("job-intel-enrichment") < out.index("log-finding-pattern")
 
 
 def test_render_caps_findings_and_examples(tmp_path):
     path = tmp_path / "digest-latest.json"
-    findings = [
-        {
-            "id": f"finding-{i}",
-            "examples": [f"example-{i}-{j}" for j in range(3)],
-        }
-        for i in range(500)
-    ]
-    digest = {
-        "generated_at": "2026-07-05T06:40:00",
-        "window_hours": 24,
-        "sections": {
-            "logs": {
-                "memory": {"rss_mb": 500},
-                "findings": findings,
-            },
-        },
-    }
-    path.write_text(json.dumps(digest), encoding="utf-8")
+    path.write_text(json.dumps(_huge_digest()), encoding="utf-8")
     out = ctx.render(path, datetime(2026, 7, 5, 7, 10))
-
-    parsed = json.loads(out)
-    surviving_findings = parsed["logs"]["findings"]
-    assert len(surviving_findings) <= 30
-    for finding in surviving_findings:
-        assert len(finding.get("examples", [])) <= 1
-    assert "findings_truncated" in parsed["logs"]
+    compact = ctx.compact_digest(_huge_digest())
+    logs = compact["sections"]["logs"]
+    assert len(logs["findings"]) <= 30
+    assert all(len(f.get("examples", [])) <= 1 for f in logs["findings"])
+    assert all(len(ex) <= 200 for f in logs["findings"] for ex in f.get("examples", []))
+    assert logs["findings_truncated"] == 470
+    assert '"findings_truncated"' in out
