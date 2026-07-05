@@ -40,9 +40,14 @@ Produce a targeted, screening-oriented CV for one specific vacancy: structured, 
 1. **Headline.** Match the role without misrepresenting the candidate; compose from `career_facts.json` headline/positioning tags filtered by the vacancy function and domain. Never use a title the candidate has not held as an implied current identity.
 2. **Professional summary.** 4–6 lines connecting the candidate to this role: years/level of experience, target domains, strongest matching capabilities, leadership scale, one differentiating executive angle. All values from the evidence bank.
 3. **Competencies.** 10–14 maximum, prioritized by exact match to the vacancy; drawn from `core_competencies` in `career_facts.json`. Drop generic ones that do not help this role.
-4. **Experience bullets.** Tailor mostly the latest 3–5 roles; keep older roles concise unless they hold a highly relevant proof point. Per role: most relevant bullets first; rewrite around the thesis packet's success dimensions; action + context + outcome pattern ("Led [scope] to achieve [outcome] by [action], in [business context]"); preserve facts, dates, scope, and strong metrics from the source; remove bullets that distract from the target role.
+4. **Experience bullets — pyramid with a hard budget.** Relevance to THIS vacancy decides depth, not recency alone:
+   - Top tier (the 2–3 most role-relevant positions, usually the most recent): 4–6 bullets each, rewritten around the thesis packet's success dimensions, action + context + outcome pattern ("Led [scope] to achieve [outcome] by [action], in [business context]").
+   - Middle tier (next 2–3 positions): 2–3 bullets each — only the proof points that serve this vacancy.
+   - Tail (older/less relevant roles, typically pre-2016): ONE line each — title, company, dates, plus at most one standout metric; or title/company/dates only.
+   - Total bullet budget for the whole CV: **max 25 bullets.** Count them before formatting; if over, cut from the tail first, then thin the middle tier.
+   - NEVER delete a role entirely (no unexplained gaps) — compress it to one line instead. Preserve facts, dates, scope, and strong metrics from the source; remove bullets that distract from the target role.
 5. **Keyword coverage.** Compare against the vacancy: role function, domain, leadership, methods, seniority keywords. Integrate naturally; no keyword stuffing.
-6. **Length.** Default 2 pages; 2–3 acceptable for executive/C-level breadth.
+6. **Length — enforced, not aspirational.** Hard limit 2 pages (3 only for C-level breadth AND only if the user asks). Before delivery, estimate pages: with standard 11pt formatting a page fits roughly 45–50 lines; summary + 12 competencies + 25 bullets + one-line tail roles + education must land within ~2 pages. If the estimate exceeds the limit, cut per the pyramid budget above and re-check. State the resulting page estimate in the change summary.
 7. **Final checks (Definition of Done).** Targeted headline; summary tailored to the vacancy; strongest matching evidence on the first page / top third; ≥80% of critical vacancy requirements addressed; no unsupported claims; no unexplained gaps; dates and titles preserved; pasteable into DOCX without structural cleanup; change summary included; risk notes included where a key requirement is weak.
 
 ## Required Inputs
