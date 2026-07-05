@@ -2766,6 +2766,43 @@ class SlackAdapter(BasePlatformAdapter):
         if subtype in {"message_changed", "message_deleted"}:
             return
 
+        # Negative-feedback loop: thread replies to an open job-intel
+        # feedback prompt are consumed by the feedback parser and must not
+        # reach the normal agent pipeline. Commands (/, !) always fall
+        # through. Any error falls back to normal handling.
+        thread_ts_for_feedback = str(event.get("thread_ts") or "").strip()
+        raw_text_for_feedback = str(event.get("text") or "")
+        if (
+            thread_ts_for_feedback
+            and thread_ts_for_feedback != str(event.get("ts") or "")
+            and raw_text_for_feedback.strip()
+            and not raw_text_for_feedback.lstrip().startswith(("/", "!"))
+        ):
+            try:
+                from job_intel.cli import run_feedback_thread_reply
+
+                feedback_result = json.loads(
+                    run_feedback_thread_reply(
+                        {
+                            "channel": event.get("channel"),
+                            "thread_ts": thread_ts_for_feedback,
+                            "user": event.get("user"),
+                            "text": raw_text_for_feedback,
+                        }
+                    )
+                )
+                status = str(feedback_result.get("status") or "")
+                if status in {"classified", "clarification_requested", "stored_unclassified", "ignored_empty"}:
+                    logger.info(
+                        "job_intel_feedback_thread_reply handled status=%s channel=%s thread_ts=%s",
+                        status,
+                        event.get("channel"),
+                        thread_ts_for_feedback,
+                    )
+                    return
+            except Exception:
+                logger.exception("job_intel_feedback_thread_reply failed; falling back to normal handling")
+
         original_text = event.get("text", "")
 
         # Slack blocks native slash commands inside threads ("/queue is not
