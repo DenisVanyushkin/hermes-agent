@@ -80,9 +80,11 @@ Artifacts — `docs/archive/market-intelligence-mvp/` (47+ files, indexed in its
   operational record, since the journal itself was lost)
 
 Also kept in place (inert): `~/.hermes/scripts/trading_autopilot_*.py`
-wrappers, `deploy/grafana/trading-autopilot-dashboard.json`, paper-trading
-journal `~/.hermes/cron/journals/paper_trading_mvp.sqlite3`, paused cron job
-definitions (for reversibility).
+wrappers, paper-trading journal
+`~/.hermes/cron/journals/paper_trading_mvp.sqlite3`, paused cron job
+definitions (for reversibility), and the dashboard source JSON
+`deploy/grafana/trading-autopilot-dashboard.json` (live Grafana copy retired,
+see below).
 
 ## Assets Retired (intentionally disabled, not deleted)
 
@@ -94,6 +96,7 @@ definitions (for reversibility).
 | cron `trading-autopilot-live-read-producer` (c6d8e3f765ba) | paused (pre-existing) | 2026-05-28 |
 | Docker `monitoring-trading-autopilot-exporter` | container stopped+removed; compose service gated behind `profiles: ["retired"]` | 2026-07-05 |
 | Prometheus scrape job `trading-autopilot` | commented out, Prometheus reloaded | 2026-07-05 |
+| Grafana dashboard "Trading Autopilot" | provisioning JSON moved to `~/.hermes/monitoring/grafana/dashboards-retired/`; auto-pruned from Grafana (`disableDeletion: false`) | 2026-07-05 |
 | cron `market-intelligence-14day-pilot-{daily,status,final-report}` | expired naturally via `repeat.times` on 2026-06-14; no longer in registry | 2026-06-14 |
 
 No systemd services or timers existed for this system (verified).
