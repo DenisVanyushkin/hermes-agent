@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -162,3 +163,53 @@ def test_job_intel_summary_reads_latest_run(tmp_path):
 def test_job_intel_summary_missing_db_reports_error(tmp_path):
     summary = collect.job_intel_summary(tmp_path / "absent.sqlite3")
     assert "error" in summary
+
+
+def test_build_digest_isolates_section_failures(tmp_path, monkeypatch):
+    # No logs, no jobs.json, no DB, doctor commands fail -> digest still produced
+    monkeypatch.setattr(collect, "run_command", lambda *a, **k: (127, "boom: not found"))
+    now = datetime(2026, 7, 5, 6, 40, 0)
+    digest = collect.build_digest(tmp_path, tmp_path, tmp_path / "no.sqlite3", now)
+    assert digest["generated_at"] == "2026-07-05T06:40:00"
+    assert digest["window_hours"] == collect.WINDOW_HOURS
+    assert "logs" in digest["sections"] or "logs" in digest["section_errors"]
+    assert "job_intel" in digest["sections"]  # returns {"error": ...} rather than raising
+    assert isinstance(digest["section_errors"], dict)
+
+
+def test_build_digest_reads_logs_and_known_issues(tmp_path, monkeypatch):
+    monkeypatch.setattr(collect, "run_command", lambda *a, **k: (0, ""))
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "gateway.log").write_text(
+        "2026-07-05 01:00:00,000 ERROR mod: timeout after 30s\n"
+        "2026-07-05 02:00:00,000 INFO agent: [MEMORY] rss=500mb\n",
+        encoding="utf-8",
+    )
+    (logs / "errors.log").write_text("", encoding="utf-8")
+    (tmp_path / "cron").mkdir()
+    (tmp_path / "cron" / "jobs.json").write_text(
+        '[{"id": "j1", "name": "ok-job", "enabled": true, "last_status": "ok"}]',
+        encoding="utf-8",
+    )
+    now = datetime(2026, 7, 5, 6, 40, 0)
+    digest = collect.build_digest(tmp_path, tmp_path, tmp_path / "no.sqlite3", now)
+    log_section = digest["sections"]["logs"]
+    assert log_section["findings"][0]["status"] == "new"
+    assert log_section["memory"]["last_mb"] == 500
+    assert digest["sections"]["cron_jobs"]["ok"][0]["name"] == "ok-job"
+    # known-issues state persisted
+    state = json.loads((tmp_path / "diagnostics" / "known-issues.json").read_text())
+    assert any("timeout" in sig for sig in state)
+
+
+def test_write_digest_rotates_old_copies(tmp_path):
+    diag = tmp_path / "diagnostics"
+    diag.mkdir()
+    old = diag / "digest-2026-06-01.json"
+    old.write_text("{}", encoding="utf-8")
+    now = datetime(2026, 7, 5, 6, 40, 0)
+    collect.write_digest({"generated_at": "x"}, diag, now)
+    assert (diag / "digest-latest.json").exists()
+    assert (diag / "digest-2026-07-05.json").exists()
+    assert not old.exists()
