@@ -3954,11 +3954,12 @@ class SlackAdapter(BasePlatformAdapter):
             },
         )
 
-        # Only react when bot is directly addressed (1:1 DM or @mention).
-        # MPIMs are shared surfaces: reacting to every group-DM message (even
-        # when unmentioned) is visible noise to the whole group, so they must
-        # be @mentioned to earn a reaction — same as any channel.
-        _should_react = (is_one_to_one_dm or is_mentioned) and self._reactions_enabled()
+        # React to every message that made it past the response gating above:
+        # anything that reaches this point will be processed and answered, so
+        # the in-progress reaction is an ack, not extra noise. Messages the bot
+        # ignores (non-allowed channel, mention required, etc.) returned early
+        # and never get here.
+        _should_react = self._reactions_enabled()
         if _should_react:
             self._reacting_message_ids.add(ts)
 
