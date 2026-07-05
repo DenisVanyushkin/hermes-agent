@@ -118,3 +118,29 @@ def summarize_cron_jobs(jobs: list[dict], output_root: Path) -> dict:
             entry["last_status"] = status or "never-ran"
             ok.append(entry)
     return {"ok": ok, "failed": failed, "paused": paused}
+
+
+def diff_known_issues(state: dict, findings: list[dict], now: datetime) -> tuple[list[dict], list[dict], dict]:
+    now_iso = now.isoformat(timespec="seconds")
+    annotated: list[dict] = []
+    new_state: dict[str, dict] = {}
+    for finding in findings:
+        sig = finding["signature"]
+        prior = state.get(sig)
+        if prior and prior.get("first_seen"):
+            first_seen = prior["first_seen"]
+            try:
+                age_days = max(0, (now.date() - datetime.fromisoformat(first_seen).date()).days)
+            except ValueError:
+                first_seen, age_days = now_iso, 0
+            status = "known"
+        else:
+            first_seen, age_days, status = now_iso, 0, "new"
+        annotated.append({**finding, "status": status, "first_seen": first_seen, "age_days": age_days})
+        new_state[sig] = {"first_seen": first_seen, "last_seen": now_iso, "count": finding["count"]}
+    resolved = [
+        {"signature": sig, "first_seen": meta.get("first_seen"), "last_seen": meta.get("last_seen")}
+        for sig, meta in state.items()
+        if sig not in new_state
+    ]
+    return annotated, resolved, new_state
