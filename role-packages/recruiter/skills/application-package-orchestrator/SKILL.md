@@ -55,20 +55,20 @@ Drive end-to-end preparation of application materials for one vacancy: build the
    8. Usage notes (recommended order of use).
    File naming: `denis_vanyushkin_<cv|cl|recruiter_message|questionnaire|application_package>_[company]_[role]`, lowercase snake_case.
 
-   **Where to save files:** write deliverables ONLY to `/output/<company>_<role>/` (this sandbox directory is the host's `~/.hermes/cache/documents/<company>_<role>/`). NEVER write package files into the repo mount (`/workspace/live-hermes/`) — stray files there dirty the git baseline and block other pipelines.
+   **Where to save files:** write deliverables ONLY to `/home/hermes/.hermes/cache/documents/<company>_<role>/`. This exact path exists both in the sandbox and on the host (same-path mount), so no path translation is ever needed. NEVER write package files into the repo mount (`/workspace/live-hermes/`) — stray files there dirty the git baseline and block other pipelines.
 
-   **How to deliver files to the chat:** in your FINAL message include one `MEDIA:` line per file with the HOST path, e.g.:
+   **How to deliver files to the chat:** in your FINAL message include one `MEDIA:` line per file, using the same path you wrote the file to, e.g.:
 
    ```
    MEDIA:/home/hermes/.hermes/cache/documents/acme_head_of_product/denis_vanyushkin_cv_acme_head_of_product.docx
    ```
 
-   The gateway converts each `MEDIA:` tag into a native file attachment on every platform (Slack included). Container path `/output/X` = host path `/home/hermes/.hermes/cache/documents/X` — always translate to the host path in `MEDIA:` tags. A file that is only mentioned as a path on disk is NOT delivered; every deliverable must have a `MEDIA:` line.
+   The gateway converts each `MEDIA:` tag into a native file attachment on every platform (Slack included). A file that is only mentioned as a path in prose is NOT delivered; every deliverable must have a `MEDIA:` line. After writing, verify the files exist at that path (`ls`) before sending the final message.
 
    **MS Word:** when the user asks for Word files, produce real `.docx` with python-docx (`pip install python-docx` in the sandbox if missing). Fall back to Markdown only if installation fails, and say so explicitly.
 8. **Report** per the delivery standard: what was prepared, positioning angle, review iterations used, key risks/confirmations. No unnecessary explanation when materials are self-contained.
 
-   **Review is a hard gate.** The package-reviewer step (5–6) MUST write its report to `/output/<company>_<role>/package_qa_report.md` (findings, final_status, iteration count). The delivery message MUST (a) state `final_status` and iteration count, and (b) attach `package_qa_report.md` via its own `MEDIA:` line alongside the materials. **A package whose output directory contains no `package_qa_report.md` is not deliverable — go back to step 5.** Skipping review is never acceptable, including for regenerated, subset, or "small" packages, and including runs where materials were drafted in an earlier session.
+   **Review is a hard gate.** The package-reviewer step (5–6) MUST write its report to `/home/hermes/.hermes/cache/documents/<company>_<role>/package_qa_report.md` (findings, final_status, iteration count). The delivery message MUST (a) state `final_status` and iteration count, and (b) attach `package_qa_report.md` via its own `MEDIA:` line alongside the materials. **A package whose output directory contains no `package_qa_report.md` is not deliverable — go back to step 5.** Skipping review is never acceptable, including for regenerated, subset, or "small" packages, and including runs where materials were drafted in an earlier session.
 
 ## Required Inputs
 
