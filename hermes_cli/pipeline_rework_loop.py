@@ -2039,6 +2039,26 @@ def _completion_allowed_final_response_text(
     if engineer_summary:
         lines.extend(["Summary:", engineer_summary, ""])
 
+    # For read-only investigation runs the substantive answer lives in the
+    # engineer findings, not in the one-line summary; without this the user
+    # only ever sees pipeline plumbing.
+    sanitized_output = safe_packet.get("engineer_sanitized_output")
+    findings = sanitized_output.get("findings") if isinstance(sanitized_output, dict) else None
+    if isinstance(findings, list) and findings:
+        lines.append("Findings:")
+        for item in findings:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("summary") or "").strip()
+            detail = str(item.get("detail") or "").strip()
+            if text and detail:
+                text = f"{text} — {detail}"
+            elif detail:
+                text = detail
+            if text:
+                lines.append(f"- {text}")
+        lines.append("")
+
     changed_files = [str(item).strip() for item in list((git_gate or {}).get("changed_files") or []) if str(item).strip()]
     if changed_files:
         lines.append("Changed files:")
