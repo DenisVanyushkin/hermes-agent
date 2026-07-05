@@ -63,7 +63,7 @@ Run every check against every material in the package:
 - `final_status`: `pass` (no findings) | `pass_with_notes` (only low/medium tone-format-risk notes) | `blocked` (any high-severity unsupported/inconsistent finding, or a forced answer that cannot be safely generated).
 - Reminder that all materials are draft only.
 
-**Persist the report:** always write the full report to `package_qa_report.md` in the package output directory (`/output/<company>_<role>/`, host `~/.hermes/cache/documents/<company>_<role>/`). The orchestrator refuses to deliver a package without this file, and it is attached to the chat together with the materials — so the report must be readable on its own: quote the checked claims and name the source of each verdict.
+**Persist the report:** always write the full report to `package_qa_report.md` in the package output directory (`/home/hermes/.hermes/cache/documents/<company>_<role>/` — same path in sandbox and on host). The orchestrator refuses to deliver a package without this file, and it is attached to the chat together with the materials — so the report must be readable on its own: quote the checked claims and name the source of each verdict.
 
 ## Failure Behavior
 
