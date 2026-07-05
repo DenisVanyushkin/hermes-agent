@@ -1,8 +1,14 @@
 name: application-materials
-description: Lightweight recruiter bundle for draft-only application materials and review.
+description: Draft-only vacancy application package - role thesis, per-material skills, and package-level review loop.
 skills:
   - vacancy-evaluation
   - positioning-and-evidence
+  - application-package-orchestrator
+  - cv-tailoring
+  - cover-letter
+  - recruiter-message
+  - questionnaire-answers
+  - package-reviewer
   - document-writer
   - document-reviewer
-expected_output: recruiter_document_packet_v1
+expected_output: application_package_v1
