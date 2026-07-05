@@ -15,7 +15,7 @@
       {
         "name": "session_id",
         "type": "query",
-        "datasource": "Prometheus",
+        "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
         "query": "label_values(trading_autopilot_session_info, session_id)",
         "refresh": 1,
         "sort": 1,
@@ -36,7 +36,7 @@
       "type": "stat",
       "title": "Current Equity",
       "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -67,7 +67,7 @@
       "targets": [
         {
           "refId": "A",
-          "datasource": "Prometheus",
+          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
           "expr": "trading_autopilot_balance_quote{session_id=~\"$session_id\",kind=\"equity\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"})",
           "legendFormat": "equity",
           "instant": true
@@ -79,7 +79,7 @@
       "type": "stat",
       "title": "Total P&L",
       "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -110,7 +110,7 @@
       "targets": [
         {
           "refId": "A",
-          "datasource": "Prometheus",
+          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
           "expr": "trading_autopilot_pnl_quote{session_id=~\"$session_id\",kind=\"total\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"})",
           "legendFormat": "total pnl",
           "instant": true
@@ -122,7 +122,7 @@
       "type": "stat",
       "title": "Operations",
       "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -146,7 +146,7 @@
       "targets": [
         {
           "refId": "A",
-          "datasource": "Prometheus",
+          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
           "expr": "sum(trading_autopilot_operation_count{session_id=~\"$session_id\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"}))",
           "legendFormat": "operations",
           "instant": true
@@ -158,7 +158,7 @@
       "type": "timeseries",
       "title": "Balance",
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 5},
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -180,7 +180,7 @@
       "targets": [
         {
           "refId": "A",
-          "datasource": "Prometheus",
+          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
           "expr": "sum by (kind) (trading_autopilot_balance_quote{session_id=~\"$session_id\",kind=~\"cash|equity\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"}))",
           "legendFormat": "{{kind}}"
         }
@@ -191,7 +191,7 @@
       "type": "timeseries",
       "title": "P&L",
       "gridPos": {"h": 9, "w": 12, "x": 12, "y": 5},
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -213,7 +213,7 @@
       "targets": [
         {
           "refId": "A",
-          "datasource": "Prometheus",
+          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
           "expr": "sum by (kind) (trading_autopilot_pnl_quote{session_id=~\"$session_id\",kind=~\"realized|unrealized|total|drawdown\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"}))",
           "legendFormat": "{{kind}}"
         }
@@ -224,7 +224,7 @@
       "type": "piechart",
       "title": "Portfolio allocation (absolute value)",
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 14},
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -243,7 +243,7 @@
       "targets": [
         {
           "refId": "A",
-          "datasource": "Prometheus",
+          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
           "expr": "sum by (asset) (trading_autopilot_allocation_value_quote{session_id=~\"$session_id\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"}))",
           "legendFormat": "{{asset}}",
           "instant": true
@@ -255,7 +255,7 @@
       "type": "bargauge",
       "title": "Operation counts",
       "gridPos": {"h": 9, "w": 12, "x": 12, "y": 14},
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -277,7 +277,7 @@
       "targets": [
         {
           "refId": "A",
-          "datasource": "Prometheus",
+          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
           "expr": "sum by (operation) (trading_autopilot_operation_count{session_id=~\"$session_id\"} and on(session_id) topk(1, trading_autopilot_snapshot_generated_at{session_id=~\"$session_id\"}))",
           "legendFormat": "{{operation}}",
           "instant": true
@@ -289,7 +289,7 @@
       "type": "table",
       "title": "Latest transactions",
       "gridPos": {"h": 9, "w": 24, "x": 0, "y": 23},
-      "datasource": "Prometheus",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -368,7 +368,7 @@
       "targets": [
         {
           "refId": "A",
-          "datasource": "Prometheus",
+          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
           "expr": "topk(10, trading_autopilot_transaction_timestamp_milliseconds{session_id=~\"$session_id\"})",
           "format": "table",
           "instant": true
