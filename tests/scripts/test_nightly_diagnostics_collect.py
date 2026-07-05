@@ -93,3 +93,26 @@ def test_summarize_cron_jobs_never_ran_job_counts_as_ok(tmp_path):
     summary = collect.summarize_cron_jobs(jobs, tmp_path / "output")
     assert summary["failed"] == [] and summary["paused"] == []
     assert summary["ok"][0]["last_status"] == "never-ran"
+
+
+def test_diff_known_issues_marks_new_known_resolved():
+    now = datetime(2026, 7, 5, 6, 40, 0)
+    state = {
+        "old sig": {"first_seen": "2026-07-01T06:40:00", "last_seen": "2026-07-04T06:40:00", "count": 2},
+        "gone sig": {"first_seen": "2026-06-20T06:40:00", "last_seen": "2026-07-04T06:40:00", "count": 1},
+    }
+    findings = [
+        {"level": "ERROR", "signature": "old sig", "count": 3, "examples": []},
+        {"level": "ERROR", "signature": "fresh sig", "count": 1, "examples": []},
+    ]
+    annotated, resolved, new_state = collect.diff_known_issues(state, findings, now)
+    by_sig = {f["signature"]: f for f in annotated}
+    assert by_sig["old sig"]["status"] == "known"
+    assert by_sig["old sig"]["age_days"] == 4
+    assert by_sig["old sig"]["first_seen"] == "2026-07-01T06:40:00"
+    assert by_sig["fresh sig"]["status"] == "new"
+    assert by_sig["fresh sig"]["age_days"] == 0
+    assert [r["signature"] for r in resolved] == ["gone sig"]
+    assert set(new_state) == {"old sig", "fresh sig"}
+    assert new_state["old sig"]["last_seen"] == "2026-07-05T06:40:00"
+    assert new_state["fresh sig"]["first_seen"] == "2026-07-05T06:40:00"
