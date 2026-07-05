@@ -45,7 +45,7 @@ Run every check against every material in the package:
 5. **Fit.** CV top third shows relevance to the vacancy; CL explains fit rather than repeating the CV; recruiter message has a clear hook; questionnaire answers reduce screening friction; role keywords present naturally. → `format` or `tone`, severity medium.
 6. **Tone.** Senior and calm; no hype, desperation, clichés, or inflated phrases; channel-appropriate concision. → `tone`, severity low–medium.
 7. **Risk.** Weak areas handled consciously; missing answers flagged rather than papered over; package not more aggressive than the evidence supports; nothing accidentally disqualifying. → `risk`, severity per impact.
-8. **Formatting.** CV skimmable; CL under one page; message within channel limits; questionnaire copy-paste ready; placeholders clearly marked; file names follow `denis_vanyushkin_<type>_[company]_[role]` snake_case. → `format`, severity low.
+8. **Formatting.** CV within 2 pages (bullet pyramid respected: full detail only for the most role-relevant 2–3 positions, tail roles one line; a CV over ~25 bullets or ~100 lines is a `format` finding); CV skimmable; CL under one page; message within channel limits; questionnaire copy-paste ready; placeholders clearly marked; file names follow `denis_vanyushkin_<type>_[company]_[role]` snake_case. → `format`, severity low.
 9. **Per-material Definition of Done** from each material skill.
 
 ## Required Inputs
