@@ -228,3 +228,6 @@ result
 
 # ── Tool Search live-test harness ─────────────────────────────────────────────
 scripts/out/
+
+# controlled pipeline workspace report artifact (durable copy lives in ~/.hermes/controlled-runs/)
+controlled_execution_report.json
