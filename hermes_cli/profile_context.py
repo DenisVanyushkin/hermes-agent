@@ -19,7 +19,7 @@ from hermes_cli.role_llm_router import (
     load_role_routing_config,
     select_role_via_llm,
 )
-from hermes_cli.profile_request_context import classification_request_text
+from hermes_cli.profile_request_context import classification_request_text, extract_role_pin
 from hermes_cli.profile_routing import RouteDecision, route_task, load_profile_registry, DEFAULT_PROFILE_REGISTRY_PATH
 from hermes_cli.profile_validation import PROFILE_ID_ALIASES
 from utils import env_var_enabled
@@ -346,7 +346,11 @@ def build_role_context_for_task(
         )
 
     llm_role_decision = None
-    if execution_plan is None:
+    # A [ROLE PIN: ...] directive (cron `role` field) is deterministic
+    # operator config — skip the LLM router entirely so a router timeout
+    # can never turn a pinned job into a keyword-cascade lottery.
+    pinned_role = extract_role_pin(task)
+    if execution_plan is None and pinned_role is None:
         try:
             _rr_cfg = _load_role_routing_config_cached()
             if _rr_cfg.strategy == "llm":

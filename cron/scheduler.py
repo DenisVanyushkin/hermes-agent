@@ -2474,6 +2474,14 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "Never combine [SILENT] with content — either report your "
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
+    # Deterministic role pin from the job's `role` field. Placed after the
+    # cron banner (which routing strips from the very start of the text) so
+    # hermes_cli.profile_request_context.extract_role_pin() finds it and role
+    # selection bypasses both the LLM router and the keyword cascade —
+    # injected script output can no longer poison role choice.
+    job_role = str(job.get("role") or "").strip()
+    if job_role:
+        prompt = f"[ROLE PIN: {job_role}]\n\n" + prompt
     prompt = cron_hint + prompt
     if skills is None:
         legacy = job.get("skill")

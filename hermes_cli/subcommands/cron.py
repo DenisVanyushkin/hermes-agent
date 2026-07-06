@@ -91,6 +91,15 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         ),
     )
     cron_create.add_argument(
+        "--role",
+        help=(
+            "Pin the agent role for this job (e.g. scribe, engineer). "
+            "Injected as a [ROLE PIN: ...] directive that deterministically "
+            "overrides LLM/keyword role routing — recommended for --script "
+            "jobs whose injected output could otherwise poison role selection."
+        ),
+    )
+    cron_create.add_argument(
         "--no-agent",
         dest="no_agent",
         action="store_true",
@@ -145,6 +154,13 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "Path to a script under ~/.hermes/scripts/. Pass empty string to clear. "
             "With --no-agent the script IS the job; otherwise its stdout is "
             "injected into the agent's prompt each run."
+        ),
+    )
+    cron_edit.add_argument(
+        "--role",
+        help=(
+            "Pin the agent role for this job (e.g. scribe, engineer). "
+            "Pass empty string to clear the pin."
         ),
     )
     cron_edit.add_argument(
