@@ -89,6 +89,56 @@ class TestImapResponseGuard(unittest.TestCase):
         self.assertEqual(len(results), 1)
 
 
+class TestImapConnectionCleanup(unittest.TestCase):
+    """Every IMAP connection is torn down on ALL exit paths.
+
+    A graceful ``logout()`` on a timed-out/half-open socket can fail without
+    ever shutting the TCP session down, leaving the server holding an idle
+    connection until ITS timeout. Poll cycles every ~15s stack these up into
+    ``[ALERT] Too many simultaneous connections``. Guarantee a hard socket
+    close so the server-side session is released immediately.
+    """
+
+    def test_fetch_forces_shutdown_when_logout_fails(self):
+        adapter = _make_adapter()
+        mock_imap = MagicMock()
+        mock_imap.uid.return_value = ("OK", [b""])  # no unseen messages
+        mock_imap.logout.side_effect = OSError("broken pipe")
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            adapter._fetch_new_messages()  # must not raise
+        # logout() failed, so the socket must be force-closed instead of leaked
+        mock_imap.shutdown.assert_called_once()
+
+    def test_fetch_timeout_closes_connection(self):
+        adapter = _make_adapter()
+        mock_imap = MagicMock()
+        mock_imap.login.side_effect = TimeoutError("read operation timed out")
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            adapter._fetch_new_messages()  # must not raise
+        # The connection was created but login timed out — it MUST be torn down.
+        self.assertTrue(
+            mock_imap.logout.called or mock_imap.shutdown.called,
+            "timed-out IMAP connection was not closed (session leak)",
+        )
+
+    def test_connect_closes_socket_on_login_failure(self):
+        import asyncio
+
+        adapter = _make_adapter()
+        mock_imap = MagicMock()
+        mock_imap.login.side_effect = OSError(
+            "b'[ALERT] Too many simultaneous connections. (Failure)'"
+        )
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            ok = asyncio.run(adapter.connect())
+        self.assertFalse(ok)
+        # connect() opened a socket then login failed — it MUST NOT leak it.
+        self.assertTrue(
+            mock_imap.logout.called or mock_imap.shutdown.called,
+            "connect() leaked the IMAP socket on login failure",
+        )
+
+
 class TestMessageIdDomain(unittest.TestCase):
     """Message-ID generation tolerates EMAIL_ADDRESS without '@'."""
 
