@@ -12,7 +12,11 @@ import json
 import re
 
 from hermes_cli.profile_approval import ApprovalPreview
-from hermes_cli.profile_request_context import classification_request_text, routing_request_text
+from hermes_cli.profile_request_context import (
+    classification_request_text,
+    extract_role_pin,
+    routing_request_text,
+)
 from hermes_cli.profile_routing import RouteDecision, route_task
 from hermes_cli.profile_validation import PROFILE_ID_ALIASES
 
@@ -969,6 +973,12 @@ _BUILTIN_ROUTING_PROFILES = frozenset(
 
 
 def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, bool, str]:
+    # An explicit [ROLE PIN: ...] directive (cron job `role` field) is
+    # operator configuration, not inferred intent — it wins over everything.
+    pinned_role = extract_role_pin(task)
+    if pinned_role:
+        return pinned_role, False, "role pinned via [ROLE PIN] directive"
+
     routing_task = routing_request_text(task)
     normalized = _normalize(routing_task)
     action_normalized = _action_text(routing_task)
