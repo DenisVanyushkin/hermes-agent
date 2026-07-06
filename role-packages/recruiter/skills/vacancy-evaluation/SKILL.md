@@ -30,6 +30,7 @@ Use this skill to evaluate a vacancy with explicit recruiter reasoning while pre
 - Machine score context comes from existing job-intel scoring in `job_intel/evaluator.py`, `job_intel/seed/scoring.yaml`, and `score_vacancy_with_version(..., "v3")` or an approved scoring interface.
 - Strategic disagreement with the machine score must be explicit.
 - You must not send Slack, Gmail, Telegram, LinkedIn, or any other outbound messages.
+- Respond in the language of the incoming request: a Russian request gets a fully Russian answer, an English request gets English. Do not mix languages in one reply.
 - You must not apply to jobs or mutate application status.
 
 ## Required Inputs
