@@ -18,6 +18,20 @@ _THREAD_CONTEXT_LINE_PREFIXES = (
     "[thread reply]",
 )
 _CRONJOB_RESPONSE_PREFIX = "cronjob response:"
+# Runtime-collected data injected by cron/scheduler.py:_build_job_prompt().
+# These sections carry script stdout / upstream-job output whose content
+# (log signatures like "image_gen ...") must never drive role selection —
+# see the 2026-07-06 morning-diagnostics artist misroute.
+_INJECTED_DATA_SECTION_PREFIXES = (
+    "## script output",
+    "## script error",
+    "## output from job",
+)
+# Deterministic role pin injected from a cron job's `role` field.
+_ROLE_PIN_LINE_RE = re.compile(
+    r"^\[role pin:\s*([a-z][a-z0-9_]{0,63})\]\s*$",
+    re.IGNORECASE,
+)
 _SEPARATOR_RE = re.compile(r"^-{3,}\s*$")
 _BRACKETED_SPEAKER_RE = re.compile(r"^\[[^\]\n]{1,80}\]\s*")
 _APPROVAL_CONSTRAINT_PREFIXES = (
@@ -66,6 +80,23 @@ def _strip_leading_reply_quote_region(text: str) -> str:
     return "\n".join(kept).strip()
 
 
+def extract_role_pin(task: str) -> str | None:
+    """Return the role pinned via a ``[ROLE PIN: <role>]`` line, if any.
+
+    The pin is injected by the cron scheduler from a job's ``role`` field and
+    deterministically overrides both the LLM role router and the keyword
+    cascade. Only well-formed role identifiers match; the first pin wins.
+    """
+
+    if not isinstance(task, str) or not task:
+        return None
+    for raw_line in task.splitlines():
+        match = _ROLE_PIN_LINE_RE.match(raw_line.strip())
+        if match:
+            return match.group(1).lower()
+    return None
+
+
 def routing_request_text(task: str) -> str:
     """Return routing text with safe reply pointers but without evidence bodies."""
 
@@ -79,6 +110,8 @@ def routing_request_text(task: str) -> str:
     kept: list[str] = []
     in_thread_context = False
     in_cron_response = False
+    in_injected_data = False
+    injected_data_fences = 0
 
     for raw_line in stripped.splitlines():
         line = raw_line.rstrip()
@@ -95,8 +128,23 @@ def routing_request_text(task: str) -> str:
                 in_cron_response = False
             continue
 
+        if in_injected_data:
+            if compact.startswith("```"):
+                injected_data_fences += 1
+                if injected_data_fences >= 2:
+                    in_injected_data = False
+            continue
+
         if any(lower.startswith(prefix) for prefix in _THREAD_CONTEXT_START_PREFIXES):
             in_thread_context = True
+            continue
+
+        if any(lower.startswith(prefix) for prefix in _INJECTED_DATA_SECTION_PREFIXES):
+            in_injected_data = True
+            injected_data_fences = 0
+            continue
+
+        if _ROLE_PIN_LINE_RE.match(compact):
             continue
 
         if lower.startswith(_CRONJOB_RESPONSE_PREFIX):
@@ -130,6 +178,8 @@ def classification_request_text(task: str) -> str:
     kept: list[str] = []
     in_thread_context = False
     in_cron_response = False
+    in_injected_data = False
+    injected_data_fences = 0
 
     for raw_line in stripped.splitlines():
         line = raw_line.rstrip()
@@ -146,8 +196,23 @@ def classification_request_text(task: str) -> str:
                 in_cron_response = False
             continue
 
+        if in_injected_data:
+            if compact.startswith("```"):
+                injected_data_fences += 1
+                if injected_data_fences >= 2:
+                    in_injected_data = False
+            continue
+
         if any(lower.startswith(prefix) for prefix in _THREAD_CONTEXT_START_PREFIXES):
             in_thread_context = True
+            continue
+
+        if any(lower.startswith(prefix) for prefix in _INJECTED_DATA_SECTION_PREFIXES):
+            in_injected_data = True
+            injected_data_fences = 0
+            continue
+
+        if _ROLE_PIN_LINE_RE.match(compact):
             continue
 
         if any(lower.startswith(prefix) for prefix in _THREAD_CONTEXT_LINE_PREFIXES):
