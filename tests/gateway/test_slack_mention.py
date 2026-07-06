@@ -390,21 +390,25 @@ def test_mpim_unmentioned_does_not_react():
 
 
 def test_reaction_guard_pinned_to_production_expression():
-    """Regression teeth for the reaction guard.
+    """Regression teeth for the reaction ack site.
 
-    ``_reaction_guard`` mirrors the production expression at the
-    ``_should_react = (is_one_to_one_dm or is_mentioned) ...`` site in
-    ``adapter.py``. This test pins that source line so a revert of the fix
-    (back to ``is_dm or is_mentioned``, which reacts to unmentioned MPIMs)
-    fails here instead of silently passing a self-referential lambda.
+    Since commit de8051c23 the reaction lifecycle applies to every message
+    that survives the response gating in ``_handle_slack_message`` (the
+    mention/DM filtering happens via early returns above), so the production
+    expression is now ``_should_react = self._reactions_enabled()``. This
+    test pins that source line so a revert to per-message-type guards -- in
+    particular the buggy ``(is_dm or is_mentioned)`` form that reacted to
+    unmentioned MPIMs -- fails here instead of silently passing a
+    self-referential lambda.
     """
     src = inspect.getsource(SlackAdapter._handle_slack_message)
-    assert "(is_one_to_one_dm or is_mentioned)" in src, (
-        "reaction guard no longer keys off is_one_to_one_dm — an unmentioned "
-        "MPIM would react again (regression of the group-DM fix)"
+    assert "_should_react = self._reactions_enabled()" in src, (
+        "reaction ack site changed -- reactions must apply to all processed "
+        "messages, gated only by the response filtering above and the "
+        "reactions_enabled config"
     )
     assert "(is_dm or is_mentioned)" not in src, (
-        "reaction guard reverted to is_dm — MPIMs would react when unmentioned"
+        "reaction guard reverted to is_dm -- MPIMs would react when unmentioned"
     )
 
 
