@@ -147,6 +147,34 @@ def _send_imap_id(imap: "imaplib.IMAP4") -> None:
         logger.debug("[Email] IMAP ID command not accepted: %s", e)
 
 
+def _close_imap_quietly(imap: "Optional[imaplib.IMAP4]") -> None:
+    """Tear down an IMAP connection on ALL exit paths, releasing the server session.
+
+    A graceful ``logout()`` is preferred, but on a timed-out or half-open socket
+    it can raise (or block until the socket timeout) WITHOUT ever shutting the
+    TCP session down — the server then holds the connection idle until its own
+    timeout. Polling every ``EMAIL_POLL_INTERVAL`` seconds stacks these orphaned
+    sessions up until the provider rejects new logins with
+    ``[ALERT] Too many simultaneous connections`` (a self-reinforcing storm,
+    since each rejected reconnect can leak yet another half-open socket).
+
+    So: attempt the graceful logout, then ALWAYS force ``shutdown()`` to
+    guarantee the socket — and thus the server-side session — is gone. Calling
+    ``shutdown()`` after a successful ``logout()`` is a harmless no-op (the
+    socket is already closed) and is swallowed.
+    """
+    if imap is None:
+        return
+    try:
+        imap.logout()
+    except Exception:  # noqa: BLE001 — logout on a broken socket is expected to fail
+        pass
+    try:
+        imap.shutdown()
+    except Exception:  # noqa: BLE001 — already closed after a clean logout, or never opened
+        pass
+
+
 def _is_automated_sender(address: str, headers: dict) -> bool:
     """Return True if this email is from an automated/noreply source."""
     addr = address.lower()
@@ -480,6 +508,9 @@ class EmailAdapter(BasePlatformAdapter):
         self._seen_uids: set = set()
         self._seen_uids_max: int = 2000   # cap to prevent unbounded memory growth
         self._poll_task: Optional[asyncio.Task] = None
+        # Consecutive IMAP fetch failures; drives exponential poll backoff so a
+        # saturated/unreachable server is not hammered every poll interval.
+        self._imap_error_streak: int = 0
 
         # Map chat_id (sender email) -> last subject + message-id for threading
         self._thread_context: Dict[str, Dict[str, str]] = {}
@@ -580,6 +611,7 @@ class EmailAdapter(BasePlatformAdapter):
             )
             return False
 
+        imap = None
         try:
             # Test IMAP connection
             imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
@@ -593,11 +625,16 @@ class EmailAdapter(BasePlatformAdapter):
                     self._seen_uids.add(uid)
             # Keep only the most recent UIDs to prevent unbounded growth
             self._trim_seen_uids()
-            imap.logout()
             logger.info("[Email] IMAP connection test passed. %d existing messages skipped.", len(self._seen_uids))
         except Exception as e:
             logger.error("[Email] IMAP connection failed: %s", e)
             return False
+        finally:
+            # Always tear the probe connection down — the old code only logged out
+            # on the success path, so a login/select failure (e.g. "Too many
+            # simultaneous connections") leaked the socket on every reconnect
+            # attempt, feeding the very saturation that caused the failure.
+            _close_imap_quietly(imap)
 
         try:
             # Test SMTP connection
@@ -637,7 +674,18 @@ class EmailAdapter(BasePlatformAdapter):
                 break
             except Exception as e:
                 logger.error("[Email] Poll error: %s", e)
-            await asyncio.sleep(self._poll_interval)
+            # Exponential backoff while IMAP is failing (streak set by
+            # _fetch_new_messages). Doubles the interval per consecutive error,
+            # capped at 5 minutes, so a "Too many simultaneous connections"
+            # storm decays instead of self-perpetuating. Reset to the base
+            # interval the moment a poll succeeds.
+            delay = self._poll_interval
+            if self._imap_error_streak:
+                delay = min(
+                    self._poll_interval * (2 ** self._imap_error_streak),
+                    300,
+                )
+            await asyncio.sleep(delay)
 
     async def _check_inbox(self) -> None:
         """Check INBOX for unseen messages and dispatch them."""
@@ -656,6 +704,8 @@ class EmailAdapter(BasePlatformAdapter):
                 imap.login(self._address, self._password)
                 _send_imap_id(imap)
                 imap.select("INBOX")
+                # Connection is healthy — clear any backoff accrued by prior errors.
+                self._imap_error_streak = 0
 
                 status, data = imap.uid("search", None, "UNSEEN")
                 if status != "OK" or not data or not data[0]:
@@ -737,11 +787,13 @@ class EmailAdapter(BasePlatformAdapter):
                         "auth_reason": auth_reason,
                     })
             finally:
-                try:
-                    imap.logout()
-                except Exception:
-                    pass
+                _close_imap_quietly(imap)
         except Exception as e:
+            # A connection/read failure (timeout, or the server's
+            # "Too many simultaneous connections" refusal). Count it so the
+            # poll loop can back off instead of hammering a saturated server
+            # every EMAIL_POLL_INTERVAL seconds.
+            self._imap_error_streak += 1
             logger.error("[Email] IMAP fetch error: %s", e)
         return results
 
