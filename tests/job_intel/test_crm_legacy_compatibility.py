@@ -95,18 +95,30 @@ def legacy_feedback_count(store: JobIntelStore) -> int:
         return int(conn.execute("SELECT COUNT(*) FROM vacancy_feedback").fetchone()[0])
 
 
-def test_run_feedback_event_returns_ok_when_crm_branch_raises(tmp_path, monkeypatch):
+def test_run_feedback_event_returns_ok_when_feedback_side_branch_raises(tmp_path, monkeypatch):
+    """Legacy feedback recording must survive downstream side-branch failures.
+
+    The old inline CRM branch (``_crm_handle_feedback_event``) was removed from
+    ``cli.run_feedback_event``; the failure-tolerant side branch is now the
+    negative-feedback prompt built via ``_feedback_loop_service``. If that
+    branch raises, the event handler must still return ``status=ok`` and the
+    legacy ``vacancy_feedback`` row must be recorded.
+    """
     store = make_store(tmp_path, monkeypatch)
     vacancy_id, slack_message_ts = seed_legacy_message_and_crm_mapping(store)
     assert vacancy_id > 0
-    monkeypatch.setattr(cli, "_crm_handle_feedback_event", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("crm boom")))
+    monkeypatch.setattr(
+        cli,
+        "_feedback_loop_service",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("feedback boom")),
+    )
 
     result = json.loads(
         cli.run_feedback_event(
             {
                 "type": "reaction_added",
                 "user": "U_TEST",
-                "reaction": "+1",
+                "reaction": "-1",
                 "item": {"channel": "C123", "ts": slack_message_ts},
                 "event_ts": "1760001111.000001",
             }
@@ -114,5 +126,5 @@ def test_run_feedback_event_returns_ok_when_crm_branch_raises(tmp_path, monkeypa
     )
 
     assert result["status"] == "ok"
-    assert result["crm_status"] == "error"
+    assert result["feedback_prompt"]["status"] == "error"
     assert legacy_feedback_count(store) == 1
