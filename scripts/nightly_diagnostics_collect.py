@@ -27,6 +27,28 @@ LOG_LINE_RE = re.compile(
 )
 MEMORY_RE = re.compile(r"\[MEMORY\] rss=(\d+)mb", re.IGNORECASE)
 
+# Known-benign log lines that are WARNING-level but carry no actionable signal —
+# routine startup narration or deliberately-unfixed config gaps. They are dropped
+# from log findings so the nightly report stops re-surfacing them every night.
+# Each entry is a substring matched against the message text (after the
+# "TIMESTAMP LEVEL " prefix). Keep this list curated and commented — add a line
+# ONLY when the warning is confirmed cosmetic or an accepted, deliberate state.
+NOISE_PATTERNS = (
+    # Telegram: normal startup path, logged at WARNING. Adapter resolves backup
+    # API IPs via DoH then connects on attempt 1/8 — always followed by an INFO
+    # "Connected to Telegram". No impact. (2026-07-06)
+    "Discovering Telegram API fallback IPs via DNS-over-HTTPS",
+    "Connecting to Telegram (attempt",
+    # Slack: multi-person-DM (mpim) support is deliberately NOT enabled — the app
+    # lacks mpim:history/message.mpim and we chose not to add them. Regular
+    # channels and 1:1 DMs are unaffected. Accepted gap, not a defect. (2026-07-06)
+    "Group DMs (multi-person DMs) will not work",
+)
+
+
+def _is_noise(text: str) -> bool:
+    return any(pattern in text for pattern in NOISE_PATTERNS)
+
 
 def parse_log_line(line: str) -> dict | None:
     match = LOG_LINE_RE.match(line.strip())
@@ -53,6 +75,8 @@ def extract_log_findings(lines, since: datetime) -> list[dict]:
         if not parsed or parsed["ts"] < since:
             continue
         if parsed["level"] not in ("ERROR", "WARNING", "CRITICAL"):
+            continue
+        if _is_noise(parsed["rest"]):
             continue
         sig = normalize_signature(parsed["rest"])
         bucket = buckets.setdefault(
