@@ -1373,6 +1373,25 @@ class SlackAdapter(BasePlatformAdapter):
                 exc,
             )
 
+        # Reaction-triggered recruiter tasks: 🔍 → vacancy+company evaluation
+        # (Russian), 👍 → application document package (English). Injects a
+        # synthetic inbound message so the reply lands in the card's thread.
+        # Independent of feedback recording above — failures are log-only.
+        try:
+            await self._maybe_dispatch_vacancy_reaction_task(event)
+        except Exception as exc:
+            logger.exception(
+                "vacancy_reaction_trigger_failed channel=%s ts=%s reaction=%s: %s",
+                channel,
+                message_ts,
+                reaction,
+                exc,
+            )
+            try:
+                await self._add_reaction(channel, message_ts, "warning")
+            except Exception:  # pragma: no cover - best effort
+                pass
+
     async def _handle_slack_idea_reaction_event(self, event: dict) -> None:
         """Capture a configured 👍 reaction on a bot-authored idea post."""
         from job_intel.idea_reaction_capture import process_event
@@ -1452,6 +1471,88 @@ class SlackAdapter(BasePlatformAdapter):
         )
         logger.info("slack_idea_reaction_capture_result %s", result)
 
+    async def _maybe_dispatch_vacancy_reaction_task(self, event: dict) -> None:
+        """🔍/👍 on a tracked vacancy card → synthetic recruiter task in-thread."""
+        from job_intel.reaction_triggers import (
+            build_trigger_prompt,
+            classify_trigger,
+            should_process,
+        )
+
+        if str((event or {}).get("type") or "") != "reaction_added":
+            return
+        reaction = str((event or {}).get("reaction") or "").strip()
+        kind = classify_trigger(reaction)
+        if not kind:
+            return
+        item = (event or {}).get("item") or {}
+        channel = str(item.get("channel") or "").strip()
+        message_ts = str(item.get("ts") or "").strip()
+        user_id = str((event or {}).get("user") or "").strip()
+        if not channel or not message_ts or not user_id:
+            return
+
+        from job_intel.cli import _logical_aliases_for_channel_id, _store
+
+        store = _store()
+        message = store.find_vacancy_message(
+            slack_channel=channel, slack_message_ts=message_ts
+        )
+        if not message:
+            for alias in _logical_aliases_for_channel_id(channel):
+                message = store.find_vacancy_message(
+                    slack_channel=alias, slack_message_ts=message_ts
+                )
+                if message:
+                    break
+        if not message:
+            logger.info(
+                "vacancy_reaction_trigger_not_tracked channel=%s ts=%s reaction=%s",
+                channel,
+                message_ts,
+                reaction,
+            )
+            return
+
+        if not should_process(
+            channel=channel, message_ts=message_ts, reaction=reaction
+        ):
+            logger.info(
+                "vacancy_reaction_trigger_duplicate channel=%s ts=%s reaction=%s",
+                channel,
+                message_ts,
+                reaction,
+            )
+            return
+
+        team_id = self._channel_team.get(channel, "")
+        bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
+        prompt = build_trigger_prompt(kind, message)
+        if bot_uid:
+            # Mention prefix so channel mention-gating in _handle_slack_message
+            # processes the synthetic message; the mention is stripped there.
+            prompt = f"<@{bot_uid}> {prompt}"
+
+        synthetic = {
+            "type": "message",
+            "text": prompt,
+            "user": user_id,
+            "channel": channel,
+            "channel_type": "channel",
+            # Reaction event_ts is unique per event → safe for the message
+            # deduplicator; also dedups Slack redeliveries at message level.
+            "ts": str((event or {}).get("event_ts") or message_ts),
+            "thread_ts": message_ts,
+            "team": team_id,
+        }
+        logger.info(
+            "vacancy_reaction_trigger_dispatch kind=%s channel=%s ts=%s vacancy_id=%s",
+            kind,
+            channel,
+            message_ts,
+            message.get("vacancy_id"),
+        )
+        await self._handle_slack_message(synthetic)
 
     async def create_handoff_thread(
         self,
