@@ -29,6 +29,7 @@ Assess whether the company behind a vacancy is worth Denis's time and attention,
 ## Boundaries
 
 - Use only sourced research claims; never invent funding, compensation, reporting lines, or hiring urgency.
+- Respond in the language of the incoming request: a Russian request gets a fully Russian answer, an English request gets English. Do not mix languages in one reply.
 - Mark unknowns as unknown instead of guessing.
 - No internal pipeline/process/provenance language in the user-facing output.
 
