@@ -101,3 +101,46 @@ def prune_seen(conn: sqlite3.Connection, now: datetime, ttl_days: int = 14) -> i
     cur = conn.execute("DELETE FROM seen WHERE first_seen < ?", (cutoff,))
     conn.commit()
     return cur.rowcount
+
+
+def normalize_item(raw: dict) -> dict:
+    pub = raw.get("published_at") or ""
+    return {
+        "source": raw.get("source", ""),
+        "type": raw.get("type", ""),
+        "title": (raw.get("title") or "").strip(),
+        "canonical_url": canonical_url(raw.get("url", "")),
+        "summary": (raw.get("summary") or "").strip(),
+        "snippet": (raw.get("snippet") or "").strip(),
+        "published_at": pub,
+    }
+
+
+def _parse_iso(s: str):
+    try:
+        dt = datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def select_candidates(items, conn, now, max_items, freshness_hours):
+    cutoff = now - timedelta(hours=freshness_hours)
+    fresh, batch_seen = [], set()
+    for it in items:
+        url = it["canonical_url"]
+        if not url or url in batch_seen or is_seen(conn, url):
+            continue
+        pub = _parse_iso(it["published_at"])
+        if pub is not None and pub < cutoff:
+            continue
+        batch_seen.add(url)
+        fresh.append(it)
+    # freshest first; unknown dates sort last (treated as epoch-far-future? no — keep, sort by known date desc)
+    fresh.sort(key=lambda i: (_parse_iso(i["published_at"]) or now), reverse=True)
+    emitted, carried = fresh[:max_items], fresh[max_items:]
+    for it in emitted:
+        mark_seen(conn, it["canonical_url"], now)
+    return emitted, carried
