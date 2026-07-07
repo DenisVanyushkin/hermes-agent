@@ -16793,6 +16793,53 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "response_previewed": _stream_consumer is not None and bool(full_response),
         }
 
+    @staticmethod
+    def _build_upstream_sync_decision_ack(message, source):
+        """Queue a one-shot upstream-sync Mode B apply for an operator decision reply.
+
+        Returns an ack string when ``message`` is a recognized decision reply and a
+        decision is pending; otherwise ``None`` so the normal path proceeds. The
+        one-shot cron job carries the upstream-sync skill and an engineer role pin,
+        so it runs Mode B in the cron pool (bypassing the observe-only orchestrator)
+        and delivers the result back to the origin thread.
+        """
+        try:
+            from hermes_cli.upstream_sync_reply import (
+                parse_upstream_sync_decision_reply,
+                has_pending_upstream_decision,
+                build_upstream_sync_decision_job_spec,
+                default_upstream_sync_state_dir,
+            )
+
+            decisions = parse_upstream_sync_decision_reply(message)
+            if not decisions:
+                return None
+            if not has_pending_upstream_decision(default_upstream_sync_state_dir()):
+                return None
+
+            source_dict = {
+                "platform": str(getattr(source, "platform", "") or "") or None,
+                "chat_id": str(getattr(source, "chat_id", "") or "") or None,
+                "thread_id": str(getattr(source, "thread_id", "") or "") or None,
+                "user_id": str(getattr(source, "user_id", "") or "") or None,
+            }
+            spec = build_upstream_sync_decision_job_spec(message, source_dict, decisions)
+
+            from cron.jobs import create_job
+
+            create_job(**spec)
+        except Exception:
+            logger.warning("upstream-sync decision intercept failed", exc_info=True)
+            return None
+
+        decision_line = ", ".join(f"{fid}: {opt}" for fid, opt in sorted(decisions.items()))
+        return (
+            "✅ Recorded your upstream-sync decisions (" + decision_line + ").\n\n"
+            "Queued the apply step (Mode B): it will create a backup ref, rebase onto "
+            "upstream, run the smoketest, restart the gateway, and roll back on failure. "
+            "I will report the result in this thread shortly."
+        )
+
     def _pipeline_controlled_final_response(self, report: Any, *, orchestrator_mode: str) -> str | None:
         if str(orchestrator_mode or "").strip().lower() != "controlled_manual":
             return None
@@ -17229,6 +17276,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         except Exception:
             logger.warning("pipeline observe hook import/invocation failed", exc_info=True)
+
+        # Upstream-sync operator decisions must reach the upstream-sync skill
+        # (Mode B), not the pipeline orchestrator below - which runs observe-only
+        # and terminally swallows the reply (_pipeline_autonomous_terminal_response).
+        # Route a recognized decision reply (with a pending decision) to a one-shot
+        # cron job that applies Mode B, and ack immediately.
+        _us_ack = self._build_upstream_sync_decision_ack(message, source)
+        if _us_ack is not None:
+            logger.info(
+                "upstream-sync decision intercept: queued Mode B one-shot: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": _us_ack,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": _us_ack},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
 
         pipeline_orchestrator_report = None
         _orchestrator_mode = str(cfg_get(user_config, "pipelines", "orchestrator", "mode", default="disabled") or "disabled").strip().lower()
