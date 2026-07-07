@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 WINDOW_HOURS = 24
-DOCTOR_TIMEOUT = 90
+DOCTOR_TIMEOUT = 180
 ROTATE_DAYS = 14
 MAX_EXAMPLES = 3
 MAX_TAIL_CHARS = 700
