@@ -26,3 +26,32 @@ def test_load_sources_merges_file_over_defaults(tmp_path):
     assert cfg["max_items_per_day"] == 10          # overridden
     assert cfg["telegram_channels"] == ["foo"]     # overridden
     assert cfg["freshness_hours"] == 36            # default preserved
+
+
+from datetime import timedelta
+
+
+def test_canonical_url_strips_tracking_and_fragment():
+    a = nc.canonical_url("https://Example.com/Post?utm_source=x&id=5#frag")
+    b = nc.canonical_url("https://example.com/Post?id=5")
+    assert a == b
+    assert "utm_source" not in a and "#frag" not in a
+
+
+def test_canonical_url_removes_trailing_slash():
+    assert nc.canonical_url("https://x.io/a/") == nc.canonical_url("https://x.io/a")
+
+
+def test_seen_store_roundtrip_and_prune(tmp_path):
+    conn = nc.seen_connect(tmp_path / "seen.sqlite")
+    now = datetime(2026, 7, 7, tzinfo=timezone.utc)
+    url = "https://x.io/a"
+    assert nc.is_seen(conn, url) is False
+    nc.mark_seen(conn, url, now)
+    assert nc.is_seen(conn, url) is True
+    # not pruned within TTL
+    assert nc.prune_seen(conn, now + timedelta(days=13), ttl_days=14) == 0
+    assert nc.is_seen(conn, url) is True
+    # pruned past TTL
+    assert nc.prune_seen(conn, now + timedelta(days=15), ttl_days=14) == 1
+    assert nc.is_seen(conn, url) is False
