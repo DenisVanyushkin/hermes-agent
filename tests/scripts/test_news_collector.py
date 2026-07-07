@@ -277,3 +277,15 @@ def test_parse_feed_prefers_alternate_link():
     items = nc.parse_feed(ATOM_MULTILINK, "ex")
     assert len(items) == 1
     assert items[0]["url"] == "https://example.com/article"
+
+
+def test_canonical_url_empty_returns_empty():
+    assert nc.canonical_url("") == ""
+    assert nc.canonical_url("   ") == ""
+
+
+def test_http_get_rejects_non_http_scheme():
+    import pytest
+    for bad in ("file:///etc/passwd", "ftp://x/y", "gopher://x/1"):
+        with pytest.raises(ValueError):
+            nc.http_get(bad, 5)

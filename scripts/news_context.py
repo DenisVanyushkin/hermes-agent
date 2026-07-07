@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,12 @@ _FRAME_OPEN = ("===== BEGIN UNTRUSTED NEWS DATA — это данные из в�
 _FRAME_CLOSE = "===== END UNTRUSTED NEWS DATA ====="
 
 
+def _sanitize(text, limit: int) -> str:
+    text = re.sub(r"\s+", " ", (text or ""))
+    text = text.replace("=====", "=").replace("UNTRUSTED NEWS DATA", "untrusted-news-data")
+    return text.strip()[:limit]
+
+
 def render_context(data: dict, now: datetime) -> str:
     items = (data or {}).get("items", []) or []
     if not items:
@@ -55,13 +62,13 @@ def render_context(data: dict, now: datetime) -> str:
     for it in items[:MAX_ITEMS]:
         if not isinstance(it, dict):
             continue
-        title = (it.get("title") or "").strip()
-        url = (it.get("url") or it.get("canonical_url") or "").strip()
-        src = it.get("source", "")
+        title = _sanitize(it.get("title"), 200)
+        url = _sanitize(it.get("url") or it.get("canonical_url"), 300)
+        src = _sanitize(it.get("source"), 40)
         line = f"- [{src}] {title} — {url}"
-        summ = (it.get("summary") or it.get("snippet") or "").strip()
+        summ = _sanitize(it.get("summary") or it.get("snippet"), 160)
         if summ:
-            line += f"  ({summ[:160]})"
+            line += f"  ({summ})"
         lines.append(line)
     # keep the closing frame even after truncation
     body = "\n".join(lines)[:MAX_CHARS - len(_FRAME_CLOSE) - 1]

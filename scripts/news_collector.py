@@ -67,6 +67,8 @@ _TRACKING = ("utm_source", "utm_medium", "utm_campaign", "utm_term",
 
 
 def canonical_url(url: str) -> str:
+    if not url or not url.strip():
+        return ""          # empty input -> empty, so url-less items are skipped
     parts = urlsplit(url.strip())
     scheme = parts.scheme.lower()
     netloc = parts.netloc.lower()
@@ -331,6 +333,8 @@ _UA = "Mozilla/5.0 (compatible; HermesNewsCollector/1.0)"
 
 
 def http_get(url: str, timeout: int) -> bytes:
+    if urlsplit(url).scheme not in ("http", "https"):
+        raise ValueError(f"refusing non-http(s) URL: {url!r}")
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
