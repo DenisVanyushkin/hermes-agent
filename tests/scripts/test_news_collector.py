@@ -199,6 +199,9 @@ def test_looks_like_injection_multilingual():
         "New RAG library for fast retrieval — github.com/foo/bar",
         "OpenAI releases GPT-6 with better reasoning",
         "Обзор нового фреймворка для агентов",
+        "Using DSPy to evaluate and improve Datasette Agent's SQL system prompts",
+        "A deep dive into prompt injection defenses for agents",
+        "You are now able to run models locally with this tool",
     ]
     for m in misses:
         assert nc.looks_like_injection(m) is False, m
