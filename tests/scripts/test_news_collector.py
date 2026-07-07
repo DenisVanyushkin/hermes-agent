@@ -251,3 +251,29 @@ def test_write_candidates_shape(tmp_path):
     assert data["carried_count"] == 0
     assert data["dropped_injection"] == 1
     assert path.name == "candidates-latest.json"
+
+
+def test_select_candidates_undated_items_sort_after_dated(tmp_path):
+    conn = nc.seen_connect(tmp_path / "seen.sqlite")
+    now = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+    iso = lambda h: (now - timedelta(hours=h)).isoformat()
+    items = [
+        nc.normalize_item(_raw("https://x.io/undated", published="")),
+        nc.normalize_item(_raw("https://x.io/dated", published=iso(5))),
+    ]
+    emitted, _ = nc.select_candidates(items, conn, now, max_items=2, freshness_hours=36)
+    assert [i["canonical_url"] for i in emitted] == ["https://x.io/dated", "https://x.io/undated"]
+
+
+ATOM_MULTILINK = b'''<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+<entry><title>T</title>
+<link href="https://example.com/feed.atom" rel="self"/>
+<link href="https://example.com/article" rel="alternate"/>
+<updated>2026-07-07T08:00:00Z</updated></entry>
+</feed>'''
+
+
+def test_parse_feed_prefers_alternate_link():
+    items = nc.parse_feed(ATOM_MULTILINK, "ex")
+    assert len(items) == 1
+    assert items[0]["url"] == "https://example.com/article"
