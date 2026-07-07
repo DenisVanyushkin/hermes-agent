@@ -48,19 +48,20 @@ def parse_upstream_sync_decision_reply(text: Optional[str]) -> Optional[dict[int
 
 
 def has_pending_upstream_decision(state_dir: Path | str) -> bool:
-    """Return True when ``<state_dir>/pending.json`` awaits an operator decision."""
+    """Return True when ``<state_dir>/pending.json`` awaits an operator decision.
+
+    The gateway runs as an unprivileged user, but the sandbox writes
+    pending.json under a root-0700 home the gateway user cannot even traverse.
+    When the status can't be read (PermissionError anywhere in the path), assume
+    a decision is pending -- the queued one-shot re-checks the authoritative
+    status as root inside the sandbox. The narrow decision-reply pattern is the
+    primary gate, so this cannot fire on ordinary messages.
+    """
     pending = Path(state_dir) / "pending.json"
     try:
         raw = pending.read_text(encoding="utf-8")
     except PermissionError:
-        # The gateway runs as an unprivileged user; the sandbox writes
-        # pending.json root-owned 0600. We can stat (existence) but not read
-        # the status. Treat an existing-but-unreadable pending.json as pending
-        # -- the queued one-shot re-checks the authoritative status as root.
-        try:
-            return pending.exists()
-        except OSError:
-            return False
+        return True
     except OSError:
         return False
     try:
@@ -70,7 +71,6 @@ def has_pending_upstream_decision(state_dir: Path | str) -> bool:
     if not isinstance(data, dict):
         return False
     return data.get("status") == "awaiting_decision"
-
 
 import os
 
