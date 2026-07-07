@@ -55,3 +55,38 @@ def test_seen_store_roundtrip_and_prune(tmp_path):
     # pruned past TTL
     assert nc.prune_seen(conn, now + timedelta(days=15), ttl_days=14) == 1
     assert nc.is_seen(conn, url) is False
+
+
+def _raw(url, title="t", published=None, source="s", typ="rss"):
+    return {"source": source, "type": typ, "title": title, "url": url,
+            "summary": "", "snippet": "", "published_at": published}
+
+
+def test_normalize_item_defaults_and_canonicalizes():
+    it = nc.normalize_item(_raw("https://x.io/a/?utm_source=z", title="Hi"))
+    assert it["canonical_url"] == "https://x.io/a"
+    assert it["title"] == "Hi"
+    assert it["summary"] == "" and it["snippet"] == ""
+
+
+def test_select_candidates_dedups_caps_and_carries(tmp_path):
+    conn = nc.seen_connect(tmp_path / "seen.sqlite")
+    now = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+    iso = lambda h: (now - timedelta(hours=h)).isoformat()
+    items = [
+        nc.normalize_item(_raw("https://x.io/1", published=iso(1))),
+        nc.normalize_item(_raw("https://x.io/2", published=iso(2))),
+        nc.normalize_item(_raw("https://x.io/2?utm_source=z", published=iso(2))),  # dup of /2
+        nc.normalize_item(_raw("https://x.io/3", published=iso(99))),              # stale
+        nc.normalize_item(_raw("https://x.io/4", published=iso(3))),
+    ]
+    emitted, carried = nc.select_candidates(items, conn, now, max_items=2, freshness_hours=36)
+    urls = [i["canonical_url"] for i in emitted]
+    assert urls == ["https://x.io/1", "https://x.io/2"]   # freshest first, dup collapsed
+    assert [i["canonical_url"] for i in carried] == ["https://x.io/4"]  # stale dropped, overflow carried
+    # emitted are marked seen; carried is not
+    assert nc.is_seen(conn, "https://x.io/1") and nc.is_seen(conn, "https://x.io/2")
+    assert nc.is_seen(conn, "https://x.io/4") is False
+    # second run: /1 and /2 now suppressed, /4 becomes emittable
+    emitted2, _ = nc.select_candidates(items, conn, now, max_items=2, freshness_hours=36)
+    assert [i["canonical_url"] for i in emitted2] == ["https://x.io/4"]
