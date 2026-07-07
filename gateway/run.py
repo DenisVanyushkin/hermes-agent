@@ -16917,7 +16917,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         dirty_suffix = ""
         if blocked_reason == "workspace_dirty_baseline":
-            entries = getattr(controller, "blocked_dirty_entries", None) or []
+            # Classify the tree at render time: the block happens in the same
+            # turn as preflight, so the working tree is unchanged, and this
+            # avoids threading entries through the controller/helper result.
+            from pathlib import Path as _DirtyPath
+
+            from hermes_cli.baseline_git import classify_dirty
+
+            try:
+                entries = classify_dirty(_DirtyPath(__file__).resolve().parents[1])
+            except Exception:
+                entries = []
             shown = entries[:20]
             lines = "\n".join(f"  • [{e.category}] {e.path}" for e in shown)
             more = "" if len(entries) <= 20 else f"\n  … {len(entries) - 20} more"

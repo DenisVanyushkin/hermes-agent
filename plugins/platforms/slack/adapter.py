@@ -1437,11 +1437,18 @@ class SlackAdapter(BasePlatformAdapter):
         if not channel or not message_ts:
             return
         client = self._get_client(channel)
-        history = await client.conversations_history(
-            channel=channel, latest=message_ts, inclusive=True, limit=1
+        # conversations_replies (not _history) so we resolve the exact message
+        # even when the block was delivered as a thread reply — history returns
+        # only top-level timeline messages and would hand back the thread parent.
+        history = await client.conversations_replies(
+            channel=channel, ts=message_ts, inclusive=True, limit=1
         )
         messages = history.get("messages", []) or []
-        if not messages or not is_block_message(str(messages[0].get("text") or "")):
+        target = next(
+            (m for m in messages if str(m.get("ts")) == message_ts),
+            messages[0] if messages else None,
+        )
+        if target is None or not is_block_message(str(target.get("text") or "")):
             logger.info("baseline_doctor_reaction_ignored not_block_message ts=%s", message_ts)
             return
         result = run_baseline_doctor()
