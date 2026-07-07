@@ -58,3 +58,46 @@ def load_sources(path: Path) -> dict:
     except FileNotFoundError:
         data = {}
     return _deep_merge(DEFAULTS, data)
+
+
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+_TRACKING = ("utm_source", "utm_medium", "utm_campaign", "utm_term",
+             "utm_content", "ref", "fbclid", "gclid")
+
+
+def canonical_url(url: str) -> str:
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    netloc = parts.netloc.lower()
+    query = urlencode([(k, v) for k, v in parse_qsl(parts.query)
+                       if k.lower() not in _TRACKING])
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit((scheme, netloc, path, query, ""))
+
+
+def seen_connect(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE IF NOT EXISTS seen "
+                 "(url TEXT PRIMARY KEY, first_seen REAL)")
+    conn.commit()
+    return conn
+
+
+def is_seen(conn: sqlite3.Connection, url: str) -> bool:
+    row = conn.execute("SELECT 1 FROM seen WHERE url = ?",
+                       (canonical_url(url),)).fetchone()
+    return row is not None
+
+
+def mark_seen(conn: sqlite3.Connection, url: str, now: datetime) -> None:
+    conn.execute("INSERT OR IGNORE INTO seen(url, first_seen) VALUES (?, ?)",
+                 (canonical_url(url), now.timestamp()))
+    conn.commit()
+
+
+def prune_seen(conn: sqlite3.Connection, now: datetime, ttl_days: int = 14) -> int:
+    cutoff = (now - timedelta(days=ttl_days)).timestamp()
+    cur = conn.execute("DELETE FROM seen WHERE first_seen < ?", (cutoff,))
+    conn.commit()
+    return cur.rowcount
