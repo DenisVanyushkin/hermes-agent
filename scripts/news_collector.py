@@ -286,22 +286,21 @@ def select_github(repos: list[dict], min_stars_week: int) -> list[dict]:
 # Blunt multilingual denylist for copy-paste prompt-injection payloads. Not a
 # security boundary — a first-line filter that drops obvious attempts and logs
 # them. Real defense is toolset trimming + write-approval staging (see plan).
+# NOTE: keep patterns IMPERATIVE multi-word attack phrasings, not bare topic
+# words — this is AI/LLM news where "system prompt"/"prompt injection" are
+# legitimate subjects; bare patterns cause false drops.
 _INJECTION_PATTERNS = (
     # English
     r"ignore\s+(all\s+|the\s+)?(previous|above|prior|preceding)\s+(instructions?|prompts?|messages?)",
     r"disregard\s+(all\s+|the\s+)?(previous|above|prior|system)",
     r"forget\s+(everything|all|the\s+above|previous)",
-    r"you\s+are\s+now\b",
     r"new\s+instructions?\s*:",
-    r"system\s+prompt",
     r"reveal\s+(your|the)\s+(system\s+)?(prompt|instructions)",
     r"override\s+(your|the)\s+(instructions|rules|guardrails)",
     # Russian
     r"игнорируй\s+(все\s+|предыдущие\s+|вышеуказанные\s+)?(инструкции|указания|сообщения)",
     r"забудь\s+(все|всё|предыдущие|указанные)",
     r"нов(ые|ая)\s+инструкц",
-    r"систем(ный|ные)\s+промпт",
-    r"ты\s+теперь\b",
     r"покажи\s+(свой\s+|системный\s+)?промпт",
     # Spanish
     r"ignora\s+(las\s+)?(instrucciones|indicaciones)\s+(anteriores|previas)",
