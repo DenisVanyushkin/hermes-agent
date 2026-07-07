@@ -276,3 +276,49 @@ def select_github(repos: list[dict], min_stars_week: int) -> list[dict]:
             "summary": desc, "snippet": "", "published_at": "",
         })
     return out
+
+
+# Blunt multilingual denylist for copy-paste prompt-injection payloads. Not a
+# security boundary — a first-line filter that drops obvious attempts and logs
+# them. Real defense is toolset trimming + write-approval staging (see plan).
+_INJECTION_PATTERNS = (
+    # English
+    r"ignore\s+(all\s+|the\s+)?(previous|above|prior|preceding)\s+(instructions?|prompts?|messages?)",
+    r"disregard\s+(all\s+|the\s+)?(previous|above|prior|system)",
+    r"forget\s+(everything|all|the\s+above|previous)",
+    r"you\s+are\s+now\b",
+    r"new\s+instructions?\s*:",
+    r"system\s+prompt",
+    r"reveal\s+(your|the)\s+(system\s+)?(prompt|instructions)",
+    r"override\s+(your|the)\s+(instructions|rules|guardrails)",
+    # Russian
+    r"игнорируй\s+(все\s+|предыдущие\s+|вышеуказанные\s+)?(инструкции|указания|сообщения)",
+    r"забудь\s+(все|всё|предыдущие|указанные)",
+    r"нов(ые|ая)\s+инструкц",
+    r"систем(ный|ные)\s+промпт",
+    r"ты\s+теперь\b",
+    r"покажи\s+(свой\s+|системный\s+)?промпт",
+    # Spanish
+    r"ignora\s+(las\s+)?(instrucciones|indicaciones)\s+(anteriores|previas)",
+    r"olvida\s+(todo|las\s+instrucciones)",
+    # German
+    r"ignoriere\s+(alle\s+|die\s+)?(vorherigen|obigen)\s+(anweisungen|instruktionen)",
+    # French
+    r"ignore[zr]?\s+les\s+instructions\s+(précédentes|precedentes)",
+    # Chinese
+    r"忽略(以上|之前|前面)(的)?(指令|指示|说明)",
+    r"忘记(以上|之前|所有)",
+)
+_INJECTION_RE = [re.compile(p, re.IGNORECASE) for p in _INJECTION_PATTERNS]
+
+
+def looks_like_injection(text: str) -> bool:
+    if not text:
+        return False
+    norm = re.sub(r"\s+", " ", text)
+    return any(rx.search(norm) for rx in _INJECTION_RE)
+
+
+def item_text(item: dict) -> str:
+    return " ".join([item.get("title", ""), item.get("summary", ""),
+                     item.get("snippet", ""), item.get("canonical_url", "")])
