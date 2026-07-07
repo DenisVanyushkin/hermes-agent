@@ -67,189 +67,49 @@ except ImportError:  # pragma: no cover - plugin loaded outside package context
 
 logger = logging.getLogger(__name__)
 
-# User-Agent prefix for outbound Slack API calls so platform partners can
-# identify HermesAgent traffic — matching other Hermes outbound surfaces
-# that already set ``HermesAgent/<version>`` for platform-partner attribution.
-try:
-    from hermes_cli import __version__ as _HERMES_VERSION
-except Exception:
-    _HERMES_VERSION = "unknown"
-_HERMES_SLACK_USER_AGENT_PREFIX = f"HermesAgent/{_HERMES_VERSION}"
 
-_SLACK_ERROR_BODY_LIMIT_BYTES = 8 * 1024
+# --- baseline doctor (reaction-triggered) ----------------------------------
+import importlib.util as _ilu  # noqa: E402
 
-
-async def _read_error_text_limited(
-    response: Any,
-    *,
-    limit: int = _SLACK_ERROR_BODY_LIMIT_BYTES,
-) -> str:
-    content = getattr(response, "content", None)
-    read = getattr(content, "read", None)
-    if callable(read):
-        chunks: list[bytes] = []
-        total = 0
-        while total <= limit:
-            size = min(4096, limit + 1 - total)
-            chunk = await read(size)
-            if not chunk:
-                break
-            data = bytes(chunk)
-            chunks.append(data)
-            total += len(data)
-        if total > limit:
-            release = getattr(response, "release", None)
-            if callable(release):
-                release()
-        return b"".join(chunks)[:limit].decode("utf-8", errors="replace")
-
-    text = await response.text()
-    return str(text)[:limit]
-
-
-_SLACK_SPECIAL_MENTION_RE = re.compile(
-    r"<!(?:everyone|channel|here)(?:\|[^>\n]*)?>", re.IGNORECASE
+from hermes_cli.baseline_doctor_service import (  # noqa: E402
+    TRIGGER_REACTION,
+    classify_action,
+    is_block_message,
+    is_operator,
+    pop_pending,
+    record_pending,
 )
+from hermes_cli.baseline_doctor_service import apply_action as _apply_action  # noqa: E402
 
-# Cap on how many thread-root images are downloaded and delivered when the
-# bot is mentioned mid-thread (cold-start hydrate). Prior thread messages'
-# attachments are surfaced as text markers only — the root is special
-# because it is very often the artifact the mention is about ("@bot what's
-# in this chart?" posted as a reply under an image).
-_THREAD_ROOT_IMAGE_MAX = 4
+_AGENT_REPO = _Path(__file__).resolve().parents[3]
 
 
-def _slack_file_marker(file_obj: Dict[str, Any]) -> str:
-    """Render a compact text marker for a Slack file attachment.
-
-    Used by :meth:`SlackAdapter._render_message_text` so thread-context and
-    parent-text rendering surface that a message carried images/files even
-    though the context fetch is text-only. Name is sanitized (newlines and
-    brackets stripped) so a hostile filename can't fake context structure.
-    """
-    name = str(file_obj.get("name") or file_obj.get("title") or file_obj.get("id") or "file")
-    name = re.sub(r"[\r\n\[\]]+", " ", name).strip() or "file"
-    mimetype = str(file_obj.get("mimetype") or "")
-    if mimetype.startswith("image/"):
-        return f"[image: {name}]"
-    if mimetype.startswith("video/"):
-        return f"[video: {name}]"
-    if mimetype.startswith("audio/"):
-        return f"[audio: {name}]"
-    return f"[file: {name} ({mimetype})]" if mimetype else f"[file: {name}]"
+def _load_run_baseline_doctor():
+    spec = _ilu.spec_from_file_location(
+        "baseline_doctor", _AGENT_REPO / "scripts" / "baseline_doctor.py"
+    )
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.run_doctor
 
 
-# ── GFM markdown table preprocessing ──────────────────────────────────────
-# Slack mrkdwn does not render GFM-style pipe tables — they appear as literal
-# pipes. Wrapping in ``` fences makes them render as monospace preformatted
-# text, and padding cells to per-column max display width (with East-Asian
-# Wide / CJK awareness) keeps the columns aligned for the reader.
-
-_TABLE_SEPARATOR_RE = re.compile(
-    r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*){1,}\|?\s*$"
-)
+def run_baseline_doctor():
+    return _load_run_baseline_doctor()(_AGENT_REPO)
 
 
-def _is_table_row(line: str) -> bool:
-    """Return True if *line* could plausibly be a table data row."""
-    stripped = line.strip()
-    return bool(stripped) and "|" in stripped
+def _render_doctor_report(result: dict) -> str:
+    lines = ["🧹 *Baseline doctor*"]
+    if result["fixed"]:
+        lines.append(f"✅ Fixed: chowned {len(result['fixed'])} root-owned file(s)")
+    if result["clean"]:
+        lines.append("✅ Baseline clean — retry the request.")
+        return "\n".join(lines)
+    lines.append("⚠️ Remaining (blocks run):")
+    for r in result["remaining"]:
+        lines.append(f"  • {r['path']} [{r['category']}] — {r.get('hint','')}")
+    lines.append("React:  📥 commit all · 🙈 gitignore all · 📦 stash all")
+    return "\n".join(lines)
 
-
-def _disp_width(s: str) -> int:
-    """Monospace display width: East-Asian Wide / Full-width chars count as 2."""
-    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
-
-
-def _pad(cell: str, width: int) -> str:
-    """Right-pad *cell* with spaces until its display width equals *width*."""
-    delta = width - _disp_width(cell)
-    return cell + (" " * delta if delta > 0 else "")
-
-
-def _split_table_row(line: str) -> List[str]:
-    """Split a ``| a | b | c |`` row into trimmed cells (outer pipes optional)."""
-    s = line.strip()
-    if s.startswith("|"):
-        s = s[1:]
-    if s.endswith("|"):
-        s = s[:-1]
-    return [c.strip() for c in s.split("|")]
-
-
-def _align_table(rows: List[str]) -> List[str]:
-    """Re-emit a markdown table with cells padded to per-column max display width.
-
-    *rows[0]* is the header, *rows[1]* is the GFM separator (regenerated to
-    match new column widths), and *rows[2:]* are data rows. Cells are
-    normalized to a uniform column count (missing cells filled with empty
-    strings) before width calculation.
-    """
-    if len(rows) < 2:
-        return rows
-    parsed = [_split_table_row(r) for r in rows]
-    n_cols = max(len(r) for r in parsed)
-    for r in parsed:
-        while len(r) < n_cols:
-            r.append("")
-    sep_idx = 1
-    parsed[sep_idx] = ["---"] * n_cols  # placeholder; regenerated below
-    widths = [max(_disp_width(r[c]) for r in parsed) for c in range(n_cols)]
-    out: List[str] = []
-    for idx, row in enumerate(parsed):
-        if idx == sep_idx:
-            cells = ["-" * widths[c] for c in range(n_cols)]
-        else:
-            cells = [_pad(row[c], widths[c]) for c in range(n_cols)]
-        out.append("| " + " | ".join(cells) + " |")
-    return out
-
-
-def _wrap_markdown_tables(text: str) -> str:
-    """Wrap GFM pipe tables in ``` fences and align column widths.
-
-    Detected by a row containing ``|`` immediately followed by a delimiter row
-    matching :data:`_TABLE_SEPARATOR_RE`. Subsequent pipe-containing non-blank
-    lines are consumed as the table body. Tables already inside fenced code
-    blocks are left alone.
-    """
-    if not text or "|" not in text or "-" not in text:
-        return text
-
-    lines = text.split("\n")
-    out: List[str] = []
-    in_fence = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.lstrip()
-        if stripped.startswith("```"):
-            in_fence = not in_fence
-            out.append(line)
-            i += 1
-            continue
-        if in_fence:
-            out.append(line)
-            i += 1
-            continue
-        if (
-            "|" in line
-            and i + 1 < len(lines)
-            and _TABLE_SEPARATOR_RE.match(lines[i + 1])
-        ):
-            block = [line, lines[i + 1]]
-            j = i + 2
-            while j < len(lines) and _is_table_row(lines[j]):
-                block.append(lines[j])
-                j += 1
-            out.append("```")
-            out.extend(_align_table(block))
-            out.append("```")
-            i = j
-            continue
-        out.append(line)
-        i += 1
-    return "\n".join(out)
 
 # ContextVar carrying the user_id of the slash-command invoker.
 # Set in _handle_slash_command, read in send() to match the correct
@@ -2303,6 +2163,92 @@ class SlackAdapter(BasePlatformAdapter):
                 await self._add_reaction(channel, message_ts, "warning")
             except Exception:  # pragma: no cover - best effort
                 pass
+
+        # Baseline doctor: 🧹 on a preflight-block message runs the doctor;
+        # 📥/🙈/📦 on the doctor's report applies the operator's chosen action.
+        # Both are operator-gated and log-only on failure.
+        try:
+            await self._maybe_run_baseline_doctor(event)
+        except Exception as exc:
+            logger.exception(
+                "baseline_doctor_reaction_failed ts=%s reaction=%s: %s",
+                message_ts,
+                reaction,
+                exc,
+            )
+        try:
+            await self._maybe_apply_baseline_action(event)
+        except Exception as exc:
+            logger.exception(
+                "baseline_doctor_action_failed reaction=%s: %s",
+                reaction,
+                exc,
+            )
+
+    async def _maybe_run_baseline_doctor(self, event: dict) -> None:
+        if str((event or {}).get("type") or "") != "reaction_added":
+            return
+        reaction = str((event or {}).get("reaction") or "").strip().lower()
+        if reaction != TRIGGER_REACTION:
+            return
+        user = str((event or {}).get("user") or "").strip()
+        if not is_operator(user):
+            logger.info("baseline_doctor_reaction_ignored non_operator user=%s", user)
+            return
+        item = (event or {}).get("item") or {}
+        channel = str(item.get("channel") or "").strip()
+        message_ts = str(item.get("ts") or "").strip()
+        if not channel or not message_ts:
+            return
+        client = self._get_client(channel)
+        history = await client.conversations_history(
+            channel=channel, latest=message_ts, inclusive=True, limit=1
+        )
+        messages = history.get("messages", []) or []
+        if not messages or not is_block_message(str(messages[0].get("text") or "")):
+            logger.info("baseline_doctor_reaction_ignored not_block_message ts=%s", message_ts)
+            return
+        result = run_baseline_doctor()
+        report = _render_doctor_report(result)
+        posted = await client.chat_postMessage(
+            channel=channel, text=report, thread_ts=message_ts
+        )
+        report_ts = str(posted.get("ts") or "")
+        if not result["clean"] and result["remaining"] and report_ts:
+            record_pending(report_ts, result["remaining"])
+
+    async def _maybe_apply_baseline_action(self, event: dict) -> None:
+        if str((event or {}).get("type") or "") != "reaction_added":
+            return
+        action = classify_action(str((event or {}).get("reaction") or ""))
+        if not action:
+            return
+        user = str((event or {}).get("user") or "").strip()
+        if not is_operator(user):
+            return
+        item = (event or {}).get("item") or {}
+        channel = str(item.get("channel") or "").strip()
+        report_ts = str(item.get("ts") or "").strip()
+        if not channel or not report_ts:
+            return
+        remaining = pop_pending(report_ts)
+        if remaining is None:
+            return  # reaction not on a doctor report we posted
+        result = _apply_action(_AGENT_REPO, action, remaining)
+        recheck = run_baseline_doctor()
+        status = (
+            "✅ Baseline clean — retry the request."
+            if recheck["clean"]
+            else "⚠️ Still dirty — check remaining files."
+        )
+        detail = result.get("detail", "")
+        text = (
+            f"🧹 Applied *{action}* to {len(result['paths'])} file(s). "
+            f"{'ok' if result['ok'] else 'FAILED: ' + detail}\n{status}"
+        )
+        await self._get_client(channel).chat_postMessage(
+            channel=channel, text=text, thread_ts=report_ts
+        )
 
     async def _handle_slack_idea_reaction_event(self, event: dict) -> None:
         """Capture a configured 👍 reaction on a bot-authored idea post."""
