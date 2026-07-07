@@ -131,13 +131,15 @@ def _report_with(reason, entries):
     return SimpleNamespace(state=state, pipeline_execution_controller=controller)
 
 
-def test_block_message_lists_dirty_files():
+def test_block_message_lists_dirty_files(monkeypatch):
+    # The renderer classifies the working tree at render time; patch that.
+    import hermes_cli.baseline_git as bg
+    monkeypatch.setattr(bg, "classify_dirty", lambda repo: [
+        DirtyEntry("untracked", "scripts/idle_idea_context.py"),
+        DirtyEntry("root_owned", "agent/foo.pyc"),
+    ])
     runner = _runner()
-    report = _report_with(
-        "workspace_dirty_baseline",
-        [DirtyEntry("untracked", "scripts/idle_idea_context.py"),
-         DirtyEntry("root_owned", "agent/foo.pyc")],
-    )
+    report = _report_with("workspace_dirty_baseline", [])
     text = runner._pipeline_autonomous_preflight_block_response(
         report, orchestrator_mode="autonomous"
     )
