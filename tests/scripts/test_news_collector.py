@@ -90,3 +90,27 @@ def test_select_candidates_dedups_caps_and_carries(tmp_path):
     # second run: /1 and /2 now suppressed, /4 becomes emittable
     emitted2, _ = nc.select_candidates(items, conn, now, max_items=2, freshness_hours=36)
     assert [i["canonical_url"] for i in emitted2] == ["https://x.io/4"]
+
+
+TG_FIXTURE = '''
+<div class="tgme_widget_message" data-post="llm_news/1234">
+  <div class="tgme_widget_message_text">New RAG library <a href="https://github.com/foo/bar">github.com/foo/bar</a> — fast retrieval</div>
+  <a class="tgme_widget_message_date" href="https://t.me/llm_news/1234"><time datetime="2026-07-07T09:01:30+00:00">09:01</time></a>
+</div>
+<div class="tgme_widget_message" data-post="llm_news/1235">
+  <div class="tgme_widget_message_text">Plain note without link</div>
+  <a class="tgme_widget_message_date" href="https://t.me/llm_news/1235"><time datetime="2026-07-07T10:00:00+00:00">10:00</time></a>
+</div>
+'''
+
+
+def test_parse_telegram_extracts_items():
+    items = nc.parse_telegram_html(TG_FIXTURE, "llm_news")
+    assert len(items) == 2
+    a, b = items
+    assert a["url"] == "https://github.com/foo/bar"       # external link preferred
+    assert a["title"].startswith("New RAG library")
+    assert a["published_at"] == "2026-07-07T09:01:30+00:00"
+    assert a["source"] == "tg:llm_news" and a["type"] == "telegram"
+    assert b["url"] == "https://t.me/llm_news/1235"        # falls back to permalink
+    assert "Plain note" in b["title"]
