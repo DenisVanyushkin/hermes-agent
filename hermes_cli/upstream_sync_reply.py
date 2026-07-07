@@ -57,3 +57,58 @@ def has_pending_upstream_decision(state_dir: Path | str) -> bool:
     if not isinstance(data, dict):
         return False
     return data.get("status") == "awaiting_decision"
+
+
+import os
+
+_SANDBOX_STATE_SUFFIX = "sandboxes/docker/default/home/.hermes/state/upstream-sync"
+
+
+def default_upstream_sync_state_dir() -> Path:
+    """Resolve the host-side upstream-sync state dir.
+
+    Mirrors upstream-sync-finalize.sh: honor ``HERMES_SYNC_STATE_DIR`` when set,
+    else derive from ``HERMES_HOME`` (the sandbox `/root` is bind-mounted from
+    ``$HERMES_HOME/sandboxes/docker/default/home``).
+    """
+    override = os.getenv("HERMES_SYNC_STATE_DIR")
+    if override:
+        return Path(override)
+    hermes_home = Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes"))
+    return hermes_home / _SANDBOX_STATE_SUFFIX
+
+
+def build_upstream_sync_decision_job_spec(
+    message: str,
+    source: dict,
+    decisions: dict[int, str],
+) -> dict:
+    """Build ``create_job`` kwargs for a one-shot upstream-sync Mode B apply.
+
+    The operator reply is carried verbatim into the prompt so the skill matches
+    decisions to feature ids; ``role="engineer"`` pins the role (bypassing the
+    keyword cascade), and ``deliver="origin"`` routes the report back to the
+    reply thread.
+    """
+    decision_line = ", ".join(f"{fid}: {opt}" for fid, opt in sorted(decisions.items()))
+    prompt = (
+        "Operator has replied with upstream-sync merge decisions. "
+        "Load the upstream-sync skill Mode B: read pending.json and apply these "
+        f"decisions, then finalize.\n\nOperator decisions: {decision_line}\n\n"
+        f"Original reply:\n{message}"
+    )
+    origin = {
+        "platform": source.get("platform"),
+        "chat_id": source.get("chat_id"),
+        "thread_id": source.get("thread_id"),
+        "user_id": source.get("user_id"),
+    }
+    return {
+        "prompt": prompt,
+        "schedule": "1m",
+        "name": "upstream-sync apply (operator decision)",
+        "skills": ["upstream-sync"],
+        "role": "engineer",
+        "deliver": "origin",
+        "origin": origin,
+    }
