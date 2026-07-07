@@ -63,6 +63,50 @@ except ImportError:  # pragma: no cover - plugin loaded outside package context
 
 logger = logging.getLogger(__name__)
 
+
+# --- baseline doctor (reaction-triggered) ----------------------------------
+import importlib.util as _ilu  # noqa: E402
+
+from hermes_cli.baseline_doctor_service import (  # noqa: E402
+    TRIGGER_REACTION,
+    classify_action,
+    is_block_message,
+    is_operator,
+    pop_pending,
+    record_pending,
+)
+from hermes_cli.baseline_doctor_service import apply_action as _apply_action  # noqa: E402
+
+_AGENT_REPO = _Path(__file__).resolve().parents[3]
+
+
+def _load_run_baseline_doctor():
+    spec = _ilu.spec_from_file_location(
+        "baseline_doctor", _AGENT_REPO / "scripts" / "baseline_doctor.py"
+    )
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.run_doctor
+
+
+def run_baseline_doctor():
+    return _load_run_baseline_doctor()(_AGENT_REPO)
+
+
+def _render_doctor_report(result: dict) -> str:
+    lines = ["🧹 *Baseline doctor*"]
+    if result["fixed"]:
+        lines.append(f"✅ Fixed: chowned {len(result['fixed'])} root-owned file(s)")
+    if result["clean"]:
+        lines.append("✅ Baseline clean — retry the request.")
+        return "\n".join(lines)
+    lines.append("⚠️ Remaining (blocks run):")
+    for r in result["remaining"]:
+        lines.append(f"  • {r['path']} [{r['category']}] — {r.get('hint','')}")
+    lines.append("React:  📥 commit all · 🙈 gitignore all · 📦 stash all")
+    return "\n".join(lines)
+
+
 # ContextVar carrying the user_id of the slash-command invoker.
 # Set in _handle_slash_command, read in send() to match the correct
 # stashed response_url when multiple users issue commands on the same
@@ -1391,6 +1435,92 @@ class SlackAdapter(BasePlatformAdapter):
                 await self._add_reaction(channel, message_ts, "warning")
             except Exception:  # pragma: no cover - best effort
                 pass
+
+        # Baseline doctor: 🧹 on a preflight-block message runs the doctor;
+        # 📥/🙈/📦 on the doctor's report applies the operator's chosen action.
+        # Both are operator-gated and log-only on failure.
+        try:
+            await self._maybe_run_baseline_doctor(event)
+        except Exception as exc:
+            logger.exception(
+                "baseline_doctor_reaction_failed ts=%s reaction=%s: %s",
+                message_ts,
+                reaction,
+                exc,
+            )
+        try:
+            await self._maybe_apply_baseline_action(event)
+        except Exception as exc:
+            logger.exception(
+                "baseline_doctor_action_failed reaction=%s: %s",
+                reaction,
+                exc,
+            )
+
+    async def _maybe_run_baseline_doctor(self, event: dict) -> None:
+        if str((event or {}).get("type") or "") != "reaction_added":
+            return
+        reaction = str((event or {}).get("reaction") or "").strip().lower()
+        if reaction != TRIGGER_REACTION:
+            return
+        user = str((event or {}).get("user") or "").strip()
+        if not is_operator(user):
+            logger.info("baseline_doctor_reaction_ignored non_operator user=%s", user)
+            return
+        item = (event or {}).get("item") or {}
+        channel = str(item.get("channel") or "").strip()
+        message_ts = str(item.get("ts") or "").strip()
+        if not channel or not message_ts:
+            return
+        client = self._get_client(channel)
+        history = await client.conversations_history(
+            channel=channel, latest=message_ts, inclusive=True, limit=1
+        )
+        messages = history.get("messages", []) or []
+        if not messages or not is_block_message(str(messages[0].get("text") or "")):
+            logger.info("baseline_doctor_reaction_ignored not_block_message ts=%s", message_ts)
+            return
+        result = run_baseline_doctor()
+        report = _render_doctor_report(result)
+        posted = await client.chat_postMessage(
+            channel=channel, text=report, thread_ts=message_ts
+        )
+        report_ts = str(posted.get("ts") or "")
+        if not result["clean"] and result["remaining"] and report_ts:
+            record_pending(report_ts, result["remaining"])
+
+    async def _maybe_apply_baseline_action(self, event: dict) -> None:
+        if str((event or {}).get("type") or "") != "reaction_added":
+            return
+        action = classify_action(str((event or {}).get("reaction") or ""))
+        if not action:
+            return
+        user = str((event or {}).get("user") or "").strip()
+        if not is_operator(user):
+            return
+        item = (event or {}).get("item") or {}
+        channel = str(item.get("channel") or "").strip()
+        report_ts = str(item.get("ts") or "").strip()
+        if not channel or not report_ts:
+            return
+        remaining = pop_pending(report_ts)
+        if remaining is None:
+            return  # reaction not on a doctor report we posted
+        result = _apply_action(_AGENT_REPO, action, remaining)
+        recheck = run_baseline_doctor()
+        status = (
+            "✅ Baseline clean — retry the request."
+            if recheck["clean"]
+            else "⚠️ Still dirty — check remaining files."
+        )
+        detail = result.get("detail", "")
+        text = (
+            f"🧹 Applied *{action}* to {len(result['paths'])} file(s). "
+            f"{'ok' if result['ok'] else 'FAILED: ' + detail}\n{status}"
+        )
+        await self._get_client(channel).chat_postMessage(
+            channel=channel, text=text, thread_ts=report_ts
+        )
 
     async def _handle_slack_idea_reaction_event(self, event: dict) -> None:
         """Capture a configured 👍 reaction on a bot-authored idea post."""
