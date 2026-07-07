@@ -192,3 +192,55 @@ def parse_telegram_html(html_text: str, channel: str) -> list[dict]:
             "published_at": time_m.group(1) if time_m else "",
         })
     return items
+
+
+from email.utils import parsedate_to_datetime
+
+
+def _iso(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return ""
+    # try RFC-822 (RSS) first, then ISO (Atom)
+    try:
+        return parsedate_to_datetime(text).astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError, IndexError):
+        pass
+    dt = _parse_iso(text.replace("Z", "+00:00"))
+    return dt.isoformat() if dt else ""
+
+
+def _localname(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def parse_feed(xml_bytes: bytes, feed_name: str) -> list[dict]:
+    try:
+        root = ET.fromstring(xml_bytes)
+    except Exception:
+        # Malformed XML (XMLParseError) or hostile XML (defusedxml raises
+        # EntitiesForbidden / DTDForbidden) — drop the feed, never abort the run.
+        return []
+    items = []
+    for node in root.iter():
+        if _localname(node.tag) not in ("item", "entry"):
+            continue
+        title = url = summary = pub = ""
+        for child in node:
+            name = _localname(child.tag)
+            if name == "title":
+                title = (child.text or "").strip()
+            elif name == "link":
+                url = child.get("href") or (child.text or "").strip() or url
+            elif name in ("description", "summary", "content"):
+                summary = _strip_tags("".join(child.itertext()))[:500]
+            elif name in ("pubdate", "published", "updated") and not pub:
+                pub = _iso(child.text or "")
+        if not (title and url):
+            continue
+        items.append({
+            "source": f"rss:{feed_name}", "type": "rss",
+            "title": title, "url": url, "summary": summary,
+            "snippet": "", "published_at": pub,
+        })
+    return items
