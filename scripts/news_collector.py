@@ -322,3 +322,114 @@ def looks_like_injection(text: str) -> bool:
 def item_text(item: dict) -> str:
     return " ".join([item.get("title", ""), item.get("summary", ""),
                      item.get("snippet", ""), item.get("canonical_url", "")])
+
+
+_UA = "Mozilla/5.0 (compatible; HermesNewsCollector/1.0)"
+
+
+def http_get(url: str, timeout: int) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def fetch_telegram(channel: str, cfg: dict) -> list[dict]:
+    html_text = http_get(f"https://t.me/s/{channel}", cfg["http_timeout"]).decode("utf-8", "replace")
+    return parse_telegram_html(html_text, channel)
+
+
+def fetch_feed(url: str, cfg: dict) -> list[dict]:
+    name = urlsplit(url).netloc.split(".")[-2] if "." in urlsplit(url).netloc else url
+    return parse_feed(http_get(url, cfg["http_timeout"]), name)
+
+
+def fetch_hn(cfg: dict) -> list[dict]:
+    ids = json.loads(http_get("https://hacker-news.firebaseio.com/v0/topstories.json",
+                              cfg["http_timeout"]))[:60]
+    stories = []
+    for i in ids:
+        try:
+            stories.append(json.loads(http_get(
+                f"https://hacker-news.firebaseio.com/v0/item/{i}.json", cfg["http_timeout"])))
+        except Exception:
+            continue
+    return select_hn(stories, cfg["hackernews"]["min_score"])
+
+
+def fetch_github(cfg: dict) -> list[dict]:
+    topics = "+".join(f"topic:{t}" for t in cfg["github_trending"]["topics"])
+    q = f"https://api.github.com/search/repositories?q={topics}+pushed:>2026-01-01&sort=stars&order=desc&per_page=30"
+    repos = json.loads(http_get(q, cfg["http_timeout"])).get("items", [])
+    return select_github(repos, cfg["github_trending"]["min_stars_week"])
+
+
+def gather_items(cfg: dict, fetchers: dict) -> tuple[list, list, list]:
+    raw, errors = [], []
+    for ch in cfg.get("telegram_channels", []):
+        try:
+            raw += [normalize_item(x) for x in fetchers["telegram"](ch, cfg)]
+        except Exception as e:
+            errors.append(f"tg:{ch}: {e}")
+    for url in cfg.get("rss_feeds", []):
+        try:
+            raw += [normalize_item(x) for x in fetchers["feed"](url, cfg)]
+        except Exception as e:
+            errors.append(f"rss:{url}: {e}")
+    for key in ("hn", "github"):
+        try:
+            raw += [normalize_item(x) for x in fetchers[key](cfg)]
+        except Exception as e:
+            errors.append(f"{key}: {e}")
+    kept, dropped = [], []
+    for it in raw:
+        (dropped if looks_like_injection(item_text(it)) else kept).append(it)
+    return kept, errors, dropped
+
+
+def write_candidates(dir_path: Path, emitted, carried, errors, dropped, now) -> Path:
+    payload = {
+        "generated_at": now.isoformat(),
+        "count": len(emitted),
+        "carried_count": len(carried),
+        "dropped_injection": len(dropped),
+        "errors": errors,
+        "items": emitted,
+    }
+    blob = json.dumps(payload, ensure_ascii=False, indent=2)
+    latest = Path(dir_path) / "candidates-latest.json"
+    dated = Path(dir_path) / f"candidates-{now:%Y%m%d}.json"
+    latest.write_text(blob, encoding="utf-8")
+    dated.write_text(blob, encoding="utf-8")
+    for old in Path(dir_path).glob("candidates-2*.json"):
+        try:
+            stamp = datetime.strptime(old.stem.split("-")[1], "%Y%m%d").replace(tzinfo=timezone.utc)
+            if (now - stamp).days > 14:
+                old.unlink()
+        except (ValueError, IndexError):
+            continue
+    return latest
+
+
+def main() -> int:
+    cfg = load_sources(news_dir() / "sources.yaml")
+    now = datetime.now(timezone.utc)
+    conn = seen_connect(news_dir() / "seen.sqlite")
+    prune_seen(conn, now)
+    fetchers = {"telegram": fetch_telegram, "feed": fetch_feed,
+                "hn": fetch_hn, "github": fetch_github}
+    items, errors, dropped = gather_items(cfg, fetchers)
+    emitted, carried = select_candidates(
+        items, conn, now, cfg["max_items_per_day"], cfg["freshness_hours"])
+    write_candidates(news_dir(), emitted, carried, errors, dropped, now)
+    log = news_dir() / "collector.log"
+    with log.open("a", encoding="utf-8") as f:
+        f.write(f"{now.isoformat()} emitted={len(emitted)} carried={len(carried)} "
+                f"dropped_injection={len(dropped)} errors={len(errors)}\n")
+        for it in dropped:
+            f.write(f"  DROPPED_INJECTION source={it.get('source')} "
+                    f"url={it.get('canonical_url')} title={it.get('title','')[:80]!r}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
