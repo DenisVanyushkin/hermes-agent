@@ -51,8 +51,21 @@ def has_pending_upstream_decision(state_dir: Path | str) -> bool:
     """Return True when ``<state_dir>/pending.json`` awaits an operator decision."""
     pending = Path(state_dir) / "pending.json"
     try:
-        data = json.loads(pending.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw = pending.read_text(encoding="utf-8")
+    except PermissionError:
+        # The gateway runs as an unprivileged user; the sandbox writes
+        # pending.json root-owned 0600. We can stat (existence) but not read
+        # the status. Treat an existing-but-unreadable pending.json as pending
+        # -- the queued one-shot re-checks the authoritative status as root.
+        try:
+            return pending.exists()
+        except OSError:
+            return False
+    except OSError:
+        return False
+    try:
+        data = json.loads(raw)
+    except ValueError:
         return False
     if not isinstance(data, dict):
         return False
