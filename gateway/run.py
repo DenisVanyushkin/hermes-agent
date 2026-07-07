@@ -18976,6 +18976,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if blocked_reason is None:
             return None
 
+        dirty_suffix = ""
+        if blocked_reason == "workspace_dirty_baseline":
+            entries = getattr(controller, "blocked_dirty_entries", None) or []
+            shown = entries[:20]
+            lines = "\n".join(f"  • [{e.category}] {e.path}" for e in shown)
+            more = "" if len(entries) <= 20 else f"\n  … {len(entries) - 20} more"
+            if lines:
+                dirty_suffix = (
+                    f"\ndirty_files:\n{lines}{more}\n"
+                    "React 🧹 to run baseline-doctor."
+                )
+
         return (
             "The autonomous engineering pipeline was selected for this request but "
             "blocked before execution started, so I did not make any changes.\n\n"
@@ -18988,6 +19000,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "mutation: none\n"
             "tests: not_run\n\n"
             "Resolve the blocker (e.g. clean the workspace) and retry the request."
+            + dirty_suffix
         )
 
     def _pipeline_autonomous_fail_closed_response(self, report: Any, *, orchestrator_mode: str, user_message: str) -> str | None:

@@ -7,10 +7,24 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from hermes_cli.baseline_git import DirtyEntry, classify_dirty
 from hermes_cli.pipeline_aiagent_executor import AIAgentReviewerExecutorBridge, AIAgentSubagentExecutorBridge
 from hermes_cli.pipeline_specs import load_pipeline_specs
 from hermes_cli.runtime_factory import RuntimeFactory, build_runtime_factory_plan
 from hermes_cli.subagent_runner import SubagentRunner
+
+
+class DirtyBaselineError(ValueError):
+    """Preflight block: the agent repo working tree is not clean.
+
+    ``str(err)`` stays ``"workspace_dirty_baseline"`` for backward compatibility
+    with existing ``blocked_reason`` handling; ``err.entries`` carries the
+    categorized dirty files for the enriched Slack block message.
+    """
+
+    def __init__(self, entries: list[DirtyEntry]) -> None:
+        super().__init__("workspace_dirty_baseline")
+        self.entries = entries
 
 ENGINEER_SUBAGENT_ID = "hermes_engineer_core"
 REVIEWER_SUBAGENT_ID = "hermes_code_reviewer"
@@ -54,6 +68,10 @@ def build_autonomous_helper_context(
             workspace=workspace,
             expected_repo_root=inferred_repo_root if repo_root is None else None,
         )
+    except DirtyBaselineError as exc:
+        runtime_context["blocked_reason"] = str(exc)
+        runtime_context["blocked_dirty_entries"] = list(exc.entries)
+        return helper_context
     except ValueError as exc:
         runtime_context["blocked_reason"] = str(exc)
         return helper_context
@@ -137,17 +155,12 @@ def _validate_repo_root_workspace(*, repo_root: Path, expected_repo_root: Path |
         _git_stdout(repo_root, "rev-parse", "HEAD")
     except ValueError as exc:
         raise ValueError("workspace_not_git_repo") from exc
-    status = _git_stdout(repo_root, "status", "--short", "--untracked-files=all")
     # The pipeline writes its own controlled_execution_report.json into the
-    # workspace root after every run; that artifact must not poison the next
-    # run's clean-baseline check.
-    meaningful_lines = [
-        line
-        for line in status.splitlines()
-        if line.strip() and line.split(maxsplit=1)[-1] != "controlled_execution_report.json"
-    ]
-    if meaningful_lines:
-        raise ValueError("workspace_dirty_baseline")
+    # workspace root after every run; classify_dirty already excludes it from
+    # the clean-baseline check.
+    entries = classify_dirty(repo_root)
+    if entries:
+        raise DirtyBaselineError(entries)
 
 
 def _build_bridge_runtime_plans(*, loaded_specs: Any, pipeline_session_id: str | None, user_message: str, config: dict[str, Any] | None) -> dict[str, Any]:
