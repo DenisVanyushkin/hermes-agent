@@ -20,9 +20,10 @@ def news_dir() -> Path:
 
 def load_candidates(path: Path) -> dict | None:
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return None
+    return data if isinstance(data, dict) else None
 
 
 def _parse_iso(s: str):
@@ -52,6 +53,8 @@ def render_context(data: dict, now: datetime) -> str:
         return "[Активно собранные новости]: свежих кандидатов нет (коллектор пуст)."
     lines = [_FRAME_OPEN, "Кандидаты от коллектора (RSS/Telegram/HN/GitHub):"]
     for it in items[:MAX_ITEMS]:
+        if not isinstance(it, dict):
+            continue
         title = (it.get("title") or "").strip()
         url = (it.get("url") or it.get("canonical_url") or "").strip()
         src = it.get("source", "")

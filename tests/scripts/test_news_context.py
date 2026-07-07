@@ -34,3 +34,21 @@ def test_render_context_note_when_empty():
     now = datetime(2026, 7, 7, 21, tzinfo=timezone.utc)
     out = ncx.render_context({"generated_at": now.isoformat(), "items": []}, now)
     assert "нет" in out.lower() or "no " in out.lower()
+
+
+def test_render_context_keeps_closing_frame_when_truncated():
+    now = datetime(2026, 7, 7, 21, tzinfo=timezone.utc)
+    items = [{"source": "s", "title": "x" * 300, "url": f"https://x.io/{i}",
+              "summary": "", "snippet": ""} for i in range(500)]
+    out = ncx.render_context(
+        {"generated_at": (now - timedelta(hours=1)).isoformat(), "items": items}, now)
+    assert out.rstrip().endswith("UNTRUSTED NEWS DATA =====")
+    assert "BEGIN UNTRUSTED" in out
+    assert len(out) <= ncx.MAX_CHARS + len(ncx._FRAME_CLOSE) + 2
+
+
+def test_load_candidates_rejects_non_dict_json(tmp_path):
+    p = tmp_path / "c.json"
+    for bad in ("[]", "null", '"oops"', "[1, 2, 3]"):
+        p.write_text(bad, encoding="utf-8")
+        assert ncx.load_candidates(p) is None
