@@ -140,3 +140,29 @@ class TestBuildJobSpec:
         )
         low = spec["prompt"].lower()
         assert "pending.json" in low and "apply" in low
+
+
+class TestHasPendingPermissionTolerance:
+    def test_unreadable_but_existing_pending_is_treated_as_pending(self, tmp_path, monkeypatch):
+        # Gateway runs as `hermes`; pending.json is written root:root 0600 by the
+        # sandbox. The host can stat (exists) but not read it. Treat an existing
+        # but unreadable pending.json as pending — the sandbox re-checks status.
+        from hermes_cli import upstream_sync_reply as usr
+        state_dir = tmp_path / "upstream-sync"
+        state_dir.mkdir()
+        pending = state_dir / "pending.json"
+        pending.write_text('{"status": "awaiting_decision"}')
+
+        real_read_text = usr.Path.read_text
+
+        def fake_read_text(self, *a, **k):
+            if self.name == "pending.json":
+                raise PermissionError(13, "Permission denied")
+            return real_read_text(self, *a, **k)
+
+        monkeypatch.setattr(usr.Path, "read_text", fake_read_text)
+        assert usr.has_pending_upstream_decision(state_dir) is True
+
+    def test_missing_pending_still_false_under_permission_logic(self, tmp_path):
+        from hermes_cli.upstream_sync_reply import has_pending_upstream_decision
+        assert has_pending_upstream_decision(tmp_path / "nope") is False
