@@ -158,3 +158,26 @@ BILLION_LAUGHS = b'''<?xml version="1.0"?>
 def test_parse_feed_rejects_hostile_xml():
     # defusedxml raises on internal-entity DTDs; parse_feed swallows it → [].
     assert nc.parse_feed(BILLION_LAUGHS, "evil") == []
+
+
+def test_select_hn_filters_by_score_and_url():
+    stories = [
+        {"type": "story", "title": "A", "url": "https://a", "score": 300, "time": 1783414800, "id": 1},
+        {"type": "story", "title": "B", "url": "https://b", "score": 10,  "time": 1783414800, "id": 2},
+        {"type": "job",   "title": "C", "url": "https://c", "score": 900, "time": 1783414800, "id": 3},
+        {"type": "story", "title": "D", "url": "",          "score": 500, "time": 1783414800, "id": 4},
+    ]
+    out = nc.select_hn(stories, min_score=150)
+    assert [i["title"] for i in out] == ["A"]
+    assert out[0]["source"] == "hn" and out[0]["published_at"].startswith("2026-")
+
+
+def test_select_github_filters_by_stars():
+    repos = [
+        {"full_name": "foo/bar", "description": "LLM tool", "html_url": "https://gh/foo", "stargazers_count": 500},
+        {"full_name": "baz/qux", "description": "small",    "html_url": "https://gh/baz", "stargazers_count": 20},
+    ]
+    out = nc.select_github(repos, min_stars_week=200)
+    assert len(out) == 1
+    assert out[0]["url"] == "https://gh/foo"
+    assert "foo/bar" in out[0]["title"] and out[0]["source"] == "github"

@@ -244,3 +244,35 @@ def parse_feed(xml_bytes: bytes, feed_name: str) -> list[dict]:
             "snippet": "", "published_at": pub,
         })
     return items
+
+
+def select_hn(stories: list[dict], min_score: int) -> list[dict]:
+    out = []
+    for s in stories:
+        if s.get("type") != "story" or not s.get("url"):
+            continue
+        if int(s.get("score", 0)) < min_score:
+            continue
+        ts = s.get("time")
+        pub = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else ""
+        out.append({
+            "source": "hn", "type": "hackernews",
+            "title": s.get("title", ""), "url": s["url"],
+            "summary": "", "snippet": "", "published_at": pub,
+        })
+    return out
+
+
+def select_github(repos: list[dict], min_stars_week: int) -> list[dict]:
+    out = []
+    for r in repos:
+        if int(r.get("stargazers_count", 0)) < min_stars_week:
+            continue
+        desc = r.get("description") or ""
+        out.append({
+            "source": "github", "type": "github",
+            "title": f"{r.get('full_name', '')} — {desc}".strip(" —"),
+            "url": r.get("html_url", ""),
+            "summary": desc, "snippet": "", "published_at": "",
+        })
+    return out
