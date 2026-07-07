@@ -138,8 +138,8 @@ def select_candidates(items, conn, now, max_items, freshness_hours):
             continue
         batch_seen.add(url)
         fresh.append(it)
-    # freshest first; unknown dates sort last (treated as epoch-far-future? no — keep, sort by known date desc)
-    fresh.sort(key=lambda i: (_parse_iso(i["published_at"]) or now), reverse=True)
+    _oldest = datetime.min.replace(tzinfo=timezone.utc)
+    fresh.sort(key=lambda i: (_parse_iso(i["published_at"]) or _oldest), reverse=True)
     emitted, carried = fresh[:max_items], fresh[max_items:]
     for it in emitted:
         mark_seen(conn, it["canonical_url"], now)
@@ -231,7 +231,10 @@ def parse_feed(xml_bytes: bytes, feed_name: str) -> list[dict]:
             if name == "title":
                 title = (child.text or "").strip()
             elif name == "link":
-                url = child.get("href") or (child.text or "").strip() or url
+                href = child.get("href") or (child.text or "").strip()
+                rel = (child.get("rel") or "alternate").lower()
+                if href and (rel == "alternate" or not url):
+                    url = href
             elif name in ("description", "summary", "content"):
                 summary = _strip_tags("".join(child.itertext()))[:500]
             elif name in ("pubdate", "published", "updated") and not pub:
@@ -428,6 +431,8 @@ def main() -> int:
         for it in dropped:
             f.write(f"  DROPPED_INJECTION source={it.get('source')} "
                     f"url={it.get('canonical_url')} title={it.get('title','')[:80]!r}\n")
+        for e in errors:
+            f.write(f"  SOURCE_ERROR {e}\n")
     return 0
 
 
