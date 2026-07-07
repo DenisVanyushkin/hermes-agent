@@ -18,8 +18,10 @@ def _adapter() -> SlackAdapter:
 def test_broom_by_operator_runs_doctor():
     adapter = _adapter()
     client = MagicMock()
-    client.conversations_history = AsyncMock(return_value={
-        "messages": [{"user": "UBOT", "bot_id": "B1",
+    # Block delivered as a thread reply — resolved via conversations_replies,
+    # and the message with ts == reacted ts must be the one checked.
+    client.conversations_replies = AsyncMock(return_value={
+        "messages": [{"user": "UBOT", "bot_id": "B1", "ts": "111.222",
                       "text": "final_verdict: autonomous_preflight_blocked"}]
     })
     client.chat_postMessage = AsyncMock(return_value={"ts": "999.000"})
@@ -45,13 +47,13 @@ def test_broom_by_operator_runs_doctor():
 def test_broom_by_non_operator_ignored():
     adapter = _adapter()
     client = MagicMock()
-    client.conversations_history = AsyncMock()
+    client.conversations_replies = AsyncMock()
     adapter._get_client = lambda ch: client
     with patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP"}):
         event = {"type": "reaction_added", "reaction": "broom", "user": "UINTRUDER",
                  "item": {"channel": "C1", "ts": "111.222"}}
         asyncio.run(adapter._maybe_run_baseline_doctor(event))
-    client.conversations_history.assert_not_awaited()
+    client.conversations_replies.assert_not_awaited()
 
 
 def test_action_reaction_applies_and_rechecks():
