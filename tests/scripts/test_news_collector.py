@@ -114,3 +114,47 @@ def test_parse_telegram_extracts_items():
     assert a["source"] == "tg:llm_news" and a["type"] == "telegram"
     assert b["url"] == "https://t.me/llm_news/1235"        # falls back to permalink
     assert "Plain note" in b["title"]
+
+
+RSS_FIXTURE = b'''<?xml version="1.0"?><rss><channel>
+<item><title>GPT-6 released</title><link>https://openai.com/gpt6</link>
+<description>A big <b>model</b></description>
+<pubDate>Mon, 07 Jul 2026 09:00:00 +0000</pubDate></item>
+</channel></rss>'''
+
+ATOM_FIXTURE = b'''<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+<entry><title>New agent framework</title>
+<link href="https://example.com/agents" rel="alternate"/>
+<summary>Build agents fast</summary>
+<updated>2026-07-07T08:00:00Z</updated></entry>
+</feed>'''
+
+
+def test_parse_feed_rss():
+    items = nc.parse_feed(RSS_FIXTURE, "openai")
+    assert len(items) == 1
+    it = items[0]
+    assert it["title"] == "GPT-6 released"
+    assert it["url"] == "https://openai.com/gpt6"
+    assert it["published_at"].startswith("2026-07-07T09:00:00")
+    assert it["source"] == "rss:openai" and it["type"] == "rss"
+    assert "model" in it["summary"] and "<b>" not in it["summary"]
+
+
+def test_parse_feed_atom():
+    items = nc.parse_feed(ATOM_FIXTURE, "example")
+    assert len(items) == 1
+    it = items[0]
+    assert it["title"] == "New agent framework"
+    assert it["url"] == "https://example.com/agents"
+    assert it["published_at"].startswith("2026-07-07T08:00:00")
+
+
+BILLION_LAUGHS = b'''<?xml version="1.0"?>
+<!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;">]>
+<rss><channel><item><title>&lol2;</title><link>https://x</link></item></channel></rss>'''
+
+
+def test_parse_feed_rejects_hostile_xml():
+    # defusedxml raises on internal-entity DTDs; parse_feed swallows it → [].
+    assert nc.parse_feed(BILLION_LAUGHS, "evil") == []
