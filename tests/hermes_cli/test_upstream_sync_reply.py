@@ -1,6 +1,7 @@
 """Tests for upstream-sync operator decision-reply detection (Task 1)."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -84,3 +85,58 @@ class TestHasPendingUpstreamDecision:
         state_dir.mkdir()
         (state_dir / "pending.json").write_text("{not json")
         assert has_pending_upstream_decision(state_dir) is False
+
+
+class TestDefaultStateDir:
+    def test_env_override_wins(self, monkeypatch):
+        from hermes_cli.upstream_sync_reply import default_upstream_sync_state_dir
+        monkeypatch.setenv("HERMES_SYNC_STATE_DIR", "/custom/state")
+        assert default_upstream_sync_state_dir() == Path("/custom/state")
+
+    def test_derives_from_hermes_home(self, monkeypatch):
+        from hermes_cli.upstream_sync_reply import default_upstream_sync_state_dir
+        monkeypatch.delenv("HERMES_SYNC_STATE_DIR", raising=False)
+        monkeypatch.setenv("HERMES_HOME", "/home/hermes/.hermes")
+        assert default_upstream_sync_state_dir() == Path(
+            "/home/hermes/.hermes/sandboxes/docker/default/home/.hermes/state/upstream-sync"
+        )
+
+
+class TestBuildJobSpec:
+    def _source(self):
+        return {
+            "platform": "slack",
+            "chat_id": "C0B3X1E5SJZ",
+            "thread_id": "1783420000.000",
+            "user_id": "U123",
+        }
+
+    def test_spec_carries_reply_skill_and_role_pin(self):
+        from hermes_cli.upstream_sync_reply import build_upstream_sync_decision_job_spec
+        msg = "1: merge both, 2: merge both, 3: merge both"
+        spec = build_upstream_sync_decision_job_spec(
+            msg, self._source(), {1: "merge both", 2: "merge both", 3: "merge both"}
+        )
+        assert msg in spec["prompt"]
+        assert spec["skills"] == ["upstream-sync"]
+        assert spec["role"] == "engineer"
+        assert spec["schedule"] == "1m"
+        assert spec["deliver"] == "origin"
+
+    def test_origin_routes_back_to_thread(self):
+        from hermes_cli.upstream_sync_reply import build_upstream_sync_decision_job_spec
+        spec = build_upstream_sync_decision_job_spec(
+            "1: merge both", self._source(), {1: "merge both"}
+        )
+        origin = spec["origin"]
+        assert origin["platform"] == "slack"
+        assert origin["chat_id"] == "C0B3X1E5SJZ"
+        assert origin["thread_id"] == "1783420000.000"
+
+    def test_prompt_signals_mode_b_apply(self):
+        from hermes_cli.upstream_sync_reply import build_upstream_sync_decision_job_spec
+        spec = build_upstream_sync_decision_job_spec(
+            "1: merge both", self._source(), {1: "merge both"}
+        )
+        low = spec["prompt"].lower()
+        assert "pending.json" in low and "apply" in low
