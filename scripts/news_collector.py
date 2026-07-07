@@ -144,3 +144,51 @@ def select_candidates(items, conn, now, max_items, freshness_hours):
     for it in emitted:
         mark_seen(conn, it["canonical_url"], now)
     return emitted, carried
+
+
+import html as _html
+
+_HREF_RE = re.compile(r'href="(https?://[^"]+)"')
+_TAG_RE = re.compile(r"<[^>]+>")
+# Split on the message CONTAINER only. The container class is
+# "tgme_widget_message" followed by a space or the closing quote; the body div
+# is "tgme_widget_message_text" (underscore), so the [ "] char class avoids
+# splitting inside a message. A single regex cannot do this reliably: a
+# non-greedy .*? before an OPTIONAL <time> group matches empty and never
+# captures the timestamp — hence the two-pass approach (split, then search).
+_TG_SPLIT_RE = re.compile(r'<div class="tgme_widget_message[ "]')
+_TG_POST_RE = re.compile(r'data-post="([^"]+)"')
+_TG_BODY_RE = re.compile(r'<div class="tgme_widget_message_text[^"]*">(.*?)</div>', re.DOTALL)
+_TG_TIME_RE = re.compile(r'<time datetime="([^"]+)"')
+
+
+def _strip_tags(fragment: str) -> str:
+    text = _TAG_RE.sub(" ", fragment)
+    return _html.unescape(re.sub(r"\s+", " ", text)).strip()
+
+
+def parse_telegram_html(html_text: str, channel: str) -> list[dict]:
+    items = []
+    for chunk in _TG_SPLIT_RE.split(html_text)[1:]:
+        post_m = _TG_POST_RE.search(chunk)
+        body_m = _TG_BODY_RE.search(chunk)
+        if not (post_m and body_m):
+            continue
+        time_m = _TG_TIME_RE.search(chunk)
+        body = body_m.group(1)
+        links = [u for u in _HREF_RE.findall(body) if "t.me/" not in u]
+        permalink = f"https://t.me/{post_m.group(1)}"
+        url = links[0] if links else permalink
+        title = _strip_tags(body)[:200]
+        if not title:
+            continue
+        items.append({
+            "source": f"tg:{channel}",
+            "type": "telegram",
+            "title": title,
+            "url": url,
+            "summary": "",
+            "snippet": "",
+            "published_at": time_m.group(1) if time_m else "",
+        })
+    return items
