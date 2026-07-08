@@ -91,6 +91,22 @@ def default_upstream_sync_state_dir() -> Path:
     return hermes_home / _SANDBOX_STATE_SUFFIX
 
 
+def _normalize_platform(value) -> "str | None":
+    """Normalize a platform value to its lowercase name.
+
+    The gateway passes ``source.platform`` which stringifies to an enum repr
+    like ``Platform.SLACK``; cron origin-delivery compares lowercase platform
+    names, so an un-normalized value silently breaks delivery back to the
+    thread.
+    """
+    s = str(value or "").strip()
+    if not s:
+        return None
+    if "." in s:
+        s = s.rsplit(".", 1)[-1]
+    return s.lower()
+
+
 def build_upstream_sync_decision_job_spec(
     message: str,
     source: dict,
@@ -111,7 +127,7 @@ def build_upstream_sync_decision_job_spec(
         f"Original reply:\n{message}"
     )
     origin = {
-        "platform": source.get("platform"),
+        "platform": _normalize_platform(source.get("platform")),
         "chat_id": source.get("chat_id"),
         "thread_id": source.get("thread_id"),
         "user_id": source.get("user_id"),
@@ -125,3 +141,21 @@ def build_upstream_sync_decision_job_spec(
         "deliver": "origin",
         "origin": origin,
     }
+
+
+def build_progress_reporter_argv(origin, *, repo, hermes_bin, script_path):
+    """Build argv for the detached progress reporter, or ``None`` if the origin
+    lacks a thread target (reporter posts into the operator's reply thread, so
+    it needs platform:chat_id:thread_id)."""
+    platform = _normalize_platform(origin.get("platform"))
+    chat_id = origin.get("chat_id")
+    thread_id = origin.get("thread_id")
+    if not (platform and chat_id and thread_id):
+        return None
+    target = f"{platform}:{chat_id}:{thread_id}"
+    return [
+        script_path,
+        "--target", target,
+        "--repo", repo,
+        "--hermes-bin", hermes_bin,
+    ]
