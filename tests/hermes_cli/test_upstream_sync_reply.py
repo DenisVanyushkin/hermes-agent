@@ -166,3 +166,42 @@ class TestHasPendingPermissionTolerance:
     def test_missing_pending_still_false_under_permission_logic(self, tmp_path):
         from hermes_cli.upstream_sync_reply import has_pending_upstream_decision
         assert has_pending_upstream_decision(tmp_path / "nope") is False
+
+
+class TestPlatformNormalization:
+    def test_enum_repr_platform_normalized(self):
+        from hermes_cli.upstream_sync_reply import build_upstream_sync_decision_job_spec
+        src = {"platform": "Platform.SLACK", "chat_id": "C1", "thread_id": "T1", "user_id": "U1"}
+        spec = build_upstream_sync_decision_job_spec("1: merge both", src, {1: "merge both"})
+        assert spec["origin"]["platform"] == "slack"
+
+    def test_plain_platform_unchanged(self):
+        from hermes_cli.upstream_sync_reply import build_upstream_sync_decision_job_spec
+        src = {"platform": "telegram", "chat_id": "C1", "thread_id": None, "user_id": "U1"}
+        spec = build_upstream_sync_decision_job_spec("1: merge both", src, {1: "merge both"})
+        assert spec["origin"]["platform"] == "telegram"
+
+
+class TestReporterArgv:
+    def test_builds_argv_with_thread_target(self):
+        from hermes_cli.upstream_sync_reply import build_progress_reporter_argv
+        origin = {"platform": "slack", "chat_id": "C1", "thread_id": "T1", "user_id": "U1"}
+        argv = build_progress_reporter_argv(origin, repo="/repo", hermes_bin="/hb",
+                                            script_path="/repo/scripts/r.py")
+        assert argv is not None
+        assert "/repo/scripts/r.py" in argv
+        assert "--target" in argv and "slack:C1:T1" in argv
+        assert "--repo" in argv and "/repo" in argv
+        assert "--hermes-bin" in argv and "/hb" in argv
+
+    def test_none_without_thread(self):
+        from hermes_cli.upstream_sync_reply import build_progress_reporter_argv
+        origin = {"platform": "slack", "chat_id": "C1", "thread_id": None, "user_id": "U1"}
+        assert build_progress_reporter_argv(origin, repo="/r", hermes_bin="/hb",
+                                            script_path="/s") is None
+
+    def test_none_without_chat(self):
+        from hermes_cli.upstream_sync_reply import build_progress_reporter_argv
+        origin = {"platform": "slack", "chat_id": None, "thread_id": "T1", "user_id": "U1"}
+        assert build_progress_reporter_argv(origin, repo="/r", hermes_bin="/hb",
+                                            script_path="/s") is None
