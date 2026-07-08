@@ -62,6 +62,12 @@ json.dump({
 }, open(path, "w"), ensure_ascii=False, indent=1)
 PY
   rm -f "$PROCESSING"
+  # On a successful apply (rebase/finalize), clear the consumed decision so a
+  # stray reply or the next scheduled sync does not re-trigger against
+  # already-applied state. Keep it on rollback/failure so the operator can retry.
+  if { [ "$ACTION" = rebase ] || [ "$ACTION" = finalize ]; } && [ "$1" = ok ]; then
+    rm -f "$STATE_DIR/pending.json"
+  fi
 }
 
 run_logged() {
