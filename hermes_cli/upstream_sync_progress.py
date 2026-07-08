@@ -88,3 +88,44 @@ def render_progress(
     if key == "rebasing" and heartbeat_due:
         return _message_for(key, snapshot), key
     return None, key
+
+
+def _read_int(path: "Path") -> "int | None":
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def read_rebase_progress(repo_path) -> "tuple[int | None, int | None, bool]":
+    """Return ``(applied, total, rebasing)`` from the live repo's rebase state.
+
+    Reads ``.git/rebase-merge/{msgnum,end}`` (interactive/merge backend) or
+    ``.git/rebase-apply/{next,last}`` (am backend). ``rebasing`` is True while
+    either directory exists.
+    """
+    from pathlib import Path as _P
+    git = _P(repo_path) / ".git"
+    merge = git / "rebase-merge"
+    apply = git / "rebase-apply"
+    if merge.is_dir():
+        return _read_int(merge / "msgnum"), _read_int(merge / "end"), True
+    if apply.is_dir():
+        return _read_int(apply / "next"), _read_int(apply / "last"), True
+    return None, None, False
+
+
+def classify_terminal(*, head: str, backup_commit: str, behind_upstream: int) -> "str | None":
+    """Decide the terminal outcome from git state alone (finalize files are
+    unreadable by the unprivileged reporter).
+
+    - ``rollback`` when HEAD is back at the pre-rebase backup commit.
+    - ``success`` when HEAD moved off the backup and the branch fully contains
+      upstream (0 commits behind).
+    - ``None`` while neither holds (still in flight).
+    """
+    if head and backup_commit and head == backup_commit:
+        return "rollback"
+    if head and head != backup_commit and behind_upstream == 0:
+        return "success"
+    return None
