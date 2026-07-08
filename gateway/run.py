@@ -18889,6 +18889,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from cron.jobs import create_job
 
             create_job(**spec)
+
+            # Spawn a detached host-side progress reporter that posts rebase
+            # milestones + heartbeat into the operator's reply thread. Best
+            # effort: never let reporter issues block the ack.
+            try:
+                import sys as _sys
+                import subprocess as _sp
+                from pathlib import Path as _Path
+                from hermes_cli.upstream_sync_reply import build_progress_reporter_argv
+
+                _repo = str(_Path(__file__).resolve().parent.parent)
+                _hermes_bin = str(_Path(_sys.executable).parent / "hermes")
+                _script = str(_Path(_repo) / "scripts" / "upstream-sync-progress-reporter.py")
+                _argv = build_progress_reporter_argv(
+                    spec["origin"], repo=_repo, hermes_bin=_hermes_bin, script_path=_script,
+                )
+                if _argv:
+                    _sp.Popen(
+                        [_sys.executable, *_argv],
+                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, stdin=_sp.DEVNULL,
+                        start_new_session=True, close_fds=True,
+                    )
+            except Exception:
+                logger.warning("upstream-sync progress reporter spawn failed", exc_info=True)
         except Exception:
             logger.warning("upstream-sync decision intercept failed", exc_info=True)
             return None

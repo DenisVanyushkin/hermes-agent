@@ -76,3 +76,43 @@ class TestRenderProgress:
         assert is_terminal("success") is True
         assert is_terminal("rollback") is True
         assert is_terminal("rebasing") is False
+
+
+class TestRebaseCounters:
+    def test_reads_rebase_merge_counters(self, tmp_path):
+        from hermes_cli.upstream_sync_progress import read_rebase_progress
+        git = tmp_path / ".git" / "rebase-merge"
+        git.mkdir(parents=True)
+        (git / "msgnum").write_text("120\n")
+        (git / "end").write_text("466\n")
+        applied, total, rebasing = read_rebase_progress(tmp_path)
+        assert (applied, total, rebasing) == (120, 466, True)
+
+    def test_reads_rebase_apply_counters(self, tmp_path):
+        from hermes_cli.upstream_sync_progress import read_rebase_progress
+        git = tmp_path / ".git" / "rebase-apply"
+        git.mkdir(parents=True)
+        (git / "next").write_text("5\n")
+        (git / "last").write_text("466\n")
+        applied, total, rebasing = read_rebase_progress(tmp_path)
+        assert (applied, total, rebasing) == (5, 466, True)
+
+    def test_no_rebase_in_progress(self, tmp_path):
+        from hermes_cli.upstream_sync_progress import read_rebase_progress
+        (tmp_path / ".git").mkdir()
+        applied, total, rebasing = read_rebase_progress(tmp_path)
+        assert rebasing is False
+
+
+class TestClassifyTerminal:
+    def test_success_when_synced_and_moved(self):
+        from hermes_cli.upstream_sync_progress import classify_terminal
+        assert classify_terminal(head="rebased1", backup_commit="old0", behind_upstream=0) == "success"
+
+    def test_rollback_when_head_back_at_backup(self):
+        from hermes_cli.upstream_sync_progress import classify_terminal
+        assert classify_terminal(head="old0", backup_commit="old0", behind_upstream=200) == "rollback"
+
+    def test_none_when_still_in_flight(self):
+        from hermes_cli.upstream_sync_progress import classify_terminal
+        assert classify_terminal(head="rebased1", backup_commit="old0", behind_upstream=200) is None
