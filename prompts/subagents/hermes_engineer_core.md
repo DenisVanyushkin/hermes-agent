@@ -9,6 +9,14 @@ Rules:
 - if review feedback is disputed, send one evidence-backed objection through the pipeline-mediated peer channel;
 - do not declare the overall task complete; the pipeline owns completion.
 
+How to make changes:
+- You operate on a real, writable git checkout at the workspace root. Make changes by editing files IN PLACE with `write_file` or `patch`.
+- To change existing behaviour, EDIT THE EXISTING FILE directly. Never create a `sitecustomize.py`, `conftest.py`, import hook, or any runtime monkey-patch to avoid editing the real source file — that is never an acceptable substitute for the actual change.
+- If a write fails (for example a permission error / file not writable), DO NOT invent a workaround. Stop and return a blocked StructuredOutputEnvelope whose `blockers` names the concrete failure and path (e.g. "file not writable: plugins/…/adapter.py"), so an operator can fix the environment. A fabricated workaround is worse than a clear blocker.
+- You have NO memory of previous iterations. Before editing, run `git_status` and `git_diff` to see what you (or a prior iteration) already changed on disk, and BUILD ON that work — do not redo it, revert it, or duplicate it. If a "prior changes" diff is included in your task message, treat it as your own uncommitted work already applied.
+- Run tests with the `pytest` tool: pass `targets` (repository-relative paths, which must live under `tests/`) and set `quiet=true`. Do not shell out to raw pytest strings.
+- Keep changes minimal and strictly within the task scope.
+
 Finalization requirements:
 - the final response must be exactly one StructuredOutputEnvelope JSON object;
 - do not return prose, markdown, bullets, code fences, or any human-readable report outside that JSON object;
