@@ -694,19 +694,17 @@ def test_autonomous_helper_final_response_text_short_circuits_normal_agent(monke
                 "real_provider_bridge_invoked": True,
                 "blocked_reason": None,
                 "final_response_text": (
-                    "Controlled engineering execution completed and stopped at the commit gate.\n\n"
-                    "Changed files:\n"
+                    "✅ ЗАДАЧА ВЫПОЛНЕНА — ревьюер одобрил, жду твоего «коммить»\n\n"
+                    "━━ Что сделано ━━\n"
+                    "Prepared the smoke-square change.\n\n"
+                    "━━ Изменения ━━ (2 файлов)\n"
                     "- hermes_cli/smoke_square.py\n"
                     "- tests/test_smoke_square.py\n\n"
-                    "Tests:\n"
-                    "- status: passed\n"
-                    "- command: /home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py\n"
-                    "- command relation: same\n"
-                    "- summary: 3 passed in 0.37s\n\n"
-                    "Reviewer:\n"
-                    "- approved: yes\n"
-                    "- decision: candidate_complete\n\n"
-                    "No commit or push was performed. Waiting for user approval before commit."
+                    "━━ Проверка ━━\n"
+                    "Тесты: ✅ passed — `/home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py` (3 passed in 0.37s)\n"
+                    "Ревьюер: ✅ approved (candidate_complete)\n\n"
+                    "━━ Дальше ━━\n"
+                    "Ничего не закоммичено. Ответь «коммить» — закоммичу изменения, «отмена» — сброшу."
                 ),
             },
         )(),
@@ -729,8 +727,8 @@ def test_autonomous_helper_final_response_text_short_circuits_normal_agent(monke
     assert events == []
     assert result["api_calls"] == 0
     assert result["tools"] == []
-    assert "Controlled engineering execution completed and stopped at the commit gate." in result["final_response"]
-    assert "No commit or push was performed. Waiting for user approval before commit." in result["final_response"]
+    assert "✅ ЗАДАЧА ВЫПОЛНЕНА" in result["final_response"]
+    assert "Ничего не закоммичено. Ответь «коммить» — закоммичу изменения, «отмена» — сброшу." in result["final_response"]
 
 
 @pytest.mark.asyncio

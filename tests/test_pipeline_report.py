@@ -465,12 +465,12 @@ def test_report_builder_preserves_honest_blocked_final_response_text() -> None:
     report = build_pipeline_execution_report(
         session=session,
         state_snapshot=snapshot,
-        final_response_text="Autonomous execution did not complete successfully.",
+        final_response_text="⛔ ЗАДАЧА ЗАБЛОКИРОВАНА — тест-команда отклонена",
         blocked_reason_override="test_command_denied",
     )
     payload = report.to_safe_dict()
 
-    assert payload["final_response"]["text"] == "Autonomous execution did not complete successfully."
+    assert payload["final_response"]["text"] == "⛔ ЗАДАЧА ЗАБЛОКИРОВАНА — тест-команда отклонена"
     assert payload["final_response"]["placeholder_reason"] == "test_command_denied"
 
 

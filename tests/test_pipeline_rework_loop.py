@@ -302,7 +302,8 @@ def test_blocked_final_response_text_handles_missing_structured_output() -> None
     )
 
     assert text is not None
-    assert "required structured output packet" in text
+    assert text.startswith("⛔ ЗАДАЧА ЗАБЛОКИРОВАНА")
+    assert "обязательный пакет структурированного вывода" in text
 
 
 def test_blocked_final_response_text_preserves_max_iterations_plain_text_summary() -> None:
@@ -319,7 +320,7 @@ def test_blocked_final_response_text_preserves_max_iterations_plain_text_summary
     )
 
     assert text is not None
-    assert "iteration cap" in text
+    assert "лимит автономных итераций" in text
     assert "plain text diagnostic summary" in text
     assert "engineer_max_iterations_without_structured_output" in text
 
@@ -375,17 +376,19 @@ def test_blocked_final_response_text_surfaces_evidence_for_invalid_engineer_outp
 
     assert text is not None
     assert text != (
-        "Autonomous execution did not complete successfully.\n\n"
-        "What happened:\n"
-        "- Engineer output did not satisfy the controlled execution contract.\n"
-        "- Reviewer was not invoked because engineer output was invalid.\n"
-        "Test status: not_requested\n"
-        "Reviewer status: blocked"
+        "⛔ ЗАДАЧА ЗАБЛОКИРОВАНА — вывод инженера невалиден\n\n"
+        "━━ Что произошло ━━\n"
+        "- Вывод инженера не удовлетворил контракту контролируемого исполнения.\n"
+        "- Ревьюер не вызывался: вывод инженера был невалиден.\n"
+        "Статус тестов: not_requested\n"
+        "Статус ревьюера: blocked\n\n"
+        "━━ Дальше ━━\n"
+        "- Дай уточнение или исправь вводные и повтори."
     )
     assert "Investigated the local fallback-refresh implementation" in text
     assert "No tool in this session can fetch or diff against remote git origin" in text
-    assert "Test status: not_requested" in text
-    assert "Reviewer status: blocked" in text
+    assert "Статус тестов: not_requested" in text
+    assert "Статус ревьюера: blocked" in text
 
 
 def test_valid_blocked_engineer_envelope_never_reports_invalid_output() -> None:
@@ -452,7 +455,7 @@ def test_valid_blocked_engineer_envelope_never_reports_invalid_output() -> None:
 
     assert text is not None
     assert "invalid" not in text.lower()
-    assert "did not satisfy the controlled execution contract" not in text
+    assert "не удовлетворил контракту контролируемого исполнения" not in text
     assert "Investigated the fallback-refresh command" in text
     assert "No tool in this session can fetch or diff against remote git origin" in text
 
@@ -534,7 +537,7 @@ def test_finalize_loop_result_preserves_blocked_final_response_text(tmp_path: Pa
 
     payload = result.execution_report.to_safe_dict()
     assert payload["final_response"]["text"] is not None
-    assert "required structured output packet" in payload["final_response"]["text"]
+    assert "обязательный пакет структурированного вывода" in payload["final_response"]["text"]
 
 
 def test_completion_allowed_final_response_text_summarizes_commit_gate() -> None:
@@ -552,16 +555,43 @@ def test_completion_allowed_final_response_text_summarizes_commit_gate() -> None
         reviewer_packet={"packet_status": "ready_for_review"},
     )
 
-    assert "Controlled engineering execution completed and stopped at the commit gate." in text
+    assert "✅ ЗАДАЧА ВЫПОЛНЕНА" in text
+    assert "━━ Изменения ━━ (2 файлов)" in text
     assert "- hermes_cli/smoke_square.py" in text
     assert "- tests/test_smoke_square.py" in text
-    assert "- status: passed" in text
-    assert "- command: /home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py" in text
-    assert "- command relation: same" in text
-    assert "- summary: 3 passed in 0.37s" in text
-    assert "- approved: yes" in text
-    assert "- decision: candidate_complete" in text
-    assert "No commit or push was performed. Waiting for user approval before commit." in text
+    assert "Тесты: ✅ passed" in text
+    assert "`/home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q --maxfail=1 tests/test_smoke_square.py`" in text
+    assert "(3 passed in 0.37s)" in text
+    assert "Ревьюер: ✅ approved (candidate_complete)" in text
+    assert "Ничего не закоммичено. Ответь «коммить» — закоммичу изменения, «отмена» — сброшу." in text
+
+
+def test_completion_allowed_final_response_text_includes_rework_and_escalation_detail() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._completion_allowed_final_response_text(
+        git_gate={"changed_files": ["hermes_cli/smoke_square.py"]},
+        test_summary={"status": "passed", "command": "venv/bin/pytest -q", "summary": "1 passed"},
+        reviewer_packet={"packet_status": "ready_for_review"},
+        review_iterations_completed=2,
+        model_escalations_used=1,
+    )
+
+    assert "Раунды доработки: 2" in text
+    assert "Эскалация модели: да — инженер переведён на усиленную модель после упорных провалов" in text
+
+
+def test_completion_allowed_final_response_text_omits_rework_and_escalation_detail_by_default() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._completion_allowed_final_response_text(
+        git_gate={"changed_files": ["hermes_cli/smoke_square.py"]},
+        test_summary={"status": "passed", "command": "venv/bin/pytest -q", "summary": "1 passed"},
+        reviewer_packet={"packet_status": "ready_for_review"},
+    )
+
+    assert "Раунды доработки:" not in text
+    assert "Эскалация модели:" not in text
 
 
 def test_completion_allowed_final_response_text_surfaces_engineer_summary() -> None:
@@ -591,7 +621,7 @@ def test_completion_allowed_final_response_text_surfaces_engineer_summary() -> N
         },
     )
 
-    assert "Summary:" in text
+    assert "✅ ИССЛЕДОВАНИЕ ЗАВЕРШЕНО" in text
     assert "опережает origin на 91 коммит" in text
 
 
@@ -900,8 +930,8 @@ def test_finalize_loop_result_materializes_completion_allowed_final_response_tex
     assert payload["completion"]["completion_allowed"] is True
     assert payload["review"]["reviewer_approved"] is True
     assert payload["final_response"]["text"] is not None
-    assert "Controlled engineering execution completed and stopped at the commit gate." in payload["final_response"]["text"]
-    assert "No commit or push was performed. Waiting for user approval before commit." in payload["final_response"]["text"]
+    assert "✅ ЗАДАЧА ВЫПОЛНЕНА" in payload["final_response"]["text"]
+    assert "Ничего не закоммичено. Ответь «коммить» — закоммичу изменения, «отмена» — сброшу." in payload["final_response"]["text"]
 
 
 
@@ -3642,8 +3672,8 @@ def test_test_command_denied_final_response_is_honest_and_reviewer_not_invoked(t
     assert result.blocked_reason == "test_command_denied"
     assert report_payload["review"]["reviewer_invoked"] is False
     assert "Tests PASSED" not in final_text
-    assert "Pytest was requested but blocked" in final_text
-    assert "No verified passing test result is available." in final_text
+    assert "Pytest был запрошен, но заблокирован" in final_text
+    assert "Подтверждённого прохождения тестов нет." in final_text
 
 
 def test_test_command_denied_final_response_reports_malformed_payload_forensics(tmp_path: Path) -> None:
@@ -3743,11 +3773,11 @@ def test_ordinary_reviewer_rework_final_response_surfaces_findings_and_test_comm
     )
 
     assert text is not None
-    assert "Reviewer requested implementation rework." in text
+    assert "Ревьюер запросил доработку реализации." in text
     assert "Run venv/bin/pytest -q tests/test_smoke_square.py and attach the result." in text
-    assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in text
-    assert "Test status: requested_not_executed" in text
-    assert "Reviewer status: ready_for_review" in text
+    assert "Команда тестов: venv/bin/pytest -q tests/test_smoke_square.py" in text
+    assert "Статус тестов: requested_not_executed" in text
+    assert "Статус ревьюера: ready_for_review" in text
 
 
 def test_pytest_tool_intent_uses_prompt_source_label() -> None:
@@ -3811,8 +3841,8 @@ def test_normal_reviewer_path_surfaces_findings_in_packet_and_final_response(tmp
     final_response = result.execution_report.to_safe_dict()["final_response"]["text"]
     assert final_response is not None
     assert "Run venv/bin/pytest -q tests/test_smoke_square.py and attach the result." in final_response
-    assert "Test status: requested_not_executed" in final_response
-    assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in final_response
+    assert "Статус тестов: requested_not_executed" in final_response
+    assert "Команда тестов: venv/bin/pytest -q tests/test_smoke_square.py" in final_response
 
 
 def test_reviewer_fail_closed_final_response_is_diagnostic() -> None:
@@ -3853,18 +3883,18 @@ def test_reviewer_fail_closed_final_response_is_diagnostic() -> None:
     )
 
     assert invalid_text is not None
-    assert "reviewer could not produce a valid review" in invalid_text.lower()
-    assert "Test status: requested_not_executed" in invalid_text
-    assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in invalid_text
-    assert "Reviewer status: review_failed" in invalid_text
+    assert "ревьюер не смог сформировать валидный пакет ревью" in invalid_text.lower()
+    assert "Статус тестов: requested_not_executed" in invalid_text
+    assert "Команда тестов: venv/bin/pytest -q tests/test_smoke_square.py" in invalid_text
+    assert "Статус ревьюера: review_failed" in invalid_text
 
     assert blocked_text is not None
-    assert "reviewer blocked completion" in blocked_text.lower()
+    assert "ревьюер заблокировал завершение" in blocked_text.lower()
     assert "Reviewer blocked the patch for an unresolved correctness issue." in blocked_text
 
     assert unavailable_text is not None
-    assert "reviewer did not complete a usable review" in unavailable_text.lower()
-    assert "Reviewer status: not_evaluated" in unavailable_text
+    assert "ревьюер не завершил пригодное ревью" in unavailable_text.lower()
+    assert "Статус ревьюера: not_evaluated" in unavailable_text
 
 
 def test_terminal_blocked_final_response_is_sanitized() -> None:
@@ -3884,12 +3914,12 @@ def test_terminal_blocked_final_response_is_sanitized() -> None:
     )
 
     assert text is not None
-    assert "terminal safety block" in text.lower()
-    assert "Blocked reason: terminal_blocked" in text
-    assert "Blocked reason detail: credential_exfiltration_risk" in text
+    assert "терминальную блокировку безопасности" in text.lower()
+    assert "Причина блокировки: terminal_blocked" in text
+    assert "Детали причины блокировки: credential_exfiltration_risk" in text
     assert "Patch leaks protected data to stdout." in text
     assert "password=abc123" not in text
-    assert "Test status: passed" in text
+    assert "Статус тестов: passed" in text
 
 
 def test_git_gate_blocked_final_response_is_diagnostic() -> None:
@@ -3907,12 +3937,12 @@ def test_git_gate_blocked_final_response_is_diagnostic() -> None:
     )
 
     assert baseline_text is not None
-    assert "workspace baseline was not clean" in baseline_text.lower()
-    assert "repository baseline must be clean" in baseline_text.lower()
+    assert "рабочее пространство не было чистым" in baseline_text.lower()
+    assert "baseline репозитория должен быть чистым" in baseline_text.lower()
 
     assert diff_text is not None
-    assert "material diff could not be trusted" in diff_text.lower()
-    assert "Blocked reason: git_diff_failed" in diff_text
+    assert "материальный diff нельзя было доверять" in diff_text.lower()
+    assert "Причина блокировки: git_diff_failed" in diff_text
 
 
 def test_malformed_test_payload_final_response_is_diagnostic() -> None:
@@ -3934,9 +3964,9 @@ def test_malformed_test_payload_final_response_is_diagnostic() -> None:
     )
 
     assert text is not None
-    assert "malformed test payload was blocked" in text.lower()
-    assert "Validator rule: malformed_test_payload" in text
-    assert "Denied payload: {status: observed, summary: workspace only contains tracked.txt}" in text
+    assert "некорректный тестовый payload заблокирован" in text.lower()
+    assert "Правило валидатора: malformed_test_payload" in text
+    assert "Отклонённый payload: {status: observed, summary: workspace only contains tracked.txt}" in text
 
 
 def test_missing_test_evidence_exhaustion_returns_diagnostic_text() -> None:
@@ -3955,9 +3985,9 @@ def test_missing_test_evidence_exhaustion_returns_diagnostic_text() -> None:
     )
 
     assert text is not None
-    assert "Missing test evidence remained unresolved" in text
-    assert "Test status: requested_not_executed" in text
-    assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in text
+    assert "Отсутствующие доказательства прохождения тестов остались неустранёнными" in text
+    assert "Статус тестов: requested_not_executed" in text
+    assert "Команда тестов: venv/bin/pytest -q tests/test_smoke_square.py" in text
 
 
 def test_reviewer_catastrophic_credential_exfiltration_stays_terminal_blocked() -> None:
@@ -4092,8 +4122,8 @@ def test_smoke_016_exhaustion_normalizes_empty_blocked_reviewer_to_missing_test_
     assert result.appended_rework_context[0]["reviewer_verdict"] == "blocked"
     final_response = result.execution_report.to_safe_dict()["final_response"]["text"]
     assert final_response is not None
-    assert "Test status: requested_not_executed" in final_response
-    assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in final_response
+    assert "Статус тестов: requested_not_executed" in final_response
+    assert "Команда тестов: venv/bin/pytest -q tests/test_smoke_square.py" in final_response
 
 
 def test_retryable_engineer_reasons() -> None:

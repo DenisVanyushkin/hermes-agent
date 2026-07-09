@@ -524,6 +524,7 @@ def execute_bounded_rework_loop(
                         disagreements=disagreements,
                         decisive_subagent=decisive_subagent,
                         model_escalations=model_escalations,
+                        model_escalations_used=model_escalations_used,
                         tests=_tests_payload(current_test_summary),
                         mutation_summary=current_mutation_summary,
                         review_overrides=review_overrides,
@@ -577,6 +578,7 @@ def execute_bounded_rework_loop(
                     disagreements=disagreements,
                     decisive_subagent=decisive_subagent,
                     model_escalations=model_escalations,
+                    model_escalations_used=model_escalations_used,
                     tests=_tests_payload(current_test_summary),
                     mutation_summary=current_mutation_summary,
                     review_overrides=review_overrides,
@@ -768,6 +770,7 @@ def execute_bounded_rework_loop(
                     disagreements=disagreements,
                     decisive_subagent=decisive_subagent,
                     model_escalations=model_escalations,
+                    model_escalations_used=model_escalations_used,
                     tests=_tests_payload(current_test_summary),
                     mutation_summary=current_mutation_summary,
                     review_overrides=review_overrides,
@@ -823,6 +826,7 @@ def execute_bounded_rework_loop(
                     disagreements=disagreements,
                     decisive_subagent=decisive_subagent,
                     model_escalations=model_escalations,
+                    model_escalations_used=model_escalations_used,
                     tests=_tests_payload(current_test_summary),
                     mutation_summary=current_mutation_summary,
                     review_overrides=review_overrides,
@@ -876,6 +880,7 @@ def execute_bounded_rework_loop(
                 disagreements=disagreements,
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
+                model_escalations_used=model_escalations_used,
                 tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
                 review_overrides=review_overrides,
@@ -915,6 +920,7 @@ def execute_bounded_rework_loop(
                 disagreements=disagreements,
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
+                model_escalations_used=model_escalations_used,
                 tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
                 test_summary=current_test_summary,
@@ -1126,6 +1132,7 @@ def execute_bounded_rework_loop(
                 disagreements=disagreements,
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
+                model_escalations_used=model_escalations_used,
                 tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
                 test_summary=current_test_summary,
@@ -1167,6 +1174,7 @@ def execute_bounded_rework_loop(
                 disagreements=disagreements,
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
+                model_escalations_used=model_escalations_used,
                 tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
                 test_summary=current_test_summary,
@@ -1220,6 +1228,7 @@ def execute_bounded_rework_loop(
                 disagreements=disagreements,
                 decisive_subagent=decisive_subagent,
                 model_escalations=model_escalations,
+                model_escalations_used=model_escalations_used,
                 tests=_tests_payload(current_test_summary),
                 mutation_summary=current_mutation_summary,
                 test_summary=current_test_summary,
@@ -1846,6 +1855,46 @@ def _blocked_loop_result(
     )
 
 
+_BLOCKED_REASON_SHORT_RU: dict[str, str] = {
+    "test_command_denied": "тест-команда отклонена",
+    "missing_structured_output": "инженер не выдал результат",
+    "max_iterations_plain_text_output": "инженер не выдал результат",
+    "reviewer_result_invalid": "ревьюер заблокировал",
+    "reviewer_verdict_blocked": "ревьюер заблокировал",
+    "reviewer_unavailable": "ревьюер заблокировал",
+    "review_loop_limit_exceeded": "исчерпаны раунды доработки",
+    "rework_exhausted_after_ordinary_reviewer_findings": "исчерпаны раунды доработки",
+    "rework_exhausted_after_missing_test_evidence": "исчерпаны раунды доработки",
+    "terminal_blocked": "терминальная блокировка безопасности",
+    "engineer_reported_blocked": "инженер сообщил о блокировке",
+    "invalid_engineer_output": "вывод инженера невалиден",
+    "engineer_result_invalid": "вывод инженера невалиден",
+}
+
+_REVIEWER_FINDINGS_NEXT_STEP_RU = "Посмотри находки ревьюера выше."
+_REWORK_EXHAUSTED_NEXT_STEP_RU = (
+    "Нужна твоя правка требований или ручная доработка — ревьюер не снял замечания за отведённые раунды."
+)
+_GENERIC_NEXT_STEP_RU = "Дай уточнение или исправь вводные и повтори."
+
+
+def _blocked_next_step_ru(blocked_reason: str | None) -> str:
+    if blocked_reason in {
+        "review_loop_limit_exceeded",
+        "rework_exhausted_after_ordinary_reviewer_findings",
+        "rework_exhausted_after_missing_test_evidence",
+    }:
+        return _REWORK_EXHAUSTED_NEXT_STEP_RU
+    if blocked_reason in {
+        "reviewer_result_invalid",
+        "reviewer_verdict_blocked",
+        "reviewer_unavailable",
+        "terminal_blocked",
+    }:
+        return _REVIEWER_FINDINGS_NEXT_STEP_RU
+    return _GENERIC_NEXT_STEP_RU
+
+
 def _blocked_final_response_text(
     *,
     blocked_reason: str | None,
@@ -1877,10 +1926,13 @@ def _blocked_final_response_text(
         *git_gate_reasons,
     }:
         return None
+    short_reason = _BLOCKED_REASON_SHORT_RU.get(blocked_reason) or (
+        "проблема с git-состоянием" if blocked_reason in git_gate_reasons else "выполнение заблокировано"
+    )
     lines = [
-        "Autonomous execution did not complete successfully.",
+        f"⛔ ЗАДАЧА ЗАБЛОКИРОВАНА — {short_reason}",
         "",
-        "What happened:",
+        "━━ Что произошло ━━",
     ]
     if blocked_reason == "test_command_denied":
         denied_results = list((test_summary or {}).get("results") or [])
@@ -1894,69 +1946,55 @@ def _blocked_final_response_text(
         )
         lines.extend(
             [
-                "- The requested file changes were prepared in the autonomous workspace.",
+                "- Запрошенные изменения файлов подготовлены в автономном воркспейсе.",
                 (
-                    "- A malformed test payload was blocked by the controlled test validator."
+                    "- Некорректный тестовый payload заблокирован валидатором тестовых команд."
                     if malformed_payload
-                    else "- Pytest was requested but blocked by the controlled test validator."
+                    else "- Pytest был запрошен, но заблокирован валидатором тестовых команд."
                 ),
-                "- Reviewer was not invoked because engineer output was invalid after the blocked test step.",
+                "- Ревьюер не вызывался: вывод инженера стал невалидным после блокировки тестового шага.",
                 "",
-                "No verified passing test result is available.",
+                "Подтверждённого прохождения тестов нет.",
             ]
         )
         if denied_command:
-            lines.append(f"Denied payload: {denied_command}")
+            lines.append(f"Отклонённый payload: {denied_command}")
         if validator_reason and validator_reason != "test_command_denied":
-            lines.append(f"Validator rule: {validator_reason}")
+            lines.append(f"Правило валидатора: {validator_reason}")
     elif blocked_reason == "missing_structured_output":
         lines.extend(
             [
-                "- The autonomous bridge reached execution, but the engineer result did not contain the required structured output packet.",
-                "- Reviewer was not invoked because the engineer result failed the structured-output contract.",
+                "- Автономный мост дошёл до исполнения, но результат инженера не содержал обязательный пакет структурированного вывода.",
+                "- Ревьюер не вызывался: результат инженера не прошёл контракт структурированного вывода.",
                 "",
-                "No verified passing test result is available.",
+                "Подтверждённого прохождения тестов нет.",
             ]
         )
     elif blocked_reason == "max_iterations_plain_text_output":
         lines.extend(
             [
-                "- The engineer hit the autonomous iteration cap and returned plain-text output instead of the required structured output packet.",
-                "- Reviewer was not invoked because the engineer result failed the structured-output contract.",
+                "- Инженер упёрся в лимит автономных итераций и вернул обычный текст вместо обязательного пакета структурированного вывода.",
+                "- Ревьюер не вызывался: результат инженера не прошёл контракт структурированного вывода.",
                 "",
-                "No verified passing test result is available.",
+                "Подтверждённого прохождения тестов нет.",
             ]
         )
     elif blocked_reason in {"reviewer_result_invalid", "reviewer_verdict_blocked", "reviewer_unavailable"}:
         lines.append(
             {
-                "reviewer_result_invalid": "- The reviewer could not produce a valid review packet after controlled execution reached the review boundary.",
-                "reviewer_verdict_blocked": "- The reviewer blocked completion for a terminal review reason.",
-                "reviewer_unavailable": "- The reviewer did not complete a usable review after the patch reached the review boundary.",
+                "reviewer_result_invalid": "- Ревьюер не смог сформировать валидный пакет ревью после того, как контролируемое исполнение дошло до границы ревью.",
+                "reviewer_verdict_blocked": "- Ревьюер заблокировал завершение по терминальной причине ревью.",
+                "reviewer_unavailable": "- Ревьюер не завершил пригодное ревью после того, как патч дошёл до границы ревью.",
             }[blocked_reason]
         )
-        lines.append("- Controlled completion remains blocked at the reviewer boundary.")
-        findings = list(reviewer_packet.get("review_findings") or [])
-        if findings:
-            lines.extend(["", "Reviewer findings:"])
-            for item in findings:
-                summary = _safe_test_text(item.get("summary")) if isinstance(item, dict) else _safe_test_text(item)
-                if summary:
-                    lines.append(f"- {summary}")
+        lines.append("- Контролируемое завершение остаётся заблокированным на границе ревью.")
     elif blocked_reason == "terminal_blocked":
         lines.extend(
             [
-                "- The controlled pipeline issued a terminal safety block.",
-                "- The run stopped instead of routing the issue into another rework attempt.",
+                "- Контролируемый пайплайн выдал терминальную блокировку безопасности.",
+                "- Запуск остановлен вместо направления проблемы на новый раунд доработки.",
             ]
         )
-        findings = list(reviewer_packet.get("review_findings") or [])
-        if findings:
-            lines.extend(["", "Safety findings:"])
-            for item in findings:
-                summary = _safe_test_text(item.get("summary")) if isinstance(item, dict) else _safe_test_text(item)
-                if summary:
-                    lines.append(f"- {summary}")
     elif blocked_reason in {
         "review_loop_limit_exceeded",
         "rework_exhausted_after_ordinary_reviewer_findings",
@@ -1964,43 +2002,36 @@ def _blocked_final_response_text(
     }:
         lines.extend(
             [
-                "- Reviewer requested implementation rework.",
-                "- Rework attempts were exhausted before the reviewer issues were resolved.",
+                "- Ревьюер запросил доработку реализации.",
+                "- Раунды доработки исчерпаны до того, как замечания ревьюера были устранены.",
             ]
         )
         if blocked_reason == "rework_exhausted_after_missing_test_evidence":
-            lines.append("- Missing test evidence remained unresolved at the review boundary.")
-        findings = list(reviewer_packet.get("review_findings") or [])
-        if findings:
-            lines.extend(["", "Reviewer findings:"])
-            for item in findings:
-                summary = _safe_test_text(item.get("summary")) if isinstance(item, dict) else _safe_test_text(item)
-                if summary:
-                    lines.append(f"- {summary}")
+            lines.append("- Отсутствующие доказательства прохождения тестов остались неустранёнными на границе ревью.")
     elif blocked_reason in git_gate_reasons:
         lines.append(
             {
-                "baseline_dirty": "- The workspace baseline was not clean before controlled completion could be trusted.",
-                "baseline_invalid": "- The initial git baseline snapshot was invalid or unavailable.",
-                "post_snapshot_invalid": "- The post-run git snapshot was invalid or unavailable.",
-                "repo_path_mismatch": "- Git snapshot comparison failed because the baseline and post-run repositories did not match.",
-                "git_diff_failed": "- Material diff could not be trusted because the git diff between baseline and post-run state failed.",
-                "git_unavailable": "- Material diff could not be trusted because required git data was unavailable.",
+                "baseline_dirty": "- Рабочее пространство не было чистым перед тем, как можно было доверять автоматическому завершению.",
+                "baseline_invalid": "- Исходный git-снимок baseline был невалиден или недоступен.",
+                "post_snapshot_invalid": "- Снимок git после запуска был невалиден или недоступен.",
+                "repo_path_mismatch": "- Сравнение git-снимков не удалось: baseline и репозиторий после запуска не совпали.",
+                "git_diff_failed": "- Материальный diff нельзя было доверять: git diff между baseline и состоянием после запуска завершился ошибкой.",
+                "git_unavailable": "- Материальный diff нельзя было доверять: нужные git-данные были недоступны.",
             }[blocked_reason]
         )
-        lines.append("- The repository baseline must be clean and comparable before automatic completion can proceed.")
+        lines.append("- Baseline репозитория должен быть чистым и сравнимым, прежде чем автоматическое завершение возможно.")
     elif blocked_reason == "engineer_reported_blocked":
         lines.extend(
             [
-                "- The engineer produced a valid, schema-conformant result and self-reported it could not proceed further.",
-                "- Reviewer was not invoked because the engineer requested review instead of declaring completion.",
+                "- Инженер выдал валидный, соответствующий схеме результат и сам сообщил, что не может продолжить.",
+                "- Ревьюер не вызывался: инженер запросил ревью вместо объявления завершения.",
             ]
         )
     else:
         lines.extend(
             [
-                "- Engineer output did not satisfy the controlled execution contract.",
-                "- Reviewer was not invoked because engineer output was invalid.",
+                "- Вывод инженера не удовлетворил контракту контролируемого исполнения.",
+                "- Ревьюер не вызывался: вывод инженера был невалиден.",
             ]
         )
     # reviewer_packet is the safe metadata wrapper built by _reviewer_packet_metadata
@@ -2020,7 +2051,7 @@ def _blocked_final_response_text(
         "missing_structured_output",
     }
     if blocked_reason in evidence_preserving_reasons and engineer_summary:
-        lines.extend(["", "Preserved diagnostic summary:", engineer_summary])
+        lines.extend(["", "Сохранённая диагностика:", engineer_summary])
     engineer_sanitized_output = safe_packet.get("engineer_sanitized_output")
     if not isinstance(engineer_sanitized_output, dict):
         engineer_sanitized_output = {}
@@ -2029,39 +2060,51 @@ def _blocked_final_response_text(
     ]
     engineer_blockers = [item for item in engineer_blockers if item]
     if blocked_reason in evidence_preserving_reasons and engineer_blockers:
-        lines.extend(["", "Engineer-reported blockers:"])
+        lines.extend(["", "Блокеры инженера:"])
         for item in engineer_blockers:
             lines.append(f"- {item}")
     engineer_next_action = _safe_test_text(engineer_sanitized_output.get("next_action"))
     if blocked_reason in evidence_preserving_reasons and engineer_next_action:
-        lines.append(f"Suggested next action: {engineer_next_action}")
+        lines.append(f"Предложенное следующее действие: {engineer_next_action}")
     changed_files = [
         str(item).strip() for item in list((safe_packet.get("git") or {}).get("changed_files") or []) if str(item).strip()
     ]
     if blocked_reason in evidence_preserving_reasons and changed_files:
-        lines.extend(["", "Changed files:"])
+        lines.extend(["", "Изменённые файлы:"])
         for path in changed_files:
             lines.append(f"- {path}")
     test_status = _safe_test_text((test_summary or {}).get("status"))
     test_command = _safe_test_text((test_summary or {}).get("command"))
     if test_status:
-        lines.append(f"Test status: {test_status}")
+        lines.append(f"Статус тестов: {test_status}")
     if test_command:
-        lines.append(f"Test command: {test_command}")
+        lines.append(f"Команда тестов: {test_command}")
     safe_summary = _safe_test_text((test_summary or {}).get("blocked_reason"))
     if safe_summary and safe_summary not in {"test_command_denied", "engineer_result_invalid"}:
-        lines.append(f"Blocked reason: {safe_summary}")
+        lines.append(f"Причина блокировки: {safe_summary}")
     elif blocked_reason in git_gate_reasons | {"terminal_blocked"}:
-        lines.append(f"Blocked reason: {blocked_reason}")
+        lines.append(f"Причина блокировки: {blocked_reason}")
     detail = _safe_test_text(safe_packet.get("blocked_reason_detail"))
     raw_detail = str(safe_packet.get("blocked_reason_detail") or "").strip()
     if detail and detail not in {"missing_structured_output", "invalid_engineer_structured_output"}:
-        lines.append(f"Blocked reason detail: {detail}")
+        lines.append(f"Детали причины блокировки: {detail}")
     elif blocked_reason == "terminal_blocked" and raw_detail and re.fullmatch(r"[a-z0-9_:-]+", raw_detail):
-        lines.append(f"Blocked reason detail: {raw_detail}")
+        lines.append(f"Детали причины блокировки: {raw_detail}")
     packet_status = str(reviewer_packet.get("packet_status") or "").strip()
     if packet_status and packet_status != "disabled":
-        lines.append(f"Reviewer status: {packet_status}")
+        lines.append(f"Статус ревьюера: {packet_status}")
+
+    findings = list(reviewer_packet.get("review_findings") or [])
+    finding_lines: list[str] = []
+    for item in findings:
+        summary = _safe_test_text(item.get("summary")) if isinstance(item, dict) else _safe_test_text(item)
+        if summary:
+            finding_lines.append(f"- {summary}")
+    if finding_lines:
+        lines.extend(["", "━━ Находки ревьюера ━━"])
+        lines.extend(finding_lines)
+
+    lines.extend(["", "━━ Дальше ━━", f"- {_blocked_next_step_ru(blocked_reason)}"])
     return "\n".join(lines)
 
 
@@ -2070,6 +2113,8 @@ def _completion_allowed_final_response_text(
     git_gate: dict[str, Any] | None,
     test_summary: dict[str, Any] | None,
     reviewer_packet: dict[str, Any] | None,
+    review_iterations_completed: int = 0,
+    model_escalations_used: int = 0,
 ) -> str:
     # A run with no material repo changes is an investigation/Q&A, not a code
     # change waiting at the commit gate -- the commit-gate framing is misleading
@@ -2077,12 +2122,6 @@ def _completion_allowed_final_response_text(
     gate = git_gate or {}
     read_only_run = not bool(gate.get("material_changes_present")) and not [
         item for item in list(gate.get("changed_files") or []) if str(item).strip()
-    ]
-    lines = [
-        "Read-only investigation completed. No repository changes were made."
-        if read_only_run
-        else "Controlled engineering execution completed and stopped at the commit gate.",
-        "",
     ]
 
     # reviewer_packet is the safe metadata wrapper built by _reviewer_packet_metadata
@@ -2095,16 +2134,10 @@ def _completion_allowed_final_response_text(
     if not isinstance(safe_packet, dict):
         safe_packet = reviewer_packet or {}
     engineer_summary = _safe_test_text(safe_packet.get("engineer_summary"))
-    if engineer_summary:
-        lines.extend(["Summary:", engineer_summary, ""])
-
-    # For read-only investigation runs the substantive answer lives in the
-    # engineer findings, not in the one-line summary; without this the user
-    # only ever sees pipeline plumbing.
     sanitized_output = safe_packet.get("engineer_sanitized_output")
     findings = sanitized_output.get("findings") if isinstance(sanitized_output, dict) else None
+    finding_lines: list[str] = []
     if isinstance(findings, list) and findings:
-        lines.append("Findings:")
         for item in findings:
             if not isinstance(item, dict):
                 continue
@@ -2115,54 +2148,65 @@ def _completion_allowed_final_response_text(
             elif detail:
                 text = detail
             if text:
-                lines.append(f"- {text}")
-        lines.append("")
+                finding_lines.append(f"- {text}")
+
+    if read_only_run:
+        lines = [
+            "✅ ИССЛЕДОВАНИЕ ЗАВЕРШЕНО — изменений в репозитории нет",
+            "",
+            "━━ Итог ━━",
+        ]
+        if engineer_summary:
+            lines.append(engineer_summary)
+        lines.extend(finding_lines)
+        while lines and lines[-1] == "":
+            lines.pop()
+        return "\n".join(lines)
+
+    lines = [
+        "✅ ЗАДАЧА ВЫПОЛНЕНА — ревьюер одобрил, жду твоего «коммить»",
+        "",
+        "━━ Что сделано ━━",
+    ]
+    if engineer_summary:
+        lines.append(engineer_summary)
+    lines.extend(finding_lines)
 
     changed_files = [str(item).strip() for item in list((git_gate or {}).get("changed_files") or []) if str(item).strip()]
-    if changed_files:
-        lines.append("Changed files:")
-        for path in changed_files:
-            lines.append(f"- {path}")
-        lines.append("")
+    lines.extend(["", f"━━ Изменения ━━ ({len(changed_files)} файлов)"])
+    for path in changed_files:
+        lines.append(f"- {path}")
+
+    lines.extend(["", "━━ Проверка ━━"])
 
     test_status = _safe_test_text((test_summary or {}).get("status")) or "unavailable"
-    skip_test_block = read_only_run and test_status in {"not_requested", "unavailable"}
-    if not skip_test_block:
-        lines.append("Tests:")
-        lines.append(f"- status: {test_status}")
-
     executed_command = _safe_test_text((test_summary or {}).get("executed_command"))
-    requested_command = _safe_test_text((test_summary or {}).get("requested_command"))
     command = _safe_test_text((test_summary or {}).get("command"))
-    command_relation = _safe_test_text((test_summary or {}).get("command_relation"))
     summary = _safe_test_text((test_summary or {}).get("summary"))
+    test_icon = "✅" if test_status == "passed" else "⚠️"
 
-    if executed_command:
-        lines.append(f"- command: {executed_command}")
-    elif command:
-        lines.append(f"- command: {command}")
-    if requested_command and requested_command != executed_command:
-        lines.append(f"- requested command: {requested_command}")
-    if command_relation:
-        lines.append(f"- command relation: {command_relation}")
+    test_command_display = executed_command or command
+    test_line_parts = [f"Тесты: {test_icon} {test_status}"]
+    if test_command_display:
+        test_line_parts.append(f"— `{test_command_display}`")
     if summary:
-        lines.append(f"- summary: {summary}")
+        test_line_parts.append(f"({summary})")
+    lines.append(" ".join(test_line_parts))
 
-    if not read_only_run:
-        lines.extend(
-            [
-                "",
-                "Reviewer:",
-                "- approved: yes",
-                "- decision: candidate_complete",
-                "",
-                "No commit or push was performed. Waiting for user approval before commit.",
-            ]
-        )
+    lines.append("Ревьюер: ✅ approved (candidate_complete)")
 
-        packet_status = str((reviewer_packet or {}).get("packet_status") or "").strip()
-        if packet_status and packet_status not in {"", "disabled", "not_built"}:
-            lines.insert(-2, f"- status: {packet_status}")
+    if review_iterations_completed > 0:
+        lines.append(f"Раунды доработки: {review_iterations_completed}")
+    if model_escalations_used > 0:
+        lines.append("Эскалация модели: да — инженер переведён на усиленную модель после упорных провалов")
+
+    lines.extend(
+        [
+            "",
+            "━━ Дальше ━━",
+            "Ничего не закоммичено. Ответь «коммить» — закоммичу изменения, «отмена» — сброшу.",
+        ]
+    )
 
     while lines and lines[-1] == "":
         lines.pop()
@@ -2198,12 +2242,15 @@ def _finalize_loop_result(
     mutation_summary: dict[str, Any] | None = None,
     review_overrides: dict[str, Any] | None = None,
     test_summary: dict[str, Any] | None = None,
+    model_escalations_used: int = 0,
 ) -> PipelineReworkLoopResult:
     final_response_text = (
         _completion_allowed_final_response_text(
             git_gate=git_gate,
             test_summary=test_summary,
             reviewer_packet=reviewer_packet,
+            review_iterations_completed=review_iterations_completed,
+            model_escalations_used=model_escalations_used,
         )
         if completion_allowed and candidate_complete and blocked_reason is None
         else _blocked_final_response_text(
