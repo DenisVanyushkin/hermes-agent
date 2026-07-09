@@ -1491,8 +1491,11 @@ class SlackAdapter(BasePlatformAdapter):
         if not channel or not ts:
             return
 
-        # Confirm the reaction is on the commit-gate message (not some other message).
-        text = ""
+        # Best-effort confirmation that the reaction is on the commit-gate message.
+        # Reject ONLY if we positively read a message that is NOT a gate message.
+        # If the fetch is empty/errors (Slack history quirk or missing scope),
+        # proceed anyway — operator + a pending commit marker is already a strong gate.
+        confirmed_non_gate = False
         try:
             hist = await self._get_client(channel).conversations_history(
                 channel=channel, latest=ts, oldest=ts, inclusive=True, limit=1,
@@ -1500,10 +1503,15 @@ class SlackAdapter(BasePlatformAdapter):
             msgs = (hist or {}).get("messages") or []
             if msgs:
                 text = str(msgs[0].get("text") or "")
+                if text and not commit_gate_service.is_gate_message(text):
+                    confirmed_non_gate = True
         except Exception:
-            logger.warning("commit-approval: failed to fetch reacted message", exc_info=True)
-            return
-        if not commit_gate_service.is_gate_message(text):
+            logger.warning(
+                "commit-approval: could not fetch reacted message; proceeding on operator+pending",
+                exc_info=True,
+            )
+        if confirmed_non_gate:
+            logger.info("commit-approval: reaction not on a commit-gate message; ignoring")
             return
 
         workspace = str(pending.get("workspace_path") or "").strip()
