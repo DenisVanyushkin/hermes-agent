@@ -4526,3 +4526,201 @@ def test_working_tree_diff_swallows_value_error(monkeypatch) -> None:
 
     monkeypatch.setattr(module.subprocess, "run", _boom)
     assert module._working_tree_diff("/some/repo") == ""
+
+
+def test_engineer_escalation_target_class_resolves_senior_coding_for_engineer_rule(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    _repo_root, loaded_specs = _loaded_specs(tmp_path)
+    pipeline_spec = loaded_specs.pipeline_specs["engineering_review_pipeline"]
+    assert module._engineer_escalation_target_class(pipeline_spec) == "senior_coding"
+
+
+def test_engineer_escalation_target_class_returns_none_without_engineer_rule() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    assert module._engineer_escalation_target_class(None) is None
+    assert module._engineer_escalation_target_class({}) is None
+    assert module._engineer_escalation_target_class(
+        {"model_escalation_policy": {"rules": [{"target_subagent": "reviewer", "escalate_to_model_class": "x"}]}}
+    ) is None
+    assert module._engineer_escalation_target_class(
+        {"model_escalation_policy": {"rules": ["not_a_dict"]}}
+    ) is None
+
+
+def test_engineer_escalates_to_senior_coding_after_persistent_test_failures(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    engineer_calls = {"count": 0}
+    captured_classes: list[str | None] = []
+
+    def _engineer_executor(_request, _runtime_plan):
+        engineer_calls["count"] += 1
+        captured_classes.append(_runtime_plan.selection.requested_model_class if _runtime_plan.selection else None)
+        _write(git_repo, "feature.txt", f"pass {engineer_calls['count']}\n")
+        if engineer_calls["count"] <= 2:
+            return {
+                "output_text": "ok",
+                "completion_reason": "completed",
+                "execution_status": "completed",
+                "raw_metadata": {
+                    "structured_output": _engineer_output(),
+                    "tool_calls": [_test_tool_call(status="failed", blocked_reason="test_command_failed")],
+                },
+            }
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": _engineer_output(),
+                "tool_calls": [_test_tool_call(status="passed", blocked_reason=None)],
+            },
+        }
+
+    def _reviewer_executor(_request, _runtime_plan):
+        return {
+            "output_text": "reviewed",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _engineer_executor,
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+            "allow_model_escalation": True,
+        },
+    )
+
+    assert engineer_calls["count"] == 3
+    assert captured_classes == [None, None, "senior_coding"]
+    assert not (result.blocked_reason == "test_command_failed")
+
+
+def test_no_escalation_when_disabled(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    engineer_calls = {"count": 0}
+    captured_classes: list[str | None] = []
+
+    def _engineer_executor(_request, _runtime_plan):
+        engineer_calls["count"] += 1
+        captured_classes.append(_runtime_plan.selection.requested_model_class if _runtime_plan.selection else None)
+        _write(git_repo, "feature.txt", f"pass {engineer_calls['count']}\n")
+        if engineer_calls["count"] <= 2:
+            return {
+                "output_text": "ok",
+                "completion_reason": "completed",
+                "execution_status": "completed",
+                "raw_metadata": {
+                    "structured_output": _engineer_output(),
+                    "tool_calls": [_test_tool_call(status="failed", blocked_reason="test_command_failed")],
+                },
+            }
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": _engineer_output(),
+                "tool_calls": [_test_tool_call(status="passed", blocked_reason=None)],
+            },
+        }
+
+    def _reviewer_executor(_request, _runtime_plan):
+        return {
+            "output_text": "reviewed",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _engineer_executor,
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+            # allow_model_escalation omitted -> defaults False
+        },
+    )
+
+    assert engineer_calls["count"] == 3
+    assert captured_classes == [None, None, None]
+    assert not (result.blocked_reason == "test_command_failed")
+
+
+def test_escalation_bounded_by_max_model_escalations_reviewer_blockers(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    engineer_calls = {"count": 0}
+    captured_classes: list[str | None] = []
+
+    def _engineer_executor(_request, _runtime_plan):
+        engineer_calls["count"] += 1
+        captured_classes.append(_runtime_plan.selection.requested_model_class if _runtime_plan.selection else None)
+        _write(git_repo, "feature.txt", f"pass {engineer_calls['count']}\n")
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": _engineer_output(),
+                "tool_calls": [],
+            },
+        }
+
+    def _reviewer_executor(_request, _runtime_plan):
+        return {
+            "output_text": "reviewed",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=["still broken"])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _engineer_executor,
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+            "allow_model_escalation": True,
+        },
+    )
+
+    from hermes_cli.pipeline_control_channel import resolve_loop_limit_policy
+    policy = resolve_loop_limit_policy(loaded_specs.pipeline_specs[_session().pipeline_id])
+    assert engineer_calls["count"] == policy.max_review_iterations
+    # Escalates exactly once (bounded by max_model_escalations=1): the class only
+    # flips to senior_coding on the final call and never advances beyond it, even
+    # though the reviewer kept blocking on every iteration.
+    assert captured_classes == [None] * (policy.max_review_iterations - 1) + ["senior_coding"]
+    assert result.user_action_required is True
+    assert result.blocked_reason is not None

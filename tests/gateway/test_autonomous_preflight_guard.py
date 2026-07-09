@@ -230,3 +230,42 @@ def test_clean_baseline_unaffected(tmp_path, monkeypatch):
         ["git", "stash", "list"], cwd=repo, check=True, capture_output=True, text=True
     ).stdout
     assert before == after == ""
+
+
+# --- engineer model escalation enablement (task 12) ------------------------
+
+
+def test_allow_model_escalation_true_when_real_provider_execution_enabled(monkeypatch):
+    """build_autonomous_helper_context must enable allow_model_escalation in the
+    controlled_runtime_context whenever real provider execution is allowed, so the
+    bounded rework loop is permitted to escalate the engineer to senior_coding on
+    persistent failure. Short-circuits via a DirtyBaselineError right after the
+    runtime_context.update(...) call, so this never touches real git state."""
+    import hermes_cli.pipeline_autonomous_execution as pae
+
+    def _raise_dirty(*_a, **_k):
+        raise pae.DirtyBaselineError([])
+
+    monkeypatch.setattr(pae, "prepare_autonomous_workspace", _raise_dirty)
+
+    helper_context = pae.build_autonomous_helper_context(
+        config={"pipelines": {"execution": {"allow_real_provider_execution": True}}},
+        user_message="do the thing",
+        session_id="sess-1",
+        pipeline_session_id="pipe-1",
+    )
+
+    assert helper_context["controlled_runtime_context"]["allow_model_escalation"] is True
+
+
+def test_allow_model_escalation_absent_when_real_provider_execution_disabled():
+    import hermes_cli.pipeline_autonomous_execution as pae
+
+    helper_context = pae.build_autonomous_helper_context(
+        config={"pipelines": {"execution": {"allow_real_provider_execution": False}}},
+        user_message="do the thing",
+        session_id="sess-1",
+        pipeline_session_id="pipe-1",
+    )
+
+    assert helper_context["controlled_runtime_context"].get("allow_model_escalation", False) is False
