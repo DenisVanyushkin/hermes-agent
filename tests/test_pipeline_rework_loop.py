@@ -4298,6 +4298,16 @@ def test_working_tree_diff_reports_uncommitted_change(tmp_path: Path):
     assert "diff --git" in diff or "@@" in diff
 
 
+def test_working_tree_diff_since_ref_reports_diff_vs_ref(tmp_path: Path):
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo = _init_git_repo(tmp_path)
+    (repo / "tracked.txt").write_text("baseline\nchanged since HEAD\n", encoding="utf-8")
+    diff = module._working_tree_diff(str(repo), since_ref="HEAD")
+    assert "tracked.txt" in diff
+    assert "changed since HEAD" in diff
+    assert "diff --git" in diff or "@@" in diff
+
+
 def test_build_test_failure_rework_context_surfaces_changed_files():
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     context = module._build_test_failure_rework_context(
