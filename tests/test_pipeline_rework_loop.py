@@ -4449,3 +4449,15 @@ def test_denied_test_command_does_not_retry(tmp_path: Path) -> None:
     assert engineer_calls["count"] == 1
     assert result.blocked_reason == "test_command_denied"
     assert result.test_summary["blocked_reason"] == "test_command_denied"
+
+
+def test_working_tree_diff_swallows_value_error(monkeypatch) -> None:
+    # A non-UTF-8 diff could raise UnicodeDecodeError (a ValueError). The helper
+    # must never raise into the live loop — it returns "" on any such error.
+    import hermes_cli.pipeline_rework_loop as module
+
+    def _boom(*_a, **_k):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad byte")
+
+    monkeypatch.setattr(module.subprocess, "run", _boom)
+    assert module._working_tree_diff("/some/repo") == ""
