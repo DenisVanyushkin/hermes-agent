@@ -61,6 +61,7 @@ def build_autonomous_helper_context(
         request_real_provider_execution=True,
         allow_mutations=True,
         allow_test_commands=True,
+        allow_model_escalation=True,
     )
     try:
         workspace = prepare_autonomous_workspace(
@@ -224,6 +225,7 @@ def _default_runtime_context(workspace: Path) -> dict[str, Any]:
         "mutation_workspace": str(workspace),
         "allow_test_commands": False,
         "test_workspace": str(workspace),
+        "allow_model_escalation": False,
     }
 
 
