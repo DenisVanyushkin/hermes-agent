@@ -181,6 +181,20 @@ def _auto_heal_dirty_baseline(repo_root: Path, entries: list[DirtyEntry]) -> lis
     """
     if any(e.category in ("stash_conflict", "root_owned") for e in entries):
         return entries
+    # Protect a commit-gate-pending deliverable: if the current dirty state is the
+    # deliverable awaiting the operator's «коммить»/«отмена», do NOT stash it — that
+    # would orphan it from its commit_gate marker. Leave it so the run blocks until
+    # the operator resolves it (commit/discard via the intercept). Best-effort.
+    try:
+        from hermes_cli import commit_gate_service
+        pending = commit_gate_service.get_pending()
+        if pending:
+            pending_files = {str(p) for p in (pending.get("changed_files") or [])}
+            dirty_files = {str(e.path) for e in entries}
+            if dirty_files and dirty_files <= pending_files:
+                return entries  # protected pending deliverable — do not stash
+    except Exception:
+        pass  # best-effort; fall through to normal auto-heal
     try:
         _git(
             repo_root, "stash", "push", "-u", "-m",
