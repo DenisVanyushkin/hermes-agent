@@ -233,6 +233,7 @@ def execute_bounded_rework_loop(
     model_escalations: list[dict[str, Any]] = []
     pending_reviewer_blockers: list[str] = []
     invalid_output_retries_used = 0
+    test_rework_iterations_used = 0
     peer_round_used = False
     decisive_subagent = REVIEWER_SUBAGENT_ID
     review_overrides: dict[str, Any] = {}
@@ -358,7 +359,22 @@ def execute_bounded_rework_loop(
                     engineer_evaluation_status=_step_evaluation_status(current_snapshot.planned_steps[0]),
                 )
             )
-        if current_test_summary.get("blocked_reason") is not None:
+        material_changes_present = bool(git_result.material_changes_present) if git_result is not None else False
+        test_blocked_reason = current_test_summary.get("blocked_reason")
+        if test_blocked_reason is not None:
+            if (
+                material_changes_present
+                and _is_retryable_test_reason(str(test_blocked_reason))
+                and test_rework_iterations_used < loop_policy.max_tool_retries
+            ):
+                test_rework_iterations_used += 1
+                appended_rework_context.append(
+                    _build_test_failure_rework_context(
+                        test_summary=current_test_summary,
+                        attempt=test_rework_iterations_used,
+                    )
+                )
+                continue
             return _blocked_loop_result(
                 fuse=fuse,
                 session=session,
@@ -378,7 +394,6 @@ def execute_bounded_rework_loop(
                 mutation_summary=current_mutation_summary,
                 test_summary=current_test_summary,
             )
-        material_changes_present = bool(git_result.material_changes_present) if git_result is not None else False
         engineer_fail_closed_reason = _engineer_fail_closed_reason(
             current_snapshot,
             material_changes_present=material_changes_present,
@@ -2957,6 +2972,29 @@ def _build_format_retry_context(*, reason: str, attempt: int) -> dict[str, Any]:
     }
 
 
+def _build_test_failure_rework_context(*, test_summary: Mapping[str, Any], attempt: int) -> dict[str, Any]:
+    failures = []
+    for result in list(test_summary.get("results") or []):
+        if isinstance(result, dict) and result.get("status") == "failed":
+            failures.append({
+                "command": result.get("command"),
+                "exit_code": result.get("exit_code"),
+                "excerpt": str(result.get("stdout_excerpt") or "")[:1500],
+            })
+    return {
+        "source": "controlled_execution_contract",
+        "kind": "test_failure_rework",
+        "attempt": attempt,
+        "instruction": (
+            "Your test command failed (exit code != 0). Do NOT stop and do NOT "
+            "discard your changes. Fix the implementation so the failing test "
+            "passes (or fix the test if it is genuinely wrong), then re-run it. "
+            "The failing test output is included below."
+        ),
+        "failures": failures,
+    }
+
+
 def _build_rework_context(
     *,
     iteration_index: int,
@@ -3317,6 +3355,16 @@ def _is_retryable_engineer_reason(reason: str | None) -> bool:
     reminder. Excludes engineer_reported_blocked (real evidence to preserve) and
     infra failures (result_missing/result_failed)."""
     return reason in _RETRYABLE_ENGINEER_REASONS
+
+
+_RETRYABLE_TEST_REASONS = frozenset({"test_command_failed"})
+
+
+def _is_retryable_test_reason(reason: str | None) -> bool:
+    """Test outcomes worth another bounded engineer attempt. Excludes
+    test_command_timeout (may re-hang) and test_command_denied (policy block,
+    re-running the same command just re-denies)."""
+    return reason in _RETRYABLE_TEST_REASONS
 
 
 def _engineer_fail_closed_reason(state_snapshot: Any, *, material_changes_present: bool = False) -> str | None:

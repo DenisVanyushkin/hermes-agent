@@ -4150,3 +4150,215 @@ def test_no_diff_invalid_output_fails_closed_immediately_when_retries_disabled(t
 
     assert calls == ["hermes_engineer_core"]
     assert result.blocked_reason == "invalid_engineer_output"
+
+
+def test_retryable_test_reasons():
+    from hermes_cli.pipeline_rework_loop import _is_retryable_test_reason
+
+    assert _is_retryable_test_reason("test_command_failed") is True
+
+
+def test_non_retryable_test_reasons():
+    from hermes_cli.pipeline_rework_loop import _is_retryable_test_reason
+
+    assert _is_retryable_test_reason("test_command_timeout") is False
+    assert _is_retryable_test_reason("test_command_denied") is False
+    assert _is_retryable_test_reason(None) is False
+
+
+def test_compose_engineer_message_includes_test_failure_rework_instruction():
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    context = module._build_test_failure_rework_context(
+        test_summary={
+            "results": [
+                {
+                    "command": ["venv/bin/pytest", "-q", "tests/test_example.py"],
+                    "exit_code": 1,
+                    "status": "failed",
+                    "stdout_excerpt": "AssertionError: wiring incomplete",
+                }
+            ]
+        },
+        attempt=1,
+    )
+    message = module._compose_engineer_message(
+        original_task="Implement bounded rework loop",
+        appended_rework_context=[context],
+    )
+    assert "Your test command failed" in message
+    assert "AssertionError: wiring incomplete" in message
+
+
+def _test_tool_call(*, status: str, blocked_reason: str | None) -> dict[str, object]:
+    return {
+        "tool_name": "pytest",
+        "status": "succeeded",
+        "result": {
+            "enabled": True,
+            "status": status,
+            "requested_count": 1,
+            "executed_count": 1,
+            "passed_count": 1 if status == "passed" else 0,
+            "failed_count": 1 if status == "failed" else 0,
+            "denied_count": 1 if status == "denied" else 0,
+            "timeout_count": 0,
+            "blocked_reason": blocked_reason,
+            "summary": f"pytest {status}",
+            "results": [
+                {
+                    "command": ["venv/bin/pytest", "-q", "tests/test_example.py"],
+                    "status": status,
+                    "exit_code": 1 if status in {"failed", "denied"} else 0,
+                    "stdout_excerpt": "AssertionError: wiring incomplete" if status == "failed" else "",
+                    "stderr_excerpt": "",
+                }
+            ],
+        },
+    }
+
+
+def test_failed_test_with_material_changes_triggers_rework(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    engineer_calls = {"count": 0}
+
+    def _engineer_executor(_request, _runtime_plan):
+        engineer_calls["count"] += 1
+        if engineer_calls["count"] == 1:
+            _write(git_repo, "feature.txt", "first pass\n")
+            return {
+                "output_text": "ok",
+                "completion_reason": "completed",
+                "execution_status": "completed",
+                "raw_metadata": {
+                    "structured_output": _engineer_output(),
+                    "tool_calls": [_test_tool_call(status="failed", blocked_reason="test_command_failed")],
+                },
+            }
+        _write(git_repo, "feature.txt", "second pass, wiring complete\n")
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": _engineer_output(),
+                "tool_calls": [_test_tool_call(status="passed", blocked_reason=None)],
+            },
+        }
+
+    def _reviewer_executor(_request, _runtime_plan):
+        return {
+            "output_text": "reviewed",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _engineer_executor,
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+        },
+    )
+
+    assert engineer_calls["count"] == 2
+    assert not (result.blocked_reason == "test_command_failed")
+    test_failure_contexts = [item for item in result.appended_rework_context if item.get("kind") == "test_failure_rework"]
+    assert len(test_failure_contexts) == 1
+    assert test_failure_contexts[0]["attempt"] == 1
+
+
+def test_failed_test_bounded_by_max_tool_retries(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    engineer_calls = {"count": 0}
+
+    def _engineer_executor(_request, _runtime_plan):
+        engineer_calls["count"] += 1
+        _write(git_repo, "feature.txt", f"pass {engineer_calls['count']}\n")
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": _engineer_output(),
+                "tool_calls": [_test_tool_call(status="failed", blocked_reason="test_command_failed")],
+            },
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message="Implement bounded rework loop",
+        repo_path=str(git_repo),
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _engineer_executor,
+                "hermes_code_reviewer": lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("reviewer must not run after terminal block")),
+            },
+        },
+    )
+
+    assert engineer_calls["count"] == 2
+    assert result.blocked_reason == "test_command_failed"
+
+
+def test_denied_test_command_does_not_retry(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+    engineer_calls = {"count": 0}
+
+    class _InvocationClient:
+        def __call__(self, runtime, payload):
+            if runtime.subagent_id == "hermes_engineer_core":
+                engineer_calls["count"] += 1
+                _write(repo, "feature.txt", f"pass {engineer_calls['count']}\n")
+                return {
+                    "structured_output": _engineer_output(
+                        tests=[
+                            "venv/bin/pytest -q tests/test_one.py",
+                            "venv/bin/pytest -q tests/test_two.py",
+                            "venv/bin/pytest -q tests/test_three.py",
+                            "venv/bin/pytest -q tests/test_four.py",
+                        ]
+                    ),
+                    "output_text": "ok",
+                }
+            raise AssertionError("reviewer must not run after terminal block")
+
+    runtime_context = module.ControlledRuntimeContext(
+        invocation_client=_InvocationClient(),
+        controlled_runner=module.ControlledRuntimeRunner(),
+        allow_test_commands=True,
+        test_workspace=str(repo),
+    )
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        controlled_runtime_context=runtime_context,
+    )
+
+    assert engineer_calls["count"] == 1
+    assert result.blocked_reason == "test_command_denied"
+    assert result.test_summary["blocked_reason"] == "test_command_denied"
