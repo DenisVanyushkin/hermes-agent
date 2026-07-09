@@ -45,6 +45,7 @@ def _is_root_owned(repo: Path, rel_path: str) -> bool:
 
 
 def classify_dirty(repo: Path) -> list[DirtyEntry]:
+    """Classify uncommitted working-tree paths as unmerged, root-owned, untracked, or modified."""
     entries: list[DirtyEntry] = []
     for xy, path in _git_porcelain(repo):
         if path == REPORT_ARTIFACT:
