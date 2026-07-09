@@ -347,6 +347,7 @@ def execute_bounded_rework_loop(
                     git_result=git_result,
                     test_summary=current_test_summary,
                     engineer_evaluation_status=_step_evaluation_status(current_snapshot.planned_steps[0]),
+                    tracked_diff=_working_tree_diff(repo_path, max_chars=40000, since_ref="HEAD"),
                 )
             )
         material_changes_present = bool(git_result.material_changes_present) if git_result is not None else False
@@ -2888,23 +2889,26 @@ _CATASTROPHIC_REVIEW_TEXT = (
 )
 
 
-def _working_tree_diff(repo_path: str | None, *, max_chars: int = 4000) -> str:
+def _working_tree_diff(repo_path: str | None, *, max_chars: int = 4000, since_ref: str | None = None) -> str:
     """Best-effort unified diff of the workspace's uncommitted changes, so a
     memoryless engineer iteration can see its own prior on-disk work. Returns ""
-    on any error or when no repo path is available."""
+    on any error or when no repo path is available. When `since_ref` is given,
+    diffs against that ref instead of the default working-tree diff (used by the
+    reviewer packet to see the same ground-truth diff as before Task 10's move)."""
     if not repo_path:
         return ""
+    diff_cmd = ["git", "-C", repo_path, "diff"]
+    if since_ref:
+        diff_cmd = ["git", "-C", repo_path, "diff", since_ref]
+    stat_cmd = ["git", "-C", repo_path, "diff", "--stat"] if not since_ref else ["git", "-C", repo_path, "diff", "--stat", since_ref]
     try:
-        stat = subprocess.run(["git", "-C", repo_path, "diff", "--stat"],
-                              capture_output=True, text=True, errors="replace", timeout=10)
-        body = subprocess.run(["git", "-C", repo_path, "diff"],
-                              capture_output=True, text=True, errors="replace", timeout=10)
+        stat = subprocess.run(stat_cmd, capture_output=True, text=True, errors="replace", timeout=15)
+        body = subprocess.run(diff_cmd, capture_output=True, text=True, errors="replace", timeout=15)
     except (OSError, subprocess.SubprocessError, ValueError):
         return ""
     if body.returncode != 0:
         return ""
-    text = (stat.stdout or "") + "\n" + (body.stdout or "")
-    text = text.strip()
+    text = ((stat.stdout or "") + "\n" + (body.stdout or "")).strip()
     if not text:
         return ""
     if len(text) > max_chars:
