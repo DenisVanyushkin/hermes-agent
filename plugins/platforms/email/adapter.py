@@ -7,6 +7,7 @@ Uses IMAP to receive and SMTP to send messages.
 Environment variables:
     EMAIL_IMAP_HOST     — IMAP server host (e.g., imap.gmail.com)
     EMAIL_IMAP_PORT     — IMAP server port (default: 993)
+    EMAIL_IMAP_TIMEOUT  — IMAP connect/read timeout in seconds (default: 60)
     EMAIL_SMTP_HOST     — SMTP server host (e.g., smtp.gmail.com)
     EMAIL_SMTP_PORT     — SMTP server port (default: 587)
     EMAIL_ADDRESS       — Email address for the agent
@@ -65,6 +66,7 @@ _AUTOMATED_HEADERS = {
 MAX_MESSAGE_LENGTH = 50_000
 
 SMTP_CONNECT_TIMEOUT = 30
+DEFAULT_IMAP_TIMEOUT = 60
 
 
 def _create_ipv4_connection(
@@ -466,6 +468,7 @@ class EmailAdapter(BasePlatformAdapter):
         self._password = os.getenv("EMAIL_PASSWORD", "")
         self._imap_host = (os.getenv("EMAIL_IMAP_HOST", "") or extra.get("imap_host", "")).strip()
         self._imap_port = env_int("EMAIL_IMAP_PORT", 993)
+        self._imap_timeout = env_int("EMAIL_IMAP_TIMEOUT", DEFAULT_IMAP_TIMEOUT)
         self._smtp_host = (os.getenv("EMAIL_SMTP_HOST", "") or extra.get("smtp_host", "")).strip()
         self._smtp_port = env_int("EMAIL_SMTP_PORT", 587)
         self._poll_interval = env_int("EMAIL_POLL_INTERVAL", 15)
@@ -614,7 +617,11 @@ class EmailAdapter(BasePlatformAdapter):
         imap = None
         try:
             # Test IMAP connection
-            imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
+            imap = imaplib.IMAP4_SSL(
+                self._imap_host,
+                self._imap_port,
+                timeout=self._imap_timeout,
+            )
             imap.login(self._address, self._password)
             _send_imap_id(imap)
             # Mark all existing messages as seen so we only process new ones
@@ -699,7 +706,11 @@ class EmailAdapter(BasePlatformAdapter):
         """Fetch new (unseen) messages from IMAP. Runs in executor thread."""
         results = []
         try:
-            imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
+            imap = imaplib.IMAP4_SSL(
+                self._imap_host,
+                self._imap_port,
+                timeout=self._imap_timeout,
+            )
             try:
                 imap.login(self._address, self._password)
                 _send_imap_id(imap)

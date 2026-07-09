@@ -1584,6 +1584,59 @@ class TestConnectSmtp(unittest.TestCase):
 class TestConnectionConfigResolution(unittest.TestCase):
     """Host/address resolution and pre-connect validation (#49736)."""
 
+    def test_imap_timeout_defaults_to_raised_value(self):
+        """IMAP connections use the higher default timeout to reduce handshake timeouts."""
+        import asyncio
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter, DEFAULT_IMAP_TIMEOUT
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+        }, clear=False):
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+
+        mock_imap = MagicMock()
+        mock_imap.uid.return_value = ("OK", [b""])
+        def _fake_create_task(coro):
+            coro.close()
+            return MagicMock()
+
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap) as mock_imap_ssl, \
+             patch("smtplib.SMTP") as mock_smtp, \
+             patch("asyncio.create_task", side_effect=_fake_create_task):
+            mock_smtp.return_value = MagicMock()
+            result = asyncio.run(adapter.connect())
+
+        self.assertTrue(result)
+        mock_imap_ssl.assert_called_once_with(
+            "imap.test.com", 993, timeout=DEFAULT_IMAP_TIMEOUT
+        )
+        adapter._running = False
+        if adapter._poll_task:
+            adapter._poll_task.cancel()
+
+    def test_imap_timeout_can_be_overridden_from_env(self):
+        """EMAIL_IMAP_TIMEOUT overrides the IMAP handshake/read timeout."""
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_IMAP_TIMEOUT": "90",
+        }, clear=False):
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+
+        self.assertEqual(adapter._imap_timeout, 90)
+
+        with patch("imaplib.IMAP4_SSL", return_value=MagicMock()) as mock_imap_ssl:
+            adapter._fetch_new_messages()
+
+        mock_imap_ssl.assert_called_once_with("imap.test.com", 993, timeout=90)
+
     def test_host_and_address_whitespace_stripped(self):
         """A stray space/newline must not reach IMAP4_SSL as part of the host.
 
