@@ -2908,10 +2908,10 @@ def _working_tree_diff(repo_path: str | None, *, max_chars: int = 4000) -> str:
         return ""
     try:
         stat = subprocess.run(["git", "-C", repo_path, "diff", "--stat"],
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, errors="replace", timeout=10)
         body = subprocess.run(["git", "-C", repo_path, "diff"],
-                              capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
+                              capture_output=True, text=True, errors="replace", timeout=10)
+    except (OSError, subprocess.SubprocessError, ValueError):
         return ""
     if body.returncode != 0:
         return ""
