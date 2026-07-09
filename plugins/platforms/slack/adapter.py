@@ -76,6 +76,7 @@ from hermes_cli.baseline_doctor_service import (  # noqa: E402
     record_pending,
 )
 from hermes_cli.baseline_doctor_service import apply_action as _apply_action  # noqa: E402
+from hermes_cli import commit_gate_service  # noqa: E402
 
 _AGENT_REPO = _Path(__file__).resolve().parents[3]
 
@@ -1457,6 +1458,11 @@ class SlackAdapter(BasePlatformAdapter):
                 exc,
             )
 
+        try:
+            await self._maybe_apply_commit_approval(event)
+        except Exception:
+            logger.exception("slack_commit_approval_failed reaction=%s user=%s", reaction, user)
+
     async def _maybe_run_baseline_doctor(self, event: dict) -> None:
         if str((event or {}).get("type") or "") != "reaction_added":
             return
@@ -1495,6 +1501,71 @@ class SlackAdapter(BasePlatformAdapter):
         report_ts = str(posted.get("ts") or "")
         if not result["clean"] and result["remaining"] and report_ts:
             record_pending(report_ts, result["remaining"])
+
+    async def _maybe_apply_commit_approval(self, event: dict) -> None:
+        """Operator ✅ on the commit-gate message commits the pending deliverable;
+        ❌ discards it. No-op unless: reaction is ✅/❌, reactor is the operator,
+        a commit is pending, and the reacted message is the commit-gate message."""
+        from pathlib import Path as _Path
+
+        if str((event or {}).get("type") or "") != "reaction_added":
+            return
+        reaction = str((event or {}).get("reaction") or "").strip().lower()
+        commit_emojis = {"white_check_mark", "heavy_check_mark", "ballot_box_with_check"}
+        discard_emojis = {"x", "negative_squared_cross_mark", "wastebasket"}
+        if reaction not in commit_emojis and reaction not in discard_emojis:
+            return
+        user = str((event or {}).get("user") or "").strip()
+        if not commit_gate_service.is_operator(user):
+            return
+        pending = commit_gate_service.get_pending()
+        if not pending:
+            return
+        item = (event or {}).get("item") or {}
+        channel = str(item.get("channel") or "").strip()
+        ts = str(item.get("ts") or "").strip()
+        if not channel or not ts:
+            return
+
+        # Confirm the reaction is on the commit-gate message (not some other message).
+        text = ""
+        try:
+            hist = await self._get_client(channel).conversations_history(
+                channel=channel, latest=ts, oldest=ts, inclusive=True, limit=1,
+            )
+            msgs = (hist or {}).get("messages") or []
+            if msgs:
+                text = str(msgs[0].get("text") or "")
+        except Exception:
+            logger.warning("commit-approval: failed to fetch reacted message", exc_info=True)
+            return
+        if not commit_gate_service.is_gate_message(text):
+            return
+
+        workspace = str(pending.get("workspace_path") or "").strip()
+        repo = _Path(workspace) if workspace else _Path(__file__).resolve().parents[3]
+        changed_files = list(pending.get("changed_files") or [])
+
+        if reaction in discard_emojis:
+            commit_gate_service.apply_discard(repo=repo, changed_files=changed_files)
+            commit_gate_service.clear_pending()
+            result_text = "🗑 Изменения отклонены и убраны в stash. Ничего не закоммичено."
+        else:
+            result = commit_gate_service.apply_commit(
+                repo=repo, changed_files=changed_files,
+                commit_message=str(pending.get("commit_message") or "chore: controlled-pipeline change"),
+                push=False,
+            )
+            if result.get("committed"):
+                commit_gate_service.clear_pending()
+                result_text = f"✅ Закоммичено: {result.get('sha') or '?'} ({len(changed_files)} файлов). Пуш не делал (скажи «запушь», если нужно)."
+            else:
+                result_text = f"⚠️ Не удалось закоммитить: {result.get('detail') or 'unknown'}"
+
+        try:
+            await self._get_client(channel).chat_postMessage(channel=channel, text=result_text, thread_ts=ts)
+        except Exception:
+            logger.warning("commit-approval: failed to post result", exc_info=True)
 
     async def _maybe_apply_baseline_action(self, event: dict) -> None:
         if str((event or {}).get("type") or "") != "reaction_added":
