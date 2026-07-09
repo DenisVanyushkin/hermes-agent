@@ -302,25 +302,13 @@ def execute_bounded_rework_loop(
                 runtime_context=runtime_context,
             )
         except MutationDenied as exc:
-            return _blocked_loop_result(
-                fuse=fuse,
-                session=session,
-                snapshot=current_snapshot,
-                original_task=user_message,
-                appended_rework_context=appended_rework_context,
-                iteration_history=iteration_history,
-                review_iterations_completed=review_iterations_completed,
-                max_review_iterations=max_review_iterations,
-                policy_source=policy_source,
-                blocked_reason="mutation_denied",
-                user_action_required=True,
-                git_gate=current_git_gate,
-                reviewer_packet=current_reviewer_packet,
-                subagent_runs=accumulated_subagent_runs,
-                usage_summary=_usage_summary_from_subagent_runs(accumulated_subagent_runs),
-                mutation_summary=_mutation_summary_from_denied_exception(exc, runtime_context),
-                test_summary=current_test_summary,
-            )
+            # git-primary: the engineer's real edits are applied live through the
+            # patch/write_file tools, which enforce the SAME path/content/security
+            # validation. The envelope-declared `mutations` field is a redundant
+            # secondary channel; a malformed or denied declaration must NOT discard
+            # the engineer's successful on-disk tool work. Record it for observability
+            # and continue — the git material-change detection below is authoritative.
+            current_mutation_summary = _mutation_summary_from_denied_exception(exc, runtime_context)
         engineer_test_summary = _apply_step_tests(
             step_kind="engineer",
             step_subagent_id=ENGINEER_SUBAGENT_ID,
