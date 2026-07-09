@@ -170,3 +170,44 @@ def test_apply_controlled_mutations_exempt_still_denies_binary_content(tmp_path:
     )
     assert summary.denied_count == 1
     assert summary.results[0]["reason"] == "binary_content_denied"
+
+
+def test_apply_controlled_mutations_permission_error_becomes_clean_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_git_repo(tmp_path)
+    target = repo / "existing.py"
+    target.write_text("original\n", encoding="utf-8")
+
+    orig_write_text = Path.write_text
+
+    def boom(self: Path, *args, **kwargs):
+        if self.name == "existing.py":
+            raise PermissionError(13, "Permission denied")
+        return orig_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", boom)
+
+    summary = apply_controlled_mutations(
+        allow_mutations=True,
+        mutation_workspace=repo,
+        mutations_payload=[{"operation": "write_text", "path": "existing.py", "content": "new\n"}],
+    )
+
+    assert summary.applied_count == 0
+    assert summary.denied_count == 1
+    assert summary.results[0]["reason"] == "write_failed_not_writable"
+    # original content preserved (write was denied, not partially applied)
+    assert target.read_text(encoding="utf-8") == "original\n"
+
+
+def test_apply_controlled_mutations_normal_write_still_applies(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    summary = apply_controlled_mutations(
+        allow_mutations=True,
+        mutation_workspace=repo,
+        mutations_payload=[{"operation": "write_text", "path": "new.py", "content": "hi\n"}],
+    )
+    assert summary.applied_count == 1
+    assert summary.denied_count == 0
+    assert (repo / "new.py").read_text(encoding="utf-8") == "hi\n"
