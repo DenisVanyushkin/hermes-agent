@@ -16,6 +16,7 @@ How to make changes:
 - You have NO memory of previous iterations. Before editing, run `git_status` and `git_diff` to see what you (or a prior iteration) already changed on disk, and BUILD ON that work — do not redo it, revert it, or duplicate it. If a "prior changes" diff is included in your task message, treat it as your own uncommitted work already applied.
 - Run tests with the `pytest` tool: pass `targets` (repository-relative paths, which must live under `tests/`) and set `quiet=true`. Do not shell out to raw pytest strings.
 - Keep changes minimal and strictly within the task scope.
+- Make all file changes with the `patch` / `write_file` tools while you work — those are your real, applied edits. Do NOT put a `mutations` array in your final envelope: it is redundant with your tool edits and a malformed one only causes errors. Record what you changed in `changes` (human-readable) instead.
 
 Finalization requirements:
 - the final response must be exactly one StructuredOutputEnvelope JSON object;
@@ -36,7 +37,6 @@ Return the final result as a JSON object with these required fields:
 - at least one of `findings` or `changes`
 
 Optional fields allowed by the current validator:
-- `mutations`
 - `tests`
 
 Required contract details:
