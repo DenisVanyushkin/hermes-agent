@@ -450,3 +450,60 @@ def test_denied_command_captures_sanitized_forensics(tmp_path: Path) -> None:
     assert denied["status"] == "denied"
     assert denied["command"][0] == "pytest"
     assert "secret-value" not in str(denied)
+
+
+def test_venv_python_dash_m_pytest_is_allowed(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_example.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def _runner(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout=".\n1 passed\n", stderr="")
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=["venv/bin/python -m pytest -q tests/test_example.py"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "passed"
+    assert payload["results"][0]["command"][:3] == ["venv/bin/python", "-m", "pytest"]
+    assert calls == [["venv/bin/python", "-m", "pytest", "-q", "tests/test_example.py"]]
+
+
+def test_dot_venv_python_dash_m_pytest_is_allowed(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    repo = _init_git_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_example.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    def _runner(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=".\n1 passed\n", stderr="")
+
+    summary = module.run_controlled_tests(
+        allow_test_commands=True,
+        test_workspace=repo,
+        tests_payload=[".venv/bin/python -m pytest -q tests/test_example.py"],
+        step_kind="engineer",
+        step_subagent_id="hermes_engineer_core",
+        subprocess_runner=_runner,
+    )
+
+    payload = summary.to_safe_dict()
+
+    assert payload["status"] == "passed"
+    assert payload["results"][0]["command"][:3] == [".venv/bin/python", "-m", "pytest"]
+
+
+def test_default_timeout_seconds_is_generous() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_test_runner")
+    assert module.DEFAULT_TIMEOUT_SECONDS >= 120

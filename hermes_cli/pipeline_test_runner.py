@@ -21,12 +21,14 @@ ALLOWED_EXECUTABLES = {
     (".venv/bin/pytest",),
     ("python", "-m", "pytest"),
     ("python3", "-m", "pytest"),
+    ("venv/bin/python", "-m", "pytest"),
+    (".venv/bin/python", "-m", "pytest"),
 }
 MAX_TEST_COMMAND_COUNT = 3
 MAX_ARGV_LENGTH = 12
 MAX_ARG_LENGTH = 200
 MAX_OUTPUT_CHARS = 800
-DEFAULT_TIMEOUT_SECONDS = 30
+DEFAULT_TIMEOUT_SECONDS = max(30, int(os.getenv("HERMES_TEST_TIMEOUT_SECONDS", "120")))
 _DISALLOWED_SHELL_MARKERS = ("&&", "||", ";", "|", ">", "<", "`", "$(", "${", "\n", "\r")
 _SECRET_PATTERN = re.compile(r"(?i)\b(api[_-]?key|token|password|secret|credential)\b\s*[:=]\s*\S+")
 
