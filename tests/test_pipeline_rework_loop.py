@@ -934,6 +934,170 @@ def test_finalize_loop_result_materializes_completion_allowed_final_response_tex
     assert "Ничего не закоммичено. Ответь «коммить» — закоммичу изменения, «отмена» — сброшу." in payload["final_response"]["text"]
 
 
+def _finalize_result_common_kwargs(*, tmp_path: Path, loaded_specs, session_module, state_module, current_state: str, session_id: str) -> dict:
+    session = session_module.PipelineSession(
+        pipeline_session_id=session_id,
+        trace_id=session_id,
+        pipeline_id="engineering_review_pipeline",
+        router_status="selected",
+        router_confidence=0.98,
+        platform="telegram",
+        session_key="agent:main:telegram:dm:1",
+        session_id=session_id,
+        chat_id="1",
+        thread_id=None,
+        user_id="user-1",
+        created_at="2026-06-22T00:00:00+00:00",
+        user_message_hash="hash",
+        mode="autonomous",
+        current_state=current_state,
+        status="created",
+        planned_steps=[],
+        selected_subagent_ids=["hermes_engineer_core", "hermes_code_reviewer"],
+        reviewer_condition="code_changes_require_review",
+    )
+    snapshot = state_module.build_pipeline_state_snapshot(
+        session=session,
+        pipeline_spec=loaded_specs.pipeline_specs["engineering_review_pipeline"],
+        loaded_specs=loaded_specs,
+    )
+    snapshot = snapshot.__class__(**{
+        **snapshot.__dict__,
+        "executed": True,
+        "completion_allowed": True,
+        "completion_blocked_reason": None,
+        "final_verdict": "controlled_rework_loop_candidate_complete",
+    })
+    return {"session": session, "snapshot": snapshot}
+
+
+def test_finalize_loop_result_writes_commit_gate_pending_marker_with_changed_files(tmp_path: Path, monkeypatch) -> None:
+    hermes_home = tmp_path / "hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    commit_gate_service = importlib.import_module("hermes_cli.commit_gate_service")
+    session_module = importlib.import_module("hermes_cli.pipeline_session")
+    state_module = importlib.import_module("hermes_cli.pipeline_state_machine")
+    loaded_specs = _loaded_specs(tmp_path)[1]
+
+    common = _finalize_result_common_kwargs(
+        tmp_path=tmp_path,
+        loaded_specs=loaded_specs,
+        session_module=session_module,
+        state_module=state_module,
+        current_state="rework_loop_candidate_complete",
+        session_id="pipe-gate-marker-1",
+    )
+
+    repo_dir = tmp_path / "repo"
+
+    module._finalize_loop_result(
+        fuse=module.PipelineExecutionFuseResult(
+            execution_mode="autonomous",
+            actual_invocation_allowed=True,
+            blocked_reason=None,
+            selected_pipeline_id="engineering_review_pipeline",
+            selected_step_kind="reviewer",
+            selected_subagent_id="hermes_code_reviewer",
+        ),
+        session=common["session"],
+        snapshot=common["snapshot"],
+        preflight_allowed=True,
+        preflight_reason_code="rework_loop_fuse_allowed",
+        iteration_history=[],
+        review_iterations_completed=1,
+        max_review_iterations=3,
+        policy_source="pipeline_spec",
+        original_task="fix the smoke test",
+        appended_rework_context=[],
+        completion_allowed=True,
+        candidate_complete=True,
+        user_action_required=True,
+        blocked_reason=None,
+        git_gate={"changed_files": ["hermes_cli/smoke_square.py", "tests/test_smoke_square.py"]},
+        reviewer_packet={"packet_status": "ready_for_review", "safe_packet": {"engineer_summary": "Fixed smoke_square rounding bug"}},
+        subagent_runs=[],
+        peer_messages=[],
+        disagreements=[],
+        decisive_subagent=None,
+        model_escalations=[],
+        tests={},
+        mutation_summary={},
+        review_overrides={},
+        test_summary={"status": "passed", "summary": "3 passed"},
+        repo_path=str(repo_dir),
+    )
+
+    pending = commit_gate_service.get_pending()
+    assert pending is not None
+    assert pending["session_id"] == "pipe-gate-marker-1"
+    assert pending["workspace_path"] == str(repo_dir)
+    assert pending["changed_files"] == ["hermes_cli/smoke_square.py", "tests/test_smoke_square.py"]
+    assert pending["commit_message"] == "Fixed smoke_square rounding bug"
+    assert pending["status"] == "awaiting_commit"
+
+
+def test_finalize_loop_result_read_only_run_does_not_write_pending_marker(tmp_path: Path, monkeypatch) -> None:
+    hermes_home = tmp_path / "hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    commit_gate_service = importlib.import_module("hermes_cli.commit_gate_service")
+    session_module = importlib.import_module("hermes_cli.pipeline_session")
+    state_module = importlib.import_module("hermes_cli.pipeline_state_machine")
+    loaded_specs = _loaded_specs(tmp_path)[1]
+
+    common = _finalize_result_common_kwargs(
+        tmp_path=tmp_path,
+        loaded_specs=loaded_specs,
+        session_module=session_module,
+        state_module=state_module,
+        current_state="rework_loop_candidate_complete",
+        session_id="pipe-gate-marker-2",
+    )
+
+    repo_dir = tmp_path / "repo"
+
+    module._finalize_loop_result(
+        fuse=module.PipelineExecutionFuseResult(
+            execution_mode="autonomous",
+            actual_invocation_allowed=True,
+            blocked_reason=None,
+            selected_pipeline_id="engineering_review_pipeline",
+            selected_step_kind="reviewer",
+            selected_subagent_id="hermes_code_reviewer",
+        ),
+        session=common["session"],
+        snapshot=common["snapshot"],
+        preflight_allowed=True,
+        preflight_reason_code="rework_loop_fuse_allowed",
+        iteration_history=[],
+        review_iterations_completed=1,
+        max_review_iterations=3,
+        policy_source="pipeline_spec",
+        original_task="investigate the flaky test",
+        appended_rework_context=[],
+        completion_allowed=True,
+        candidate_complete=True,
+        user_action_required=True,
+        blocked_reason=None,
+        git_gate={"changed_files": []},
+        reviewer_packet={"packet_status": "ready_for_review", "safe_packet": {"engineer_summary": "No changes were necessary"}},
+        subagent_runs=[],
+        peer_messages=[],
+        disagreements=[],
+        decisive_subagent=None,
+        model_escalations=[],
+        tests={},
+        mutation_summary={},
+        review_overrides={},
+        test_summary={"status": "not_requested"},
+        repo_path=str(repo_dir),
+    )
+
+    assert commit_gate_service.get_pending() is None
+
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(

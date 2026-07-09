@@ -512,6 +512,7 @@ def execute_bounded_rework_loop(
                         max_review_iterations=max_review_iterations,
                         policy_source=policy_source,
                         original_task=user_message,
+                        repo_path=repo_path,
                         appended_rework_context=appended_rework_context,
                         completion_allowed=allow_completion_after_review and bool(escalation_result["completion_allowed"]),
                         candidate_complete=bool(escalation_result["candidate_complete"]),
@@ -566,6 +567,7 @@ def execute_bounded_rework_loop(
                     max_review_iterations=max_review_iterations,
                     policy_source=policy_source,
                     original_task=user_message,
+                    repo_path=repo_path,
                     appended_rework_context=appended_rework_context,
                     completion_allowed=False,
                     candidate_complete=False,
@@ -758,6 +760,7 @@ def execute_bounded_rework_loop(
                     max_review_iterations=max_review_iterations,
                     policy_source=policy_source,
                     original_task=user_message,
+                    repo_path=repo_path,
                     appended_rework_context=appended_rework_context,
                     completion_allowed=allow_completion_after_review,
                     candidate_complete=True,
@@ -814,6 +817,7 @@ def execute_bounded_rework_loop(
                     max_review_iterations=max_review_iterations,
                     policy_source=policy_source,
                     original_task=user_message,
+                    repo_path=repo_path,
                     appended_rework_context=appended_rework_context,
                     completion_allowed=allow_completion_after_review and bool(escalation_result["completion_allowed"]),
                     candidate_complete=bool(escalation_result["candidate_complete"]),
@@ -868,6 +872,7 @@ def execute_bounded_rework_loop(
                 max_review_iterations=max_review_iterations,
                 policy_source=policy_source,
                 original_task=user_message,
+                repo_path=repo_path,
                 appended_rework_context=appended_rework_context,
                 completion_allowed=False,
                 candidate_complete=False,
@@ -908,6 +913,7 @@ def execute_bounded_rework_loop(
                 max_review_iterations=max_review_iterations,
                 policy_source=policy_source,
                 original_task=user_message,
+                repo_path=repo_path,
                 appended_rework_context=appended_rework_context,
                 completion_allowed=True,
                 candidate_complete=True,
@@ -1120,6 +1126,7 @@ def execute_bounded_rework_loop(
                 max_review_iterations=max_review_iterations,
                 policy_source=policy_source,
                 original_task=user_message,
+                repo_path=repo_path,
                 appended_rework_context=appended_rework_context,
                 completion_allowed=False,
                 candidate_complete=False,
@@ -1162,6 +1169,7 @@ def execute_bounded_rework_loop(
                 max_review_iterations=max_review_iterations,
                 policy_source=policy_source,
                 original_task=user_message,
+                repo_path=repo_path,
                 appended_rework_context=appended_rework_context,
                 completion_allowed=completion_allowed,
                 candidate_complete=True,
@@ -1211,6 +1219,7 @@ def execute_bounded_rework_loop(
                 max_review_iterations=max_review_iterations,
                 policy_source=policy_source,
                 original_task=user_message,
+                repo_path=repo_path,
                 appended_rework_context=appended_rework_context,
                 completion_allowed=False,
                 candidate_complete=False,
@@ -2243,7 +2252,9 @@ def _finalize_loop_result(
     review_overrides: dict[str, Any] | None = None,
     test_summary: dict[str, Any] | None = None,
     model_escalations_used: int = 0,
+    repo_path: str | None = None,
 ) -> PipelineReworkLoopResult:
+    gate_reached = completion_allowed and candidate_complete and blocked_reason is None
     final_response_text = (
         _completion_allowed_final_response_text(
             git_gate=git_gate,
@@ -2252,13 +2263,21 @@ def _finalize_loop_result(
             review_iterations_completed=review_iterations_completed,
             model_escalations_used=model_escalations_used,
         )
-        if completion_allowed and candidate_complete and blocked_reason is None
+        if gate_reached
         else _blocked_final_response_text(
             blocked_reason=blocked_reason,
             test_summary=test_summary,
             reviewer_packet=reviewer_packet,
         )
     )
+    if gate_reached:
+        _record_commit_gate_pending(
+            session=session,
+            repo_path=repo_path,
+            git_gate=git_gate,
+            original_task=original_task,
+            reviewer_packet=reviewer_packet,
+        )
     return PipelineReworkLoopResult(
         fuse=fuse,
         state_snapshot=snapshot,
@@ -2296,6 +2315,52 @@ def _finalize_loop_result(
         mutation_summary=mutation_summary or {},
         test_summary=test_summary,
     )
+
+
+def _draft_commit_message(*, original_task: str, reviewer_packet: dict[str, Any] | None) -> str:
+    """Draft a commit message for the pending commit-gate marker: prefer the
+    engineer's own summary (from the reviewer packet's safe_packet), falling
+    back to a truncated original task."""
+    safe_packet = (reviewer_packet or {}).get("safe_packet")
+    if not isinstance(safe_packet, dict):
+        safe_packet = reviewer_packet or {}
+    engineer_summary = _safe_test_text(safe_packet.get("engineer_summary"))
+    if engineer_summary:
+        return engineer_summary
+    task_text = str(original_task or "").strip()
+    if task_text:
+        return task_text[:72]
+    return "chore: controlled-pipeline change"
+
+
+def _record_commit_gate_pending(
+    *,
+    session: PipelineSession,
+    repo_path: str | None,
+    git_gate: dict[str, Any] | None,
+    original_task: str,
+    reviewer_packet: dict[str, Any] | None,
+) -> None:
+    """Best-effort: write the pending-commit marker when the controlled
+    pipeline stops at the commit gate with material changes. Never breaks
+    finalize -- the marker is a convenience for the reply/reaction intercept,
+    not part of the pipeline's own correctness."""
+    changed_files = [
+        str(item).strip() for item in list((git_gate or {}).get("changed_files") or []) if str(item).strip()
+    ]
+    if not changed_files:
+        return
+    try:
+        from hermes_cli import commit_gate_service
+
+        commit_gate_service.record_pending(
+            session_id=getattr(session, "pipeline_session_id", "") or "",
+            workspace_path=str(repo_path or ""),
+            changed_files=changed_files,
+            commit_message=_draft_commit_message(original_task=original_task, reviewer_packet=reviewer_packet),
+        )
+    except Exception:
+        pass
 
 
 def _normalize_controlled_runtime_context(
