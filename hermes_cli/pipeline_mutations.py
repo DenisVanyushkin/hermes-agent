@@ -122,12 +122,23 @@ class MutationExecutor:
 
     def _apply_planned(self, plan: tuple[MutationRequest, PurePosixPath, Path]) -> MutationResult:
         mutation, relative_path, destination = plan
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise MutationDenied("write_failed_parent_dir", mutation.operation, mutation.path) from exc
         if destination.exists() and destination.is_symlink():
             raise MutationDenied("symlink_target_denied", mutation.operation, mutation.path)
 
         content_bytes = mutation.content.encode("utf-8")
-        destination.write_text(mutation.content, encoding="utf-8")
+        try:
+            destination.write_text(mutation.content, encoding="utf-8")
+        except PermissionError as exc:
+            # Target not writable by the pipeline user - commonly a root-owned file
+            # left in the repo. Surface a concrete, actionable blocker so the engineer
+            # reports it instead of fabricating a runtime monkey-patch workaround.
+            raise MutationDenied("write_failed_not_writable", mutation.operation, mutation.path) from exc
+        except OSError as exc:
+            raise MutationDenied("write_failed_os_error", mutation.operation, mutation.path) from exc
         return MutationResult(
             operation=mutation.operation,
             path=relative_path.as_posix(),
