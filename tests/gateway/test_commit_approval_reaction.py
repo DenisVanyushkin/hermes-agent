@@ -180,3 +180,32 @@ def test_x_reaction_on_gate_message_discards_real_repo(tmp_path):
     assert status.stdout.strip() == ""  # feature.py stashed away, tree clean
     stash_list = _git(repo, "stash", "list")
     assert "commit-gate: discarded pending deliverable" in stash_list.stdout
+
+
+
+
+def test_checkmark_commits_when_history_fetch_empty(tmp_path):
+    # Real bug scenario: Slack conversations_history returns no messages (quirk or
+    # missing scope), so the gate-message text cannot be confirmed. With operator +
+    # a pending marker, the commit must still proceed (best-effort gate-message check).
+    repo = _make_repo(tmp_path)
+    (repo / "feature.py").write_text("VALUE = 1\n")
+
+    hermes_home = tmp_path / "home"
+    adapter = _adapter()
+    client = MagicMock()
+    client.conversations_history = AsyncMock(return_value={"messages": []})
+    client.chat_postMessage = AsyncMock(return_value={"ts": "999.000"})
+    adapter._get_client = lambda ch: client
+
+    with patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP", "HERMES_HOME": str(hermes_home)}):
+        commit_gate_service.record_pending(
+            session_id="s1", workspace_path=str(repo),
+            changed_files=["feature.py"], commit_message="feat: add feature",
+        )
+        event = _gate_event("white_check_mark")
+        asyncio.run(adapter._maybe_apply_commit_approval(event))
+        assert commit_gate_service.get_pending() is None
+
+    log = _git(repo, "log", "--oneline", "-1")
+    assert "feat: add feature" in log.stdout
