@@ -39,7 +39,7 @@ loop_policy:
   max_peer_discussion_rounds_per_iteration: 1
   max_disagreement_rounds_per_iteration: 1
   max_invalid_output_retries: 1
-  max_tool_retries: 1
+  max_tool_retries: 2
   max_model_escalations: 1
   max_clarification_rounds: 0
   on_limit_exceeded: block_and_escalate_to_user
