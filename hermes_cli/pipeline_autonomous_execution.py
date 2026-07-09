@@ -160,7 +160,34 @@ def _validate_repo_root_workspace(*, repo_root: Path, expected_repo_root: Path |
     # the clean-baseline check.
     entries = classify_dirty(repo_root)
     if entries:
+        entries = _auto_heal_dirty_baseline(repo_root, entries)
+    if entries:
         raise DirtyBaselineError(entries)
+
+
+def _auto_heal_dirty_baseline(repo_root: Path, entries: list[DirtyEntry]) -> list[DirtyEntry]:
+    """A prior blocked autonomous run can leave its own uncommitted edits in the
+    workspace (= repo root), which would DirtyBaselineError the next run. Best-effort
+    self-heal: stash the leftover (recoverable) and re-check. Returns the still-dirty
+    entries (empty if healed). Never raises; on any failure returns the original
+    entries so the caller falls back to the normal DirtyBaselineError.
+
+    Only auto-heals when there are no `stash_conflict` (unmerged/conflicted index)
+    or `root_owned` entries — `git stash` can't cleanly move those (the pipeline
+    runs as a non-root user, so root-owned leftovers need chown/baseline_doctor;
+    conflicted index state needs manual attention). Only the common modified/
+    untracked leftover from a prior blocked run is auto-healed.
+    """
+    if any(e.category in ("stash_conflict", "root_owned") for e in entries):
+        return entries
+    try:
+        _git(
+            repo_root, "stash", "push", "-u", "-m",
+            "auto-heal: autonomous baseline leftover from a prior blocked run",
+        )
+    except Exception:
+        return entries
+    return classify_dirty(repo_root)
 
 
 def _build_bridge_runtime_plans(*, loaded_specs: Any, pipeline_session_id: str | None, user_message: str, config: dict[str, Any] | None) -> dict[str, Any]:

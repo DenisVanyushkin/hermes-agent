@@ -84,7 +84,7 @@ def test_preflight_guard_skips_routing_failed_and_non_autonomous() -> None:
 import subprocess
 from pathlib import Path
 
-from hermes_cli.baseline_git import DirtyEntry
+from hermes_cli.baseline_git import DirtyEntry, classify_dirty
 from hermes_cli.pipeline_autonomous_execution import (
     DirtyBaselineError,
     _validate_repo_root_workspace,
@@ -147,3 +147,86 @@ def test_block_message_lists_dirty_files(monkeypatch):
     assert "[untracked] scripts/idle_idea_context.py" in text
     assert "[root_owned] agent/foo.pyc" in text
     assert "React 🧹 to run baseline-doctor." in text
+
+
+# --- auto-heal dirty baseline (task 11) ------------------------------------
+
+
+def _chown_hermes(*paths):
+    for p in paths:
+        subprocess.run(["chown", "-R", "hermes:hermes", str(p)], check=True)
+
+
+def _allow_dubious_ownership(monkeypatch, repo):
+    # These tests run as root (ssh hermes) but chown the repo to the hermes
+    # user to realistically simulate the non-root pipeline leftover; git
+    # otherwise refuses to operate on a repo it doesn't own ("dubious
+    # ownership"). Scope the allowance to this test process's env only.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(repo))
+
+
+def test_auto_heal_stashes_modified_untracked_leftover(tmp_path, monkeypatch):
+    """A prior blocked run's leftover (modified tracked file + untracked file,
+    owned by the non-root pipeline user) must be auto-stashed instead of
+    raising DirtyBaselineError, and must be recoverable from the stash."""
+    repo = _seed_repo(tmp_path)
+    _chown_hermes(repo)
+    _allow_dubious_ownership(monkeypatch, repo)
+    (repo / "tracked.txt").write_text("base\nleftover edit\n")
+    (repo / "stray.py").write_text("x\n")
+    _chown_hermes(repo / "tracked.txt", repo / "stray.py")
+
+    _validate_repo_root_workspace(repo_root=repo, expected_repo_root=None)
+
+    assert classify_dirty(repo) == []
+    stash_list = subprocess.run(
+        ["git", "stash", "list"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+    assert "auto-heal" in stash_list
+
+
+def test_auto_heal_falls_back_to_raise_on_root_owned(tmp_path, monkeypatch):
+    """A root_owned dirty entry can't be cleanly moved by `git stash` (the
+    pipeline runs as a non-root user), so auto-heal must not attempt it and
+    the existing hard-fail must still apply."""
+    import hermes_cli.pipeline_autonomous_execution as pae
+
+    repo = _seed_repo(tmp_path)
+    monkeypatch.setattr(
+        pae,
+        "classify_dirty",
+        lambda repo: [DirtyEntry("root_owned", "agent/foo.pyc")],
+    )
+
+    try:
+        pae._validate_repo_root_workspace(repo_root=repo, expected_repo_root=None)
+    except pae.DirtyBaselineError as err:
+        assert err.entries == [DirtyEntry("root_owned", "agent/foo.pyc")]
+    else:
+        raise AssertionError("expected DirtyBaselineError")
+
+    # Auto-heal must not have attempted a stash for an unhealable entry.
+    stash_list = subprocess.run(
+        ["git", "stash", "list"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+    assert stash_list == ""
+
+
+def test_clean_baseline_unaffected(tmp_path, monkeypatch):
+    """A clean repo proceeds exactly as before: no stash created, no raise."""
+    repo = _seed_repo(tmp_path)
+    _chown_hermes(repo)
+    _allow_dubious_ownership(monkeypatch, repo)
+
+    before = subprocess.run(
+        ["git", "stash", "list"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+
+    _validate_repo_root_workspace(repo_root=repo, expected_repo_root=None)
+
+    after = subprocess.run(
+        ["git", "stash", "list"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+    assert before == after == ""
