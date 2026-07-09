@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import shlex
+import subprocess
 from typing import Any, Mapping
 
 from hermes_cli.pipeline_git_delta import GitMaterialChangeResult, GitSnapshot
@@ -14,6 +15,7 @@ _SCHEMA_VERSION = "reviewer_packet.v1"
 _MAX_TEXT_LENGTH = 2000
 _MAX_UNTRACKED_FILE_BYTES = 4096
 _MAX_UNTRACKED_FILE_LINES = 120
+_MAX_REVIEWER_DIFF_CHARS = 40000  # reviewer must actually read the code; larger than the engineer's 4k self-diff cap
 _BLOCKING_GIT_STATUSES = {
     "baseline_invalid",
     "post_snapshot_invalid",
@@ -207,6 +209,8 @@ def packet_from_git_delta(
     post_snapshot: GitSnapshot,
     git_result: GitMaterialChangeResult,
 ) -> dict[str, Any]:
+    repo_path = post_snapshot.repo_path or baseline_snapshot.repo_path
+    tracked_diff = _reviewer_tracked_diff(repo_path)
     return {
         "baseline_head_sha": git_result.baseline_head_sha or baseline_snapshot.head_sha,
         "post_head_sha": git_result.post_head_sha or post_snapshot.head_sha,
@@ -220,10 +224,36 @@ def packet_from_git_delta(
         "unstaged_files": _sorted_strings(git_result.unstaged_files),
         "review_reason": git_result.blocked_reason or git_result.status,
         "untracked_file_details": _collect_untracked_file_details(
-            repo_path=post_snapshot.repo_path or baseline_snapshot.repo_path,
+            repo_path=repo_path,
             untracked_files=git_result.untracked_files,
         ),
+        "tracked_diff": tracked_diff,
+        "tracked_diff_available": bool(tracked_diff),
     }
+
+
+def _reviewer_tracked_diff(repo_path: str | None, *, max_chars: int = _MAX_REVIEWER_DIFF_CHARS) -> str:
+    """Deterministic ground-truth diff of the engineer's uncommitted changes, so
+    the reviewer can inspect the actual code. Returns "" on any error (the packet
+    then signals the diff is unavailable rather than raising)."""
+    if not repo_path:
+        return ""
+    try:
+        stat = subprocess.run(["git", "-C", repo_path, "diff", "--stat"],
+                              capture_output=True, text=True, errors="replace", timeout=15)
+        # include both unstaged (working tree) and staged changes
+        body = subprocess.run(["git", "-C", repo_path, "diff", "HEAD"],
+                              capture_output=True, text=True, errors="replace", timeout=15)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    if body.returncode != 0:
+        return ""
+    text = ((stat.stdout or "") + "\n" + (body.stdout or "")).strip()
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n... [diff truncated; request specific files if needed]"
+    return text
 
 
 def _collect_untracked_file_details(*, repo_path: str | None, untracked_files: list[str]) -> list[dict[str, Any]]:
