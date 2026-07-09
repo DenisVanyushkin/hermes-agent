@@ -232,6 +232,106 @@ def test_clean_baseline_unaffected(tmp_path, monkeypatch):
     assert before == after == ""
 
 
+# --- pending commit-gate deliverable protection (task C3) ------------------
+
+
+def test_pending_commit_deliverable_is_not_stashed(tmp_path, monkeypatch):
+    """A commit-gate-pending deliverable (recorded by Task C1) sitting dirty in
+    the workspace must NOT be auto-heal-stashed by a new incoming task's
+    preflight — that would orphan it from its commit_gate marker (the exact
+    bug that made «коммить» find nothing). The run must block with
+    DirtyBaselineError instead, leaving the dirty tree AND the marker intact."""
+    from hermes_cli import commit_gate_service
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    repo = _seed_repo(repo_dir)
+    _chown_hermes(repo)
+    _allow_dubious_ownership(monkeypatch, repo)
+    (repo / "tracked.txt").write_text("base\npending edit\n")
+    _chown_hermes(repo / "tracked.txt")
+
+    commit_gate_service.record_pending(
+        session_id="s",
+        workspace_path=str(repo),
+        changed_files=["tracked.txt"],
+        commit_message="m",
+    )
+
+    try:
+        _validate_repo_root_workspace(repo_root=repo, expected_repo_root=None)
+    except DirtyBaselineError as err:
+        assert [e.path for e in err.entries] == ["tracked.txt"]
+    else:
+        raise AssertionError("expected DirtyBaselineError")
+
+    stash_list = subprocess.run(
+        ["git", "stash", "list"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+    assert stash_list == ""
+    assert commit_gate_service.get_pending() is not None
+
+
+def test_non_pending_leftover_still_auto_heals(tmp_path, monkeypatch):
+    """No pending marker at all -> ordinary Task 11 auto-heal behavior is
+    unchanged: the leftover is stashed and the run proceeds."""
+    from hermes_cli import commit_gate_service
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+    assert commit_gate_service.get_pending() is None
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    repo = _seed_repo(repo_dir)
+    _chown_hermes(repo)
+    _allow_dubious_ownership(monkeypatch, repo)
+    (repo / "tracked.txt").write_text("base\nleftover edit\n")
+    _chown_hermes(repo / "tracked.txt")
+
+    _validate_repo_root_workspace(repo_root=repo, expected_repo_root=None)
+
+    assert classify_dirty(repo) == []
+    stash_list = subprocess.run(
+        ["git", "stash", "list"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+    assert "auto-heal" in stash_list
+
+
+def test_dirty_exceeds_pending_falls_through(tmp_path, monkeypatch):
+    """Pending marker covers tracked.txt only, but the tree also has an
+    unrelated dirty file (stray.py) not in the marker -> dirty_files is not a
+    subset of pending_files -> normal auto-heal (stash) still happens."""
+    from hermes_cli import commit_gate_service
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    repo = _seed_repo(repo_dir)
+    _chown_hermes(repo)
+    _allow_dubious_ownership(monkeypatch, repo)
+    (repo / "tracked.txt").write_text("base\npending edit\n")
+    (repo / "stray.py").write_text("x\n")
+    _chown_hermes(repo / "tracked.txt", repo / "stray.py")
+
+    commit_gate_service.record_pending(
+        session_id="s",
+        workspace_path=str(repo),
+        changed_files=["tracked.txt"],
+        commit_message="m",
+    )
+
+    _validate_repo_root_workspace(repo_root=repo, expected_repo_root=None)
+
+    assert classify_dirty(repo) == []
+    stash_list = subprocess.run(
+        ["git", "stash", "list"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+    assert "auto-heal" in stash_list
+
+
 # --- engineer model escalation enablement (task 12) ------------------------
 
 
