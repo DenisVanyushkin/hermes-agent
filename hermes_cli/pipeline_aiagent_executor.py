@@ -781,7 +781,10 @@ class AIAgentSubagentExecutorBridge:
             ),
             "pytest": self._tool_definition(
                 "pytest",
-                "Run allowed pytest targets inside the controlled workspace. The runtime chooses the executable.",
+                (
+                    "Run pytest inside the controlled workspace. Set quiet=true (required). "
+                    "targets must be repository-relative paths under tests/. The runtime chooses the executable."
+                ),
                 {
                     "targets": {"type": "array", "items": {"type": "string"}},
                     "quiet": {"type": "boolean"},

@@ -1017,6 +1017,17 @@ def test_bridge_pytest_is_constrained_and_terminal_missing(tmp_path: Path) -> No
     assert all(tool["function"]["name"] != "terminal" for tool in bridge._tool_definitions())
 
 
+def test_bridge_pytest_tool_schema_documents_quiet_and_targets_constraints(tmp_path: Path) -> None:
+    repo_root, _runtime_result = _build_runtime_result(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent, conversation_runner=lambda *_args: {"output_text": "ok"})
+
+    pytest_tool = next(tool for tool in bridge._tool_definitions() if tool["function"]["name"] == "pytest")
+    description = pytest_tool["function"]["description"]
+    assert "quiet=true" in description
+    assert "tests/" in description
+
+
 def test_bridge_pytest_accepts_structured_payload_and_hides_executable_choice(tmp_path: Path) -> None:
     repo_root, _runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)
