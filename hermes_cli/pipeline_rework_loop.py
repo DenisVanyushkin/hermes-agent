@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -248,6 +249,7 @@ def execute_bounded_rework_loop(
         engineer_message = _compose_engineer_message(
             original_task=user_message,
             appended_rework_context=appended_rework_context,
+            prior_changes_diff=_working_tree_diff(repo_path) if appended_rework_context else None,
         )
         try:
             engineer_result = _execute_step(
@@ -372,6 +374,7 @@ def execute_bounded_rework_loop(
                     _build_test_failure_rework_context(
                         test_summary=current_test_summary,
                         attempt=test_rework_iterations_used,
+                        changed_files=list(getattr(git_result, "changed_files", []) or []) if git_result is not None else [],
                     )
                 )
                 continue
@@ -2897,10 +2900,42 @@ _CATASTROPHIC_REVIEW_TEXT = (
 )
 
 
-def _compose_engineer_message(*, original_task: str, appended_rework_context: list[dict[str, Any]]) -> str:
+def _working_tree_diff(repo_path: str | None, *, max_chars: int = 4000) -> str:
+    """Best-effort unified diff of the workspace's uncommitted changes, so a
+    memoryless engineer iteration can see its own prior on-disk work. Returns ""
+    on any error or when no repo path is available."""
+    if not repo_path:
+        return ""
+    try:
+        stat = subprocess.run(["git", "-C", repo_path, "diff", "--stat"],
+                              capture_output=True, text=True, timeout=10)
+        body = subprocess.run(["git", "-C", repo_path, "diff"],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if body.returncode != 0:
+        return ""
+    text = (stat.stdout or "") + "\n" + (body.stdout or "")
+    text = text.strip()
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n... [diff truncated]"
+    return text
+
+
+def _compose_engineer_message(*, original_task: str, appended_rework_context: list[dict[str, Any]], prior_changes_diff: str | None = None) -> str:
     if not appended_rework_context:
         return original_task
-    return "\n\n".join([original_task, "Normalized reviewer feedback:", *[_serialize_rework_context(item) for item in appended_rework_context]])
+    parts = [original_task]
+    if prior_changes_diff:
+        parts.append(
+            "Your prior uncommitted changes (already applied on disk — build on "
+            "these, do NOT redo or revert them):\n" + prior_changes_diff
+        )
+    parts.append("Rework guidance (address every item below):")
+    parts.extend(_serialize_rework_context(item) for item in appended_rework_context)
+    return "\n\n".join(parts)
 
 
 def _compose_reviewer_message(
@@ -2972,7 +3007,7 @@ def _build_format_retry_context(*, reason: str, attempt: int) -> dict[str, Any]:
     }
 
 
-def _build_test_failure_rework_context(*, test_summary: Mapping[str, Any], attempt: int) -> dict[str, Any]:
+def _build_test_failure_rework_context(*, test_summary: Mapping[str, Any], attempt: int, changed_files: list[str] | None = None) -> dict[str, Any]:
     failures = []
     for result in list(test_summary.get("results") or []):
         if isinstance(result, dict) and result.get("status") == "failed":
@@ -2985,10 +3020,12 @@ def _build_test_failure_rework_context(*, test_summary: Mapping[str, Any], attem
         "source": "controlled_execution_contract",
         "kind": "test_failure_rework",
         "attempt": attempt,
+        "your_changed_files": list(changed_files or []),
         "instruction": (
             "Your test command failed (exit code != 0). Do NOT stop and do NOT "
-            "discard your changes. Fix the implementation so the failing test "
-            "passes (or fix the test if it is genuinely wrong), then re-run it. "
+            "discard your changes. The files you have already changed are listed in "
+            "`your_changed_files` — edit the implementation there (do not create new "
+            "wrapper/monkey-patch files) so the failing test passes, then re-run it. "
             "The failing test output is included below."
         ),
         "failures": failures,

@@ -4189,6 +4189,89 @@ def test_compose_engineer_message_includes_test_failure_rework_instruction():
     assert "AssertionError: wiring incomplete" in message
 
 
+def test_compose_engineer_message_no_context_returns_original_task_unchanged():
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    composed = module._compose_engineer_message(
+        original_task="Implement bounded rework loop",
+        appended_rework_context=[],
+    )
+    assert composed == "Implement bounded rework loop"
+
+
+def test_compose_engineer_message_uses_neutral_header_not_reviewer_mislabel():
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    context_item = module._build_format_retry_context(reason="missing_structured_output", attempt=1)
+    composed = module._compose_engineer_message(
+        original_task="Implement bounded rework loop",
+        appended_rework_context=[context_item],
+    )
+    assert "Rework guidance" in composed
+    assert "Normalized reviewer feedback" not in composed
+
+
+def test_compose_engineer_message_prepends_prior_diff_before_guidance():
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    context_item = module._build_format_retry_context(reason="missing_structured_output", attempt=1)
+    composed = module._compose_engineer_message(
+        original_task="Implement bounded rework loop",
+        appended_rework_context=[context_item],
+        prior_changes_diff="diff --git a/foo.py b/foo.py\n+added line",
+    )
+    assert "build on these" in composed
+    assert composed.index("build on these") < composed.index("Rework guidance")
+    assert "diff --git a/foo.py" in composed
+
+
+def test_working_tree_diff_returns_empty_for_none_repo_path():
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    assert module._working_tree_diff(None) == ""
+
+
+def test_working_tree_diff_returns_empty_for_non_repo_path(tmp_path: Path):
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+    assert module._working_tree_diff(str(not_a_repo)) == ""
+
+
+def test_working_tree_diff_reports_uncommitted_change(tmp_path: Path):
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo = _init_git_repo(tmp_path)
+    (repo / "tracked.txt").write_text("baseline\nchanged\n", encoding="utf-8")
+    diff = module._working_tree_diff(str(repo))
+    assert "tracked.txt" in diff
+    assert "diff --git" in diff or "@@" in diff
+
+
+def test_build_test_failure_rework_context_surfaces_changed_files():
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    context = module._build_test_failure_rework_context(
+        test_summary={
+            "results": [
+                {
+                    "command": ["venv/bin/pytest", "-q", "tests/test_example.py"],
+                    "exit_code": 1,
+                    "status": "failed",
+                    "stdout_excerpt": "AssertionError: wiring incomplete",
+                }
+            ]
+        },
+        attempt=1,
+        changed_files=["hermes_cli/foo.py", "hermes_cli/bar.py"],
+    )
+    assert context["your_changed_files"] == ["hermes_cli/foo.py", "hermes_cli/bar.py"]
+    assert "your_changed_files" in context["instruction"]
+
+
+def test_build_test_failure_rework_context_defaults_to_empty_changed_files():
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    context = module._build_test_failure_rework_context(
+        test_summary={"results": []},
+        attempt=1,
+    )
+    assert context["your_changed_files"] == []
+
+
 def _test_tool_call(*, status: str, blocked_reason: str | None) -> dict[str, object]:
     return {
         "tool_name": "pytest",
