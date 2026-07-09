@@ -500,3 +500,37 @@ def test_valid_engineer_result_and_explicit_fuse_allow_reviewer_one_step() -> No
     assert result.blocked_reason is None
     assert result.selected_step_kind == "reviewer"
     assert result.selected_subagent_id == "hermes_code_reviewer"
+
+
+def _reviewer_prereq_snapshot(*, runner_status="succeeded", evaluation_status, validation_status="valid"):
+    from types import SimpleNamespace
+
+    step = SimpleNamespace(
+        runner_result={"status": runner_status, "structured_output": {"validation_status": validation_status}},
+        evaluation_result={"status": evaluation_status},
+    )
+    return SimpleNamespace(planned_steps=[step])
+
+
+def test_reviewer_prereq_allows_blocked_engineer_when_material_changes_present():
+    # A synthesized "blocked" envelope (valid schema) with real file changes must
+    # reach the reviewer, mirroring _engineer_fail_closed_reason escape hatch.
+    from hermes_cli.pipeline_execution_fuse import _reviewer_prereq_failure
+
+    snap = _reviewer_prereq_snapshot(evaluation_status="blocked", validation_status="valid")
+    assert _reviewer_prereq_failure(snap, material_changes_present=True) is None
+
+
+def test_reviewer_prereq_blocks_blocked_engineer_without_material_changes():
+    from hermes_cli.pipeline_execution_fuse import _reviewer_prereq_failure
+
+    snap = _reviewer_prereq_snapshot(evaluation_status="blocked", validation_status="valid")
+    assert _reviewer_prereq_failure(snap, material_changes_present=False) == "engineer_result_invalid"
+
+
+def test_reviewer_prereq_still_blocks_failed_runner_even_with_material_changes():
+    # runner failure is infra, not a format issue -- material changes must NOT rescue it.
+    from hermes_cli.pipeline_execution_fuse import _reviewer_prereq_failure
+
+    snap = _reviewer_prereq_snapshot(runner_status="failed", evaluation_status="not_evaluated")
+    assert _reviewer_prereq_failure(snap, material_changes_present=True) == "engineer_result_failed"
