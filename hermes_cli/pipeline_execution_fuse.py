@@ -308,5 +308,7 @@ def _reviewer_prereq_failure(
             return None
         return "engineer_result_invalid"
     if evaluation_status != "candidate_complete":
+        if material_changes_present:
+            return None
         return "engineer_result_invalid"
     return None
