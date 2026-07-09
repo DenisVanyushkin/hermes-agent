@@ -1053,6 +1053,54 @@ def test_engineer_allowed_mutation_flows_through_git_gate_and_report(tmp_path: P
     assert result.execution_report.to_safe_dict()["mutation_summary"]["applied_count"] == 1
 
 
+def test_engineer_malformed_envelope_mutations_do_not_discard_tool_changes(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+
+    class _InvocationClient:
+        def __call__(self, runtime, payload):
+            if runtime.subagent_id == "hermes_engineer_core":
+                # Simulate the engineer's REAL edit already landed on disk via the
+                # patch/write_file tools (material change), while the envelope ALSO
+                # declares a malformed `mutations` entry (content is not a string ->
+                # invalid_mutation_content). The malformed declaration must not
+                # discard the real, already-applied tool work.
+                _write(repo, "feature.txt", "real tool change\n")
+                return {
+                    "structured_output": _engineer_output(
+                        mutations=[{"operation": "write_text", "path": "feature.txt", "content": None}]
+                    ),
+                    "output_text": "ok",
+                }
+            return {
+                "structured_output": _reviewer_output(blockers=[]),
+                "output_text": "ok",
+            }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "invocation_client": _InvocationClient(),
+            "controlled_runner": module.ControlledRuntimeRunner(),
+            "allow_mutations": True,
+            "mutation_workspace": str(repo),
+        },
+    )
+
+    assert result.blocked_reason != "mutation_denied"
+    assert result.mutation_summary["denied_count"] == 1
+    assert "feature.txt" in result.git_gate["changed_files"]
+    assert result.completion_allowed is True
+
+
 def test_engineer_mutation_denied_when_gate_disabled(tmp_path: Path) -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     repo_root, loaded_specs = _loaded_specs(tmp_path)
@@ -1083,9 +1131,13 @@ def test_engineer_mutation_denied_when_gate_disabled(tmp_path: Path) -> None:
         },
     )
 
-    assert result.completion_allowed is False
-    assert result.blocked_reason == "mutation_denied"
+    # Engineer envelope-mutation denial is now advisory (git-primary): the
+    # declaration is recorded as denied, but it no longer fatally blocks the
+    # loop. The security-critical invariant is unchanged: a denied mutation is
+    # NEVER applied, gate-disabled or not.
+    assert result.blocked_reason != "mutation_denied"
     assert result.mutation_summary["denied_count"] == 1
+    assert result.mutation_summary["applied_count"] == 0
     assert not (repo / "safe.txt").exists()
 
 
@@ -1177,7 +1229,10 @@ def test_engineer_mixed_mutation_batch_fails_closed_without_partial_writes(tmp_p
         },
     )
 
-    assert result.blocked_reason == "mutation_denied"
+    # Engineer envelope-mutation denial is advisory (git-primary), not fatal —
+    # but the mixed-batch fails-CLOSED invariant is unchanged: no partial
+    # writes, the safe entry is not applied alongside the unsafe one.
+    assert result.blocked_reason != "mutation_denied"
     assert result.mutation_summary["applied_count"] == 0
     assert result.mutation_summary["denied_count"] >= 1
     assert not (repo / "safe.txt").exists()
