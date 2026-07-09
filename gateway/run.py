@@ -16864,6 +16864,63 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "I will report the result in this thread shortly."
         )
 
+    @staticmethod
+    def _build_commit_approval_ack(message, source):
+        """Commit or discard the pending commit-gate deliverable on an operator reply.
+
+        Returns an ack string when ``message`` is a recognized commit/discard reply
+        AND a commit is pending; otherwise ``None`` so the normal path proceeds.
+        Commits inline (no new pipeline run). Push only on an explicit push reply.
+        """
+        try:
+            import os as _os
+            from pathlib import Path as _Path
+            from hermes_cli import commit_gate_service
+
+            action = commit_gate_service.parse_commit_reply(message)
+            if not action:
+                return None
+            pending = commit_gate_service.get_pending()
+            if not pending:
+                return None
+
+            platform = str(getattr(source, "platform", "") or "")
+            user_id = str(getattr(source, "user_id", "") or "")
+            # Operator gate for Slack when an operator UID is configured; other
+            # platforms fall through to the pending-marker gate (sole-operator setup).
+            if platform == "slack" and (_os.getenv("HERMES_OPERATOR_SLACK_UID") or "").strip():
+                if not commit_gate_service.is_operator(user_id):
+                    return None
+
+            workspace = str(pending.get("workspace_path") or "").strip()
+            repo = _Path(workspace) if workspace else _Path(__file__).resolve().parent.parent
+            changed_files = list(pending.get("changed_files") or [])
+
+            if action == "discard":
+                commit_gate_service.apply_discard(repo=repo, changed_files=changed_files)
+                commit_gate_service.clear_pending()
+                return "🗑 Изменения отклонены и убраны в stash. Ничего не закоммичено."
+
+            result = commit_gate_service.apply_commit(
+                repo=repo,
+                changed_files=changed_files,
+                commit_message=str(pending.get("commit_message") or "chore: controlled-pipeline change"),
+                push=(action == "commit_push"),
+            )
+            if not result.get("committed"):
+                return f"⚠️ Не удалось закоммитить: {result.get('detail') or 'unknown error'}"
+            commit_gate_service.clear_pending()
+            sha = result.get("sha") or "?"
+            n = len(changed_files)
+            if action == "commit_push":
+                if result.get("pushed"):
+                    return f"✅ Закоммичено и запушено: {sha} ({n} файлов)."
+                return f"✅ Закоммичено: {sha} ({n} файлов). ⚠️ Пуш не удался: {result.get('push_detail') or 'unknown'}"
+            return f"✅ Закоммичено: {sha} ({n} файлов). Пуш не делал (скажи «запушь», если нужно)."
+        except Exception:
+            logger.warning("commit-approval intercept failed", exc_info=True)
+            return None
+
     def _pipeline_controlled_final_response(self, report: Any, *, orchestrator_mode: str) -> str | None:
         if str(orchestrator_mode or "").strip().lower() != "controlled_manual":
             return None
@@ -17318,6 +17375,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": _us_ack},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
+        _commit_ack = self._build_commit_approval_ack(message, source)
+        if _commit_ack is not None:
+            logger.info(
+                "commit-approval intercept: handled reply: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": _commit_ack,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": _commit_ack},
                 ],
                 "api_calls": 0,
                 "tools": [],
