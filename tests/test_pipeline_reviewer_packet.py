@@ -487,15 +487,26 @@ def test_max_iterations_plain_text_missing_structured_output_gets_precise_block_
     assert packet.engineer_summary == "plain text diagnostic summary"
 
 
-def test_module_does_not_run_git_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_module_only_runs_expected_git_diff_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Task 9 note: this test previously asserted pipeline_reviewer_packet never
+    # invokes subprocess at all. That invariant is now intentionally relaxed:
+    # the module attaches a real `git diff HEAD` (via _reviewer_tracked_diff)
+    # so the reviewer can inspect actual code instead of just file names (see
+    # smoke a8b42428, blocked on diff_not_inspectable). This test now asserts
+    # the module never runs anything OTHER than that specific, read-only,
+    # defensive git-diff invocation.
     module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
     seen: list[list[str]] = []
+    real_run = subprocess.run
 
-    def _unexpected_run(*args, **kwargs):
-        seen.append(list(args[0]) if args else [])
-        raise AssertionError("pipeline_reviewer_packet must not invoke subprocesses")
+    def _guarded_run(*args, **kwargs):
+        argv = list(args[0]) if args else []
+        seen.append(argv)
+        if len(argv) >= 4 and argv[0] == "git" and argv[1] == "-C" and argv[3] == "diff":
+            return real_run(*args, **kwargs)
+        raise AssertionError(f"unexpected subprocess invocation: {argv}")
 
-    monkeypatch.setattr(subprocess, "run", _unexpected_run)
+    monkeypatch.setattr(subprocess, "run", _guarded_run)
 
     packet = module.build_reviewer_packet(
         pipeline_id="engineering_review_pipeline",
@@ -507,7 +518,9 @@ def test_module_does_not_run_git_commands(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     assert packet.review_required is True
-    assert seen == []
+    assert seen, "expected the module to attempt the ground-truth git diff read"
+    for argv in seen:
+        assert argv[0] == "git" and argv[1] == "-C" and argv[3] == "diff"
 
 
 def test_test_summary_results_are_sanitized_and_path_safe() -> None:
@@ -682,3 +695,61 @@ def test_test_summary_classifies_semantic_command_equivalence() -> None:
     )
     assert normalized["command_relation"] == "equivalent"
     assert "same pytest target" in normalized["command_relation_reason"]
+
+
+def _init_git_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "reviewer-git-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True)
+    (repo / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+def test_reviewer_packet_includes_tracked_diff(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+    repo = _init_git_repo(tmp_path)
+    (repo / "tracked.txt").write_text("baseline\nchanged by engineer\n", encoding="utf-8")
+
+    packet = module.build_reviewer_packet(
+        pipeline_id="engineering_review_pipeline",
+        task_summary="Attach ground-truth diff to reviewer packet",
+        engineer_output=_engineer_output(),
+        baseline_snapshot=_snapshot(head_sha="abc123", repo_path=str(repo)),
+        post_snapshot=_snapshot(
+            head_sha="abc123",
+            repo_path=str(repo),
+            unstaged_files=("tracked.txt",),
+        ),
+        git_result=_git_result(
+            changed_files=["tracked.txt"],
+            unstaged_files=["tracked.txt"],
+            baseline_head_sha="abc123",
+            post_head_sha="abc123",
+            head_changed=False,
+        ),
+    )
+
+    payload = packet.to_safe_dict()
+    git_section = payload["git"]
+
+    assert git_section["tracked_diff_available"] is True
+    assert "tracked.txt" in git_section["tracked_diff"]
+    assert "diff --git" in git_section["tracked_diff"] or "@@" in git_section["tracked_diff"]
+    assert "changed by engineer" in git_section["tracked_diff"]
+
+
+def test_reviewer_tracked_diff_defensive(tmp_path: Path, monkeypatch) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_reviewer_packet")
+
+    assert module._reviewer_tracked_diff(None) == ""
+    assert module._reviewer_tracked_diff("/nonexistent/repo") == ""
+
+    def _boom(*_a, **_k):
+        raise ValueError("simulated diff failure")
+
+    monkeypatch.setattr(module.subprocess, "run", _boom)
+    assert module._reviewer_tracked_diff(str(tmp_path)) == ""
