@@ -168,6 +168,16 @@ class PipelineReworkLoopResult:
         }
 
 
+def _engineer_escalation_target_class(pipeline_spec: Mapping[str, Any] | None) -> str | None:
+    for rule in ((pipeline_spec or {}).get("model_escalation_policy") or {}).get("rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("target_subagent") == "engineer":
+            klass = rule.get("escalate_to_model_class")
+            return klass if isinstance(klass, str) else None
+    return None
+
+
 def execute_bounded_rework_loop(
     *,
     config: dict[str, Any] | None,
@@ -239,6 +249,11 @@ def execute_bounded_rework_loop(
     decisive_subagent = REVIEWER_SUBAGENT_ID
     review_overrides: dict[str, Any] = {}
     loop_policy = resolve_loop_limit_policy(pipeline_spec)
+    engineer_requested_model_class: str | None = None
+    model_escalations_used = 0
+    persistent_engineer_failures = 0
+    _escalation_target_class = _engineer_escalation_target_class(pipeline_spec)
+    _escalation_allowed = bool(getattr(runtime_context, "allow_model_escalation", False)) and _escalation_target_class is not None
 
     while True:
         loop_snapshot = {
@@ -270,6 +285,7 @@ def execute_bounded_rework_loop(
                     "loop_allowed": True,
                     "review_iterations_completed": review_iterations_completed,
                 },
+                requested_model_class=engineer_requested_model_class,
             )
         except ExecutorBridgeResolutionError as exc:
             return _blocked_loop_result(
@@ -366,6 +382,10 @@ def execute_bounded_rework_loop(
                         changed_files=list(getattr(git_result, "changed_files", []) or []) if git_result is not None else [],
                     )
                 )
+                persistent_engineer_failures += 1
+                if _escalation_allowed and persistent_engineer_failures >= 2 and model_escalations_used < loop_policy.max_model_escalations:
+                    engineer_requested_model_class = _escalation_target_class
+                    model_escalations_used += 1
                 continue
             return _blocked_loop_result(
                 fuse=fuse,
@@ -1205,6 +1225,10 @@ def execute_bounded_rework_loop(
                 test_summary=current_test_summary,
             )
 
+        persistent_engineer_failures += 1
+        if _escalation_allowed and persistent_engineer_failures >= 2 and model_escalations_used < loop_policy.max_model_escalations:
+            engineer_requested_model_class = _escalation_target_class
+            model_escalations_used += 1
         pending_reviewer_blockers = list(reviewer_blockers)
 
 
@@ -1286,6 +1310,7 @@ def _execute_step(
     step_kind: str,
     user_message: str,
     metadata: dict[str, Any],
+    requested_model_class: str | None = None,
 ) -> ControlledOneStepExecutionResult:
     step = current_snapshot.planned_steps[step_index]
     configured_execution_mode = str(
@@ -1302,6 +1327,7 @@ def _execute_step(
                 subagent_id=step.subagent_id,
                 pipeline_session_id=session.pipeline_session_id,
                 invocation_id=f"{session.pipeline_session_id}:{step_kind}:loop:{step_index}",
+                requested_model_class=requested_model_class,
             )
         )
         runner_request = _build_runner_request_from_runtime_plan(
