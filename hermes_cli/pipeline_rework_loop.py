@@ -232,6 +232,7 @@ def execute_bounded_rework_loop(
     disagreements: list[dict[str, Any]] = []
     model_escalations: list[dict[str, Any]] = []
     pending_reviewer_blockers: list[str] = []
+    invalid_output_retries_used = 0
     peer_round_used = False
     decisive_subagent = REVIEWER_SUBAGENT_ID
     review_overrides: dict[str, Any] = {}
@@ -377,11 +378,27 @@ def execute_bounded_rework_loop(
                 mutation_summary=current_mutation_summary,
                 test_summary=current_test_summary,
             )
+        material_changes_present = bool(git_result.material_changes_present) if git_result is not None else False
         engineer_fail_closed_reason = _engineer_fail_closed_reason(
             current_snapshot,
-            material_changes_present=bool(git_result.material_changes_present) if git_result is not None else False,
+            material_changes_present=material_changes_present,
         )
         if engineer_fail_closed_reason is not None:
+            # git-primary: a material diff already returned None above, so we only
+            # reach here on NO diff. Guard keeps the retry strictly no-diff-scoped.
+            if (
+                not material_changes_present
+                and _is_retryable_engineer_reason(engineer_fail_closed_reason)
+                and invalid_output_retries_used < loop_policy.max_invalid_output_retries
+            ):
+                invalid_output_retries_used += 1
+                appended_rework_context.append(
+                    _build_format_retry_context(
+                        reason=engineer_fail_closed_reason,
+                        attempt=invalid_output_retries_used,
+                    )
+                )
+                continue
             return _blocked_loop_result(
                 fuse=fuse,
                 session=session,
@@ -2923,6 +2940,23 @@ def _serialize_rework_context(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=True)
 
 
+def _build_format_retry_context(*, reason: str, attempt: int) -> dict[str, Any]:
+    return {
+        "source": "controlled_execution_contract",
+        "kind": "structured_output_format_retry",
+        "attempt": attempt,
+        "reason": reason,
+        "instruction": (
+            "You made NO file changes and returned no parseable structured result "
+            f"(reason: {reason}). Do NOT repeat the analysis. Decide and report as "
+            "exactly one StructuredOutputEnvelope JSON object (no prose, no fences): "
+            "either status=blocked with concrete `blockers` explaining what stopped "
+            "you (missing access, contradictory requirement, ambiguous scope), or "
+            "status=succeeded if there was genuinely nothing to change."
+        ),
+    }
+
+
 def _build_rework_context(
     *,
     iteration_index: int,
@@ -3271,6 +3305,18 @@ def _git_result_blocks_completion(git_result: GitMaterialChangeResult) -> bool:
         "post_snapshot_invalid",
         "git_unavailable",
     } or bool(git_result.baseline_dirty)
+
+
+_RETRYABLE_ENGINEER_REASONS = frozenset(
+    {"missing_structured_output", "invalid_engineer_output", "max_iterations_plain_text_output"}
+)
+
+
+def _is_retryable_engineer_reason(reason: str | None) -> bool:
+    """Format-level failures worth one more engineer attempt with an explicit
+    reminder. Excludes engineer_reported_blocked (real evidence to preserve) and
+    infra failures (result_missing/result_failed)."""
+    return reason in _RETRYABLE_ENGINEER_REASONS
 
 
 def _engineer_fail_closed_reason(state_snapshot: Any, *, material_changes_present: bool = False) -> str | None:

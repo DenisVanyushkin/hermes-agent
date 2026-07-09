@@ -2312,10 +2312,19 @@ def test_invalid_engineer_structured_output_without_material_diff_blocks_before_
         repo_path=str(git_repo),
     )
 
-    assert calls == ["hermes_engineer_core"]
+    # engineering_review_pipeline.yaml sets max_invalid_output_retries: 1, so the
+    # no-diff invalid-output case now gets one reminder-driven retry before
+    # failing closed (Task 2). This executor keeps returning the same invalid
+    # payload, so the retry is exhausted and the loop still fails closed --
+    # just after two engineer attempts instead of one.
+    assert calls == ["hermes_engineer_core", "hermes_engineer_core"]
     assert result.blocked_reason == "invalid_engineer_output"
     assert result.git_gate["material_changes_present"] is False
     assert result.reviewer_packet["present"] is True
+    assert any(
+        item.get("kind") == "structured_output_format_retry" and item.get("attempt") == 1
+        for item in result.appended_rework_context
+    )
 
 
 def test_git_gate_dirty_baseline_fails_closed_without_attributing_existing_changes(tmp_path: Path) -> None:
@@ -4030,3 +4039,114 @@ def test_smoke_016_exhaustion_normalizes_empty_blocked_reviewer_to_missing_test_
     assert final_response is not None
     assert "Test status: requested_not_executed" in final_response
     assert "Test command: venv/bin/pytest -q tests/test_smoke_square.py" in final_response
+
+
+def test_retryable_engineer_reasons() -> None:
+    from hermes_cli.pipeline_rework_loop import _is_retryable_engineer_reason
+
+    assert _is_retryable_engineer_reason("missing_structured_output") is True
+    assert _is_retryable_engineer_reason("invalid_engineer_output") is True
+    assert _is_retryable_engineer_reason("max_iterations_plain_text_output") is True
+
+
+def test_non_retryable_engineer_reasons_preserve_evidence() -> None:
+    from hermes_cli.pipeline_rework_loop import _is_retryable_engineer_reason
+
+    assert _is_retryable_engineer_reason("engineer_reported_blocked") is False
+    assert _is_retryable_engineer_reason("engineer_result_failed") is False
+    assert _is_retryable_engineer_reason("engineer_result_missing") is False
+    assert _is_retryable_engineer_reason(None) is False
+
+
+def test_format_retry_context_message_carries_instruction() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    context_item = module._build_format_retry_context(reason="missing_structured_output", attempt=1)
+    assert context_item["kind"] == "structured_output_format_retry"
+    assert context_item["reason"] == "missing_structured_output"
+    assert context_item["attempt"] == 1
+
+    composed = module._compose_engineer_message(
+        original_task="Implement bounded rework loop",
+        appended_rework_context=[context_item],
+    )
+    assert "Do NOT repeat the analysis" in composed
+    assert "missing_structured_output" in composed
+
+
+def test_no_diff_missing_envelope_retries_once_before_fail_closed(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+    engineer_calls = {"count": 0}
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        if request.subagent_id == "hermes_engineer_core":
+            engineer_calls["count"] += 1
+            payload = _invalid_output() if engineer_calls["count"] == 1 else _engineer_output()
+        else:
+            payload = _reviewer_output(blockers=[])
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": payload},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+    )
+
+    assert engineer_calls["count"] == 2
+    # No material diff on either call, so once the retried engineer output is
+    # valid + candidate_complete the loop short-circuits to completion without
+    # invoking the reviewer (nothing to review) -- see the
+    # `not git_result.material_changes_present` completion branch.
+    assert calls == ["hermes_engineer_core", "hermes_engineer_core"]
+    assert result.blocked_reason != "missing_structured_output"
+    assert result.blocked_reason != "invalid_engineer_output"
+    assert result.candidate_complete is True
+    assert any(item.get("kind") == "structured_output_format_retry" for item in result.appended_rework_context)
+
+
+def test_no_diff_invalid_output_fails_closed_immediately_when_retries_disabled(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    spec_path = repo_root / "config" / "pipelines" / "engineering_review_pipeline.yaml"
+    spec_path.write_text(
+        spec_path.read_text().replace("max_invalid_output_retries: 1", "max_invalid_output_retries: 0"),
+        encoding="utf-8",
+    )
+    loaded_specs = load_pipeline_specs(repo_root=repo_root)
+    repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        return {
+            "output_text": "engineer emitted invalid structured output",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _invalid_output()},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+    )
+
+    assert calls == ["hermes_engineer_core"]
+    assert result.blocked_reason == "invalid_engineer_output"
