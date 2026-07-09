@@ -4396,7 +4396,11 @@ def test_failed_test_bounded_by_max_tool_retries(tmp_path: Path) -> None:
         },
     )
 
-    assert engineer_calls["count"] == 2
+    # Decoupled from the concrete spec value: the engineer runs once, then up to
+    # max_tool_retries additional times, then terminal-blocks. Robust to spec bumps.
+    from hermes_cli.pipeline_control_channel import resolve_loop_limit_policy
+    _policy = resolve_loop_limit_policy(loaded_specs.pipeline_specs[_session().pipeline_id])
+    assert engineer_calls["count"] == 1 + _policy.max_tool_retries
     assert result.blocked_reason == "test_command_failed"
 
 
