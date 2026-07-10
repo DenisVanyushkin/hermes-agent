@@ -732,6 +732,12 @@ def _transcribe_command_stt(
             "error": f"STT command provider '{provider_name}' failed: {exc}",
         }
 
+    if result.stderr and result.stderr.strip():
+        logger.info(
+            "Command STT provider '%s' stderr: %s",
+            provider_name, result.stderr.strip(),
+        )
+
     logger.info(
         "Transcribed %s via command STT provider '%s' (%d chars)",
         audio.name, provider_name, len(transcript_text),
