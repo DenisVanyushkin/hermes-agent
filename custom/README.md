@@ -128,39 +128,62 @@ conversation pipeline. Chain: `whatsapp voice note` → `stt.providers.transcrib
 inside the wrapper to a local `faster-whisper` (`small`, `int8`, CPU) running in
 `hermes-agent`'s own venv when the remote call fails or returns empty.
 
-Confirmed on the live path in `~/.hermes/logs/agent.log` (WhatsApp PTT → text,
-2026-07-10):
+### Happy path — confirmed on the live gateway
+
+`~/.hermes/logs/agent.log`, 2026-07-10 20:22 UTC, real WhatsApp voice note from
+Denis, transcriber reachable:
 
 ```
+2026-07-10 20:22:22,915 INFO gateway.run: inbound message: platform=whatsapp user=Denis Vanyushkin ... msg='[ptt received]'
 2026-07-10 20:22:23,035 INFO tools.transcription_tools: Transcribing aud_8ab4d1acc5e2.ogg via command STT provider 'transcriber'...
 2026-07-10 20:22:31,585 INFO tools.transcription_tools: Transcribed aud_8ab4d1acc5e2.ogg via command STT provider 'transcriber' (47 chars)
-2026-07-10 20:26:17,932 INFO tools.transcription_tools: Transcribing aud_9a3e13f8fdde.ogg via command STT provider 'transcriber'...
-2026-07-10 20:26:25,024 INFO tools.transcription_tools: Transcribed aud_9a3e13f8fdde.ogg via command STT provider 'transcriber' (32 chars)
 ```
 
-followed by a normal `agent.turn_context` conversation turn and a reply — i.e. voice
-in produces a meaningful answer out. Transcript *char counts* are visible in these
-log lines (full transcript text in the audit log is Phase 2 scope, not yet wired).
+followed by a normal `agent.turn_context` conversation turn and a reply ~32s later
+(49 chars). Denis confirmed the reply matched what he actually said — voice in
+produces a meaningful answer out.
 
-These three logged transcriptions all completed in ~7-9s, consistent with the
-remote transcriber succeeding (matches the "STT ~8s" note below) — none of them
-exercise the local fallback. The fallback path itself is proven separately by
-`custom/stt/test_transcribe_remote.sh`, which runs the wrapper twice: once against
-the real transcriber (happy path) and once with `TRANSCRIBER_URL=http://127.0.0.1:9`
-(forced-dead endpoint) to force the `faster-whisper` branch. Re-run 2026-07-11,
-both legs pass:
+### Fallback path — confirmed on the live gateway
+
+Method: `TRANSCRIBER_URL` swapped to a dead endpoint (`http://127.0.0.1:9`) in the
+STT command invocation, gateway restarted (`Gateway startup ...` at 20:24:25) to
+pick it up. Two real voice notes sent afterward both transcribed successfully —
+with the dead URL, only the local `faster-whisper` fallback could have produced
+these transcripts:
+
+```
+2026-07-10 20:26:17,826 INFO gateway.run: inbound message: platform=whatsapp user=Denis Vanyushkin ... msg='[ptt received]'
+2026-07-10 20:26:17,932 INFO tools.transcription_tools: Transcribing aud_9a3e13f8fdde.ogg via command STT provider 'transcriber'...
+2026-07-10 20:26:25,024 INFO tools.transcription_tools: Transcribed aud_9a3e13f8fdde.ogg via command STT provider 'transcriber' (32 chars)
+
+2026-07-10 20:26:49,159 INFO gateway.run: inbound message: platform=whatsapp user=Denis Vanyushkin ... msg='[ptt received]'
+2026-07-10 20:26:49,234 INFO tools.transcription_tools: Transcribing aud_42eb5cfc79e5.ogg via command STT provider 'transcriber'...
+2026-07-10 20:26:57,649 INFO tools.transcription_tools: Transcribed aud_42eb5cfc79e5.ogg via command STT provider 'transcriber' (8 chars)
+```
+
+Both replies delivered, human-confirmed by Denis. Config was then reverted to the
+live transcriber URL and the gateway restarted again (20:28:14) back to normal
+operation. Note the fallback transcriptions (~7.2s and ~8.5s) are about as fast as
+the remote happy-path call (~8.5s) because `faster-whisper small` was already
+warm on that host — cold-start (first model load) took ~16.6s during Task 11's
+standalone testing.
+
+Transcript *char counts* are visible directly in these `tools.transcription_tools`
+log lines for every voice message on both paths; full transcript text in a
+dedicated audit log is Phase 2 scope, not yet wired.
+
+### Regression check (no gateway needed)
+
+`custom/stt/test_transcribe_remote.sh` exercises the wrapper standalone: happy
+path against the real transcriber, then fallback with
+`TRANSCRIBER_URL=http://127.0.0.1:9` forcing a connection failure — both legs
+assert the transcript contains "гермес" (not just non-empty). Re-run 2026-07-11:
 
 ```
 $ bash custom/stt/test_transcribe_remote.sh
 transcriber unavailable, falling back to local faster-whisper
 ALL PASS
 ```
-
-An earlier fallback run through the *live* gateway (dead URL swapped into
-`stt.providers.transcriber` temporarily, real WhatsApp voice note, human-confirmed
-by Denis) also produced a correct reply, but that run predates this log file and
-is not present in current `agent.log` — treat the script above as the reproducible
-regression check for the fallback branch going forward.
 
 ### Network hole (two layers)
 
@@ -191,18 +214,20 @@ internet egress unaffected (`https://api.telegram.org` → HTTP 302).
 ### Test entry points
 
 - `custom/stt/test_transcribe_remote.sh` — standalone regression test, no gateway
-  needed. Exercises the wrapper directly: happy path against the real transcriber,
-  then fallback with `TRANSCRIBER_URL=http://127.0.0.1:9` forcing a connection
-  failure. Requires `custom/stt/fixture_ru.ogg` (voice fixture containing the word
-  "гермес", used as the correctness check instead of a mere non-empty-output check).
+  needed (see above). Requires `custom/stt/fixture_ru.ogg` (voice fixture
+  containing the word "гермес", used as the correctness check).
 - `TRANSCRIBER_URL` env var overrides the remote endpoint for
   `custom/stt/transcribe_remote.sh` directly — useful for pointing at a
-  different transcriber or forcing the fallback branch manually.
+  different transcriber or forcing the fallback branch manually (this is the
+  same mechanism used for the live-gateway fallback proof above, applied at the
+  command level instead of the script level).
 
 ### Known notes
 
-- The transcriber's `/tts` endpoint is broken upstream (home-pc side) — Phase 1
-  only uses `/transcribe`; text-to-speech is out of scope here.
-- Remote STT latency is ~8s end-to-end for a short voice note (see log excerpt
-  above); local `faster-whisper` fallback is slower (model load + CPU inference)
-  but was not the timed path in the reproducible test above.
+- The transcriber's `/tts` endpoint is broken upstream (home-pc side, no TTS
+  model registered on the `speaches.vanyushk.in` backend) — Phase 1 only uses
+  `/transcribe`; text-to-speech is out of scope here.
+- Remote STT latency is ~8s end-to-end for a short voice note; the local
+  `faster-whisper` fallback is comparable once warm (~7-8s) but has a slow
+  cold start (~16.6s first load) if the process hasn't transcribed anything
+  yet.
