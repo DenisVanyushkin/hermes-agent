@@ -117,3 +117,92 @@ live code path in `~/.hermes/logs/agent.log`, e.g.:
 Other aux functions (`approval`, `curator`, `mcp`, `session_search`, `triage_specifier`)
 stay on `openai-codex` / `gpt-5.4-mini`, separate from the main conversation model
 (`gpt-5.6-luna`).
+
+## Phase 1 — voice (2026-07-11)
+
+Voice messages (WhatsApp PTT) are transcribed to text before entering the normal
+conversation pipeline. Chain: `whatsapp voice note` → `stt.providers.transcriber`
+(config.yaml, `type: command`) → `custom/stt/transcribe_remote.sh {input_path}
+{output_path}` → remote transcriber at `http://192.168.1.20:5001/transcribe`
+(home-pc, docker swarm, OpenAI Whisper + Redis cache), with automatic fallback
+inside the wrapper to a local `faster-whisper` (`small`, `int8`, CPU) running in
+`hermes-agent`'s own venv when the remote call fails or returns empty.
+
+Confirmed on the live path in `~/.hermes/logs/agent.log` (WhatsApp PTT → text,
+2026-07-10):
+
+```
+2026-07-10 20:22:23,035 INFO tools.transcription_tools: Transcribing aud_8ab4d1acc5e2.ogg via command STT provider 'transcriber'...
+2026-07-10 20:22:31,585 INFO tools.transcription_tools: Transcribed aud_8ab4d1acc5e2.ogg via command STT provider 'transcriber' (47 chars)
+2026-07-10 20:26:17,932 INFO tools.transcription_tools: Transcribing aud_9a3e13f8fdde.ogg via command STT provider 'transcriber'...
+2026-07-10 20:26:25,024 INFO tools.transcription_tools: Transcribed aud_9a3e13f8fdde.ogg via command STT provider 'transcriber' (32 chars)
+```
+
+followed by a normal `agent.turn_context` conversation turn and a reply — i.e. voice
+in produces a meaningful answer out. Transcript *char counts* are visible in these
+log lines (full transcript text in the audit log is Phase 2 scope, not yet wired).
+
+These three logged transcriptions all completed in ~7-9s, consistent with the
+remote transcriber succeeding (matches the "STT ~8s" note below) — none of them
+exercise the local fallback. The fallback path itself is proven separately by
+`custom/stt/test_transcribe_remote.sh`, which runs the wrapper twice: once against
+the real transcriber (happy path) and once with `TRANSCRIBER_URL=http://127.0.0.1:9`
+(forced-dead endpoint) to force the `faster-whisper` branch. Re-run 2026-07-11,
+both legs pass:
+
+```
+$ bash custom/stt/test_transcribe_remote.sh
+transcriber unavailable, falling back to local faster-whisper
+ALL PASS
+```
+
+An earlier fallback run through the *live* gateway (dead URL swapped into
+`stt.providers.transcriber` temporarily, real WhatsApp voice note, human-confirmed
+by Denis) also produced a correct reply, but that run predates this log file and
+is not present in current `agent.log` — treat the script above as the reproducible
+regression check for the fallback branch going forward.
+
+### Network hole (two layers)
+
+The gateway host (`hermes-home`, VM 200, VLAN 20 "Agents") is otherwise isolated
+from the rest of the LAN (see `hermes-vlan-isolation` notes); voice needed one
+narrow, outbound-only exception to reach the transcriber on `home-pc`
+(`192.168.1.20:5001`). Added in both enforcement layers, per the project's
+"add holes in two places" rule:
+
+1. **Firewalla** — allow rule added by Denis (Agents VLAN → `192.168.1.20:5001`),
+   layered on top of the existing Agents→LAN block-all.
+2. **Proxmox belt** (`/etc/pve/firewall/200.fw` on `pve1`) — explicit `ACCEPT`
+   line ahead of the default-DROP block:
+
+   ```
+   OUT ACCEPT -dest 192.168.1.20 -p tcp -dport 5001 # transcriber STT (Amina assistant, 2026-07-11)
+   ```
+
+   Backup of the pre-change file: `pve1:/root/200.fw.bak-amina-p1`.
+
+Verified from `hermes-home` (2026-07-11): transcriber reachable and healthy
+(`curl http://192.168.1.20:5001/health` → `{"status":"healthy", ...}`); every
+other previously-open LAN target stays blocked (`192.168.1.1:22` Firewalla SSH,
+`192.168.1.4:8006` Proxmox UI, `192.168.1.21:80` homeserver, `192.168.102.22:8123`
+Home Assistant, `192.168.1.20:80` transcriber host's other port) — all timeout;
+internet egress unaffected (`https://api.telegram.org` → HTTP 302).
+
+### Test entry points
+
+- `custom/stt/test_transcribe_remote.sh` — standalone regression test, no gateway
+  needed. Exercises the wrapper directly: happy path against the real transcriber,
+  then fallback with `TRANSCRIBER_URL=http://127.0.0.1:9` forcing a connection
+  failure. Requires `custom/stt/fixture_ru.ogg` (voice fixture containing the word
+  "гермес", used as the correctness check instead of a mere non-empty-output check).
+- `TRANSCRIBER_URL` env var overrides the remote endpoint for
+  `custom/stt/transcribe_remote.sh` directly — useful for pointing at a
+  different transcriber or forcing the fallback branch manually.
+
+### Known notes
+
+- The transcriber's `/tts` endpoint is broken upstream (home-pc side) — Phase 1
+  only uses `/transcribe`; text-to-speech is out of scope here.
+- Remote STT latency is ~8s end-to-end for a short voice note (see log excerpt
+  above); local `faster-whisper` fallback is slower (model load + CPU inference)
+  but was not the timed path in the reproducible test above.
