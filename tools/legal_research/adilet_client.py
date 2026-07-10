@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import pathlib
 import re
 import ssl
 import time
@@ -138,6 +139,14 @@ class AdiletClient:
         self.retries = retries
         self.backoff_seconds = backoff_seconds
         self.ssl_context = ssl.create_default_context()
+        # adilet.zan.kz serves an incomplete chain (leaf only, no GoGetSSL
+        # intermediate); Linux OpenSSL does no AIA chasing, so verification
+        # fails without the bundled intermediate. The bundle chains to
+        # DigiCert Global Root G2 from the system store — verification stays
+        # fully enabled.
+        bundle = pathlib.Path(__file__).resolve().parent / "adilet_ca_bundle.pem"
+        if bundle.exists():
+            self.ssl_context.load_verify_locations(cafile=str(bundle))
 
     def fetch(self, url: str) -> FetchResult:
         warnings: list[str] = []
