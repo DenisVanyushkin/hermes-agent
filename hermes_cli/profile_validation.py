@@ -23,6 +23,7 @@ ACTIVE_PROFILE_IDS = {
     "engineer",
     "career_strategist",
     "artist",
+    "lawyer",
     "scribe",
     "researcher",
     "security_auditor",
@@ -35,6 +36,7 @@ CANONICAL_ACTIVE_PROFILE_IDS = {
     "engineer",
     "career_strategist",
     "artist",
+    "lawyer",
     "scribe",
     "researcher",
     "security_auditor",
@@ -48,6 +50,7 @@ PROFILE_ID_ALIASES = {
     "trading_observer_trader": "trading_observer_trader_deferred",
     "hermes_engineer_core": "engineer",
     "hermes_artist_core": "artist",
+    "hermes_lawyer_core": "lawyer",
 }
 
 MODEL_TIERS = {"standard", "reasoning", "coding", "critical", "code_review"}
@@ -69,6 +72,7 @@ CANONICAL_TOOL_CATEGORIES = {
     "web_search",
     "browser",
     "image_generate",
+    "legal_research",
     "calendar",
     "contacts",
     "email_draft",

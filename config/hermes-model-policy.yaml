@@ -32,6 +32,7 @@ profile_tiers:
   engineer: coding
   career_strategist: standard
   artist: standard
+  lawyer: standard
   scribe: standard
   researcher: standard
   general_operator: standard
@@ -251,6 +252,24 @@ role_policies:
           supportsStructuredOutputs: true
           supportsReasoning: true
           contextLength: large
+  lawyer:
+    base_model: gpt-5.6-luna
+    escalation:
+      model_family: none
+      example_model: null
+      conditions: []
+    free_fallback:
+      allowed_for:
+      - clarifying_dialogue
+      not_final_authority_for:
+      - legal_conclusions
+      - legal_answer_delivery
+      role_filters:
+        require:
+          supportsTools: true
+        prefer:
+          supportsStructuredOutputs: true
+          latencyMs: low
   career_strategist:
     base_model: gpt-5.6-luna
     escalation:
