@@ -20,7 +20,7 @@ top of a dev assistant.
 - `model.default: gpt-5.6-luna`, `model.provider: openai-codex` (`~/.hermes/config.yaml`).
 - OpenAI-codex credential is an OAuth credential pool entry in `~/.hermes/auth.json`
   (`credential_pool.openai-codex[0]`, label `openai-codex-oauth-1`) — tied to the
-  ChatGPT Plus account under Amina's Apple-relay email. Do not print `auth.json` raw;
+  ChatGPT Plus account — Denis's separate account (Apple-relay email), dedicated to this instance. Do not print `auth.json` raw;
   it contains live access/refresh tokens.
 - OpenRouter API key is supplied via `.env` (`OPENROUTER_API_KEY`), used only for
   auxiliary (non-main-conversation) functions — see below.
