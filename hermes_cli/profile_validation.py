@@ -51,7 +51,7 @@ PROFILE_ID_ALIASES = {
 }
 
 MODEL_TIERS = {"standard", "reasoning", "coding", "critical", "code_review"}
-DEFAULT_BASE_MODEL = "gpt-5.4-mini"
+DEFAULT_BASE_MODEL = "gpt-5.6-luna"
 CANONICAL_TOOL_CATEGORIES = {
     "repo_read",
     "repo_write",

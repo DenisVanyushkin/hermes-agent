@@ -307,10 +307,10 @@ def test_loaders_and_model_resolution_round_trip():
     general_resolved = resolve_profile_model("general_operator", policy)
     assert resolved.model_tier == "critical"
     assert resolved.model_resolution_status == "no_fallback_stop_and_escalate"
-    assert resolved.model == "gpt-5.5"
+    assert resolved.model == "gpt-5.6-sol"
     assert resolved.provider == "openai-codex"
     assert general_resolved.model_tier == "standard"
-    assert general_resolved.model == "gpt-5.4-mini"
+    assert general_resolved.model == "gpt-5.6-luna"
 
 
 def test_decision_to_dict_preserves_route_chain():

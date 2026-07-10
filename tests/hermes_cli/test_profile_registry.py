@@ -38,7 +38,7 @@ def test_valid_canonical_registry_passes():
     policy = yaml.safe_load(CANONICAL_POLICY.read_text(encoding="utf-8"))
     assert policy["profile_tiers"]["general_operator"] == "standard"
     assert policy["profile_tiers"]["engineer"] == "coding"
-    assert policy["model_governance"]["default_base_model"] == "gpt-5.4-mini"
+    assert policy["model_governance"]["default_base_model"] == "gpt-5.6-luna"
     assert policy["fallback_selection_policy"]["mode"] == "capability_based"
     assert set(policy["role_policies"]) == {
         "chief_coordinator",

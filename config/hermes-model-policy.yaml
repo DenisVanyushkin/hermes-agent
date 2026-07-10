@@ -2,26 +2,26 @@ schema_version: 1
 tiers:
   standard:
     provider: openai-codex
-    model: gpt-5.4-mini
+    model: gpt-5.6-luna
     fallback_behavior: fallback_allowed
   reasoning:
     provider: openai-codex
-    model: gpt-5.4
+    model: gpt-5.6-terra
     fallback_behavior: fallback_allowed
   critical:
     provider: openai-codex
-    model: gpt-5.5
+    model: gpt-5.6-sol
     allow_fallback: false
     unavailable_behavior: stop_and_escalate
     fallback_models: []
     fallback_behavior: stop_and_escalate
   code_review:
     provider: openai-codex
-    model: gpt-5.5
+    model: gpt-5.6-sol
     fallback_behavior: critical_then_reasoning_then_standard
   coding:
     provider: openai-codex
-    model: gpt-5.4
+    model: gpt-5.6-terra
     fallback_behavior: reasoning_then_standard
 profile_tiers:
   chief_hermes: reasoning
@@ -33,7 +33,7 @@ profile_tiers:
   general_operator: standard
   security_auditor: critical
 model_governance:
-  default_base_model: gpt-5.4-mini
+  default_base_model: gpt-5.6-luna
   base_model_owner: human_operator_maintainer
   escalation_model_owner: human_operator_maintainer
   free_fallback_owner: hermes_runtime_selector
@@ -104,10 +104,10 @@ fallback_selection_policy:
       supportsResponseFormat: true
 role_policies:
   chief_coordinator:
-    base_model: gpt-5.4-mini
+    base_model: gpt-5.6-luna
     escalation:
       model_family: strong_reasoning
-      example_model: gpt-5.5
+      example_model: gpt-5.6-sol
       conditions:
       - routing_is_ambiguous
       - risk_is_high
@@ -129,7 +129,7 @@ role_policies:
           supportsResponseFormat: true
           supportsReasoning: true
   engineer:
-    base_model: gpt-5.4-mini
+    base_model: gpt-5.6-luna
     escalation:
       model_family: specialized_coding
       example_model: xiaomi/mimo-v2.5-pro
@@ -156,10 +156,10 @@ role_policies:
           liteEvalScore: high
           contextLength: large
   security_auditor:
-    base_model: gpt-5.4-mini
+    base_model: gpt-5.6-luna
     escalation:
       model_family: strong_reasoning
-      example_model: gpt-5.5
+      example_model: gpt-5.6-sol
       conditions:
       - public_exposure
       - auth_session_cookie_changes
@@ -182,7 +182,7 @@ role_policies:
           supportsReasoning: true
           contextLength: large
   scribe:
-    base_model: gpt-5.4-mini
+    base_model: gpt-5.6-luna
     escalation:
       model_family: none
       example_model: null
@@ -203,7 +203,7 @@ role_policies:
           supportsResponseFormat: true
           latencyMs: low
   artist:
-    base_model: gpt-5.4-mini
+    base_model: gpt-5.6-luna
     escalation:
       model_family: none
       example_model: null
@@ -223,7 +223,7 @@ role_policies:
           supportsResponseFormat: true
           latencyMs: low
   researcher:
-    base_model: gpt-5.4-mini
+    base_model: gpt-5.6-luna
     escalation:
       model_family: strong_reasoning
       example_model: gpt-5.5
@@ -248,10 +248,10 @@ role_policies:
           supportsReasoning: true
           contextLength: large
   career_strategist:
-    base_model: gpt-5.4-mini
+    base_model: gpt-5.6-luna
     escalation:
       model_family: strong_reasoning
-      example_model: gpt-5.5
+      example_model: gpt-5.6-sol
       conditions:
       - executive_decisions
       - high_value_applications
@@ -274,7 +274,7 @@ role_policies:
           supportsReasoning: true
           contextLength: large
   general_operator:
-    base_model: gpt-5.4-mini
+    base_model: gpt-5.6-luna
     escalation:
       model_family: none
       example_model: null
