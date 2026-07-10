@@ -28,6 +28,7 @@ _ROLE_INTENTS = {
     "researcher": "external research",
     "career_strategist": "career/job",
     "artist": "image generation",
+    "lawyer": "legal analysis (Kazakhstan law)",
     "general_operator": "personal/admin",
 }
 
@@ -126,6 +127,25 @@ _ARTIST_TERMS = (
     "edit this photo",
     "edit the image",
     "edit the photo",
+)
+
+_LAWYER_NOUN_TERMS = (
+    "закон", "кодекс", "стать", "нпа", "договор", "штраф", "суд", "иск",
+    "налог", "юрист", "адвокат", "трудовой кодекс", "тк рк", "гк рк",
+    "коап", "ответственност", "увольнен", "уволить", "зарплат", "недостач",
+    "аренд", "adilet", "адилет", "law", "legal", "legislation", "contract",
+    "liability", "fine", "court", "lawsuit", "regulation",
+)
+_LAWYER_TERMS = (
+    "законно ли", "имею ли право", "имеет ли право", "могут ли меня",
+    "что грозит за", "какая ответственность", "какая статья", "по закону",
+    "согласно закону", "нарушение закона", "судебная практика",
+    "is it legal", "am i allowed", "under kazakhstan law", "what does the law say",
+)
+_LAWYER_QUESTION_TERMS = (
+    "законно", "право", "обязан", "должен ли", "можно ли", "могут ли",
+    "грозит", "ответственност", "оспорить", "взыскать", "регулирует",
+    "проверь", "риски", "enforceable", "liable", "legal", "allowed",
 )
 
 _ENGINEER_TERMS = (
@@ -966,6 +986,7 @@ _BUILTIN_ROUTING_PROFILES = frozenset(
         "security_auditor",
         "career_strategist",
         "artist",
+        "lawyer",
         "scribe",
         "researcher",
     }
@@ -1011,6 +1032,15 @@ def _select_role(task: str, route_decision: RouteDecision | None) -> tuple[str, 
         # Fixed phrases alone are brittle ("сгенерируй МНЕ изображение"), so a
         # generation verb combined with an image noun also selects the artist.
         return "artist", False, "image generation/editing intent detected"
+
+    if _contains_any(normalized, _LAWYER_TERMS) or (
+        _contains(normalized, _LAWYER_QUESTION_TERMS) and _contains(normalized, _LAWYER_NOUN_TERMS)
+    ):
+        # Legal-rights intent must win over career (labor-law overlap:
+        # увольнение/отпуск/зарплата) and over engineer ("проверь договор"
+        # is a legal review, not a config review). Question-form terms
+        # anchored to legal nouns keep resume/vacancy phrasing in career.
+        return "lawyer", False, "kazakhstan legal question detected"
 
     if _contains_any(normalized, _ENGINEER_TERMS):
         if _contains_any(normalized, _SECURITY_REVIEW_TERMS):

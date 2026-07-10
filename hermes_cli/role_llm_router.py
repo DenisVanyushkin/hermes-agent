@@ -26,6 +26,7 @@ SELECTABLE_ROLES: tuple[str, ...] = (
     "security_auditor",
     "career_strategist",
     "artist",
+    "lawyer",
     "scribe",
     "researcher",
     "general_operator",
@@ -42,6 +43,7 @@ _ROLE_DESCRIPTIONS = {
     "security_auditor": "explicit security reviews, audits of secrets/auth/exposure",
     "career_strategist": "vacancies, CV/resume, cover letters, interviews, career decisions, recruiter messaging",
     "artist": "drawing, generating or editing images/pictures/photos/logos/sketches/posters in any phrasing",
+    "lawyer": "Kazakhstan law questions in any phrasing: laws, codes, articles, legal acts, rights and obligations, fines, contract legality, courts, налоги, трудовые споры",
     "scribe": "documentation, handoff notes, status capture, memory/state updates",
     "researcher": "external research, web fact-finding, summarizing sources",
     "general_operator": "ordinary personal/admin tasks: reminders, bookings, small questions, anything else",
@@ -121,6 +123,10 @@ def _build_messages(task: str) -> list[dict[str, str]]:
                 "Rules: judge intent, not keywords — paraphrases and typos in any language "
                 "must still map to the right role. Image creation/editing in ANY phrasing "
                 "(draw, нарисуй, изобрази, сделай в стиле..., make me a wallpaper) is artist. "
+                "Questions about legal rights, obligations, legality, fines or what the law "
+                "says (закон, кодекс, статья, договор, штраф) in ANY phrasing are lawyer; "
+                "job search, resumes and vacancies are career_strategist even when labor "
+                "topics overlap. "
                 "Report low confidence when genuinely unsure."
             ),
         },
@@ -131,6 +137,7 @@ def _build_messages(task: str) -> list[dict[str, str]]:
                 'Input: "изобрази-ка мне закат как у Миядзаки" -> {"role": "artist", "confidence": 0.95, "reasoning_summary": "image request"}\n'
                 'Input: "почини падающий тест в CI" -> {"role": "engineer", "confidence": 0.95, "reasoning_summary": "code fix"}\n'
                 'Input: "стоит ли откликаться на эту вакансию" -> {"role": "career_strategist", "confidence": 0.9, "reasoning_summary": "vacancy decision"}\n'
+                'Input: "Могут ли меня уволить, пока я на больничном?" -> {"role": "lawyer", "confidence": 0.95, "reasoning_summary": "legal rights question"}\n'
                 'Input: "напомни завтра про стоматолога" -> {"role": "general_operator", "confidence": 0.9, "reasoning_summary": "personal reminder"}\n\n'
                 f"Task:\n{task.strip()}\n"
             ),

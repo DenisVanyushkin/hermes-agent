@@ -25,6 +25,7 @@ def _call_returning(payload):
 
 def test_selectable_roles_include_all_builtin_task_roles():
     assert "artist" in SELECTABLE_ROLES
+    assert "lawyer" in SELECTABLE_ROLES
     assert "chief_hermes" not in SELECTABLE_ROLES
 
 

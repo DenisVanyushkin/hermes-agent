@@ -64,6 +64,11 @@ def _review_verdict(verdict: str, summary: str = "ok") -> ReviewVerdict:
         ("Review my CV and vacancy strategy", "career_strategist"),
         ("Зафиксируй итог сегодняшней работы по ролям Hermes", "scribe"),
         ("Оцени вакансию Head of Product для меня", "career_strategist"),
+        ("Могут ли меня уволить без предупреждения?", "lawyer"),
+        ("Какая статья ТК РК регулирует сверхурочную работу?", "lawyer"),
+        ("Законно ли удерживать зарплату за недостачу?", "lawyer"),
+        ("Что грозит за просрочку уплаты налога ИП?", "lawyer"),
+        ("Проверь договор аренды на риски по закону РК", "lawyer"),
         ("Нарисуй кота-космонавта в стиле акварели", "artist"),
         ("Сгенерируй картинку заката над морем", "artist"),
         ("Generate an image of a cyberpunk city", "artist"),
@@ -583,7 +588,7 @@ def test_review_gate_observe_emits_non_blocking_requirement():
     assert decision.status == "pending"
     assert "would be required" in decision.warning
     assert decision.reviewer_provider == "openai-codex"
-    assert decision.reviewer_model == "gpt-5.5"
+    assert decision.reviewer_model == "gpt-5.6-sol"
     assert decision.automatic_review_invoked is False
     assert decision.packet_hash.startswith("sha256:")
 
@@ -880,12 +885,12 @@ def test_run_code_review_logs_selected_and_actual_provider_model(caplog, monkeyp
 
     assert verdict.verdict == "approved"
     assert reviewed_packet["reviewer_provider"] == "openai-codex"
-    assert reviewed_packet["reviewer_model"] == "gpt-5.5"
+    assert reviewed_packet["reviewer_model"] == "gpt-5.6-sol"
     assert "reviewer invocation: purpose=code_review" in caplog.text
     assert "selected_provider=openai-codex" in caplog.text
-    assert "selected_model=gpt-5.5" in caplog.text
+    assert "selected_model=gpt-5.6-sol" in caplog.text
     assert "actual_provider=openai-codex" in caplog.text
-    assert "actual_model=gpt-5.5" in caplog.text
+    assert "actual_model=gpt-5.6-sol" in caplog.text
     assert "success=true" in caplog.text
 
 
@@ -1030,7 +1035,7 @@ def test_review_gate_package_engineer_invokes_code_review_tier(monkeypatch):
     assert decision.automatic_review_invoked is True
     assert decision.automatic_review_verdict == "approved"
     assert decision.reviewer_provider == "openai-codex"
-    assert decision.reviewer_model == "gpt-5.5"
+    assert decision.reviewer_model == "gpt-5.6-sol"
     assert decision.blocking is False
 
 
