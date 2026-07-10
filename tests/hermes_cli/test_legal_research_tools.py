@@ -6,6 +6,7 @@ import tools.legal_research_tool  # noqa: F401  (top-level register calls)
 EXPECTED = {
     "search_acts", "get_act_text", "get_act_info", "get_act_history",
     "get_act_links", "get_act_downloads", "healthcheck_source",
+    "legal_answer_review",
 }
 
 

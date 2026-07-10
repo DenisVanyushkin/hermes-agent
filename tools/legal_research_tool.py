@@ -127,3 +127,64 @@ registry.register(
     emoji="⚖️",
     max_result_size_chars=10_000,
 )
+
+
+LEGAL_ANSWER_REVIEW_SCHEMA = {
+    "name": "legal_answer_review",
+    "description": (
+        "MANDATORY before delivering a legal answer that contains conclusions "
+        "(interpretation, rights/obligations, deadlines, comparisons). Verifies every "
+        "citation against adilet.zan.kz deterministically and runs an adversarial "
+        "second-model review. Returns a verdict with typed findings; max 2 rework "
+        "rounds, then deliver with the unresolved findings disclosed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "description": "The user's legal question"},
+            "answer_markdown": {"type": "string", "description": "The full draft answer"},
+            "answer_kind": {"type": "string", "enum": ["lookup", "conclusions"]},
+            "citations": {
+                "type": "array",
+                "description": "One entry per relied-on norm",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {"type": "string", "description": "Adilet doc id, e.g. K1500000414"},
+                        "article": {"type": "string", "description": "Article number, e.g. 77 or 182-1"},
+                        "quote": {"type": "string", "description": "Exact quoted norm text, when quoting"},
+                        "claim": {"type": "string", "description": "The answer claim this citation supports"},
+                        "linked_doc_id": {"type": "string", "description": "Other act's doc_id when claiming a relation"},
+                    },
+                    "required": ["doc_id", "claim"],
+                },
+            },
+        },
+        "required": ["question", "answer_markdown", "answer_kind", "citations"],
+    },
+}
+
+
+def _handle_legal_answer_review(args, **kwargs) -> str:
+    from hermes_cli.legal_review_gate import run_legal_review
+
+    result = run_legal_review(
+        question=args.get("question", ""),
+        answer_markdown=args.get("answer_markdown", ""),
+        answer_kind=args.get("answer_kind", "conclusions"),
+        citations=args.get("citations", []),
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+registry.register(
+    name="legal_answer_review",
+    toolset="legal_research",
+    schema=LEGAL_ANSWER_REVIEW_SCHEMA,
+    handler=_handle_legal_answer_review,
+    check_fn=_check_legal_research,
+    requires_env=[],
+    is_async=False,
+    emoji="🧑‍⚖️",
+    max_result_size_chars=60_000,
+)
