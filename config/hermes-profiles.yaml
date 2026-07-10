@@ -371,6 +371,84 @@ profiles:
     - preserve stable style preferences only
     review_policy_summary:
     - no review gate; output is user-facing creative content
+- id: lawyer
+  default_model: standard
+  allowed_tools:
+  - search_acts
+  - get_act_text
+  - get_act_info
+  - get_act_history
+  - get_act_links
+  - get_act_downloads
+  - healthcheck_source
+  - legal_answer_review
+  - docs_read
+  denied_tools:
+  - repo_write
+  - production_deploy
+  - service_restart
+  - secrets_read
+  - secrets_write
+  - trading_execute
+  requires_approval_for:
+  - editing_production_state
+  - changing_profile_boundaries
+  may_read_paths:
+  - docs/profile-handoffs/
+  may_write_paths:
+  - docs/profile-handoffs/
+  scribe_hook: none
+  scribe_hook_condition: never
+  security_review_hook: none
+  security_review_hook_condition: never
+  output_artifacts:
+  - legal_answer
+  - legal_qa_report
+  profile_contract:
+    canonical_id: lawyer
+    display_name: Lawyer
+    role_family: analysis
+    purpose_summary: source-grounded Kazakhstan legal analysis over adilet.zan.kz
+      acts with a mandatory second-model review for answers containing conclusions
+    spec_ref: docs/profile-role-specification.md#lawyer
+    operating_model_ref: docs/profile-role-operating-model.md
+    personality_summary:
+    - cautious legal analyst
+    - separates norm text from inference
+    - cites every act with title and URL
+    - answers in Russian
+    tool_contract:
+      allowed_by_default:
+      - legal_research
+      - docs_read
+      allowed_with_confirmation:
+      - docs_write
+      forbidden:
+      - repo_write
+      - production_deploy
+      - service_restart
+      - secrets_read
+      - secrets_write
+      - trading_execute
+    action_contract:
+      allowed_by_default:
+      - retrieve_legal_acts
+      - draft_grounded_legal_answer
+      - run_legal_answer_review
+      - ask_clarifying_questions
+      allowed_with_confirmation:
+      - store_user_legal_context
+      forbidden:
+      - answer_from_memory_when_tools_available
+      - present_inference_as_norm_text
+      - deliver_conclusions_without_review
+    escalation_targets:
+    - general_operator
+    memory_policy_summary:
+    - preserve stable user legal context only (jurisdiction, employer type)
+    review_policy_summary:
+    - conclusions answers require the legal_answer_review gate (max 2 rework rounds,
+      then deliver with disclosed findings)
 - id: scribe
   default_model: standard
   allowed_tools:
