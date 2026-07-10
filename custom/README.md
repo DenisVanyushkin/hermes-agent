@@ -41,7 +41,9 @@ top of a dev assistant.
 
 ### Home channels (cron/alert default delivery targets, `.env`)
 - `TELEGRAM_HOME_CHANNEL=79564752` (Denis)
-- `WHATSAPP_HOME_CHANNEL=244882006364348@lid` (Amina's WhatsApp LID)
+- `WHATSAPP_HOME_CHANNEL=107494508621998@lid` — **Denis's** main WhatsApp LID,
+  not Amina's. Switched from Amina's LID because the home channel receives
+  system/restart noise, which should not land in Amina's chat.
 
 ## Deliberate deviations from the VPS/default global config
 
@@ -66,6 +68,43 @@ Two recurring jobs deliver a short Almaty weather forecast to Amina over WhatsAp
 
 Inspect with `$H cron list` where
 `H="/home/denis/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main"`.
+
+**Note:** during the pilot (see "Pilot mode" below), both jobs' `deliver`
+field is temporarily repointed away from `+77011102626` — see that section
+for current state and the revert steps.
+
+## Pilot mode (2026-07-11)
+
+**Гермес is running a PILOT with a test number, not Amina.** Amina
+(+77011102626) has been temporarily and fully removed from the loop: the
+gateway will not answer her (she is no longer in the WhatsApp allowlist), and
+the weather crons no longer deliver to her. This overrides the Phase-0
+baseline documented above (WhatsApp channel, weather crons) for the duration
+of the pilot.
+
+- **Pilot user:** +77782110625 (Denis's second number), standing in for
+  Amina for pilot testing.
+- **WhatsApp allowlist** (`.env`, `WHATSAPP_ALLOWED_USERS`): now
+  `+77782110625,+77012110625` (pilot number + Denis main). Amina's number is
+  **not** in the allowlist — unauthorized DMs from her are dropped per
+  `whatsapp.unauthorized_dm_behavior: ignore`.
+- **Weather crons** (`~/.hermes/cron/jobs.json`): both `8b751dbfd5d6`
+  (morning) and `150d115fe905` (evening) now have
+  `"deliver": "whatsapp:+77782110625"` instead of Amina's number. Edited via
+  `$H cron edit <job_id> --deliver whatsapp:+<number>`.
+- Pre-change `.env` backup: `~/.hermes/.env.bak-pilot-20260710203739`.
+
+### Revert checklist for go-live (Amina back in the loop)
+
+1. `.env`: swap `WHATSAPP_ALLOWED_USERS` pilot number back to Amina's:
+   `WHATSAPP_ALLOWED_USERS=+77011102626,+77012110625`.
+2. Crons: repoint both jobs back to Amina —
+   `$H cron edit 8b751dbfd5d6 --deliver whatsapp:+77011102626` and
+   `$H cron edit 150d115fe905 --deliver whatsapp:+77011102626`.
+3. Restart the gateway: `$H gateway restart`.
+4. Verify: `grep WHATSAPP_ALLOWED_USERS ~/.hermes/.env` and
+   `grep '"deliver"' ~/.hermes/cron/jobs.json` both show `+77011102626`, and
+   the pilot number (`+77782110625`) no longer appears in either.
 
 ## Backups inventory (outside git, under `~/.hermes/`)
 
