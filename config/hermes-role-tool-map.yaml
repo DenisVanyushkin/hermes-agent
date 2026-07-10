@@ -111,6 +111,21 @@ categories:
       - text_to_speech
       - mixture_of_agents
 
+  legal_research:
+    description: >-
+      Kazakhstan legal acts research on adilet.zan.kz: act search, text with
+      per-article extraction, metadata, change history, cross-references and
+      the legal answer review gate. Split out so the lawyer role can allow
+      legal work without broad shell access.
+    tools:
+      - search_acts
+      - get_act_text
+      - get_act_info
+      - get_act_history
+      - get_act_links
+      - get_act_downloads
+      - healthcheck_source
+      - legal_answer_review
   image_generation:
     description: >-
       Image generation and editing via the unified image_generate tool
