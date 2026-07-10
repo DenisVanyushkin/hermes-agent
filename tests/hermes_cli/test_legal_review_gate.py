@@ -78,3 +78,59 @@ def test_network_error_is_unverifiable_not_refuted():
     )
     assert evidence[0]["checks_failed"] == []
     assert evidence[0]["unverifiable"]
+
+
+def test_review_verdict_changes_requested_on_type_not_severity(tmp_path, monkeypatch):
+    from hermes_cli import legal_review_gate
+    monkeypatch.setattr(legal_review_gate, "_REPORT_DIR", tmp_path)
+
+    def fake_llm(messages, provider, model):
+        return ('{"verdict": "approved", "findings": [{"type": "nonexistent_article", '
+                '"severity": "low", "quote": "ст. 999", "explanation": "нет такой статьи", '
+                '"suggested_fix": "удалить"}], "summary": "ok"}')
+
+    result = legal_review_gate.run_legal_review(
+        question="q", answer_markdown="a", answer_kind="conclusions",
+        citations=[], llm_call=fake_llm,
+    )
+    assert result["verdict"] == "changes_requested"
+    assert result["report_path"] is not None
+
+
+def test_review_unavailable_on_llm_failure_still_returns_stage1(tmp_path, monkeypatch):
+    from hermes_cli import legal_review_gate
+    monkeypatch.setattr(legal_review_gate, "_REPORT_DIR", tmp_path)
+
+    def broken_llm(messages, provider, model):
+        raise RuntimeError("model down")
+
+    result = legal_review_gate.run_legal_review(
+        question="q", answer_markdown="a", answer_kind="conclusions",
+        citations=[], llm_call=broken_llm,
+    )
+    assert result["verdict"] == "review_unavailable"
+    assert "stage1_evidence" in result
+
+
+def test_lookup_answers_skip_llm_review(tmp_path, monkeypatch):
+    from hermes_cli import legal_review_gate
+    monkeypatch.setattr(legal_review_gate, "_REPORT_DIR", tmp_path)
+    calls = []
+
+    def counting_llm(messages, provider, model):
+        calls.append(1)
+        return '{"verdict": "approved", "findings": [], "summary": ""}'
+
+    result = legal_review_gate.run_legal_review(
+        question="q", answer_markdown="a", answer_kind="lookup",
+        citations=[], llm_call=counting_llm,
+    )
+    assert calls == []
+    assert result["verdict"] == "approved"
+
+
+def test_legal_review_tier_resolves_to_terra():
+    from hermes_cli.legal_review_gate import resolve_legal_review_model
+    provider, model = resolve_legal_review_model()
+    assert provider == "openai-codex"
+    assert model == "gpt-5.6-terra"

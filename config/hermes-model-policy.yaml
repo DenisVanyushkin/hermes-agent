@@ -15,6 +15,10 @@ tiers:
     unavailable_behavior: stop_and_escalate
     fallback_models: []
     fallback_behavior: stop_and_escalate
+  legal_review:
+    provider: openai-codex
+    model: gpt-5.6-terra
+    fallback_behavior: reasoning_then_standard
   code_review:
     provider: openai-codex
     model: gpt-5.6-sol

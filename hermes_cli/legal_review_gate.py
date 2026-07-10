@@ -173,3 +173,131 @@ def _verify_one(citation, client, info_cache, text_cache, links_cache) -> dict:
             evidence["unverifiable"].append(f"act_links_unreachable:{doc_id}")
 
     return evidence
+
+
+def _build_review_messages(question, answer_markdown, evidence) -> list[dict]:
+    system = (
+        "You are Hermes' adversarial legal answer reviewer for Kazakhstan law. "
+        "Your job is to find defects, not to be agreeable. Check: citations "
+        "supported by evidence; no inference presented as norm text; no invented "
+        "links between acts; limitations disclosed. Findings are typed — the TYPE "
+        "decides the verdict, not the severity. Return JSON only. No markdown."
+    )
+    user = json.dumps({
+        "expected_schema": _REVIEW_SCHEMA,
+        "question": question,
+        "answer_markdown": answer_markdown,
+        "deterministic_evidence": evidence,
+    }, ensure_ascii=False)
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def resolve_legal_review_model() -> tuple[str, str]:
+    """(provider, model) for the review call — config-pinned, never hardcoded."""
+    from hermes_cli.review_gate import resolve_reviewer_model
+
+    resolved = resolve_reviewer_model(_REVIEW_TIER)
+    return resolved["provider"], resolved["model"]
+
+
+def _default_llm_call(messages, provider, model) -> str:
+    # Mirrors hermes_cli.review_gate.run_code_review's invocation path.
+    from agent.auxiliary_client import resolve_provider_client
+
+    client, resolved_model = resolve_provider_client(
+        provider,
+        model,
+        raw_codex=False,
+        async_mode=False,
+    )
+    if client is None:
+        raise RuntimeError(f"unable to resolve client for {provider} / {model}")
+    response = client.chat.completions.create(
+        model=resolved_model or model,
+        messages=messages,
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+    choice = response.choices[0]
+    message = getattr(choice, "message", None)
+    content = getattr(message, "content", None) if message is not None else None
+    if not content:
+        raise RuntimeError("review model returned empty content")
+    return str(content)
+
+
+def _extract_json(raw: str) -> str:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-z]*\s*|\s*```$", "", raw, flags=re.S)
+    start, end = raw.find("{"), raw.rfind("}")
+    return raw[start:end + 1] if start != -1 and end > start else raw
+
+
+def run_legal_review(question, answer_markdown, answer_kind, citations, llm_call=None) -> dict:
+    """Two-stage review of a drafted legal answer.
+
+    Stage 1 always runs (deterministic). Stage 2 (LLM verdict on the pinned
+    ``legal_review`` tier) runs for ``conclusions`` answers, or when stage 1
+    found hard failures. Hard finding types force ``changes_requested``.
+    A failed review call yields ``review_unavailable`` — fail open with
+    disclosure, stage-1 evidence still attached.
+    """
+    evidence = verify_citations(citations or [])
+    stage1_failures = sorted({code for e in evidence for code in e["checks_failed"]})
+
+    result = {
+        "verdict": "approved",
+        "findings": [],
+        "summary": "",
+        "stage1_evidence": evidence,
+        "report_path": None,
+    }
+
+    if answer_kind != "conclusions" and not stage1_failures:
+        return _finalize(result, question)
+
+    llm_call = llm_call or _default_llm_call
+    try:
+        provider, model = resolve_legal_review_model()
+    except Exception:  # noqa: BLE001 — resolution failure must not kill the review
+        provider, model = "openai-codex", "gpt-5.6-terra"
+    try:
+        raw = llm_call(_build_review_messages(question, answer_markdown, evidence), provider, model)
+        parsed = json.loads(_extract_json(raw))
+        result["findings"] = [f for f in parsed.get("findings", []) if isinstance(f, dict)]
+        result["summary"] = str(parsed.get("summary", ""))
+        result["verdict"] = str(parsed.get("verdict", "changes_requested"))
+    except Exception as exc:  # noqa: BLE001 — review must fail open with disclosure
+        result["verdict"] = "review_unavailable"
+        result["summary"] = f"review model call failed: {exc}"
+
+    finding_types = {str(f.get("type")) for f in result["findings"]}
+    if (finding_types & HARD_FINDING_TYPES) or stage1_failures:
+        for code in stage1_failures:
+            if code not in finding_types:
+                result["findings"].append({
+                    "type": code,
+                    "severity": "high",
+                    "quote": "",
+                    "explanation": "deterministic citation check failed",
+                    "suggested_fix": "исправить или удалить утверждение",
+                })
+        if result["verdict"] != "review_unavailable":
+            result["verdict"] = "changes_requested"
+
+    return _finalize(result, question)
+
+
+def _finalize(result: dict, question: str) -> dict:
+    try:
+        _REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        path = _REPORT_DIR / f"legal_qa_{int(time.time() * 1000)}.json"
+        path.write_text(
+            json.dumps({"question": question, **result}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        result["report_path"] = str(path)
+    except OSError:
+        pass
+    return result
