@@ -116,9 +116,19 @@ def _extract_article(body_text: str, article: str) -> str | None:
     number = re.escape(article)
     pattern = rf"^\s*Статья\s+{number}[.\s].*?(?=^\s*Статья\s+\d|\Z)"
     matches = re.findall(pattern, body_text, flags=re.S | re.M)
-    if not matches:
+    if matches:
+        return max(matches, key=len).strip()
+
+    # Ведомственные правила и приказы нумеруются пунктами ("11. Текст…"),
+    # без слова "Статья". Annex tables reuse clause numbers, so ALL matching
+    # clauses are returned (concatenated) — quote verification then works
+    # against whichever occurrence the citation meant.
+    clause_pattern = rf"^\s*{number}\.\s.*?(?=^\s*\d+(?:-\d+)?\.\s|\Z)"
+    clause_matches = re.findall(clause_pattern, body_text, flags=re.S | re.M)
+    clause_matches = [m.strip() for m in clause_matches if len(m.strip()) > 20]
+    if not clause_matches:
         return None
-    return max(matches, key=len).strip()
+    return "\n\n".join(clause_matches)
 
 
 def _parse_table_rows(table_html: str) -> list[list[str]]:

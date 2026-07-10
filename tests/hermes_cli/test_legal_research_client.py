@@ -67,3 +67,25 @@ def test_tool_schemas_cover_seven_tools():
         "search_acts", "get_act_text", "get_act_info", "get_act_history",
         "get_act_links", "get_act_downloads", "healthcheck_source",
     }
+
+
+def test_clause_extraction_from_rules_doc():
+    client = make_client({"/rus/docs/V1900018961": "rules_act.html"})
+    result = client.get_act_text("V1900018961", article="12")
+    assert "не допускается продавать" in result["text"]
+    assert len(result["text"]) < 30_000
+    assert not any(str(w).startswith("article_not_found") for w in result["warnings"])
+
+
+def test_clause_extraction_returns_all_duplicate_numbered_clauses():
+    client = make_client({"/rus/docs/V1900018961": "rules_act.html"})
+    result = client.get_act_text("V1900018961", article="11")
+    assert "Юридические лица-поставщики" in result["text"]
+    assert len(result["text"]) < 30_000
+    assert not any(str(w).startswith("article_not_found") for w in result["warnings"])
+
+
+def test_fabricated_clause_still_not_found():
+    client = make_client({"/rus/docs/V1900018961": "rules_act.html"})
+    result = client.get_act_text("V1900018961", article="9999")
+    assert any(str(w).startswith("article_not_found") for w in result["warnings"])
