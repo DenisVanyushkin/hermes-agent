@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, sys
 from datetime import datetime, timedelta, timezone
-from fam import audit, db as famdb, people
+from fam import audit, db as famdb, people, places
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -71,6 +71,43 @@ def cmd_people_list(args):
             print(f"{r['id']}\t{r['kind']}\t{r['name']}{slug_part}")
     return 0
 
+def cmd_places_add(args):
+    conn = famdb.connect()
+    p = places.add(conn, args.name, address=args.address, lat=args.lat,
+                    lon=args.lon, aliases=args.alias)
+    conn.commit()
+    print(f"added place: {p['name']} (id={p['id']})")
+    return 0
+
+def cmd_places_alias(args):
+    conn = famdb.connect()
+    places.alias(conn, args.ref, args.alias)
+    conn.commit()
+    print(f"alias added: {args.alias} -> {args.ref}")
+    return 0
+
+def cmd_places_resolve(args):
+    conn = famdb.connect()
+    p = places.resolve(conn, args.text)
+    if args.json:
+        print(json.dumps(p, ensure_ascii=False))
+    elif p is None:
+        print("not found")
+    else:
+        print(f"{p['name']} (id={p['id']}) {p['address']}".rstrip())
+    return 0
+
+def cmd_places_list(args):
+    conn = famdb.connect()
+    rows = places.list_all(conn)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for r in rows:
+            addr_part = f"\t{r['address']}" if r["address"] else ""
+            print(f"{r['id']}\t{r['name']}{addr_part}")
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(prog="fam")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -118,6 +155,30 @@ def build_parser():
                       help="machine-readable output")
 
     spl = people_sub.add_parser("list"); spl.set_defaults(func=cmd_people_list)
+    spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    sp = sub.add_parser("places")
+    places_sub = sp.add_subparsers(dest="places_cmd", required=True)
+
+    spa = places_sub.add_parser("add"); spa.set_defaults(func=cmd_places_add)
+    spa.add_argument("name")
+    spa.add_argument("--address", default="")
+    spa.add_argument("--lat", type=float)
+    spa.add_argument("--lon", type=float)
+    spa.add_argument("--alias", dest="alias", action="append", default=[],
+                      help="attach an alias (repeatable)")
+
+    spal = places_sub.add_parser("alias"); spal.set_defaults(func=cmd_places_alias)
+    spal.add_argument("ref", help="id or name of the place")
+    spal.add_argument("alias", help="new alias to attach")
+
+    spr = places_sub.add_parser("resolve"); spr.set_defaults(func=cmd_places_resolve)
+    spr.add_argument("text")
+    spr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spl = places_sub.add_parser("list"); spl.set_defaults(func=cmd_places_list)
     spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
