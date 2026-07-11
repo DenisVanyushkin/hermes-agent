@@ -1,0 +1,10 @@
+{
+  "target": "whatsapp:+77782110625",
+  "quiet_start": "21:30",
+  "quiet_end": "07:30",
+  "daily_budget": 8,
+  "gate_model": "gpt-5.4-mini",
+  "gate_provider": "openai-codex",
+  "max_len_reminder": 300,
+  "max_len_digest": 900
+}
