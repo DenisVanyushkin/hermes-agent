@@ -214,8 +214,10 @@ def _month_arg(value):
         raise argparse.ArgumentTypeError(f"invalid month (expected YYYY-MM): {value}")
     return (year, month)
 
-def _week_arg(value):
-    """argparse type= for --week: YYYY-MM-DD, validated as a real date."""
+def _date_arg(value):
+    """argparse type= for --day/--week: YYYY-MM-DD, validated as a real
+    date. Shared by both flags since the format contract is identical.
+    """
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
         raise argparse.ArgumentTypeError(f"invalid date (expected YYYY-MM-DD): {value}")
     try:
@@ -229,8 +231,10 @@ def cmd_cal_grid(args):
     if args.month is not None:
         year, month = args.month
         out = grid.render_month(conn, year, month, args.out)
-    else:
+    elif args.week is not None:
         out = grid.render_week(conn, args.week, args.out)
+    else:
+        out = grid.render_day(conn, args.day, args.out)
     if args.json:
         print(json.dumps({"ok": True, "path": out}, ensure_ascii=False))
     else:
@@ -371,9 +375,10 @@ def build_parser():
 
     spg = cal_sub.add_parser("grid"); spg.set_defaults(func=cmd_cal_grid)
     grid_group = spg.add_mutually_exclusive_group(required=True)
-    grid_group.add_argument("--month", type=_month_arg, help="YYYY-MM")
-    grid_group.add_argument("--week", type=_week_arg,
+    grid_group.add_argument("--day", type=_date_arg, help="YYYY-MM-DD")
+    grid_group.add_argument("--week", type=_date_arg,
                              help="YYYY-MM-DD, any day within the target Mon-Sun week")
+    grid_group.add_argument("--month", type=_month_arg, help="YYYY-MM")
     spg.add_argument("-o", "--out", dest="out", required=True, help="output PNG path")
     spg.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")

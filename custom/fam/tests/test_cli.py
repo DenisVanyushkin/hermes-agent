@@ -85,3 +85,54 @@ def test_cal_grid_bad_week_format_exit_2(db, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.main(["cal", "grid", "--week", "2026-13-99", "-o", out_path])
     assert exc.value.code == 2
+
+# --- day view: `fam cal grid --day` wiring ---
+
+def test_cal_grid_day_writes_png(db, capsys, tmp_path):
+    cal.add(db, "Врач", "2026-07-11T05:00:00+00:00"); db.commit()
+    out_path = str(tmp_path / "day.png")
+    rc = cli.main(["cal", "grid", "--day", "2026-07-11", "-o", out_path])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert out_path in captured.out
+    import os
+    assert os.path.getsize(out_path) > 5000
+
+def test_cal_grid_day_json_writes_png(db, capsys, tmp_path):
+    out_path = str(tmp_path / "day.png")
+    rc = cli.main(["cal", "grid", "--day", "2026-07-11", "-o", out_path, "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out == {"ok": True, "path": out_path}
+
+def test_cal_grid_bad_day_format_exit_2(db, tmp_path):
+    out_path = str(tmp_path / "x.png")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["cal", "grid", "--day", "2026-13-99", "-o", out_path])
+    assert exc.value.code == 2
+
+def test_cal_grid_requires_exactly_one_of_day_week_or_month(db, tmp_path):
+    out_path = str(tmp_path / "x.png")
+
+    # None of the three.
+    with pytest.raises(SystemExit) as exc_none:
+        cli.main(["cal", "grid", "-o", out_path])
+    assert exc_none.value.code == 2
+
+    # day + week.
+    with pytest.raises(SystemExit) as exc_day_week:
+        cli.main(["cal", "grid", "--day", "2026-07-11", "--week", "2026-07-13",
+                   "-o", out_path])
+    assert exc_day_week.value.code == 2
+
+    # day + month.
+    with pytest.raises(SystemExit) as exc_day_month:
+        cli.main(["cal", "grid", "--day", "2026-07-11", "--month", "2026-07",
+                   "-o", out_path])
+    assert exc_day_month.value.code == 2
+
+    # all three.
+    with pytest.raises(SystemExit) as exc_all_three:
+        cli.main(["cal", "grid", "--day", "2026-07-11", "--week", "2026-07-13",
+                   "--month", "2026-07", "-o", out_path])
+    assert exc_all_three.value.code == 2

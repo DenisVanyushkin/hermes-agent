@@ -19,7 +19,10 @@ way to read or change family data.
 
 ## When to Use
 
-- Calendar: "запиши", "когда у нас...", "перенеси", "отмени", "покажи неделю/месяц/день".
+- Calendar: "запиши", "когда у нас...", "перенеси", "отмени", "покажи
+  неделю/месяц/день". Synonyms for the grid picture: "сетка", "расписание",
+  "календарь покажи/пришли" — all of these mean render the day/week/month
+  grid.
 - People: "кто такой X", adding/looking up a family member, friend, or group.
 - Places: "где находится Y", adding/looking up an address.
 - Any request to view or change the household schedule or the people/places glossary.
@@ -81,7 +84,7 @@ way to read or change family data.
 | One event | `fam cal show <id>` |
 | One day | `fam cal day YYYY-MM-DD` |
 | A date range | `fam cal range <from_iso> <to_iso>` |
-| Month/week picture | `fam cal grid --month YYYY-MM -o /tmp/grid.png` (or `--week YYYY-MM-DD`) |
+| Day/week/month picture | `fam cal grid --day YYYY-MM-DD -o /tmp/grid.png` (or `--week YYYY-MM-DD` / `--month YYYY-MM`) |
 | Who is X | `fam people resolve "X"` |
 | Add a person/group | `fam people add "Name" [--group] [--alias A]` |
 | Add an alias | `fam people alias <ref> <alias>` |
@@ -92,9 +95,23 @@ way to read or change family data.
 
 ## Calendar Grid
 
-`fam cal grid --month YYYY-MM -o /tmp/grid.png --json` (or `--week
-YYYY-MM-DD`) renders a PNG of the month/week. Send it back to the user by
-including `MEDIA:/tmp/grid.png` in your reply.
+`fam cal grid --day YYYY-MM-DD -o /tmp/grid.png --json` (or `--week
+YYYY-MM-DD`, or `--month YYYY-MM`) renders a PNG picture of the day, week,
+or month — exactly one of `--day`/`--week`/`--month` is required.
+Synonyms that all mean "render the grid": "сетка", "расписание", "календарь
+покажи/пришли", as well as "покажи день/неделю/месяц".
+
+If the render succeeds, send the picture back to the user by including
+`MEDIA:/tmp/grid.png` in your reply.
+
+**Honest failure — never claim a picture that doesn't exist.** If `cal
+grid` exits non-zero, or the output file doesn't exist afterward (check
+with `ls`), do **not** send a `MEDIA:` tag. Instead tell the user, briefly
+and in one line, that the картинка не получилась и почему (e.g. "не смог
+собрать картинку расписания — сбой в терминале"). Anything more detailed
+for your own diagnosis (stderr output, stack traces, the exact failing
+command) stays in your terminal session's stderr — never forward it to the
+user.
 
 ## Reply Style
 
