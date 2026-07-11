@@ -1,10 +1,14 @@
 import pytest
-from fam import audit, cal, people, places
+from fam import audit, cal, people, places, rem
 
 def _seed(db):
     people.add(db, "Тая", slug="taya")
     people.add(db, "Денис", slug="denis")
     places.add(db, "Клиника Дента", aliases=["стоматолог"])
+    db.commit()
+
+def _seed_rules(db):
+    rem.seed_default_rules(db)
     db.commit()
 
 def test_add_resolves_refs_and_roundtrips(db):
@@ -111,3 +115,139 @@ def test_update_unknown_person_in_add_person_raises_without_mutation(db):
 def test_to_utc_iso_rejects_naive_datetime():
     with pytest.raises(ValueError):
         cal._to_utc_iso("2026-07-15T10:00:00")
+
+# --- Task 3: regeneration hooks (rem.regenerate/cancel_chain wired into cal) ---
+# Dates are fixed far in the future (2099) since these hooks call
+# rem.regenerate() with the real clock (no now_utc override), unlike the
+# rem.py-level tests which pin "now" explicitly.
+
+def test_add_creates_reminder_instances(db):
+    _seed(db)
+    _seed_rules(db)
+
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+
+    rows = db.execute(
+        "SELECT * FROM reminders WHERE event_id=? ORDER BY fire_at_utc",
+        (e["id"],)).fetchall()
+    # default rule: start-60min, leave_at+0 (== start, no place/travel)
+    assert len(rows) == 2
+    assert {r["status"] for r in rows} == {"pending"}
+
+def test_update_notes_does_not_regenerate(db):
+    _seed(db)
+    _seed_rules(db)
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+
+    before = {r["id"]: r["fire_at_utc"] for r in db.execute(
+        "SELECT id, fire_at_utc FROM reminders WHERE event_id=?", (e["id"],))}
+
+    cal.update(db, e["id"], notes="просто заметка")
+    db.commit()
+
+    after = {r["id"]: r["fire_at_utc"] for r in db.execute(
+        "SELECT id, fire_at_utc FROM reminders WHERE event_id=?", (e["id"],))}
+
+    # same row ids, same fire_at_utc -- update(notes=...) must not touch
+    # the reminder chain at all.
+    assert before == after
+
+def test_update_start_utc_regenerates(db):
+    _seed(db)
+    _seed_rules(db)
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+
+    cal.update(db, e["id"], start_utc="2099-01-02T05:00:00+00:00")
+    db.commit()
+
+    rows = db.execute(
+        "SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
+        "ORDER BY fire_at_utc", (e["id"],)).fetchall()
+    fire_times = [r["fire_at_utc"] for r in rows]
+    assert fire_times == [
+        "2099-01-02T04:00:00+00:00",  # start - 60min
+        "2099-01-02T05:00:00+00:00",  # leave_at (no travel) == start
+    ]
+
+def test_update_travel_min_regenerates_leave_at_stage(db):
+    _seed(db)
+    _seed_rules(db)
+    pl = places.add(db, "Клиника2")
+    db.execute("UPDATE places SET travel_min=10 WHERE id=?", (pl["id"],))
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00", place="Клиника2")
+    db.commit()
+
+    cal.update(db, e["id"], travel_min=30)
+    db.commit()
+
+    row = db.execute(
+        "SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
+        "AND anchor='leave_at'", (e["id"],)).fetchone()
+    assert row["fire_at_utc"] == "2099-01-01T04:30:00+00:00"  # start - 30min override
+
+def test_update_place_change_regenerates(db):
+    _seed(db)
+    _seed_rules(db)
+    pl1 = places.add(db, "Место1")
+    pl2 = places.add(db, "Место2")
+    db.execute("UPDATE places SET travel_min=10 WHERE id=?", (pl1["id"],))
+    db.execute("UPDATE places SET travel_min=50 WHERE id=?", (pl2["id"],))
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00", place="Место1")
+    db.commit()
+
+    cal.update(db, e["id"], place="Место2")
+    db.commit()
+
+    row = db.execute(
+        "SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
+        "AND anchor='leave_at'", (e["id"],)).fetchone()
+    assert row["fire_at_utc"] == "2099-01-01T04:10:00+00:00"  # start - 50min
+
+def test_update_participants_change_regenerates_taya_stage(db):
+    _seed(db)
+    _seed_rules(db)
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+    assert db.execute(
+        "SELECT COUNT(*) c FROM reminders WHERE event_id=?", (e["id"],)
+    ).fetchone()["c"] == 2  # default rule only, Тая not yet a participant
+
+    cal.update(db, e["id"], add_person=["Тая"])
+    db.commit()
+
+    rule_ids = {r["rule_id"] for r in db.execute(
+        "SELECT DISTINCT rule_id FROM reminders WHERE event_id=? AND status='pending'",
+        (e["id"],))}
+    assert len(rule_ids) == 2  # default + slug:taya both represented now
+    labels = {r["label"] for r in db.execute(
+        "SELECT label FROM reminders WHERE event_id=? AND status='pending'", (e["id"],))}
+    assert "Тае пора собираться" in labels
+
+def test_cancel_cancels_pending_reminder_chain(db):
+    _seed(db)
+    _seed_rules(db)
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+
+    cal.cancel(db, e["id"])
+    db.commit()
+
+    statuses = {r["status"] for r in db.execute(
+        "SELECT status FROM reminders WHERE event_id=?", (e["id"],))}
+    assert statuses == {"cancelled"}
+
+def test_done_cancels_pending_reminder_chain(db):
+    _seed(db)
+    _seed_rules(db)
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+
+    cal.done(db, e["id"])
+    db.commit()
+
+    statuses = {r["status"] for r in db.execute(
+        "SELECT status FROM reminders WHERE event_id=?", (e["id"],))}
+    assert statuses == {"cancelled"}

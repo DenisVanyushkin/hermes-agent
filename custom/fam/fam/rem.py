@@ -21,6 +21,7 @@ DEFAULT_STAGES = [
 TAYA_STAGES = [
     {"anchor": "leave_at", "offset_min": -45, "label": "Тае пора собираться"},
 ]
+AMINA_STAGES = []  # inert reserve: no stages until an admin populates it
 
 
 def _now():
@@ -59,6 +60,12 @@ def applicable_rules(conn, event):
     """Enabled reminder_rules whose scope is 'default' or 'slug:<slug>'
     for any participant of the event. Each rule's stages field is parsed
     from JSON into a list of dicts.
+
+    A rule whose stages column is not valid JSON (e.g. hand-edited/
+    corrupted by an admin) is skipped rather than raised -- a bad rule
+    must never block event creation, since this runs inside cal.add's/
+    cal.update's regenerate hook. It is audited as rem.rule_error so an
+    admin can find and fix it via `fam rem rules`.
     """
     slugs = {p["slug"] for p in event.get("participants", []) if p.get("slug")}
     scopes = {"default"} | {f"slug:{s}" for s in slugs}
@@ -71,7 +78,11 @@ def applicable_rules(conn, event):
     rules = []
     for row in rows:
         d = dict(row)
-        d["stages"] = json.loads(d["stages"])
+        try:
+            d["stages"] = json.loads(d["stages"])
+        except (json.JSONDecodeError, TypeError):
+            audit.log(conn, "rem.rule_error", {"rule_id": d["id"]})
+            continue
         rules.append(d)
     return rules
 
@@ -142,6 +153,47 @@ def cancel_chain(conn, event_id):
     return _transition_pending(conn, event_id, "cancelled", "rem.cancel_chain")
 
 
+# ---- CLI-facing queries ----
+
+def list_reminders(conn, event_id=None, due=False, now_utc=None):
+    """List reminders ordered by fire_at_utc ascending. Optionally
+    filtered to one event_id, and/or to "due" reminders (status='pending'
+    AND fire_at_utc <= now) -- the exact selection the reminders tick
+    (Task 6) will use.
+    """
+    sql = "SELECT * FROM reminders WHERE 1=1"
+    params = []
+    if event_id is not None:
+        sql += " AND event_id=?"
+        params.append(event_id)
+    if due:
+        sql += " AND status='pending' AND fire_at_utc <= ?"
+        params.append(now_utc or _now())
+    sql += " ORDER BY fire_at_utc"
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_rules(conn):
+    """List all reminder_rules (enabled or not), for admin visibility.
+
+    Unlike applicable_rules(), this does NOT skip a rule with malformed
+    stages JSON -- it surfaces it (stages left as the raw string, plus
+    stages_error=True) so an admin can see and fix it directly instead of
+    it silently vanishing from view.
+    """
+    rows = conn.execute("SELECT * FROM reminder_rules ORDER BY id").fetchall()
+    out = []
+    for row in rows:
+        d = dict(row)
+        try:
+            d["stages"] = json.loads(d["stages"])
+        except (json.JSONDecodeError, TypeError):
+            d["stages_error"] = True
+        out.append(d)
+    return out
+
+
 def _seed_rule(conn, scope, stages):
     existing = conn.execute(
         "SELECT 1 FROM reminder_rules WHERE scope=?", (scope,)
@@ -157,9 +209,15 @@ def _seed_rule(conn, scope, stages):
 
 
 def seed_default_rules(conn):
-    """Idempotently insert the default and slug:taya reminder rules. A
-    scope that already has a rule is left untouched (no re-insert, no
-    audit entry) -- safe to call on every startup.
+    """Idempotently insert the default, slug:taya, and slug:amina reminder
+    rules. A scope that already has a rule is left untouched (no
+    re-insert, no audit entry) -- safe to call on every startup (fam init
+    calls this).
+
+    slug:amina ships with empty stages -- an inert reserve for a future
+    Amina-specific reminder cadence; applicable_rules() picks it up like
+    any other rule (0 stages -> 0 reminders) once an admin populates it.
     """
     _seed_rule(conn, "default", DEFAULT_STAGES)
     _seed_rule(conn, "slug:taya", TAYA_STAGES)
+    _seed_rule(conn, "slug:amina", AMINA_STAGES)

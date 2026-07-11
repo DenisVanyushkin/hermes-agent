@@ -1,11 +1,13 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, grid, people, places
+from fam import audit, cal, db as famdb, grid, people, places, rem
 
 def cmd_init(args):
     conn = famdb.connect()
     famdb.init_db(conn)
+    rem.seed_default_rules(conn)
+    conn.commit()
     out = {"ok": True, "db": famdb.resolve_db_path()}
     print(json.dumps(out, ensure_ascii=False) if args.json else f"initialized {out['db']}")
     return 0
@@ -119,7 +121,8 @@ def _fmt_event(e):
 def cmd_cal_add(args):
     conn = famdb.connect()
     e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
-                participants=args.with_, transport=args.transport, notes=args.notes)
+                participants=args.with_, transport=args.transport, notes=args.notes,
+                travel_min=args.travel_min)
     conn.commit()
     if args.json:
         print(json.dumps(e, ensure_ascii=False))
@@ -136,6 +139,7 @@ def cmd_cal_update(args):
     if args.place is not None: fields["place"] = args.place
     if args.transport is not None: fields["transport"] = args.transport
     if args.notes is not None: fields["notes"] = args.notes
+    if args.travel_min is not None: fields["travel_min"] = args.travel_min
     if args.add_person: fields["add_person"] = args.add_person
     if args.rm_person: fields["rm_person"] = args.rm_person
     e = cal.update(conn, args.id, **fields)
@@ -241,6 +245,56 @@ def cmd_cal_grid(args):
         print(f"wrote {out}")
     return 0
 
+def _fmt_reminder(r):
+    return f"{r['id']}\t{r['event_id']}\t{r['fire_at_utc']}\t{r['label']}\t[{r['status']}]"
+
+def cmd_rem_list(args):
+    conn = famdb.connect()
+    rows = rem.list_reminders(conn, event_id=args.event, due=args.due)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for r in rows:
+            print(_fmt_reminder(r))
+    return 0
+
+def cmd_rem_ack(args):
+    conn = famdb.connect()
+    if cal.get(conn, args.event_id) is None:
+        raise ValueError(f"unknown event: {args.event_id}")
+    count = rem.ack_chain(conn, args.event_id)
+    conn.commit()
+    out = {"event_id": args.event_id, "acked": count}
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        print(f"acked {count} reminder(s) for event {args.event_id}")
+    return 0
+
+def cmd_rem_cancel(args):
+    conn = famdb.connect()
+    if cal.get(conn, args.event_id) is None:
+        raise ValueError(f"unknown event: {args.event_id}")
+    count = rem.cancel_chain(conn, args.event_id)
+    conn.commit()
+    out = {"event_id": args.event_id, "cancelled": count}
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        print(f"cancelled {count} reminder(s) for event {args.event_id}")
+    return 0
+
+def cmd_rem_rules(args):
+    conn = famdb.connect()
+    rows = rem.list_rules(conn)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for r in rows:
+            state = "on" if r["enabled"] else "off"
+            print(f"{r['id']}\t{r['scope']}\t{state}\t{r['stages']}")
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(prog="fam")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -329,6 +383,8 @@ def build_parser():
                       help="participant ref: name/alias/slug/group (repeatable)")
     spa.add_argument("--transport", choices=transport_choices, default="unknown")
     spa.add_argument("--notes", default="")
+    spa.add_argument("--travel-min", dest="travel_min", type=int,
+                      help="override place travel minutes for leave_at (default: take from place)")
     spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
@@ -340,6 +396,8 @@ def build_parser():
     spu.add_argument("--place")
     spu.add_argument("--transport", choices=transport_choices)
     spu.add_argument("--notes")
+    spu.add_argument("--travel-min", dest="travel_min", type=int,
+                      help="override place travel minutes for leave_at")
     spu.add_argument("--add-person", dest="add_person", action="append", default=[],
                       help="participant ref to add (repeatable)")
     spu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
@@ -381,6 +439,31 @@ def build_parser():
     grid_group.add_argument("--month", type=_month_arg, help="YYYY-MM")
     spg.add_argument("-o", "--out", dest="out", required=True, help="output PNG path")
     spg.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    sp = sub.add_parser("rem")
+    rem_sub = sp.add_subparsers(dest="rem_cmd", required=True)
+
+    spl = rem_sub.add_parser("list"); spl.set_defaults(func=cmd_rem_list)
+    rem_list_group = spl.add_mutually_exclusive_group()
+    rem_list_group.add_argument("--event", type=int, help="filter to one event id")
+    rem_list_group.add_argument("--due", action="store_true",
+                                 help="pending reminders with fire_at_utc <= now")
+    spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spa = rem_sub.add_parser("ack"); spa.set_defaults(func=cmd_rem_ack)
+    spa.add_argument("event_id", type=int)
+    spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spc = rem_sub.add_parser("cancel"); spc.set_defaults(func=cmd_rem_cancel)
+    spc.add_argument("event_id", type=int)
+    spc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spr = rem_sub.add_parser("rules"); spr.set_defaults(func=cmd_rem_rules)
+    spr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
     return p

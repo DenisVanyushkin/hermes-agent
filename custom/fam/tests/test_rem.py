@@ -44,6 +44,21 @@ def test_leave_at_no_place_is_zero(db):
     assert rem.leave_at(db, event) == event["start_utc"] == "2026-07-15T05:00:00+00:00"
 
 
+# Carry-over from T2 review, finding 2: an explicit event-level travel_min=0
+# must still win over a nonzero place travel_min -- pins the "is None" (not
+# "is falsy") precedence check in leave_at().
+def test_leave_at_event_travel_zero_overrides_nonzero_place(db):
+    _seed_people(db)
+    pl = places.add(db, "Клиника")
+    db.execute("UPDATE places SET travel_min=20 WHERE id=?", (pl["id"],))
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00", place="Клиника")
+    db.execute("UPDATE events SET travel_min=0 WHERE id=?", (e["id"],))
+    db.commit()
+
+    event = cal.get(db, e["id"])
+    assert rem.leave_at(db, event) == event["start_utc"] == "2026-07-15T05:00:00+00:00"
+
+
 # ---- applicable_rules scoping ----
 
 def test_applicable_rules_taya_scope_only_when_participant(db):
@@ -62,7 +77,10 @@ def test_applicable_rules_taya_scope_only_when_participant(db):
     scopes_with = {r["scope"] for r in
                    rem.applicable_rules(db, cal.get(db, e_with_taya["id"]))}
 
-    assert scopes_no == {"default"}
+    # e_no_taya's participant is Амина (slug=amina), so slug:amina's
+    # (empty-stages) reserve rule legitimately matches too -- scope
+    # matching doesn't care that the rule currently has 0 stages.
+    assert scopes_no == {"default", "slug:amina"}
     assert scopes_with == {"default", "slug:taya"}
     for r in rem.applicable_rules(db, cal.get(db, e_with_taya["id"])):
         assert isinstance(r["stages"], list)
@@ -81,6 +99,49 @@ def test_applicable_rules_skips_disabled(db):
     assert rem.applicable_rules(db, cal.get(db, e["id"])) == []
 
 
+# Carry-over from T2 review, finding 3: a rule row with a malformed stages
+# column (e.g. hand-edited by an admin) must never raise out of
+# applicable_rules -- a bad rule must not break event creation. It is
+# skipped and audited instead.
+def test_applicable_rules_skips_malformed_stages_and_audits(db):
+    _seed_people(db)
+    row = db.execute(
+        "INSERT INTO reminder_rules(scope, stages, enabled, created_at) "
+        "VALUES (?,?,?,?)",
+        ("default", "not-json", 1, "2026-01-01T00:00:00+00:00"),
+    )
+    bad_rule_id = row.lastrowid
+    db.commit()
+
+    rules = rem.applicable_rules(db, {"participants": []})
+
+    assert rules == []
+    audit_rows = audit.query(db, since_utc=None, kind_prefix="rem.rule_error",
+                              grep=None, limit=10)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["payload"]["rule_id"] == bad_rule_id
+
+
+def test_broken_rule_stages_does_not_break_event_creation(db):
+    _seed_people(db)
+    db.execute(
+        "INSERT INTO reminder_rules(scope, stages, enabled, created_at) "
+        "VALUES (?,?,?,?)",
+        ("default", "{not valid json", 1, "2026-01-01T00:00:00+00:00"),
+    )
+    db.commit()
+
+    # must not raise despite the malformed rule -- cal.add's regenerate
+    # hook calls applicable_rules internally.
+    e = cal.add(db, "Событие", "2026-07-20T05:00:00+00:00")
+    db.commit()
+
+    assert e["id"] is not None
+    rows = audit.query(db, since_utc=None, kind_prefix="rem.rule_error",
+                        grep=None, limit=10)
+    assert len(rows) >= 1
+
+
 # ---- seed_default_rules ----
 
 def test_seed_default_rules_idempotent_and_audited_once(db):
@@ -91,11 +152,11 @@ def test_seed_default_rules_idempotent_and_audited_once(db):
 
     rows = db.execute(
         "SELECT scope FROM reminder_rules ORDER BY scope").fetchall()
-    assert [r["scope"] for r in rows] == ["default", "slug:taya"]
+    assert [r["scope"] for r in rows] == ["default", "slug:amina", "slug:taya"]
 
     audit_rows = audit.query(db, since_utc=None, kind_prefix="rem.seed",
                               grep=None, limit=10)
-    assert len(audit_rows) == 2
+    assert len(audit_rows) == 3
 
 
 def test_seed_default_rules_stage_content(db):
@@ -116,6 +177,13 @@ def test_seed_default_rules_stage_content(db):
     assert taya_stages == [
         {"anchor": "leave_at", "offset_min": -45, "label": "Тае пора собираться"},
     ]
+
+    # slug:amina ships as an inert reserve -- empty stages, no reminders
+    # generated until an admin populates it.
+    amina_stages = json.loads(db.execute(
+        "SELECT stages FROM reminder_rules WHERE scope='slug:amina'"
+    ).fetchone()["stages"])
+    assert amina_stages == []
 
 
 # ---- regenerate ----
@@ -213,7 +281,12 @@ def test_regenerate_on_cancelled_event_clears_pending(db):
     rem.regenerate(db, e["id"], now_utc=now)
     db.commit()
 
-    cal.cancel(db, e["id"])
+    # Flip the event's status directly via SQL rather than cal.cancel() --
+    # cal.cancel() now (Task 3) also fires rem.cancel_chain, which would
+    # transition these pending rows to 'cancelled' itself and mask what
+    # this test is actually pinning: regenerate()'s own contract that a
+    # non-active event yields a clean delete-and-no-recreate.
+    db.execute("UPDATE events SET status='cancelled' WHERE id=?", (e["id"],))
     db.commit()
 
     created = rem.regenerate(db, e["id"], now_utc=now)
@@ -273,3 +346,53 @@ def test_cancel_chain_counts_and_audit(db):
                         grep=None, limit=1)
     assert rows[0]["payload"]["event_id"] == e["id"]
     assert rows[0]["payload"]["count"] == 2
+
+
+# ---- list_reminders / list_rules (CLI-facing queries) ----
+
+def test_list_reminders_filters_by_event_and_due(db):
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+    now = "2026-07-19T00:00:00+00:00"
+    e1 = cal.add(db, "Раз", "2026-07-20T05:00:00+00:00")
+    e2 = cal.add(db, "Два", "2026-07-21T05:00:00+00:00")
+    db.commit()
+    rem.regenerate(db, e1["id"], now_utc=now)
+    rem.regenerate(db, e2["id"], now_utc=now)
+    db.commit()
+
+    only_e1 = rem.list_reminders(db, event_id=e1["id"])
+    assert len(only_e1) == 2
+    assert {r["event_id"] for r in only_e1} == {e1["id"]}
+
+    # nothing is due yet (all fire_at_utc are in the future relative to `now`)
+    assert rem.list_reminders(db, due=True, now_utc=now) == []
+
+    # push one of e1's stages into the past relative to `now` and confirm
+    # it (and only it) shows up as due
+    past_row = only_e1[0]
+    db.execute("UPDATE reminders SET fire_at_utc=? WHERE id=?",
+               ("2026-07-18T00:00:00+00:00", past_row["id"]))
+    db.commit()
+
+    due = rem.list_reminders(db, due=True, now_utc=now)
+    assert [r["id"] for r in due] == [past_row["id"]]
+
+
+def test_list_rules_surfaces_malformed_stages_without_raising(db):
+    rem.seed_default_rules(db)
+    row = db.execute(
+        "INSERT INTO reminder_rules(scope, stages, enabled, created_at) "
+        "VALUES (?,?,?,?)",
+        ("slug:broken", "not-json", 1, "2026-01-01T00:00:00+00:00"),
+    )
+    bad_id = row.lastrowid
+    db.commit()
+
+    rules = rem.list_rules(db)
+    by_id = {r["id"]: r for r in rules}
+
+    assert len(rules) == 4  # default, slug:taya, slug:amina, slug:broken
+    assert by_id[bad_id]["stages_error"] is True
+    assert by_id[bad_id]["stages"] == "not-json"  # left raw, not raised

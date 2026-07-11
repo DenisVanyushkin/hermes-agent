@@ -10,7 +10,7 @@ convert through Asia/Almaty via zoneinfo.
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import audit, people, places
+from fam import audit, people, places, rem
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -86,11 +86,16 @@ def _resolve_place(conn, place_ref):
 
 
 def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
-        transport="unknown", notes=""):
+        transport="unknown", notes="", travel_min=None):
     """Create an event. place/participants are text refs (id/name/alias/
     slug); an unresolvable ref raises UnknownRefError and nothing is
     inserted. Group participants expand to their members at add-time (the
-    audit payload keeps the original ref, e.g. "татешки").
+    audit payload keeps the original ref, e.g. "татешки"). travel_min
+    overrides the place's travel_min for rem.leave_at() -- None (default)
+    means "take it from the place" (see rem.leave_at).
+
+    Regenerates the event's reminder chain (rem.regenerate) in the same
+    transaction, after the insert.
     """
     # Validate all refs first, before any insert.
     pl = _resolve_place(conn, place)
@@ -102,9 +107,10 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
 
     cur = conn.execute(
         "INSERT INTO events(title, start_utc, end_utc, place_id, transport, "
-        "status, notes, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        "status, notes, travel_min, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (title, start, end, pl["id"] if pl else None, transport, "active",
-         notes, now, now),
+         notes, travel_min, now, now),
     )
     event_id = cur.lastrowid
 
@@ -119,8 +125,10 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
         "cal.add",
         {"id": event_id, "title": title, "start_utc": start, "end_utc": end,
          "place": place, "participants": list(participants),
-         "transport": transport, "notes": notes},
+         "transport": transport, "notes": notes, "travel_min": travel_min},
     )
+
+    rem.regenerate(conn, event_id)
 
     return get(conn, event_id)
 
@@ -153,18 +161,29 @@ def get(conn, event_id):
 
 _UPDATE_FIELDS = {
     "title", "start_utc", "end_utc", "place", "transport", "notes",
-    "add_person", "rm_person",
+    "add_person", "rm_person", "travel_min",
 }
+
+# Fields whose change should trigger a reminder-chain regeneration
+# (compared as actual DB column values before vs. after the write --
+# NOT "was the field passed", so an offset-only start_utc rewrite that
+# normalizes to the same instant correctly does not trigger a regen).
+_REGEN_TRIGGER_COLUMNS = ("start_utc", "travel_min", "place_id")
 
 
 def update(conn, event_id, **fields):
     """Update mutable fields on an event. Accepts any of: title, start_utc,
-    end_utc, place, transport, notes, add_person (list of refs), rm_person
-    (list of refs). Any other keyword raises ValueError before any write.
-    place/add_person refs are resolved (UnknownRefError on failure) before
-    any write. start_utc/end_utc are normalized to UTC exactly once, and
-    that same normalized string is used for both the SQL SET clause and
-    the audit payload below. Writes updated_at.
+    end_utc, place, transport, notes, travel_min, add_person (list of
+    refs), rm_person (list of refs). Any other keyword raises ValueError
+    before any write. place/add_person refs are resolved (UnknownRefError
+    on failure) before any write. start_utc/end_utc are normalized to UTC
+    exactly once, and that same normalized string is used for both the
+    SQL SET clause and the audit payload below. Writes updated_at.
+
+    Regenerates the event's reminder chain (rem.regenerate) in the same
+    transaction, but ONLY if start_utc, travel_min, place, or the
+    participant set actually changed (updated_at is never a regen
+    signal) -- e.g. update(notes=...) never touches the reminder chain.
     """
     existing = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
     if existing is None:
@@ -176,6 +195,13 @@ def update(conn, event_id, **fields):
         raise ValueError(
             f"unknown field: {name} (valid: {', '.join(sorted(_UPDATE_FIELDS))})"
         )
+
+    # Snapshot old regen-relevant state before any mutation.
+    old_regen_state = tuple(existing[c] for c in _REGEN_TRIGGER_COLUMNS)
+    old_participant_ids = {r["person_id"] for r in conn.execute(
+        "SELECT person_id FROM event_participants WHERE event_id=?",
+        (event_id,),
+    ).fetchall()}
 
     # Normalize start_utc/end_utc once, in place, before either the SQL
     # write or the audit payload consume them — both must see the same
@@ -205,6 +231,7 @@ def update(conn, event_id, **fields):
         "end_utc": "end_utc",
         "transport": "transport",
         "notes": "notes",
+        "travel_min": "travel_min",
     }
     for key, col in column_map.items():
         if key in fields:
@@ -243,6 +270,18 @@ def update(conn, event_id, **fields):
         audit_payload["rm_person"] = list(rm_person)
     audit.log(conn, "cal.update", audit_payload)
 
+    new_row = conn.execute(
+        "SELECT * FROM events WHERE id=?", (event_id,)
+    ).fetchone()
+    new_regen_state = tuple(new_row[c] for c in _REGEN_TRIGGER_COLUMNS)
+    new_participant_ids = {r["person_id"] for r in conn.execute(
+        "SELECT person_id FROM event_participants WHERE event_id=?",
+        (event_id,),
+    ).fetchall()}
+    if (new_regen_state != old_regen_state
+            or new_participant_ids != old_participant_ids):
+        rem.regenerate(conn, event_id)
+
     return get(conn, event_id)
 
 
@@ -259,13 +298,19 @@ def _set_status(conn, event_id, status, kind):
 
 
 def cancel(conn, event_id):
-    """Mark an event cancelled."""
-    return _set_status(conn, event_id, "cancelled", "cal.cancel")
+    """Mark an event cancelled and cancel its pending reminder chain."""
+    result = _set_status(conn, event_id, "cancelled", "cal.cancel")
+    rem.cancel_chain(conn, event_id)
+    return result
 
 
 def done(conn, event_id):
-    """Mark an event done."""
-    return _set_status(conn, event_id, "done", "cal.done")
+    """Mark an event done and cancel its pending reminder chain (it
+    already happened -- no more reminders needed).
+    """
+    result = _set_status(conn, event_id, "done", "cal.done")
+    rem.cancel_chain(conn, event_id)
+    return result
 
 
 def list_range(conn, from_utc, to_utc, status="active"):
