@@ -459,7 +459,13 @@ rendered successfully but the picture never reached the user.
   (append-only) but not renaming or removing an existing alias — admin fixes
   go through direct `sqlite3` + a matching `fam log`-visible audit row (as
   done once during Phase 2a itself). Candidate for Phase 2b/3
-  (`progress.md` backlog note under `2a-T9`).
+  (`progress.md` backlog note under `2a-T9`). **Because a direct `sqlite3`
+  edit bypasses `fam`'s own `audit.log()` call, the operator must manually
+  `INSERT INTO audit_log(ts_utc, kind, actor, payload) VALUES (...)` (UTC
+  timestamp, a descriptive `kind`, `actor='admin'`) as part of the same fix
+  — easy to forget, but skipping it silently breaks `fam log`'s claim to be
+  the complete append-only record of every mutation, per the pattern used for
+  the «Мег»→«Мега» alias rename in T9.**
 - **Lat/lon are not parsed from 2GIS links yet.** `fam places add` accepts
   `--lat`/`--lon` as plain floats; there is no code that extracts coordinates
   from a pasted 2GIS URL — whoever adds a place either supplies them manually

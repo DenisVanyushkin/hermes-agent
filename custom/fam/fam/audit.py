@@ -12,6 +12,8 @@ def log(conn, kind, payload, actor="agent"):
     return cur.lastrowid
 
 def query(conn, since_utc, kind_prefix, grep, limit=50):
+    if limit is None or limit <= 0:
+        raise ValueError("limit must be positive")
     sql = "SELECT * FROM audit_log WHERE 1=1"
     params = []
     if since_utc:

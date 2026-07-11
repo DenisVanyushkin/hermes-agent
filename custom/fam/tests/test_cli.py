@@ -136,3 +136,25 @@ def test_cal_grid_requires_exactly_one_of_day_week_or_month(db, tmp_path):
         cli.main(["cal", "grid", "--day", "2026-07-11", "--week", "2026-07-13",
                    "--month", "2026-07", "-o", out_path])
     assert exc_all_three.value.code == 2
+
+# --- Final-review hardening: audit.query limit guard, CLI-level ---
+
+def test_log_rejects_negative_limit_exit_2(db, capsys):
+    rc = cli.main(["log", "--limit", "-1"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
+
+def test_log_rejects_zero_limit_exit_2(db, capsys):
+    rc = cli.main(["log", "--limit", "0"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
+
+# --- Final-review hardening: naive-ISO datetimes rejected, CLI-level ---
+
+def test_cal_add_naive_start_exit_2(db, capsys):
+    rc = cli.main(["cal", "add", "--title", "X", "--start", "2026-07-15T10:00:00"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""

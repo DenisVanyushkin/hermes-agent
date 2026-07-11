@@ -107,3 +107,7 @@ def test_update_unknown_person_in_add_person_raises_without_mutation(db):
 
     got = cal.get(db, e["id"])
     assert [p["name"] for p in got["participants"]] == ["Тая"]
+
+def test_to_utc_iso_rejects_naive_datetime():
+    with pytest.raises(ValueError):
+        cal._to_utc_iso("2026-07-15T10:00:00")

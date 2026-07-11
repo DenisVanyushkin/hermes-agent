@@ -30,12 +30,16 @@ def _now():
 
 
 def _to_utc_iso(value):
-    """Accept an ISO-8601 string with any offset (fromisoformat) and
-    normalize to a UTC ISO string. Also accepts an already-UTC string.
+    """Accept an ISO-8601 string with an explicit UTC offset
+    (fromisoformat) and normalize to a UTC ISO string. A naive string
+    (no tzinfo) is rejected rather than silently assumed to be UTC --
+    callers must state their offset explicitly.
     """
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        raise ValueError(
+            f"datetime must include an explicit UTC offset: {value}"
+        )
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 

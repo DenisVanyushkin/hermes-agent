@@ -1,3 +1,4 @@
+import pytest
 from fam import audit
 
 def test_log_and_query_roundtrip(db):
@@ -14,3 +15,11 @@ def test_query_filters(db):
     assert len(audit.query(db, None, "people.", None)) == 1
     assert len(audit.query(db, None, None, '"t": "a"')) == 1
     assert audit.query(db, "2999-01-01T00:00:00+00:00", None, None) == []
+
+def test_query_rejects_non_positive_limit(db):
+    audit.log(db, "cal.add", {"t": "a"})
+    db.commit()
+    with pytest.raises(ValueError):
+        audit.query(db, None, None, None, limit=0)
+    with pytest.raises(ValueError):
+        audit.query(db, None, None, None, limit=-1)
