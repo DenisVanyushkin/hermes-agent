@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
-import argparse, json, sys
-from datetime import datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, people, places
+import argparse, json, re, sys
+from datetime import date as _date, datetime, timedelta, timezone
+from fam import audit, cal, db as famdb, grid, people, places
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -202,6 +202,41 @@ def cmd_cal_range(args):
             print(_fmt_event(e))
     return 0
 
+def _month_arg(value):
+    """argparse type= for --month: YYYY-MM -> (year, month). Raising
+    ArgumentTypeError here makes argparse print a message and exit 2,
+    same contract as an unrecognized/malformed flag.
+    """
+    if not re.fullmatch(r"\d{4}-\d{2}", value):
+        raise argparse.ArgumentTypeError(f"invalid month (expected YYYY-MM): {value}")
+    year, month = int(value[:4]), int(value[5:7])
+    if not 1 <= month <= 12:
+        raise argparse.ArgumentTypeError(f"invalid month (expected YYYY-MM): {value}")
+    return (year, month)
+
+def _week_arg(value):
+    """argparse type= for --week: YYYY-MM-DD, validated as a real date."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise argparse.ArgumentTypeError(f"invalid date (expected YYYY-MM-DD): {value}")
+    try:
+        _date(int(value[:4]), int(value[5:7]), int(value[8:10]))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid date (expected YYYY-MM-DD): {value}")
+    return value
+
+def cmd_cal_grid(args):
+    conn = famdb.connect()
+    if args.month is not None:
+        year, month = args.month
+        out = grid.render_month(conn, year, month, args.out)
+    else:
+        out = grid.render_week(conn, args.week, args.out)
+    if args.json:
+        print(json.dumps({"ok": True, "path": out}, ensure_ascii=False))
+    else:
+        print(f"wrote {out}")
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(prog="fam")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -333,6 +368,15 @@ def build_parser():
     sprange.add_argument("to_iso")
     sprange.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                           help="machine-readable output")
+
+    spg = cal_sub.add_parser("grid"); spg.set_defaults(func=cmd_cal_grid)
+    grid_group = spg.add_mutually_exclusive_group(required=True)
+    grid_group.add_argument("--month", type=_month_arg, help="YYYY-MM")
+    grid_group.add_argument("--week", type=_week_arg,
+                             help="YYYY-MM-DD, any day within the target Mon-Sun week")
+    spg.add_argument("-o", "--out", dest="out", required=True, help="output PNG path")
+    spg.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
 
     return p
 
