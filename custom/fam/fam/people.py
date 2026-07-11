@@ -67,12 +67,51 @@ def resolve(conn, text):
     return p
 
 
+def _alias_conflict_owner(conn, alias_fold):
+    """Return the name of the person/group that already owns alias_fold (a
+    casefolded string), checking both person/group names and existing
+    aliases. None if alias_fold is free.
+
+    SQLite's built-in NOCASE collation (used by the people_aliases PK) only
+    folds ASCII, so it will happily let "Таюша" and "таюша" coexist as two
+    distinct rows pointing at two different people, silently misrouting
+    lookups. This does the uniqueness check in Python with str.casefold()
+    instead, which is correct for any Unicode script.
+    """
+    for row in conn.execute("SELECT name FROM people").fetchall():
+        if row["name"].casefold() == alias_fold:
+            return row["name"]
+    for row in conn.execute(
+        "SELECT a.alias AS _alias, p.name AS _name FROM people_aliases a "
+        "JOIN people p ON p.id = a.person_id"
+    ).fetchall():
+        if row["_alias"].casefold() == alias_fold:
+            return row["_name"]
+    return None
+
+
 def add(conn, name, kind="person", slug=None, aliases=()):
-    """Create a person or group. Raises ValueError if the name already exists."""
+    """Create a person or group. Raises ValueError if the name already
+    exists, or if any alias collides (casefolded) with an existing
+    person/group name or alias, or with another alias in this same call.
+    """
     name_fold = name.casefold()
     for row in conn.execute("SELECT name FROM people").fetchall():
         if row["name"].casefold() == name_fold:
             raise ValueError(f"person already exists: {name}")
+
+    # Validate every alias up front, before inserting anything, so a
+    # rejected alias never leaves a partial insert (a person row with no or
+    # partial aliases attached).
+    seen_folds = {}
+    for a in aliases:
+        a_fold = a.casefold()
+        owner = _alias_conflict_owner(conn, a_fold)
+        if owner is not None:
+            raise ValueError(f"alias already in use by {owner}: {a}")
+        if a_fold in seen_folds:
+            raise ValueError(f"duplicate alias in request: {a}")
+        seen_folds[a_fold] = a
 
     cur = conn.execute(
         "INSERT INTO people(name, kind, slug, created_at) VALUES (?,?,?,?)",
@@ -98,10 +137,17 @@ def add(conn, name, kind="person", slug=None, aliases=()):
 
 
 def alias(conn, person_ref, alias):
-    """Attach an additional alias to an existing person/group."""
+    """Attach an additional alias to an existing person/group. Raises
+    ValueError if person_ref is unknown, or if alias (casefolded) collides
+    with an existing person/group name or alias belonging to anyone.
+    """
     p = get(conn, person_ref)
     if p is None:
         raise ValueError(f"unknown person: {person_ref}")
+
+    owner = _alias_conflict_owner(conn, alias.casefold())
+    if owner is not None:
+        raise ValueError(f"alias already in use by {owner}: {alias}")
 
     conn.execute(
         "INSERT INTO people_aliases(alias, person_id) VALUES (?,?)",
@@ -124,15 +170,19 @@ def add_member(conn, group_ref, person_ref):
     if p is None or p["kind"] != "person":
         raise ValueError(f"not a person: {person_ref}")
 
-    conn.execute(
+    cur = conn.execute(
         "INSERT OR IGNORE INTO group_members(group_id, person_id) VALUES (?,?)",
         (g["id"], p["id"]),
     )
-    audit.log(
-        conn, "people.member",
-        {"group_id": g["id"], "group": g["name"],
-         "person_id": p["id"], "person": p["name"]},
-    )
+    # INSERT OR IGNORE no-ops on a duplicate membership (rowcount 0) — only
+    # audit-log an actual insert, so re-adding an existing member doesn't
+    # spam the audit trail.
+    if cur.rowcount == 1:
+        audit.log(
+            conn, "people.member",
+            {"group_id": g["id"], "group": g["name"],
+             "person_id": p["id"], "person": p["name"]},
+        )
     return None
 
 
