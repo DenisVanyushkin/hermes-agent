@@ -95,8 +95,10 @@ def test_load_config_reads_existing_without_overwriting(tmp_path):
 
 @pytest.mark.parametrize("local_time,expected", [
     ("21:29:00", False),
+    ("21:30:00", True),   # carry-over T5->T6: exact start, inclusive
     ("21:31:00", True),
     ("07:29:00", True),
+    ("07:30:00", False),  # carry-over T5->T6: exact end, exclusive
     ("07:31:00", False),
 ])
 def test_in_quiet_hours_cross_midnight_edges(local_time, expected):
@@ -130,6 +132,20 @@ def test_budget_spent_today_counts_only_todays_gate_sent(db):
 def test_budget_spent_today_zero_when_no_rows(db):
     db.commit()
     assert gate.budget_spent_today(db, now_utc="2026-07-11T10:00:00+00:00") == 0
+
+
+# Carry-over T5->T6: the digest is delivered with force=True outside the
+# daily budget -- its gate.sent row must not shrink the count reminders
+# see. Only the payload's inner "kind" (not audit_log.kind, which is
+# always "gate.sent") distinguishes a digest send from a reminder send.
+def test_budget_spent_today_excludes_digest_kind(db):
+    now_utc = "2026-07-11T10:00:00+00:00"
+    _insert_audit(db, "gate.sent", "2026-07-11T12:00:00+00:00", {"kind": "digest"})
+    for _ in range(3):
+        _insert_audit(db, "gate.sent", "2026-07-11T12:00:00+00:00", {"kind": "reminder"})
+    db.commit()
+
+    assert gate.budget_spent_today(db, now_utc=now_utc) == 3
 
 
 # ---- deliver: quiet hours ----

@@ -1,6 +1,6 @@
 import json
 import pytest
-from fam import cal, cli, people, places, rem
+from fam import cal, cli, gate, people, places, rem
 
 def test_json_flag_works_before_and_after_subcommand(db, capsys, monkeypatch):
     # db fixture sets FAM_DB to tmp DB; init writes to it
@@ -297,3 +297,59 @@ def test_rem_rules_plain_output(db, capsys):
     assert cli.main(["rem", "rules"]) == 0
     text = capsys.readouterr().out
     assert "default" in text and "slug:taya" in text
+
+# --- Task 6: `fam tick reminders` CLI wiring ---
+# gate.deliver is monkeypatched everywhere here -- these tests exercise
+# the CLI's argument parsing/wiring/output-shape contract only, not
+# gate's own subprocess pipeline (test_gate.py) or the tick orchestration
+# logic itself (test_tick.py).
+
+def _due_reminder(db, event_id, fire_at="2000-01-01T00:00:00+00:00"):
+    cur = db.execute(
+        "INSERT INTO reminders(event_id, label, anchor, fire_at_utc, "
+        "status, created_at) VALUES (?,?,?,?,?,?)",
+        (event_id, "проверка", "start", fire_at, "pending",
+         "2000-01-01T00:00:00+00:00"),
+    )
+    return cur.lastrowid
+
+def test_tick_reminders_json_shape(db, capsys, monkeypatch):
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+    _due_reminder(db, e["id"])
+    db.commit()
+    monkeypatch.setattr(gate, "deliver", lambda *a, **k: "sent")
+
+    rc = cli.main(["tick", "reminders", "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert out == {"due": 1, "sent": 1, "quiet": 0, "budget": 0,
+                    "error": 0, "cancelled": 0}
+
+def test_tick_reminders_now_override(db, capsys, monkeypatch):
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+    # fire_at is in the future relative to the real wall clock but in the
+    # past relative to the --now override below -- pins that --now, not
+    # real time, drives due-selection.
+    _due_reminder(db, e["id"], fire_at="2030-06-01T00:00:00+00:00")
+    db.commit()
+    monkeypatch.setattr(gate, "deliver", lambda *a, **k: "sent")
+
+    rc = cli.main(["tick", "reminders", "--now", "2030-06-02T00:00:00+00:00",
+                   "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert out["due"] == 1
+    assert out["sent"] == 1
+
+def test_tick_reminders_plain_output(db, capsys, monkeypatch):
+    monkeypatch.setattr(gate, "deliver", lambda *a, **k: "sent")
+
+    rc = cli.main(["tick", "reminders"])
+    text = capsys.readouterr().out
+
+    assert rc == 0
+    assert "due=0" in text and "sent=0" in text and "cancelled=0" in text

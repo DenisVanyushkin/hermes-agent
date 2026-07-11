@@ -90,15 +90,20 @@ def _almaty_day_utc_bounds(now_utc):
 
 def budget_spent_today(conn, now_utc=None):
     """Count of gate.sent audit rows within "today" in Asia/Almaty local
-    time (relative to now_utc, defaulting to the real current time).
+    time (relative to now_utc, defaulting to the real current time),
+    EXCLUDING kind="digest" rows -- the digest is delivered with force=True
+    outside the daily budget (plan: "дайджест вне бюджета"), so its own
+    gate.sent row must not shrink the budget available to reminders. The
+    payload's inner "kind" (reminder/digest/...) is what's filtered on,
+    not audit_log.kind (which is always the literal string "gate.sent").
     """
     from_utc, to_utc = _almaty_day_utc_bounds(now_utc or _now())
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM audit_log WHERE kind='gate.sent' "
+    rows = conn.execute(
+        "SELECT payload FROM audit_log WHERE kind='gate.sent' "
         "AND ts_utc >= ? AND ts_utc < ?",
         (from_utc, to_utc),
-    ).fetchone()
-    return row["n"]
+    ).fetchall()
+    return sum(1 for r in rows if json.loads(r["payload"]).get("kind") != "digest")
 
 
 def _build_prompt(raw):

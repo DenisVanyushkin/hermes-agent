@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, grid, people, places, rem
+from fam import audit, cal, db as famdb, grid, people, places, rem, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -295,6 +295,17 @@ def cmd_rem_rules(args):
             print(f"{r['id']}\t{r['scope']}\t{state}\t{r['stages']}")
     return 0
 
+def cmd_tick_reminders(args):
+    conn = famdb.connect()
+    # tick.reminders() owns its own commits (see fam/tick.py docstring) --
+    # unlike the other cmd_* handlers above, no conn.commit() here.
+    counts = tick.reminders(conn, now_utc=args.now)
+    if args.json:
+        print(json.dumps(counts, ensure_ascii=False))
+    else:
+        print(" ".join(f"{k}={v}" for k, v in counts.items()))
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(prog="fam")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -464,6 +475,14 @@ def build_parser():
 
     spr = rem_sub.add_parser("rules"); spr.set_defaults(func=cmd_rem_rules)
     spr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    sp = sub.add_parser("tick")
+    tick_sub = sp.add_subparsers(dest="tick_cmd", required=True)
+
+    spt = tick_sub.add_parser("reminders"); spt.set_defaults(func=cmd_tick_reminders)
+    spt.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
+    spt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
     return p
