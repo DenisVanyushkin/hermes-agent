@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from fam import audit, gate
+from fam import audit, gate, tick
 
 CFG = {
     "target": "whatsapp:+77782110625",
@@ -428,3 +428,161 @@ def test_deliver_digest_kind_uses_digest_ceiling(db, fake_run):
 
     assert status == "sent"
     assert len(fake_run.calls) == 3
+
+
+# ---- deliver: digest closing question is never dropped (live-found bug) ----
+#
+# Live evidence: a real digest went out with the weather/events summary but
+# without its closing question (raw["question"] = tick.DIGEST_QUESTION) --
+# the LLM rewrite's own brevity instructions won out over preserving it.
+# The fix makes the question's presence deterministic and independent of
+# the LLM: the rewrite prompt is told not to write its own question at all
+# (GATE_DIGEST_NO_QUESTION_INSTRUCTION), and deliver() appends
+# raw["question"] as the text's own last line itself, on both the rewrite
+# and the fallback path, with an exactly-once dedupe (the fallback text
+# already ends with the question by tick._build_digest_fallback's own
+# construction).
+
+def test_deliver_digest_rewrite_appends_question_exactly_once(db, fake_run):
+    raw = {"kind": "digest", "date_local": "2026-07-11", "weather": None,
+           "events": [], "question": tick.DIGEST_QUESTION}
+    fake_run.rewrite_responses = [_completed(0, "Сегодня без осадков, планов нет.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "digest", raw, "человеческий фолбэк\n\n" + tick.DIGEST_QUESTION, CFG,
+        now_utc="2026-07-11T12:00:00+05:00", force=True,
+    )
+    db.commit()
+
+    assert status == "sent"
+    rows = audit.query(db, None, "gate.sent", None)
+    final = rows[0]["payload"]["final"]
+    assert rows[0]["payload"]["attempt"] == "rewrite"
+    assert final.endswith(tick.DIGEST_QUESTION)
+    assert final.count(tick.DIGEST_QUESTION) == 1
+
+
+def test_deliver_digest_rewrite_prompt_forbids_own_question(db, fake_run):
+    raw = {"kind": "digest", "question": tick.DIGEST_QUESTION}
+    fake_run.rewrite_responses = [_completed(0, "Сводка коротко.")]
+    fake_run.send_response = _completed(0, "")
+
+    gate.deliver(db, "digest", raw, "fallback\n\n" + tick.DIGEST_QUESTION, CFG,
+                  now_utc="2026-07-11T12:00:00+05:00", force=True)
+
+    rewrite_args, _ = fake_run.calls[0]
+    prompt = rewrite_args[rewrite_args.index("-z") + 1]
+    assert "Не задавай вопросов" in prompt
+
+
+def test_deliver_reminder_prompt_has_no_digest_question_instruction(db, fake_run):
+    fake_run.rewrite_responses = [_completed(0, "Скоро событие.")]
+    fake_run.send_response = _completed(0, "")
+
+    gate.deliver(db, "reminder", {"label": "тест"}, "fallback", CFG,
+                  now_utc="2026-07-11T12:00:00+05:00")
+
+    rewrite_args, _ = fake_run.calls[0]
+    prompt = rewrite_args[rewrite_args.index("-z") + 1]
+    assert "Не задавай вопросов" not in prompt
+
+
+def test_deliver_digest_fallback_appends_question_exactly_once_no_duplicate(db, fake_run):
+    # human_fallback mirrors tick._build_digest_fallback: it already ends
+    # with the question by construction (a single "\n" separator, the
+    # last line of the lines list) -- the dedupe must not double it when
+    # the rewrite fails and this fallback text becomes final_text verbatim.
+    raw = {"kind": "digest", "question": tick.DIGEST_QUESTION}
+    human_fallback = (
+        "Доброе утро! Сегодня 2026-07-11.\nСобытий нет.\n" + tick.DIGEST_QUESTION
+    )
+    fake_run.rewrite_responses = [_completed(1, "", "boom")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(db, "digest", raw, human_fallback, CFG,
+                           now_utc="2026-07-11T12:00:00+05:00", force=True)
+    db.commit()
+
+    assert status == "sent"
+    rows = audit.query(db, None, "gate.sent", None)
+    final = rows[0]["payload"]["final"]
+    assert rows[0]["payload"]["attempt"] == "fallback"
+    assert final.endswith(tick.DIGEST_QUESTION)
+    assert final.count(tick.DIGEST_QUESTION) == 1
+
+
+def test_deliver_reminder_kind_no_question_logic_even_if_raw_has_question(db, fake_run):
+    # Guard: question handling is gated on kind=="digest" only -- a
+    # reminder's raw is never inspected for a "question" key, even if one
+    # happens to be present.
+    fake_run.rewrite_responses = [_completed(0, "Скоро событие.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", {"label": "тест", "question": "Куда идём?"}, "fallback",
+        CFG, now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    rows = audit.query(db, None, "gate.sent", None)
+    assert rows[0]["payload"]["final"] == "Скоро событие."
+
+
+DIGEST_TIGHT_CFG = dict(CFG, max_len_digest=30)
+
+
+def test_deliver_digest_over_ceiling_shortens_informational_question_preserved(db, fake_run):
+    question = "Что по планам?"
+    raw = {"kind": "digest", "question": question}
+    fake_run.rewrite_responses = [
+        _completed(0, "очень длинный текст сверх лимита для дайджеста"),
+        _completed(0, "коротко"),
+    ]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(db, "digest", raw, "fallback\n\n" + question,
+                           DIGEST_TIGHT_CFG,
+                           now_utc="2026-07-11T12:00:00+05:00", force=True)
+    db.commit()
+
+    assert status == "sent"
+    rows = audit.query(db, None, "gate.sent", None)
+    payload = rows[0]["payload"]
+    assert payload["final"] == "коротко\n\n" + question
+    assert payload["final"].count(question) == 1
+    assert "long" not in payload
+
+    # the shorten-retry must target the informational part only, not the
+    # combined (question-included) text -- the question is re-appended
+    # after, never sent through the LLM's "shorten to N chars" instruction.
+    shorten_args, _ = fake_run.calls[1]
+    shorten_prompt = shorten_args[shorten_args.index("-z") + 1]
+    assert question not in shorten_prompt
+
+
+def test_deliver_digest_still_over_ceiling_sends_with_long_flag_question_preserved(db, fake_run):
+    question = "Что по планам?"
+    raw = {"kind": "digest", "question": question}
+    long_text = "очень длинный текст сверх лимита для дайджеста"
+    fake_run.rewrite_responses = [
+        _completed(0, long_text),
+        _completed(0, "всё ещё длинновато для лимита дайджеста"),
+    ]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(db, "digest", raw, "fallback\n\n" + question,
+                           DIGEST_TIGHT_CFG,
+                           now_utc="2026-07-11T12:00:00+05:00", force=True)
+    db.commit()
+
+    assert status == "sent"
+    rows = audit.query(db, None, "gate.sent", None)
+    payload = rows[0]["payload"]
+    # the ceiling is never allowed to truncate the question away, even
+    # when the informational part is still too long after one shorten
+    # retry -- long=True flags it instead, exactly like the reminder path.
+    assert payload["final"].endswith(question)
+    assert payload["final"].count(question) == 1
+    assert payload["long"] is True

@@ -40,6 +40,17 @@ GATE_STYLE_INSTRUCTION = (
     "адрес, сумма) — остальные детали убирай."
 )
 
+# Live-found bug: a real digest went out with the weather/events summary
+# but without its closing question -- the LLM rewrite's own brevity rules
+# ("1-3 коротких предложения") won out over preserving raw["question"].
+# Fix: the digest's closing question is no longer the LLM's job at all.
+# This instruction tells the rewrite not to write one of its own, and
+# deliver() appends the real question (raw["question"]) itself,
+# deterministically, after the rewrite -- see _ensure_trailing_question.
+GATE_DIGEST_NO_QUESTION_INSTRUCTION = (
+    "Не задавай вопросов и не добавляй призывов — только сводка."
+)
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -120,9 +131,17 @@ def budget_spent_today(conn, now_utc=None):
     return sum(1 for r in rows if json.loads(r["payload"]).get("kind") != "digest")
 
 
-def _build_prompt(raw):
+def _build_prompt(raw, kind=None):
+    """Build the rewrite prompt for `raw`. For kind=="digest", the style
+    instruction gets GATE_DIGEST_NO_QUESTION_INSTRUCTION appended -- the
+    LLM must never write its own closing question/CTA for a digest;
+    deliver() owns that deterministically (see _ensure_trailing_question).
+    """
+    instruction = GATE_STYLE_INSTRUCTION
+    if kind == "digest":
+        instruction = f"{instruction} {GATE_DIGEST_NO_QUESTION_INSTRUCTION}"
     return (
-        f"{GATE_STYLE_INSTRUCTION}\n"
+        f"{instruction}\n"
         "Перепиши следующий факт для отправки пользователю: "
         f"{json.dumps(raw, ensure_ascii=False)}"
     )
@@ -130,6 +149,34 @@ def _build_prompt(raw):
 
 def _shorten_prompt(text, max_len):
     return f"Сократи до {max_len} знаков: {text}"
+
+
+def _strip_trailing_question(text, question):
+    """Remove a trailing occurrence of `question` from `text` (and any
+    whitespace/newline separator right before it), if present. The
+    return value never ends with `question`.
+
+    Used so the digest's closing question can always be appended in
+    canonical form (see _ensure_trailing_question) without ever
+    double-including it -- regardless of whether `text` is an LLM
+    rewrite (instructed to never add its own question -- see
+    GATE_DIGEST_NO_QUESTION_INSTRUCTION -- so this is normally a no-op
+    for it) or the deterministic human_fallback (which already ends with
+    the question by construction, in tick._build_digest_fallback).
+    """
+    stripped = text.rstrip()
+    if stripped.endswith(question):
+        stripped = stripped[: -len(question)].rstrip()
+    return stripped
+
+
+def _ensure_trailing_question(text, question):
+    """Return `text` with `question` guaranteed to be present as its own
+    final line, exactly once -- strip-then-append rather than a presence
+    check, so formatting differences (e.g. a single vs double newline
+    before it) always collapse to the same canonical form.
+    """
+    return f"{_strip_trailing_question(text, question)}\n\n{question}"
 
 
 def _call_rewrite(prompt, cfg):
@@ -177,9 +224,24 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
          return "budget".
       3. rewrite via hermes -z; any failure/empty output falls back to
          human_fallback (attempt="fallback" vs "rewrite").
+      3b. digest closing question (kind=="digest" and raw["question"] is
+          a non-empty string): final_text is guaranteed to end with
+          raw["question"] as its own last line, exactly once, on BOTH
+          the rewrite and fallback paths (_ensure_trailing_question) --
+          see GATE_DIGEST_NO_QUESTION_INSTRUCTION's docstring for why
+          this is deterministic rather than left to the LLM. Any other
+          kind (or a digest with no/blank raw["question"]) skips this
+          step entirely.
       4. length ceiling (max_len_reminder for kind="reminder",
-         max_len_digest otherwise): over -> one "Сократи до N знаков:"
-         retry; still over -> send as-is with long=True in the audit.
+         max_len_digest otherwise), checked against the combined text:
+         over -> one "Сократи до N знаков:" retry; still over -> send
+         as-is with long=True in the audit. When step 3b applied, the
+         shorten-retry targets the informational part only (the question
+         stripped back off first) so the question is never sent through
+         a "shorten to N chars" instruction, then is re-appended after --
+         the question itself is never truncated away, even when the
+         combined text is still over max_len afterwards (long=True
+         covers that case, same as the no-question path).
       5. send via hermes send; failure -> audit gate.error, return
          "error". Success -> audit gate.sent{kind,raw,final,attempt[,long]},
          return "sent".
@@ -194,7 +256,7 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
         audit.log(conn, "gate.skip", {"kind": kind, "reason": "budget"})
         return "budget"
 
-    rewritten = _call_rewrite(_build_prompt(raw), cfg)
+    rewritten = _call_rewrite(_build_prompt(raw, kind), cfg)
     if rewritten is not None:
         final_text = rewritten
         attempt = "rewrite"
@@ -202,14 +264,28 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
         final_text = human_fallback
         attempt = "fallback"
 
+    question = raw.get("question") if kind == "digest" else None
+    if not (isinstance(question, str) and question.strip()):
+        question = None
+    if question is not None:
+        final_text = _ensure_trailing_question(final_text, question)
+
     max_len = cfg["max_len_reminder"] if kind == "reminder" else cfg["max_len_digest"]
     long_flag = False
     if len(final_text) > max_len:
-        shortened = _call_rewrite(_shorten_prompt(final_text, max_len), cfg)
-        if shortened is not None and len(shortened) <= max_len:
-            final_text = shortened
+        if question is not None:
+            informational = _strip_trailing_question(final_text, question)
+            shortened = _call_rewrite(_shorten_prompt(informational, max_len), cfg)
+            if shortened is not None:
+                final_text = _ensure_trailing_question(shortened, question)
+            if len(final_text) > max_len:
+                long_flag = True
         else:
-            long_flag = True
+            shortened = _call_rewrite(_shorten_prompt(final_text, max_len), cfg)
+            if shortened is not None and len(shortened) <= max_len:
+                final_text = shortened
+            else:
+                long_flag = True
 
     if not _call_send(final_text, cfg):
         audit.log(conn, "gate.error",
