@@ -84,7 +84,7 @@ way to read or change family data.
 | One event | `fam cal show <id>` |
 | One day | `fam cal day YYYY-MM-DD` |
 | A date range | `fam cal range <from_iso> <to_iso>` |
-| Day/week/month picture | `fam cal grid --day YYYY-MM-DD -o /tmp/grid.png` (or `--week YYYY-MM-DD` / `--month YYYY-MM`) |
+| Day/week/month picture | `fam cal grid --day YYYY-MM-DD -o /home/denis/.hermes/cache/documents/grid.png` (or `--week YYYY-MM-DD` / `--month YYYY-MM`) |
 | Who is X | `fam people resolve "X"` |
 | Add a person/group | `fam people add "Name" [--group] [--alias A]` |
 | Add an alias | `fam people alias <ref> <alias>` |
@@ -95,14 +95,14 @@ way to read or change family data.
 
 ## Calendar Grid
 
-`fam cal grid --day YYYY-MM-DD -o /tmp/grid.png --json` (or `--week
+`fam cal grid --day YYYY-MM-DD -o /home/denis/.hermes/cache/documents/grid.png --json` (or `--week
 YYYY-MM-DD`, or `--month YYYY-MM`) renders a PNG picture of the day, week,
 or month — exactly one of `--day`/`--week`/`--month` is required.
 Synonyms that all mean "render the grid": "сетка", "расписание", "календарь
 покажи/пришли", as well as "покажи день/неделю/месяц".
 
 If the render succeeds, send the picture back to the user by including
-`MEDIA:/tmp/grid.png` in your reply.
+`MEDIA:/home/denis/.hermes/cache/documents/grid.png` in your reply.
 
 **Honest failure — never claim a picture that doesn't exist.** If `cal
 grid` exits non-zero, or the output file doesn't exist afterward (check
