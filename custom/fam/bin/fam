@@ -1,4 +1,27 @@
 #!/usr/bin/env bash
 # Runs fam from any context (host or sandbox) via its own location.
+#
+# Prefers the repo venv's python3 (has Pillow etc.) when it's actually
+# usable by the interpreter that ends up running. On the host, the venv's
+# python3 symlink resolves to the same versioned interpreter the venv was
+# built with, so its site-packages apply normally.
+#
+# Inside the agent sandbox, this same code+venv tree is bind-mounted too,
+# but venv/bin/python3 is an *absolute* symlink (-> /usr/bin/python3) that,
+# resolved inside the container's own root filesystem, lands on a *different*
+# unrelated system Python (different minor version, no matching
+# lib/pythonX.Y/site-packages under venv/) instead of failing outright — so a
+# bare executable check is not enough to trust it. We additionally confirm
+# that interpreter's own version has a matching site-packages directory in
+# the venv before using it, and fall back to PATH's python3 (the sandbox's
+# own interpreter, where Pillow is installed separately) otherwise.
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m fam "$@"
+VENV_PY="$DIR/../../venv/bin/python3"
+PY="python3"
+if [ -x "$VENV_PY" ]; then
+  VER="$("$VENV_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
+  if [ -n "$VER" ] && [ -d "$DIR/../../venv/lib/python$VER/site-packages" ]; then
+    PY="$VENV_PY"
+  fi
+fi
+PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m fam "$@"

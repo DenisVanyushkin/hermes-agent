@@ -270,3 +270,79 @@ internet egress unaffected (`https://api.telegram.org` → HTTP 302).
   `faster-whisper` fallback is comparable once warm (~7-8s) but has a slow
   cold start (~16.6s first load) if the process hasn't transcribed anything
   yet.
+
+
+## Phase 2a — fam sandbox bridge (2026-07-11)
+
+Amina's personal-assistant data tool (`custom/fam`, a small CLI backed by SQLite —
+people/places/calendar/audit log) is reachable both from the host and from the
+agent's own terminal sandbox (Docker), against the **same** live database.
+
+### Mounts (`terminal.docker_volumes`, `~/.hermes/config.yaml`)
+
+Two mounts make this work, both required:
+
+- `~/.hermes/hermes-agent:/workspace/live-hermes` — fam's **code** (already existed,
+  used by other `custom/` tools too).
+- `~/.hermes/private/amina:/root/.hermes/private/amina` — fam's **database**
+  (`assistant.db`), added in Phase 2a Task 7.
+
+Inside the sandbox: `python3 -c "import fam.db as d; print(d.resolve_db_path())"`
+(or just `custom/fam/bin/fam --json init`) resolves to
+`/root/.hermes/private/amina/assistant.db`, the exact bind-mounted path — same
+file the host resolves to at `/home/denis/.hermes/private/amina/assistant.db`. One
+database, two access points.
+
+**Recreate sandbox containers after any `docker_volumes` change.**
+`terminal.container_persistent: true` means running `hermes-*` containers keep
+whatever mounts they were created with; editing `config.yaml` alone does **not**
+retroactively add a new mount to an already-running container. After changing
+`docker_volumes`, remove the *sandbox* containers so the agent creates fresh ones
+on next use:
+
+```
+docker ps -a --filter 'name=^hermes-' --format '{{.Names}}'   # verify list first!
+docker rm -f <name-1> <name-2> ...                            # then remove by exact name
+systemctl --user restart hermes-gateway
+```
+
+**Use the anchored `^hermes-` filter, and eyeball the printed list before removing
+anything.** An unanchored `--filter name=hermes-` matches *substrings* anywhere in
+the container name — it would also catch `deploy-hermes-webui-1` (the production
+web UI container, unrelated to the agent sandbox, must never be touched here).
+
+### `bin/fam` — venv-preferring shim
+
+`custom/fam/bin/fam` runs `python3 -m fam` with `PYTHONPATH` set to its own
+package directory, so it works unmodified from either context. It prefers the
+repo's own `venv/bin/python3` (has Pillow, needed for `fam cal grid`) over
+whatever `python3` resolves to on `PATH`, mirroring
+`custom/stt/transcribe_remote.sh`'s `VENV_PY` pattern — with one extra check
+`transcribe_remote.sh` didn't need: since the sandbox bind-mounts the *entire*
+repo (including `venv/`), `venv/bin/python3`'s absolute symlink target
+(`-> /usr/bin/python3`) resolves *inside the container's own filesystem* to an
+unrelated system Python of a different minor version (no matching
+`venv/lib/pythonX.Y/site-packages` for that version), rather than failing
+outright — so the shim also checks that the resolved interpreter's version has a
+matching `site-packages` dir in the venv before trusting it, and falls back to
+`python3` on `PATH` otherwise (the sandbox's own interpreter, where Pillow is
+installed separately — see below).
+
+### Pillow in the sandbox
+
+Pillow is **not** part of the sandbox image (`nikolaik/python-nodejs:python3.11-nodejs20`)
+and is **not** picked up from the host venv inside the container (see above), so
+`fam cal grid` needs it installed directly in the running sandbox container:
+`pip install Pillow`. This lands in the container's own (non-bind-mounted)
+`site-packages`, so it persists only as long as that specific container isn't
+recreated — reinstall after any container recreation (e.g. after a
+`docker_volumes` change, see above).
+
+### Regression coverage
+
+`custom/fam/tests/test_no_pillow_import.py` guards that `fam.cli` / `fam.grid`
+import cleanly with Pillow completely blocked (via a `sys.meta_path` finder that
+raises `ImportError` for `PIL`/`PIL.*`) — Pillow is only ever imported lazily
+inside `grid.render_month()`/`render_week()`, so every other `fam` subcommand
+must keep working in environments without Pillow (e.g. the sandbox, before
+`pip install Pillow` has been run there).
