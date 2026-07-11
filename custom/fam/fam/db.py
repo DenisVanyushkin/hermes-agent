@@ -115,6 +115,10 @@ def init_db(conn):
     _ensure_column(conn, "places", "travel_min",
                    "travel_min INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "events", "travel_min", "travel_min INTEGER")
+    # pre-live guards (post-review): retry cap on repeated tick delivery
+    # errors (fam/tick.py) needs a per-reminder counter.
+    _ensure_column(conn, "reminders", "error_count",
+                   "error_count INTEGER NOT NULL DEFAULT 0")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','2b')")
     conn.execute(

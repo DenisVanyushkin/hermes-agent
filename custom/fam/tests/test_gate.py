@@ -14,6 +14,7 @@ CFG = {
     "gate_provider": "openai-codex",
     "max_len_reminder": 300,
     "max_len_digest": 900,
+    "reminder_max_age_min": 120,
 }
 
 
@@ -89,6 +90,24 @@ def test_load_config_reads_existing_without_overwriting(tmp_path):
     cfg = gate.load_config(config_path=target, example_path=example)
 
     assert cfg["target"] == "whatsapp:+70000000000"
+
+
+def test_load_config_default_merges_missing_reminder_max_age_min(tmp_path):
+    # A live config predating the reminder_max_age_min key (Fix 1,
+    # pre-live guards) must still load -- the key is merged in at its
+    # default (120) in memory, without rewriting the admin's file on disk.
+    example = tmp_path / "fam-config.example.json"
+    example.write_text(json.dumps(CFG, ensure_ascii=False), encoding="utf-8")
+    target = tmp_path / "private" / "amina" / "fam-config.json"
+    target.parent.mkdir(parents=True)
+    legacy = {k: v for k, v in CFG.items() if k != "reminder_max_age_min"}
+    target.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    cfg = gate.load_config(config_path=target, example_path=example)
+
+    assert cfg["reminder_max_age_min"] == 120
+    on_disk = json.loads(target.read_text(encoding="utf-8"))
+    assert "reminder_max_age_min" not in on_disk
 
 
 # ---- in_quiet_hours: cross-midnight window (21:30-07:30 Almaty) ----

@@ -25,6 +25,13 @@ HERMES = ["/home/denis/.hermes/hermes-agent/venv/bin/python", "-m", "hermes_cli.
 CONFIG_PATH = Path("/home/denis/.hermes/private/amina/fam-config.json")
 CONFIG_EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "fam-config.example.json"
 
+# Keys added to fam-config.example.json after a live config may already
+# exist on disk. load_config() default-merges any of these missing from
+# the loaded JSON so an older live config keeps working without a manual
+# edit -- the file on disk is never rewritten for this, only the in-memory
+# dict returned to the caller.
+CONFIG_DEFAULTS = {"reminder_max_age_min": 120}
+
 GATE_STYLE_INSTRUCTION = (
     "Ты пишешь как Гермес — тёплый, лаконичный ассистент семьи. Перепиши "
     "заново в 1-3 коротких предложения. Тон тёплый, без канцелярита и "
@@ -56,13 +63,20 @@ def load_config(config_path=None, example_path=None):
     config_path/example_path are injection points for tests; they default
     to the real live path (~/.hermes/private/amina/fam-config.json) and
     the git template (custom/fam/fam-config.example.json).
+
+    Any key in CONFIG_DEFAULTS missing from the loaded JSON (a live config
+    that predates that key) is default-merged into the returned dict --
+    see CONFIG_DEFAULTS's docstring.
     """
     cfg_path = Path(config_path) if config_path is not None else CONFIG_PATH
     ex_path = Path(example_path) if example_path is not None else CONFIG_EXAMPLE_PATH
     if not cfg_path.exists():
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text(ex_path.read_text(encoding="utf-8"), encoding="utf-8")
-    return json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    for key, value in CONFIG_DEFAULTS.items():
+        cfg.setdefault(key, value)
+    return cfg
 
 
 def in_quiet_hours(now_utc, cfg):

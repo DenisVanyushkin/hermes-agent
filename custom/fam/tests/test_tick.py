@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from fam import audit, cal, gate, people, places, tick
@@ -11,10 +13,15 @@ CFG = {
     "gate_provider": "openai-codex",
     "max_len_reminder": 300,
     "max_len_digest": 900,
+    "reminder_max_age_min": 120,
 }
 
 NOW = "2026-07-20T04:30:00+00:00"
-PAST = "2000-01-01T00:00:00+00:00"   # always "due" relative to NOW
+# 10 min before NOW: always "due" relative to NOW, and -- since Fix 1's
+# stale-age guard cancels anything older than cfg["reminder_max_age_min"]
+# (120 min default) -- fresh enough to survive it and reach gate.deliver,
+# unlike the year-2000 timestamp this used to be.
+PAST = "2026-07-20T04:20:00+00:00"
 FUTURE = "2099-01-01T00:00:00+00:00"  # never "due" relative to NOW
 
 
@@ -70,7 +77,8 @@ def test_due_selection_only_past_fire_at_is_processed(db, fake_deliver):
     counts = tick.reminders(db, now_utc=NOW, cfg=CFG)
 
     assert counts == {"due": 1, "sent": 1, "quiet": 0, "budget": 0,
-                       "error": 0, "cancelled": 0}
+                       "error": 0, "cancelled": 0, "stale": 0,
+                       "error_capped": 0}
     assert len(fake_deliver.calls) == 1
     statuses = {r["id"]: r["status"] for r in db.execute(
         "SELECT id, status FROM reminders WHERE event_id=?", (e["id"],))}
@@ -179,7 +187,8 @@ def test_inactive_event_cancels_reminder_without_delivering(db, fake_deliver,
     counts = tick.reminders(db, now_utc=NOW, cfg=CFG)
 
     assert counts == {"due": 1, "sent": 0, "quiet": 0, "budget": 0,
-                       "error": 0, "cancelled": 1}
+                       "error": 0, "cancelled": 1, "stale": 0,
+                       "error_capped": 0}
     assert fake_deliver.calls == []
     row = db.execute(
         "SELECT status FROM reminders WHERE id=?", (rid,)
@@ -192,6 +201,134 @@ def test_inactive_event_cancels_reminder_without_delivering(db, fake_deliver,
     assert audit_rows[0]["payload"] == {"reminder_id": rid, "event_id": e["id"]}
 
 
+# ---- stale-age guard: parked-too-long reminders are cancelled, not sent
+# (Fix 1, pre-live guards review round) ----
+
+def test_stale_pending_reminder_8h_old_is_cancelled_not_delivered(db, fake_deliver):
+    # Models a reminder repeatedly parked by quiet hours until it's 8h
+    # old -- well past reminder_max_age_min (120 min default) -- which
+    # must now be cancelled as stale rather than delivered late.
+    e = _event(db)  # start 2026-07-20T05:00:00+00:00, 30 min after NOW
+    db.commit()
+    old_fire_at = "2026-07-19T20:30:00+00:00"  # 8h before NOW
+    rid = _insert_reminder(db, e["id"], fire_at=old_fire_at)
+    db.commit()
+    fake_deliver.responses = []  # must not be called
+
+    counts = tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    assert counts["due"] == 1
+    assert counts["stale"] == 1
+    assert counts["sent"] == 0
+    assert fake_deliver.calls == []
+    row = db.execute(
+        "SELECT status FROM reminders WHERE id=?", (rid,)
+    ).fetchone()
+    assert row["status"] == "cancelled"
+
+    audit_rows = audit.query(db, since_utc=None, kind_prefix="rem.cancel_stale_age",
+                              grep=None, limit=10)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["payload"] == {
+        "reminder_id": rid, "event_id": e["id"],
+        "fire_at_utc": old_fire_at, "age_min": 480,
+    }
+
+
+def test_fresh_reminder_10_min_late_is_delivered_normally(db, fake_deliver):
+    # Age < reminder_max_age_min (120): delivered as normal, not stale.
+    e = _event(db)
+    db.commit()
+    rid = _insert_reminder(db, e["id"], fire_at=PAST)  # 10 min before NOW
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    counts = tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    assert counts["due"] == 1
+    assert counts["stale"] == 0
+    assert counts["sent"] == 1
+    assert len(fake_deliver.calls) == 1
+    row = db.execute(
+        "SELECT status FROM reminders WHERE id=?", (rid,)
+    ).fetchone()
+    assert row["status"] == "sent"
+
+
+def test_stale_via_event_start_far_in_past_even_with_fresh_fire_at(db, fake_deliver):
+    # The OR branch: a fresh fire_at (age 0) is still stale if the
+    # event's own start_utc is already more than max_age in the past --
+    # e.g. a reminder regenerated late for an event that already happened.
+    e = _event(db, start="2026-07-20T02:00:00+00:00")  # 2h30m before NOW
+    db.commit()
+    rid = _insert_reminder(db, e["id"], fire_at=NOW)
+    db.commit()
+    fake_deliver.responses = []  # must not be called
+
+    counts = tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    assert counts["stale"] == 1
+    assert counts["sent"] == 0
+    assert fake_deliver.calls == []
+    row = db.execute(
+        "SELECT status FROM reminders WHERE id=?", (rid,)
+    ).fetchone()
+    assert row["status"] == "cancelled"
+
+
+# ---- retry cap: repeated delivery errors eventually cancel the reminder
+# (Fix 2, pre-live guards review round) ----
+
+def test_two_errors_keep_reminder_pending_with_incrementing_error_count(db, fake_deliver):
+    e = _event(db)
+    db.commit()
+    rid = _insert_reminder(db, e["id"])
+    db.commit()
+
+    fake_deliver.responses = ["error"]
+    first = tick.reminders(db, now_utc=NOW, cfg=CFG)
+    assert first["error"] == 1
+    assert first["error_capped"] == 0
+
+    fake_deliver.responses = ["error"]
+    second = tick.reminders(db, now_utc=NOW, cfg=CFG)
+    assert second["error"] == 1
+    assert second["error_capped"] == 0
+
+    row = db.execute(
+        "SELECT status, error_count FROM reminders WHERE id=?", (rid,)
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["error_count"] == 2
+
+
+def test_third_error_hits_cap_and_cancels(db, fake_deliver):
+    e = _event(db)
+    db.commit()
+    rid = _insert_reminder(db, e["id"])
+    db.commit()
+
+    for _ in range(2):
+        fake_deliver.responses = ["error"]
+        tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    fake_deliver.responses = ["error"]
+    counts = tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    assert counts["error"] == 0
+    assert counts["error_capped"] == 1
+    row = db.execute(
+        "SELECT status, error_count FROM reminders WHERE id=?", (rid,)
+    ).fetchone()
+    assert row["status"] == "cancelled"
+    assert row["error_count"] == 3
+
+    audit_rows = audit.query(db, since_utc=None, kind_prefix="rem.cancel_error_cap",
+                              grep=None, limit=10)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["payload"] == {"reminder_id": rid, "errors": 3}
+
+
 # ---- zero-run always audits ----
 
 def test_zero_due_run_still_audits_tick_reminders(db, fake_deliver):
@@ -200,7 +337,8 @@ def test_zero_due_run_still_audits_tick_reminders(db, fake_deliver):
     counts = tick.reminders(db, now_utc=NOW, cfg=CFG)
 
     assert counts == {"due": 0, "sent": 0, "quiet": 0, "budget": 0,
-                       "error": 0, "cancelled": 0}
+                       "error": 0, "cancelled": 0, "stale": 0,
+                       "error_capped": 0}
     rows = audit.query(db, since_utc=None, kind_prefix="tick.reminders",
                         grep=None, limit=10)
     assert len(rows) == 1
@@ -241,7 +379,8 @@ def test_idempotent_rerun_sees_zero_due(db, fake_deliver):
     second = tick.reminders(db, now_utc=NOW, cfg=CFG)
 
     assert second == {"due": 0, "sent": 0, "quiet": 0, "budget": 0,
-                       "error": 0, "cancelled": 0}
+                       "error": 0, "cancelled": 0, "stale": 0,
+                       "error_capped": 0}
     assert len(fake_deliver.calls) == 1  # only the first run's call
 
 
@@ -266,13 +405,20 @@ def test_idempotent_rerun_after_quiet_leaves_reminder_due_again(db, fake_deliver
 
 # ---- default now_utc / default cfg wiring (no explicit override) ----
 
-def test_reminders_uses_real_now_when_not_given(db, fake_deliver, monkeypatch):
-    # No event/reminder due "for real" (fixture rows use PAST, which is
-    # always due regardless of wall-clock time) -- this just pins that
-    # omitting now_utc doesn't raise and produces a real ISO string.
-    e = _event(db)
+def test_reminders_uses_real_now_when_not_given(db, fake_deliver):
+    # This pins that omitting now_utc doesn't raise and drives
+    # due-selection off the real wall clock. Both the event start and the
+    # reminder's fire_at are built relative to the real current time
+    # (rather than the fixed NOW/PAST constants) so they stay inside
+    # reminder_max_age_min of whenever this test actually runs -- an
+    # old fixed timestamp would now be judged stale by Fix 1's guard
+    # before ever reaching gate.deliver.
+    real_now = datetime.now(timezone.utc)
+    start = (real_now + timedelta(hours=1)).isoformat(timespec="seconds")
+    fire_at = (real_now - timedelta(minutes=5)).isoformat(timespec="seconds")
+    e = _event(db, start=start)
     db.commit()
-    _insert_reminder(db, e["id"])
+    _insert_reminder(db, e["id"], fire_at=fire_at)
     db.commit()
     fake_deliver.responses = ["sent"]
 

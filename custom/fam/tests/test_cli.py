@@ -1,4 +1,6 @@
 import json
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fam import cal, cli, gate, people, places, rem
 
@@ -304,7 +306,40 @@ def test_rem_rules_plain_output(db, capsys):
 # gate's own subprocess pipeline (test_gate.py) or the tick orchestration
 # logic itself (test_tick.py).
 
-def _due_reminder(db, event_id, fire_at="2000-01-01T00:00:00+00:00"):
+# fam tick reminders (cmd_tick_reminders) calls tick.reminders(conn,
+# now_utc=args.now) with no cfg override, so an un-monkeypatched run falls
+# through to gate.load_config()'s REAL CONFIG_PATH/CONFIG_EXAMPLE_PATH --
+# i.e. the live /home/denis/.hermes/private/amina/fam-config.json on
+# whatever machine runs the suite. Every test below must monkeypatch
+# gate.CONFIG_PATH/CONFIG_EXAMPLE_PATH to tmp_path first (mirrors
+# test_tick.py's test_reminders_loads_config_when_not_given) so the CLI
+# suite can never write to that real path on a foreign machine.
+_HERMETIC_CFG = {
+    "target": "whatsapp:+77782110625",
+    "quiet_start": "21:30",
+    "quiet_end": "07:30",
+    "daily_budget": 8,
+    "gate_model": "gpt-5.4-mini",
+    "gate_provider": "openai-codex",
+    "max_len_reminder": 300,
+    "max_len_digest": 900,
+    "reminder_max_age_min": 120,
+}
+
+def _hermetic_gate_config(tmp_path, monkeypatch):
+    example = tmp_path / "fam-config.example.json"
+    example.write_text(json.dumps(_HERMETIC_CFG, ensure_ascii=False),
+                        encoding="utf-8")
+    target = tmp_path / "fam-config.json"
+    monkeypatch.setattr(gate, "CONFIG_PATH", target)
+    monkeypatch.setattr(gate, "CONFIG_EXAMPLE_PATH", example)
+
+def _due_reminder(db, event_id, fire_at=None):
+    if fire_at is None:
+        # Fresh relative to the real wall clock -- Fix 1's stale-age guard
+        # would otherwise cancel an old fixed timestamp before delivery.
+        fire_at = (datetime.now(timezone.utc) - timedelta(minutes=10)
+                   ).isoformat(timespec="seconds")
     cur = db.execute(
         "INSERT INTO reminders(event_id, label, anchor, fire_at_utc, "
         "status, created_at) VALUES (?,?,?,?,?,?)",
@@ -313,7 +348,8 @@ def _due_reminder(db, event_id, fire_at="2000-01-01T00:00:00+00:00"):
     )
     return cur.lastrowid
 
-def test_tick_reminders_json_shape(db, capsys, monkeypatch):
+def test_tick_reminders_json_shape(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
     e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
     db.commit()
     _due_reminder(db, e["id"])
@@ -325,15 +361,19 @@ def test_tick_reminders_json_shape(db, capsys, monkeypatch):
 
     assert rc == 0
     assert out == {"due": 1, "sent": 1, "quiet": 0, "budget": 0,
-                    "error": 0, "cancelled": 0}
+                    "error": 0, "cancelled": 0, "stale": 0,
+                    "error_capped": 0}
 
-def test_tick_reminders_now_override(db, capsys, monkeypatch):
+def test_tick_reminders_now_override(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
     e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
     db.commit()
     # fire_at is in the future relative to the real wall clock but in the
     # past relative to the --now override below -- pins that --now, not
-    # real time, drives due-selection.
-    _due_reminder(db, e["id"], fire_at="2030-06-01T00:00:00+00:00")
+    # real time, drives due-selection. Kept within reminder_max_age_min
+    # (120 min default) of the override so Fix 1's stale-age guard doesn't
+    # cancel it before delivery.
+    _due_reminder(db, e["id"], fire_at="2030-06-01T23:50:00+00:00")
     db.commit()
     monkeypatch.setattr(gate, "deliver", lambda *a, **k: "sent")
 
@@ -345,7 +385,8 @@ def test_tick_reminders_now_override(db, capsys, monkeypatch):
     assert out["due"] == 1
     assert out["sent"] == 1
 
-def test_tick_reminders_plain_output(db, capsys, monkeypatch):
+def test_tick_reminders_plain_output(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
     monkeypatch.setattr(gate, "deliver", lambda *a, **k: "sent")
 
     rc = cli.main(["tick", "reminders"])

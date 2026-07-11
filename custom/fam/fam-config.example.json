@@ -6,5 +6,6 @@
   "gate_model": "gpt-5.4-mini",
   "gate_provider": "openai-codex",
   "max_len_reminder": 300,
-  "max_len_digest": 900
+  "max_len_digest": 900,
+  "reminder_max_age_min": 120
 }
