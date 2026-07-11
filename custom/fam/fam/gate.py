@@ -48,7 +48,9 @@ GATE_STYLE_INSTRUCTION = (
 # deliver() appends the real question (raw["question"]) itself,
 # deterministically, after the rewrite -- see _ensure_trailing_question.
 GATE_DIGEST_NO_QUESTION_INSTRUCTION = (
-    "Не задавай вопросов и не добавляй призывов — только сводка."
+    "Не задавай вопросов и не добавляй призывов — только сводка. "
+    "Если в сводке есть погода — обязательно укажи диапазон температур (минимум…максимум). "
+    "Лаконичность не должна терять факты: каждое поле сводки должно быть отражено в тексте."
 )
 
 

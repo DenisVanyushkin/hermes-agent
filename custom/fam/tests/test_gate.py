@@ -476,6 +476,32 @@ def test_deliver_digest_rewrite_prompt_forbids_own_question(db, fake_run):
     assert "Не задавай вопросов" in prompt
 
 
+def test_deliver_digest_prompt_includes_temperature_range_instruction(db, fake_run):
+    raw = {"kind": "digest", "question": tick.DIGEST_QUESTION}
+    fake_run.rewrite_responses = [_completed(0, "Сводка.")]
+    fake_run.send_response = _completed(0, "")
+
+    gate.deliver(db, "digest", raw, "fallback\n\n" + tick.DIGEST_QUESTION, CFG,
+                  now_utc="2026-07-11T12:00:00+05:00", force=True)
+
+    rewrite_args, _ = fake_run.calls[0]
+    prompt = rewrite_args[rewrite_args.index("-z") + 1]
+    assert "Если в сводке есть погода — обязательно укажи диапазон температур (минимум…максимум)" in prompt
+
+
+def test_deliver_digest_prompt_includes_informativeness_instruction(db, fake_run):
+    raw = {"kind": "digest", "question": tick.DIGEST_QUESTION}
+    fake_run.rewrite_responses = [_completed(0, "Сводка.")]
+    fake_run.send_response = _completed(0, "")
+
+    gate.deliver(db, "digest", raw, "fallback\n\n" + tick.DIGEST_QUESTION, CFG,
+                  now_utc="2026-07-11T12:00:00+05:00", force=True)
+
+    rewrite_args, _ = fake_run.calls[0]
+    prompt = rewrite_args[rewrite_args.index("-z") + 1]
+    assert "Лаконичность не должна терять факты: каждое поле сводки должно быть отражено в тексте" in prompt
+
+
 def test_deliver_reminder_prompt_has_no_digest_question_instruction(db, fake_run):
     fake_run.rewrite_responses = [_completed(0, "Скоро событие.")]
     fake_run.send_response = _completed(0, "")
