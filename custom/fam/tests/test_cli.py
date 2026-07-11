@@ -539,6 +539,31 @@ def test_cal_add_denis_participant_but_email_disabled_does_not_send(db, capsys, 
     assert rc == 0
     assert calls == []
 
+def test_cal_add_mail_hook_config_load_failure_does_not_fail_cal_op(db, capsys, monkeypatch, tmp_path):
+    # Fix round 1 hardening: _maybe_email_event's whole body (config
+    # load, send, audit) is wrapped in try/except -- a raise from
+    # gate.load_config() itself (e.g. a corrupt live config file) must
+    # not propagate past the CLI operation, which has already committed
+    # the calendar write by the time this hook runs.
+    _seed_denis(db)
+    monkeypatch.setattr(
+        cli.gate, "load_config",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("corrupt config")),
+    )
+
+    rc = cli.main(["cal", "add", "--title", "Событие", "--start",
+                    "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert cal.get(db, out["id"]) is not None  # event persisted regardless
+
+    rows = audit.query(db, since_utc=None, kind_prefix="mail.", grep=None, limit=10)
+    errors = [r for r in rows if r["kind"] == "mail.error"]
+    assert len(errors) == 1
+    assert errors[0]["payload"]["event_id"] == out["id"]
+    assert "corrupt config" in errors[0]["payload"]["error"]
+
 def test_cal_add_mail_failure_audits_error_and_does_not_fail_cal_op(db, capsys, monkeypatch, tmp_path):
     _hermetic_gate_config(tmp_path, monkeypatch)
     _seed_denis(db)
@@ -586,6 +611,69 @@ def test_cal_update_without_denis_does_not_trigger_mail(db, capsys, monkeypatch,
 
     assert rc == 0
     assert calls == []
+
+# --- Fix round 1: cal-update mail hook fires only on a MATERIAL change ---
+# (start_utc/end_utc/place/participants/travel_min) -- see cal.py's
+# _MAIL_TRIGGER_COLUMNS/update()'s "_material_changed" signal, which
+# cmd_cal_update consults instead of re-deriving old-vs-new itself.
+
+def test_cal_update_notes_only_on_denis_event_does_not_resend_mail(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _seed_denis(db)
+    calls = []
+    def fake_send(event, cfg, **kwargs):
+        calls.append(event["id"])
+        return {"ok": True, "id": "m1"}
+    monkeypatch.setattr(cli.mail, "send_event_email", fake_send)
+
+    rc_add = cli.main(["cal", "add", "--title", "Событие", "--start",
+                        "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc_add == 0
+    assert len(calls) == 1  # the add fired the hook once, unconditionally
+
+    rc_update = cli.main(["cal", "update", str(out["id"]), "--notes", "просто заметка"])
+    assert rc_update == 0
+
+    # A notes-only update is not material -- call count must stay at 1.
+    assert len(calls) == 1
+
+def test_cal_update_start_utc_on_denis_event_resends_mail(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _seed_denis(db)
+    calls = []
+    def fake_send(event, cfg, **kwargs):
+        calls.append(event["id"])
+        return {"ok": True, "id": "m1"}
+    monkeypatch.setattr(cli.mail, "send_event_email", fake_send)
+
+    rc_add = cli.main(["cal", "add", "--title", "Событие", "--start",
+                        "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc_add == 0
+    assert len(calls) == 1
+
+    rc_update = cli.main(["cal", "update", str(out["id"]), "--start",
+                           "2026-07-15T06:00:00+00:00"])
+    assert rc_update == 0
+
+    # start_utc IS material -- the hook must fire again.
+    assert len(calls) == 2
+
+def test_cal_update_json_output_does_not_leak_material_changed_key(db, capsys, monkeypatch, tmp_path):
+    # "_material_changed" is an internal signal between cal.update() and
+    # cli.py's hook -- it must never appear in `fam cal update --json`'s
+    # public output.
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    monkeypatch.setattr(cli.mail, "send_event_email", lambda *a, **k: {"ok": True, "id": "m1"})
+
+    rc = cli.main(["cal", "update", str(e["id"]), "--notes", "x", "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert "_material_changed" not in out
 
 # --- `fam mail test EVENT_ID` (manual live-trigger command, T11) ---
 

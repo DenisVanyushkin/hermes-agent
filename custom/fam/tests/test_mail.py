@@ -148,6 +148,57 @@ def test_build_ics_escapes_backslash_itself():
     assert _ics_field(ics, "SUMMARY") == "C:\\Users\\denis"
 
 
+def _unfold(ics_text):
+    """Reverse RFC5545 line folding: a continuation physical line starts
+    with a single SPACE: drop the CRLF and that leading space, splicing
+    it onto the end of the previous logical line. Mirrors what any real
+    ICS consumer (and RFC5545 3.1 itself) must do before parsing.
+    """
+    physical = ics_text.split("\r\n")
+    logical = []
+    for line in physical:
+        if line.startswith(" ") and logical:
+            logical[-1] += line[1:]
+        else:
+            logical.append(line)
+    return "\r\n".join(logical)
+
+
+def test_build_ics_folds_long_lines_to_75_octets_and_unfolds_losslessly():
+    # Cyrillic is 2 octets/char in UTF-8 -- this SUMMARY/LOCATION each
+    # blow past the 75-octet RFC5545 line limit by a wide margin, and the
+    # multi-byte characters land at all sorts of offsets relative to any
+    # naive fixed-width split, so a byte-unsafe fold would corrupt one.
+    long_title = "Очень длинное название события, которое совершенно точно не влезает в одну строку ICS " * 2
+    long_place = "Очень длинное название места проведения встречи, которое тоже не влезает в лимит"
+    ics = mail.build_ics(_event(title=long_title, place={"id": 1, "name": long_place}))
+
+    physical_lines = ics.split("\r\n")
+    assert len(physical_lines) > 1
+    for line in physical_lines:
+        assert len(line.encode("utf-8")) <= 75, f"line exceeds 75 octets: {line!r}"
+
+    # Any continuation line's single leading space landed on a char
+    # boundary -- decoding never raised above, but also assert no fold
+    # boundary split a multi-byte sequence by checking every physical
+    # line round-trips through utf-8 cleanly (already implied, kept
+    # explicit for clarity of intent).
+    for line in physical_lines:
+        line.encode("utf-8").decode("utf-8")
+
+    unfolded = _unfold(ics)
+    assert _ics_field(unfolded, "SUMMARY") == long_title
+    assert _ics_field(unfolded, "LOCATION") == long_place
+
+
+def test_build_ics_short_lines_are_not_folded():
+    ics = mail.build_ics(_event(title="Врач"))
+    # No property line here is anywhere near 75 octets -- folding must be
+    # a no-op: no line should start with a continuation space.
+    physical_lines = ics.split("\r\n")
+    assert not any(line.startswith(" ") for line in physical_lines if line)
+
+
 # ---- build_message ----
 
 def _decode_message(raw_b64url):
@@ -164,9 +215,27 @@ def test_build_message_returns_raw_key_only():
 
 
 def test_build_message_raw_is_urlsafe_base64_alphabet():
+    # Gmail API's "raw" field is base64url per RFC4648 sec5 WITHOUT "="
+    # padding (both the Gmail docs and RFC4648 sec3.2 treat padding as
+    # optional/omittable for this use) -- "=" is deliberately excluded
+    # from the accepted alphabet here, not just from the +/ exclusions.
     result = mail.build_message(_event(), CFG)
-    assert re.fullmatch(r"[A-Za-z0-9_=\-]+", result["raw"])
+    assert re.fullmatch(r"[A-Za-z0-9_\-]+", result["raw"])
     assert "+" not in result["raw"] and "/" not in result["raw"]
+    assert "=" not in result["raw"]
+
+
+def test_build_message_raw_has_no_trailing_padding_regardless_of_length():
+    # Whether the un-padded encoding needs 0/1/2 "=" of padding depends on
+    # len(mime_bytes) % 3, which shifts with content length -- vary the
+    # title length so at least one of these lands on a byte count that
+    # WOULD produce "=" padding if it weren't stripped, pinning the fix
+    # rather than relying on one incidental length.
+    for n in range(1, 8):
+        result = mail.build_message(_event(title="X" * n), CFG)
+        assert not result["raw"].endswith("="), (
+            f"title length {n}: raw ends with padding: {result['raw'][-4:]!r}"
+        )
 
 
 def test_build_message_headers_from_cfg():
@@ -184,6 +253,20 @@ def test_build_message_has_ics_attachment_named_event_ics():
     assert len(attachments) == 1
     ics_bytes = attachments[0].get_payload(decode=True)
     assert ics_bytes.decode("utf-8").startswith("BEGIN:VCALENDAR")
+
+
+def test_build_message_ics_attachment_content_type_is_text_calendar_publish():
+    # Gmail (and most calendar clients) only offer "Add to calendar" UI
+    # for text/calendar parts with method=PUBLISH matching the .ics
+    # METHOD:PUBLISH inside -- application/ics (the old content-type
+    # here) renders as a plain download instead.
+    result = mail.build_message(_event(), CFG)
+    msg = _decode_message(result["raw"])
+    attachment = next(p for p in msg.walk() if p.get_filename() == "event.ics")
+    assert attachment.get_content_type() == "text/calendar"
+    assert attachment.get_param("method") == "PUBLISH"
+    assert (attachment.get_param("charset") or "").lower() == "utf-8"
+    assert attachment.get_filename() == "event.ics"
 
 
 def test_build_message_ics_attachment_matches_build_ics():

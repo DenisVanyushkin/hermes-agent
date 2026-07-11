@@ -239,6 +239,87 @@ def test_cancel_cancels_pending_reminder_chain(db):
         "SELECT status FROM reminders WHERE event_id=?", (e["id"],))}
     assert statuses == {"cancelled"}
 
+# --- Fix round 1: update()'s "_material_changed" signal (mail hook dedup) ---
+# The mail hook (cli.py's _maybe_email_event) needs to know whether a
+# `cal update` changed a field the .ics email actually reflects
+# (start_utc/end_utc/place/participants/travel_min) -- a notes-only edit
+# must not re-send. update() computes and exposes this as a transient
+# "_material_changed" key on its returned dict, reusing the same
+# before/after snapshots it already takes for reminder-chain regen
+# detection (a superset: adds end_utc, which is not regen-relevant but IS
+# mail-relevant -- see cal.py's _MAIL_TRIGGER_COLUMNS).
+
+def test_update_notes_only_is_not_material_changed(db):
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    updated = cal.update(db, e["id"], notes="просто заметка")
+    assert updated["_material_changed"] is False
+
+def test_update_title_only_is_not_material_changed(db):
+    # title is not in the mail-material field set (see cli.py's docstring
+    # for the task's field list) even though it feeds SUMMARY -- follows
+    # the spec literally rather than editorializing.
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    updated = cal.update(db, e["id"], title="Новое название")
+    assert updated["_material_changed"] is False
+
+def test_update_start_utc_is_material_changed(db):
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    updated = cal.update(db, e["id"], start_utc="2026-07-15T06:00:00+00:00")
+    assert updated["_material_changed"] is True
+
+def test_update_end_utc_only_is_material_changed(db):
+    # end_utc is NOT a reminder-regen trigger column, but IS mail-material
+    # -- the one field where the two sets diverge, pinning that mail's
+    # signal isn't just a re-use of the regen flag itself.
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    updated = cal.update(db, e["id"], end_utc="2026-07-15T07:00:00+00:00")
+    assert updated["_material_changed"] is True
+
+def test_update_place_change_is_material_changed(db):
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    updated = cal.update(db, e["id"], place="Клиника Дента")
+    assert updated["_material_changed"] is True
+
+def test_update_travel_min_change_is_material_changed(db):
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00", place="Клиника Дента")
+    db.commit()
+    updated = cal.update(db, e["id"], travel_min=15)
+    assert updated["_material_changed"] is True
+
+def test_update_add_person_is_material_changed(db):
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    updated = cal.update(db, e["id"], add_person=["Тая"])
+    assert updated["_material_changed"] is True
+
+def test_update_rm_person_is_material_changed(db):
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00", participants=["Тая"])
+    db.commit()
+    updated = cal.update(db, e["id"], rm_person=["Тая"])
+    assert updated["_material_changed"] is True
+
+def test_update_no_op_participant_add_is_not_material_changed(db):
+    # add_person for someone already a participant: participant set is
+    # unchanged (INSERT OR IGNORE), so this must not read as material.
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00", participants=["Тая"])
+    db.commit()
+    updated = cal.update(db, e["id"], add_person=["Тая"])
+    assert updated["_material_changed"] is False
+
 def test_done_cancels_pending_reminder_chain(db):
     _seed(db)
     _seed_rules(db)

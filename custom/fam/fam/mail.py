@@ -25,7 +25,6 @@ path rather than raising).
 import base64
 import os
 from datetime import datetime, timedelta, timezone
-from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
@@ -72,6 +71,43 @@ def _escape_ics_text(value):
     )
 
 
+_ICS_LINE_LIMIT = 75
+
+
+def _fold_ics_line(line, limit=_ICS_LINE_LIMIT):
+    """Fold one RFC5545 content line (no line break) into physical lines
+    of at most `limit` OCTETS each, per RFC5545 3.1: a continuation
+    physical line is introduced by CRLF followed by a single SPACE, and
+    that leading space counts toward its 75-octet budget (so a
+    continuation line carries at most limit-1 octets of real content).
+    Byte-safe: counts UTF-8 octets, not characters, and never splits a
+    multi-byte UTF-8 sequence across a fold boundary -- a naive
+    fixed-width slice on the encoded bytes can land mid-character for
+    Cyrillic (2 octets/char) text, corrupting it on decode. Returns the
+    CRLF-joined folded text (no trailing line break); a line already
+    within the limit is returned unchanged.
+    """
+    encoded = line.encode("utf-8")
+    if len(encoded) <= limit:
+        return line
+
+    chunks = []
+    start = 0
+    n = len(encoded)
+    first = True
+    while start < n:
+        budget = limit if first else limit - 1  # continuation lines reserve 1 octet for the leading space
+        end = min(start + budget, n)
+        # Back off `end` while it points into a UTF-8 continuation
+        # byte (10xxxxxx) so we never split a multi-byte character.
+        while end > start and end < n and (encoded[end] & 0xC0) == 0x80:
+            end -= 1
+        chunks.append(encoded[start:end].decode("utf-8"))
+        start = end
+        first = False
+    return "\r\n ".join(chunks)
+
+
 def build_ics(event):
     """Build an RFC5545 VCALENDAR/VEVENT text for `event` (the dict shape
     cal.get() returns: id, title, start_utc, end_utc, place, participants).
@@ -113,7 +149,12 @@ def build_ics(event):
         lines.append(f"DESCRIPTION:{_escape_ics_text('Участники: ' + names)}")
 
     lines += ["END:VEVENT", "END:VCALENDAR"]
-    return "\r\n".join(lines) + "\r\n"
+    # Fold each logical line to RFC5545's 75-octet limit before joining --
+    # see _fold_ics_line's docstring. Applied here (once, on the fully
+    # assembled content lines) rather than at each f-string call site
+    # above, so every property -- including any added later -- is covered.
+    folded_lines = [_fold_ics_line(l) for l in lines]
+    return "\r\n".join(folded_lines) + "\r\n"
 
 
 def _almaty_dt(iso_str):
@@ -169,11 +210,20 @@ def build_message(event, cfg):
     )
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    ics_part = MIMEApplication(build_ics(event).encode("utf-8"), _subtype="ics")
+    # text/calendar (not application/ics): this is the RFC5545/RFC2445-
+    # blessed content-type for a .ics MIME part, and method=PUBLISH here
+    # (mirroring the METHOD:PUBLISH inside the .ics body itself, see
+    # build_ics) is what makes Gmail and most calendar clients offer an
+    # "Add to calendar" affordance instead of rendering a bare download.
+    ics_part = MIMEText(build_ics(event), _subtype="calendar", _charset="utf-8")
+    ics_part.set_param("method", "PUBLISH")
     ics_part.add_header("Content-Disposition", "attachment", filename="event.ics")
     msg.attach(ics_part)
 
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+    # Gmail's "raw" field is base64url (RFC4648 sec5) WITHOUT "=" padding
+    # -- Gmail's API accepts padded input too, but strip it to match spec
+    # or convention exactly rather than relying on server-side leniency.
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii").rstrip("=")
     return {"raw": raw}
 
 

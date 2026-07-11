@@ -127,25 +127,52 @@ def _log_mail_result(conn, event_id, result, to=None):
     else:
         audit.log(conn, "mail.error", {"event_id": event_id, "error": result.get("error")})
 
-def _maybe_email_event(conn, e):
+def _maybe_email_event(conn, e, material_changed=True):
     """After a successful `cal add`/`cal update` whose participants
     include the person with slug=="denis", send an .ics email via
     mail.send_event_email() -- IF cfg["email_enabled"] (Task 10). This is
     a CLI-layer side effect, not a domain one (mirrors how gate/tick own
     delivery, not cal.py itself) -- it runs in its OWN transaction, after
     the caller's cal.add()/cal.update() has already committed, since a
-    mail hiccup must never undo or block the calendar write. Best-effort:
-    any failure is caught inside send_event_email() (never raises) and
-    logged as `mail.error`; success logs `mail.sent`.
+    mail hiccup must never undo or block the calendar write. Success logs
+    `mail.sent`; a send failure logs `mail.error` (send_event_email()
+    itself never raises).
+
+    material_changed: dedup gate for `cal update` (Fix round 1) -- an
+    update should only re-send when a MATERIAL field actually changed
+    (start_utc/end_utc/place/participants/travel_min; see cal.py's
+    _MAIL_TRIGGER_COLUMNS and update()'s "_material_changed" signal,
+    which cmd_cal_update passes straight through here), e.g. a notes-only
+    edit must not trigger a second email. `cal add` always passes the
+    default True: an add has no "before" state to compare against, so it
+    is unconditionally material (still gated on the denis-participant and
+    email_enabled checks below).
+
+    The whole body below is wrapped in try/except: config load, send, and
+    audit are all best-effort here (Fix round 1 hardening) -- e.g.
+    gate.load_config() raising on a corrupt live config must never
+    propagate past this function and fail the `cal add`/`cal update`
+    operation, which has already committed by the time this runs. On any
+    failure, makes one best-effort attempt to audit mail.error (itself
+    wrapped, in case even that fails) and always swallows.
     """
-    if not _event_has_denis_participant(e):
-        return
-    cfg = gate.load_config()
-    if not cfg.get("email_enabled"):
-        return
-    result = mail.send_event_email(e, cfg)
-    _log_mail_result(conn, e["id"], result, to=cfg.get("email_to"))
-    conn.commit()
+    try:
+        if not material_changed:
+            return
+        if not _event_has_denis_participant(e):
+            return
+        cfg = gate.load_config()
+        if not cfg.get("email_enabled"):
+            return
+        result = mail.send_event_email(e, cfg)
+        _log_mail_result(conn, e["id"], result, to=cfg.get("email_to"))
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 -- deliberate catch-all, see docstring
+        try:
+            audit.log(conn, "mail.error", {"event_id": e.get("id"), "error": str(exc)})
+            conn.commit()
+        except Exception:  # noqa: BLE001 -- best-effort audit; never propagate
+            pass
 
 def cmd_cal_add(args):
     conn = famdb.connect()
@@ -174,7 +201,11 @@ def cmd_cal_update(args):
     if args.rm_person: fields["rm_person"] = args.rm_person
     e = cal.update(conn, args.id, **fields)
     conn.commit()
-    _maybe_email_event(conn, e)
+    # cal.update()'s "_material_changed" is an internal signal for this
+    # hook only (see cal.py's docstring) -- pop it before anything else
+    # (JSON output below) sees the dict, so it never leaks as public API.
+    material_changed = e.pop("_material_changed", True)
+    _maybe_email_event(conn, e, material_changed=material_changed)
     if args.json:
         print(json.dumps(e, ensure_ascii=False))
     else:

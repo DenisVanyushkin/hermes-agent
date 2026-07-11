@@ -170,6 +170,15 @@ _UPDATE_FIELDS = {
 # normalizes to the same instant correctly does not trigger a regen).
 _REGEN_TRIGGER_COLUMNS = ("start_utc", "travel_min", "place_id")
 
+# Fields whose change should (re-)trigger cli.py's cal-update mail hook
+# (_maybe_email_event -> Denis's .ics email, Task 10) -- a superset of
+# _REGEN_TRIGGER_COLUMNS: adds end_utc, which doesn't affect the
+# reminder chain but DOES change what's on the calendar entry, so a
+# notes-only edit (no _MAIL_TRIGGER_COLUMNS or participant-set change)
+# must not re-send while a bare end_utc edit must. Participant-set
+# changes are checked the same way as for regen (see update() below).
+_MAIL_TRIGGER_COLUMNS = _REGEN_TRIGGER_COLUMNS + ("end_utc",)
+
 
 def update(conn, event_id, **fields):
     """Update mutable fields on an event. Accepts any of: title, start_utc,
@@ -184,6 +193,16 @@ def update(conn, event_id, **fields):
     transaction, but ONLY if start_utc, travel_min, place, or the
     participant set actually changed (updated_at is never a regen
     signal) -- e.g. update(notes=...) never touches the reminder chain.
+
+    The returned dict carries one extra transient key, "_material_changed"
+    -- True iff any of _MAIL_TRIGGER_COLUMNS or the participant set
+    changed (reusing the same before/after snapshots taken for the regen
+    decision above, just compared against the slightly larger mail column
+    set). This is cli.py's cal-update mail hook's dedup signal: it must
+    only re-send Denis's .ics email on a material change, never on e.g. a
+    notes-only edit. Callers that don't care (get()/add() callers, most
+    test assertions) can simply ignore the key; cli.py's cmd_cal_update
+    pops it off before further use (JSON output, etc.).
     """
     existing = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
     if existing is None:
@@ -278,11 +297,22 @@ def update(conn, event_id, **fields):
         "SELECT person_id FROM event_participants WHERE event_id=?",
         (event_id,),
     ).fetchall()}
-    if (new_regen_state != old_regen_state
-            or new_participant_ids != old_participant_ids):
+    participants_changed = new_participant_ids != old_participant_ids
+    if (new_regen_state != old_regen_state or participants_changed):
         rem.regenerate(conn, event_id)
 
-    return get(conn, event_id)
+    # Mail-material check reuses old_regen_state/new_regen_state (a
+    # prefix of _MAIL_TRIGGER_COLUMNS) plus the one extra column
+    # (end_utc) and the participant-change flag already computed above --
+    # see _MAIL_TRIGGER_COLUMNS's docstring for why this is a superset of
+    # the regen check rather than a separate re-derivation.
+    old_mail_state = old_regen_state + (existing["end_utc"],)
+    new_mail_state = new_regen_state + (new_row["end_utc"],)
+    material_changed = new_mail_state != old_mail_state or participants_changed
+
+    result = get(conn, event_id)
+    result["_material_changed"] = material_changed
+    return result
 
 
 def _set_status(conn, event_id, status, kind):
