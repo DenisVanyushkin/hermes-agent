@@ -141,6 +141,18 @@ not Phase-0-specific.)
   `hermes-security-auditor-core`) and are wired via `role_packages.routing` above,
   which is the config that actually governs routing.
 
+## Skills: activation caveats
+
+**Gateway caching:** The gateway's skills system prompt uses an in-process LRU cache
+keyed on directory structure, available tools, and platform — **not** on file
+content. Adding or editing a `SKILL.md` file requires a gateway restart to take
+effect: `systemctl --user restart hermes-gateway`.
+
+**Session-baked skills list:** Existing chat sessions keep the skills list baked
+into their system prompt at session creation time. After installing a new skill (or
+after gateway restart), active sessions must be reset with `/reset` in chat, or they
+will not see the newly available skill.
+
 ## Aux functions on OpenRouter
 
 `auxiliary.title_generation`, `auxiliary.compression`, and `auxiliary.web_extract` are

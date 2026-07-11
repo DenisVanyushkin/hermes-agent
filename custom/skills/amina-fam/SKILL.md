@@ -55,9 +55,10 @@ way to read or change family data.
 2. **Unknown person/place ⇒ stop and ask, then retry.** fam exits 2 with
    `unknown person: X` or `unknown place: X` on stderr when a name doesn't
    resolve. Stop, ask the user to confirm who/where it is ("это кто/где —
-   записать?"), and only after they confirm run `fam people add <X> --alias
-   <X>` or `fam places add <X> --alias <X>` using the exact name they used,
-   then retry the original command.
+   записать?"). When they confirm, run `fam people add <X> --alias <X>` or
+   `fam places add <X> --alias <X>` using their exact wording verbatim —
+   never normalize or clean up the form, so the alias matches what they
+   actually said. Then retry the original command.
 3. **Other stderr + exit 2 failures are real errors, not retry bait.**
    Examples: `alias already in use by ...`, `unknown field: ...`, `unknown
    event: ...`. Read the message and fix the actual problem (different
