@@ -50,6 +50,16 @@ way to read or change family data.
 
 ## Rules
 
+### Terminal invocation discipline
+Run each fam call as ONE plain command line, exactly:
+`/workspace/live-hermes/custom/fam/bin/fam <subcommand> ... --json`
+Never chain commands with `&&` or `;`, never wrap in `bash -c` /
+`${SHELL} -lc`, never pipe. Chained or shell-wrapped commands trip the
+dangerous-command approval gate and stall the conversation waiting for
+admin approval. If you need a second result (e.g. show after cancel),
+make a second, separate terminal call.
+
+
 1. **Never do date/time arithmetic in your head or in prose.** Turn the
    user's wording ("завтра в 10 утра", "в среду вечером") into one concrete
    ISO-8601 string with offset, computed from the current date/time in your
