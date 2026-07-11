@@ -483,8 +483,9 @@ def test_digest_raw_shape_with_weather_and_event(db, fake_deliver):
         "kind": "digest",
         "date_local": "2026-07-20",
         "weather": WX,
-        "events": [{"title": "Встреча", "start_local": e["start_local"]}],
-        "question": True,
+        "events": [{"event_id": e["id"], "title": "Встреча",
+                     "start_local": e["start_local"]}],
+        "question": tick.DIGEST_QUESTION,
     }
 
 
@@ -500,7 +501,7 @@ def test_digest_raw_event_includes_place_name_when_present(db, fake_deliver):
 
     raw = fake_deliver.calls[0]["raw"]
     assert raw["events"] == [
-        {"title": "Врач", "start_local": e["start_local"],
+        {"event_id": e["id"], "title": "Врач", "start_local": e["start_local"],
          "place_name": "Клиника"}
     ]
 
@@ -552,7 +553,7 @@ def test_digest_fallback_includes_all_sections_and_question(db, fake_deliver):
     assert "19" in fallback and "33" in fallback and "без осадков" in fallback
     time_str = datetime.fromisoformat(e["start_local"]).strftime("%H:%M")
     assert f"{time_str} Встреча" in fallback
-    assert fallback.rstrip().endswith("Какие планы на сегодня?")
+    assert fallback.rstrip().endswith(tick.DIGEST_QUESTION)
     assert len(fallback) <= 900
 
 
@@ -563,7 +564,7 @@ def test_digest_fallback_no_events_says_so(db, fake_deliver):
 
     fallback = fake_deliver.calls[0]["human_fallback"]
     assert "Событий нет" in fallback
-    assert fallback.rstrip().endswith("Какие планы на сегодня?")
+    assert fallback.rstrip().endswith(tick.DIGEST_QUESTION)
 
 
 def test_digest_fallback_omits_weather_section_when_none(db, fake_deliver):
@@ -573,7 +574,7 @@ def test_digest_fallback_omits_weather_section_when_none(db, fake_deliver):
 
     fallback = fake_deliver.calls[0]["human_fallback"]
     assert "°C" not in fallback
-    assert fallback.rstrip().endswith("Какие планы на сегодня?")
+    assert fallback.rstrip().endswith(tick.DIGEST_QUESTION)
 
 
 def test_digest_fallback_mentions_precipitation_when_present(db, fake_deliver):
@@ -591,19 +592,24 @@ def test_digest_fallback_mentions_precipitation_when_present(db, fake_deliver):
 
 def test_digest_dup_guard_skips_when_gate_sent_digest_already_today(db, fake_deliver):
     # 2026-07-20T02:00:00Z falls inside today's Almaty day bounds relative
-    # to NOW (2026-07-19T19:00Z .. 2026-07-20T19:00Z).
+    # to NOW (2026-07-19T19:00Z .. 2026-07-20T19:00Z). The guard's day
+    # window is anchored to the real wall clock (Fix 3), so this test
+    # injects _real_now=NOW to pin it to the same fixed instant as the
+    # rest of this fixed-NOW test suite, rather than the actual clock.
     _insert_gate_sent(db, "2026-07-20T02:00:00+00:00", {"kind": "digest"})
     db.commit()
     fake_deliver.responses = []  # must not be called
 
-    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx(),
+                           _real_now=NOW)
 
-    assert summary == {"skipped": "already_sent"}
+    assert summary == {"skipped": "already_sent", "date_local": "2026-07-20"}
     assert fake_deliver.calls == []
     rows = audit.query(db, since_utc=None, kind_prefix="tick.digest",
                         grep=None, limit=10)
     assert len(rows) == 1
-    assert rows[0]["payload"] == {"skipped": "already_sent"}
+    assert rows[0]["payload"] == {"skipped": "already_sent",
+                                   "date_local": "2026-07-20"}
 
 
 def test_digest_dup_guard_ignores_gate_sent_reminder_kind(db, fake_deliver):
@@ -613,7 +619,8 @@ def test_digest_dup_guard_ignores_gate_sent_reminder_kind(db, fake_deliver):
     db.commit()
     fake_deliver.responses = ["sent"]
 
-    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx(),
+                           _real_now=NOW)
 
     assert summary["status"] == "sent"
     assert len(fake_deliver.calls) == 1
@@ -624,9 +631,36 @@ def test_digest_dup_guard_ignores_yesterdays_digest(db, fake_deliver):
     db.commit()
     fake_deliver.responses = ["sent"]
 
-    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx(),
+                           _real_now=NOW)
 
     assert summary["status"] == "sent"
+
+
+def test_digest_dup_guard_follows_real_clock_not_now_utc_override(db, fake_deliver):
+    # Fix 3: audit.log() always stamps ts_utc from the REAL wall clock
+    # (see audit.py), regardless of any now_utc a caller passes -- so a
+    # live run's dup-guard window must be computed from the real clock
+    # too, never from now_utc. Model a gate.sent digest row anchored to
+    # the real current day (as audit.log() would actually write it in
+    # production), then call digest() with now_utc pointing at
+    # "yesterday" relative to the real clock -- e.g. a stale/incorrect
+    # --now override on a live run. The guard must still see today's
+    # real-clock row and skip; if the guard wrongly used now_utc for its
+    # window instead, it would look at the wrong day and miss the row,
+    # causing a live double-send.
+    real_now = datetime.now(timezone.utc)
+    _insert_gate_sent(db, real_now.isoformat(timespec="seconds"),
+                       {"kind": "digest"})
+    db.commit()
+    stale_now_utc = (real_now - timedelta(days=1)).isoformat(timespec="seconds")
+    fake_deliver.responses = []  # must not be called
+
+    summary = tick.digest(db, now_utc=stale_now_utc, cfg=CFG,
+                           _fetch_weather=_fetch_wx())
+
+    assert summary["skipped"] == "already_sent"
+    assert fake_deliver.calls == []
 
 
 class _FakeRunOK:
@@ -659,7 +693,8 @@ def test_digest_real_second_run_same_day_is_skipped(db, monkeypatch):
     assert first["status"] == "sent"
 
     second = tick.digest(db, cfg=CFG, _fetch_weather=_fetch_wx())
-    assert second == {"skipped": "already_sent"}
+    assert second["skipped"] == "already_sent"
+    assert "date_local" in second
 
 
 # ---- gate.deliver wiring: force=True, outside budget ----

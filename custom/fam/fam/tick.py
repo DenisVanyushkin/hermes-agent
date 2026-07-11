@@ -36,6 +36,11 @@ ALMATY = ZoneInfo("Asia/Almaty")
 # rather than retried forever once its error_count reaches this many.
 ERROR_CAP = 3
 
+# The digest's fixed closing question -- goes into raw["question"] (the
+# JSON the LLM rewrite sees) AND the deterministic human_fallback, from
+# this single constant, so the two can never drift apart.
+DIGEST_QUESTION = "Какие планы на сегодня? Расскажи или надиктуй — запишу."
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -189,15 +194,30 @@ def _today_almaty(now_utc):
     return _parse_utc(now_utc).astimezone(ALMATY).date().isoformat()
 
 
-def _digest_already_sent_today(conn, now_utc):
+def _digest_already_sent_today(conn, _real_now=None):
     """True if a gate.sent audit row with payload kind=="digest" already
     exists within today's Asia/Almaty calendar day. Reuses gate.py's own
     day-bounds helper so "today" always agrees with budget_spent_today's
     definition, even though budget_spent_today itself EXCLUDES digest
     rows from its own count (see gate.py's docstring) -- the two queries
     look at the same window for different reasons.
+
+    The day window is always anchored to the REAL wall clock, never to
+    digest()'s own now_utc override: audit.log() stamps every row's
+    ts_utc from datetime.now() regardless of any now_utc a caller passes
+    elsewhere (see audit.py), so the gate.sent row this guard is looking
+    for is always real-clock-stamped. Deriving the window from now_utc
+    instead would let a live run's --now override (or any drift between
+    now_utc and the real clock) point the guard at the wrong day,
+    causing a double-send (window misses today's real row) or a wrong
+    skip (window matches a stale row it shouldn't).
+
+    _real_now is a test-only injection point (mirrors _fetch_weather's
+    role for the weather fetch): None means "use the actual current
+    time", the normal production behaviour.
     """
-    from_utc, to_utc = gate._almaty_day_utc_bounds(now_utc)
+    real_now = _real_now or _now()
+    from_utc, to_utc = gate._almaty_day_utc_bounds(real_now)
     rows = conn.execute(
         "SELECT payload FROM audit_log WHERE kind='gate.sent' "
         "AND ts_utc >= ? AND ts_utc < ?",
@@ -245,11 +265,11 @@ def _build_digest_fallback(date_local, wx, events):
         lines.extend(_fallback_event_line(e) for e in events)
     else:
         lines.append("Событий нет.")
-    lines.append("Какие планы на сегодня?")
+    lines.append(DIGEST_QUESTION)
     return "\n".join(lines)
 
 
-def digest(conn, cfg=None, now_utc=None, _fetch_weather=None):
+def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
     """Run one digest tick: today's weather + today's active events + a
     fixed closing question, delivered as a single gate.deliver(kind=
     "digest", force=True) call -- outside the daily budget and meant to
@@ -260,9 +280,14 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None):
     events): if a gate.sent audit row with payload kind=="digest" already
     exists for today's Asia/Almaty calendar day -- i.e. the scheduled
     digest already went out and this is a re-run (manual retry, a second
-    timer fire, etc.) -- returns {"skipped": "already_sent"} and audits
-    tick.digest with that same payload, without touching weather/cal or
-    calling gate.deliver again.
+    timer fire, etc.) -- returns {"skipped": "already_sent", "date_local"}
+    and audits tick.digest with that same payload, without touching
+    weather/cal or calling gate.deliver again. The guard's day window is
+    always anchored to the REAL wall clock (see
+    _digest_already_sent_today's docstring), NOT to now_utc below --
+    now_utc only drives date_local and which events count as "today"'s.
+    _real_now is a test-only injection point for that real-clock window
+    (mirrors _fetch_weather); production always leaves it as None.
 
     weather: (_fetch_weather or weather.fetch_almaty)(). None is a
     legitimate outcome (Open-Meteo unreachable) -- the weather section is
@@ -272,40 +297,43 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None):
     Constraints call this out explicitly for the digest, as opposed to
     contexts that need cal.list_range(status=None)): a cancelled/done
     event has nothing left to plan around, only what's still actually on
-    today's plan belongs in a "what's the plan today" message.
+    today's plan belongs in a "what's the plan today" message. Each event
+    item includes event_id so a later ack/cancel-from-context (Task 9)
+    can address it.
 
-    question: always True in raw (a flag, not the question text itself --
-    the fixed phrasing "какие планы на сегодня?" only appears in the
-    deterministic human_fallback; the LLM rewrite phrases its own closing
-    ask in Hermes's voice from that flag plus the rest of raw). This also
-    doubles as the day's planning intake per the digest-doubles-as-intake
-    spec amendment: replying in chat with today's plans is the expected
-    next turn.
+    question: the fixed closing ask (DIGEST_QUESTION) goes into raw
+    verbatim -- not a bare flag -- since raw is the JSON the LLM rewrite
+    actually reads; the same constant is also the last line of the
+    deterministic human_fallback, so the two can never phrase the ask
+    differently. This also doubles as the day's planning intake per the
+    digest-doubles-as-intake spec amendment: replying in chat with
+    today's plans is the expected next turn.
 
     Always audits tick.digest -- both the dup-guard skip and the normal
     path -- with {status, date_local, weather_present, n_events} (or
-    {skipped: "already_sent"}) so an admin can see what happened without
-    cross-referencing gate.sent.
+    {skipped: "already_sent", date_local}) so an admin can see what
+    happened without cross-referencing gate.sent.
 
     Returns the same dict that was audited.
     """
     now = now_utc or _now()
     cfg = cfg if cfg is not None else gate.load_config()
+    date_local = _today_almaty(now)
 
-    if _digest_already_sent_today(conn, now):
-        summary = {"skipped": "already_sent"}
+    if _digest_already_sent_today(conn, _real_now=_real_now):
+        summary = {"skipped": "already_sent", "date_local": date_local}
         audit.log(conn, "tick.digest", summary)
         conn.commit()
         return summary
 
-    date_local = _today_almaty(now)
     fetch = _fetch_weather or weather.fetch_almaty
     wx = fetch()
     events = cal.day(conn, date_local)
 
     event_list = []
     for e in events:
-        item = {"title": e["title"], "start_local": e["start_local"]}
+        item = {"event_id": e["id"], "title": e["title"],
+                "start_local": e["start_local"]}
         if e["place"]:
             item["place_name"] = e["place"]["name"]
         event_list.append(item)
@@ -315,7 +343,7 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None):
         "date_local": date_local,
         "weather": wx,
         "events": event_list,
-        "question": True,
+        "question": DIGEST_QUESTION,
     }
     human_fallback = _build_digest_fallback(date_local, wx, event_list)
 

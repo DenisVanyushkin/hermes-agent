@@ -448,10 +448,18 @@ def test_tick_digest_skips_when_already_sent_today(db, capsys, monkeypatch, tmp_
     _hermetic_gate_config(tmp_path, monkeypatch)
     _hermetic_weather(monkeypatch)
     now = "2026-07-20T04:30:00+00:00"
+    # Fix 3 (tick.py, digest wall-clock dup-guard decoupling): the guard's
+    # day window is always anchored to the REAL wall clock -- audit.log()
+    # stamps every row's ts_utc from datetime.now() regardless of any
+    # --now override -- so the existing gate.sent row it must see here
+    # has to be real-clock-stamped too, exactly as gate.deliver would
+    # actually write it in production. A fake --now-aligned timestamp
+    # (the old fixed "2026-07-20T02:00:00+00:00") would no longer be
+    # inside the guard's real-clock window and the skip would never fire.
+    real_now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     db.execute(
         "INSERT INTO audit_log(ts_utc, kind, actor, payload) VALUES(?,?,?,?)",
-        ("2026-07-20T02:00:00+00:00", "gate.sent", "test",
-         json.dumps({"kind": "digest"})),
+        (real_now, "gate.sent", "test", json.dumps({"kind": "digest"})),
     )
     db.commit()
     monkeypatch.setattr(gate, "deliver", _must_not_be_called)
@@ -460,4 +468,4 @@ def test_tick_digest_skips_when_already_sent_today(db, capsys, monkeypatch, tmp_
     out = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert out == {"skipped": "already_sent"}
+    assert out == {"skipped": "already_sent", "date_local": "2026-07-20"}
