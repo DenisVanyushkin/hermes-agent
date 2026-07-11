@@ -300,6 +300,48 @@ def test_rem_rules_plain_output(db, capsys):
     text = capsys.readouterr().out
     assert "default" in text and "slug:taya" in text
 
+# --- Task 11: `fam rem active` CLI wiring (reminder-reaction ack fix) ---
+
+def test_rem_active_json_shape(db, capsys):
+    _seed_rem(db)
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+
+    assert cli.main(["rem", "active", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert len(out) == 1
+    assert out[0]["event_id"] == e["id"]
+    assert out[0]["title"] == "Событие"
+    assert out[0]["pending_count"] == 2
+    assert out[0]["sent_count"] == 0
+    assert set(out[0]) == {"event_id", "title", "start_local",
+                            "next_fire_local", "pending_count", "sent_count"}
+
+def test_rem_active_plain_output(db, capsys):
+    _seed_rem(db)
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+
+    assert cli.main(["rem", "active"]) == 0
+    text = capsys.readouterr().out
+    assert str(e["id"]) in text and "Событие" in text
+
+def test_rem_active_empty_when_nothing_pending(db, capsys):
+    _seed_rem(db)
+
+    assert cli.main(["rem", "active", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+def test_rem_active_excludes_fully_acked_event(db, capsys):
+    _seed_rem(db)
+    e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")
+    db.commit()
+    assert cli.main(["rem", "ack", str(e["id"]), "--json"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["rem", "active", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
 # --- Task 6: `fam tick reminders` CLI wiring ---
 # gate.deliver is monkeypatched everywhere here -- these tests exercise
 # the CLI's argument parsing/wiring/output-shape contract only, not

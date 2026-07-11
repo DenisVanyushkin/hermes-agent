@@ -357,6 +357,27 @@ def cmd_rem_rules(args):
             print(f"{r['id']}\t{r['scope']}\t{state}\t{r['stages']}")
     return 0
 
+def _fmt_active_chain(a):
+    return (f"{a['event_id']}\t{a['start_local']}\t{a['title']}\t"
+            f"next={a['next_fire_local']}\tpending={a['pending_count']}\t"
+            f"sent={a['sent_count']}")
+
+def cmd_rem_active(args):
+    """`fam rem active` -- events with an in-progress reminder chain (>=1
+    pending reminder). This is the lookup a conversational reaction
+    ("уже выходим") uses to find WHICH event it's about, since the
+    reminder that fired is delivered out-of-band and never lands in the
+    agent's own session context (see amina-fam skill's Reminder Reactions).
+    """
+    conn = famdb.connect()
+    rows = rem.active_chains(conn)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for r in rows:
+            print(_fmt_active_chain(r))
+    return 0
+
 def cmd_tick_reminders(args):
     conn = famdb.connect()
     # tick.reminders() owns its own commits (see fam/tick.py docstring) --
@@ -570,6 +591,10 @@ def build_parser():
     spr = rem_sub.add_parser("rules"); spr.set_defaults(func=cmd_rem_rules)
     spr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
+
+    spac = rem_sub.add_parser("active"); spac.set_defaults(func=cmd_rem_active)
+    spac.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
 
     sp = sub.add_parser("tick")
     tick_sub = sp.add_subparsers(dest="tick_cmd", required=True)

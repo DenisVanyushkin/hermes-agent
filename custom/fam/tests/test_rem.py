@@ -396,3 +396,108 @@ def test_list_rules_surfaces_malformed_stages_without_raising(db):
     assert len(rules) == 4  # default, slug:taya, slug:amina, slug:broken
     assert by_id[bad_id]["stages_error"] is True
     assert by_id[bad_id]["stages"] == "not-json"  # left raw, not raised
+
+
+# ---- active_chains (Task 11: reminder-reaction ack fix) ----
+#
+# A conversational reaction ("уже выходим") arrives in a turn that never
+# saw the reminder that triggered it -- reminders are delivered out-of-band
+# by the tick (a separate `hermes send`), not by this conversation. The
+# skill resolves "which event?" via `fam rem active`, i.e. active_chains():
+# distinct events that still have >=1 pending reminder ("a chain in
+# progress"). sent/acked/cancelled rows never make an event show up here on
+# their own -- only a still-pending row does.
+
+def test_active_chains_mixed_sent_and_pending_counts(db):
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+    now = "2026-07-19T00:00:00+00:00"
+    e = cal.add(db, "Событие", "2026-07-20T05:00:00+00:00")
+    db.commit()
+    rem.regenerate(db, e["id"], now_utc=now)
+    db.commit()
+
+    rows = db.execute(
+        "SELECT id, fire_at_utc FROM reminders WHERE event_id=? "
+        "ORDER BY fire_at_utc", (e["id"],)).fetchall()
+    assert len(rows) == 2
+    # simulate the earlier stage having already fired and been sent by the
+    # tick -- exactly the "mark stage-0 sent" setup the E2E smoke test uses.
+    db.execute("UPDATE reminders SET status='sent', sent_at=? WHERE id=?",
+               (now, rows[0]["id"]))
+    db.commit()
+
+    chains = rem.active_chains(db)
+
+    assert len(chains) == 1
+    c = chains[0]
+    assert c["event_id"] == e["id"]
+    assert c["title"] == "Событие"
+    assert c["pending_count"] == 1
+    assert c["sent_count"] == 1
+    assert c["start_local"] == cal._to_local_iso(e["start_utc"])
+    assert c["next_fire_local"] == cal._to_local_iso(rows[1]["fire_at_utc"])
+
+
+def test_active_chains_fully_acked_event_absent(db):
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+    now = "2026-07-19T00:00:00+00:00"
+    e = cal.add(db, "Подтверждено", "2026-07-20T05:00:00+00:00")
+    db.commit()
+    rem.regenerate(db, e["id"], now_utc=now)
+    db.commit()
+    rem.ack_chain(db, e["id"])
+    db.commit()
+
+    assert rem.active_chains(db) == []
+
+
+def test_active_chains_cancelled_event_absent(db):
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+    now = "2026-07-19T00:00:00+00:00"
+    e = cal.add(db, "Отменено", "2026-07-20T05:00:00+00:00")
+    db.commit()
+    rem.regenerate(db, e["id"], now_utc=now)
+    db.commit()
+    rem.cancel_chain(db, e["id"])
+    db.commit()
+
+    assert rem.active_chains(db) == []
+
+
+def test_active_chains_orders_by_next_fire_ascending(db):
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+    now = "2026-07-19T00:00:00+00:00"
+    # intentionally added out of chronological order, so a correct result
+    # pins the ORDER BY rather than incidentally matching insertion order.
+    e_later = cal.add(db, "Позже", "2026-07-25T05:00:00+00:00")
+    e_sooner = cal.add(db, "Раньше", "2026-07-20T05:00:00+00:00")
+    db.commit()
+    rem.regenerate(db, e_later["id"], now_utc=now)
+    rem.regenerate(db, e_sooner["id"], now_utc=now)
+    db.commit()
+
+    chains = rem.active_chains(db)
+
+    assert [c["event_id"] for c in chains] == [e_sooner["id"], e_later["id"]]
+
+
+def test_active_chains_empty_when_no_reminders_at_all(db):
+    # no reminder_rules seeded -> applicable_rules() matches nothing ->
+    # cal.add()'s regenerate hook creates 0 reminders for this event.
+    _seed_people(db)
+    cal.add(db, "Без напоминаний", "2026-07-20T05:00:00+00:00")
+    db.commit()
+
+    assert rem.active_chains(db) == []
+
+
+def test_active_chains_empty_on_fresh_db(db):
+    assert rem.active_chains(db) == []

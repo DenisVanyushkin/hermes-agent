@@ -194,6 +194,55 @@ def list_rules(conn):
     return out
 
 
+def active_chains(conn, now_utc=None):
+    """Distinct events that currently have >=1 pending reminder -- i.e. a
+    reminder chain still in progress.
+
+    This is what a conversational reaction ("уже выходим/едем/собираемся")
+    resolves against when the fired reminder that triggered it is NOT in
+    the agent's session context -- reminders are delivered out-of-band by
+    the tick (a separate `hermes send`), never by the conversation itself.
+    See the amina-fam skill's Reminder Reactions section: it runs `fam rem
+    active` first, then acks the one event it names (or asks, if several).
+
+    now_utc is accepted for signature symmetry with the other CLI-facing
+    queries in this module (list_reminders/regenerate); it is not used to
+    filter here since status='pending' already captures exactly "not yet
+    acted on", independent of whether fire_at_utc itself is past or
+    future.
+
+    For each event: event_id, title, start_local (Asia/Almaty),
+    next_fire_local (the soonest still-pending fire, Asia/Almaty),
+    pending_count, sent_count. Ordered by next fire ascending (soonest
+    chain first) -- events with 0 pending reminders (fully acked/
+    cancelled, or never had any) never appear.
+    """
+    from fam import cal  # deferred: avoid import-time cycle with cal.py
+
+    rows = conn.execute(
+        "SELECT e.id AS event_id, e.title AS title, e.start_utc AS start_utc,"
+        "  SUM(CASE WHEN r.status='pending' THEN 1 ELSE 0 END) AS pending_count,"
+        "  SUM(CASE WHEN r.status='sent' THEN 1 ELSE 0 END) AS sent_count,"
+        "  MIN(CASE WHEN r.status='pending' THEN r.fire_at_utc END) AS next_fire_utc"
+        " FROM events e JOIN reminders r ON r.event_id = e.id"
+        " GROUP BY e.id"
+        " HAVING SUM(CASE WHEN r.status='pending' THEN 1 ELSE 0 END) >= 1"
+        " ORDER BY next_fire_utc"
+    ).fetchall()
+    out = []
+    for row in rows:
+        d = dict(row)
+        out.append({
+            "event_id": d["event_id"],
+            "title": d["title"],
+            "start_local": cal._to_local_iso(d["start_utc"]),
+            "next_fire_local": cal._to_local_iso(d["next_fire_utc"]),
+            "pending_count": d["pending_count"],
+            "sent_count": d["sent_count"],
+        })
+    return out
+
+
 def _seed_rule(conn, scope, stages):
     existing = conn.execute(
         "SELECT 1 FROM reminder_rules WHERE scope=?", (scope,)
