@@ -342,13 +342,20 @@ installed separately — see below).
 
 ### Pillow in the sandbox
 
-Pillow is **not** part of the sandbox image (`nikolaik/python-nodejs:python3.11-nodejs20`)
-and is **not** picked up from the host venv inside the container (see above), so
-`fam cal grid` needs it installed directly in the running sandbox container:
-`pip install Pillow`. This lands in the container's own (non-bind-mounted)
-`site-packages`, so it persists only as long as that specific container isn't
-recreated — reinstall after any container recreation (e.g. after a
-`docker_volumes` change, see above).
+**Superseded 2026-07-11 (Phase 2a Task 9):** `terminal.docker_image` now points at
+a custom, durable image, `hermes-sandbox-amina:1` (built from
+`~/.hermes/sandbox-image/Dockerfile`, `FROM nikolaik/python-nodejs:python3.11-nodejs20`
++ `RUN pip install Pillow==12.2.0`), so Pillow is baked in and survives sandbox
+container recreation — the old "reinstall after every recreation" workflow below no
+longer applies. See "Sandbox image" under "Phase 2a — fam core" for the rebuild
+command.
+
+Historical note (Phase 2a Task 7, no longer accurate): Pillow used to be **not**
+part of the sandbox image and **not** picked up from the host venv inside the
+container (see above), so `fam cal grid` needed it installed directly in the
+running sandbox container (`pip install Pillow`), which landed in the container's
+own (non-bind-mounted) `site-packages` and had to be reinstalled after every
+container recreation.
 
 ### Regression coverage
 
@@ -356,5 +363,116 @@ recreated — reinstall after any container recreation (e.g. after a
 import cleanly with Pillow completely blocked (via a `sys.meta_path` finder that
 raises `ImportError` for `PIL`/`PIL.*`) — Pillow is only ever imported lazily
 inside `grid.render_month()`/`render_week()`, so every other `fam` subcommand
-must keep working in environments without Pillow (e.g. the sandbox, before
-`pip install Pillow` has been run there).
+must keep working in environments without Pillow (e.g. a sandbox running the
+stock image instead of `hermes-sandbox-amina:1`, or any host Python without
+Pillow installed).
+
+## Phase 2a — fam core (2026-07-11)
+
+Accepted (Task 10). `fam` is Amina's private family-data core: calendar,
+people/places glossaries, PNG grid rendering, and an audit log, driven
+entirely through its own CLI and exposed to the agent via the `amina-fam`
+skill (see "Phase 2a — fam sandbox bridge" above for the sandbox mount
+details). Full history: `.superpowers/sdd/2a-task-{1..10}-*.md` reports and
+`.superpowers/sdd/progress.md` (`2a-T1`..`2a-T9` entries) in this repo;
+design spec `docs/superpowers/specs/2026-07-10-amina-assistant-design.md`
+§10; plan `docs/superpowers/plans/2026-07-11-amina-phase2a-fam-core.md`.
+
+### Components
+
+- `custom/fam/fam/db.py` — schema/init, WAL + foreign keys on.
+- `custom/fam/fam/audit.py` — `audit_log` write (`log()`) + query (`query()`,
+  filters: `--since`/`--last-hours`, `--kind`, `--grep`, `--limit`).
+- `custom/fam/fam/people.py`, `places.py` — glossaries: add/alias/resolve/list,
+  case-insensitive matching with a cyrillic-safe alias-collision guard,
+  `people` also supports groups (`--group`, `member` to add members; a group
+  ref passed to `cal add --with`/`--add-person` expands to its members
+  automatically).
+- `custom/fam/fam/cal.py` — event CRUD (`add/update/cancel/done/show/day/range`),
+  UTC storage with Asia/Almaty local-time conversion via `zoneinfo`; unknown
+  person/place refs raise `UnknownRefError` (stderr `unknown person|place: X`,
+  exit 2) **before** any write — the CLI-facing signal for the skill to stop
+  and ask the user, then `people add`/`places add`, then retry.
+- `custom/fam/fam/grid.py` — PNG rendering, `render_day`/`render_week`/`render_month`
+  (Pillow, imported lazily so non-grid commands work without it — see
+  "Regression coverage" above).
+- `custom/fam/fam/cli.py` + `custom/fam/bin/fam` — the CLI surface and its
+  venv-preferring shim (see above).
+- `custom/skills/amina-fam/SKILL.md` — the skill that drives all of the above
+  from a live conversation (glossary interrogation loop, verbatim alias
+  wording, no shell chaining, honest grid-failure reporting).
+
+### Database
+
+Same SQLite file, two access points (see "Mounts" above):
+- Host: `/home/denis/.hermes/private/amina/assistant.db`
+- Sandbox: `/root/.hermes/private/amina/assistant.db`
+
+`fam.db.resolve_db_path()` picks the right one automatically (`$FAM_DB` env
+var overrides both, for tests/scratch DBs).
+
+### Test command
+
+```
+cd ~/.hermes/hermes-agent
+PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -v
+```
+
+54 tests, all green, clean output (no warnings) as of Task 10 acceptance
+(2026-07-11).
+
+### Sandbox image
+
+`terminal.docker_image: hermes-sandbox-amina:1` (`~/.hermes/config.yaml`) —
+a custom image with Pillow baked in, replacing the stock
+`nikolaik/python-nodejs:python3.11-nodejs20` (which lacks Pillow and doesn't
+durably pick it up from the host venv — see "Pillow in the sandbox" above).
+
+Rebuild after changing `~/.hermes/sandbox-image/Dockerfile`:
+
+```
+docker build -t hermes-sandbox-amina:1 ~/.hermes/sandbox-image/
+docker ps -a --filter 'name=^hermes-' --format '{{.Names}}'   # verify list first!
+docker rm -f <name-1> <name-2> ...                             # recreate sandboxes
+systemctl --user restart hermes-gateway
+```
+
+(Same anchored-filter caution as "Recreate sandbox containers after any
+`docker_volumes` change" above — never touch `deploy-hermes-webui-1`.)
+
+### Media exchange dir convention
+
+Grid PNGs (and any other file the agent needs to hand back to the user) go
+through `/home/denis/.hermes/cache/documents/`, bind-mounted at the **same
+absolute path** inside the sandbox (`docker_volumes`:
+`/home/denis/.hermes/cache/documents:/home/denis/.hermes/cache/documents`) —
+not `/tmp`, which is sandbox-local and invisible to the gateway process that
+serves `MEDIA:` attachments. Convention: `fam cal grid ... -o
+/home/denis/.hermes/cache/documents/grid.png`, then reply with
+`MEDIA:/home/denis/.hermes/cache/documents/grid.png`. Fixed in commit
+`d31ca793c` after the original SKILL.md draft used `/tmp/grid.png`, which
+rendered successfully but the picture never reached the user.
+
+### Known limitations
+
+- **No alias rename/remove CLI.** `people`/`places` support `add`/`alias`
+  (append-only) but not renaming or removing an existing alias — admin fixes
+  go through direct `sqlite3` + a matching `fam log`-visible audit row (as
+  done once during Phase 2a itself). Candidate for Phase 2b/3
+  (`progress.md` backlog note under `2a-T9`).
+- **Lat/lon are not parsed from 2GIS links yet.** `fam places add` accepts
+  `--lat`/`--lon` as plain floats; there is no code that extracts coordinates
+  from a pasted 2GIS URL — whoever adds a place either supplies them manually
+  or leaves them unset.
+- **Reminder engine, Тая-rules, morning digest, email, and the style gateway
+  are Phase 2b**, not part of this core (spec §10, "Фаза 2 — ядро fam" lists
+  them as later scope; this Phase 2a slice covers CRUD + glossaries + grid +
+  audit only, per `.superpowers/sdd/2a-task-10-brief.md`).
+- **Group unwrapping is unit-verified, not live-E2E-verified.** `cal add
+  --with <group>` expanding to member `person_id`s is covered by
+  `test_group_participant_expands`/`test_group_resolves_with_members`
+  (`custom/fam/tests/test_cal.py`, `test_people.py`) but wasn't specifically
+  exercised through a live pilot-chat dialogue in Task 9's E2E pass.
+- Day-view grid's hour window is fixed (08:00–22:00); events outside it are
+  clamped to the nearest edge row rather than shown at their true time
+  (deliberate simplicity trade-off, `2a-task-9-gridfix-report.md`).
