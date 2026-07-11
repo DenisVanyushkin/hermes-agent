@@ -45,7 +45,7 @@ way to read or change family data.
   - `people add|alias|member|resolve|list`
   - `places add|alias|resolve|list`
   - `cal add|update|cancel|done|show|day|range|grid`
-  - `rem list|ack|cancel|rules`
+  - `rem list|ack|cancel|rules|active`
 - Time: the household lives in Asia/Almaty (+05:00). Take "now" from the
   date/time already available in your context — never ask the user what
   today's date is. Talk to the user in Asia/Almaty local time, short form
@@ -109,6 +109,7 @@ make a second, separate terminal call.
 | Recent activity | `fam log --last-hours 24` |
 | Reminders for one event | `fam rem list --event ID --json` |
 | Reminders due right now | `fam rem list --due --json` |
+| Events with an in-progress reminder chain | `fam rem active --json` |
 | Already on the way (ack chain) | `fam rem ack EVENT_ID` |
 | Stop nagging about it (cancel chain) | `fam rem cancel EVENT_ID` |
 | What rules generate reminders | `fam rem rules --json` |
@@ -135,21 +136,34 @@ user.
 
 ## Reminder Reactions
 
-Reminders and the digest are sent proactively — the household reacts to
-them in whatever conversation turn comes next. Ack/cancel always apply to
-an event's whole remaining reminder chain, never a single stage:
+Reminders and the digest are sent proactively, out-of-band — a background
+tick fires them through a separate `hermes send`, not this conversation.
+When the household reacts in a later turn ("уже выходим"), the reminder
+that triggered it genuinely is NOT in your session context — you cannot
+recall which event it was about, you have to look it up. Ack/cancel
+always apply to an event's whole remaining reminder chain, never a single
+stage:
 
-- **"уже едем/выходим/собираемся/знаю" (already on it)** → `fam rem ack
-  EVENT_ID`. Acks every still-pending reminder for that event; sent/acked/
-  cancelled ones are untouched.
+- **"уже едем/выходим/собираемся/готовимся/на месте/знаю" (already on
+  it)** — especially a SHORT reply like this with no event named, which
+  is almost always a reaction to a reminder that just fired out-of-band.
+  Do NOT just say "понял" without looking it up first — acking is the
+  whole point of the reply:
+  1. `fam rem active --json` — events with an in-progress reminder chain
+     (still-pending reminders).
+  2. Exactly one result → `fam rem ack EVENT_ID` for it, then tell the
+     user briefly what you silenced (title + time).
+  3. Several results → ask which one, by title/time — never guess.
+  4. No results → nothing is pending; a plain conversational
+     acknowledgment is enough, no fam call needed.
 - **"не напоминай про это" / "погаси напоминания про X" (stop nagging)**
   → `fam rem cancel EVENT_ID`. Same scope as ack, cancelled instead.
 - **"какие напоминания" (what's pending)** → `fam rem list --due --json`
   for what's about to fire, or `fam rem list --json` for everything.
 
-**Finding the event_id.** If only one event plausibly fits what the user
-just said, use its id directly. Otherwise resolve it before calling
-`ack`/`cancel`:
+**Finding the event_id for cancel** (ack resolves it via `fam rem active`
+above instead). If only one event plausibly fits what the user just said,
+use its id directly. Otherwise resolve it before calling `cancel`:
 1. `fam log --kind gate.sent --last-hours 6 --json` — each row's
    `payload` carries the `raw` that produced that message: `raw.event_id`
    for a reminder, `raw.events[].event_id` per item for a digest. This is
