@@ -1,5 +1,5 @@
 import pytest
-from fam import cal, people, places
+from fam import audit, cal, people, places
 
 def _seed(db):
     people.add(db, "Тая", slug="taya")
@@ -46,3 +46,64 @@ def test_cancel_hides_from_day(db):
     e = cal.add(db, "Отменить", "2026-07-15T05:00:00+00:00"); db.commit()
     cal.cancel(db, e["id"]); db.commit()
     assert cal.day(db, "2026-07-15") == []
+
+# --- Finding 1: update() audit payload must be UTC-normalized ---
+
+def test_update_audit_payload_is_utc_normalized(db):
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    cal.update(db, e["id"], start_utc="2026-07-15T11:00:00+05:00")
+    db.commit()
+
+    rows = audit.query(db, since_utc=None, kind_prefix="cal.update", grep=None, limit=1)
+    payload = rows[0]["payload"]
+    # 11:00+05:00 == 06:00 UTC
+    assert payload["start_utc"] == "2026-07-15T06:00:00+00:00"
+
+    got = cal.get(db, e["id"])
+    assert got["start_utc"] == "2026-07-15T06:00:00+00:00"
+
+# --- Finding 2: update() must reject unknown fields ---
+
+def test_update_rejects_unknown_field(db):
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+
+    with pytest.raises(ValueError):
+        cal.update(db, e["id"], bogus="x")
+
+    got = cal.get(db, e["id"])
+    assert got["title"] == "Событие"
+
+    rows = audit.query(db, since_utc=None, kind_prefix="cal.update", grep=None, limit=10)
+    assert rows == []
+
+# --- Finding 4: update() participant add/rm + unknown-person coverage ---
+
+def test_update_add_and_remove_participant_roundtrip(db):
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+
+    cal.update(db, e["id"], add_person=["Тая"])
+    db.commit()
+    got = cal.get(db, e["id"])
+    assert [p["name"] for p in got["participants"]] == ["Тая"]
+
+    cal.update(db, e["id"], rm_person=["Тая"])
+    db.commit()
+    got = cal.get(db, e["id"])
+    assert got["participants"] == []
+
+def test_update_unknown_person_in_add_person_raises_without_mutation(db):
+    _seed(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00", participants=["Тая"])
+    db.commit()
+
+    with pytest.raises(cal.UnknownRefError):
+        cal.update(db, e["id"], add_person=["Незнакомец"])
+
+    got = cal.get(db, e["id"])
+    assert [p["name"] for p in got["participants"]] == ["Тая"]

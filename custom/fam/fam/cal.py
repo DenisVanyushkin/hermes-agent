@@ -147,15 +147,38 @@ def get(conn, event_id):
     return d
 
 
+_UPDATE_FIELDS = {
+    "title", "start_utc", "end_utc", "place", "transport", "notes",
+    "add_person", "rm_person",
+}
+
+
 def update(conn, event_id, **fields):
     """Update mutable fields on an event. Accepts any of: title, start_utc,
     end_utc, place, transport, notes, add_person (list of refs), rm_person
-    (list of refs). place/add_person refs are resolved (UnknownRefError on
-    failure) before any write. Writes updated_at.
+    (list of refs). Any other keyword raises ValueError before any write.
+    place/add_person refs are resolved (UnknownRefError on failure) before
+    any write. start_utc/end_utc are normalized to UTC exactly once, and
+    that same normalized string is used for both the SQL SET clause and
+    the audit payload below. Writes updated_at.
     """
     existing = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
     if existing is None:
         raise ValueError(f"unknown event: {event_id}")
+
+    unknown_fields = set(fields) - _UPDATE_FIELDS
+    if unknown_fields:
+        name = sorted(unknown_fields)[0]
+        raise ValueError(
+            f"unknown field: {name} (valid: {', '.join(sorted(_UPDATE_FIELDS))})"
+        )
+
+    # Normalize start_utc/end_utc once, in place, before either the SQL
+    # write or the audit payload consume them — both must see the same
+    # UTC-normalized string, never the raw caller-supplied offset.
+    for key in ("start_utc", "end_utc"):
+        if key in fields and fields[key] is not None:
+            fields[key] = _to_utc_iso(fields[key])
 
     add_person = fields.pop("add_person", None) or []
     rm_person = fields.pop("rm_person", None) or []
@@ -181,11 +204,8 @@ def update(conn, event_id, **fields):
     }
     for key, col in column_map.items():
         if key in fields:
-            value = fields[key]
-            if key in ("start_utc", "end_utc") and value is not None:
-                value = _to_utc_iso(value)
             set_clauses.append(f"{col}=?")
-            params.append(value)
+            params.append(fields[key])
     if place_given:
         set_clauses.append("place_id=?")
         params.append(place_id)

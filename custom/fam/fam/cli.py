@@ -169,10 +169,13 @@ def cmd_cal_done(args):
 def cmd_cal_show(args):
     conn = famdb.connect()
     e = cal.get(conn, args.id)
+    if e is None:
+        # cal.get() returning None is fine (mirrors people/places get());
+        # unknown ids are rejected here, like update/cancel/done's
+        # ValueError contract, so `fam cal show <bad-id>` exits 2.
+        raise ValueError(f"unknown event: {args.id}")
     if args.json:
         print(json.dumps(e, ensure_ascii=False))
-    elif e is None:
-        print("not found")
     else:
         print(_fmt_event(e))
     return 0

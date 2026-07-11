@@ -32,3 +32,11 @@ def test_people_add_duplicate_cli_exit_code_2(db, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert captured.err.strip() != ""
+
+# --- Fix round 1, Finding 3: cal show unknown id -> exit 2 ---
+
+def test_cal_show_unknown_id_exit_2(db, capsys):
+    rc = cli.main(["cal", "show", "999"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
