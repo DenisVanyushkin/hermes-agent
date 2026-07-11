@@ -62,6 +62,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts_utc);
 def resolve_db_path():
     env = os.environ.get("FAM_DB")
     if env:
+        if not os.path.isdir(os.path.dirname(env) or "."):
+            raise SystemExit(2)
         return env
     for p in (HOST_DB, SANDBOX_DB):
         if os.path.isdir(os.path.dirname(p)):

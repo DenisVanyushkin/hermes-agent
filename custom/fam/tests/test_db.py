@@ -1,4 +1,5 @@
 import sqlite3
+import pytest
 
 EXPECTED_TABLES = {
     "meta", "events", "event_participants", "people",
@@ -18,3 +19,9 @@ def test_init_is_idempotent(db):
 def test_wal_and_fk_enabled(db):
     assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+def test_resolve_db_path_fam_db_parent_missing(monkeypatch):
+    monkeypatch.setenv("FAM_DB", "/nonexistent/x/assistant.db")
+    from fam import db as famdb
+    with pytest.raises(SystemExit):
+        famdb.resolve_db_path()
