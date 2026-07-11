@@ -306,6 +306,17 @@ def cmd_tick_reminders(args):
         print(" ".join(f"{k}={v}" for k, v in counts.items()))
     return 0
 
+def cmd_tick_digest(args):
+    conn = famdb.connect()
+    # tick.digest() owns its own commit (see fam/tick.py) -- no
+    # conn.commit() here, same as cmd_tick_reminders above.
+    summary = tick.digest(conn, now_utc=args.now)
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False))
+    else:
+        print(" ".join(f"{k}={v}" for k, v in summary.items()))
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(prog="fam")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -484,6 +495,11 @@ def build_parser():
     spt.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
     spt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
+
+    sptd = tick_sub.add_parser("digest"); sptd.set_defaults(func=cmd_tick_digest)
+    sptd.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
+    sptd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
 
     return p
 

@@ -1,3 +1,5 @@
+import json
+import subprocess
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -429,7 +431,6 @@ def test_reminders_uses_real_now_when_not_given(db, fake_deliver):
 
 def test_reminders_loads_config_when_not_given(db, fake_deliver, monkeypatch, tmp_path):
     example = tmp_path / "fam-config.example.json"
-    import json
     example.write_text(json.dumps(CFG, ensure_ascii=False), encoding="utf-8")
     target = tmp_path / "fam-config.json"
     monkeypatch.setattr(gate, "CONFIG_PATH", target)
@@ -440,3 +441,296 @@ def test_reminders_loads_config_when_not_given(db, fake_deliver, monkeypatch, tm
 
     assert counts["due"] == 0
     assert target.exists()
+
+
+# ==== Task 7: fam tick digest ====
+# NOW ("2026-07-20T04:30:00+00:00") is 2026-07-20T09:30 Almaty, so "today"
+# for the digest is 2026-07-20 -- reused from the reminders section above.
+
+WX = {
+    "today": {"tmin": 19.0, "tmax": 33.0, "precip_mm": 0.0,
+              "precip_hours": 0.0, "wind": 10.0},
+    "tomorrow": {"tmin": 18.0, "tmax": 30.0, "precip_mm": 2.0,
+                 "precip_hours": 3.0, "wind": 12.0},
+}
+
+
+def _fetch_wx(wx=WX):
+    return lambda: wx
+
+
+def _insert_gate_sent(db, ts_utc, payload):
+    db.execute(
+        "INSERT INTO audit_log(ts_utc, kind, actor, payload) VALUES(?,?,?,?)",
+        (ts_utc, "gate.sent", "test", json.dumps(payload, ensure_ascii=False)),
+    )
+
+
+# ---- raw assembly ----
+
+def test_digest_raw_shape_with_weather_and_event(db, fake_deliver):
+    e = _event(db, title="Встреча", start="2026-07-20T10:00:00+00:00")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    call = fake_deliver.calls[0]
+    assert call["kind"] == "digest"
+    assert call["force"] is True
+    raw = call["raw"]
+    assert raw == {
+        "kind": "digest",
+        "date_local": "2026-07-20",
+        "weather": WX,
+        "events": [{"title": "Встреча", "start_local": e["start_local"]}],
+        "question": True,
+    }
+
+
+def test_digest_raw_event_includes_place_name_when_present(db, fake_deliver):
+    places.add(db, "Клиника")
+    db.commit()
+    e = _event(db, title="Врач", place="Клиника",
+               start="2026-07-20T10:00:00+00:00")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    raw = fake_deliver.calls[0]["raw"]
+    assert raw["events"] == [
+        {"title": "Врач", "start_local": e["start_local"],
+         "place_name": "Клиника"}
+    ]
+
+
+def test_digest_raw_weather_none_when_fetch_returns_none(db, fake_deliver):
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=lambda: None)
+
+    assert fake_deliver.calls[0]["raw"]["weather"] is None
+
+
+def test_digest_raw_events_empty_when_none_today(db, fake_deliver):
+    # tomorrow, not today -- cal.day() must not pick it up
+    _event(db, start="2026-07-21T05:00:00+00:00")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert fake_deliver.calls[0]["raw"]["events"] == []
+
+
+def test_digest_raw_omits_cancelled_events(db, fake_deliver):
+    # cal.day() is active-only by design (plan: right choice for a "what's
+    # still on the plan today" digest) -- a cancelled event today must not
+    # appear.
+    e = _event(db, start="2026-07-20T10:00:00+00:00")
+    cal.cancel(db, e["id"])
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert fake_deliver.calls[0]["raw"]["events"] == []
+
+
+# ---- fallback text shape ----
+
+def test_digest_fallback_includes_all_sections_and_question(db, fake_deliver):
+    e = _event(db, title="Встреча", start="2026-07-20T10:00:00+00:00")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    fallback = fake_deliver.calls[0]["human_fallback"]
+    assert "2026-07-20" in fallback
+    assert "19" in fallback and "33" in fallback and "без осадков" in fallback
+    time_str = datetime.fromisoformat(e["start_local"]).strftime("%H:%M")
+    assert f"{time_str} Встреча" in fallback
+    assert fallback.rstrip().endswith("Какие планы на сегодня?")
+    assert len(fallback) <= 900
+
+
+def test_digest_fallback_no_events_says_so(db, fake_deliver):
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    fallback = fake_deliver.calls[0]["human_fallback"]
+    assert "Событий нет" in fallback
+    assert fallback.rstrip().endswith("Какие планы на сегодня?")
+
+
+def test_digest_fallback_omits_weather_section_when_none(db, fake_deliver):
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=lambda: None)
+
+    fallback = fake_deliver.calls[0]["human_fallback"]
+    assert "°C" not in fallback
+    assert fallback.rstrip().endswith("Какие планы на сегодня?")
+
+
+def test_digest_fallback_mentions_precipitation_when_present(db, fake_deliver):
+    wx = {"today": dict(WX["today"], precip_mm=5.0), "tomorrow": WX["tomorrow"]}
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=lambda: wx)
+
+    fallback = fake_deliver.calls[0]["human_fallback"]
+    assert "без осадков" not in fallback
+    assert "осад" in fallback
+
+
+# ---- dup guard: already sent today ----
+
+def test_digest_dup_guard_skips_when_gate_sent_digest_already_today(db, fake_deliver):
+    # 2026-07-20T02:00:00Z falls inside today's Almaty day bounds relative
+    # to NOW (2026-07-19T19:00Z .. 2026-07-20T19:00Z).
+    _insert_gate_sent(db, "2026-07-20T02:00:00+00:00", {"kind": "digest"})
+    db.commit()
+    fake_deliver.responses = []  # must not be called
+
+    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert summary == {"skipped": "already_sent"}
+    assert fake_deliver.calls == []
+    rows = audit.query(db, since_utc=None, kind_prefix="tick.digest",
+                        grep=None, limit=10)
+    assert len(rows) == 1
+    assert rows[0]["payload"] == {"skipped": "already_sent"}
+
+
+def test_digest_dup_guard_ignores_gate_sent_reminder_kind(db, fake_deliver):
+    # A reminder's gate.sent row (payload kind="reminder") must not trip
+    # the digest's own dup guard -- only kind=="digest" counts.
+    _insert_gate_sent(db, "2026-07-20T02:00:00+00:00", {"kind": "reminder"})
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert summary["status"] == "sent"
+    assert len(fake_deliver.calls) == 1
+
+
+def test_digest_dup_guard_ignores_yesterdays_digest(db, fake_deliver):
+    _insert_gate_sent(db, "2026-07-19T10:00:00+00:00", {"kind": "digest"})
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert summary["status"] == "sent"
+
+
+class _FakeRunOK:
+    """Real gate.deliver, fake hermes subprocess -- exercises the dup
+    guard end-to-end against the gate.sent row gate.deliver itself
+    writes, unlike the fake_deliver-based tests above which never touch
+    gate.py's own audit trail."""
+
+    def __call__(self, args, **kwargs):
+        if "-z" in args:
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="Доброе утро!", stderr="")
+        if "send" in args:
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected hermes invocation: {args}")
+
+
+def test_digest_real_second_run_same_day_is_skipped(db, monkeypatch):
+    # Uses the REAL wall clock (no now_utc override) on purpose:
+    # audit.log() always stamps ts_utc from the real clock, regardless of
+    # any now_utc a caller passes to a domain function (see audit.py) --
+    # so the gate.sent row gate.deliver writes here is real-time-stamped,
+    # and this test's day-bounds must be anchored to that same real "now"
+    # for the dup guard to see it. This matches production exactly:
+    # systemd invokes `fam tick digest` with no --now override at all.
+    monkeypatch.setattr(gate.subprocess, "run", _FakeRunOK())
+
+    first = tick.digest(db, cfg=CFG, _fetch_weather=_fetch_wx())
+    assert first["status"] == "sent"
+
+    second = tick.digest(db, cfg=CFG, _fetch_weather=_fetch_wx())
+    assert second == {"skipped": "already_sent"}
+
+
+# ---- gate.deliver wiring: force=True, outside budget ----
+
+def test_digest_uses_force_true_bypassing_quiet_and_budget(db, fake_deliver):
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert fake_deliver.calls[0]["force"] is True
+    assert fake_deliver.calls[0]["now_utc"] == NOW
+
+
+# ---- always audits tick.digest ----
+
+def test_digest_audits_tick_digest_with_status_on_sent(db, fake_deliver):
+    fake_deliver.responses = ["sent"]
+
+    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert summary["status"] == "sent"
+    rows = audit.query(db, since_utc=None, kind_prefix="tick.digest",
+                        grep=None, limit=10)
+    assert len(rows) == 1
+    assert rows[0]["payload"]["status"] == "sent"
+    assert rows[0]["payload"]["date_local"] == "2026-07-20"
+
+
+def test_digest_audits_tick_digest_with_status_on_error(db, fake_deliver):
+    fake_deliver.responses = ["error"]
+
+    summary = tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert summary["status"] == "error"
+    rows = audit.query(db, since_utc=None, kind_prefix="tick.digest",
+                        grep=None, limit=10)
+    assert rows[0]["payload"]["status"] == "error"
+
+
+# ---- default now_utc / cfg wiring ----
+
+def test_digest_uses_real_now_when_not_given(db, fake_deliver):
+    fake_deliver.responses = ["sent"]
+
+    summary = tick.digest(db, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert summary["status"] == "sent"
+    assert "date_local" in summary
+
+
+def test_digest_loads_config_when_not_given(db, fake_deliver, monkeypatch, tmp_path):
+    example = tmp_path / "fam-config.example.json"
+    example.write_text(json.dumps(CFG, ensure_ascii=False), encoding="utf-8")
+    target = tmp_path / "fam-config.json"
+    monkeypatch.setattr(gate, "CONFIG_PATH", target)
+    monkeypatch.setattr(gate, "CONFIG_EXAMPLE_PATH", example)
+    fake_deliver.responses = ["sent"]
+
+    summary = tick.digest(db, now_utc=NOW, _fetch_weather=_fetch_wx())
+
+    assert summary["status"] == "sent"
+    assert target.exists()
+
+
+def test_digest_defaults_fetch_weather_to_weather_fetch_almaty(db, fake_deliver, monkeypatch):
+    # Pins the production default injection point without ever touching
+    # the network: weather.fetch_almaty itself is monkeypatched.
+    from fam import weather as weather_mod
+    monkeypatch.setattr(weather_mod, "fetch_almaty", lambda: WX)
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG)
+
+    assert fake_deliver.calls[0]["raw"]["weather"] == WX

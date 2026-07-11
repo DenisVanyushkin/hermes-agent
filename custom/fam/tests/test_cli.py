@@ -394,3 +394,70 @@ def test_tick_reminders_plain_output(db, capsys, monkeypatch, tmp_path):
 
     assert rc == 0
     assert "due=0" in text and "sent=0" in text and "cancelled=0" in text
+
+# --- Task 7: `fam tick digest` CLI wiring ---
+# Same hermetic-config discipline as the reminders section above, plus
+# weather.fetch_almaty is also monkeypatched -- tick.digest() has no
+# --fetch-weather CLI override, so an un-mocked run would hit the real
+# Open-Meteo network from this test suite.
+
+def _hermetic_weather(monkeypatch, wx=None):
+    from fam import weather
+    monkeypatch.setattr(weather, "fetch_almaty", lambda: wx)
+
+def _must_not_be_called(*a, **k):
+    raise AssertionError("gate.deliver must not be called")
+
+def test_tick_digest_json_shape(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _hermetic_weather(monkeypatch)
+    monkeypatch.setattr(gate, "deliver", lambda *a, **k: "sent")
+
+    rc = cli.main(["tick", "digest", "--now", "2026-07-20T04:30:00+00:00",
+                   "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert out == {"status": "sent", "date_local": "2026-07-20",
+                    "weather_present": False, "n_events": 0}
+
+def test_tick_digest_now_override_drives_date_local(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _hermetic_weather(monkeypatch)
+    monkeypatch.setattr(gate, "deliver", lambda *a, **k: "sent")
+
+    rc = cli.main(["tick", "digest", "--now", "2030-06-02T00:00:00+00:00",
+                   "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert out["date_local"] == "2030-06-02"
+
+def test_tick_digest_plain_output(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _hermetic_weather(monkeypatch)
+    monkeypatch.setattr(gate, "deliver", lambda *a, **k: "sent")
+
+    rc = cli.main(["tick", "digest", "--now", "2026-07-20T04:30:00+00:00"])
+    text = capsys.readouterr().out
+
+    assert rc == 0
+    assert "status=sent" in text and "date_local=2026-07-20" in text
+
+def test_tick_digest_skips_when_already_sent_today(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _hermetic_weather(monkeypatch)
+    now = "2026-07-20T04:30:00+00:00"
+    db.execute(
+        "INSERT INTO audit_log(ts_utc, kind, actor, payload) VALUES(?,?,?,?)",
+        ("2026-07-20T02:00:00+00:00", "gate.sent", "test",
+         json.dumps({"kind": "digest"})),
+    )
+    db.commit()
+    monkeypatch.setattr(gate, "deliver", _must_not_be_called)
+
+    rc = cli.main(["tick", "digest", "--now", now, "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert out == {"skipped": "already_sent"}
