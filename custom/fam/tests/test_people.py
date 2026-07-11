@@ -71,6 +71,16 @@ def test_alias_unknown_ref_raises(db):
     with pytest.raises(ValueError):
         people.alias(db, "НетТакого", "кличка")
 
+# --- T4 review fast-follow: pure intra-batch dup (no pre-existing conflict) ---
+# Two aliases in the SAME add() call that only collide with each other
+# (neither collides with anything already in the DB). Code already handles
+# this via seen_folds in people.add() — this is a regression guard, expected
+# green immediately.
+
+def test_add_intra_batch_duplicate_alias_rejected(db):
+    with pytest.raises(ValueError):
+        people.add(db, "Новая", aliases=["Ляля", "ляля"])
+
 # --- Finding 4 (Minor): audit noise on duplicate group_members insert ---
 
 def test_add_member_duplicate_call_adds_no_new_audit_row(db):

@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, sys
 from datetime import datetime, timedelta, timezone
-from fam import audit, db as famdb, people, places
+from fam import audit, cal, db as famdb, people, places
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -108,6 +108,97 @@ def cmd_places_list(args):
             print(f"{r['id']}\t{r['name']}{addr_part}")
     return 0
 
+def _fmt_event(e):
+    line = f"{e['id']}\t{e['start_local']}\t{e['title']}\t[{e['status']}]"
+    if e.get("place"):
+        line += f"\t@{e['place']['name']}"
+    if e.get("participants"):
+        line += "\twith:" + ",".join(p["name"] for p in e["participants"])
+    return line
+
+def cmd_cal_add(args):
+    conn = famdb.connect()
+    e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
+                participants=args.with_, transport=args.transport, notes=args.notes)
+    conn.commit()
+    if args.json:
+        print(json.dumps(e, ensure_ascii=False))
+    else:
+        print(f"added event: {e['title']} (id={e['id']}) {e['start_local']}")
+    return 0
+
+def cmd_cal_update(args):
+    conn = famdb.connect()
+    fields = {}
+    if args.title is not None: fields["title"] = args.title
+    if args.start is not None: fields["start_utc"] = args.start
+    if args.end is not None: fields["end_utc"] = args.end
+    if args.place is not None: fields["place"] = args.place
+    if args.transport is not None: fields["transport"] = args.transport
+    if args.notes is not None: fields["notes"] = args.notes
+    if args.add_person: fields["add_person"] = args.add_person
+    if args.rm_person: fields["rm_person"] = args.rm_person
+    e = cal.update(conn, args.id, **fields)
+    conn.commit()
+    if args.json:
+        print(json.dumps(e, ensure_ascii=False))
+    else:
+        print(f"updated event: {e['title']} (id={e['id']})")
+    return 0
+
+def cmd_cal_cancel(args):
+    conn = famdb.connect()
+    e = cal.cancel(conn, args.id)
+    conn.commit()
+    if args.json:
+        print(json.dumps(e, ensure_ascii=False))
+    else:
+        print(f"cancelled event: {e['title']} (id={e['id']})")
+    return 0
+
+def cmd_cal_done(args):
+    conn = famdb.connect()
+    e = cal.done(conn, args.id)
+    conn.commit()
+    if args.json:
+        print(json.dumps(e, ensure_ascii=False))
+    else:
+        print(f"done event: {e['title']} (id={e['id']})")
+    return 0
+
+def cmd_cal_show(args):
+    conn = famdb.connect()
+    e = cal.get(conn, args.id)
+    if args.json:
+        print(json.dumps(e, ensure_ascii=False))
+    elif e is None:
+        print("not found")
+    else:
+        print(_fmt_event(e))
+    return 0
+
+def cmd_cal_day(args):
+    conn = famdb.connect()
+    rows = cal.day(conn, args.date)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for e in rows:
+            print(_fmt_event(e))
+    return 0
+
+def cmd_cal_range(args):
+    conn = famdb.connect()
+    from_utc = cal._to_utc_iso(args.from_iso)
+    to_utc = cal._to_utc_iso(args.to_iso)
+    rows = cal.list_range(conn, from_utc, to_utc)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for e in rows:
+            print(_fmt_event(e))
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(prog="fam")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -182,12 +273,72 @@ def build_parser():
     spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
+    sp = sub.add_parser("cal")
+    cal_sub = sp.add_subparsers(dest="cal_cmd", required=True)
+    transport_choices = ["car", "walk", "public", "unknown"]
+
+    spa = cal_sub.add_parser("add"); spa.set_defaults(func=cmd_cal_add)
+    spa.add_argument("--title", required=True)
+    spa.add_argument("--start", required=True,
+                      help="ISO-8601, any offset (e.g. 2026-07-15T10:00:00+05:00)")
+    spa.add_argument("--end")
+    spa.add_argument("--place", help="place name/alias/id")
+    spa.add_argument("--with", dest="with_", action="append", default=[],
+                      help="participant ref: name/alias/slug/group (repeatable)")
+    spa.add_argument("--transport", choices=transport_choices, default="unknown")
+    spa.add_argument("--notes", default="")
+    spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spu = cal_sub.add_parser("update"); spu.set_defaults(func=cmd_cal_update)
+    spu.add_argument("id", type=int)
+    spu.add_argument("--title")
+    spu.add_argument("--start")
+    spu.add_argument("--end")
+    spu.add_argument("--place")
+    spu.add_argument("--transport", choices=transport_choices)
+    spu.add_argument("--notes")
+    spu.add_argument("--add-person", dest="add_person", action="append", default=[],
+                      help="participant ref to add (repeatable)")
+    spu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
+                      help="participant ref to remove (repeatable)")
+    spu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spc = cal_sub.add_parser("cancel"); spc.set_defaults(func=cmd_cal_cancel)
+    spc.add_argument("id", type=int)
+    spc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spd = cal_sub.add_parser("done"); spd.set_defaults(func=cmd_cal_done)
+    spd.add_argument("id", type=int)
+    spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    sps = cal_sub.add_parser("show"); sps.set_defaults(func=cmd_cal_show)
+    sps.add_argument("id", type=int)
+    sps.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spday = cal_sub.add_parser("day"); spday.set_defaults(func=cmd_cal_day)
+    spday.add_argument("date", help="YYYY-MM-DD in Asia/Almaty")
+    spday.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable output")
+
+    sprange = cal_sub.add_parser("range"); sprange.set_defaults(func=cmd_cal_range)
+    sprange.add_argument("from_iso")
+    sprange.add_argument("to_iso")
+    sprange.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                          help="machine-readable output")
+
     return p
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
+    except cal.UnknownRefError as e:
+        print(str(e), file=sys.stderr); return 2
     except ValueError as e:
         print(str(e), file=sys.stderr); return 2
     except famdb.sqlite3.Error as e:

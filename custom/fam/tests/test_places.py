@@ -60,3 +60,13 @@ def test_add_duplicate_name_raises(db):
 def test_alias_unknown_ref_raises(db):
     with pytest.raises(ValueError):
         places.alias(db, "НетТакого", "кличка")
+
+# --- T4 review fast-follow: pure intra-batch dup (no pre-existing conflict) ---
+# Two aliases in the SAME add() call that only collide with each other
+# (neither collides with anything already in the DB). Code already handles
+# this via seen_folds in places.add() — this is a regression guard, expected
+# green immediately.
+
+def test_add_intra_batch_duplicate_alias_rejected(db):
+    with pytest.raises(ValueError):
+        places.add(db, "Новая", aliases=["Кафе", "КАФЕ"])
