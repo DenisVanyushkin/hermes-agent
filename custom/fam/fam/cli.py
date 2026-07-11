@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, grid, people, places, rem, tick
+from fam import audit, cal, db as famdb, gate, grid, mail, people, places, rem, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -118,12 +118,42 @@ def _fmt_event(e):
         line += "\twith:" + ",".join(p["name"] for p in e["participants"])
     return line
 
+def _event_has_denis_participant(e):
+    return any(p.get("slug") == "denis" for p in e.get("participants", []))
+
+def _log_mail_result(conn, event_id, result, to=None):
+    if result.get("ok"):
+        audit.log(conn, "mail.sent", {"event_id": event_id, "to": to})
+    else:
+        audit.log(conn, "mail.error", {"event_id": event_id, "error": result.get("error")})
+
+def _maybe_email_event(conn, e):
+    """After a successful `cal add`/`cal update` whose participants
+    include the person with slug=="denis", send an .ics email via
+    mail.send_event_email() -- IF cfg["email_enabled"] (Task 10). This is
+    a CLI-layer side effect, not a domain one (mirrors how gate/tick own
+    delivery, not cal.py itself) -- it runs in its OWN transaction, after
+    the caller's cal.add()/cal.update() has already committed, since a
+    mail hiccup must never undo or block the calendar write. Best-effort:
+    any failure is caught inside send_event_email() (never raises) and
+    logged as `mail.error`; success logs `mail.sent`.
+    """
+    if not _event_has_denis_participant(e):
+        return
+    cfg = gate.load_config()
+    if not cfg.get("email_enabled"):
+        return
+    result = mail.send_event_email(e, cfg)
+    _log_mail_result(conn, e["id"], result, to=cfg.get("email_to"))
+    conn.commit()
+
 def cmd_cal_add(args):
     conn = famdb.connect()
     e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
                 participants=args.with_, transport=args.transport, notes=args.notes,
                 travel_min=args.travel_min)
     conn.commit()
+    _maybe_email_event(conn, e)
     if args.json:
         print(json.dumps(e, ensure_ascii=False))
     else:
@@ -144,6 +174,7 @@ def cmd_cal_update(args):
     if args.rm_person: fields["rm_person"] = args.rm_person
     e = cal.update(conn, args.id, **fields)
     conn.commit()
+    _maybe_email_event(conn, e)
     if args.json:
         print(json.dumps(e, ensure_ascii=False))
     else:
@@ -315,6 +346,27 @@ def cmd_tick_digest(args):
         print(json.dumps(summary, ensure_ascii=False))
     else:
         print(" ".join(f"{k}={v}" for k, v in summary.items()))
+    return 0
+
+def cmd_mail_test(args):
+    """`fam mail test EVENT_ID` -- manually trigger the .ics email for one
+    event, unconditionally (no email_enabled/denis-participant gating --
+    this is a diagnostic/live-check command, see Task 10/T11). Always
+    exits 0 on a known event; the send outcome (ok/error) is reported in
+    the output itself, same as the cal add/update hook's audit contract.
+    """
+    conn = famdb.connect()
+    e = cal.get(conn, args.id)
+    if e is None:
+        raise ValueError(f"unknown event: {args.id}")
+    cfg = gate.load_config()
+    result = mail.send_event_email(e, cfg)
+    _log_mail_result(conn, e["id"], result, to=cfg.get("email_to"))
+    conn.commit()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"mail test: {result}")
     return 0
 
 def build_parser():
@@ -499,6 +551,14 @@ def build_parser():
     sptd = tick_sub.add_parser("digest"); sptd.set_defaults(func=cmd_tick_digest)
     sptd.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
     sptd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    sp = sub.add_parser("mail")
+    mail_sub = sp.add_subparsers(dest="mail_cmd", required=True)
+
+    spmt = mail_sub.add_parser("test"); spmt.set_defaults(func=cmd_mail_test)
+    spmt.add_argument("id", type=int)
+    spmt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
 
     return p

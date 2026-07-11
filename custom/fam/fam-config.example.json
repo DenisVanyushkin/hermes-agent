@@ -7,5 +7,8 @@
   "gate_provider": "openai-codex",
   "max_len_reminder": 300,
   "max_len_digest": 900,
-  "reminder_max_age_min": 120
+  "reminder_max_age_min": 120,
+  "email_enabled": true,
+  "email_from": "germes@vanyushk.in",
+  "email_to": "hermes@vanyushk.in"
 }

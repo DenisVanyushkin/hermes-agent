@@ -15,6 +15,9 @@ CFG = {
     "max_len_reminder": 300,
     "max_len_digest": 900,
     "reminder_max_age_min": 120,
+    "email_enabled": True,
+    "email_from": "germes@vanyushk.in",
+    "email_to": "hermes@vanyushk.in",
 }
 
 
@@ -108,6 +111,30 @@ def test_load_config_default_merges_missing_reminder_max_age_min(tmp_path):
     assert cfg["reminder_max_age_min"] == 120
     on_disk = json.loads(target.read_text(encoding="utf-8"))
     assert "reminder_max_age_min" not in on_disk
+
+
+def test_load_config_default_merges_missing_email_keys(tmp_path):
+    # Task 10: the live config on hermes-home predates email_enabled/
+    # email_from/email_to -- same default-merge path as
+    # reminder_max_age_min above, so `fam cal add`'s mail hook and
+    # `fam mail test` work against it without a manual live-file edit.
+    example = tmp_path / "fam-config.example.json"
+    example.write_text(json.dumps(CFG, ensure_ascii=False), encoding="utf-8")
+    target = tmp_path / "private" / "amina" / "fam-config.json"
+    target.parent.mkdir(parents=True)
+    legacy = {
+        k: v for k, v in CFG.items()
+        if k not in ("email_enabled", "email_from", "email_to")
+    }
+    target.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    cfg = gate.load_config(config_path=target, example_path=example)
+
+    assert cfg["email_enabled"] is True
+    assert cfg["email_from"] == "germes@vanyushk.in"
+    assert cfg["email_to"] == "hermes@vanyushk.in"
+    on_disk = json.loads(target.read_text(encoding="utf-8"))
+    assert "email_enabled" not in on_disk
 
 
 # ---- in_quiet_hours: cross-midnight window (21:30-07:30 Almaty) ----

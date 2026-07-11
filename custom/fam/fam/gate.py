@@ -30,7 +30,18 @@ CONFIG_EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "fam-config.examp
 # the loaded JSON so an older live config keeps working without a manual
 # edit -- the file on disk is never rewritten for this, only the in-memory
 # dict returned to the caller.
-CONFIG_DEFAULTS = {"reminder_max_age_min": 120}
+#
+# email_enabled/email_from/email_to (Task 10, Phase 2b): the live config
+# on hermes-home predates these keys (added together with fam/mail.py),
+# so they go through this same default-merge path rather than a manual
+# live-file edit -- see cli.py's cal add/update mail hook and `fam mail
+# test`, both of which read these via gate.load_config().
+CONFIG_DEFAULTS = {
+    "reminder_max_age_min": 120,
+    "email_enabled": True,
+    "email_from": "germes@vanyushk.in",
+    "email_to": "hermes@vanyushk.in",
+}
 
 GATE_STYLE_INSTRUCTION = (
     "Ты пишешь как Гермес — тёплый, лаконичный ассистент семьи. Перепиши "

@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from fam import cal, cli, gate, people, places, rem
+from fam import audit, cal, cli, gate, mail, people, places, rem
 
 def test_json_flag_works_before_and_after_subcommand(db, capsys, monkeypatch):
     # db fixture sets FAM_DB to tmp DB; init writes to it
@@ -469,3 +469,179 @@ def test_tick_digest_skips_when_already_sent_today(db, capsys, monkeypatch, tmp_
 
     assert rc == 0
     assert out == {"skipped": "already_sent", "date_local": "2026-07-20"}
+
+# --- Task 10: mail hook on `cal add`/`cal update` (participant slug=="denis") ---
+# Same hermetic-config discipline as the tick sections above --
+# _hermetic_gate_config default-merges gate.CONFIG_DEFAULTS's email_enabled/
+# email_from/email_to (see gate.py) into the tmp live config, so these
+# tests get email_enabled=True for free without listing those keys in
+# _HERMETIC_CFG. cli.mail.send_event_email is always monkeypatched --
+# these tests exercise the CLI hook's wiring/conditions/audit contract
+# only, never a real Gmail call (that's test_mail.py's job).
+
+def _seed_denis(db):
+    people.add(db, "Денис", slug="denis")
+    db.commit()
+
+def test_cal_add_with_denis_participant_sends_mail_and_audits(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _seed_denis(db)
+    calls = []
+    def fake_send(event, cfg, **kwargs):
+        calls.append(event["id"])
+        return {"ok": True, "id": "msg-1"}
+    monkeypatch.setattr(cli.mail, "send_event_email", fake_send)
+
+    rc = cli.main(["cal", "add", "--title", "Событие", "--start",
+                    "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert calls == [out["id"]]
+    rows = audit.query(db, since_utc=None, kind_prefix="mail.", grep=None, limit=10)
+    sent = [r for r in rows if r["kind"] == "mail.sent"]
+    assert len(sent) == 1
+    assert sent[0]["payload"] == {"event_id": out["id"], "to": "hermes@vanyushk.in"}
+
+def test_cal_add_without_denis_participant_does_not_send_mail(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    people.add(db, "Тая", slug="taya"); db.commit()
+    calls = []
+    monkeypatch.setattr(cli.mail, "send_event_email", lambda *a, **k: calls.append(1))
+
+    rc = cli.main(["cal", "add", "--title", "Событие", "--start",
+                    "2026-07-15T05:00:00+00:00", "--with", "Тая"])
+
+    assert rc == 0
+    assert calls == []
+
+def test_cal_add_denis_participant_but_email_disabled_does_not_send(db, capsys, monkeypatch, tmp_path):
+    # Explicit email_enabled: false on disk overrides CONFIG_DEFAULTS's true.
+    example = tmp_path / "fam-config.example.json"
+    example.write_text(json.dumps(_HERMETIC_CFG, ensure_ascii=False), encoding="utf-8")
+    target = tmp_path / "fam-config.json"
+    target.write_text(
+        json.dumps(dict(_HERMETIC_CFG, email_enabled=False,
+                         email_from="germes@vanyushk.in",
+                         email_to="hermes@vanyushk.in"),
+                    ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gate, "CONFIG_PATH", target)
+    monkeypatch.setattr(gate, "CONFIG_EXAMPLE_PATH", example)
+    _seed_denis(db)
+    calls = []
+    monkeypatch.setattr(cli.mail, "send_event_email", lambda *a, **k: calls.append(1))
+
+    rc = cli.main(["cal", "add", "--title", "Событие", "--start",
+                    "2026-07-15T05:00:00+00:00", "--with", "Денис"])
+
+    assert rc == 0
+    assert calls == []
+
+def test_cal_add_mail_failure_audits_error_and_does_not_fail_cal_op(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _seed_denis(db)
+    monkeypatch.setattr(
+        cli.mail, "send_event_email",
+        lambda *a, **k: {"ok": False, "error": "unauthorized_client"},
+    )
+
+    rc = cli.main(["cal", "add", "--title", "Событие", "--start",
+                    "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    # The cal operation itself must succeed regardless of the mail failure.
+    assert rc == 0
+    rows = audit.query(db, since_utc=None, kind_prefix="mail.", grep=None, limit=10)
+    errors = [r for r in rows if r["kind"] == "mail.error"]
+    assert len(errors) == 1
+    assert errors[0]["payload"] == {"event_id": out["id"], "error": "unauthorized_client"}
+
+def test_cal_update_add_person_denis_triggers_mail(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _seed_denis(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    calls = []
+    def fake_send(event, cfg, **kwargs):
+        calls.append(event["id"])
+        return {"ok": True, "id": "m1"}
+    monkeypatch.setattr(cli.mail, "send_event_email", fake_send)
+
+    rc = cli.main(["cal", "update", str(e["id"]), "--add-person", "Денис"])
+
+    assert rc == 0
+    assert calls == [e["id"]]
+
+def test_cal_update_without_denis_does_not_trigger_mail(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    people.add(db, "Тая", slug="taya"); db.commit()
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    calls = []
+    monkeypatch.setattr(cli.mail, "send_event_email", lambda *a, **k: calls.append(1))
+
+    rc = cli.main(["cal", "update", str(e["id"]), "--add-person", "Тая"])
+
+    assert rc == 0
+    assert calls == []
+
+# --- `fam mail test EVENT_ID` (manual live-trigger command, T11) ---
+
+def test_mail_test_command_success(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _seed_denis(db)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00", participants=["Денис"])
+    db.commit()
+    monkeypatch.setattr(
+        cli.mail, "send_event_email",
+        lambda event, cfg, **k: {"ok": True, "id": "msg-42"},
+    )
+
+    rc = cli.main(["mail", "test", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert out == {"ok": True, "id": "msg-42"}
+    rows = audit.query(db, since_utc=None, kind_prefix="mail.", grep=None, limit=10)
+    assert any(r["kind"] == "mail.sent" and r["payload"]["event_id"] == e["id"] for r in rows)
+
+def test_mail_test_command_failure_reports_error_and_audits(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    monkeypatch.setattr(
+        cli.mail, "send_event_email",
+        lambda event, cfg, **k: {"ok": False, "error": "access_denied"},
+    )
+
+    rc = cli.main(["mail", "test", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    # `mail test` is a diagnostic command -- it reports a send failure in
+    # its own JSON/audit output rather than treating it as a CLI error.
+    assert rc == 0
+    assert out == {"ok": False, "error": "access_denied"}
+    rows = audit.query(db, since_utc=None, kind_prefix="mail.", grep=None, limit=10)
+    assert any(r["kind"] == "mail.error" for r in rows)
+
+def test_mail_test_unknown_event_exit_2(db, tmp_path, monkeypatch):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    rc = cli.main(["mail", "test", "999"])
+    assert rc == 2
+
+def test_mail_test_plain_output(db, capsys, monkeypatch, tmp_path):
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    monkeypatch.setattr(
+        cli.mail, "send_event_email",
+        lambda event, cfg, **k: {"ok": True, "id": "msg-9"},
+    )
+
+    rc = cli.main(["mail", "test", str(e["id"])])
+    text = capsys.readouterr().out
+
+    assert rc == 0
+    assert "msg-9" in text
