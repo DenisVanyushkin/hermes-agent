@@ -1,0 +1,6 @@
+[Unit]
+Description=Amina fam: morning digest tick
+
+[Service]
+Type=oneshot
+ExecStart=/home/denis/.hermes/hermes-agent/custom/fam/bin/fam tick digest

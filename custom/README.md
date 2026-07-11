@@ -63,10 +63,10 @@ Two recurring jobs deliver a short Almaty weather forecast to Amina over WhatsAp
 
 | Job ID | Name | Schedule (UTC) | Local (Almaty) | Status |
 |---|---|---|---|---|
-| `8b751dbfd5d6` | Утренний короткий прогноз погоды Алматы — Амина | `0 2 * * *` | 07:00 | active |
+| `8b751dbfd5d6` | Утренний короткий прогноз погоды Алматы — Амина | `0 2 * * *` | 07:00 | **paused** (2026-07-11, Phase 2b Task 8 — replaced by `fam-digest.timer`, see "Phase 2b — proactive timers" below) |
 | `150d115fe905` | Вечерний короткий прогноз погоды Алматы — Амина | `0 15 * * *` | 20:00 | active |
 
-Inspect with `$H cron list` where
+Inspect with `$H cron list --all` (plain `list` hides paused jobs) where
 `H="/home/denis/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main"`.
 
 **Note:** during the pilot (see "Pilot mode" below), both jobs' `deliver`
@@ -482,3 +482,92 @@ rendered successfully but the picture never reached the user.
 - Day-view grid's hour window is fixed (08:00–22:00); events outside it are
   clamped to the nearest edge row rather than shown at their true time
   (deliberate simplicity trade-off, `2a-task-9-gridfix-report.md`).
+
+## Phase 2b — proactive timers (reminders + digest) (2026-07-11)
+
+Two `systemd --user` timers drive fam's proactive side (reminder chains and the
+morning digest) independently of `hermes cron` — they call `fam tick <name>`
+directly, no LLM in the loop for the tick itself (only the style gate's rewrite
+step, `hermes -z`, touches the model). Unit files live in git
+(`custom/fam/systemd/`) and are installed as symlinks, per this project's
+"units in git, install by symlink" convention (see fam-reminders/fam-digest
+below).
+
+| Timer | Schedule | Service | Notes |
+|---|---|---|---|
+| `fam-reminders.timer` | `OnCalendar=*:0/5` (every 5 min), `Persistent=false` | `fam tick reminders` (`Type=oneshot`) | Sends due reminder-chain stages via the style gate; always writes a `tick.reminders` audit row, even when 0 due. |
+| `fam-digest.timer` | `OnCalendar=*-*-* 02:30:00 UTC` (07:30 Almaty), `Persistent=true` | `fam tick digest` (`Type=oneshot`) | Weather + today's events + a "what are your plans today?" prompt, one gated send/day (`force=True`, outside the daily budget); has its own dup-guard independent of systemd (`gate.sent kind=digest` already logged today → `{"skipped": "already_sent"}`). |
+
+No unit uses `--now`/`WantedBy` tricks to fire immediately — the dup-guard for
+the digest and the due-time filter for reminders both key off the real wall
+clock, so an extra unplanned run is a no-op, not a duplicate send.
+
+### Install
+
+```
+mkdir -p ~/.config/systemd/user
+cd ~/.config/systemd/user
+for f in fam-reminders.service fam-reminders.timer fam-digest.service fam-digest.timer; do
+  ln -sf /home/denis/.hermes/hermes-agent/custom/fam/systemd/$f $f
+done
+systemctl --user daemon-reload
+systemctl --user enable --now fam-reminders.timer fam-digest.timer
+systemctl --user list-timers --all | grep fam   # confirm next-run times
+```
+
+### Disable / roll back
+
+```
+systemctl --user disable --now fam-reminders.timer fam-digest.timer
+```
+
+(The service units are `Type=oneshot` with no `[Install]` section — only the
+`.timer` units are enabled; disabling the timers is sufficient, no separate
+service-level action needed.) To revert to the old weather-cron delivery
+instead of the digest:
+
+```
+H="/home/denis/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main"
+$H cron resume 8b751dbfd5d6
+```
+
+### Manual smoke test
+
+```
+systemctl --user start fam-reminders.service
+journalctl --user -u fam-reminders --since "2 min ago"
+custom/fam/bin/fam log --last-hours 1 --kind tick --json   # tick.reminders audit row
+
+custom/fam/bin/fam tick digest --json                      # DO NOT pass --now; real send
+custom/fam/bin/fam log --last-hours 1 --json                # gate.sent row with raw/final text
+```
+
+### Live verification (2026-07-11, Task 8 acceptance)
+
+- `fam-reminders.timer` / `fam-digest.timer` both `enabled`+`active`, confirmed
+  via `systemctl --user list-timers --all`.
+- `fam-reminders.service` manual run: clean journal, `due=0 sent=0 ... stale=0
+  error_capped=0`, matching `tick.reminders` audit row (no reminder chains exist
+  yet — expected, Task 8 predates any live event with an armed chain).
+- `fam tick digest --json` (real run, no `--now`): `{"status": "sent",
+  "date_local": "2026-07-11", "weather_present": true, "n_events": 0}` — live
+  Open-Meteo fetch, real `hermes -z` rewrite, real WhatsApp send to the pilot
+  number. Audit `gate.sent` row's `final` text:
+  > Сегодня тепло: до 32.7°, без осадков, ветер около 8.1 м/с. Завтра ещё
+  > жарче — до 33.9°, тоже сухо; дел на сегодня нет.
+
+  **Known gap:** the rewrite dropped the raw payload's `question` field
+  ("Какие планы на сегодня? Расскажи или надиктуй — запишу.") — the delivered
+  message covers weather only. Per the spec amendment making the digest double
+  as the daily-plan intake prompt, this defeats that half of its purpose. The
+  gate's `GATE_STYLE_INSTRUCTION` (`custom/fam/fam/gate.py`) doesn't currently
+  tell the rewrite model to preserve the question — worth a prompt tweak or an
+  explicit "always keep the question line" rule in a follow-up task; not fixed
+  here per this task's "don't rewrite code without evidence of a send failure"
+  scope (the send itself succeeded).
+- Second `fam tick digest --json` run (same day): `{"skipped": "already_sent",
+  "date_local": "2026-07-11"}` — dup-guard confirmed live, independent of the
+  systemd schedule.
+- Morning weather cron `8b751dbfd5d6` paused (`$H cron pause 8b751dbfd5d6`,
+  confirmed via `$H cron list --all` showing `[paused]`); evening
+  `150d115fe905` untouched, still `[active]`.
