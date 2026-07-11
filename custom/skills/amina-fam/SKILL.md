@@ -1,6 +1,6 @@
 ---
 name: amina-fam
-description: Use fam (the family calendar/people/places CLI) whenever the conversation touches the household schedule, contacts, or locations — recording or checking events, "who is X", "where is Y", showing a day/week/month.
+description: "fam CLI: calendar/people/places + reminders ('уже выходим/едем/собираемся/готовимся/на месте/знаю', 'не напоминай про это', 'какие напоминания' are reactions to a reminder/digest the agent itself already sent — use fam here too). Also for recording/checking events, 'who is X', 'where is Y', day/week/month views, or any household schedule/contacts/locations request."
 version: 1.0.0
 author: Hermes Agent
 license: MIT
