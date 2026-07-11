@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Runs fam from any context (host or sandbox) via its own location.
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m fam "$@"
