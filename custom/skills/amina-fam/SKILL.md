@@ -26,6 +26,10 @@ way to read or change family data.
 - People: "кто такой X", adding/looking up a family member, friend, or group.
 - Places: "где находится Y", adding/looking up an address.
 - Any request to view or change the household schedule or the people/places glossary.
+- Reacting to a reminder or the morning digest the agent itself sent
+  earlier — "уже выходим", "не напоминай про это", "какие напоминания",
+  or a reply to the digest's closing question. See Reminder Reactions and
+  Digest Replies below.
 
 ## Tool
 
@@ -41,6 +45,7 @@ way to read or change family data.
   - `people add|alias|member|resolve|list`
   - `places add|alias|resolve|list`
   - `cal add|update|cancel|done|show|day|range|grid`
+  - `rem list|ack|cancel|rules`
 - Time: the household lives in Asia/Almaty (+05:00). Take "now" from the
   date/time already available in your context — never ask the user what
   today's date is. Talk to the user in Asia/Almaty local time, short form
@@ -102,6 +107,11 @@ make a second, separate terminal call.
 | Where is Y | `fam places resolve "Y"` |
 | Add a place | `fam places add "Name" [--address A] [--lat LAT] [--lon LON] [--alias A]` |
 | Recent activity | `fam log --last-hours 24` |
+| Reminders for one event | `fam rem list --event ID --json` |
+| Reminders due right now | `fam rem list --due --json` |
+| Already on the way (ack chain) | `fam rem ack EVENT_ID` |
+| Stop nagging about it (cancel chain) | `fam rem cancel EVENT_ID` |
+| What rules generate reminders | `fam rem rules --json` |
 
 ## Calendar Grid
 
@@ -122,6 +132,48 @@ and in one line, that the картинка не получилась и поче
 for your own diagnosis (stderr output, stack traces, the exact failing
 command) stays in your terminal session's stderr — never forward it to the
 user.
+
+## Reminder Reactions
+
+Reminders and the digest are sent proactively — the household reacts to
+them in whatever conversation turn comes next. Ack/cancel always apply to
+an event's whole remaining reminder chain, never a single stage:
+
+- **"уже едем/выходим/собираемся/знаю" (already on it)** → `fam rem ack
+  EVENT_ID`. Acks every still-pending reminder for that event; sent/acked/
+  cancelled ones are untouched.
+- **"не напоминай про это" / "погаси напоминания про X" (stop nagging)**
+  → `fam rem cancel EVENT_ID`. Same scope as ack, cancelled instead.
+- **"какие напоминания" (what's pending)** → `fam rem list --due --json`
+  for what's about to fire, or `fam rem list --json` for everything.
+
+**Finding the event_id.** If only one event plausibly fits what the user
+just said, use its id directly. Otherwise resolve it before calling
+`ack`/`cancel`:
+1. `fam log --kind gate.sent --last-hours 6 --json` — each row's
+   `payload` carries the `raw` that produced that message: `raw.event_id`
+   for a reminder, `raw.events[].event_id` per item for a digest. This is
+   almost always enough to match "it" to a specific event.
+2. Still unclear? Match the title the user mentioned against `fam cal day
+   <today> --json` or `fam rem list --due --json`.
+3. More than one candidate, or none? Stop and ask which event they mean
+   — never guess an id.
+
+`ack`/`cancel` report how many stages they touched (`{"acked": N}` /
+`{"cancelled": N}`); `N == 0` means there was nothing pending (already
+sent, or already acted on) — say that plainly rather than implying you
+just silenced something.
+
+## Digest Replies
+
+The morning digest always closes with the same question: "Если появятся
+планы или изменения — расскажи или надиктуй, я запишу."
+
+- Plans or changes in the reply → ordinary calendar intake, the same
+  add/update rules as any other conversation — nothing digest-specific
+  about it.
+- A plain "всё в силе" / "без изменений" / "как обычно" acknowledgment →
+  no fam call needed; one short line back is enough.
 
 ## Reply Style
 
