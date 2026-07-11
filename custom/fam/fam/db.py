@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS places (
   lat REAL, lon REAL,
   source TEXT NOT NULL DEFAULT 'manual',  -- manual|2gis (Phase 3)
   notes TEXT NOT NULL DEFAULT '',
+  travel_min INTEGER NOT NULL DEFAULT 0,  -- manual leave_at minutes (2b); 2GIS in Phase 3
   created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS place_aliases (
   alias TEXT PRIMARY KEY COLLATE NOCASE,
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS events (
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active','cancelled','done')),
   notes TEXT NOT NULL DEFAULT '',
+  travel_min INTEGER,                     -- NULL = take from place; override (2b)
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
@@ -57,6 +59,26 @@ CREATE TABLE IF NOT EXISTS audit_log (
   actor TEXT NOT NULL DEFAULT 'agent',    -- agent|tick|admin
   payload TEXT NOT NULL DEFAULT '{}');    -- JSON
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts_utc);
+CREATE TABLE IF NOT EXISTS reminder_rules (
+  id INTEGER PRIMARY KEY,
+  scope TEXT NOT NULL,                    -- 'default' | 'slug:<slug>'
+  stages TEXT NOT NULL,                   -- JSON [{anchor,offset_min,label}]
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reminders (
+  id INTEGER PRIMARY KEY,
+  event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  rule_id INTEGER,
+  stage_idx INTEGER,
+  label TEXT NOT NULL DEFAULT '',
+  anchor TEXT NOT NULL DEFAULT 'start',   -- 'start' | 'leave_at'
+  fire_at_utc TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','sent','acked','cancelled')),
+  persistent INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  sent_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_reminders_fire ON reminders(status, fire_at_utc);
 """
 
 def resolve_db_path():
@@ -79,8 +101,22 @@ def connect(db_path=None):
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
+def _ensure_column(conn, table, column, add_ddl):
+    """Add COLUMN to TABLE if missing. SQLite has no ADD COLUMN IF NOT
+    EXISTS, so guard via PRAGMA table_info (idempotent migration)."""
+    cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {add_ddl}")
+
 def init_db(conn):
     conn.executescript(SCHEMA)
+    # schema 2b: migrate pre-2b tables that predate these columns
+    # (CREATE TABLE IF NOT EXISTS above only helps fresh databases).
+    _ensure_column(conn, "places", "travel_min",
+                   "travel_min INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "events", "travel_min", "travel_min INTEGER")
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','2a')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','2b')")
+    conn.execute(
+        "UPDATE meta SET value='2b' WHERE key='schema_version'")
     conn.commit()
