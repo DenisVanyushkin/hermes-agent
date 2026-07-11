@@ -39,7 +39,7 @@ ERROR_CAP = 3
 # The digest's fixed closing question -- goes into raw["question"] (the
 # JSON the LLM rewrite sees) AND the deterministic human_fallback, from
 # this single constant, so the two can never drift apart.
-DIGEST_QUESTION = "Какие планы на сегодня? Расскажи или надиктуй — запишу."
+DIGEST_QUESTION = "Если появятся планы или изменения — расскажи или надиктуй, я запишу."
 
 
 def _now():
