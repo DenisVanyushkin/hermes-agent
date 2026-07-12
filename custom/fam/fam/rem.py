@@ -24,6 +24,37 @@ TAYA_STAGES = [
 AMINA_STAGES = []  # inert reserve: no stages until an admin populates it
 
 
+KIND_PREPARE = "prepare"
+KIND_LEAVE = "leave"
+
+
+def build_stages(lead_min):
+    """Эскалационная цепочка для лида `lead_min` минут до выхода (leave_at).
+
+    Формула (решение Дениса, 2026-07-12): offsets {D, D-5, D-15} ∪
+    ({30, 15} если < D) ∪ {0}. При коллизии offset'ов countdown-лейбл
+    («выходить через …») побеждает prepare-лейбл: за 15 минут до выхода
+    важнее сказать «выходить через 15 минут», чем «не отвлекаемся».
+    kind: prepare-стадии гасятся ack'ом «собираемся», leave-стадии — только
+    «выходим» (см. ack_chain scope, Task 4).
+    """
+    d = lead_min
+    stages = {0: ("пора выходить", KIND_LEAVE)}
+    if 0 < 30 < d:
+        stages[30] = ("выходить через полчаса", KIND_LEAVE)
+    if 0 < 15 < d:
+        stages[15] = ("выходить через 15 минут", KIND_LEAVE)
+    stages.setdefault(d, ("пора собираться", KIND_PREPARE))
+    if d - 5 > 0:
+        stages.setdefault(d - 5, ("уже начали собираться?", KIND_PREPARE))
+    if d - 15 > 0:
+        stages.setdefault(d - 15, ("не отвлекаемся, собираемся", KIND_PREPARE))
+    return [
+        {"anchor": "leave_at", "offset_min": -off, "label": label, "kind": kind}
+        for off, (label, kind) in sorted(stages.items(), reverse=True)
+    ]
+
+
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 

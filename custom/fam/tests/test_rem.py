@@ -501,3 +501,36 @@ def test_active_chains_empty_when_no_reminders_at_all(db):
 
 def test_active_chains_empty_on_fresh_db(db):
     assert rem.active_chains(db) == []
+
+
+def test_build_stages_lead_60_matches_denis_spec():
+    stages = rem.build_stages(60)
+    assert [(s["offset_min"], s["label"], s["kind"]) for s in stages] == [
+        (-60, "пора собираться", "prepare"),
+        (-55, "уже начали собираться?", "prepare"),
+        (-45, "не отвлекаемся, собираемся", "prepare"),
+        (-30, "выходить через полчаса", "leave"),
+        (-15, "выходить через 15 минут", "leave"),
+        (0, "пора выходить", "leave"),
+    ]
+    assert all(s["anchor"] == "leave_at" for s in stages)
+
+
+def test_build_stages_lead_30_countdown_wins_collision():
+    # D-15 == 15 совпадает с countdown-15 — побеждает countdown-лейбл
+    stages = rem.build_stages(30)
+    assert [(s["offset_min"], s["label"], s["kind"]) for s in stages] == [
+        (-30, "пора собираться", "prepare"),
+        (-25, "уже начали собираться?", "prepare"),
+        (-15, "выходить через 15 минут", "leave"),
+        (0, "пора выходить", "leave"),
+    ]
+
+
+def test_build_stages_short_lead_degrades_gracefully():
+    stages = rem.build_stages(15)
+    assert [(s["offset_min"], s["label"], s["kind"]) for s in stages] == [
+        (-15, "пора собираться", "prepare"),
+        (-10, "уже начали собираться?", "prepare"),
+        (0, "пора выходить", "leave"),
+    ]
