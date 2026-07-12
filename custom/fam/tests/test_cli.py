@@ -510,7 +510,7 @@ def test_tick_reminders_json_shape(db, capsys, monkeypatch, tmp_path):
     assert rc == 0
     assert out == {"due": 1, "sent": 1, "quiet": 0, "budget": 0,
                     "error": 0, "cancelled": 0, "stale": 0,
-                    "error_capped": 0}
+                    "error_capped": 0, "road_recomputed": 0}
 
 def test_tick_reminders_now_override(db, capsys, monkeypatch, tmp_path):
     _hermetic_gate_config(tmp_path, monkeypatch)

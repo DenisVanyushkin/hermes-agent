@@ -28,7 +28,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import audit, cal, gate, rem, weather
+from fam import audit, cal, gate, rem, road, weather
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -55,6 +55,149 @@ def _parse_utc(value):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def road_recompute(conn, now_utc=None, cfg=None):
+    """Threshold road recompute (Phase 3a Task 4): at T-120 and T-60
+    before an active future event's leave_at (cfg["road_recompute_min"],
+    default [120, 60] -- sorted desc here so the widest window is tried
+    first), recompute travel time via road.compute_travel_min with
+    departAt = the event's CURRENT leave_at. Called at the very start of
+    reminders(), before due selection, so a moved leave_at affects this
+    same tick's due reminders -- not just the next one.
+
+    Candidate selection: cheap SQL first (active, future-start events
+    whose place has both lat and lon), then per-event Python logic
+    (leave_at needs cal.get's full event dict, which SQL alone can't
+    give). If cfg has no home coordinates configured, nothing is ever a
+    candidate -- this is checked once up front (mirrors cal._recompute_road's
+    same guard) rather than per event.
+
+    Per event: minutes_to_leave = leave_at - now. Events already past
+    their leave_at (<=0) are skipped -- nothing left to prepare for. For
+    each threshold (widest first): the window is "open" once
+    minutes_to_leave <= threshold; it counts as already-checked-in-this-
+    window only if road_checked_at is not None AND
+    road_checked_at >= leave_at - threshold (i.e. the last check
+    happened at or after this window opened). The first open,
+    not-yet-checked threshold triggers exactly one recompute for this
+    event this tick, then moves to the next event -- this both matches
+    "one recompute per threshold" (a check inside window N only
+    satisfies window N+1 once N+1's own boundary arrives, since N+1's
+    window opens later than N's) and avoids doing two recomputes for one
+    event in one tick when multiple windows are simultaneously open
+    (e.g. the very first check ever, discovered already inside the T-60
+    window).
+
+    Write: source tomtom/straight with a changed minute value updates
+    travel_min_road + road_checked_at, audits road.recompute {event_id,
+    old, new, source}, and regenerates the reminder chain (rem.regenerate
+    -- pending stages move, sent stages are untouched by construction).
+    Unchanged minutes only bump road_checked_at (no audit, no regen).
+    Source manual/place/none has nothing new to persist as
+    travel_min_road, but road_checked_at is still bumped -- otherwise an
+    event whose place lacks coordinates in cfg's home sense, or that has
+    fallen through to a manual/place figure, would be re-tried every
+    single tick forever for no reason.
+
+    Never raises: each event is wrapped in try/except -- any failure
+    (including inside road.compute_travel_min, though that function
+    itself is already defensive) is audited as road.hook_error and the
+    loop continues to the next candidate, exactly like cal._recompute_road's
+    contract.
+
+    Commits once per event touched (recompute or checked-at bump), or
+    once per per-event failure -- same per-item commit granularity as
+    the rest of this module (see module docstring).
+
+    Returns the count of events touched (recomputed or checked-at
+    bumped) this tick -- folded into reminders()'s tick.reminders audit
+    as "road_recomputed".
+    """
+    cfg = cfg if cfg is not None else gate.load_config()
+    if cfg.get("road_home_lat") is None or cfg.get("road_home_lon") is None:
+        return 0
+
+    now = now_utc or _now()
+    now_dt = _parse_utc(now)
+    thresholds = sorted(cfg.get("road_recompute_min", [120, 60]), reverse=True)
+
+    candidates = conn.execute(
+        "SELECT e.id FROM events e JOIN places p ON p.id = e.place_id "
+        "WHERE e.status='active' AND e.start_utc > ? "
+        "AND p.lat IS NOT NULL AND p.lon IS NOT NULL",
+        (now,),
+    ).fetchall()
+
+    touched = 0
+    for row in candidates:
+        event_id = row["id"]
+        try:
+            event = cal.get(conn, event_id)
+            if event is None or event["status"] != "active":
+                continue
+
+            leave_dt = _parse_utc(rem.leave_at(conn, event))
+            minutes_to_leave = (leave_dt - now_dt).total_seconds() / 60
+            if minutes_to_leave <= 0:
+                continue
+
+            checked_at = event.get("road_checked_at")
+            checked_dt = _parse_utc(checked_at) if checked_at else None
+
+            for threshold in thresholds:
+                if minutes_to_leave > threshold:
+                    continue
+                window_open = leave_dt - timedelta(minutes=threshold)
+                if checked_dt is not None and checked_dt >= window_open:
+                    continue
+
+                depart_at = leave_dt.isoformat(timespec="seconds")
+                minutes, source = road.compute_travel_min(
+                    conn, event, cfg, now_utc=depart_at)
+                # road_checked_at is stamped from this tick's own `now`
+                # (injected or real, per _now() at the top of reminders())
+                # -- NOT a fresh real-clock read -- so the threshold-
+                # window guard above compares like with like across
+                # ticks, mirroring how sent_at/fire_at_utc are stamped
+                # elsewhere in this module. cal._recompute_road's own
+                # hook uses a fresh real-clock stamp instead, but that
+                # hook has no "which tick's now" ambiguity to resolve.
+                if source in ("tomtom", "straight"):
+                    old_minutes = event.get("travel_min_road")
+                    if minutes != old_minutes:
+                        conn.execute(
+                            "UPDATE events SET travel_min_road=?, "
+                            "road_checked_at=? WHERE id=?",
+                            (minutes, now, event_id),
+                        )
+                        audit.log(conn, "road.recompute",
+                                  {"event_id": event_id, "old": old_minutes,
+                                   "new": minutes, "source": source})
+                        rem.regenerate(conn, event_id, now_utc=now)
+                    else:
+                        conn.execute(
+                            "UPDATE events SET road_checked_at=? WHERE id=?",
+                            (now, event_id),
+                        )
+                else:
+                    # manual/place/none: nothing computed to persist as
+                    # travel_min_road, but the window still counts as
+                    # checked -- otherwise a place without coordinates
+                    # (or a config without home coords) would be retried
+                    # every single minute forever.
+                    conn.execute(
+                        "UPDATE events SET road_checked_at=? WHERE id=?",
+                        (now, event_id),
+                    )
+                conn.commit()
+                touched += 1
+                break
+        except Exception:
+            audit.log(conn, "road.hook_error", {"event_id": event_id})
+            conn.commit()
+
+    return touched
 
 
 def reminders(conn, now_utc=None, cfg=None):
@@ -86,19 +229,29 @@ def reminders(conn, now_utc=None, cfg=None):
         it is left pending (a later tick will retry) and counted as
         "error" so a persistent-but-not-yet-capped failure stays visible.
 
-    Commits once per due reminder (see module docstring), plus once more
-    for the tick-level audit row below.
+    Before any of the above, road_recompute(conn, now_utc=now, cfg=cfg)
+    (Phase 3a Task 4) runs first: threshold road recomputes at T-120/T-60
+    before an event's leave_at. Deliberately first, not last -- a
+    recompute in THIS call can move leave_at (and thus the leave_at-
+    anchored reminder chain) before due selection below runs, so a
+    reminder whose fire time just shifted earlier is correctly picked up
+    (or skipped) by this very tick rather than the next one.
+
+    Commits once per due reminder (see module docstring), once per event
+    touched by road_recompute, plus once more for the tick-level audit
+    row below.
 
     ALWAYS audits tick.reminders {due, sent, quiet, budget, error,
-    cancelled, stale, error_capped} -- including an all-zero run, so
-    "nothing was due" is a recorded fact rather than indistinguishable
-    from "the tick didn't run at all". This is a deliberately richer
-    contract than the original implementation plan's literal
-    {due, sent, skipped}: quiet/budget/error/cancelled/stale/error_capped
-    are each their own bucket instead of being collapsed into "skipped",
-    because a persistent delivery failure, a stale-age cancel, and a
-    quiet-hours defer are operationally different things an admin needs
-    to tell apart in the tick summary.
+    cancelled, stale, error_capped, road_recomputed} -- including an
+    all-zero run, so "nothing was due" is a recorded fact rather than
+    indistinguishable from "the tick didn't run at all". This is a
+    deliberately richer contract than the original implementation plan's
+    literal {due, sent, skipped}: quiet/budget/error/cancelled/stale/
+    error_capped/road_recomputed are each their own bucket instead of
+    being collapsed into "skipped", because a persistent delivery
+    failure, a stale-age cancel, a quiet-hours defer, and a threshold
+    road recompute are operationally different things an admin needs to
+    tell apart in the tick summary.
 
     Returns the counts dict.
     """
@@ -108,9 +261,12 @@ def reminders(conn, now_utc=None, cfg=None):
     max_age_min = cfg.get("reminder_max_age_min", 120)
     max_age = timedelta(minutes=max_age_min)
 
+    road_recomputed = road_recompute(conn, now_utc=now, cfg=cfg)
+
     due = rem.list_reminders(conn, due=True, now_utc=now)
     counts = {"due": len(due), "sent": 0, "quiet": 0, "budget": 0,
-              "error": 0, "cancelled": 0, "stale": 0, "error_capped": 0}
+              "error": 0, "cancelled": 0, "stale": 0, "error_capped": 0,
+              "road_recomputed": road_recomputed}
 
     for reminder in due:
         event = cal.get(conn, reminder["event_id"])

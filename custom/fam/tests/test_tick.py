@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from fam import audit, cal, gate, people, places, tick
+from fam import audit, cal, gate, people, places, rem, tick
 
 CFG = {
     "target": "whatsapp:+77782110625",
@@ -80,7 +80,7 @@ def test_due_selection_only_past_fire_at_is_processed(db, fake_deliver):
 
     assert counts == {"due": 1, "sent": 1, "quiet": 0, "budget": 0,
                        "error": 0, "cancelled": 0, "stale": 0,
-                       "error_capped": 0}
+                       "error_capped": 0, "road_recomputed": 0}
     assert len(fake_deliver.calls) == 1
     statuses = {r["id"]: r["status"] for r in db.execute(
         "SELECT id, status FROM reminders WHERE event_id=?", (e["id"],))}
@@ -266,7 +266,7 @@ def test_inactive_event_cancels_reminder_without_delivering(db, fake_deliver,
 
     assert counts == {"due": 1, "sent": 0, "quiet": 0, "budget": 0,
                        "error": 0, "cancelled": 1, "stale": 0,
-                       "error_capped": 0}
+                       "error_capped": 0, "road_recomputed": 0}
     assert fake_deliver.calls == []
     row = db.execute(
         "SELECT status FROM reminders WHERE id=?", (rid,)
@@ -416,7 +416,7 @@ def test_zero_due_run_still_audits_tick_reminders(db, fake_deliver):
 
     assert counts == {"due": 0, "sent": 0, "quiet": 0, "budget": 0,
                        "error": 0, "cancelled": 0, "stale": 0,
-                       "error_capped": 0}
+                       "error_capped": 0, "road_recomputed": 0}
     rows = audit.query(db, since_utc=None, kind_prefix="tick.reminders",
                         grep=None, limit=10)
     assert len(rows) == 1
@@ -458,7 +458,7 @@ def test_idempotent_rerun_sees_zero_due(db, fake_deliver):
 
     assert second == {"due": 0, "sent": 0, "quiet": 0, "budget": 0,
                        "error": 0, "cancelled": 0, "stale": 0,
-                       "error_capped": 0}
+                       "error_capped": 0, "road_recomputed": 0}
     assert len(fake_deliver.calls) == 1  # only the first run's call
 
 
@@ -517,6 +517,218 @@ def test_reminders_loads_config_when_not_given(db, fake_deliver, monkeypatch, tm
 
     assert counts["due"] == 0
     assert target.exists()
+
+
+# ==== Task 4: threshold road recompute (T-120/T-60) ====
+
+ROAD_CFG = dict(CFG, road_home_lat=43.2220, road_home_lon=76.8512,
+                 road_coef=1.4, road_speed_kmh=30, road_daily_cap=100,
+                 road_timeout_sec=10, road_recompute_min=[120, 60])
+
+NO_HOME_ROAD_CFG = dict(ROAD_CFG, road_home_lat=None, road_home_lon=None)
+
+
+def _road_place(db, name="Клиника"):
+    places.add(db, name, lat=43.2298, lon=76.8823)
+    db.commit()
+    return name
+
+
+def _add_event_neutral_road(db, monkeypatch, place, start="2026-07-20T06:29:00+00:00",
+                             **kw):
+    """cal.add() (Task 3) runs its own road hook at add-time, reading the
+    REAL on-disk config via gate.load_config() -- unrelated to whatever
+    cfg a test later passes to tick.reminders(). On a host whose live
+    fam-config.json already has home coordinates configured (as this
+    one's does), that hook would fire for real and pre-seed
+    travel_min_road with a value these tests don't control, breaking
+    both the "old" value in road.recompute's audit payload and the
+    minutes-to-leave arithmetic the threshold-window tests rely on.
+    Neutralizing compute_travel_min to ("none") for the add() call only
+    keeps events created this way at travel_min_road=None, exactly like
+    a from-scratch test DB -- the caller then sets its own
+    compute_travel_min stub for the tick-level recompute under test.
+    """
+    monkeypatch.setattr(tick.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+    e = cal.add(db, "Врач", start, place=place, **kw)
+    db.commit()
+    return e
+
+
+def test_road_recompute_at_119min_happens_once_per_window(db, fake_deliver, monkeypatch):
+    place = _road_place(db)
+    e = _add_event_neutral_road(db, monkeypatch, place)
+    # start = NOW + 119min, travel 0 initially -> leave_at = start
+
+    monkeypatch.setattr(tick.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (5, "tomtom"))
+    fake_deliver.responses = []
+
+    counts = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
+    assert counts["road_recomputed"] == 1
+    got = cal.get(db, e["id"])
+    assert got["travel_min_road"] == 5
+    assert got["road_checked_at"] == NOW  # stamped from this tick's own now
+    assert audit.query(db, None, "road.recompute", None)
+
+    # Second tick, same NOW: road_checked_at (== NOW) already covers the
+    # T-120 window that just opened (leave_at shifted to NOW+114min after
+    # the first recompute, but window_open == leave_at-120 predates NOW),
+    # so no second call.
+    counts2 = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
+    assert counts2["road_recomputed"] == 0
+
+
+def test_road_recompute_second_threshold_window_after_first(db, fake_deliver, monkeypatch):
+    place = _road_place(db)
+    # start = NOW + 119min; a constant travel figure (10) keeps leave_at
+    # fixed at NOW+109min once first recomputed, so the T-60 window's
+    # boundary can be reasoned about precisely on the second tick.
+    e = _add_event_neutral_road(db, monkeypatch, place)
+    monkeypatch.setattr(tick.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (10, "tomtom"))
+    fake_deliver.responses = []
+
+    first = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
+    assert first["road_recomputed"] == 1  # T-120 window, travel_min_road None->10
+
+    now2 = (datetime.fromisoformat(NOW) + timedelta(minutes=50)).isoformat(
+        timespec="seconds")
+    # leave_at is now NOW+109min; at now2 (NOW+50min) that's 59 min away
+    # -- a fresh T-60 window the earlier road_checked_at (== NOW) doesn't
+    # cover (window_open == leave_at-60 == NOW+49min > NOW).
+    second = tick.reminders(db, now_utc=now2, cfg=ROAD_CFG)
+    assert second["road_recomputed"] == 1
+
+
+def test_road_recompute_changed_minutes_updates_and_regenerates_chain(
+        db, fake_deliver, monkeypatch):
+    rem.seed_default_rules(db)
+    db.commit()
+    place = _road_place(db)
+    e = _add_event_neutral_road(db, monkeypatch, place)
+
+    # Seed one already-sent reminder for this event: must survive the
+    # regenerate untouched (rem.regenerate only ever deletes 'pending').
+    sent_id = _insert_reminder(db, e["id"], label="старое", fire_at=PAST,
+                                status="sent")
+    db.commit()
+    pending_before = db.execute(
+        "SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
+        "ORDER BY fire_at_utc LIMIT 1", (e["id"],)).fetchone()
+
+    monkeypatch.setattr(tick.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (45, "tomtom"))
+    fake_deliver.responses = []
+    counts = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
+
+    assert counts["road_recomputed"] == 1
+    got = cal.get(db, e["id"])
+    assert got["travel_min_road"] == 45
+    rows = audit.query(db, None, "road.recompute", None)
+    assert rows and rows[0]["payload"] == {
+        "event_id": e["id"], "old": None, "new": 45, "source": "tomtom"}
+    assert audit.query(db, None, "rem.regenerate", None)
+
+    sent_row = db.execute(
+        "SELECT status, fire_at_utc FROM reminders WHERE id=?", (sent_id,)
+    ).fetchone()
+    assert sent_row["status"] == "sent"  # untouched by regen
+
+    pending_after = db.execute(
+        "SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
+        "ORDER BY fire_at_utc LIMIT 1", (e["id"],)).fetchone()
+    if pending_before and pending_after:
+        assert pending_after["fire_at_utc"] != pending_before["fire_at_utc"]
+
+
+def test_road_recompute_unchanged_minutes_only_bumps_checked_at(
+        db, fake_deliver, monkeypatch):
+    place = _road_place(db)
+    e = _add_event_neutral_road(db, monkeypatch, place, travel_min=7)
+    # Pre-set travel_min_road to the same value compute_travel_min will
+    # return, and road_checked_at to something clearly outside any
+    # threshold window, so this tick's recompute finds "unchanged".
+    db.execute(
+        "UPDATE events SET travel_min_road=7, road_checked_at=? WHERE id=?",
+        ("2026-07-19T00:00:00+00:00", e["id"]))
+    db.commit()
+
+    regen_before = len(audit.query(db, None, "rem.regenerate", None))
+
+    monkeypatch.setattr(tick.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (7, "tomtom"))
+    fake_deliver.responses = []
+    counts = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
+
+    assert counts["road_recomputed"] == 1
+    assert not audit.query(db, None, "road.recompute", None)
+    # cal.add() itself already logged one rem.regenerate at add-time --
+    # only assert road_recompute (unchanged minutes) didn't log another.
+    assert len(audit.query(db, None, "rem.regenerate", None)) == regen_before
+    got = cal.get(db, e["id"])
+    assert got["travel_min_road"] == 7
+    assert got["road_checked_at"] == NOW
+
+
+def test_road_recompute_event_without_coords_never_a_candidate(
+        db, fake_deliver, monkeypatch):
+    places.add(db, "Клиника без координат")  # no lat/lon
+    db.commit()
+    cal.add(db, "Врач", "2026-07-20T06:29:00+00:00",
+            place="Клиника без координат")
+    db.commit()
+
+    monkeypatch.setattr(
+        tick.road, "compute_travel_min",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")))
+    fake_deliver.responses = []
+    counts = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
+    assert counts["road_recomputed"] == 0
+
+
+def test_road_recompute_no_home_coords_means_no_candidates(
+        db, fake_deliver, monkeypatch):
+    place = _road_place(db)
+    _add_event_neutral_road(db, monkeypatch, place)
+
+    monkeypatch.setattr(
+        tick.road, "compute_travel_min",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")))
+    fake_deliver.responses = []
+    counts = tick.reminders(db, now_utc=NOW, cfg=NO_HOME_ROAD_CFG)
+    assert counts["road_recomputed"] == 0
+
+
+def test_road_recompute_error_is_audited_and_tick_continues(
+        db, fake_deliver, monkeypatch):
+    place = _road_place(db)
+    e = _add_event_neutral_road(db, monkeypatch, place)
+    due_id = _insert_reminder(db, e["id"], fire_at=PAST)
+    db.commit()
+
+    def boom(conn, event, cfg, now_utc=None):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(tick.road, "compute_travel_min", boom)
+    fake_deliver.responses = ["sent"]
+
+    counts = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
+
+    assert counts["road_recomputed"] == 0
+    rows = audit.query(db, None, "road.hook_error", None)
+    assert rows and rows[0]["payload"] == {"event_id": e["id"]}
+    # due processing still ran despite the road_recompute failure
+    assert counts["due"] == 1 and counts["sent"] == 1
+    assert db.execute("SELECT status FROM reminders WHERE id=?",
+                       (due_id,)).fetchone()["status"] == "sent"
+
+
+def test_road_recompute_key_always_present_on_quiet_run(db, fake_deliver):
+    counts = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
+    assert counts == {"due": 0, "sent": 0, "quiet": 0, "budget": 0,
+                       "error": 0, "cancelled": 0, "stale": 0,
+                       "error_capped": 0, "road_recomputed": 0}
 
 
 # ==== Task 7: fam tick digest ====
