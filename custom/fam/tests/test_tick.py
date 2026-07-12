@@ -128,6 +128,8 @@ def test_raw_and_fallback_shape(db, fake_deliver):
         "start_local": e["start_local"],
         "participants": ["Тая"],
         "place_name": "Клиника",
+        # NOW = 2026-07-20T04:30:00+00:00 UTC == 09:30:00+05:00 Almaty.
+        "sent_now_local": "2026-07-20T09:30:00+05:00",
     }
     assert call["human_fallback"] == (
         f"пора выходить: Врач — {e['start_local']}"
@@ -146,6 +148,43 @@ def test_raw_omits_place_name_when_no_place(db, fake_deliver):
 
     assert "place_name" not in fake_deliver.calls[0]["raw"]
     assert fake_deliver.calls[0]["raw"]["participants"] == []
+
+
+# ---- sent_now_local: send-time anchor, distinct from the event's own
+# start_local (Task 16 live bug -- "В 13:00 Тае пора собираться": the
+# rewrite bound the label's action to the event's start_local instead of
+# the actual send time) ----
+
+def test_raw_sent_now_local_is_almaty_iso_of_now(db, fake_deliver):
+    e = _event(db)
+    db.commit()
+    _insert_reminder(db, e["id"])
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    # NOW = 2026-07-20T04:30:00+00:00 UTC == 09:30:00+05:00 Asia/Almaty.
+    raw = fake_deliver.calls[0]["raw"]
+    assert raw["sent_now_local"] == "2026-07-20T09:30:00+05:00"
+
+
+def test_raw_sent_now_local_differs_from_event_start_local(db, fake_deliver):
+    # Mirrors the live-found bug's shape: a reminder (e.g. the "Тае пора
+    # собираться" leave_at-45min stage) fires well before its event's own
+    # start -- sent_now_local and start_local must never be conflated.
+    e = _event(db, start="2026-07-20T08:00:00+00:00")  # 13:00 Almaty
+    db.commit()
+    _insert_reminder(db, e["id"], label="Тае пора собираться")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)  # 09:30 Almaty
+
+    raw = fake_deliver.calls[0]["raw"]
+    assert raw["start_local"] == e["start_local"] == "2026-07-20T13:00:00+05:00"
+    assert raw["sent_now_local"] == "2026-07-20T09:30:00+05:00"
+    assert raw["sent_now_local"] != raw["start_local"]
 
 
 # ---- quiet / budget / error leave the reminder pending ----

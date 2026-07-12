@@ -541,6 +541,53 @@ def test_deliver_reminder_prompt_has_no_digest_question_instruction(db, fake_run
     assert "Не задавай вопросов" not in prompt
 
 
+# ---- deliver: reminder time semantics + fabrication ban (Task 16,
+# live-found bug -- "В 13:00 Тае пора собираться в поселок": the rewrite
+# bound the label's action ("собираться", due at send time) to the
+# event's own start_local (13:00) instead) ----
+
+def test_deliver_reminder_prompt_includes_time_semantics_instruction(db, fake_run):
+    fake_run.rewrite_responses = [_completed(0, "Скоро событие.")]
+    fake_run.send_response = _completed(0, "")
+
+    gate.deliver(
+        db, "reminder",
+        {"label": "Тае пора собираться", "start_local": "2026-07-12T13:00:00+05:00",
+         "sent_now_local": "2026-07-12T12:15:00+05:00"},
+        "fallback", CFG, now_utc="2026-07-12T12:15:00+05:00",
+    )
+
+    rewrite_args, _ = fake_run.calls[0]
+    prompt = rewrite_args[rewrite_args.index("-z") + 1]
+    assert gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION in prompt
+    # the instruction must actually carry both requirements from the
+    # brief, not just be present as an opaque blob:
+    assert "sent_now_local" in gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION
+    assert "start_local" in gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION
+
+
+def test_deliver_digest_prompt_has_no_reminder_time_semantics_instruction(db, fake_run):
+    raw = {"kind": "digest", "question": tick.DIGEST_QUESTION}
+    fake_run.rewrite_responses = [_completed(0, "Сводка.")]
+    fake_run.send_response = _completed(0, "")
+
+    gate.deliver(db, "digest", raw, "fallback\n\n" + tick.DIGEST_QUESTION, CFG,
+                  now_utc="2026-07-11T12:00:00+05:00", force=True)
+
+    rewrite_args, _ = fake_run.calls[0]
+    prompt = rewrite_args[rewrite_args.index("-z") + 1]
+    assert gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION not in prompt
+
+
+def test_gate_style_instruction_has_no_literal_reminder_example():
+    # Live-found bug (few-shot bleed): a real rewrite once emitted the
+    # literal sentence "Тае пора собираться" verbatim -- it existed only
+    # as a copy-able example inside GATE_STYLE_INSTRUCTION, unrelated to
+    # the actual raw data being rewritten. The addressing rule must be
+    # expressed without a ready-made phrase the model can paste back.
+    assert "Тае пора собираться" not in gate.GATE_STYLE_INSTRUCTION
+
+
 def test_deliver_digest_fallback_appends_question_exactly_once_no_duplicate(db, fake_run):
     # human_fallback mirrors tick._build_digest_fallback: it already ends
     # with the question by construction (a single "\n" separator, the

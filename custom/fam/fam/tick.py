@@ -148,6 +148,18 @@ def reminders(conn, now_utc=None, cfg=None):
             "title": event["title"],
             "start_local": event["start_local"],
             "participants": [p["name"] for p in event["participants"]],
+            # Live-found bug (Task 16): the rewrite once bound the
+            # label's action to event["start_local"] (the event's own
+            # start) instead of the actual send time -- e.g. "В 13:00 Тае
+            # пора собираться" for a reminder that fires 45 min before
+            # the event. sent_now_local is the real send-time anchor,
+            # derived from the same `now_dt` this tick already parsed
+            # (never a fresh wall-clock read), so gate.py's rewrite has
+            # an explicit "now" distinct from the event's start_local --
+            # see GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION.
+            "sent_now_local": now_dt.astimezone(ALMATY).isoformat(
+                timespec="seconds"
+            ),
         }
         if event["place"]:
             raw["place_name"] = event["place"]["name"]

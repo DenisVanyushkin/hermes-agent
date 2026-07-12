@@ -51,8 +51,10 @@ GATE_STYLE_INSTRUCTION = (
     "адрес, сумма) — остальные детали убирай. Сообщение всегда адресовано "
     "владельцу чата — обращайся только к нему. Всех остальных людей "
     "(включая участников события) упоминай в третьем лице, никогда не "
-    "обращайся к ним напрямую. Пример: не «Тая, собирайся», а "
-    "«Тае пора собираться»."
+    "обращайся к ним напрямую: имя третьего лица ставь в косвенном "
+    "падеже (дательном или родительном) в безличной конструкции с «пора» "
+    "или «нужно» + инфинитив, а не в повелительном наклонении, как при "
+    "прямом обращении ко второму лицу."
 )
 
 # Live-found bug: a real digest went out with the weather/events summary
@@ -66,6 +68,26 @@ GATE_DIGEST_NO_QUESTION_INSTRUCTION = (
     "Не задавай вопросов и не добавляй призывов — только сводка. "
     "Если в сводке есть погода — обязательно укажи диапазон температур (минимум…максимум). "
     "Лаконичность не должна терять факты: каждое поле сводки должно быть отражено в тексте."
+)
+
+# Live-found bug: a real reminder went out as "В 13:00 Тае пора
+# собираться в поселок" -- the rewrite bound the label's action
+# ("собираться", due right now, at send time) to event["start_local"]
+# (13:00, the event's own start) instead. raw["sent_now_local"] (added
+# in tick.py's reminders()) is the actual send-time anchor; this
+# instruction spells out the semantics explicitly and separately bans
+# inventing any fact/person/action absent from raw -- a second live bug
+# (few-shot bleed off GATE_STYLE_INSTRUCTION's old literal example) had
+# the rewrite add wording not grounded in the data at all.
+GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION = (
+    "Это напоминание отправляется прямо сейчас, в момент, указанный в "
+    "поле sent_now_local. Поле label — это действие, которое нужно "
+    "сделать СЕЙЧАС, в момент отправки, а не в будущем. Поле start_local "
+    "— это время начала самого события, а НЕ время действия из label; "
+    "запрещено писать, что действие из label нужно сделать в "
+    "start_local, или иначе привязывать это действие ко времени начала "
+    "события. Не добавляй факты, людей или действия, которых нет в "
+    "переданных данных."
 )
 
 
@@ -153,10 +175,15 @@ def _build_prompt(raw, kind=None):
     instruction gets GATE_DIGEST_NO_QUESTION_INSTRUCTION appended -- the
     LLM must never write its own closing question/CTA for a digest;
     deliver() owns that deterministically (see _ensure_trailing_question).
+    For kind=="reminder", GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION is
+    appended instead -- it spells out sent_now_local vs. start_local
+    semantics and bans fabricated facts (see that constant's docstring).
     """
     instruction = GATE_STYLE_INSTRUCTION
     if kind == "digest":
         instruction = f"{instruction} {GATE_DIGEST_NO_QUESTION_INSTRUCTION}"
+    elif kind == "reminder":
+        instruction = f"{instruction} {GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION}"
     return (
         f"{instruction}\n"
         "Перепиши следующий факт для отправки пользователю: "
