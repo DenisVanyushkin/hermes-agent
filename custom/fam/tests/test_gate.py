@@ -28,6 +28,26 @@ def _insert_audit(db, kind, ts_utc, payload=None):
     )
 
 
+# Frozen "now" reused by the phase-2c chain-budget tests below --
+# 15:00 Almaty, 11 Jul 2026, same day used by the pre-existing
+# budget_spent_today tests above.
+NOW = "2026-07-11T10:00:00+00:00"
+
+
+def _seed_gate_sent(db, kind, event_id=None, n=1, now_utc=None):
+    """Insert n gate.sent audit rows with payload {"kind": kind, "raw":
+    {"event_id": event_id}}, timestamped inside today's Almaty day
+    relative to now_utc (defaults to the module's frozen NOW) -- same
+    window convention as _insert_audit's callers above (see
+    test_budget_spent_today_counts_only_todays_gate_sent for the
+    Almaty-day boundary math this relies on).
+    """
+    ts_utc = now_utc or NOW
+    for _ in range(n):
+        _insert_audit(db, "gate.sent", ts_utc,
+                       {"kind": kind, "raw": {"event_id": event_id}})
+
+
 class FakeRun:
     """Records every subprocess.run() call and dispatches a canned
     CompletedProcess-like response based on whether the call is the
@@ -194,6 +214,26 @@ def test_budget_spent_today_excludes_digest_kind(db):
     assert gate.budget_spent_today(db, now_utc=now_utc) == 3
 
 
+# Phase 2c: a reminder chain (all sends for the same event_id, same day)
+# costs one budget unit, not one per send -- see gate.py's
+# budget_spent_today docstring update and its "Цепочка = 1 единица
+# бюджета" comment (decision: Денис, task 2c-5).
+def test_budget_counts_chain_as_one(db):
+    _seed_gate_sent(db, kind="reminder", event_id=7, n=3)
+    _seed_gate_sent(db, kind="reminder", event_id=8, n=1)
+    db.commit()
+
+    assert gate.budget_spent_today(db, now_utc=NOW) == 2
+
+
+def test_budget_digest_still_excluded(db):
+    _seed_gate_sent(db, kind="digest", n=1)
+    _seed_gate_sent(db, kind="reminder", event_id=7, n=2)
+    db.commit()
+
+    assert gate.budget_spent_today(db, now_utc=NOW) == 1
+
+
 # ---- deliver: quiet hours ----
 
 def test_deliver_quiet_hours_skips_and_audits(db, fake_run):
@@ -257,6 +297,43 @@ def test_deliver_force_bypasses_budget(db, fake_run):
     )
 
     assert status == "sent"
+
+
+# Phase 2c: chain continuation is free -- if event_id=7 already sent a
+# reminder today, a later reminder for the same event passes even with
+# the budget otherwise exhausted by other events (_reminder_sent_today).
+def test_deliver_chain_continuation_free_at_budget_limit(db, fake_run):
+    for eid in range(100, 100 + CFG["daily_budget"]):
+        _seed_gate_sent(db, kind="reminder", event_id=eid, n=1)
+    _seed_gate_sent(db, kind="reminder", event_id=7, n=1)
+    db.commit()
+    fake_run.rewrite_responses = [_completed(0, "Скоро событие.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", {"event_id": 7, "label": "x"}, "fallback text", CFG,
+        now_utc=NOW,
+    )
+
+    assert status == "sent"
+
+
+# Phase 2c: a brand-new chain (no prior gate.sent today for its
+# event_id) still gets budget-gated normally once the daily_budget of
+# distinct chains/sends is reached.
+def test_deliver_new_chain_blocked_at_budget_limit(db, fake_run):
+    for eid in range(100, 100 + CFG["daily_budget"]):
+        _seed_gate_sent(db, kind="reminder", event_id=eid, n=1)
+    db.commit()
+
+    status = gate.deliver(
+        db, "reminder", {"event_id": 9, "label": "x"}, "fallback text", CFG,
+        now_utc=NOW,
+    )
+    db.commit()
+
+    assert status == "budget"
+    assert fake_run.calls == []
 
 
 # ---- deliver: rewrite success ----

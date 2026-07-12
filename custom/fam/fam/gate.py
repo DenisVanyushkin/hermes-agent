@@ -180,6 +180,15 @@ def budget_spent_today(conn, now_utc=None):
     gate.sent row must not shrink the budget available to reminders. The
     payload's inner "kind" (reminder/digest/...) is what's filtered on,
     not audit_log.kind (which is always the literal string "gate.sent").
+
+    Phase 2c (decision: Денис, task 2c-5): a reminder CHAIN -- every
+    gate.sent kind="reminder" row sharing the same raw.event_id, sent the
+    same Almaty day -- costs one budget unit, not one per send, since a
+    chain is escalation for a single event, not N independent sends. Rows
+    are deduped by raw.event_id in row order; a reminder row with no
+    event_id (raw missing it, or raw.event_id is None) can't be deduped
+    against anything and falls through to the ordinary one-row-one-unit
+    count below, same as any non-reminder non-digest kind.
     """
     from_utc, to_utc = _almaty_day_utc_bounds(now_utc or _now())
     rows = conn.execute(
@@ -187,7 +196,44 @@ def budget_spent_today(conn, now_utc=None):
         "AND ts_utc >= ? AND ts_utc < ?",
         (from_utc, to_utc),
     ).fetchall()
-    return sum(1 for r in rows if json.loads(r["payload"]).get("kind") != "digest")
+    spent = 0
+    seen_reminder_events = set()
+    for r in rows:
+        payload = json.loads(r["payload"])
+        kind = payload.get("kind")
+        if kind == "digest":
+            continue
+        if kind == "reminder":
+            eid = (payload.get("raw") or {}).get("event_id")
+            if eid is not None:
+                if eid in seen_reminder_events:
+                    continue
+                seen_reminder_events.add(eid)
+        spent += 1
+    return spent
+
+
+def _reminder_sent_today(conn, event_id, now_utc):
+    """True if `event_id` already has a gate.sent kind="reminder" row
+    within today's Asia/Almaty day (relative to now_utc) -- i.e. this is
+    a chain continuation, not a new chain. Continuation sends are free
+    even once the daily budget is otherwise exhausted (deliver() below);
+    event_id=None never matches (nothing to continue).
+    """
+    if event_id is None:
+        return False
+    from_utc, to_utc = _almaty_day_utc_bounds(now_utc)
+    rows = conn.execute(
+        "SELECT payload FROM audit_log WHERE kind='gate.sent' "
+        "AND ts_utc >= ? AND ts_utc < ?",
+        (from_utc, to_utc),
+    ).fetchall()
+    for r in rows:
+        payload = json.loads(r["payload"])
+        if (payload.get("kind") == "reminder"
+                and (payload.get("raw") or {}).get("event_id") == event_id):
+            return True
+    return False
 
 
 def _build_prompt(raw, kind=None):
@@ -295,7 +341,9 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
     Pipeline (force=True skips the quiet-hours and budget gates):
       1. quiet hours -> audit gate.skip{reason:"quiet"}, return "quiet".
       2. daily budget reached -> audit gate.skip{reason:"budget"},
-         return "budget".
+         return "budget" -- UNLESS kind=="reminder" and this event
+         already has a gate.sent kind=reminder row today (chain
+         continuation is free; see _reminder_sent_today, phase 2c).
       3. rewrite via hermes -z; any failure/empty output falls back to
          human_fallback (attempt="fallback" vs "rewrite").
       3b. digest closing question (kind=="digest" and raw["question"] is
@@ -327,8 +375,13 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
         return "quiet"
 
     if not force and budget_spent_today(conn, now_utc=now) >= cfg["daily_budget"]:
-        audit.log(conn, "gate.skip", {"kind": kind, "reason": "budget"})
-        return "budget"
+        # Phase 2c: a reminder continuing a chain that already sent today
+        # is free even at the limit -- only a brand-new chain (or any
+        # other kind) is actually blocked. See _reminder_sent_today.
+        if not (kind == "reminder"
+                and _reminder_sent_today(conn, raw.get("event_id"), now)):
+            audit.log(conn, "gate.skip", {"kind": kind, "reason": "budget"})
+            return "budget"
 
     rewritten = _call_rewrite(_build_prompt(raw, kind), cfg)
     if rewritten is not None:
