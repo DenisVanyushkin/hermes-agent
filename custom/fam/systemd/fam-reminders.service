@@ -3,4 +3,5 @@ Description=Amina fam: reminders tick
 
 [Service]
 Type=oneshot
+EnvironmentFile=-%h/.hermes/.env
 ExecStart=/home/denis/.hermes/hermes-agent/custom/fam/bin/fam tick reminders
