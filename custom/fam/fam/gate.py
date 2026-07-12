@@ -80,6 +80,17 @@ GATE_DIGEST_NO_QUESTION_INSTRUCTION = (
 # inventing any fact/person/action absent from raw -- a second live bug
 # (few-shot bleed off GATE_STYLE_INSTRUCTION's old literal example) had
 # the rewrite add wording not grounded in the data at all.
+#
+# Actor attribution follows the label's OWN meaning (reviewer finding,
+# Task 16 fix round). A first draft of the anti-reassignment clause said
+# "the actor is the participant, not the chat owner" -- correct for a
+# self-naming label ("Тае пора собираться") but the mirrored
+# misattribution for the more common generic DEFAULT_STAGES labels
+# ("пора выходить", "скоро событие"), which are the chat owner's own
+# obligation with participants as third-person context, and undefined
+# for participants=[]. Hence the three-way rule below: named actor stays
+# the actor; impersonal label belongs to the owner; empty participants
+# is a normal case, not a gap to fill.
 GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION = (
     "Это напоминание отправляется прямо сейчас, в момент, указанный в "
     "поле sent_now_local. Поле label — это действие, которое нужно "
@@ -87,11 +98,16 @@ GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION = (
     "— это время начала самого события, а НЕ время действия из label; "
     "запрещено писать, что действие из label нужно сделать в "
     "start_local, или иначе привязывать это действие ко времени начала "
-    "события. Действующее лицо в label — тот участник, к кому оно "
-    "относится по смыслу (см. participants), а не владелец чата; "
-    "запрещено переадресовывать это действие владельцу чата или менять, "
-    "кто его выполняет. Не добавляй факты, людей или действия, которых "
-    "нет в переданных данных."
+    "события. Исполнителя действия из label определяй только по самому "
+    "label: если label сам называет человека — действие выполняет именно "
+    "он, запрещено переадресовывать это действие владельцу чата или "
+    "менять, кто его выполняет; если label никого не называет — действие "
+    "относится к самому владельцу чата, запрещено назначать исполнителем "
+    "такого действия кого-то из participants или выдуманного человека. "
+    "Список participants — это контекст события (упоминай этих людей в "
+    "третьем лице), а не исполнители действия из label; пустой "
+    "participants — обычная ситуация: просто напомни владельцу чата. Не "
+    "добавляй факты, людей или действия, которых нет в переданных данных."
 )
 
 

@@ -576,6 +576,25 @@ def test_gate_reminder_time_semantics_instruction_forbids_reassigning_label_acto
     assert "переадресовывать" in gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION
 
 
+def test_gate_reminder_time_semantics_instruction_attribution_follows_label():
+    # Reviewer finding (Task 16 fix round): the anti-reassignment clause
+    # above was designed and live-probed only against a self-naming label
+    # ("Тае пора собираться") and overcorrected on the other two real
+    # payload shapes. (a) Generic DEFAULT_STAGES labels ("пора выходить",
+    # "скоро событие") with participants=["Тая"]: the action belongs to
+    # the chat owner (who e.g. drives the participant) -- the old wording
+    # ("действующее лицо -- тот участник, ... а не владелец чата")
+    # plausibly forced the participant into the actor slot, the mirrored
+    # form of the very misattribution this task exists to kill.
+    # (b) participants=[] (a real case, see tick.py): the old wording
+    # said "not the chat owner" with nobody else left to attribute to.
+    # Attribution must follow the label's own meaning instead.
+    instr = gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION
+    assert "только по самому label" in instr
+    assert "если label никого не называет" in instr
+    assert "пустой participants" in instr
+
+
 def test_deliver_digest_prompt_has_no_reminder_time_semantics_instruction(db, fake_run):
     raw = {"kind": "digest", "question": tick.DIGEST_QUESTION}
     fake_run.rewrite_responses = [_completed(0, "Сводка.")]
