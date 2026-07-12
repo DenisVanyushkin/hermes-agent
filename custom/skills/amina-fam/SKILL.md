@@ -77,27 +77,38 @@ make a second, separate terminal call.
    has none) — never from a date mentioned earlier in the conversation.
    Pass that string straight to fam. Don't narrate the calculation — just
    produce the ISO value.
-2. **Unknown person/place ⇒ stop and ask, then retry.** fam exits 2 with
+2. **`--start` is when the event BEGINS (быть на месте), never the
+   departure time.** The system computes departure itself (start −
+   travel_min) — never pass a departure time as `--start`. If the user
+   names a DEPARTURE time («выезжаем в 9», «выедем в час», or answers a
+   question of yours about выезд): travel known → start = departure time
+   + travel_min; travel unknown → first ask for the travel time or the
+   arrival time. Ask for times yourself as "во сколько нужно быть на
+   месте?" — NOT "во сколько выезжать" (departure is derived; the system
+   computes it). If the user clearly thinks in departure terms, convert
+   as above and name BOTH times in the confirmation ("на месте в 09:40,
+   выезд в 09:00").
+3. **Unknown person/place ⇒ stop and ask, then retry.** fam exits 2 with
    `unknown person: X` or `unknown place: X` on stderr when a name doesn't
    resolve. Stop, ask the user to confirm who/where it is ("это кто/где —
    записать?"). When they confirm, run `fam people add <X> --alias <X>` or
    `fam places add <X> --alias <X>` using their exact wording verbatim —
    never normalize or clean up the form, so the alias matches what they
    actually said. Then retry the original command.
-3. **Destination phrasing ⇒ resolve the place before recording.**
+4. **Destination phrasing ⇒ resolve the place before recording.**
    "съездить/поехать/сходить в/к X" means X is a place, not just words in
    the title — run `fam places resolve X` first. Unknown → same
    unknown person/place stop-and-ask rule as above ("это где — записать?");
    on confirmation `fam places add` with the user's exact wording, then
    pass `--place` to `cal add`/`cal update`. Don't ask about travel time
    (`--travel-min`) — record it only if the user brings it up themselves.
-4. **Other stderr + exit 2 failures are real errors, not retry bait.**
+5. **Other stderr + exit 2 failures are real errors, not retry bait.**
    Examples: `alias already in use by ...`, `unknown field: ...`, `unknown
    event: ...`. Read the message and fix the actual problem (different
    alias, a valid field name, the right event id) or tell the user what's
    wrong — don't blindly resubmit the same command. Exception: `start is
    in the past` has its own protocol, the past-start protocol below.
-5. **`start is in the past` ⇒ past event or stale "now", not a bug.**
+6. **`start is in the past` ⇒ past event or stale "now", not a bug.**
    `cal add`/`cal update --start` exits 2 with `start is in the past
    (now: <ISO+05:00>). If the user means a past event, retry with
    --allow-past; otherwise re-derive the date (run date).` when the ISO
@@ -107,17 +118,17 @@ make a second, separate terminal call.
    `--allow-past`. Otherwise your "now" was wrong → make one `date` call,
    re-derive the ISO from the fresh date/time, and retry without
    `--allow-past`.
-6. **Never delete or overwrite anything without an explicit request.**
+7. **Never delete or overwrite anything without an explicit request.**
    Cancelling an event is `fam cal cancel <id>`, never a raw edit. Get the
    id from `cal show`/`cal day --json`/`cal range --json`, never guess it.
-7. `cal day` / `cal range` / `cal grid` only ever list **active** events —
+8. `cal day` / `cal range` / `cal grid` only ever list **active** events —
    cancelled events are hidden by design, not gone.
 
 ## Quick Reference
 
 | Goal | Command |
 | --- | --- |
-| Record an event | `fam cal add --title T --start ISO [--end ISO] [--place P] [--with NAME]... [--transport car\|walk\|public\|unknown] [--notes N]` |
+| Record an event | `fam cal add --title T --start ISO (время начала, не выезда) [--end ISO] [--place P] [--with NAME]... [--transport car\|walk\|public\|unknown] [--notes N]` |
 | Change an event | `fam cal update <id> [--start ISO] [--place P] [--add-person N] [--rm-person N] ...` |
 | Cancel an event | `fam cal cancel <id>` |
 | Mark an event done | `fam cal done <id>` |
