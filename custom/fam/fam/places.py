@@ -145,6 +145,78 @@ def alias(conn, place_ref, alias):
     return None
 
 
+_UPDATE_FIELDS = {"lat", "lon", "travel_min", "address", "notes"}
+
+# Fields whose change ripples into future events at this place (see
+# update()'s docstring) -- address/notes are presentation-only.
+_RIPPLE_FIELDS = {"lat", "lon", "travel_min"}
+
+
+def update(conn, ref, **fields):
+    """Update mutable fields on a place (whitelist: lat, lon, travel_min,
+    address, notes), following cal.update's pattern. ref resolves via
+    get() (id/name/alias, case-insensitive). Raises ValueError on an
+    unknown place, an unknown field, or an empty field set -- always
+    before any write.
+
+    Ripple (3a, Task 5): a lat/lon/travel_min change affects FUTURE
+    active events held at this place -- their reminder chains are
+    regenerated (leave_at may shift via the place-travel rung) and their
+    road_checked_at is NULLed (coords changed => any computed road figure
+    is stale; the next tick recomputes it). Past/non-active events are
+    untouched. The audit payload carries "events_touched" with the ripple
+    count. Everything happens in the caller's single transaction (this
+    module never commits).
+    """
+    from fam import rem  # deferred: avoid an import cycle (rem -> cal -> places)
+
+    p = get(conn, ref)
+    if p is None:
+        raise ValueError(f"unknown place: {ref}")
+
+    unknown_fields = set(fields) - _UPDATE_FIELDS
+    if unknown_fields:
+        name = sorted(unknown_fields)[0]
+        raise ValueError(
+            f"unknown field: {name} (valid: {', '.join(sorted(_UPDATE_FIELDS))})"
+        )
+    if not fields:
+        raise ValueError("no fields to update")
+
+    set_clauses = []
+    params = []
+    for key in sorted(fields):
+        set_clauses.append(f"{key}=?")
+        params.append(fields[key])
+    params.append(p["id"])
+    conn.execute(
+        f"UPDATE places SET {', '.join(set_clauses)} WHERE id=?", params
+    )
+
+    events_touched = 0
+    if _RIPPLE_FIELDS & set(fields):
+        rows = conn.execute(
+            "SELECT id FROM events WHERE place_id=? AND status='active' "
+            "AND start_utc >= ?",
+            (p["id"], _now()),
+        ).fetchall()
+        for r in rows:
+            conn.execute(
+                "UPDATE events SET road_checked_at=NULL WHERE id=?",
+                (r["id"],),
+            )
+            rem.regenerate(conn, r["id"])
+        events_touched = len(rows)
+
+    payload = {"id": p["id"]}
+    payload.update(fields)
+    payload["events_touched"] = events_touched
+    audit.log(conn, "places.update", payload)
+
+    row = conn.execute("SELECT * FROM places WHERE id=?", (p["id"],)).fetchone()
+    return dict(row)
+
+
 def list_all(conn):
     """List all places, ordered by name."""
     rows = conn.execute(

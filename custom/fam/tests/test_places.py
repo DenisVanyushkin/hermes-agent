@@ -70,3 +70,89 @@ def test_alias_unknown_ref_raises(db):
 def test_add_intra_batch_duplicate_alias_rejected(db):
     with pytest.raises(ValueError):
         places.add(db, "Новая", aliases=["Кафе", "КАФЕ"])
+
+# --- Task 5 (3a): places.update ---
+
+def _seed_rules(db):
+    from fam import rem
+    rem.seed_default_rules(db)
+    rem.migrate_rules_2c(db)
+
+
+def test_update_unknown_place_raises(db):
+    with pytest.raises(ValueError):
+        places.update(db, "НетТакого", travel_min=10)
+
+
+def test_update_no_fields_raises(db):
+    places.add(db, "Мега"); db.commit()
+    with pytest.raises(ValueError):
+        places.update(db, "Мега")
+
+
+def test_update_unknown_field_raises(db):
+    places.add(db, "Мега"); db.commit()
+    with pytest.raises(ValueError):
+        places.update(db, "Мега", color="red")
+
+
+def test_update_via_alias_sets_fields_and_audits(db):
+    from fam import audit
+    places.add(db, "Мега", aliases=["мол"])
+    db.commit()
+    p = places.update(db, "МОЛ", lat=43.2, lon=76.9, address="Розыбакиева 247")
+    db.commit()
+    assert p["lat"] == 43.2 and p["lon"] == 76.9
+    assert p["address"] == "Розыбакиева 247"
+    rows = audit.query(db, None, "places.update", None)
+    assert rows
+    payload = rows[0]["payload"]
+    assert payload["id"] == p["id"]
+    assert payload["events_touched"] == 0
+
+
+def test_update_coords_ripples_future_active_events(db):
+    from fam import audit, cal
+    _seed_rules(db)
+    places.add(db, "Мега"); db.commit()
+    future = cal.add(db, "Кино", "2099-01-02T06:00:00+00:00", place="Мега")
+    past = cal.add(db, "Было", "2000-01-02T06:00:00+00:00", place="Мега")
+    cal.add(db, "Без места", "2099-01-03T06:00:00+00:00")
+    # simulate a previously computed (now stale) road value
+    for eid in (future["id"], past["id"]):
+        db.execute(
+            "UPDATE events SET travel_min_road=26, "
+            "road_checked_at='2026-01-01T00:00:00+00:00' WHERE id=?", (eid,))
+    db.commit()
+
+    places.update(db, "Мега", lat=43.2, lon=76.9)
+    db.commit()
+
+    # future event's road freshness is invalidated; past event untouched
+    row = db.execute("SELECT road_checked_at FROM events WHERE id=?",
+                     (future["id"],)).fetchone()
+    assert row["road_checked_at"] is None
+    row = db.execute("SELECT road_checked_at FROM events WHERE id=?",
+                     (past["id"],)).fetchone()
+    assert row["road_checked_at"] is not None
+
+    payload = audit.query(db, None, "places.update", None)[0]["payload"]
+    assert payload["events_touched"] == 1
+
+
+def test_update_travel_min_shifts_future_leave_at_chain(db):
+    from fam import cal
+    _seed_rules(db)
+    places.add(db, "Мега"); db.commit()
+    e = cal.add(db, "Кино", "2099-01-02T06:00:00+00:00", place="Мега")
+    db.commit()
+    q = ("SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
+         "AND anchor='leave_at' AND label='пора выходить'")
+    before = db.execute(q, (e["id"],)).fetchone()
+    assert before["fire_at_utc"] == "2099-01-02T06:00:00+00:00"
+
+    places.update(db, "Мега", travel_min=40)
+    db.commit()
+
+    after = db.execute(q, (e["id"],)).fetchone()
+    assert after["fire_at_utc"] == "2099-01-02T05:20:00+00:00"

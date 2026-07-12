@@ -905,3 +905,90 @@ def test_mail_test_plain_output(db, capsys, monkeypatch, tmp_path):
 
     assert rc == 0
     assert "msg-9" in text
+
+# --- Task 5 (3a): `fam road` + `fam places update` ---
+
+ROAD_CFG_T5 = {
+    "road_home_lat": 43.2220, "road_home_lon": 76.8512,
+    "road_coef": 1.4, "road_speed_kmh": 30, "road_daily_cap": 100,
+    "road_timeout_sec": 10,
+}
+
+
+def test_road_unknown_event_exit_2(db, capsys):
+    rc = cli.main(["road", "999"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "unknown event" in captured.err
+
+
+def test_road_coordless_event_source_none_exit_0(db, capsys):
+    e = cal.add(db, "Без места", "2099-01-02T05:00:00+00:00")
+    db.commit()
+    rc = cli.main(["road", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out == {"event_id": e["id"], "travel_min_road": None,
+                   "source": "none", "reason": "no coordinates"}
+
+
+def test_road_computes_writes_and_regenerates(db, capsys, monkeypatch):
+    rem.seed_default_rules(db)
+    rem.migrate_rules_2c(db)
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG_T5)
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                        lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+    places.add(db, "Мега", lat=43.2298, lon=76.8823)
+    db.commit()
+    e = cal.add(db, "Кино", "2099-01-02T06:00:00+00:00", place="Мега")
+    db.commit()
+
+    # a fresh recompute returns a different figure -- the command must
+    # persist it AND move the chain (leave_at shifts 26 -> 31 min).
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                        lambda conn, event, cfg, now_utc=None: (31, "tomtom"))
+    rc = cli.main(["--json", "road", str(e["id"])])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out == {"event_id": e["id"], "travel_min_road": 31,
+                   "source": "tomtom",
+                   "leave_at_local": "2099-01-02T10:29:00+05:00"}
+
+    row = db.execute("SELECT travel_min_road, road_checked_at FROM events "
+                     "WHERE id=?", (e["id"],)).fetchone()
+    assert row["travel_min_road"] == 31
+    assert row["road_checked_at"] is not None
+
+    stage = db.execute(
+        "SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
+        "AND anchor='leave_at' AND label='пора выходить'", (e["id"],)).fetchone()
+    assert stage["fire_at_utc"] == "2099-01-02T05:29:00+00:00"
+
+
+def test_places_update_cli_json_before_and_after_subcommand(db, capsys):
+    places.add(db, "Мега")
+    db.commit()
+    assert cli.main(["--json", "places", "update", "Мега",
+                     "--travel-min", "40"]) == 0
+    out1 = json.loads(capsys.readouterr().out)
+    assert out1["travel_min"] == 40
+    assert cli.main(["places", "update", "Мега", "--notes", "парковка P2",
+                     "--json"]) == 0
+    out2 = json.loads(capsys.readouterr().out)
+    assert out2["notes"] == "парковка P2"
+
+
+def test_places_update_unknown_place_exit_2(db, capsys):
+    rc = cli.main(["places", "update", "НетТакого", "--travel-min", "5"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
+
+
+def test_places_update_no_fields_exit_2(db, capsys):
+    places.add(db, "Мега")
+    db.commit()
+    rc = cli.main(["places", "update", "Мега"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""

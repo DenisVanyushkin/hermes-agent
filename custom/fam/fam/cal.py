@@ -93,11 +93,20 @@ def _resolve_place(conn, place_ref):
 _ROAD_TRIGGER_COLUMNS = ("start_utc", "place_id", "transport")
 
 
-def _recompute_road(conn, event_id):
+def recompute_road(conn, event_id):
     """Compute and persist real-road travel time for event_id, if the
     place has coordinates and home is configured. Called from add() (always)
     and update() (only when _ROAD_TRIGGER_COLUMNS changed), BEFORE
     rem.regenerate so the regenerated chain sees fresh travel_min_road.
+    Also the single code path behind `fam road` (Task 5) -- the manual
+    recompute must behave byte-identically to the hooks (same audit
+    kinds: road.computed / road.hook_error).
+
+    Returns {"minutes": M, "source": S} when a computed value was
+    persisted, None otherwise (unknown event, no coord place, no home
+    config, non-computed source, or a swallowed error). The hooks ignore
+    the return value; `fam road` uses it to distinguish "computed" from
+    the informational no-coordinates case.
 
     Only "tomtom"/"straight" sources are computed values worth persisting
     -- "manual"/"place"/"none" are leave_at()'s own lower-rung fallbacks,
@@ -112,13 +121,13 @@ def _recompute_road(conn, event_id):
     try:
         event = get(conn, event_id)
         if event is None:
-            return
+            return None
         place = event.get("place")
         if not place or place.get("lat") is None or place.get("lon") is None:
-            return
+            return None
         cfg = gate.load_config()
         if cfg.get("road_home_lat") is None or cfg.get("road_home_lon") is None:
-            return
+            return None
 
         depart_at = event["start_utc"]
         minutes, source = road.compute_travel_min(conn, event, cfg, now_utc=depart_at)
@@ -131,8 +140,11 @@ def _recompute_road(conn, event_id):
             )
             audit.log(conn, "road.computed",
                       {"event_id": event_id, "minutes": minutes, "source": source})
+            return {"minutes": minutes, "source": source}
+        return None
     except Exception:
         audit.log(conn, "road.hook_error", {"event_id": event_id})
+        return None
 
 
 def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
@@ -178,7 +190,7 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
          "transport": transport, "notes": notes, "travel_min": travel_min},
     )
 
-    _recompute_road(conn, event_id)
+    recompute_road(conn, event_id)
 
     rem.regenerate(conn, event_id)
 
@@ -361,7 +373,7 @@ def update(conn, event_id, **fields):
     # Road recompute BEFORE regen, so a fresh regen reads the just-written
     # travel_min_road (rem.regenerate re-fetches the event from DB).
     if new_road_state != old_road_state:
-        _recompute_road(conn, event_id)
+        recompute_road(conn, event_id)
 
     if (new_regen_state != old_regen_state or participants_changed):
         rem.regenerate(conn, event_id)

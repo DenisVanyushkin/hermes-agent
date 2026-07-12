@@ -70,7 +70,7 @@ def road_recompute(conn, now_utc=None, cfg=None):
     whose place has both lat and lon), then per-event Python logic
     (leave_at needs cal.get's full event dict, which SQL alone can't
     give). If cfg has no home coordinates configured, nothing is ever a
-    candidate -- this is checked once up front (mirrors cal._recompute_road's
+    candidate -- this is checked once up front (mirrors cal.recompute_road's
     same guard) rather than per event.
 
     Per event: minutes_to_leave = leave_at - now. Events already past
@@ -117,7 +117,7 @@ def road_recompute(conn, now_utc=None, cfg=None):
     Never raises: each event is wrapped in try/except -- any failure
     (including inside road.compute_travel_min, though that function
     itself is already defensive) is audited as road.hook_error and the
-    loop continues to the next candidate, exactly like cal._recompute_road's
+    loop continues to the next candidate, exactly like cal.recompute_road's
     contract.
 
     Commits once per event touched (recompute or checked-at bump), or
@@ -174,7 +174,7 @@ def road_recompute(conn, now_utc=None, cfg=None):
                 # -- NOT a fresh real-clock read -- so the threshold-
                 # window guard above compares like with like across
                 # ticks, mirroring how sent_at/fire_at_utc are stamped
-                # elsewhere in this module. cal._recompute_road's own
+                # elsewhere in this module. cal.recompute_road's own
                 # hook uses a fresh real-clock stamp instead, but that
                 # hook has no "which tick's now" ambiguity to resolve.
                 if source in ("tomtom", "straight"):

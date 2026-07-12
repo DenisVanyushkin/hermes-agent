@@ -100,6 +100,22 @@ def cmd_places_resolve(args):
         print(f"{p['name']} (id={p['id']}) {p['address']}".rstrip())
     return 0
 
+def cmd_places_update(args):
+    conn = famdb.connect()
+    fields = {}
+    if args.lat is not None: fields["lat"] = args.lat
+    if args.lon is not None: fields["lon"] = args.lon
+    if args.travel_min is not None: fields["travel_min"] = args.travel_min
+    if args.address is not None: fields["address"] = args.address
+    if args.notes is not None: fields["notes"] = args.notes
+    p = places.update(conn, args.ref, **fields)
+    conn.commit()
+    if args.json:
+        print(json.dumps(p, ensure_ascii=False))
+    else:
+        print(f"updated place: {p['name']} (id={p['id']})")
+    return 0
+
 def cmd_places_list(args):
     conn = famdb.connect()
     rows = places.list_all(conn)
@@ -450,6 +466,44 @@ def cmd_mail_test(args):
         print(f"mail test: {result}")
     return 0
 
+def cmd_road(args):
+    """`fam road EVENT_ID` -- manual road recompute for one event (debug +
+    skill use, Task 5). Runs the SAME code path as cal add/update's hook
+    (cal.recompute_road -- same audit kinds), then regenerates the
+    reminder chain so it reflects the fresh travel_min_road, mirroring
+    cal.update's hook order. An event without usable coordinates (or no
+    home config) is informational, not an error: source "none", exit 0.
+    """
+    conn = famdb.connect()
+    e = cal.get(conn, args.event_id)
+    if e is None:
+        raise ValueError(f"unknown event: {args.event_id}")
+    res = cal.recompute_road(conn, args.event_id)
+    if res is None:
+        # commit anyway: recompute_road may still have audited
+        # road.error/road.cap/road.hook_error rows worth keeping.
+        conn.commit()
+        out = {"event_id": args.event_id, "travel_min_road": None,
+               "source": "none", "reason": "no coordinates"}
+        if args.json:
+            print(json.dumps(out, ensure_ascii=False))
+        else:
+            print(f"road: event {args.event_id} has no coordinates (source=none)")
+        return 0
+    rem.regenerate(conn, args.event_id)
+    conn.commit()
+    e = cal.get(conn, args.event_id)
+    out = {"event_id": args.event_id,
+           "travel_min_road": e["travel_min_road"],
+           "source": res["source"],
+           "leave_at_local": cal._to_local_iso(rem.leave_at(conn, e))}
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        print(f"road: event {args.event_id} travel_min_road={out['travel_min_road']} "
+              f"source={out['source']} leave_at={out['leave_at_local']}")
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(prog="fam")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -514,6 +568,17 @@ def build_parser():
     spal = places_sub.add_parser("alias"); spal.set_defaults(func=cmd_places_alias)
     spal.add_argument("ref", help="id or name of the place")
     spal.add_argument("alias", help="new alias to attach")
+
+    spu = places_sub.add_parser("update"); spu.set_defaults(func=cmd_places_update)
+    spu.add_argument("ref", help="id, name, or alias of the place")
+    spu.add_argument("--lat", type=float)
+    spu.add_argument("--lon", type=float)
+    spu.add_argument("--travel-min", dest="travel_min", type=int,
+                      help="manual leave_at minutes fallback")
+    spu.add_argument("--address")
+    spu.add_argument("--notes")
+    spu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
 
     spr = places_sub.add_parser("resolve"); spr.set_defaults(func=cmd_places_resolve)
     spr.add_argument("text")
@@ -651,6 +716,11 @@ def build_parser():
     spmt.add_argument("id", type=int)
     spmt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
+
+    sp = sub.add_parser("road"); sp.set_defaults(func=cmd_road)
+    sp.add_argument("event_id", type=int)
+    sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                     help="machine-readable output")
 
     return p
 
