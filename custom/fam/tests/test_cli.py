@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -160,6 +161,94 @@ def test_cal_add_naive_start_exit_2(db, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert captured.err.strip() != ""
+
+# --- Task 13: past-start guardrail (`cal add`/`cal update`), CLI-level ---
+
+_PAST_HINT_RE = re.compile(
+    r"start is in the past \(now: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+05:00\)\. "
+    r"If the user means a past event, retry with --allow-past; otherwise "
+    r"re-derive the date \(run date\)\."
+)
+
+def test_cal_add_start_in_past_exit_2(db, capsys):
+    past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+    rc = cli.main(["cal", "add", "--title", "X", "--start", past])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert _PAST_HINT_RE.search(captured.err)
+
+def test_cal_add_start_within_grace_period_succeeds(db, capsys):
+    within = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(timespec="seconds")
+    rc = cli.main(["cal", "add", "--title", "X", "--start", within, "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["title"] == "X"
+
+def test_cal_add_start_just_past_grace_period_exit_2(db, capsys):
+    just_past = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat(timespec="seconds")
+    rc = cli.main(["cal", "add", "--title", "X", "--start", just_past])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert _PAST_HINT_RE.search(captured.err)
+
+def test_cal_add_allow_past_bypasses_guardrail(db, capsys):
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
+    rc = cli.main(["cal", "add", "--title", "X", "--start", past, "--allow-past", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["title"] == "X"
+
+def test_cal_add_rejected_past_start_writes_no_audit_or_event(db, capsys):
+    past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+    rc = cli.main(["cal", "add", "--title", "X", "--start", past])
+    capsys.readouterr()
+    assert rc == 2
+    assert db.execute("SELECT COUNT(*) c FROM audit_log WHERE kind='cal.add'").fetchone()["c"] == 0
+    assert db.execute("SELECT COUNT(*) c FROM events").fetchone()["c"] == 0
+
+def test_cal_add_past_end_without_past_start_is_not_validated(db, capsys):
+    end_in_past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
+    rc = cli.main(["cal", "add", "--title", "X", "--start",
+                   "2099-01-01T05:00:00+00:00", "--end", end_in_past, "--json"])
+    assert rc == 0
+
+def test_cal_update_start_in_past_exit_2(db, capsys):
+    e = cal.add(db, "Т", "2099-01-01T05:00:00+00:00")
+    db.commit()
+    past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+    rc = cli.main(["cal", "update", str(e["id"]), "--start", past])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert _PAST_HINT_RE.search(captured.err)
+
+def test_cal_update_other_field_on_past_event_without_allow_past_succeeds(db, capsys):
+    past = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(timespec="seconds")
+    e = cal.add(db, "Т", past)  # domain call bypasses the CLI-only guardrail
+    db.commit()
+    rc = cli.main(["cal", "update", str(e["id"]), "--notes", "hello", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["notes"] == "hello"
+
+def test_cal_update_allow_past_bypasses_guardrail(db, capsys):
+    e = cal.add(db, "Т", "2099-01-01T05:00:00+00:00")
+    db.commit()
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
+    rc = cli.main(["cal", "update", str(e["id"]), "--start", past, "--allow-past", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["start_utc"] == cal._to_utc_iso(past)
+
+def test_cal_update_rejected_past_start_writes_no_audit(db, capsys):
+    e = cal.add(db, "Т", "2099-01-01T05:00:00+00:00")
+    db.commit()
+    capsys.readouterr()
+    past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+    rc = cli.main(["cal", "update", str(e["id"]), "--start", past])
+    capsys.readouterr()
+    assert rc == 2
+    rows = db.execute("SELECT COUNT(*) c FROM audit_log WHERE kind='cal.update'").fetchone()
+    assert rows["c"] == 0
 
 # --- Task 3: fam init also seeds default reminder rules ---
 

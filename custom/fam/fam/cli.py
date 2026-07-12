@@ -174,7 +174,32 @@ def _maybe_email_event(conn, e, material_changed=True):
         except Exception:  # noqa: BLE001 -- best-effort audit; never propagate
             pass
 
+# Task 13: `cal add`/`cal update --start` guardrail -- CLI-layer only (the
+# domain cal.add()/cal.update() are untouched: they still accept any
+# valid ISO-8601 start with an explicit offset). An LLM caller with no
+# reliable "now" signal in its context can log a start in the past (e.g.
+# "today at 1pm" recorded with yesterday's date, the 12.07 incident this
+# guardrail exists for) -- a 10-minute grace period tolerates ordinary
+# submission latency around "right now" without flagging it as a mistake.
+# --allow-past bypasses this for genuinely retroactive entries.
+_PAST_START_GRACE = timedelta(minutes=10)
+
+def _check_start_not_past(start_value, allow_past):
+    if allow_past:
+        return
+    start_utc = cal._to_utc_iso(start_value)
+    start_dt = datetime.fromisoformat(start_utc)
+    now_dt = datetime.now(timezone.utc)
+    if start_dt < now_dt - _PAST_START_GRACE:
+        now_almaty = now_dt.astimezone(cal.ALMATY).isoformat(timespec="seconds")
+        raise ValueError(
+            f"start is in the past (now: {now_almaty}). If the user means "
+            "a past event, retry with --allow-past; otherwise re-derive "
+            "the date (run date)."
+        )
+
 def cmd_cal_add(args):
+    _check_start_not_past(args.start, args.allow_past)
     conn = famdb.connect()
     e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
                 participants=args.with_, transport=args.transport, notes=args.notes,
@@ -188,6 +213,8 @@ def cmd_cal_add(args):
     return 0
 
 def cmd_cal_update(args):
+    if args.start is not None:
+        _check_start_not_past(args.start, args.allow_past)
     conn = famdb.connect()
     fields = {}
     if args.title is not None: fields["title"] = args.title
@@ -511,6 +538,8 @@ def build_parser():
     spa.add_argument("--notes", default="")
     spa.add_argument("--travel-min", dest="travel_min", type=int,
                       help="override place travel minutes for leave_at (default: take from place)")
+    spa.add_argument("--allow-past", dest="allow_past", action="store_true",
+                      help="skip the past-start guardrail (retroactive event entry)")
     spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
@@ -528,6 +557,8 @@ def build_parser():
                       help="participant ref to add (repeatable)")
     spu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
                       help="participant ref to remove (repeatable)")
+    spu.add_argument("--allow-past", dest="allow_past", action="store_true",
+                      help="skip the past-start guardrail (retroactive event entry)")
     spu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
