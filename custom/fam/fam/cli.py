@@ -479,16 +479,27 @@ def cmd_road(args):
     if e is None:
         raise ValueError(f"unknown event: {args.event_id}")
     res = cal.recompute_road(conn, args.event_id)
-    if res is None:
+    if res.get("minutes") is None:
         # commit anyway: recompute_road may still have audited
         # road.error/road.cap/road.hook_error rows worth keeping.
         conn.commit()
+        reason = res["reason"]
         out = {"event_id": args.event_id, "travel_min_road": None,
-               "source": "none", "reason": "no coordinates"}
+               "source": "none", "reason": reason}
         if args.json:
             print(json.dumps(out, ensure_ascii=False))
-        else:
-            print(f"road: event {args.event_id} has no coordinates (source=none)")
+        elif reason == "no_place_coords":
+            print(f"road: event {args.event_id} has no place coordinates (source=none)")
+        elif reason == "no_home_config":
+            print(f"road: event {args.event_id} skipped, home coordinates not "
+                  f"configured (source=none)")
+        elif reason.startswith("fallback_source:"):
+            src = reason.split(":", 1)[1]
+            print(f"road: event {args.event_id} not computed, leave_at falls "
+                  f"back to '{src}' (source=none)")
+        else:  # "error"
+            print(f"road: event {args.event_id} recompute failed -- детали в "
+                  f"fam log --kind road (source=none)")
         return 0
     rem.regenerate(conn, args.event_id)
     conn.commit()

@@ -197,7 +197,7 @@ def update(conn, ref, **fields):
     if _RIPPLE_FIELDS & set(fields):
         rows = conn.execute(
             "SELECT id FROM events WHERE place_id=? AND status='active' "
-            "AND start_utc >= ?",
+            "AND start_utc > ?",  # strictly-future
             (p["id"], _now()),
         ).fetchall()
         for r in rows:

@@ -929,7 +929,54 @@ def test_road_coordless_event_source_none_exit_0(db, capsys):
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert out == {"event_id": e["id"], "travel_min_road": None,
-                   "source": "none", "reason": "no coordinates"}
+                   "source": "none", "reason": "no_place_coords"}
+
+
+def test_road_no_home_config_reason(db, capsys, monkeypatch):
+    monkeypatch.setattr(cal.gate, "load_config",
+                        lambda: {"road_home_lat": None, "road_home_lon": None})
+    places.add(db, "Мега", lat=43.2298, lon=76.8823)
+    db.commit()
+    e = cal.add(db, "Кино", "2099-01-02T06:00:00+00:00", place="Мега")
+    db.commit()
+    rc = cli.main(["road", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["reason"] == "no_home_config"
+    assert out["source"] == "none" and out["travel_min_road"] is None
+
+
+def test_road_fallback_source_reason(db, capsys, monkeypatch):
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG_T5)
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                        lambda conn, event, cfg, now_utc=None: (40, "manual"))
+    places.add(db, "Мега", lat=43.2298, lon=76.8823)
+    db.commit()
+    e = cal.add(db, "Кино", "2099-01-02T06:00:00+00:00", place="Мега")
+    db.commit()
+    rc = cli.main(["road", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["reason"] == "fallback_source:manual"
+
+
+def test_road_error_reason(db, capsys, monkeypatch):
+    def boom(conn, event, cfg, now_utc=None):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG_T5)
+    places.add(db, "Мега", lat=43.2298, lon=76.8823)
+    db.commit()
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                        lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+    e = cal.add(db, "Кино", "2099-01-02T06:00:00+00:00", place="Мега")
+    db.commit()
+    monkeypatch.setattr(cal.road, "compute_travel_min", boom)
+    rc = cli.main(["road", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["reason"] == "error"
+    rows = audit.query(db, None, "road.hook_error", None)
+    assert rows
 
 
 def test_road_computes_writes_and_regenerates(db, capsys, monkeypatch):

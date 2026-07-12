@@ -103,10 +103,13 @@ def recompute_road(conn, event_id):
     kinds: road.computed / road.hook_error).
 
     Returns {"minutes": M, "source": S} when a computed value was
-    persisted, None otherwise (unknown event, no coord place, no home
-    config, non-computed source, or a swallowed error). The hooks ignore
-    the return value; `fam road` uses it to distinguish "computed" from
-    the informational no-coordinates case.
+    persisted; otherwise {"minutes": None, "reason": R} with R one of
+    "no_place_coords" (no place, or place without lat/lon),
+    "no_home_config" (road_home_lat/lon unset), "fallback_source:<source>"
+    (compute_travel_min landed on a non-computed rung: manual/place/none)
+    or "error" (swallowed exception, audited as road.hook_error; also the
+    can't-happen-from-the-hooks unknown-event case). The hooks ignore the
+    return value; `fam road` passes the reason through to its output.
 
     Only "tomtom"/"straight" sources are computed values worth persisting
     -- "manual"/"place"/"none" are leave_at()'s own lower-rung fallbacks,
@@ -121,13 +124,13 @@ def recompute_road(conn, event_id):
     try:
         event = get(conn, event_id)
         if event is None:
-            return None
+            return {"minutes": None, "reason": "error"}
         place = event.get("place")
         if not place or place.get("lat") is None or place.get("lon") is None:
-            return None
+            return {"minutes": None, "reason": "no_place_coords"}
         cfg = gate.load_config()
         if cfg.get("road_home_lat") is None or cfg.get("road_home_lon") is None:
-            return None
+            return {"minutes": None, "reason": "no_home_config"}
 
         depart_at = event["start_utc"]
         minutes, source = road.compute_travel_min(conn, event, cfg, now_utc=depart_at)
@@ -141,10 +144,10 @@ def recompute_road(conn, event_id):
             audit.log(conn, "road.computed",
                       {"event_id": event_id, "minutes": minutes, "source": source})
             return {"minutes": minutes, "source": source}
-        return None
+        return {"minutes": None, "reason": f"fallback_source:{source}"}
     except Exception:
         audit.log(conn, "road.hook_error", {"event_id": event_id})
-        return None
+        return {"minutes": None, "reason": "error"}
 
 
 def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
