@@ -87,16 +87,16 @@ make a second, separate terminal call.
 3. **Destination phrasing ⇒ resolve the place before recording.**
    "съездить/поехать/сходить в/к X" means X is a place, not just words in
    the title — run `fam places resolve X` first. Unknown → same
-   stop-and-ask as rule 2 ("это где — записать?"); on confirmation `fam
-   places add` with the user's exact wording, then pass `--place` to `cal
-   add`/`cal update`. Don't ask about travel time (`--travel-min`) —
-   record it only if the user brings it up themselves.
+   unknown person/place stop-and-ask rule as above ("это где — записать?");
+   on confirmation `fam places add` with the user's exact wording, then
+   pass `--place` to `cal add`/`cal update`. Don't ask about travel time
+   (`--travel-min`) — record it only if the user brings it up themselves.
 4. **Other stderr + exit 2 failures are real errors, not retry bait.**
    Examples: `alias already in use by ...`, `unknown field: ...`, `unknown
    event: ...`. Read the message and fix the actual problem (different
    alias, a valid field name, the right event id) or tell the user what's
    wrong — don't blindly resubmit the same command. Exception: `start is
-   in the past` has its own protocol, rule 5 below.
+   in the past` has its own protocol, the past-start protocol below.
 5. **`start is in the past` ⇒ past event or stale "now", not a bug.**
    `cal add`/`cal update --start` exits 2 with `start is in the past
    (now: <ISO+05:00>). If the user means a past event, retry with
@@ -135,7 +135,8 @@ make a second, separate terminal call.
 | Reminders for one event | `fam rem list --event ID --json` |
 | Reminders due right now | `fam rem list --due --json` |
 | Events with an in-progress reminder chain | `fam rem active --json` |
-| Already on the way (ack chain) | `fam rem ack EVENT_ID` |
+| Just starting to get ready (ack prepare stages only) | `fam rem ack EVENT_ID --scope prepare` |
+| Already on the way (ack whole chain) | `fam rem ack EVENT_ID` |
 | Stop nagging about it (cancel chain) | `fam rem cancel EVENT_ID` |
 | What rules generate reminders | `fam rem rules --json` |
 
@@ -169,18 +170,37 @@ recall which event it was about, you have to look it up. Ack/cancel
 always apply to an event's whole remaining reminder chain, never a single
 stage:
 
-- **"уже едем/выходим/собираемся/готовимся/на месте/знаю" (already on
-  it)** — especially a SHORT reply like this with no event named, which
-  is almost always a reaction to a reminder that just fired out-of-band.
-  Do NOT just say "понял" without looking it up first — acking is the
-  whole point of the reply:
+- **Ack is scoped to what's actually done** — "собираемся" ≠ "выходим".
+  Acking silences everything in the reply's scope; don't over-silence a
+  chain that still has "пора выходить" stages left to fire:
+  - **"собираемся / начали / начали собираться / готовимся" (getting
+    ready)** → `fam rem ack EVENT_ID --scope prepare`. Only the getting-
+    ready stages go quiet; departure-stage reminders still fire later.
+  - **"выходим / уже выходим / едем / вышли / в пути / на месте" (on the
+    way)** → `fam rem ack EVENT_ID` (no `--scope`, silences the whole
+    remaining chain).
+  - **Ambiguous ("уже", "знаю", "понял" with no event named)** — this is
+    almost always a reaction to a reminder that just fired out-of-band,
+    but the wording alone doesn't say prepare-stage vs departure-stage.
+    Do NOT just say "понял" without looking it up first, and do NOT guess
+    the scope — ask ONE short clarifying question ("уже выходите или
+    пока собираетесь?").
   1. `fam rem active --json` — events with an in-progress reminder chain
      (still-pending reminders).
-  2. Exactly one result → `fam rem ack EVENT_ID` for it, then tell the
-     user briefly what you silenced (title + time).
+  2. Exactly one result → ack it with the scope matching the reply
+     (`--scope prepare` or full), then tell the user briefly what you
+     silenced (title + time).
   3. Several results → ask which one, by title/time — never guess.
   4. No results → nothing is pending; a plain conversational
      acknowledgment is enough, no fam call needed.
+
+  Examples:
+  - "начали собираться" → one active event → `fam rem ack 42 --scope
+    prepare` → "Понял, сборы отметил — как выйдете, скажите."
+  - "уже вышли" → one active event → `fam rem ack 42` → "Понял, больше не
+    напоминаю про врача в 15:00."
+  - "угу" (no context) → uncertain scope → "Уже выходите или пока
+    собираетесь?"
 - **"не напоминай про это" / "погаси напоминания про X" (stop nagging)**
   → `fam rem cancel EVENT_ID`. Same scope as ack, cancelled instead.
 - **"какие напоминания" (what's pending)** → `fam rem list --due --json`
