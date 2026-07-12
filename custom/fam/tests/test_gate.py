@@ -33,6 +33,12 @@ def _insert_audit(db, kind, ts_utc, payload=None):
 # budget_spent_today tests above.
 NOW = "2026-07-11T10:00:00+00:00"
 
+# Frozen "now" inside the quiet window (21:30-07:30 Almaty) -- 22:00
+# Almaty, 11 Jul 2026, same instant the pre-existing quiet-hours tests
+# already used as a literal. Reused by the phase-2c night-fire tests
+# below (task 2c-6: reminders ignore quiet hours).
+QUIET_NOW = "2026-07-11T22:00:00+05:00"
+
 
 def _seed_gate_sent(db, kind, event_id=None, n=1, now_utc=None):
     """Insert n gate.sent audit rows with payload {"kind": kind, "raw":
@@ -237,8 +243,14 @@ def test_budget_digest_still_excluded(db):
 # ---- deliver: quiet hours ----
 
 def test_deliver_quiet_hours_skips_and_audits(db, fake_run):
+    # 2c night-fire: quiet hours no longer gate kind="reminder" (Denis
+    # decision, 2026-07-12 -- "планы бывают и ночью, их не нужно
+    # замалчивать"). This test now covers a non-reminder kind, which
+    # keeps the pre-existing quiet-gate semantics; the reminder-specific
+    # night-fire behavior is covered by
+    # test_deliver_reminder_ignores_quiet_hours below.
     status = gate.deliver(
-        db, "reminder", {"label": "тест"}, "fallback text", CFG,
+        db, "note", {"label": "тест"}, "fallback text", CFG,
         now_utc="2026-07-11T22:00:00+05:00",
     )
     db.commit()
@@ -248,6 +260,33 @@ def test_deliver_quiet_hours_skips_and_audits(db, fake_run):
     rows = audit.query(db, None, "gate.", None)
     assert rows[0]["kind"] == "gate.skip"
     assert rows[0]["payload"]["reason"] == "quiet"
+
+
+def test_deliver_reminder_ignores_quiet_hours(db, fake_run):
+    # 2c night-fire (Denis decision, 2026-07-12): a reminder chain fires
+    # on schedule regardless of the quiet window -- "планы бывают и
+    # ночью, их не нужно замалчивать". QUIET_NOW is inside 21:30-07:30
+    # Almaty, same instant the pre-existing quiet-hours tests use.
+    fake_run.rewrite_responses = [_completed(0, "Скоро событие.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", {"event_id": 7, "label": "x"}, "fallback text", CFG,
+        now_utc=QUIET_NOW,
+    )
+
+    assert status == "sent"
+
+
+def test_deliver_non_reminder_still_quiet_gated(db, fake_run):
+    # 2c night-fire (Denis decision, 2026-07-12): the quiet window still
+    # applies to non-reminder kinds -- only reminders were carved out.
+    status = gate.deliver(
+        db, "note", {"x": 1}, "fallback text", CFG, now_utc=QUIET_NOW,
+    )
+
+    assert status == "quiet"
+    assert fake_run.calls == []
 
 
 def test_deliver_force_bypasses_quiet_hours(db, fake_run):

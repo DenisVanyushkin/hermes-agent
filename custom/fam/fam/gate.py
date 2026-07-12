@@ -339,7 +339,12 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
     "sent", "quiet", "budget", "error".
 
     Pipeline (force=True skips the quiet-hours and budget gates):
-      1. quiet hours -> audit gate.skip{reason:"quiet"}, return "quiet".
+      1. quiet hours -> audit gate.skip{reason:"quiet"}, return "quiet" --
+         UNLESS kind=="reminder" (phase 2c, decision: Денис, 2026-07-12:
+         "планы бывают и ночью, их не нужно замалчивать"). A reminder
+         chain fires on its own schedule at any hour; the quiet window
+         still applies to every other kind (e.g. future non-reminder
+         proactive kinds).
       2. daily budget reached -> audit gate.skip{reason:"budget"},
          return "budget" -- UNLESS kind=="reminder" and this event
          already has a gate.sent kind=reminder row today (chain
@@ -370,7 +375,11 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
     """
     now = now_utc or _now()
 
-    if not force and in_quiet_hours(now, cfg):
+    # Тихие часы НЕ действуют на напоминания (решение Дениса,
+    # 2026-07-12): «планы бывают и ночью, их не нужно замалчивать» —
+    # цепочка события стреляет по расписанию в любое время суток.
+    # Quiet-окно остаётся для будущих не-reminder проактивных видов.
+    if not force and kind != "reminder" and in_quiet_hours(now, cfg):
         audit.log(conn, "gate.skip", {"kind": kind, "reason": "quiet"})
         return "quiet"
 
