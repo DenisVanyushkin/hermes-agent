@@ -566,6 +566,16 @@ def test_deliver_reminder_prompt_includes_time_semantics_instruction(db, fake_ru
     assert "start_local" in gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION
 
 
+def test_gate_reminder_time_semantics_instruction_forbids_reassigning_label_actor():
+    # Live-probe-found bug (Task 16, iteration 2): a rewrite of {"label":
+    # "Тае пора собираться", "participants": ["Тая"], ...} once came back
+    # as "Тебе пора собирать Таю" -- the label's own actor (Тая)
+    # reassigned to the chat owner. Reminder-specific because it's
+    # phrased in terms of raw's own label/participants fields.
+    assert "participants" in gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION
+    assert "переадресовывать" in gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION
+
+
 def test_deliver_digest_prompt_has_no_reminder_time_semantics_instruction(db, fake_run):
     raw = {"kind": "digest", "question": tick.DIGEST_QUESTION}
     fake_run.rewrite_responses = [_completed(0, "Сводка.")]
@@ -586,6 +596,15 @@ def test_gate_style_instruction_has_no_literal_reminder_example():
     # the actual raw data being rewritten. The addressing rule must be
     # expressed without a ready-made phrase the model can paste back.
     assert "Тае пора собираться" not in gate.GATE_STYLE_INSTRUCTION
+
+
+def test_gate_style_instruction_forbids_attributing_participant_action_to_owner():
+    # Live-probe-found bug (Task 16, iteration 1): after the copy-able
+    # example was removed, a real rewrite of {"label": "Тае пора
+    # собираться", ...} once came back as "Тебе пора собираться" -- the
+    # participant's own action reassigned to the chat owner. The
+    # addressing rule now explicitly forbids this.
+    assert "не приписывай их действие" in gate.GATE_STYLE_INSTRUCTION
 
 
 def test_deliver_digest_fallback_appends_question_exactly_once_no_duplicate(db, fake_run):
