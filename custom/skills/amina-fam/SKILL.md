@@ -46,12 +46,17 @@ way to read or change family data.
   - `places add|alias|resolve|list`
   - `cal add|update|cancel|done|show|day|range|grid`
   - `rem list|ack|cancel|rules|active`
-- Time: the household lives in Asia/Almaty (+05:00). Take "now" from the
-  date/time already available in your context — never ask the user what
-  today's date is. Talk to the user in Asia/Almaty local time, short form
-  ("ср 15-го, 10:00"). Every value you pass to fam (`--start`, `--end`, a
-  `day` date) is ISO-8601 with an explicit offset, e.g.
-  `2026-07-15T10:00:00+05:00`.
+- Time: the household lives in Asia/Almaty (+05:00). "Now" comes from the
+  timestamp prefix on the **latest** user message, `[Dow YYYY-MM-DD
+  HH:MM:SS TZ]` (e.g. `[Tue 2026-04-28 13:40:53 CEST]`) — read it from
+  there and convert to Asia/Almaty as usual. If that message has no such
+  prefix, make exactly one `date` call via the `terminal` tool before any
+  date/time arithmetic, and use that. Never derive "today" from an
+  earlier turn in the conversation — it drifts (the incident this rule
+  exists for: "сегодня в час" got logged with yesterday's date). Talk to
+  the user in Asia/Almaty local time, short form ("ср 15-го, 10:00").
+  Every value you pass to fam (`--start`, `--end`, a `day` date) is
+  ISO-8601 with an explicit offset, e.g. `2026-07-15T10:00:00+05:00`.
 
 ## Rules
 
@@ -67,9 +72,11 @@ make a second, separate terminal call.
 
 1. **Never do date/time arithmetic in your head or in prose.** Turn the
    user's wording ("завтра в 10 утра", "в среду вечером") into one concrete
-   ISO-8601 string with offset, computed from the current date/time in your
-   context, and pass that string straight to fam. Don't narrate the
-   calculation — just produce the ISO value.
+   ISO-8601 string with offset, computed from "now" as established under
+   Time above (the message's timestamp prefix, or one `date` call if it
+   has none) — never from a date mentioned earlier in the conversation.
+   Pass that string straight to fam. Don't narrate the calculation — just
+   produce the ISO value.
 2. **Unknown person/place ⇒ stop and ask, then retry.** fam exits 2 with
    `unknown person: X` or `unknown place: X` on stderr when a name doesn't
    resolve. Stop, ask the user to confirm who/where it is ("это кто/где —
@@ -77,15 +84,33 @@ make a second, separate terminal call.
    `fam places add <X> --alias <X>` using their exact wording verbatim —
    never normalize or clean up the form, so the alias matches what they
    actually said. Then retry the original command.
-3. **Other stderr + exit 2 failures are real errors, not retry bait.**
+3. **Destination phrasing ⇒ resolve the place before recording.**
+   "съездить/поехать/сходить в/к X" means X is a place, not just words in
+   the title — run `fam places resolve X` first. Unknown → same
+   stop-and-ask as rule 2 ("это где — записать?"); on confirmation `fam
+   places add` with the user's exact wording, then pass `--place` to `cal
+   add`/`cal update`. Don't ask about travel time (`--travel-min`) —
+   record it only if the user brings it up themselves.
+4. **Other stderr + exit 2 failures are real errors, not retry bait.**
    Examples: `alias already in use by ...`, `unknown field: ...`, `unknown
    event: ...`. Read the message and fix the actual problem (different
    alias, a valid field name, the right event id) or tell the user what's
-   wrong — don't blindly resubmit the same command.
-4. **Never delete or overwrite anything without an explicit request.**
+   wrong — don't blindly resubmit the same command. Exception: `start is
+   in the past` has its own protocol, rule 5 below.
+5. **`start is in the past` ⇒ past event or stale "now", not a bug.**
+   `cal add`/`cal update --start` exits 2 with `start is in the past
+   (now: <ISO+05:00>). If the user means a past event, retry with
+   --allow-past; otherwise re-derive the date (run date).` when the ISO
+   you sent is more than a few minutes behind now. The user is clearly
+   talking about something already past ("вчера были у бабушки", "запиши,
+   что мы ездили в...") → retry the identical command with
+   `--allow-past`. Otherwise your "now" was wrong → make one `date` call,
+   re-derive the ISO from the fresh date/time, and retry without
+   `--allow-past`.
+6. **Never delete or overwrite anything without an explicit request.**
    Cancelling an event is `fam cal cancel <id>`, never a raw edit. Get the
    id from `cal show`/`cal day --json`/`cal range --json`, never guess it.
-5. `cal day` / `cal range` / `cal grid` only ever list **active** events —
+7. `cal day` / `cal range` / `cal grid` only ever list **active** events —
    cancelled events are hidden by design, not gone.
 
 ## Quick Reference
