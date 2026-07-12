@@ -556,18 +556,263 @@ custom/fam/bin/fam log --last-hours 1 --json                # gate.sent row with
   > Сегодня тепло: до 32.7°, без осадков, ветер около 8.1 м/с. Завтра ещё
   > жарче — до 33.9°, тоже сухо; дел на сегодня нет.
 
-  **Known gap:** the rewrite dropped the raw payload's `question` field
-  ("Какие планы на сегодня? Расскажи или надиктуй — запишу.") — the delivered
-  message covers weather only. Per the spec amendment making the digest double
-  as the daily-plan intake prompt, this defeats that half of its purpose. The
-  gate's `GATE_STYLE_INSTRUCTION` (`custom/fam/fam/gate.py`) doesn't currently
+  **Known gap (resolved — see "Phase 2b — acceptance" below):** the rewrite
+  dropped the raw payload's `question` field ("Какие планы на сегодня?
+  Расскажи или надиктуй — запишу.") — the delivered message covers weather
+  only. Per the spec amendment making the digest double as the daily-plan
+  intake prompt, this defeats that half of its purpose. The gate's
+  `GATE_STYLE_INSTRUCTION` (`custom/fam/fam/gate.py`) doesn't currently
   tell the rewrite model to preserve the question — worth a prompt tweak or an
   explicit "always keep the question line" rule in a follow-up task; not fixed
   here per this task's "don't rewrite code without evidence of a send failure"
-  scope (the send itself succeeded).
+  scope (the send itself succeeded). Fixed by a prompt tweak the same day; live
+  digests since (e.g. 2026-07-12 07:31 Almaty) close with the invitation —
+  confirmed in the acceptance section below.
 - Second `fam tick digest --json` run (same day): `{"skipped": "already_sent",
   "date_local": "2026-07-11"}` — dup-guard confirmed live, independent of the
   systemd schedule.
 - Morning weather cron `8b751dbfd5d6` paused (`$H cron pause 8b751dbfd5d6`,
   confirmed via `$H cron list --all` showing `[paused]`); evening
   `150d115fe905` untouched, still `[active]`.
+
+## Phase 2b — acceptance: reminders, gate, digest, email (2026-07-12)
+
+Accepted (Task 12; `.superpowers/sdd/task-12-report.md`). This phase grew
+beyond the original plan — Tasks 13–16 were added mid-phase, incident-driven
+(see "Date-anchor incident" below) — and this section documents the state as
+it shipped, on top of "Phase 2b — proactive timers" above. Full history:
+`.superpowers/sdd/progress.md` (`2b-T8`..`2b-T16` entries),
+`.superpowers/sdd/task-{13,14,15,16}-report.md`; design spec
+`docs/superpowers/specs/2026-07-10-amina-assistant-design.md` §10; plan
+`docs/superpowers/plans/2026-07-11-amina-phase2b-reminders.md`.
+
+### What an operator needs to know
+
+**The two timers** (detail above, under "Phase 2b — proactive timers"):
+`fam-reminders.timer` fires every 5 min (`OnCalendar=*:0/5`), `fam-digest.timer`
+fires once a day at `02:30:00 UTC` = `07:30` Almaty. Both `enabled`+`active` as
+of this acceptance (`systemctl --user list-timers --all | grep fam`).
+
+**`fam-config.json` knobs**
+(`~/.hermes/private/amina/fam-config.json`, not in git — private data dir):
+
+```json
+{
+  "target": "whatsapp:+77782110625",
+  "quiet_start": "21:30",
+  "quiet_end": "07:30",
+  "daily_budget": 8,
+  "gate_model": "gpt-5.4-mini",
+  "gate_provider": "openai-codex",
+  "max_len_reminder": 300,
+  "max_len_digest": 900
+}
+```
+
+- `quiet_start`/`quiet_end` (`21:30`–`07:30` local): no proactive send inside
+  this window; the digest at `07:30` lands right at the boundary. Reminder
+  chains due during quiet hours are gated (`gate.skip`, `reason: "quiet"`) and
+  left pending — a later tick retries once the window ends ("остальное ждёт
+  утра", spec §6.4). A reminder repeatedly parked this way for too long
+  (`reminder_max_age_min`, default 120 min, or past the event's own start by
+  that same margin) is cancelled instead of retried forever
+  (`rem.cancel_stale_age`) — that's the "протухшее умирает" half of the rule.
+- `daily_budget` (`8`/day): proactive-message ceiling, counted as `gate.sent`
+  rows for "today" in Asia/Almaty (`budget_spent_today`, `custom/fam/fam/gate.py`).
+  The digest is excluded from the count on both sides — it doesn't consume
+  budget and isn't capped by it (`force=True`, per the timer table above).
+  Reminder stages are **not** currently exempt from the cap in code (spec §6.4
+  describes cap-exempt reminder chains and non-chain overflow "accumulating
+  into the digest" as the target design; as implemented in this phase there's
+  only the reminders+digest tick pair, and a budget-capped reminder stage is
+  simply left pending — `gate.skip`, `reason: "budget"` — for a later
+  `fam-reminders` tick to retry, same mechanism as a quiet-hours skip). Worth
+  a follow-up task if the budget is ever tuned low enough for this gap to
+  matter in practice; at `8`/day it hasn't been observed live.
+- `target` is the pilot's WhatsApp number (`whatsapp:+77782110625`), **not
+  Amina** — pilot mode is still active as of this acceptance (see "Pilot
+  mode" above). **Gap in the existing "Revert checklist for go-live" above:
+  it swaps the `.env` allowlist and the two weather-cron `--deliver` targets
+  back to Amina's number, but doesn't mention this file** — whoever does the
+  go-live revert needs to also edit `fam-config.json`'s `target` (Amina's
+  full JID/number in the same `whatsapp:+<number>` form), or fam's
+  reminders/digest will keep going to the pilot number after everything else
+  has switched over.
+- `gate_model`/`gate_provider` (`gpt-5.4-mini`/`openai-codex`) is the small,
+  cheap model used only for the style-gate rewrite step — separate from
+  whatever model drives the main conversational agent.
+- `max_len_reminder`/`max_len_digest` (`300`/`900` chars) are the
+  deterministic-ceiling values from spec §6.2 step 2 (rewrite too long → one
+  "shorter" retry → send as-is + audit flag, never silently truncated).
+
+**`--allow-past` flag** (`fam cal add`/`fam cal update`, Task 13,
+`ce75d5271`): both subcommands reject a `--start` more than 10 minutes in the
+past (`_PAST_START_GRACE`) with exit 2 and this exact stderr:
+
+```
+start is in the past (now: <ISO+05:00>). If the user means a past event,
+retry with --allow-past; otherwise re-derive the date (run date).
+```
+
+`--allow-past` bypasses the check for genuinely retroactive entries (e.g. "we
+went to the doctor yesterday, log it"). Nothing is written to the DB or the
+audit log on rejection — the check runs before `cal.add()`/`cal.update()` is
+called. `cal update` only runs the check when `--start` is actually passed;
+editing an unrelated field on an already-past event needs no flag. `--end` is
+never validated against "now" by this guardrail.
+
+**`gateway.message_timestamps` + global timezone** (Task 15): as of this
+acceptance, `~/.hermes/config.yaml` has
+
+```yaml
+gateway:
+  message_timestamps:
+    enabled: true
+timezone: 'Asia/Almaty'
+```
+
+Every inbound user message the gateway replays to the model now carries a
+`[Dow YYYY-MM-DD HH:MM:SS +05]`-style prefix (Almaty, not UTC or server-local
+— server-local is `Etc/UTC`, confirmed via `timedatectl`; without the
+`timezone` key set, the prefix would have rendered 5 hours off). This is a
+**global instance setting** — it affects every session's replayed history, not
+just Amina's fam usage.
+
+Side effect: `timezone` flipping means every `hermes cron` schedule
+(`OnCalendar`/`crontab`-style `schedule` field) that was hand-tuned to hit a
+specific Almaty wall-clock time under the old empty-timezone (server-local
+UTC) default had to be retuned so the same instant still fires. The evening
+weather cron (`150d115fe905`) moved from `0 15 * * *` to `0 20 * * *` — both
+mean "15:00 UTC", but the cron field itself is now interpreted Almaty-local,
+so the digits changed to keep the same firing instant. Anyone adding a new
+`hermes cron` job from here on should write the schedule in Almaty-local
+terms directly, not UTC.
+
+**Skill v3 time-source rules**
+(`custom/skills/amina-fam/SKILL.md`, Task 14, `087e462f5`): "now" is defined
+strictly as (a) the `[Dow YYYY-MM-DD HH:MM:SS TZ]` prefix on the **latest**
+user message (see above), converted to Almaty if needed, or (b) if no prefix
+is present, exactly one `date` call via the `terminal` tool before any
+date/time arithmetic. Deriving "today" from an earlier turn in the
+conversation is explicitly forbidden — this is the direct fix for the
+2026-07-12 date-anchor incident (below). The skill also gained: a
+stop-and-ask rule for destination places ("съездить/поехать в X" ⇒ resolve or
+add `X` via `fam places` before recording, don't just leave it as prose in the
+title) and a documented reaction to the `--allow-past` guardrail's exit-2 (ask
+"is this a past event?" → retry with the flag, or re-derive today's date and
+retry without it).
+
+**Gate reminder-semantics instruction**
+(`custom/fam/fam/gate.py`, Task 16, `83920cffc`+`87fd399bb`+`673e754c8`): the
+style-gate rewrite prompt for `kind="reminder"` now gets an extra instruction
+block (`GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION`, mirroring how
+`kind="digest"` gets `GATE_DIGEST_NO_QUESTION_INSTRUCTION`) that pins down
+three things the small rewrite model kept getting wrong on live traffic:
+`start_local` is the event's start time, not the time the reminder's `label`
+action should happen (they're anchored differently — see spec §5); the actor
+performing the `label` action is determined by the label's own wording, not
+defaulted to the chat owner or to a `participants` entry that doesn't belong
+there; and no facts/people/actions may be invented beyond what's in the raw
+payload. `GATE_STYLE_INSTRUCTION`'s addressing rule also lost its old
+copy-pasteable literal example (few-shot bleed risk — the model was echoing
+it onto unrelated data) in favor of a grammatical description. This ships
+live on the next `fam-reminders` tick with no restart needed (it's a plain
+Python prompt-string change picked up by the systemd timer's next
+invocation, not part of the gateway process or the skill file).
+
+**`/reset` after a skill change**: any edit to
+`custom/skills/amina-fam/SKILL.md` (or its deployed copy at
+`~/.hermes/skills/amina-fam/SKILL.md` — both must stay byte-identical, `scp`
+one from the other rather than hand-editing both) only takes effect for
+**new** hermes sessions. An already-open session keeps serving the system
+prompt it was built with, skills baked in at session-creation time — the
+in-process skills-prompt cache doesn't self-invalidate on a new `SKILL.md`.
+After any skill edit that reaches a live session (pilot WhatsApp, admin
+Telegram), send `/reset` (or `/new`) in that chat once the gateway has
+picked up the file (a `systemctl --user restart hermes-gateway` is *not*
+required for the skill text itself — only `/reset` is — but Task 15 bundled
+a restart anyway because it was also flipping `message_timestamps`). No
+scripted/CLI path exists for this; it's a live chat command, so it has to be
+run by whoever has access to that chat (Denis, for the admin/pilot chats in
+this instance).
+
+### Date-anchor incident (2026-07-12) and the fix chain
+
+Root cause: `gateway.message_timestamps` defaulted off + the skill said "take
+now from context already available" + a day-old session → the only date
+signal available to the model was yesterday's turns. Result: "запиши на
+сегодня в час" was logged against yesterday's date (event 10, later corrected
+by hand to `2026-07-12T13:00+05:00`). Fix chain, in order: **T13** (`fam`
+guardrail rejecting past `--start` unless `--allow-past`, catches this class
+of error at write time even if the model still misderives "now") → **T14**
+(skill v3, forces the model to always establish "now" from the message
+timestamp or a `date` call) → **T15** (turns the timestamp prefix on, sets
+`timezone: Asia/Almaty` so the prefix is correct, restarts, live-verified: a
+real WhatsApp message with no explicit date landed on the correct day with no
+`date` call needed) → **T16** (gate reminder-semantics fix, a related but
+independent bug found during T14/T15's live reminder-chain observation: the
+style-gate rewrite was misattributing/mistiming the reminder text itself,
+not the event date).
+
+### Live verification (2026-07-12)
+
+- **Digest**: `07:31:23` Almaty, single delivery (one `tick.digest` + one
+  `gate.sent kind=digest` audit row), min…max weather range, closes with the
+  daily-plan question — confirms the Task-8-era "known gap" above is fixed:
+  > Сегодня без планов: погода +21…34, без осадков, ветер 9.4 м/с. Завтра тоже
+  > без осадков: +22…31, ветер 8.8 м/с.
+  >
+  > Если появятся планы или изменения — расскажи или надиктуй, я запишу.
+- **Full reminder chain, event 10** (Тая-participant event, `start_local
+  13:00`): three stages fired and were delivered correctly-addressed —
+  `12:01:18` (start-60, generic label, audit id `314`, predates all Task 16
+  commits — no `sent_now_local` in the raw payload yet) → *"В 13:00 вам с
+  Таей нужно съездить в поселок. Тае пора собираться."*; `12:16:19`
+  (dedicated Тая leave_at stage, audit id `318`, also pre-Task-16) →
+  *"В 13:00 Тае пора собираться в поселок."*; `13:01:19` (start/leave stage,
+  audit id `328`, sent after `83920cffc`+`87fd399bb` had landed — `08:03:56`
+  `673e754c8` landed ~2.5 min later, so this reflects the round-1/round-2
+  fix, not yet the final three-way attribution rule) →
+  *"Пора выходить с Таей в посёлок."* — owner-addressed, Тая correctly kept
+  in third person, no action misattributed to the owner. Ids `318`/`328` are
+  the same before/after pair `.superpowers/sdd/progress.md`'s `2b-T16` entry
+  cites as "production before/after" — note its own caveat still applies:
+  `328` validates the round-1 code (`sent_now_local` + time-semantics
+  instruction, live and correct here), not the round-2/final wording
+  (owner-reassignment ban, three-way attribution rule) — those were validated
+  by Task 16's `hermes -z` probe transcripts, not by this one production send.
+- **Email + `.ics`**: live send verified twice during Task 10, and again
+  during Task 11's E2E chain-generation pass (`email+ics OK`) — Denis
+  receives a calendar invite on create/update of any event with him as a
+  participant, per spec §7.1.
+- **Quiet hours / gate / budget**: unit-covered (part of the 278-test suite)
+  and live-confirmed during Task 11 (`gate.skip`, `reason: "quiet"`, on a
+  chain stage that fell inside the `21:30`–`07:30` window).
+- **Ack quenches chain ("уже едем/выходим/собираемся")**: reminders are
+  delivered out-of-band (tick → `hermes send`), so a reaction in the next
+  chat turn has no `event_id` in context — `fam rem active --json` (added in
+  Task 11's ack-fix) looks up in-progress chains by title/time so the agent
+  can resolve which event the reaction refers to without guessing, then
+  `fam rem ack EVENT_ID` marks that event's remaining pending stages `acked`
+  (`rem.ack_chain`; the separate "не напоминай про это" path uses
+  `fam rem cancel` → `cancelled` instead). Live-confirmed end-to-end via `-z`
+  smoke test in Task 11 (`.superpowers/sdd/2b-task-11-ackfix-report.md`):
+  "уже выходим" → `rem active` → `rem ack` → one-line confirmation, DB
+  state verified (`fam rem active --json` → `[]` after).
+- **Full test suite**: `278 passed`, zero warnings —
+  `PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`.
+
+### Known gaps carried forward (not blocking this acceptance)
+
+- A residual, rare (`1/9` live probes) name-declension slip in gate-rewritten
+  reminder text (`Тане` instead of the correct dative `Тае`) — flagged in
+  Task 16's report as small-model stochastic noise, not an
+  instruction-following failure; watch the live audit log before deciding
+  whether it needs a follow-up task.
+- Reminder-chain timing drift (13:00-anchored stage arriving at `13:01:19`,
+  not `13:00:00`) is a known, separately-scoped issue — Denis decided to fix
+  it in a follow-up mini-phase (2c: finer-grained timer + `AccuracySec=1s` +
+  an expanded stage schedule) rather than block this acceptance on it
+  (`.superpowers/sdd/progress.md`, "PHASE 2c DECISIONS").
+- `people`/`places` alias rename/remove CLI is still missing (carried over
+  from Phase 2a's "Known limitations" above, unchanged in 2b).
