@@ -221,7 +221,10 @@ def test_update_participants_change_regenerates_taya_stage(db):
     rule_ids = {r["rule_id"] for r in db.execute(
         "SELECT DISTINCT rule_id FROM reminders WHERE event_id=? AND status='pending'",
         (e["id"],))}
-    assert len(rule_ids) == 2  # default + slug:taya both represented now
+    # 2c precedence: slug:taya (non-empty stages) replaces default rather
+    # than stacking with it, so only its rule_id is represented now
+    # (was 2: default + slug:taya).
+    assert len(rule_ids) == 1
     labels = {r["label"] for r in db.execute(
         "SELECT label FROM reminders WHERE event_id=? AND status='pending'", (e["id"],))}
     assert "Тае пора собираться" in labels

@@ -97,6 +97,11 @@ def applicable_rules(conn, event):
     must never block event creation, since this runs inside cal.add's/
     cal.update's regenerate hook. It is audited as rem.rule_error so an
     admin can find and fix it via `fam rem rules`.
+
+    Precedence (2c): a specific (slug-scoped) rule with non-empty stages
+    REPLACES the default rule rather than stacking with it. A slug rule
+    with empty stages (an inert reserve, e.g. slug:amina) does not claim
+    precedence -- the default rule still applies alongside it.
     """
     slugs = {p["slug"] for p in event.get("participants", []) if p.get("slug")}
     scopes = {"default"} | {f"slug:{s}" for s in slugs}
@@ -115,6 +120,17 @@ def applicable_rules(conn, event):
             audit.log(conn, "rem.rule_error", {"rule_id": d["id"]})
             continue
         rules.append(d)
+
+    # Прецедентность (2c): slug-правило с непустыми stages ЗАМЕЩАЕТ
+    # default, а не дополняет его -- иначе Тая-событие получило бы
+    # default-цепочку D=30 плюс Тая-цепочку D=60 (дубли каждые 5-15
+    # минут). Пустое slug-правило (slug:amina -- инертный резерв)
+    # прецедентность не захватывает: событие с одной Аминой получает
+    # default, а не ноль напоминаний.
+    specific = [r for r in rules
+                if r["scope"] != "default" and r["stages"]]
+    if specific:
+        return [r for r in rules if r["scope"] != "default"]
     return rules
 
 

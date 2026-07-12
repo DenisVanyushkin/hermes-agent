@@ -81,9 +81,60 @@ def test_applicable_rules_taya_scope_only_when_participant(db):
     # (empty-stages) reserve rule legitimately matches too -- scope
     # matching doesn't care that the rule currently has 0 stages.
     assert scopes_no == {"default", "slug:amina"}
-    assert scopes_with == {"default", "slug:taya"}
+    # 2c precedence: slug:taya has non-empty stages, so it REPLACES
+    # default rather than stacking with it (was {"default", "slug:taya"}).
+    assert scopes_with == {"slug:taya"}
     for r in rem.applicable_rules(db, cal.get(db, e_with_taya["id"])):
         assert isinstance(r["stages"], list)
+
+
+# ---- applicable_rules precedence (2c) ----
+
+def test_applicable_rules_slug_rule_suppresses_default(db):
+    # A specific (slug-scoped) rule with non-empty stages replaces the
+    # default rule rather than stacking with it.
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+
+    e = cal.add(db, "С Таей", "2026-07-15T06:00:00+00:00",
+                participants=["Тая"])
+    db.commit()
+
+    rules = rem.applicable_rules(db, cal.get(db, e["id"]))
+    scopes = {r["scope"] for r in rules}
+    assert scopes == {"slug:taya"}
+
+
+def test_applicable_rules_default_when_no_slug_match(db):
+    # An event with no slug-scoped participants (or none with a matching
+    # rule) falls back to the default rule.
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+
+    e = cal.add(db, "Без слагов", "2026-07-15T05:00:00+00:00",
+                participants=["Денис"])
+    db.commit()
+
+    rules = rem.applicable_rules(db, cal.get(db, e["id"]))
+    assert {r["scope"] for r in rules} == {"default"}
+
+
+def test_applicable_rules_empty_slug_rule_does_not_claim_precedence(db):
+    # slug:amina is seeded with empty stages (inert reserve) -- an event
+    # with only Амина as participant must still get the default chain,
+    # not zero reminders.
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+
+    e = cal.add(db, "Только Амина", "2026-07-15T05:00:00+00:00",
+                participants=["Амина"])
+    db.commit()
+
+    rules = rem.applicable_rules(db, cal.get(db, e["id"]))
+    assert {r["scope"] for r in rules} == {"default", "slug:amina"}
 
 
 def test_applicable_rules_skips_disabled(db):
