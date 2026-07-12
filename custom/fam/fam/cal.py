@@ -172,12 +172,17 @@ _REGEN_TRIGGER_COLUMNS = ("start_utc", "travel_min", "place_id")
 
 # Fields whose change should (re-)trigger cli.py's cal-update mail hook
 # (_maybe_email_event -> Denis's .ics email, Task 10) -- a superset of
-# _REGEN_TRIGGER_COLUMNS: adds end_utc, which doesn't affect the
-# reminder chain but DOES change what's on the calendar entry, so a
+# _REGEN_TRIGGER_COLUMNS: adds end_utc and title, which don't affect the
+# reminder chain but DO change what's on the calendar entry, so a
 # notes-only edit (no _MAIL_TRIGGER_COLUMNS or participant-set change)
-# must not re-send while a bare end_utc edit must. Participant-set
-# changes are checked the same way as for regen (see update() below).
-_MAIL_TRIGGER_COLUMNS = _REGEN_TRIGGER_COLUMNS + ("end_utc",)
+# must not re-send while a bare end_utc or title edit must.
+# title's inclusion is a product decision (Denis, phase-2b final review
+# Minor #7), superseding the earlier spec-literal reading that left it
+# out: title feeds the .ics SUMMARY, and the stable UID means the
+# admin's calendar entry just updates its name on the re-sent email.
+# Participant-set changes are checked the same way as for regen (see
+# update() below).
+_MAIL_TRIGGER_COLUMNS = _REGEN_TRIGGER_COLUMNS + ("end_utc", "title")
 
 
 def update(conn, event_id, **fields):
@@ -301,13 +306,17 @@ def update(conn, event_id, **fields):
     if (new_regen_state != old_regen_state or participants_changed):
         rem.regenerate(conn, event_id)
 
-    # Mail-material check reuses old_regen_state/new_regen_state (a
-    # prefix of _MAIL_TRIGGER_COLUMNS) plus the one extra column
-    # (end_utc) and the participant-change flag already computed above --
-    # see _MAIL_TRIGGER_COLUMNS's docstring for why this is a superset of
-    # the regen check rather than a separate re-derivation.
-    old_mail_state = old_regen_state + (existing["end_utc"],)
-    new_mail_state = new_regen_state + (new_row["end_utc"],)
+    # Mail-material check derives both snapshots straight from
+    # _MAIL_TRIGGER_COLUMNS (a superset of the regen columns -- see its
+    # docstring, incl. why title is in it) plus the participant-change
+    # flag already computed above. `existing` is the pre-mutation row
+    # fetched at the top, so this reads the true "before" values even
+    # though it runs after the UPDATE. Deriving from the column set
+    # directly (rather than hand-appending each extra column to the
+    # regen tuples, as an earlier revision did) makes _MAIL_TRIGGER_COLUMNS
+    # the single place to widen the mail trigger.
+    old_mail_state = tuple(existing[c] for c in _MAIL_TRIGGER_COLUMNS)
+    new_mail_state = tuple(new_row[c] for c in _MAIL_TRIGGER_COLUMNS)
     material_changed = new_mail_state != old_mail_state or participants_changed
 
     result = get(conn, event_id)

@@ -140,7 +140,8 @@ def _maybe_email_event(conn, e, material_changed=True):
 
     material_changed: dedup gate for `cal update` (Fix round 1) -- an
     update should only re-send when a MATERIAL field actually changed
-    (start_utc/end_utc/place/participants/travel_min; see cal.py's
+    (title/start_utc/end_utc/place/participants/travel_min; title added
+    by product decision, phase-2b final review Minor #7 -- see cal.py's
     _MAIL_TRIGGER_COLUMNS and update()'s "_material_changed" signal,
     which cmd_cal_update passes straight through here), e.g. a notes-only
     edit must not trigger a second email. `cal add` always passes the

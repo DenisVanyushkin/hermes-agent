@@ -242,12 +242,13 @@ def test_cancel_cancels_pending_reminder_chain(db):
 # --- Fix round 1: update()'s "_material_changed" signal (mail hook dedup) ---
 # The mail hook (cli.py's _maybe_email_event) needs to know whether a
 # `cal update` changed a field the .ics email actually reflects
-# (start_utc/end_utc/place/participants/travel_min) -- a notes-only edit
-# must not re-send. update() computes and exposes this as a transient
+# (title/start_utc/end_utc/place/participants/travel_min) -- a notes-only
+# edit must not re-send. update() computes and exposes this as a transient
 # "_material_changed" key on its returned dict, reusing the same
 # before/after snapshots it already takes for reminder-chain regen
-# detection (a superset: adds end_utc, which is not regen-relevant but IS
-# mail-relevant -- see cal.py's _MAIL_TRIGGER_COLUMNS).
+# detection (a superset: adds end_utc and title, which are not
+# regen-relevant but ARE mail-relevant -- see cal.py's
+# _MAIL_TRIGGER_COLUMNS).
 
 def test_update_notes_only_is_not_material_changed(db):
     _seed(db)
@@ -256,15 +257,18 @@ def test_update_notes_only_is_not_material_changed(db):
     updated = cal.update(db, e["id"], notes="просто заметка")
     assert updated["_material_changed"] is False
 
-def test_update_title_only_is_not_material_changed(db):
-    # title is not in the mail-material field set (see cli.py's docstring
-    # for the task's field list) even though it feeds SUMMARY -- follows
-    # the spec literally rather than editorializing.
+def test_update_title_only_is_material_changed(db):
+    # Product decision (Denis, phase-2b final review Minor #7),
+    # superseding the earlier spec-literal reading that excluded title:
+    # a title-only rename IS material -- title feeds the .ics SUMMARY,
+    # and the stable UID means the admin's calendar entry just updates
+    # its name on the re-sent email (without it, the entry silently
+    # keeps the stale title).
     _seed(db)
     e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
     db.commit()
     updated = cal.update(db, e["id"], title="Новое название")
-    assert updated["_material_changed"] is False
+    assert updated["_material_changed"] is True
 
 def test_update_start_utc_is_material_changed(db):
     _seed(db)

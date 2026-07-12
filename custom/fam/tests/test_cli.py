@@ -744,7 +744,8 @@ def test_cal_update_without_denis_does_not_trigger_mail(db, capsys, monkeypatch,
     assert calls == []
 
 # --- Fix round 1: cal-update mail hook fires only on a MATERIAL change ---
-# (start_utc/end_utc/place/participants/travel_min) -- see cal.py's
+# (title/start_utc/end_utc/place/participants/travel_min -- title added
+# by product decision, phase-2b final review Minor #7) -- see cal.py's
 # _MAIL_TRIGGER_COLUMNS/update()'s "_material_changed" signal, which
 # cmd_cal_update consults instead of re-deriving old-vs-new itself.
 
@@ -789,6 +790,29 @@ def test_cal_update_start_utc_on_denis_event_resends_mail(db, capsys, monkeypatc
     assert rc_update == 0
 
     # start_utc IS material -- the hook must fire again.
+    assert len(calls) == 2
+
+def test_cal_update_title_only_on_denis_event_resends_mail(db, capsys, monkeypatch, tmp_path):
+    # Product decision (Denis, phase-2b final review Minor #7): a
+    # title-only rename IS material -- the .ics's stable UID means the
+    # admin's calendar entry updates its SUMMARY on the re-sent email.
+    _hermetic_gate_config(tmp_path, monkeypatch)
+    _seed_denis(db)
+    calls = []
+    def fake_send(event, cfg, **kwargs):
+        calls.append(event["id"])
+        return {"ok": True, "id": "m1"}
+    monkeypatch.setattr(cli.mail, "send_event_email", fake_send)
+
+    rc_add = cli.main(["cal", "add", "--title", "Событие", "--start",
+                        "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc_add == 0
+    assert len(calls) == 1
+
+    rc_update = cli.main(["cal", "update", str(out["id"]), "--title",
+                           "Новое название"])
+    assert rc_update == 0
     assert len(calls) == 2
 
 def test_cal_update_json_output_does_not_leak_material_changed_key(db, capsys, monkeypatch, tmp_path):
