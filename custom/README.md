@@ -61,13 +61,22 @@ top of a dev assistant.
 Two recurring jobs deliver a short Almaty weather forecast to Amina over WhatsApp
 (`whatsapp:+77011102626`):
 
-| Job ID | Name | Schedule (UTC) | Local (Almaty) | Status |
-|---|---|---|---|---|
-| `8b751dbfd5d6` | Утренний короткий прогноз погоды Алматы — Амина | `0 2 * * *` | 07:00 | **paused** (2026-07-11, Phase 2b Task 8 — replaced by `fam-digest.timer`, see "Phase 2b — proactive timers" below) |
-| `150d115fe905` | Вечерний короткий прогноз погоды Алматы — Амина | `0 15 * * *` | 20:00 | active |
+| Job ID | Name | Schedule (Almaty-local) | Status |
+|---|---|---|---|
+| `8b751dbfd5d6` | Утренний короткий прогноз погоды Алматы — Амина | `0 7 * * *` | **paused** (2026-07-11, Phase 2b Task 8 — replaced by `fam-digest.timer`, see "Phase 2b — proactive timers" below) |
+| `150d115fe905` | Вечерний короткий прогноз погоды Алматы — Амина | `0 20 * * *` | active |
 
 Inspect with `$H cron list --all` (plain `list` hides paused jobs) where
 `H="/home/denis/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main"`.
+
+The morning cron's digits were retuned `0 2 * * *` → `0 7 * * *` during the
+Task 15 global `timezone: Asia/Almaty` flip (see "`gateway.message_timestamps`
++ global timezone" below) — cron `schedule` fields are interpreted
+Almaty-local now, not server-local UTC, so the same 07:00 firing instant
+needed different digits. It was retuned alongside the evening job even though
+it's kept paused; `next_run_at` only gets recomputed when a job is
+resumed, so until then `jobs.json` still shows a stale past value for this
+job rather than a fresh future one.
 
 **Note:** during the pilot (see "Pilot mode" below), both jobs' `deliver`
 field is temporarily repointed away from `+77011102626` — see that section
@@ -101,10 +110,17 @@ of the pilot.
 2. Crons: repoint both jobs back to Amina —
    `$H cron edit 8b751dbfd5d6 --deliver whatsapp:+77011102626` and
    `$H cron edit 150d115fe905 --deliver whatsapp:+77011102626`.
-3. Restart the gateway: `$H gateway restart`.
-4. Verify: `grep WHATSAPP_ALLOWED_USERS ~/.hermes/.env` and
-   `grep '"deliver"' ~/.hermes/cron/jobs.json` both show `+77011102626`, and
-   the pilot number (`+77782110625`) no longer appears in either.
+3. fam-config: switch `~/.hermes/private/amina/fam-config.json`'s `target`
+   field from the pilot number back to Amina's WhatsApp:
+   `"target": "whatsapp:+77011102626"` — otherwise fam's proactive sends
+   (reminders/digest) keep going to the pilot number after everything else
+   has gone live.
+4. Restart the gateway: `$H gateway restart`.
+5. Verify: `grep WHATSAPP_ALLOWED_USERS ~/.hermes/.env`,
+   `grep '"deliver"' ~/.hermes/cron/jobs.json`, and
+   `grep '"target"' ~/.hermes/private/amina/fam-config.json` all show
+   `+77011102626`, and the pilot number (`+77782110625`) no longer appears in
+   any of them.
 
 ## Backups inventory (outside git, under `~/.hermes/`)
 
@@ -631,13 +647,12 @@ of this acceptance (`systemctl --user list-timers --all | grep fam`).
   matter in practice; at `8`/day it hasn't been observed live.
 - `target` is the pilot's WhatsApp number (`whatsapp:+77782110625`), **not
   Amina** — pilot mode is still active as of this acceptance (see "Pilot
-  mode" above). **Gap in the existing "Revert checklist for go-live" above:
-  it swaps the `.env` allowlist and the two weather-cron `--deliver` targets
-  back to Amina's number, but doesn't mention this file** — whoever does the
-  go-live revert needs to also edit `fam-config.json`'s `target` (Amina's
-  full JID/number in the same `whatsapp:+<number>` form), or fam's
-  reminders/digest will keep going to the pilot number after everything else
-  has switched over.
+  mode" above). The "Revert checklist for go-live" above originally only
+  swapped the `.env` allowlist and the two weather-cron `--deliver` targets
+  back to Amina's number and missed this file; fixed post-review (phase-2b
+  final review) by adding an explicit `fam-config.json` `target` step to that
+  checklist, so the go-live revert no longer leaves fam's reminders/digest
+  pointed at the pilot number after everything else has switched over.
 - `gate_model`/`gate_provider` (`gpt-5.4-mini`/`openai-codex`) is the small,
   cheap model used only for the style-gate rewrite step — separate from
   whatever model drives the main conversational agent.
