@@ -1,0 +1,6 @@
+[Unit]
+Description=Amina fam: skill-sync curator drift auto-commit
+
+[Service]
+Type=oneshot
+ExecStart=/home/denis/.hermes/hermes-agent/custom/fam/bin/skill-sync

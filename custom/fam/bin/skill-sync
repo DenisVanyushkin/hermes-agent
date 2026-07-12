@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Reconciles curator-patched deployed skill copies back into git.
+#
+# The Hermes background curator (skill_manage) sometimes patches deployed
+# skill copies under ~/.hermes/skills/<name>/SKILL.md directly, bypassing
+# git. This script folds such drift back into the git-tracked copy under
+# ~/.hermes/hermes-agent/custom/skills/<name>/SKILL.md, commits, and pushes.
+#
+# Rule: deployed differs from git AND deployed is newer (mtime) -> fold
+# deployed into git, commit, push (push failure is non-fatal - the local
+# commit is safe and will be picked up next run). Otherwise: skip silently.
+# Never touches frontmatter/content - verbatim copy.
+set -uo pipefail
+
+REPO="$HOME/.hermes/hermes-agent"
+SKILLS_DIR="$REPO/custom/skills"
+DEPLOY_DIR="$HOME/.hermes/skills"
+
+folded=0
+skipped_drift=0
+clean=0
+
+for git_skill_md in "$SKILLS_DIR"/*/SKILL.md; do
+  [ -f "$git_skill_md" ] || continue
+  name="$(basename "$(dirname "$git_skill_md")")"
+  deployed="$DEPLOY_DIR/$name/SKILL.md"
+
+  [ -f "$deployed" ] || continue
+
+  if cmp -s "$git_skill_md" "$deployed"; then
+    clean=$((clean + 1))
+    continue
+  fi
+
+  # Differ. Fold only if deployed is newer than the git copy.
+  if [ "$deployed" -nt "$git_skill_md" ]; then
+    cp "$deployed" "$git_skill_md"
+    rel_path="custom/skills/$name/SKILL.md"
+    git -C "$REPO" add "$rel_path"
+    if git -C "$REPO" commit -m "chore(amina): curator patch auto-commit ($name)" >/dev/null; then
+      folded=$((folded + 1))
+      if ! git -C "$REPO" push >/dev/null 2>&1; then
+        echo "skill-sync: warning: push failed for $name, commit kept locally"
+      fi
+    fi
+  else
+    # git copy is newer or equal - our process's responsibility to sync
+    # forward, not this script's; leave for direct sync elsewhere.
+    skipped_drift=$((skipped_drift + 1))
+  fi
+done
+
+echo "skill-sync: ${folded} folded, ${skipped_drift} skipped-drift, ${clean} clean"

@@ -1,0 +1,9 @@
+[Unit]
+Description=Amina fam: skill-sync curator drift auto-commit schedule
+
+[Timer]
+OnCalendar=*:0/30
+Persistent=false
+
+[Install]
+WantedBy=timers.target
