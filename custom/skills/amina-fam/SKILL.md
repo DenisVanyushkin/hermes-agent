@@ -166,9 +166,11 @@ Reminders and the digest are sent proactively, out-of-band — a background
 tick fires them through a separate `hermes send`, not this conversation.
 When the household reacts in a later turn ("уже выходим"), the reminder
 that triggered it genuinely is NOT in your session context — you cannot
-recall which event it was about, you have to look it up. Ack/cancel
-always apply to an event's whole remaining reminder chain, never a single
-stage:
+recall which event it was about, you have to look it up. Ack applies to
+a stage-group — the prepare stages or the whole remaining chain — chosen
+by the user's wording per the mapping below, never a single individual
+stage and never guessed (unclear wording → one clarifying question).
+Cancel always applies to the whole remaining chain:
 
 - **Ack is scoped to what's actually done** — "собираемся" ≠ "выходим".
   Acking silences everything in the reply's scope; don't over-silence a
@@ -202,7 +204,8 @@ stage:
   - "угу" (no context) → uncertain scope → "Уже выходите или пока
     собираетесь?"
 - **"не напоминай про это" / "погаси напоминания про X" (stop nagging)**
-  → `fam rem cancel EVENT_ID`. Same scope as ack, cancelled instead.
+  → `fam rem cancel EVENT_ID`. Cancel is ALWAYS whole-chain — it has no
+  `--scope` option; never pass one.
 - **"какие напоминания" (what's pending)** → `fam rem list --due --json`
   for what's about to fire, or `fam rem list --json` for everything.
 
