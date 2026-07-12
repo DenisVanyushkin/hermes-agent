@@ -103,6 +103,7 @@ def test_straight_line_minutes_plausible_range():
 
 
 def test_ladder_falls_back_to_straight_then_manual(monkeypatch, db):
+    monkeypatch.setenv("TOMTOM_API_KEY", CFG_KEY)
     monkeypatch.setattr(road, "tomtom_route_minutes", lambda *a, **k: None)
     mins, src = road.compute_travel_min(db, EVENT_WITH_COORDS, CFG, now_utc=NOW)
     assert src == "straight" and mins > 0
@@ -121,6 +122,7 @@ def test_ladder_place_and_none_rungs(db):
 
 
 def test_successful_tomtom_call_is_audited(monkeypatch, db):
+    monkeypatch.setenv("TOMTOM_API_KEY", CFG_KEY)
     monkeypatch.setattr(road, "tomtom_route_minutes", lambda *a, **k: 26)
     mins, src = road.compute_travel_min(db, EVENT_WITH_COORDS, CFG, now_utc=NOW)
     assert (mins, src) == (26, "tomtom")
@@ -130,6 +132,7 @@ def test_successful_tomtom_call_is_audited(monkeypatch, db):
 
 
 def test_daily_cap_skips_tomtom(monkeypatch, db):
+    monkeypatch.setenv("TOMTOM_API_KEY", CFG_KEY)
     monkeypatch.setattr(
         road, "tomtom_route_minutes",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("cap should block this call")))
@@ -145,3 +148,15 @@ def test_daily_cap_skips_tomtom(monkeypatch, db):
     assert src == "straight" and mins > 0
     rows = audit.query(db, None, "road.cap", None)
     assert rows and rows[0]["payload"] == {"event_id": 1}
+
+
+def test_no_key_skips_tomtom_silently(monkeypatch, db):
+    monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
+    monkeypatch.setattr(
+        road, "tomtom_route_minutes",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no-key should skip this call")))
+    mins, src = road.compute_travel_min(db, EVENT_WITH_COORDS, CFG, now_utc=NOW)
+    assert src == "straight" and mins > 0
+    assert audit.query(db, None, "road.error", None) == []
+    assert audit.query(db, None, "road.call", None) == []
+    assert audit.query(db, None, "road.cap", None) == []

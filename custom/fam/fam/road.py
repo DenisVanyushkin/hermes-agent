@@ -111,17 +111,21 @@ def compute_travel_min(conn, event, cfg, now_utc=None):
     to_lon = place.get("lon")
 
     if to_lat is not None and to_lon is not None and home_lat is not None and home_lon is not None:
-        cap = cfg.get("road_daily_cap", 100)
-        if _tomtom_calls_today(conn, now) >= cap:
-            audit.log(conn, "road.cap", {"event_id": event_id})
-        else:
-            depart_at = now if isinstance(now, str) else now.isoformat(timespec="seconds")
-            minutes = tomtom_route_minutes(home_lat, home_lon, to_lat, to_lon, depart_at, cfg)
-            if minutes is not None:
-                audit.log(conn, "road.call",
-                           {"event_id": event_id, "minutes": minutes, "source": "tomtom"})
-                return minutes, "tomtom"
-            audit.log(conn, "road.error", {"event_id": event_id})
+        # No key at all: skip the tomtom rung silently -- no road.call,
+        # no road.cap, no road.error. Distinguishes "not configured" from
+        # a real attempt that failed (which still logs road.error below).
+        if os.environ.get("TOMTOM_API_KEY", "").strip():
+            cap = cfg.get("road_daily_cap", 100)
+            if _tomtom_calls_today(conn, now) >= cap:
+                audit.log(conn, "road.cap", {"event_id": event_id})
+            else:
+                depart_at = now if isinstance(now, str) else now.isoformat(timespec="seconds")
+                minutes = tomtom_route_minutes(home_lat, home_lon, to_lat, to_lon, depart_at, cfg)
+                if minutes is not None:
+                    audit.log(conn, "road.call",
+                               {"event_id": event_id, "minutes": minutes, "source": "tomtom"})
+                    return minutes, "tomtom"
+                audit.log(conn, "road.error", {"event_id": event_id})
         return straight_line_minutes(home_lat, home_lon, to_lat, to_lon, cfg), "straight"
 
     if event.get("travel_min") is not None:

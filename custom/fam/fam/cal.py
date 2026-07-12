@@ -10,7 +10,7 @@ convert through Asia/Almaty via zoneinfo.
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import audit, people, places, rem
+from fam import audit, gate, people, places, rem, road
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -85,6 +85,56 @@ def _resolve_place(conn, place_ref):
     return pl
 
 
+# Columns whose change should trigger a road recompute in update() --
+# mirrors _REGEN_TRIGGER_COLUMNS's before/after-snapshot technique below.
+# transport is included even though compute_travel_min doesn't currently
+# branch on it, matching the plan's literal trigger set (future-proofing
+# for a transport-aware ladder rung without a second migration).
+_ROAD_TRIGGER_COLUMNS = ("start_utc", "place_id", "transport")
+
+
+def _recompute_road(conn, event_id):
+    """Compute and persist real-road travel time for event_id, if the
+    place has coordinates and home is configured. Called from add() (always)
+    and update() (only when _ROAD_TRIGGER_COLUMNS changed), BEFORE
+    rem.regenerate so the regenerated chain sees fresh travel_min_road.
+
+    Only "tomtom"/"straight" sources are computed values worth persisting
+    -- "manual"/"place"/"none" are leave_at()'s own lower-rung fallbacks,
+    not something road.py computed, so travel_min_road/road_checked_at
+    are left NULL/untouched in those cases (nothing was computed).
+
+    Never raises: calendar operations must not fail because of road
+    logic. Any unexpected exception here is swallowed and audited as
+    road.hook_error (road.py's own tomtom failures already audit
+    road.error internally and don't raise).
+    """
+    try:
+        event = get(conn, event_id)
+        if event is None:
+            return
+        place = event.get("place")
+        if not place or place.get("lat") is None or place.get("lon") is None:
+            return
+        cfg = gate.load_config()
+        if cfg.get("road_home_lat") is None or cfg.get("road_home_lon") is None:
+            return
+
+        depart_at = event["start_utc"]
+        minutes, source = road.compute_travel_min(conn, event, cfg, now_utc=depart_at)
+        if source in ("tomtom", "straight"):
+            now = _now()
+            conn.execute(
+                "UPDATE events SET travel_min_road=?, road_checked_at=? "
+                "WHERE id=?",
+                (minutes, now, event_id),
+            )
+            audit.log(conn, "road.computed",
+                      {"event_id": event_id, "minutes": minutes, "source": source})
+    except Exception:
+        audit.log(conn, "road.hook_error", {"event_id": event_id})
+
+
 def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
         transport="unknown", notes="", travel_min=None):
     """Create an event. place/participants are text refs (id/name/alias/
@@ -127,6 +177,8 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
          "place": place, "participants": list(participants),
          "transport": transport, "notes": notes, "travel_min": travel_min},
     )
+
+    _recompute_road(conn, event_id)
 
     rem.regenerate(conn, event_id)
 
@@ -222,6 +274,7 @@ def update(conn, event_id, **fields):
 
     # Snapshot old regen-relevant state before any mutation.
     old_regen_state = tuple(existing[c] for c in _REGEN_TRIGGER_COLUMNS)
+    old_road_state = tuple(existing[c] for c in _ROAD_TRIGGER_COLUMNS)
     old_participant_ids = {r["person_id"] for r in conn.execute(
         "SELECT person_id FROM event_participants WHERE event_id=?",
         (event_id,),
@@ -298,11 +351,18 @@ def update(conn, event_id, **fields):
         "SELECT * FROM events WHERE id=?", (event_id,)
     ).fetchone()
     new_regen_state = tuple(new_row[c] for c in _REGEN_TRIGGER_COLUMNS)
+    new_road_state = tuple(new_row[c] for c in _ROAD_TRIGGER_COLUMNS)
     new_participant_ids = {r["person_id"] for r in conn.execute(
         "SELECT person_id FROM event_participants WHERE event_id=?",
         (event_id,),
     ).fetchall()}
     participants_changed = new_participant_ids != old_participant_ids
+
+    # Road recompute BEFORE regen, so a fresh regen reads the just-written
+    # travel_min_road (rem.regenerate re-fetches the event from DB).
+    if new_road_state != old_road_state:
+        _recompute_road(conn, event_id)
+
     if (new_regen_state != old_regen_state or participants_changed):
         rem.regenerate(conn, event_id)
 

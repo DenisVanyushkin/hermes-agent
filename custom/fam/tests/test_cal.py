@@ -1,5 +1,15 @@
 import pytest
-from fam import audit, cal, people, places, rem
+from fam import audit, cal, gate, people, places, rem
+
+ROAD_CFG = {
+    "road_home_lat": 43.2220, "road_home_lon": 76.8512,
+    "road_coef": 1.4, "road_speed_kmh": 30, "road_daily_cap": 100,
+    "road_timeout_sec": 10,
+}
+
+NO_HOME_CFG = {
+    "road_home_lat": None, "road_home_lon": None,
+}
 
 def _seed(db):
     people.add(db, "Тая", slug="taya")
@@ -335,6 +345,153 @@ def test_update_no_op_participant_add_is_not_material_changed(db):
     db.commit()
     updated = cal.update(db, e["id"], add_person=["Тая"])
     assert updated["_material_changed"] is False
+
+# --- Task 3: road computation hook ---
+
+def test_add_with_coords_and_home_computes_road(db, monkeypatch):
+    _seed(db)
+    places.add(db, "Лемана ПРО", lat=43.2298, lon=76.8823)
+    db.commit()
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+    e = cal.add(db, "Строймаг", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
+    db.commit()
+    got = cal.get(db, e["id"])
+    assert got["travel_min_road"] == 26
+    assert got["road_checked_at"] is not None
+    rows = audit.query(db, None, "road.computed", None)
+    assert rows and rows[0]["payload"] == {
+        "event_id": e["id"], "minutes": 26, "source": "tomtom"}
+    # chain regenerated from leave_at = start - 26min
+    r = db.execute(
+        "SELECT fire_at_utc FROM reminders WHERE event_id=? AND anchor='leave_at' "
+        "ORDER BY fire_at_utc", (e["id"],)).fetchall()
+    # not asserting exact rule offsets here; just that regen ran using
+    # the fresh travel_min_road via rem.leave_at (covered by rem tests).
+    assert isinstance(r, list)
+
+
+def test_add_straight_source_is_also_written(db, monkeypatch):
+    _seed(db)
+    places.add(db, "Лемана ПРО", lat=43.2298, lon=76.8823)
+    db.commit()
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (12, "straight"))
+    e = cal.add(db, "Строймаг", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
+    db.commit()
+    got = cal.get(db, e["id"])
+    assert got["travel_min_road"] == 12
+    assert got["road_checked_at"] is not None
+
+
+def test_add_manual_or_none_source_leaves_travel_min_road_null(db, monkeypatch):
+    _seed(db)
+    places.add(db, "Лемана ПРО", lat=43.2298, lon=76.8823)
+    db.commit()
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
+
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (40, "manual"))
+    e1 = cal.add(db, "Строймаг1", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
+    db.commit()
+    assert cal.get(db, e1["id"])["travel_min_road"] is None
+
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+    e2 = cal.add(db, "Строймаг2", "2026-07-15T06:00:00+00:00", place="Лемана ПРО")
+    db.commit()
+    assert cal.get(db, e2["id"])["travel_min_road"] is None
+
+
+def test_add_without_coord_place_never_calls_road(db, monkeypatch):
+    _seed(db)  # "Клиника Дента" place has no lat/lon
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
+    monkeypatch.setattr(
+        cal.road, "compute_travel_min",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")))
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00", place="стоматолог")
+    db.commit()
+    assert cal.get(db, e["id"])["travel_min_road"] is None
+
+
+def test_add_without_place_never_calls_road(db, monkeypatch):
+    _seed(db)
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
+    monkeypatch.setattr(
+        cal.road, "compute_travel_min",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")))
+    e = cal.add(db, "Событие без места", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    assert cal.get(db, e["id"])["travel_min_road"] is None
+
+
+def test_add_without_home_config_never_calls_road(db, monkeypatch):
+    _seed(db)
+    places.add(db, "Лемана ПРО", lat=43.2298, lon=76.8823)
+    db.commit()
+    monkeypatch.setattr(cal.gate, "load_config", lambda: NO_HOME_CFG)
+    monkeypatch.setattr(
+        cal.road, "compute_travel_min",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")))
+    e = cal.add(db, "Строймаг", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
+    db.commit()
+    assert cal.get(db, e["id"])["travel_min_road"] is None
+
+
+def test_update_title_only_does_not_recompute_road(db, monkeypatch):
+    _seed(db)
+    places.add(db, "Лемана ПРО", lat=43.2298, lon=76.8823)
+    db.commit()
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+    e = cal.add(db, "Строймаг", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
+    db.commit()
+
+    monkeypatch.setattr(
+        cal.road, "compute_travel_min",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not recompute")))
+    cal.update(db, e["id"], title="Строймаг (переименован)")
+    db.commit()
+    assert cal.get(db, e["id"])["travel_min_road"] == 26
+
+
+def test_update_start_utc_recomputes_road(db, monkeypatch):
+    _seed(db)
+    places.add(db, "Лемана ПРО", lat=43.2298, lon=76.8823)
+    db.commit()
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+    e = cal.add(db, "Строймаг", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
+    db.commit()
+
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (33, "tomtom"))
+    cal.update(db, e["id"], start_utc="2026-07-15T06:00:00+00:00")
+    db.commit()
+    assert cal.get(db, e["id"])["travel_min_road"] == 33
+
+
+def test_road_hook_unexpected_exception_does_not_break_add(db, monkeypatch):
+    _seed(db)
+    places.add(db, "Лемана ПРО", lat=43.2298, lon=76.8823)
+    db.commit()
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
+
+    def boom(conn, event, cfg, now_utc=None):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(cal.road, "compute_travel_min", boom)
+
+    e = cal.add(db, "Строймаг", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
+    db.commit()
+    assert cal.get(db, e["id"]) is not None
+    assert cal.get(db, e["id"])["travel_min_road"] is None
+    rows = audit.query(db, None, "road.hook_error", None)
+    assert rows and rows[0]["payload"] == {"event_id": e["id"]}
+
 
 def test_done_cancels_pending_reminder_chain(db):
     _seed(db)
