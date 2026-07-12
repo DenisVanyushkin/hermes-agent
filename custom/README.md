@@ -831,3 +831,141 @@ not the event date).
   (`.superpowers/sdd/progress.md`, "PHASE 2c DECISIONS").
 - `people`/`places` alias rename/remove CLI is still missing (carried over
   from Phase 2a's "Known limitations" above, unchanged in 2b).
+
+## Phase 2c — escalation chains (2026-07-12)
+
+Accepted (Task 11; `.superpowers/sdd/task-2c-11-report.md`). Builds on top of
+"Phase 2b — acceptance" above; full history: `.superpowers/sdd/progress.md`
+(`2c-T1`..`2c-T10` entries + "PHASE 2c DECISIONS"/"PHASE 2c DECISION UPDATE"),
+task reports `.superpowers/sdd/task-2c-{1..9}-report.md`; plan
+`docs/superpowers/plans/2026-07-12-amina-phase2c-escalation.md`.
+
+### Stage formula and rule precedence
+
+For a reminder with lead `D` minutes to departure `T`, stages are
+`{D, D-5, D-15} ∪ ({30, 15} if < D) ∪ {0}`, one countdown value winning on
+overlap (no duplicate stage at the same minute-offset). `D=60` (default rule,
+Тая not a participant) → `60/55/45/30/15/0`. Тая-participant events get
+`D=60` too via a **dedicated `slug:taya` rule**, but the precedence rule is:
+if any slug-scoped rule (`slug:taya`, `slug:amina`, …) applies to an event
+and its stages list is non-empty, it **suppresses** the `default` rule for
+that event — only the more specific rule fires, not both
+(`fam/rem.py::applicable_rules`, `2c-T2`). An empty-stages slug rule does
+**not** claim precedence (default still applies alongside it). Non-Тая events
+without a matching slug rule fall back to `D=30` on `default`
+(`30/25/15/0`).
+
+**Reseeding after manual rule edits**: `rem.py` gained
+`migrate_rules_2c(conn, now_utc=None)` — a one-shot, `meta`-guarded
+(`meta.rules_version='2c'`) reseed of the `default`/`slug:taya` rule stages
+plus a `regenerate()` pass over every active future event. It's called
+automatically from `cmd_init` on every `fam init`/CLI bootstrap, so it's a
+no-op once the guard key is set. If you hand-edit `fam_rules` stages directly
+in the DB (or restore an old `stages` JSON), delete the `meta.rules_version`
+key and re-run any `fam` command that reaches `cmd_init` (or call
+`migrate_rules_2c(conn)` directly) — it reseeds the built-in rules from code
+and regenerates pending instances for every future event. The pre-migration
+stages are preserved in the audit log (`rem.migrate_2c`, payload's `old` key)
+before being overwritten, so a hand rollback is always recoverable from
+audit. Live migration (2c-T3) touched rules `4/6/0` stages with `0` events
+regenerated (the one live event at the time was already past the
+future-event filter).
+
+### Ack scopes
+
+`fam rem ack EVENT_ID [--scope prepare|all]` (default `all`, byte-compatible
+with existing skill/README invocations). `--scope prepare` acks only
+`kind='prepare'` stages, leaving `kind='leave'` stages pending; `--scope all`
+(default) acks every pending stage regardless of kind
+(`fam/rem.py::ack_chain`, `2c-T4`). Maps to the two conversational triggers:
+«собираемся» (we're getting ready) → `prepare` only; «выходим/едем» (we're
+leaving) → `all`. Live-confirmed 2026-07-12: «начали собираться» at 22:06
+Almaty (17:06 UTC) → `rem.ack scope=prepare`, `count=0` (both prepare stages
+had already fired — a valid no-op, not an error); «уже выходим» at 22:16
+Almaty (17:16 UTC) → `rem.ack scope=all`, `count=1`.
+
+### Chain budget semantics
+
+A reminder chain spends **one** `daily_budget` unit total, not one per
+stage: the first stage of a chain to actually send debits the budget; every
+follow-up stage for the same `event_id` is free (dedup keyed off
+`event_id`, so an event with `event_id IS NULL` never dedups against
+anything — verified with no ripple to existing tests) (`fam/gate.py`/`tick`
+path, `2c-T5`).
+
+### Night-fire semantics
+
+Reminder chains **override quiet hours** — Denis's decision
+(`PHASE 2c DECISION UPDATE`, progress.md) supersedes the quiet-hours-aware
+front-load originally planned for Phase 2b's final review: night plans must
+fire on schedule and are never silenced. `tick.reminders` skips the quiet
+check entirely when `kind='reminder'`; quiet hours remain in force for any
+future non-reminder proactive kind. Live-confirmed 2026-07-12: `gate.sent`
+at `22:00:19` and `22:05:21` Almaty (`17:00:19`/`17:05:21` UTC) — both
+inside the `21:30`–`07:30` quiet window — for event 15's "Лемана ПРО" chain.
+The staleness guard (`rem.cancel_stale_age`, still `quiet`/`budget`-skip
+driven) now only matters for genuinely missed ticks, not a quiet-hours
+morning backlog.
+
+### Minutely timer
+
+`fam-reminders.timer` moved from `OnCalendar=*:0/5` (every 5 min) to
+`OnCalendar=*:0/1` (every 1 min) with `AccuracySec=1s`, fixing the ~1 min
+delivery drift observed in Phase 2b acceptance (e.g. a 13:00 reminder
+arriving at 13:01:19). `systemctl --user list-timers | grep fam` shows the
+minutely cadence live. Live-confirmed exact on-the-minute firing: a
+`tick.reminders` audit row at `13:12:00.000` UTC. Rollback: restore
+`OnCalendar=*:0/5` in the unit file and `daemon-reload`.
+
+### Text variation (`prior_texts`)
+
+Each `gate.sent` payload for a reminder chain carries `prior_texts`: the
+list of already-sent stage texts for that `event_id`'s chain so far. The
+style-gate rewrite prompt uses it to avoid repeating the same wording stage
+to stage (labels carry intent; no verbatim repetition across a chain)
+(`2c-T7`). Live-confirmed 2026-07-12: the `17:05:21` UTC stage's raw payload
+carries `prior_texts: ["Пора собираться в Лемана ПРО."]`; the `17:15:23`
+stage carries both prior texts, and each rewritten `final` text differs from
+the ones before it.
+
+### Departure-vs-start conversion
+
+A live Phase-2c E2E run (2c-T10, evening 12.07) surfaced a bug: when the
+user answers "во сколько выезжать?" with a departure time, that time is the
+**leave/departure** instant, not the event's `start` — passing it straight
+through as `--start` shifted the event's actual start earlier than intended.
+Live example: event 15 ("Поездка в Лемана ПРО"), user said «выезжаем в
+22:30», travel time 40 min → correct `start_local` is `23:10` (22:30 +
+40 min travel), recorded that way with the departure intent preserved in the
+event notes (`"Выезд в 22:30"`). Skill v4.1 documents this
+departure-vs-start conversion explicitly so the agent computes `start` from
+a stated departure time + travel, rather than passing the departure time
+straight through as `--start`.
+
+### Decisions checklist — evidence
+
+| Decision | Evidence | Verdict |
+|---|---|---|
+| Stage formula `D`/`D-5`/`D-15`/`{30,15}`/`0`, countdown wins on overlap | `2c-T1` report + `test_rem.py` `build_stages` tests (byte-match to plan, incl. `lead=45` hand-trace) | PASS |
+| Тая ⇒ `D=60` else `D=30`, rule precedence (slug suppresses default; empty-stages slug does not) | `2c-T2` report, `test_applicable_rules_slug_rule_suppresses_default` etc.; live migration reseeded rules `4/6/0` stages (`2c-T3`) | PASS |
+| Chain = 1 budget unit | `2c-T5` report, dedup-by-`event_id` tests, `None`-eid no-dedup case | PASS |
+| Scoped ack («собираемся»→prepare, «выходим»→all) | `2c-T4` tests + live: `rem.ack scope=prepare` 22:06 Almaty count=0 (valid no-op), `scope=all` 22:16 Almaty count=1 | PASS |
+| Night-fire (reminders override quiet hours) | `2c-T6` report + live `gate.sent` 22:00:19 and 22:05:21 Almaty inside quiet window | PASS |
+| Minutely timer + `AccuracySec=1s` | `2c-T8`, `systemctl --user list-timers` minutely cadence, live tick `13:12:00.000` UTC exact | PASS |
+| Text variation via `prior_texts` | `2c-T7` report + live raw payload at 17:05/17:15 UTC carrying `prior_texts` | PASS |
+| Departure-vs-start conversion | Live 2c-T10 bug + fix: event 15 `start` 23:10 from «выезжаем в 22:30» + travel 40; notes `"Выезд в 22:30"`; skill v4.1 | PASS |
+| Destination clarification (resolve → ask → `places add`) | Live 2c-T10 evening run, 13:27 UTC, "Лемана ПРО" flow | PASS |
+| 22:30 silence (last chain stage sent, chain then goes quiet — no further stage past the final one) | Newest `gate.sent` as of this acceptance is `17:15:23` UTC (22:15 Almaty, "выходить через 15 минут" stage); check was performed before the 22:30 stage's own due time elapsed enough margin to call it — **see note below** | SEE NOTE |
+
+Note on the last row: at the time this acceptance was written (17:25–17:26
+UTC / 22:25–22:26 Almaty), the newest `gate.sent` row was still the
+`17:15:23` UTC one and the brief's own confirmation threshold (past `17:31`
+UTC with no newer `gate.sent`) had not yet been reached — the check is
+honestly **inconclusive at write time**, not confirmed. Re-run
+`fam log --last-hours 1 --kind gate.sent` after `17:31` UTC on 2026-07-12 to
+settle it; if `17:15:23` is still the newest row, silence is confirmed.
+
+### Full suite
+
+`308 passed`, zero warnings —
+`PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`.
