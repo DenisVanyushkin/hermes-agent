@@ -2536,9 +2536,10 @@ class TestApprovalPromptRedaction:
                                   approval_callback=cb)
         assert seen["command"] == "rm -rf /var/data"
 
-    def test_execute_code_pending_fallback_redacts_script(self):
-        """check_execute_code_guard's no-notifier fallback masks an embedded
-        secret in both the pending record and the returned approval message."""
+    def test_execute_code_no_notifier_fallback_redacts_script(self):
+        """check_execute_code_guard's no-notifier fallback denies definitively
+        (nothing consumes a pending approval headlessly) while still masking an
+        embedded secret in the returned message and command echo."""
         from unittest.mock import patch as _patch
 
         from tools.approval import check_execute_code_guard
@@ -2554,10 +2555,13 @@ class TestApprovalPromptRedaction:
                         return_value=True):
                 with _patch("tools.approval._get_approval_mode",
                             return_value="manual"):
-                    # No gateway notify callback registered -> pending fallback.
+                    # No gateway notify callback registered -> definitive deny.
                     result = check_execute_code_guard(code, "local")
 
-        assert result.get("status") == "pending_approval"
+        assert result["approved"] is False
+        assert result.get("status") != "pending_approval"
+        assert result.get("approval_pending") is not True
+        assert "do not retry" in result["message"].lower()
         # The script's credential must not appear in the user-facing message.
         assert "sk-proj-abc123xyz4567890abcdef" not in result["message"]
         assert "sk-proj-abc123xyz4567890abcdef" not in result["command"]

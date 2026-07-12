@@ -2511,6 +2511,82 @@ def _get_cron_approval_mode() -> str:
         return "deny"
 
 
+def _headless_session_is_cron(session_key: str) -> bool:
+    """True when the current approval decision belongs to a cron job.
+
+    The env flag is authoritative but process-global and racy in the shared
+    gateway process (pool threads can carry stale interactive contextvars),
+    so the ``cron_<job>_<ts>`` session-key shape is accepted as an equally
+    valid signal.
+    """
+    return env_var_enabled("HERMES_CRON_SESSION") or str(session_key or "").startswith("cron_")
+
+
+def _resolve_headless_gateway_approval(
+    session_key: str,
+    *,
+    pattern_key: str,
+    pattern_keys: list,
+    description: str,
+    display_target: str,
+    target_label: str,
+) -> dict:
+    """Deterministic decision for a gateway-context approval with no notifier.
+
+    Nothing ever consumes the legacy ``_pending`` queue, so returning
+    ``pending_approval`` here was a dead end: the agent kept retrying a
+    command that could never be approved (2026-07-12 weather-cron incident).
+    Cron sessions follow ``approvals.cron_mode``; every other headless
+    session gets a definitive deny the model can act on.
+    """
+    if _headless_session_is_cron(session_key):
+        if _get_cron_approval_mode() == "approve":
+            logger.warning(
+                "approval: auto-approving flagged %s in cron session %s "
+                "(approvals.cron_mode=approve): %s",
+                target_label, session_key, description,
+            )
+            return {
+                "approved": True,
+                "message": None,
+                "cron_auto_approved": True,
+                "description": description,
+            }
+        return {
+            "approved": False,
+            "pattern_key": pattern_key,
+            "status": "denied_no_approver",
+            "command": display_target,
+            "description": description,
+            "outcome": "denied",
+            "user_consent": False,
+            "message": (
+                f"BLOCKED: {description}. This is a cron session with no user "
+                "present, so approval is impossible — do not retry this "
+                f"{target_label} and do not wait for approval; none can arrive. "
+                "Find an alternative approach that avoids the flagged pattern, "
+                "or finish the task without it. To allow dangerous commands in "
+                "cron jobs, set approvals.cron_mode: approve in config.yaml."
+            ),
+        }
+    return {
+        "approved": False,
+        "pattern_key": pattern_key,
+        "status": "denied_no_approver",
+        "command": display_target,
+        "description": description,
+        "outcome": "denied",
+        "user_consent": False,
+        "message": (
+            f"BLOCKED: {description}. No approval channel is available in this "
+            f"non-interactive session, so approval is impossible — do not retry "
+            f"this {target_label} and do not wait for approval; none can "
+            "arrive. Use a safer alternative that avoids the flagged pattern, "
+            "or report the limitation in your final answer."
+        ),
+    }
+
+
 def _strip_shell_comments(command: str) -> str:
     """Strip shell-style comments from a command before LLM assessment.
 
@@ -3518,36 +3594,20 @@ def check_all_command_guards(command: str, env_type: str,
             return {"approved": True, "message": None,
                     "user_approved": True, "description": combined_desc}
 
-        # Fallback: no gateway callback registered (e.g. cron, batch).
-        # Return approval_required for backward compat. Redact secrets in the
-        # user-facing copy — the raw `command` is preserved for execution and
-        # the allowlist keys off pattern_key, so redaction is display-only.
+        # No gateway callback registered (e.g. cron, batch): resolve now —
+        # nothing consumes a pending approval in a headless session, so a
+        # "pending" answer would just stall the agent. Redact secrets in the
+        # user-facing copy — the allowlist keys off pattern_key, so redaction
+        # is display-only.
         from agent.redact import redact_sensitive_text
-        _disp_command = redact_sensitive_text(command)
-        _disp_combined_desc = redact_sensitive_text(combined_desc)
-        pending_data = {
-            "command": _disp_command,
-            "pattern_key": primary_key,
-            "pattern_keys": all_keys,
-            "description": _disp_combined_desc,
-        }
-        if smart_denied_for_owner:
-            pending_data.update(smart_denied=True, allow_permanent=False)
-        submit_pending(session_key, pending_data)
-        result = {
-            "approved": False,
-            "pattern_key": primary_key,
-            "status": "pending_approval",
-            "approval_pending": True,
-            "command": _disp_command,
-            "description": _disp_combined_desc,
-            "message": (
-                f"⚠️ {_disp_combined_desc}. Asking the user for approval.\n\n**Command:**\n```\n{_disp_command}\n```"
-            ),
-        }
-        if smart_denied_for_owner:
-            result.update(smart_denied=True, allow_permanent=False)
-        return result
+        return _resolve_headless_gateway_approval(
+            session_key,
+            pattern_key=primary_key,
+            pattern_keys=all_keys,
+            description=redact_sensitive_text(combined_desc),
+            display_target=redact_sensitive_text(command),
+            target_label="command",
+        )
 
     # CLI interactive: single combined prompt
     # Hide [a]lways when any tirith warning is present
@@ -3747,31 +3807,16 @@ def check_execute_code_guard(code: str, env_type: str,
 
     if notify_cb is None:
         # No gateway callback registered (e.g. ask-mode without a notifier):
-        # surface a pending approval for backward compatibility.
-        pending_data = {
-            "command": display_command,
-            "pattern_key": pattern_key,
-            "pattern_keys": [pattern_key],
-            "description": display_description,
-        }
-        if smart_denied_for_owner:
-            pending_data.update(smart_denied=True, allow_permanent=False)
-        submit_pending(session_key, pending_data)
-        result = {
-            "approved": False,
-            "pattern_key": pattern_key,
-            "status": "pending_approval",
-            "approval_pending": True,
-            "command": display_command,
-            "description": display_description,
-            "message": (
-                f"⚠️ {display_description}. Asking the user for approval.\n\n"
-                f"**Code:**\n```python\n{display_code}\n```"
-            ),
-        }
-        if smart_denied_for_owner:
-            result.update(smart_denied=True, allow_permanent=False)
-        return result
+        # resolve now — nothing consumes a pending approval in a headless
+        # session, so a "pending" answer would just stall the agent.
+        return _resolve_headless_gateway_approval(
+            session_key,
+            pattern_key=pattern_key,
+            pattern_keys=[pattern_key],
+            description=display_description,
+            display_target=display_command,
+            target_label="script",
+        )
 
     approval_data = {
         "command": display_command,

@@ -272,11 +272,15 @@ def test_guard_gateway_wait_uses_canonical_timeout(
     assert res["outcome"] == "timeout"
 
 
-def test_guard_gateway_missing_notify_is_pending(gw_session):
-    # No notify callback registered → backward-compat pending approval.
+def test_guard_gateway_missing_notify_denies_definitively(gw_session):
+    # No notify callback registered in a non-cron headless session → definitive
+    # deny. A pending approval would dead-end here: nothing consumes the legacy
+    # _pending queue, so the agent would retry forever (2026-07-12 incident).
     res = A.check_execute_code_guard("import os", "local")
     assert res["approved"] is False
-    assert res["status"] == "pending_approval"
+    assert res["status"] != "pending_approval"
+    assert res.get("approval_pending") is not True
+    assert "do not retry" in res["message"].lower()
 
 
 def test_guard_smart_mode(gw_session, monkeypatch):

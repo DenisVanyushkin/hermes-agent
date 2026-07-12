@@ -314,6 +314,28 @@ class TestHostPrefixList:
 class TestDockerHostBindApproval:
     """Docker host bind mounts disable the container approval fast-path."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_permanent_approvals(self):
+        """Deterministic empty permanent allowlist for every test here.
+
+        ``_permanent_approved`` is a process-global set seeded at import from
+        ``command_allowlist`` and mutated by ``always``-scope approvals in
+        other test files. Without this reset, whether e.g. ``execute_code`` is
+        pre-approved when these tests run depends on suite ordering, which made
+        the host-bound approval assertions flaky. Save/clear/restore keeps the
+        class hermetic without disturbing other files.
+        """
+        import tools.approval as _A
+        with _A._lock:
+            _saved = set(_A._permanent_approved)
+            _A._permanent_approved.clear()
+        try:
+            yield
+        finally:
+            with _A._lock:
+                _A._permanent_approved.clear()
+                _A._permanent_approved.update(_saved)
+
     def test_docker_host_access_detection(self):
         """_docker_has_host_access flags bind-mounted host paths only."""
         # Isolated docker (no host binds) -> not host access.
@@ -385,9 +407,14 @@ class TestDockerHostBindApproval:
             lambda _c: {"action": "allow", "findings": [], "summary": ""})
         res = A.check_all_command_guards("rm -rf /workspace", "docker",
                                          has_host_access=True)
-        # Must NOT take the silent container fast-path.
+        # Must NOT take the silent container fast-path. With no approval
+        # channel registered (headless), the guard resolves to a definitive
+        # deny rather than a dead-end pending approval (2026-07-12 incident:
+        # nothing consumes the pending queue, so the agent would retry forever).
         assert res.get("approved") is not True
-        assert res.get("status") == "pending_approval"
+        assert res.get("status") != "pending_approval"
+        assert res.get("approval_pending") is not True
+        assert "do not retry" in res["message"].lower()
 
     def test_execute_code_isolated_docker_keeps_fast_path(self, monkeypatch):
         """Isolated Docker execute_code still bypasses the guard."""
@@ -406,8 +433,12 @@ class TestDockerHostBindApproval:
         res = A.check_execute_code_guard(
             "import os; os.system('rm -rf /workspace')", "docker",
             has_host_access=True)
+        # Not the silent container fast-path; headless with no approver →
+        # definitive deny rather than a dead-end pending approval (2026-07-12).
         assert res.get("approved") is not True
-        assert res.get("status") == "pending_approval"
+        assert res.get("status") != "pending_approval"
+        assert res.get("approval_pending") is not True
+        assert "do not retry" in res["message"].lower()
 
     def test_execute_code_vercel_sandbox_always_skips(self, monkeypatch):
         """vercel_sandbox has no host-bind concept and stays always-skipped."""
