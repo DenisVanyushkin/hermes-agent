@@ -29,6 +29,56 @@ DEFAULT_ROUTER_LLM_MAX_ATTEMPTS = 2
 VALID_ROUTER_STRATEGIES = {"deterministic", "llm"}
 VALID_LLM_FALLBACK_STRATEGIES = {"deterministic", "fail_closed"}
 
+# Substrings (lowercased) that mark a router failure as provider/transport
+# infrastructure trouble rather than a broken routing contract. Infra failures
+# are eligible for the degraded no-tools conversational fallback; contract
+# failures stay hard fail-closed because the router output itself is suspect.
+ROUTER_INFRA_FAILURE_MARKERS: tuple[str, ...] = (
+    "authenticationerror",
+    "apiconnectionerror",
+    "apistatuserror",
+    "connection",
+    "token_invalidated",
+    "token_revoked",
+    "rate limit",
+    "ratelimit",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+    "stream exceeded",
+    "no sse events",
+    " 401",
+    " 403",
+    " 429",
+    " 502",
+    " 503",
+    " 504",
+    "401 ",
+    "401:",
+    "403:",
+    "429 ",
+    "429:",
+    "502:",
+    "503:",
+    "504:",
+)
+
+
+def classify_router_failure(reason: Any) -> str:
+    """Classify a routing_failure_reason as ``"infra"`` or ``"contract"``.
+
+    Unknown/empty reasons classify as ``"contract"`` so the fail-closed guard
+    stays authoritative unless the failure is recognizably infrastructural.
+    """
+    text = str(reason or "").strip().lower()
+    if not text:
+        return "contract"
+    if any(marker in text for marker in ROUTER_INFRA_FAILURE_MARKERS):
+        return "infra"
+    return "contract"
+
 _ROUTER_RESPONSE_FORMAT = {
     "response_format": {
         "type": "json_schema",
