@@ -10,5 +10,13 @@
   "reminder_max_age_min": 120,
   "email_enabled": true,
   "email_from": "germes@vanyushk.in",
-  "email_to": "hermes@vanyushk.in"
+  "email_to": "hermes@vanyushk.in",
+  "road_provider": "tomtom",
+  "road_home_lat": null,
+  "road_home_lon": null,
+  "road_coef": 1.4,
+  "road_speed_kmh": 30,
+  "road_daily_cap": 100,
+  "road_timeout_sec": 10,
+  "road_recompute_min": [120, 60]
 }
