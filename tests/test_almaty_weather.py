@@ -6,6 +6,8 @@ from hermes_cli.almaty_weather import (
     DailyWeather,
     build_weekly,
     connect,
+    fetch_station,
+    meteostat_url,
     parse_open_meteo,
     parse_yr,
     render_morning,
@@ -52,6 +54,20 @@ def test_parsers_normalize_daily_weather():
     assert yr_row.target_date == "2026-07-12"
     assert yr_row.prcp == 0.2
     assert yr_row.wspd == 2.0
+
+
+def test_meteostat_disables_model_fill_and_converts_wind_to_ms():
+    seen = []
+    def getter(url, _headers):
+        seen.append(url)
+        return {"data": [{
+            "date": "2026-07-11 00:00:00", "tmin": 19, "tmax": 31,
+            "tavg": 25, "prcp": 0, "wspd": 7.2,
+        }]}
+    rows = fetch_station(date(2026, 7, 11), date(2026, 7, 11), getter)
+    assert rows[0].wspd == 2.0
+    assert "model=false" in seen[0]
+    assert "model=false" in meteostat_url(date(2026, 7, 11), date(2026, 7, 11))
 
 
 def test_morning_snapshot_is_idempotent_and_matches_render(tmp_path):

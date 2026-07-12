@@ -301,7 +301,12 @@ def render_morning(
 
 
 def meteostat_url(start: date, end: date) -> str:
-    params = {"station": STATION, "start": start.isoformat(), "end": end.isoformat()}
+    params = {
+        "station": STATION,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "model": "false",
+    }
     return "https://d.meteostat.net/app/proxy/stations/daily?" + urllib.parse.urlencode(params)
 
 
@@ -320,7 +325,9 @@ def fetch_station(start: date, end: date, getter: JsonGetter = fetch_json) -> li
                 source=f"meteostat:{STATION}", target_date=target,
                 tmin=_round(row.get("tmin")), tmax=_round(row.get("tmax")),
                 tavg=_round(row.get("tavg")), prcp=_round(row.get("prcp")),
-                wspd=_round(row.get("wspd")),
+                # Meteostat's default metric unit for wspd is km/h. Forecast
+                # snapshots use m/s, so normalize observations before scoring.
+                wspd=_round(float(row["wspd"]) / 3.6) if row.get("wspd") is not None else None,
             ))
     return sorted(result, key=lambda row: row.target_date)
 
