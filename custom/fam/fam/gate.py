@@ -244,15 +244,25 @@ def _ensure_trailing_question(text, question):
 
 
 def _call_rewrite(prompt, cfg):
-    """Run `hermes -z PROMPT -m MODEL --provider PROVIDER`. Returns the
-    stripped stdout text, or None on ANY failure (timeout, process error,
-    non-zero exit, empty output) -- callers fall back to a human-written
-    text rather than propagating an exception.
+    """Run `hermes -z PROMPT -m MODEL --provider PROVIDER -t clarify`.
+    Returns the stripped stdout text, or None on ANY failure (timeout,
+    process error, non-zero exit, empty output) -- callers fall back to a
+    human-written text rather than propagating an exception.
+
+    "-t clarify" is a security pin (phase-2b final review), not a
+    functional choice: oneshot mode runs with HERMES_YOLO_MODE=1
+    (approvals auto-bypassed) and would otherwise load the user's
+    default cli toolsets -- terminal included -- while `prompt` embeds
+    user-authored strings (event titles, place names), i.e. a prompt
+    injection here would be host command execution. An explicit -t
+    REPLACES the configured toolsets for the invocation, and clarify
+    resolves to the single benign tool ['clarify']. The rewrite is a
+    pure text task and must never have host tools.
     """
     try:
         result = subprocess.run(
             HERMES + ["-z", prompt, "-m", cfg["gate_model"],
-                      "--provider", cfg["gate_provider"]],
+                      "--provider", cfg["gate_provider"], "-t", "clarify"],
             capture_output=True, text=True, timeout=90,
         )
     except (subprocess.TimeoutExpired, OSError):

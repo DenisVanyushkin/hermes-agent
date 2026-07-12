@@ -290,6 +290,13 @@ def test_deliver_rewrite_success_sends_rewritten_text(db, fake_run):
     # -- search past the "-z PROMPT" pair for the gate's own -m flag.
     assert rewrite_args[rewrite_args.index("-m", z_idx) + 1] == CFG["gate_model"]
     assert rewrite_args[rewrite_args.index("--provider") + 1] == CFG["gate_provider"]
+    # security pin (phase-2b final review): the rewrite invocation must
+    # always carry "-t clarify" -- oneshot mode bypasses approvals
+    # (HERMES_YOLO_MODE=1) and would otherwise load the default cli
+    # toolsets, terminal included, while the prompt embeds user-authored
+    # strings (event titles, place names). An explicit -t REPLACES the
+    # configured toolsets; clarify is the minimal benign one.
+    assert rewrite_args[rewrite_args.index("-t", z_idx) + 1] == "clarify"
     assert rewrite_kwargs["timeout"] == 90
 
     send_args, send_kwargs = fake_run.calls[1]
@@ -371,6 +378,10 @@ def test_deliver_over_ceiling_retries_and_shortens(db, fake_run):
     shorten_args, _ = fake_run.calls[1]
     prompt = shorten_args[shorten_args.index("-z") + 1]
     assert "Сократи до 10 знаков" in prompt
+    # the shorten retry goes through the same _call_rewrite, so it must
+    # carry the same "-t clarify" security pin as the first rewrite call
+    # (see test_deliver_rewrite_success_sends_rewritten_text).
+    assert shorten_args[shorten_args.index("-t") + 1] == "clarify"
 
     rows = audit.query(db, None, "gate.sent", None)
     payload = rows[0]["payload"]
