@@ -353,6 +353,23 @@ def test_rem_ack_unknown_event_exit_2(db, capsys):
     assert rc == 2
     assert captured.err.strip() != ""
 
+def test_cli_rem_ack_scope_prepare(db, capsys):
+    people.add(db, "Тая", slug="taya")
+    rem.seed_default_rules(db)
+    db.commit()
+    e = cal.add(db, "С Таей", "2099-01-01T05:00:00+00:00", participants=["Тая"])
+    db.commit()
+
+    assert cli.main(["rem", "ack", str(e["id"]), "--scope", "prepare", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"event_id": e["id"], "acked": 3, "scope": "prepare"}
+
+def test_rem_ack_unknown_event_scope_prepare_exit_2(db, capsys):
+    rc = cli.main(["rem", "ack", "999", "--scope", "prepare"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
+
 def test_rem_cancel_json_and_exit_code(db, capsys):
     _seed_rem(db)
     e = cal.add(db, "Событие", "2099-01-01T05:00:00+00:00")

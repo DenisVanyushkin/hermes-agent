@@ -185,9 +185,23 @@ def _transition_pending(conn, event_id, new_status, audit_kind):
     return count
 
 
-def ack_chain(conn, event_id):
-    """Mark this event's pending reminders acked. Returns the count."""
-    return _transition_pending(conn, event_id, "acked", "rem.ack")
+def ack_chain(conn, event_id, scope="all"):
+    """Mark this event's pending reminders acked. Returns the count.
+
+    scope="prepare" гасит только стадии сборов (kind='prepare') --
+    «уже собираемся» не должно отменять «пора выходить»; scope="all"
+    (default, обратная совместимость) гасит всю цепочку («уже выходим»).
+    """
+    if scope not in ("all", "prepare"):
+        raise ValueError(f"unknown ack scope: {scope}")
+    sql = "UPDATE reminders SET status='acked' WHERE event_id=? AND status='pending'"
+    params = [event_id]
+    if scope == "prepare":
+        sql += " AND kind='prepare'"
+    cur = conn.execute(sql, params)
+    audit.log(conn, "rem.ack",
+              {"event_id": event_id, "count": cur.rowcount, "scope": scope})
+    return cur.rowcount
 
 
 def cancel_chain(conn, event_id):

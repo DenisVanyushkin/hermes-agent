@@ -464,6 +464,31 @@ def test_ack_chain_counts_and_audit(db):
     assert rows[0]["payload"]["count"] == 4
 
 
+def test_ack_scope_prepare_leaves_leave_stages(conn_with_taya_event):
+    conn, event = conn_with_taya_event
+    rem.regenerate(conn, event["id"])
+    count = rem.ack_chain(conn, event["id"], scope="prepare")
+    assert count == 3                                    # D=60: три prepare
+    left = rem.list_reminders(conn, event_id=event["id"])
+    assert {r["kind"] for r in left if r["status"] == "pending"} == {"leave"}
+    assert {r["kind"] for r in left if r["status"] == "acked"} == {"prepare"}
+
+
+def test_ack_scope_all_default_unchanged(conn_with_taya_event):
+    conn, event = conn_with_taya_event
+    rem.regenerate(conn, event["id"])
+    assert rem.ack_chain(conn, event["id"]) == 6
+    assert all(r["status"] == "acked"
+               for r in rem.list_reminders(conn, event_id=event["id"]))
+
+
+def test_ack_chain_unknown_scope_raises(conn_with_taya_event):
+    conn, event = conn_with_taya_event
+    rem.regenerate(conn, event["id"])
+    with pytest.raises(ValueError):
+        rem.ack_chain(conn, event["id"], scope="bogus")
+
+
 def test_cancel_chain_counts_and_audit(db):
     _seed_people(db)
     rem.seed_default_rules(db)

@@ -353,9 +353,9 @@ def cmd_rem_ack(args):
     conn = famdb.connect()
     if cal.get(conn, args.event_id) is None:
         raise ValueError(f"unknown event: {args.event_id}")
-    count = rem.ack_chain(conn, args.event_id)
+    count = rem.ack_chain(conn, args.event_id, scope=args.scope)
     conn.commit()
-    out = {"event_id": args.event_id, "acked": count}
+    out = {"event_id": args.event_id, "acked": count, "scope": args.scope}
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
     else:
@@ -613,6 +613,8 @@ def build_parser():
 
     spa = rem_sub.add_parser("ack"); spa.set_defaults(func=cmd_rem_ack)
     spa.add_argument("event_id", type=int)
+    spa.add_argument("--scope", choices=["prepare", "all"], default="all",
+                      help="prepare = only kind='prepare' stages; all = whole chain (default)")
     spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
