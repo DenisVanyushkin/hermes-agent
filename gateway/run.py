@@ -19190,6 +19190,46 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "I did not run terminal commands, invoke tools, or modify the workspace."
         )
 
+    def _pipeline_router_infra_degraded_notice(
+        self, report: Any, *, orchestrator_mode: str, router_decision: Any
+    ) -> str | None:
+        """Disclosure line for turns where the pipeline router died on infrastructure.
+
+        Returns a notice string when the router failure is infrastructural
+        (auth/network/timeout) — the caller then skips the fail-closed template
+        and runs a normal conversational turn with tools hard-disabled. Returns
+        None for contract failures so the fail-closed guard stays in charge.
+        """
+        if str(orchestrator_mode or "").strip().lower() != "autonomous":
+            return None
+        if report is None or router_decision is None:
+            return None
+
+        state = getattr(report, "state", None)
+        if str(getattr(state, "router_status", "") or "").strip().lower() != "routing_failed":
+            return None
+
+        controller = getattr(report, "pipeline_execution_controller", None)
+        if controller is None:
+            return None
+        if bool(getattr(controller, "actual_execution_invoked", False)):
+            return None
+
+        from hermes_cli.pipeline_router import classify_router_failure
+
+        reason = getattr(router_decision, "routing_failure_reason", None)
+        if classify_router_failure(reason) != "infra":
+            return None
+
+        summary = " ".join(str(reason).split())
+        if len(summary) > 160:
+            summary = summary[:157] + "…"
+        return (
+            "⚠️ Pipeline router unavailable this turn — infrastructure error, "
+            f"not your request ({summary}). Degraded conversational mode: "
+            "tools disabled, no commands run, nothing modified."
+        )
+
     def _pipeline_autonomous_terminal_response(self, report: Any, *, orchestrator_mode: str) -> str | None:
         if str(orchestrator_mode or "").strip().lower() != "autonomous":
             return None
@@ -19685,11 +19725,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "compression_exhausted": False,
             }
 
-        autonomous_fail_closed_response = self._pipeline_autonomous_fail_closed_response(
+        router_infra_degraded_notice = self._pipeline_router_infra_degraded_notice(
             pipeline_orchestrator_report,
             orchestrator_mode=_orchestrator_mode,
-            user_message=message,
+            router_decision=router_decision,
         )
+        autonomous_fail_closed_response = None
+        if router_infra_degraded_notice is not None:
+            logger.info(
+                "pipeline router infra failure: degrading to no-tools conversational turn: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+        else:
+            autonomous_fail_closed_response = self._pipeline_autonomous_fail_closed_response(
+                pipeline_orchestrator_report,
+                orchestrator_mode=_orchestrator_mode,
+                user_message=message,
+            )
         if autonomous_fail_closed_response is not None:
             logger.info(
                 "pipeline autonomous fail-closed guard blocked normal agent fallback: session=%s platform=%s",
@@ -19757,6 +19810,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        if router_infra_degraded_notice is not None:
+            # Router died on infrastructure, not on the request: answer
+            # conversationally but keep the fail-closed safety property by
+            # denying every toolset for this turn.
+            enabled_toolsets = []
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
@@ -21876,6 +21934,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 final_response = _sanitize_gateway_final_response(source.platform, final_response)
                 if not final_response:
                     final_response = f"⚠️ {result['error']}" if result.get("error") else ""
+                if router_infra_degraded_notice:
+                    final_response = (
+                        f"{router_infra_degraded_notice}\n\n{final_response}"
+                        if final_response
+                        else router_infra_degraded_notice
+                    )
                 return {
                     "final_response": final_response,
                     "messages": result.get("messages", []),
@@ -21993,6 +22057,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 except Exception:
                     pass
+
+            if router_infra_degraded_notice and final_response:
+                final_response = f"{router_infra_degraded_notice}\n\n{final_response}"
 
             return {
                 "final_response": final_response,
