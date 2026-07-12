@@ -241,7 +241,12 @@ use its id directly. Otherwise resolve it before calling `cancel`:
 `ack`/`cancel` report how many stages they touched (`{"acked": N}` /
 `{"cancelled": N}`); `N == 0` means there was nothing pending (already
 sent, or already acted on) — say that plainly rather than implying you
-just silenced something.
+just silenced something. In particular, after `rem ack EVENT_ID --scope
+prepare` returns `acked: 0`, do not say that preparation reminders were
+silenced; state that no preparation stages remained and preserve any
+still-pending departure reminder. If the user then says they are leaving,
+acknowledge the full chain with `rem ack EVENT_ID` and confirm that remaining
+reminders were stopped.
 
 ## Digest Replies
 
