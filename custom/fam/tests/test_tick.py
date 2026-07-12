@@ -634,7 +634,8 @@ def test_road_recompute_changed_minutes_updates_and_regenerates_chain(
     sent_row = db.execute(
         "SELECT status, fire_at_utc FROM reminders WHERE id=?", (sent_id,)
     ).fetchone()
-    assert sent_row["status"] == "sent"  # untouched by regen
+    assert sent_row["status"] == "sent"    # untouched by regen
+    assert sent_row["fire_at_utc"] == PAST  # fire time not rewritten either
 
     pending_after = db.execute(
         "SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
@@ -670,6 +671,95 @@ def test_road_recompute_unchanged_minutes_only_bumps_checked_at(
     got = cal.get(db, e["id"])
     assert got["travel_min_road"] == 7
     assert got["road_checked_at"] == NOW
+
+
+class RecordingRoad:
+    """compute_travel_min stub that records every call's now_utc
+    (depart_at anchor) and returns canned (minutes, source) results
+    consumed in order (last one repeats)."""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def __call__(self, conn, event, cfg, now_utc=None):
+        self.calls.append({"now_utc": now_utc})
+        if len(self.results) > 1:
+            return self.results.pop(0)
+        return self.results[0]
+
+
+def test_road_recompute_big_shift_forces_followup_at_corrected_anchor(
+        db, fake_deliver, monkeypatch):
+    # Anchor re-check rule: a recompute whose delta > 10 min was anchored
+    # at the now-wrong OLD leave -- checked_at is left NULL so the next
+    # tick recomputes once more, with depart_at == the NEW leave.
+    place = _road_place(db)
+    # start = NOW + 90min (06:00Z); prior computed travel 20 -> leave at
+    # 05:40Z, 70 min away: inside T-120, outside T-60.
+    e = _add_event_neutral_road(db, monkeypatch, place,
+                                 start="2026-07-20T06:00:00+00:00")
+    db.execute(
+        "UPDATE events SET travel_min_road=20, road_checked_at=? WHERE id=?",
+        ("2026-07-19T00:00:00+00:00", e["id"]))
+    db.commit()
+
+    stub = RecordingRoad([(45, "tomtom")])  # 20 -> 45: big shift (25 > 10)
+    monkeypatch.setattr(tick.road, "compute_travel_min", stub)
+    fake_deliver.responses = []
+
+    first = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
+    assert first["road_recomputed"] == 1
+    got = cal.get(db, e["id"])
+    assert got["travel_min_road"] == 45
+    assert got["road_checked_at"] is None  # forces the follow-up
+    # first call was anchored at the OLD leave (start - 20min = 05:40Z)
+    assert stub.calls[0]["now_utc"] == "2026-07-20T05:40:00+00:00"
+
+    now2 = (datetime.fromisoformat(NOW) + timedelta(minutes=1)).isoformat(
+        timespec="seconds")
+    second = tick.reminders(db, now_utc=now2, cfg=ROAD_CFG)
+    assert second["road_recomputed"] == 1
+    # follow-up anchored at the CORRECTED leave (start - 45min = 05:15Z)
+    assert stub.calls[1]["now_utc"] == "2026-07-20T05:15:00+00:00"
+    # stable result (45 again) -> unchanged branch: checked_at sticks
+    got2 = cal.get(db, e["id"])
+    assert got2["road_checked_at"] == now2
+
+    # third tick: freshness invariant satisfied, no further calls
+    now3 = (datetime.fromisoformat(NOW) + timedelta(minutes=2)).isoformat(
+        timespec="seconds")
+    third = tick.reminders(db, now_utc=now3, cfg=ROAD_CFG)
+    assert third["road_recomputed"] == 0
+    assert len(stub.calls) == 2
+
+
+def test_road_recompute_small_shift_sets_checked_at_no_followup(
+        db, fake_deliver, monkeypatch):
+    place = _road_place(db)
+    e = _add_event_neutral_road(db, monkeypatch, place,
+                                 start="2026-07-20T06:00:00+00:00")
+    db.execute(
+        "UPDATE events SET travel_min_road=20, road_checked_at=? WHERE id=?",
+        ("2026-07-19T00:00:00+00:00", e["id"]))
+    db.commit()
+
+    stub = RecordingRoad([(25, "tomtom")])  # 20 -> 25: small shift (5 <= 10)
+    monkeypatch.setattr(tick.road, "compute_travel_min", stub)
+    fake_deliver.responses = []
+
+    first = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
+    assert first["road_recomputed"] == 1
+    got = cal.get(db, e["id"])
+    assert got["travel_min_road"] == 25
+    assert got["road_checked_at"] == NOW  # small delta: no anchor re-check
+    assert audit.query(db, None, "road.recompute", None)  # still audited
+
+    now2 = (datetime.fromisoformat(NOW) + timedelta(minutes=1)).isoformat(
+        timespec="seconds")
+    second = tick.reminders(db, now_utc=now2, cfg=ROAD_CFG)
+    assert second["road_recomputed"] == 0  # no follow-up
+    assert len(stub.calls) == 1
 
 
 def test_road_recompute_event_without_coords_never_a_candidate(

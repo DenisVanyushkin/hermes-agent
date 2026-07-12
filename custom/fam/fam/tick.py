@@ -89,11 +89,25 @@ def road_recompute(conn, now_utc=None, cfg=None):
     (e.g. the very first check ever, discovered already inside the T-60
     window).
 
+    The threshold guard is really a FRESHNESS INVARIANT: an event is
+    skipped for threshold T iff a check already exists within T minutes
+    of the event's CURRENT leave_at (checked_at >= leave_dt - T) -- so
+    when leave itself moves, the guard is re-evaluated against the new
+    leave and self-heals, rather than tracking historical window
+    boundaries. Freshness alone still leaves one gap: the recompute that
+    MOVED leave was anchored (depart_at) at the OLD leave, so its stored
+    figure is fresh but its anchor is stale -- the anchor re-check rule
+    below (big shift -> checked_at=NULL -> one follow-up recompute at
+    the corrected anchor next tick) closes it.
+
     Write: source tomtom/straight with a changed minute value updates
-    travel_min_road + road_checked_at, audits road.recompute {event_id,
-    old, new, source}, and regenerates the reminder chain (rem.regenerate
-    -- pending stages move, sent stages are untouched by construction).
-    Unchanged minutes only bump road_checked_at (no audit, no regen).
+    travel_min_road, audits road.recompute {event_id, old, new, source},
+    and regenerates the reminder chain (rem.regenerate -- pending stages
+    move, sent stages are untouched by construction). road_checked_at is
+    stamped `now` for a small change, but set to NULL when the change is
+    big (|new - old| > 10 min, old not NULL) -- the anchor re-check rule
+    above. Unchanged minutes only bump road_checked_at (no audit, no
+    regen).
     Source manual/place/none has nothing new to persist as
     travel_min_road, but road_checked_at is still bumped -- otherwise an
     event whose place lacks coordinates in cfg's home sense, or that has
@@ -166,10 +180,31 @@ def road_recompute(conn, now_utc=None, cfg=None):
                 if source in ("tomtom", "straight"):
                     old_minutes = event.get("travel_min_road")
                     if minutes != old_minutes:
+                        # Anchor drift vs freshness (review fix): this
+                        # recompute's depart_at was the OLD leave_at. A
+                        # small delta barely moves leave, so the stale
+                        # anchor is immaterial and the freshness
+                        # invariant (checked within `threshold` min of
+                        # the current leave) can resume. A BIG delta
+                        # (>10 min, and only when there was a prior
+                        # computed value to drift from -- old NULL means
+                        # first-ever computation, whose anchor error is
+                        # unknowable and bounded by the thresholds
+                        # anyway) moves leave enough that the figure we
+                        # just stored was computed for a departure time
+                        # now materially wrong. Storing checked_at=NULL
+                        # instead of now forces exactly one follow-up
+                        # recompute on the next tick, anchored at the
+                        # corrected leave; if that one is stable
+                        # (delta <= 10) checked_at sticks. Oscillation is
+                        # bounded by road_daily_cap.
+                        big_shift = (old_minutes is not None
+                                     and abs(minutes - old_minutes) > 10)
+                        checked_stamp = None if big_shift else now
                         conn.execute(
                             "UPDATE events SET travel_min_road=?, "
                             "road_checked_at=? WHERE id=?",
-                            (minutes, now, event_id),
+                            (minutes, checked_stamp, event_id),
                         )
                         audit.log(conn, "road.recompute",
                                   {"event_id": event_id, "old": old_minutes,
