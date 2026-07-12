@@ -7,6 +7,7 @@ def cmd_init(args):
     conn = famdb.connect()
     famdb.init_db(conn)
     rem.seed_default_rules(conn)
+    rem.migrate_rules_2c(conn)
     conn.commit()
     out = {"ok": True, "db": famdb.resolve_db_path()}
     print(json.dumps(out, ensure_ascii=False) if args.json else f"initialized {out['db']}")

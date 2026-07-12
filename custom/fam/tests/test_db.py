@@ -76,6 +76,61 @@ def _make_2a_db(path):
     return conn
 
 
+# Snapshot of the schema-2b `reminders` table (pre-2c, no `kind` column),
+# used to build a 2b-shaped DB so the 2b->2c column migration in init_db
+# can be exercised against a real "old" database rather than one that was
+# already created 2c-shaped. Every other 2b table/column is unaffected by
+# this migration, so only `reminders` needs to be re-declared here -- the
+# rest is created via the live SCHEMA/`_ensure_column` path, same as any
+# fresh database.
+LEGACY_2B_REMINDERS = """
+CREATE TABLE IF NOT EXISTS reminders (
+  id INTEGER PRIMARY KEY,
+  event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  rule_id INTEGER,
+  stage_idx INTEGER,
+  label TEXT NOT NULL DEFAULT '',
+  anchor TEXT NOT NULL DEFAULT 'start',
+  fire_at_utc TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','sent','acked','cancelled')),
+  persistent INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  sent_at TEXT,
+  error_count INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_reminders_fire ON reminders(status, fire_at_utc);
+"""
+
+
+def _make_2b_db(path):
+    from fam import db as famdb
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    # Build the rest of the 2b schema via the real (current) SCHEMA/
+    # migrations, then swap in the pre-2c `reminders` shape so only the
+    # `kind` column migration is actually being exercised.
+    conn.executescript(famdb.SCHEMA)
+    conn.execute("DROP TABLE reminders")
+    conn.executescript(LEGACY_2B_REMINDERS)
+    conn.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','2b')")
+    conn.execute("UPDATE meta SET value='2b' WHERE key='schema_version'")
+    conn.commit()
+    return conn
+
+
+@pytest.fixture()
+def legacy_2b_conn(tmp_path):
+    conn = _make_2b_db(tmp_path / "legacy_2b.db")
+    yield conn
+    conn.close()
+
+
+@pytest.fixture()
+def fresh_conn(db):
+    return db
+
+
 def test_init_creates_all_tables(db):
     rows = db.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -102,7 +157,7 @@ def test_resolve_db_path_fam_db_parent_missing(monkeypatch):
 def test_fresh_db_is_2b(db):
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "2b"
+    ).fetchone()["value"] == "2c"
 
 def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     from fam import db as famdb
@@ -119,7 +174,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "2b"
+    ).fetchone()["value"] == "2c"
 
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -138,7 +193,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "2b"
+    ).fetchone()["value"] == "2c"
     conn.close()
 
 def test_places_travel_min_default_zero(db):
@@ -209,3 +264,25 @@ def test_idx_reminders_fire_exists(db):
     idx = {r["name"] for r in db.execute(
         "SELECT name FROM sqlite_master WHERE type='index'")}
     assert "idx_reminders_fire" in idx
+
+
+# ---- schema 2c migration: reminders.kind ----
+
+def test_reminders_kind_column_exists(fresh_conn):
+    cols = {r["name"] for r in fresh_conn.execute("PRAGMA table_info(reminders)")}
+    assert "kind" in cols
+
+def test_legacy_2b_db_gets_kind_column(legacy_2b_conn):
+    from fam import db as famdb
+    cols_before = {r["name"] for r in
+                   legacy_2b_conn.execute("PRAGMA table_info(reminders)")}
+    assert "kind" not in cols_before
+
+    famdb.init_db(legacy_2b_conn)
+
+    cols = {r["name"] for r in
+            legacy_2b_conn.execute("PRAGMA table_info(reminders)")}
+    assert "kind" in cols
+    assert legacy_2b_conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "2c"

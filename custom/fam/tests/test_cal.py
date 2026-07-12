@@ -131,8 +131,9 @@ def test_add_creates_reminder_instances(db):
     rows = db.execute(
         "SELECT * FROM reminders WHERE event_id=? ORDER BY fire_at_utc",
         (e["id"],)).fetchall()
-    # default rule: start-60min, leave_at+0 (== start, no place/travel)
-    assert len(rows) == 2
+    # default rule (2c) = build_stages(30): leave_at-30/-25/-15/0
+    # (== start, no place/travel)
+    assert len(rows) == 4
     assert {r["status"] for r in rows} == {"pending"}
 
 def test_update_notes_does_not_regenerate(db):
@@ -167,8 +168,11 @@ def test_update_start_utc_regenerates(db):
         "SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
         "ORDER BY fire_at_utc", (e["id"],)).fetchall()
     fire_times = [r["fire_at_utc"] for r in rows]
+    # default rule (2c) = build_stages(30): leave_at-30/-25/-15/0
     assert fire_times == [
-        "2099-01-02T04:00:00+00:00",  # start - 60min
+        "2099-01-02T04:30:00+00:00",
+        "2099-01-02T04:35:00+00:00",
+        "2099-01-02T04:45:00+00:00",
         "2099-01-02T05:00:00+00:00",  # leave_at (no travel) == start
     ]
 
@@ -183,9 +187,12 @@ def test_update_travel_min_regenerates_leave_at_stage(db):
     cal.update(db, e["id"], travel_min=30)
     db.commit()
 
+    # every default (2c) stage anchors on leave_at -- pin the "пора
+    # выходить" (offset 0) stage, whose fire_at_utc == leave_at exactly,
+    # to check the travel_min override without depending on row order.
     row = db.execute(
         "SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
-        "AND anchor='leave_at'", (e["id"],)).fetchone()
+        "AND anchor='leave_at' AND label='пора выходить'", (e["id"],)).fetchone()
     assert row["fire_at_utc"] == "2099-01-01T04:30:00+00:00"  # start - 30min override
 
 def test_update_place_change_regenerates(db):
@@ -201,9 +208,10 @@ def test_update_place_change_regenerates(db):
     cal.update(db, e["id"], place="Место2")
     db.commit()
 
+    # pin the "пора выходить" (offset 0) stage -- fire_at_utc == leave_at.
     row = db.execute(
         "SELECT fire_at_utc FROM reminders WHERE event_id=? AND status='pending' "
-        "AND anchor='leave_at'", (e["id"],)).fetchone()
+        "AND anchor='leave_at' AND label='пора выходить'", (e["id"],)).fetchone()
     assert row["fire_at_utc"] == "2099-01-01T04:10:00+00:00"  # start - 50min
 
 def test_update_participants_change_regenerates_taya_stage(db):
@@ -213,7 +221,7 @@ def test_update_participants_change_regenerates_taya_stage(db):
     db.commit()
     assert db.execute(
         "SELECT COUNT(*) c FROM reminders WHERE event_id=?", (e["id"],)
-    ).fetchone()["c"] == 2  # default rule only, Тая not yet a participant
+    ).fetchone()["c"] == 4  # default rule (2c, 4 stages), Тая not yet a participant
 
     cal.update(db, e["id"], add_person=["Тая"])
     db.commit()
@@ -227,7 +235,8 @@ def test_update_participants_change_regenerates_taya_stage(db):
     assert len(rule_ids) == 1
     labels = {r["label"] for r in db.execute(
         "SELECT label FROM reminders WHERE event_id=? AND status='pending'", (e["id"],))}
-    assert "Тае пора собираться" in labels
+    # slug:taya (2c) = build_stages(60): D=60's prepare-stage label
+    assert "пора собираться" in labels
 
 def test_cancel_cancels_pending_reminder_chain(db):
     _seed(db)

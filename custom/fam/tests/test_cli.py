@@ -301,7 +301,7 @@ def test_rem_list_json_and_plain(db, capsys):
 
     assert cli.main(["rem", "list", "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert len(out) == 2
+    assert len(out) == 4  # default (2c) = build_stages(30), 4 stages
     assert all(r["event_id"] == e["id"] for r in out)
 
     assert cli.main(["rem", "list"]) == 0
@@ -316,7 +316,7 @@ def test_rem_list_event_filter(db, capsys):
 
     assert cli.main(["rem", "list", "--event", str(e1["id"]), "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert len(out) == 2
+    assert len(out) == 4  # default (2c) = build_stages(30), 4 stages
     assert all(r["event_id"] == e1["id"] for r in out)
 
 def test_rem_list_due_filter(db, capsys):
@@ -341,7 +341,7 @@ def test_rem_ack_json_and_exit_code(db, capsys):
 
     assert cli.main(["rem", "ack", str(e["id"]), "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["acked"] == 2
+    assert out["acked"] == 4  # default (2c) = build_stages(30), 4 stages
 
     statuses = {r["status"] for r in db.execute(
         "SELECT status FROM reminders WHERE event_id=?", (e["id"],))}
@@ -360,7 +360,7 @@ def test_rem_cancel_json_and_exit_code(db, capsys):
 
     assert cli.main(["rem", "cancel", str(e["id"]), "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["cancelled"] == 2
+    assert out["cancelled"] == 4  # default (2c) = build_stages(30), 4 stages
 
     statuses = {r["status"] for r in db.execute(
         "SELECT status FROM reminders WHERE event_id=?", (e["id"],))}
@@ -401,7 +401,7 @@ def test_rem_active_json_shape(db, capsys):
     assert len(out) == 1
     assert out[0]["event_id"] == e["id"]
     assert out[0]["title"] == "Событие"
-    assert out[0]["pending_count"] == 2
+    assert out[0]["pending_count"] == 4  # default (2c) = build_stages(30), 4 stages
     assert out[0]["sent_count"] == 0
     assert set(out[0]) == {"event_id", "title", "start_local",
                             "next_fire_local", "pending_count", "sent_count"}

@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS reminders (
   stage_idx INTEGER,
   label TEXT NOT NULL DEFAULT '',
   anchor TEXT NOT NULL DEFAULT 'start',   -- 'start' | 'leave_at'
+  kind TEXT NOT NULL DEFAULT 'leave',     -- 'prepare' | 'leave' (2c, ack по смыслу)
   fire_at_utc TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending','sent','acked','cancelled')),
@@ -119,8 +120,14 @@ def init_db(conn):
     # errors (fam/tick.py) needs a per-reminder counter.
     _ensure_column(conn, "reminders", "error_count",
                    "error_count INTEGER NOT NULL DEFAULT 0")
+    # schema 2c: вид стадии для ack-по-смыслу («собираемся» гасит только
+    # prepare; «выходим» — всё). Старые строки получают 'leave' — для уже
+    # отправленных/погашенных это неважно, а pending пересоздаст
+    # rem.migrate_rules_2c.
+    _ensure_column(conn, "reminders", "kind",
+                   "kind TEXT NOT NULL DEFAULT 'leave'")
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','2b')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','2c')")
     conn.execute(
-        "UPDATE meta SET value='2b' WHERE key='schema_version'")
+        "UPDATE meta SET value='2c' WHERE key='schema_version'")
     conn.commit()

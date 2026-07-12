@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from fam import audit, cal, people, places, rem
 
 
@@ -8,6 +10,46 @@ def _seed_people(db):
     people.add(db, "Амина", slug="amina")
     people.add(db, "Денис", slug="denis")
     db.commit()
+
+
+@pytest.fixture()
+def conn_with_taya_event(db):
+    """A db with rules seeded and one future active event whose sole
+    participant is Тая -- applicable_rules() precedence gives it just the
+    slug:taya chain (build_stages(60): a mix of prepare and leave kinds),
+    per test_regenerate_writes_stage_kind.
+    """
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+    e = cal.add(db, "С Таей", "2026-07-20T05:00:00+00:00",
+                participants=["Тая"])
+    db.commit()
+    return db, e
+
+
+@pytest.fixture()
+def conn_with_future_default_event(db):
+    """A db with the pre-2c rule content seeded (old 2-stage default/taya
+    shape) and one future active event with no slug-scoped participant,
+    so it picks up the (pre-migration) default rule -- migrate_rules_2c
+    then reseeds default/slug:taya to the 2c escalation chains and must
+    regenerate this event's reminders against the new content.
+    """
+    _seed_people(db)
+    rem._seed_rule(db, "default", [
+        {"anchor": "start", "offset_min": -60, "label": "скоро событие"},
+        {"anchor": "leave_at", "offset_min": 0, "label": "пора выходить"},
+    ])
+    rem._seed_rule(db, "slug:taya", [
+        {"anchor": "leave_at", "offset_min": -45, "label": "Тае пора собираться"},
+    ])
+    rem._seed_rule(db, "slug:amina", [])
+    db.commit()
+    e = cal.add(db, "Без Таи", "2026-07-20T05:00:00+00:00",
+                participants=["Денис"])
+    db.commit()
+    return db, e
 
 
 # ---- leave_at arithmetic ----
@@ -214,20 +256,19 @@ def test_seed_default_rules_stage_content(db):
     rem.seed_default_rules(db)
     db.commit()
 
+    # 2c: default/taya stages come from build_stages() (escalation
+    # chains) rather than a hand-written two-stage list -- see
+    # test_build_stages_lead_30_countdown_wins_collision/lead_60 below for
+    # the canonical shape pin; this test just confirms seeding wires them.
     default_stages = json.loads(db.execute(
         "SELECT stages FROM reminder_rules WHERE scope='default'"
     ).fetchone()["stages"])
-    assert default_stages == [
-        {"anchor": "start", "offset_min": -60, "label": "скоро событие"},
-        {"anchor": "leave_at", "offset_min": 0, "label": "пора выходить"},
-    ]
+    assert default_stages == rem.build_stages(30)
 
     taya_stages = json.loads(db.execute(
         "SELECT stages FROM reminder_rules WHERE scope='slug:taya'"
     ).fetchone()["stages"])
-    assert taya_stages == [
-        {"anchor": "leave_at", "offset_min": -45, "label": "Тае пора собираться"},
-    ]
+    assert taya_stages == rem.build_stages(60)
 
     # slug:amina ships as an inert reserve -- empty stages, no reminders
     # generated until an admin populates it.
@@ -237,7 +278,43 @@ def test_seed_default_rules_stage_content(db):
     assert amina_stages == []
 
 
+# ---- migrate_rules_2c ----
+
+def test_migrate_rules_2c_reseeds_and_regenerates(conn_with_future_default_event):
+    conn, event = conn_with_future_default_event
+    rem.migrate_rules_2c(conn)
+    rules = {r["scope"]: r["stages"] for r in rem.list_rules(conn)}
+    assert rules["default"] == rem.build_stages(30)
+    assert rules["slug:taya"] == rem.build_stages(60)
+    # future active event is regenerated against the new escalation chain
+    rems = rem.list_reminders(conn, event_id=event["id"])
+    assert len(rems) == 4                    # D=30: 30/25/15/0
+
+    audit_rows = audit.query(conn, since_utc=None, kind_prefix="rem.migrate_2c",
+                              grep=None, limit=10)
+    assert {r["payload"]["scope"] for r in audit_rows} == {"default", "slug:taya"}
+
+    # repeat call is a no-op (meta-гвард rules_version='2c')
+    before = [dict(r) for r in rems]
+    regenerated = rem.migrate_rules_2c(conn)
+    assert regenerated == 0
+    assert [dict(r) for r in rem.list_reminders(conn, event_id=event["id"])] == before
+
+
+def test_migrate_rules_2c_returns_regenerated_count(conn_with_future_default_event):
+    conn, event = conn_with_future_default_event
+    regenerated = rem.migrate_rules_2c(conn)
+    assert regenerated == 1
+
+
 # ---- regenerate ----
+
+def test_regenerate_writes_stage_kind(conn_with_taya_event):
+    conn, event = conn_with_taya_event
+    rem.regenerate(conn, event["id"])
+    kinds = {r["kind"] for r in rem.list_reminders(conn, event_id=event["id"])}
+    assert kinds == {"prepare", "leave"}
+
 
 def test_past_stage_not_created(db):
     _seed_people(db)
@@ -253,13 +330,21 @@ def test_past_stage_not_created(db):
     db.commit()
 
     rows = db.execute(
-        "SELECT * FROM reminders WHERE event_id=?", (e["id"],)).fetchall()
-    # -60min stage would fire at 04:30 (past) -> skipped;
-    # leave_at (offset 0, no travel) fires at start 05:30 (future) -> created
-    assert created == 1
-    assert len(rows) == 1
-    assert rows[0]["label"] == "пора выходить"
-    assert rows[0]["fire_at_utc"] == "2026-07-20T05:30:00+00:00"
+        "SELECT * FROM reminders WHERE event_id=? ORDER BY fire_at_utc",
+        (e["id"],)).fetchall()
+    # default (2c) = build_stages(30): offsets -30/-25/-15/0 from leave_at
+    # (== start, no travel). -30min stage fires exactly at `now` (05:00) --
+    # fire_dt <= now_dt is skipped, not just strictly past -> the other
+    # three (-25/-15/0) are created.
+    assert created == 3
+    assert len(rows) == 3
+    assert [r["fire_at_utc"] for r in rows] == [
+        "2026-07-20T05:05:00+00:00",
+        "2026-07-20T05:15:00+00:00",
+        "2026-07-20T05:30:00+00:00",
+    ]
+    assert rows[-1]["label"] == "пора выходить"
+    assert rows[-1]["fire_at_utc"] == "2026-07-20T05:30:00+00:00"
 
 
 def test_regenerate_on_reschedule_moves_pending_keeps_sent(db):
@@ -272,22 +357,24 @@ def test_regenerate_on_reschedule_moves_pending_keeps_sent(db):
     e = cal.add(db, "Событие", start1)
     db.commit()
 
+    # default (2c) = build_stages(30): 4 stages at offsets -30/-25/-15/0
+    # from leave_at (== start1, no travel) -> all 4 future relative to now.
     created = rem.regenerate(db, e["id"], now_utc=now)
     db.commit()
-    assert created == 2
+    assert created == 4
 
     rows = db.execute(
         "SELECT * FROM reminders WHERE event_id=? ORDER BY fire_at_utc",
         (e["id"],)).fetchall()
-    assert len(rows) == 2
+    assert len(rows) == 4
 
-    # simulate the earlier stage having already fired and been sent
+    # simulate the earliest stage having already fired and been sent
     sent_row = dict(rows[0])
     db.execute(
         "UPDATE reminders SET status='sent', sent_at=? WHERE id=?",
         (now, sent_row["id"]))
     db.commit()
-    other_pending_fire_at = rows[1]["fire_at_utc"]
+    other_pending_fire_ats = {r["fire_at_utc"] for r in rows[1:]}
 
     # reschedule the event forward
     start2 = "2026-07-21T05:00:00+00:00"
@@ -296,7 +383,7 @@ def test_regenerate_on_reschedule_moves_pending_keeps_sent(db):
 
     created2 = rem.regenerate(db, e["id"], now_utc=now)
     db.commit()
-    assert created2 == 2
+    assert created2 == 4
 
     all_rows = [dict(r) for r in db.execute(
         "SELECT * FROM reminders WHERE event_id=?", (e["id"],)).fetchall()]
@@ -309,14 +396,16 @@ def test_regenerate_on_reschedule_moves_pending_keeps_sent(db):
     assert by_status["sent"][0]["id"] == sent_row["id"]
     assert by_status["sent"][0]["fire_at_utc"] == sent_row["fire_at_utc"]
 
-    # old pending row's fire time is gone; two new pending rows reflect
+    # old pending rows' fire times are gone; four new pending rows reflect
     # the new start (fire_at moved, not just row identities)
     pending = by_status.get("pending", [])
-    assert len(pending) == 2
+    assert len(pending) == 4
     fire_times = sorted(p["fire_at_utc"] for p in pending)
-    assert other_pending_fire_at not in fire_times
+    assert not (set(fire_times) & other_pending_fire_ats)
     assert fire_times == [
-        "2026-07-21T04:00:00+00:00",  # start - 60min
+        "2026-07-21T04:30:00+00:00",  # leave_at - 30min
+        "2026-07-21T04:35:00+00:00",  # leave_at - 25min
+        "2026-07-21T04:45:00+00:00",  # leave_at - 15min
         "2026-07-21T05:00:00+00:00",  # leave_at (travel 0) == start
     ]
 
@@ -363,7 +452,7 @@ def test_ack_chain_counts_and_audit(db):
 
     count = rem.ack_chain(db, e["id"])
     db.commit()
-    assert count == 2
+    assert count == 4  # default (2c) = build_stages(30), 4 stages
 
     statuses = {r["status"] for r in db.execute(
         "SELECT status FROM reminders WHERE event_id=?", (e["id"],)).fetchall()}
@@ -372,7 +461,7 @@ def test_ack_chain_counts_and_audit(db):
     rows = audit.query(db, since_utc=None, kind_prefix="rem.ack", grep=None,
                         limit=1)
     assert rows[0]["payload"]["event_id"] == e["id"]
-    assert rows[0]["payload"]["count"] == 2
+    assert rows[0]["payload"]["count"] == 4
 
 
 def test_cancel_chain_counts_and_audit(db):
@@ -387,7 +476,7 @@ def test_cancel_chain_counts_and_audit(db):
 
     count = rem.cancel_chain(db, e["id"])
     db.commit()
-    assert count == 2
+    assert count == 4  # default (2c) = build_stages(30), 4 stages
 
     statuses = {r["status"] for r in db.execute(
         "SELECT status FROM reminders WHERE event_id=?", (e["id"],)).fetchall()}
@@ -396,7 +485,7 @@ def test_cancel_chain_counts_and_audit(db):
     rows = audit.query(db, since_utc=None, kind_prefix="rem.cancel_chain",
                         grep=None, limit=1)
     assert rows[0]["payload"]["event_id"] == e["id"]
-    assert rows[0]["payload"]["count"] == 2
+    assert rows[0]["payload"]["count"] == 4
 
 
 # ---- list_reminders / list_rules (CLI-facing queries) ----
@@ -414,7 +503,7 @@ def test_list_reminders_filters_by_event_and_due(db):
     db.commit()
 
     only_e1 = rem.list_reminders(db, event_id=e1["id"])
-    assert len(only_e1) == 2
+    assert len(only_e1) == 4  # default (2c) = build_stages(30), 4 stages
     assert {r["event_id"] for r in only_e1} == {e1["id"]}
 
     # nothing is due yet (all fire_at_utc are in the future relative to `now`)
@@ -472,9 +561,11 @@ def test_active_chains_mixed_sent_and_pending_counts(db):
     rows = db.execute(
         "SELECT id, fire_at_utc FROM reminders WHERE event_id=? "
         "ORDER BY fire_at_utc", (e["id"],)).fetchall()
-    assert len(rows) == 2
-    # simulate the earlier stage having already fired and been sent by the
-    # tick -- exactly the "mark stage-0 sent" setup the E2E smoke test uses.
+    # default (2c) = build_stages(30): 4 stages
+    assert len(rows) == 4
+    # simulate the earliest stage having already fired and been sent by
+    # the tick -- exactly the "mark stage-0 sent" setup the E2E smoke test
+    # uses.
     db.execute("UPDATE reminders SET status='sent', sent_at=? WHERE id=?",
                (now, rows[0]["id"]))
     db.commit()
@@ -485,7 +576,7 @@ def test_active_chains_mixed_sent_and_pending_counts(db):
     c = chains[0]
     assert c["event_id"] == e["id"]
     assert c["title"] == "Событие"
-    assert c["pending_count"] == 1
+    assert c["pending_count"] == 3
     assert c["sent_count"] == 1
     assert c["start_local"] == cal._to_local_iso(e["start_utc"])
     assert c["next_fire_local"] == cal._to_local_iso(rows[1]["fire_at_utc"])

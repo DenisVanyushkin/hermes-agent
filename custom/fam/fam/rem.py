@@ -14,16 +14,6 @@ from datetime import datetime, timedelta, timezone
 
 from fam import audit
 
-DEFAULT_STAGES = [
-    {"anchor": "start", "offset_min": -60, "label": "скоро событие"},
-    {"anchor": "leave_at", "offset_min": 0, "label": "пора выходить"},
-]
-TAYA_STAGES = [
-    {"anchor": "leave_at", "offset_min": -45, "label": "Тае пора собираться"},
-]
-AMINA_STAGES = []  # inert reserve: no stages until an admin populates it
-
-
 KIND_PREPARE = "prepare"
 KIND_LEAVE = "leave"
 
@@ -53,6 +43,11 @@ def build_stages(lead_min):
         {"anchor": "leave_at", "offset_min": -off, "label": label, "kind": kind}
         for off, (label, kind) in sorted(stages.items(), reverse=True)
     ]
+
+
+DEFAULT_STAGES = build_stages(30)
+TAYA_STAGES = build_stages(60)
+AMINA_STAGES = []  # inert reserve: no stages until an admin populates it
 
 
 def _now():
@@ -167,10 +162,10 @@ def regenerate(conn, event_id, now_utc=None):
                     continue
                 conn.execute(
                     "INSERT INTO reminders(event_id, rule_id, stage_idx, "
-                    "label, anchor, fire_at_utc, status, created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "label, anchor, kind, fire_at_utc, status, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
                     (event_id, rule["id"], stage_idx, stage["label"],
-                     stage["anchor"],
+                     stage["anchor"], stage.get("kind", KIND_LEAVE),
                      fire_dt.isoformat(timespec="seconds"), "pending",
                      created_at),
                 )
@@ -317,3 +312,36 @@ def seed_default_rules(conn):
     _seed_rule(conn, "default", DEFAULT_STAGES)
     _seed_rule(conn, "slug:taya", TAYA_STAGES)
     _seed_rule(conn, "slug:amina", AMINA_STAGES)
+
+
+def migrate_rules_2c(conn, now_utc=None):
+    """Одноразовый (meta-гвард rules_version='2c') пересев default- и
+    Тая-правил на эскалационные цепочки + перегенерация напоминаний всех
+    активных будущих событий. Старые stages пишутся в audit
+    (rem.migrate_2c) перед перезаписью -- админ-правки не теряются молча.
+    """
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key='rules_version'").fetchone()
+    if row is not None and row["value"] == "2c":
+        return 0
+    now = now_utc or _now()
+    new_stages = {"default": DEFAULT_STAGES, "slug:taya": TAYA_STAGES}
+    for scope, stages in new_stages.items():
+        old = conn.execute(
+            "SELECT stages FROM reminder_rules WHERE scope=?", (scope,)
+        ).fetchone()
+        audit.log(conn, "rem.migrate_2c",
+                  {"scope": scope, "old": old["stages"] if old else None})
+        conn.execute(
+            "UPDATE reminder_rules SET stages=? WHERE scope=?",
+            (json.dumps(stages, ensure_ascii=False), scope))
+    regenerated = 0
+    rows = conn.execute(
+        "SELECT id FROM events WHERE status='active' AND start_utc > ?",
+        (now,)).fetchall()
+    for r in rows:
+        regenerate(conn, r["id"], now_utc=now)
+        regenerated += 1
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('rules_version','2c')")
+    return regenerated
