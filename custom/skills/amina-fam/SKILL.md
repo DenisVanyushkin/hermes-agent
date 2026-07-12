@@ -87,7 +87,10 @@ make a second, separate terminal call.
    месте?" — NOT "во сколько выезжать" (departure is derived; the system
    computes it). If the user clearly thinks in departure terms, convert
    as above and name BOTH times in the confirmation ("на месте в 09:40,
-   выезд в 09:00").
+   выезд в 09:00"). Exception to the no-arithmetic rule above: this
+   minute addition (выезд + travel_min) is the ONE calculation you do
+   yourself — "now" for it still comes the usual way (timestamp prefix,
+   or one `date` call).
 3. **Unknown person/place ⇒ stop and ask, then retry.** fam exits 2 with
    `unknown person: X` or `unknown place: X` on stderr when a name doesn't
    resolve. Stop, ask the user to confirm who/where it is ("это кто/где —
@@ -102,6 +105,9 @@ make a second, separate terminal call.
    on confirmation `fam places add` with the user's exact wording, then
    pass `--place` to `cal add`/`cal update`. Don't ask about travel time
    (`--travel-min`) — record it only if the user brings it up themselves.
+   Exception: the user named a departure time — then the
+   departure-vs-start rule above governs (уточни дорогу или
+   время-на-месте).
 5. **Other stderr + exit 2 failures are real errors, not retry bait.**
    Examples: `alias already in use by ...`, `unknown field: ...`, `unknown
    event: ...`. Read the message and fix the actual problem (different
@@ -128,7 +134,7 @@ make a second, separate terminal call.
 
 | Goal | Command |
 | --- | --- |
-| Record an event | `fam cal add --title T --start ISO (время начала, не выезда) [--end ISO] [--place P] [--with NAME]... [--transport car\|walk\|public\|unknown] [--notes N]` |
+| Record an event (`--start` = время начала, не выезда) | `fam cal add --title T --start ISO [--end ISO] [--place P] [--with NAME]... [--transport car\|walk\|public\|unknown] [--notes N]` |
 | Change an event | `fam cal update <id> [--start ISO] [--place P] [--add-person N] [--rm-person N] ...` |
 | Cancel an event | `fam cal cancel <id>` |
 | Mark an event done | `fam cal done <id>` |
