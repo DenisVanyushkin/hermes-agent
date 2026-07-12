@@ -40,18 +40,25 @@ NOW = "2026-07-11T10:00:00+00:00"
 QUIET_NOW = "2026-07-11T22:00:00+05:00"
 
 
-def _seed_gate_sent(db, kind, event_id=None, n=1, now_utc=None):
+def _seed_gate_sent(db, kind, event_id=None, n=1, now_utc=None, final=None):
     """Insert n gate.sent audit rows with payload {"kind": kind, "raw":
-    {"event_id": event_id}}, timestamped inside today's Almaty day
-    relative to now_utc (defaults to the module's frozen NOW) -- same
-    window convention as _insert_audit's callers above (see
+    {"event_id": event_id}[, "final": final]}, timestamped inside today's
+    Almaty day relative to now_utc (defaults to the module's frozen NOW)
+    -- same window convention as _insert_audit's callers above (see
     test_budget_spent_today_counts_only_todays_gate_sent for the
     Almaty-day boundary math this relies on).
+
+    final (phase 2c, task 7): the delivered text, for
+    prior_texts_today's payload["final"] lookup -- omitted from the
+    payload entirely when None, matching how the pre-existing budget/
+    chain tests (which don't care about "final") stay unchanged.
     """
     ts_utc = now_utc or NOW
     for _ in range(n):
-        _insert_audit(db, "gate.sent", ts_utc,
-                       {"kind": kind, "raw": {"event_id": event_id}})
+        payload = {"kind": kind, "raw": {"event_id": event_id}}
+        if final is not None:
+            payload["final"] = final
+        _insert_audit(db, "gate.sent", ts_utc, payload)
 
 
 class FakeRun:
@@ -373,6 +380,57 @@ def test_deliver_new_chain_blocked_at_budget_limit(db, fake_run):
 
     assert status == "budget"
     assert fake_run.calls == []
+
+
+# Phase 2c, task 7: the gate.skip audit row carries event_id when raw
+# has one, so a skip caused by quiet hours or budget is traceable back
+# to the reminder chain it belongs to, not just a bare kind+reason. Uses
+# kind="note" + QUIET_NOW (quiet-hours skip path) as the brief specifies
+# -- the budget-skip site gets the same skip_payload construction, not a
+# second test, since both sites share one code path in the implementation.
+def test_gate_skip_payload_carries_event_id(db):
+    gate.deliver(db, "note", {"event_id": 7}, "fb", CFG, now_utc=QUIET_NOW)
+    db.commit()
+    row = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='gate.skip' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert json.loads(row["payload"])["event_id"] == 7
+
+
+def test_gate_skip_payload_omits_event_id_when_raw_has_none(db):
+    gate.deliver(db, "note", {"label": "x"}, "fb", CFG, now_utc=QUIET_NOW)
+    db.commit()
+    row = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='gate.skip' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert "event_id" not in json.loads(row["payload"])
+
+
+# ---- prior_texts_today ----
+
+# Phase 2c, task 7: prior_texts_today feeds the variation-rule instruction
+# (GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION) -- it must return only THIS
+# event's already-sent final texts, today, in send order, so the rewrite
+# knows what not to repeat.
+def test_prior_texts_today_returns_this_events_finals(db):
+    _seed_gate_sent(db, kind="reminder", event_id=7, final="Пора собираться.")
+    _seed_gate_sent(db, kind="reminder", event_id=8, final="Другое событие.")
+    db.commit()
+    assert gate.prior_texts_today(db, 7, NOW) == ["Пора собираться."]
+
+
+def test_prior_texts_today_empty_when_no_prior_sends(db):
+    db.commit()
+    assert gate.prior_texts_today(db, 7, NOW) == []
+
+
+def test_prior_texts_today_ordered_by_send_order(db):
+    _seed_gate_sent(db, kind="reminder", event_id=7, final="Первое.")
+    _seed_gate_sent(db, kind="reminder", event_id=7, final="Второе.")
+    db.commit()
+    assert gate.prior_texts_today(db, 7, NOW) == ["Первое.", "Второе."]
 
 
 # ---- deliver: rewrite success ----
@@ -720,6 +778,14 @@ def test_gate_reminder_time_semantics_instruction_attribution_follows_label():
     assert "только по самому label" in instr
     assert "если label никого не называет" in instr
     assert "пустой participants" in instr
+
+
+# Phase 2c, task 7: variation rule -- a reminder chain that has already
+# sent earlier today must not repeat itself verbatim. prior_texts (built
+# by tick.py from gate.prior_texts_today) is the input; this instruction
+# is what tells the rewrite what to do with it.
+def test_reminder_instruction_bans_verbatim_repeat():
+    assert "prior_texts" in gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION
 
 
 def test_deliver_digest_prompt_has_no_reminder_time_semantics_instruction(db, fake_run):

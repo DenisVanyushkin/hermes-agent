@@ -163,6 +163,16 @@ def reminders(conn, now_utc=None, cfg=None):
         }
         if event["place"]:
             raw["place_name"] = event["place"]["name"]
+        # Phase 2c, task 7: this event's already-sent reminder texts
+        # today (if any) go into raw so the rewrite doesn't repeat
+        # itself verbatim on a chain continuation -- see
+        # gate.prior_texts_today and the variation-rule clause appended
+        # to GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION. Key omitted
+        # entirely (not an empty list) when there's nothing prior, so a
+        # first send's raw stays exactly as it was before this task.
+        prior = gate.prior_texts_today(conn, event["id"], now)
+        if prior:
+            raw["prior_texts"] = prior
         human_fallback = (
             f"{reminder['label']}: {event['title']} — {event['start_local']}"
         )

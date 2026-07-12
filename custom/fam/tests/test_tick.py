@@ -136,6 +136,43 @@ def test_raw_and_fallback_shape(db, fake_deliver):
     )
     assert call["now_utc"] == NOW
 
+    # Phase 2c, task 7: a second tick for the SAME event, after an
+    # earlier send today, carries raw["prior_texts"] with that earlier
+    # send's final text -- the variation-rule input (see
+    # GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION). gate.deliver is mocked
+    # here (fake_deliver never writes a real gate.sent audit row), so
+    # the earlier send is seeded directly as an audit row, same shape
+    # gate.deliver's own payload uses.
+    db.execute(
+        "INSERT INTO audit_log(ts_utc, kind, actor, payload) VALUES(?,?,?,?)",
+        (NOW, "gate.sent", "test", json.dumps(
+            {"kind": "reminder", "raw": {"event_id": e["id"]},
+             "final": "Пора выходить к врачу."},
+            ensure_ascii=False,
+        )),
+    )
+    db.commit()
+    _insert_reminder(db, e["id"], label="уже пора")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    second_call = fake_deliver.calls[-1]
+    assert second_call["raw"]["prior_texts"] == ["Пора выходить к врачу."]
+
+
+def test_raw_omits_prior_texts_when_no_prior_sends_today(db, fake_deliver):
+    e = _event(db)
+    db.commit()
+    _insert_reminder(db, e["id"])
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    assert "prior_texts" not in fake_deliver.calls[0]["raw"]
+
 
 def test_raw_omits_place_name_when_no_place(db, fake_deliver):
     e = _event(db)

@@ -108,6 +108,9 @@ GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION = (
     "третьем лице), а не исполнители действия из label; пустой "
     "participants — обычная ситуация: просто напомни владельцу чата. Не "
     "добавляй факты, людей или действия, которых нет в переданных данных."
+    " Если в данных есть prior_texts — это уже отправленные сообщения "
+    "этой же цепочки: не повторяй их формулировки дословно, передай "
+    "новый label своими словами, не пересказывая прежние сообщения."
 )
 
 
@@ -236,6 +239,34 @@ def _reminder_sent_today(conn, event_id, now_utc):
     return False
 
 
+def prior_texts_today(conn, event_id, now_utc):
+    """final-тексты сегодняшних (Almaty) reminder-отправок этого события,
+    в порядке отправки — вход для инструкции вариативности («не повторяй
+    дословно»).
+
+    Same audit-scan pattern as _reminder_sent_today (same day-bounds
+    helper, same table), but a different return shape (all matching
+    finals, not a bool) -- kept as its own function rather than merged
+    with _reminder_sent_today: one is a stop-at-first-match existence
+    check, the other collects every match in order, and the two callers
+    (budget-gate vs. the rewrite prompt) want different things.
+    """
+    from_utc, to_utc = _almaty_day_utc_bounds(now_utc)
+    rows = conn.execute(
+        "SELECT payload FROM audit_log WHERE kind='gate.sent' "
+        "AND ts_utc >= ? AND ts_utc < ? ORDER BY id",
+        (from_utc, to_utc),
+    ).fetchall()
+    out = []
+    for r in rows:
+        payload = json.loads(r["payload"])
+        if (payload.get("kind") == "reminder"
+                and (payload.get("raw") or {}).get("event_id") == event_id
+                and payload.get("final")):
+            out.append(payload["final"])
+    return out
+
+
 def _build_prompt(raw, kind=None):
     """Build the rewrite prompt for `raw`. For kind=="digest", the style
     instruction gets GATE_DIGEST_NO_QUESTION_INSTRUCTION appended -- the
@@ -339,13 +370,14 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
     "sent", "quiet", "budget", "error".
 
     Pipeline (force=True skips the quiet-hours and budget gates):
-      1. quiet hours -> audit gate.skip{reason:"quiet"}, return "quiet" --
+      1. quiet hours -> audit gate.skip{reason:"quiet"[,event_id]},
+         return "quiet" --
          UNLESS kind=="reminder" (phase 2c, decision: Денис, 2026-07-12:
          "планы бывают и ночью, их не нужно замалчивать"). A reminder
          chain fires on its own schedule at any hour; the quiet window
          still applies to every other kind (e.g. future non-reminder
          proactive kinds).
-      2. daily budget reached -> audit gate.skip{reason:"budget"},
+      2. daily budget reached -> audit gate.skip{reason:"budget"[,event_id]},
          return "budget" -- UNLESS kind=="reminder" and this event
          already has a gate.sent kind=reminder row today (chain
          continuation is free; see _reminder_sent_today, phase 2c).
@@ -380,7 +412,10 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
     # цепочка события стреляет по расписанию в любое время суток.
     # Quiet-окно остаётся для будущих не-reminder проактивных видов.
     if not force and kind != "reminder" and in_quiet_hours(now, cfg):
-        audit.log(conn, "gate.skip", {"kind": kind, "reason": "quiet"})
+        skip_payload = {"kind": kind, "reason": "quiet"}
+        if isinstance(raw, dict) and raw.get("event_id") is not None:
+            skip_payload["event_id"] = raw["event_id"]
+        audit.log(conn, "gate.skip", skip_payload)
         return "quiet"
 
     if not force and budget_spent_today(conn, now_utc=now) >= cfg["daily_budget"]:
@@ -389,7 +424,10 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
         # other kind) is actually blocked. See _reminder_sent_today.
         if not (kind == "reminder"
                 and _reminder_sent_today(conn, raw.get("event_id"), now)):
-            audit.log(conn, "gate.skip", {"kind": kind, "reason": "budget"})
+            skip_payload = {"kind": kind, "reason": "budget"}
+            if isinstance(raw, dict) and raw.get("event_id") is not None:
+                skip_payload["event_id"] = raw["event_id"]
+            audit.log(conn, "gate.skip", skip_payload)
             return "budget"
 
     rewritten = _call_rewrite(_build_prompt(raw, kind), cfg)
