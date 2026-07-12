@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS events (
     CHECK (status IN ('active','cancelled','done')),
   notes TEXT NOT NULL DEFAULT '',
   travel_min INTEGER,                     -- NULL = take from place; override (2b)
+  travel_min_road INTEGER,                -- computed road minutes with traffic; beats manual (3a)
+  road_checked_at TEXT,                   -- UTC ISO of last road computation (3a)
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
@@ -126,8 +128,15 @@ def init_db(conn):
     # rem.migrate_rules_2c.
     _ensure_column(conn, "reminders", "kind",
                    "kind TEXT NOT NULL DEFAULT 'leave'")
+    # schema 3a: computed road minutes (with traffic) beat the user's
+    # off-hand manual travel_min figure in leave_at() (product decision,
+    # Denis 2026-07-12). Columns are inert until Task 3 starts writing them.
+    _ensure_column(conn, "events", "travel_min_road",
+                   "travel_min_road INTEGER")
+    _ensure_column(conn, "events", "road_checked_at",
+                   "road_checked_at TEXT")
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','2c')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','3a')")
     conn.execute(
-        "UPDATE meta SET value='2c' WHERE key='schema_version'")
+        "UPDATE meta SET value='3a' WHERE key='schema_version'")
     conn.commit()

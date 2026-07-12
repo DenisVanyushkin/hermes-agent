@@ -154,10 +154,13 @@ def test_resolve_db_path_fam_db_parent_missing(monkeypatch):
 
 # ---- schema 2b migration ----
 
-def test_fresh_db_is_2b(db):
+# Renamed from test_fresh_db_is_2b: the name had gone stale since the 2c
+# migration (final-review 2c minor) and would have gone stale again at 3a;
+# name it after what it actually checks instead of a hardcoded version.
+def test_fresh_db_schema_version_current(db):
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "2c"
+    ).fetchone()["value"] == "3a"
 
 def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     from fam import db as famdb
@@ -174,7 +177,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "2c"
+    ).fetchone()["value"] == "3a"
 
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -184,6 +187,8 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     assert "travel_min" in place_cols
     event_cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
     assert "travel_min" in event_cols
+    assert "travel_min_road" in event_cols
+    assert "road_checked_at" in event_cols
 
     idx = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='index'")}
@@ -193,7 +198,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "2c"
+    ).fetchone()["value"] == "3a"
     conn.close()
 
 def test_places_travel_min_default_zero(db):
@@ -285,4 +290,65 @@ def test_legacy_2b_db_gets_kind_column(legacy_2b_conn):
     assert "kind" in cols
     assert legacy_2b_conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "2c"
+    ).fetchone()["value"] == "3a"
+
+# ---- schema 3a migration: events.travel_min_road, events.road_checked_at ----
+
+def test_fresh_db_has_travel_min_road_columns(fresh_conn):
+    cols = {r["name"] for r in fresh_conn.execute("PRAGMA table_info(events)")}
+    assert "travel_min_road" in cols
+    assert "road_checked_at" in cols
+
+def test_legacy_2c_db_gets_travel_min_road_columns(tmp_path):
+    from fam import db as famdb
+    conn = sqlite3.connect(str(tmp_path / "legacy_2c.db"))
+    conn.row_factory = sqlite3.Row
+    # A 2c-shaped db is just the current SCHEMA (which already includes
+    # the 3a columns) minus those two columns -- drop/recreate events
+    # without them to get a genuine pre-3a shape.
+    conn.executescript(famdb.SCHEMA)
+    conn.execute("DROP TABLE events")
+    conn.executescript("""
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  start_utc TEXT NOT NULL,
+  end_utc TEXT,
+  place_id INTEGER REFERENCES places(id),
+  transport TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (transport IN ('car','walk','public','unknown')),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active','cancelled','done')),
+  notes TEXT NOT NULL DEFAULT '',
+  travel_min INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
+""")
+    conn.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','2c')")
+    conn.execute("UPDATE meta SET value='2c' WHERE key='schema_version'")
+    conn.commit()
+
+    cols_before = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    assert "travel_min_road" not in cols_before
+    assert "road_checked_at" not in cols_before
+
+    famdb.init_db(conn)
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    assert "travel_min_road" in cols
+    assert "road_checked_at" in cols
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "3a"
+    conn.close()
+
+def test_events_travel_min_road_nullable(db):
+    db.execute(
+        "INSERT INTO events(title, start_utc, created_at, updated_at) "
+        "VALUES ('E','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
+    row = db.execute(
+        "SELECT travel_min_road, road_checked_at FROM events WHERE title='E'").fetchone()
+    assert row["travel_min_road"] is None
+    assert row["road_checked_at"] is None

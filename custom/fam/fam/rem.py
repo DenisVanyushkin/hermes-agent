@@ -70,11 +70,17 @@ def _parse_utc(value):
 def leave_at(conn, event):
     """UTC ISO string: event["start_utc"] minus travel minutes.
 
-    travel minutes = event["travel_min"] if it is not None, else the
-    event's place travel_min if the event has a place, else 0. With
+    Priority (3a): event["travel_min_road"] (computed, with traffic) beats
+    event["travel_min"] (manual override) beats the event's place
+    travel_min beats 0. Product decision (Denis 2026-07-12): a computed
+    road estimate with live traffic is more trustworthy than the user's
+    off-hand "ехать 40 минут" guess, so it takes precedence; the manual
+    figure remains the fallback when no road computation exists yet. With
     travel 0 (e.g. no place), leave_at == start_utc.
     """
-    travel = event.get("travel_min")
+    travel = event.get("travel_min_road")
+    if travel is None:
+        travel = event.get("travel_min")
     if travel is None:
         place = event.get("place")
         travel = place["travel_min"] if place else 0

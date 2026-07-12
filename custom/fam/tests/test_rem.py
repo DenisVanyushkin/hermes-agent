@@ -55,6 +55,8 @@ def conn_with_future_default_event(db):
 # ---- leave_at arithmetic ----
 
 def test_leave_at_event_override_beats_place(db):
+    # 3a road priority: travel_min_road unset here, so falls through to the
+    # manual event override -- this rung of the ladder is unaffected by 3a.
     _seed_people(db)
     pl = places.add(db, "Клиника")
     db.execute("UPDATE places SET travel_min=20 WHERE id=?", (pl["id"],))
@@ -67,6 +69,8 @@ def test_leave_at_event_override_beats_place(db):
 
 
 def test_leave_at_place_fallback(db):
+    # 3a road priority: no travel_min_road, no manual travel_min -- falls
+    # through to the place's travel_min, same as pre-3a.
     _seed_people(db)
     pl = places.add(db, "Клиника")
     db.execute("UPDATE places SET travel_min=20 WHERE id=?", (pl["id"],))
@@ -78,6 +82,7 @@ def test_leave_at_place_fallback(db):
 
 
 def test_leave_at_no_place_is_zero(db):
+    # 3a road priority: no road, no manual, no place -- bottom rung, 0.
     _seed_people(db)
     e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00")
     db.commit()
@@ -90,6 +95,8 @@ def test_leave_at_no_place_is_zero(db):
 # must still win over a nonzero place travel_min -- pins the "is None" (not
 # "is falsy") precedence check in leave_at().
 def test_leave_at_event_travel_zero_overrides_nonzero_place(db):
+    # 3a road priority: travel_min_road unset -- falls through to manual;
+    # the "is None" (not "is falsy") check still governs this rung.
     _seed_people(db)
     pl = places.add(db, "Клиника")
     db.execute("UPDATE places SET travel_min=20 WHERE id=?", (pl["id"],))
@@ -97,6 +104,43 @@ def test_leave_at_event_travel_zero_overrides_nonzero_place(db):
     db.execute("UPDATE events SET travel_min=0 WHERE id=?", (e["id"],))
     db.commit()
 
+    event = cal.get(db, e["id"])
+    assert rem.leave_at(db, event) == event["start_utc"] == "2026-07-15T05:00:00+00:00"
+
+
+# ---- leave_at 3a road priority ladder ----
+# Priority: travel_min_road (computed, with traffic) beats travel_min
+# (manual override) beats place.travel_min beats 0. One event mutated
+# through all four rungs, per file convention (see the four tests above
+# for the pre-3a manual/place/zero rungs individually).
+
+def test_leave_at_road_beats_manual_beats_place_beats_zero(db):
+    _seed_people(db)
+    pl = places.add(db, "Клиника")
+    db.execute("UPDATE places SET travel_min=20 WHERE id=?", (pl["id"],))
+    e = cal.add(db, "Событие", "2026-07-15T05:00:00+00:00", place="Клиника")
+    db.commit()
+
+    # Rung 1: place.travel_min only -> 20 min.
+    event = cal.get(db, e["id"])
+    assert rem.leave_at(db, event) == "2026-07-15T04:40:00+00:00"
+
+    # Rung 2: manual travel_min beats place.
+    db.execute("UPDATE events SET travel_min=5 WHERE id=?", (e["id"],))
+    db.commit()
+    event = cal.get(db, e["id"])
+    assert rem.leave_at(db, event) == "2026-07-15T04:55:00+00:00"
+
+    # Rung 3: computed travel_min_road beats manual travel_min.
+    db.execute("UPDATE events SET travel_min_road=35 WHERE id=?", (e["id"],))
+    db.commit()
+    event = cal.get(db, e["id"])
+    assert rem.leave_at(db, event) == "2026-07-15T04:25:00+00:00"
+
+    # Rung 4: travel_min_road=0 still wins over nonzero manual/place (the
+    # "is None" not "is falsy" check applies at every rung).
+    db.execute("UPDATE events SET travel_min_road=0 WHERE id=?", (e["id"],))
+    db.commit()
     event = cal.get(db, e["id"])
     assert rem.leave_at(db, event) == event["start_utc"] == "2026-07-15T05:00:00+00:00"
 
