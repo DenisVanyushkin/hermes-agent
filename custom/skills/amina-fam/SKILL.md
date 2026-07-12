@@ -43,9 +43,10 @@ way to read or change family data.
   - `init`
   - `log [--since|--last-hours] [--kind] [--grep] [--limit]`
   - `people add|alias|member|resolve|list`
-  - `places add|alias|resolve|list`
+  - `places add|update|alias|resolve|list`
   - `cal add|update|cancel|done|show|day|range|grid`
   - `rem list|ack|cancel|rules|active`
+  - `road <event_id>`
 - Time: the household lives in Asia/Almaty (+05:00). "Now" comes from the
   timestamp prefix on the **latest** user message, `[Dow YYYY-MM-DD
   HH:MM:SS TZ]` (e.g. `[Tue 2026-04-28 13:40:53 CEST]`) — read it from
@@ -90,7 +91,10 @@ make a second, separate terminal call.
    выезд в 09:00"). Exception to the no-arithmetic rule above: this
    minute addition (выезд + travel_min) is the ONE calculation you do
    yourself — "now" for it still comes the usual way (timestamp prefix,
-   or one `date` call).
+   or one `date` call). If the road hasn't been computed yet, this
+   conversion uses the user's stated travel (or you ask for the arrival
+   time as above) — the system will correct the departure time itself via
+   the road re-checks before выезд.
 3. **Unknown person/place ⇒ stop and ask, then retry.** fam exits 2 with
    `unknown person: X` or `unknown place: X` on stderr when a name doesn't
    resolve. Stop, ask the user to confirm who/where it is ("это кто/где —
@@ -105,16 +109,38 @@ make a second, separate terminal call.
    on confirmation `fam places add` with the user's exact wording, then
    pass `--place` to `cal add`/`cal update`. Don't ask about travel time
    (`--travel-min`) — record it only if the user brings it up themselves.
+   When the event's place HAS coordinates, the system computes the real
+   road with live traffic itself at creation and re-checks it before
+   выезд — never ask for travel time then, and don't treat user-stated
+   minutes as the truth. Minutes the user volunteers are still recorded
+   (`--travel-min`) as a fallback, but once a computed value exists, tell
+   the user THAT one: after `cal add`, if the returned JSON shows
+   `travel_min_road` set, put the computed дорога and выезд in your
+   confirmation instead of the user's guess (`fam road <event_id>`
+   returns the current `travel_min_road` + `leave_at_local` any time).
    Exception: the user named a departure time — then the
    departure-vs-start rule above governs (уточни дорогу или
    время-на-месте).
-5. **Other stderr + exit 2 failures are real errors, not retry bait.**
+5. **A 2GIS link carries the place's coordinates — extract them.** A
+   2GIS URL ends in `.../geo/<id>/LON,LAT`, and the order is LON,LAT
+   (сначала долгота, потом широта — NOT lat,lon). Example:
+   `https://2gis.kz/almaty/geo/70000001030764296/76.781529,43.233821`
+   → `--lon 76.781529 --lat 43.233821`. When creating a place from such
+   a link, pass them along with the link:
+   `fam places add "Name" --address <link> --lat <LAT> --lon <LON>`.
+   When the place already exists WITHOUT coordinates and the user sends
+   a 2GIS link for it: `fam places update <ref> --lat <LAT> --lon <LON>
+   --address <link>`. Double-check the order every time — the first
+   number in the URL is the longitude (долгота), the second is the
+   latitude (широта); swapping them puts the place in the ocean and the
+   computed road becomes garbage.
+6. **Other stderr + exit 2 failures are real errors, not retry bait.**
    Examples: `alias already in use by ...`, `unknown field: ...`, `unknown
    event: ...`. Read the message and fix the actual problem (different
    alias, a valid field name, the right event id) or tell the user what's
    wrong — don't blindly resubmit the same command. Exception: `start is
    in the past` has its own protocol, the past-start protocol below.
-6. **`start is in the past` ⇒ past event or stale "now", not a bug.**
+7. **`start is in the past` ⇒ past event or stale "now", not a bug.**
    `cal add`/`cal update --start` exits 2 with `start is in the past
    (now: <ISO+05:00>). If the user means a past event, retry with
    --allow-past; otherwise re-derive the date (run date).` when the ISO
@@ -123,11 +149,14 @@ make a second, separate terminal call.
    что мы ездили в...") → retry the identical command with
    `--allow-past`. Otherwise your "now" was wrong → make one `date` call,
    re-derive the ISO from the fresh date/time, and retry without
-   `--allow-past`.
-7. **Never delete or overwrite anything without an explicit request.**
+   `--allow-past`. If the error fires on a start you CONVERTED from a
+   departure time («выезжаем в X»), do NOT use `--allow-past` — a
+   converted start in the past almost always means the departure date was
+   mis-anchored; re-ask the user for the correct date/time instead.
+8. **Never delete or overwrite anything without an explicit request.**
    Cancelling an event is `fam cal cancel <id>`, never a raw edit. Get the
    id from `cal show`/`cal day --json`/`cal range --json`, never guess it.
-8. `cal day` / `cal range` / `cal grid` only ever list **active** events —
+9. `cal day` / `cal range` / `cal grid` only ever list **active** events —
    cancelled events are hidden by design, not gone.
 
 ## Quick Reference
@@ -148,6 +177,8 @@ make a second, separate terminal call.
 | Add to a group | `fam people member <group_ref> <person_ref>` |
 | Where is Y | `fam places resolve "Y"` |
 | Add a place | `fam places add "Name" [--address A] [--lat LAT] [--lon LON] [--alias A]` |
+| Update a place (coords from a 2GIS link, address) | `fam places update <ref> [--lat LAT] [--lon LON] [--address A] [--travel-min M]` |
+| Пересчитать дорогу / когда выходить | `fam road <event_id>` |
 | Recent activity | `fam log --last-hours 24` |
 | Reminders for one event | `fam rem list --event ID --json` |
 | Reminders due right now | `fam rem list --due --json` |
