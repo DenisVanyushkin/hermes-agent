@@ -143,11 +143,12 @@ def partition(features: list[Feature], memory: dict, *, security_re=SECURITY_RE)
 
 
 def record_decisions(memory: dict, decided_features: list[Feature], *, now: str) -> dict:
-    entries = memory.setdefault("entries", [])
-    by_fingerprint = {entry["fingerprint"]: entry for entry in entries}
     for feature in decided_features:
         if feature.decision not in VALID_DECISIONS:
             raise ValueError(f"invalid decision {feature.decision!r} for {feature.fingerprint}")
+    entries = memory.setdefault("entries", [])
+    by_fingerprint = {entry["fingerprint"]: entry for entry in entries}
+    for feature in decided_features:
         entry = by_fingerprint.get(feature.fingerprint)
         if entry is None:
             entry = {

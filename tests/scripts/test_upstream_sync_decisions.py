@@ -208,3 +208,13 @@ def test_record_rejects_invalid_decision():
     memory = _mem()
     with pytest.raises(ValueError):
         mod.record_decisions(memory, [_feat(["a.py"], ["feat: a"], "keep-remote")], now="2026-07-13T10:00:00Z")
+
+
+def test_record_invalid_in_batch_is_atomic():
+    memory = _mem()
+    good = _feat(["a.py"], ["feat: a"], "keep-local")
+    bad = _feat(["b.py"], ["feat: b"], "not-a-decision")
+    with pytest.raises(ValueError):
+        mod.record_decisions(memory, [good, bad], now="2026-07-13T10:00:00Z")
+    assert memory["entries"] == []          # nothing partially applied
+    assert memory.get("updated_at") in (None,)  # untouched
