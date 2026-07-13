@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, gate, grid, mail, people, places, rem, tick
+from fam import audit, cal, db as famdb, gate, grid, mail, people, places, plans, rem, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -515,6 +515,77 @@ def cmd_road(args):
               f"source={out['source']} leave_at={out['leave_at_local']}")
     return 0
 
+def _fmt_plan(p):
+    line = f"{p['id']}\t{p['title']}\t[{p['status']}]"
+    if p.get("deadline"):
+        line += f"\tdue={p['deadline']}"
+    if p.get("place"):
+        line += f"\t@{p['place']['name']}"
+    if p.get("person"):
+        line += f"\tfor:{p['person']['name']}"
+    return line
+
+def cmd_plan_add(args):
+    conn = famdb.connect()
+    plan_id = plans.add(conn, args.title, place=args.place, person=args.person,
+                         deadline=args.deadline, notes=args.notes)
+    conn.commit()
+    p = plans.get(conn, plan_id)
+    if args.json:
+        print(json.dumps(p, ensure_ascii=False))
+    else:
+        print(f"added plan: {p['title']} (id={p['id']})")
+    return 0
+
+def cmd_plan_list(args):
+    conn = famdb.connect()
+    rows = plans.list_all(conn) if args.all else plans.list_open(conn)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for p in rows:
+            print(_fmt_plan(p))
+    return 0
+
+def cmd_plan_done(args):
+    conn = famdb.connect()
+    if not plans.mark(conn, args.id, "done"):
+        raise ValueError(f"unknown plan: {args.id}")
+    conn.commit()
+    p = plans.get(conn, args.id)
+    if args.json:
+        print(json.dumps(p, ensure_ascii=False))
+    else:
+        print(f"done plan: {p['title']} (id={p['id']})")
+    return 0
+
+def cmd_plan_drop(args):
+    conn = famdb.connect()
+    if not plans.mark(conn, args.id, "dropped"):
+        raise ValueError(f"unknown plan: {args.id}")
+    conn.commit()
+    p = plans.get(conn, args.id)
+    if args.json:
+        print(json.dumps(p, ensure_ascii=False))
+    else:
+        print(f"dropped plan: {p['title']} (id={p['id']})")
+    return 0
+
+def cmd_plan_attach(args):
+    conn = famdb.connect()
+    if plans.get(conn, args.id) is None:
+        raise ValueError(f"unknown plan: {args.id}")
+    if cal.get(conn, args.event) is None:
+        raise ValueError(f"unknown event: {args.event}")
+    plans.attach(conn, args.id, args.event)
+    conn.commit()
+    p = plans.get(conn, args.id)
+    if args.json:
+        print(json.dumps(p, ensure_ascii=False))
+    else:
+        print(f"attached plan {args.id} -> event {args.event}")
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(prog="fam")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -726,6 +797,40 @@ def build_parser():
     spmt = mail_sub.add_parser("test"); spmt.set_defaults(func=cmd_mail_test)
     spmt.add_argument("id", type=int)
     spmt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    sp = sub.add_parser("plan")
+    plan_sub = sp.add_subparsers(dest="plan_cmd", required=True)
+
+    spa = plan_sub.add_parser("add"); spa.set_defaults(func=cmd_plan_add)
+    spa.add_argument("title")
+    spa.add_argument("--place", help="place name/alias/id")
+    spa.add_argument("--person", help="person name/alias/slug")
+    spa.add_argument("--deadline", help="YYYY-MM-DD local")
+    spa.add_argument("--notes", default="")
+    spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spl = plan_sub.add_parser("list"); spl.set_defaults(func=cmd_plan_list)
+    spl.add_argument("--all", action="store_true",
+                      help="include done/dropped plans (default: open only)")
+    spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spd = plan_sub.add_parser("done"); spd.set_defaults(func=cmd_plan_done)
+    spd.add_argument("id", type=int)
+    spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spdr = plan_sub.add_parser("drop"); spdr.set_defaults(func=cmd_plan_drop)
+    spdr.add_argument("id", type=int)
+    spdr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    spat = plan_sub.add_parser("attach"); spat.set_defaults(func=cmd_plan_attach)
+    spat.add_argument("id", type=int)
+    spat.add_argument("--event", type=int, required=True)
+    spat.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
 
     sp = sub.add_parser("road"); sp.set_defaults(func=cmd_road)

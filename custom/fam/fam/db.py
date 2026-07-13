@@ -82,6 +82,17 @@ CREATE TABLE IF NOT EXISTS reminders (
   created_at TEXT NOT NULL,
   sent_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_reminders_fire ON reminders(status, fire_at_utc);
+CREATE TABLE IF NOT EXISTS plans (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  place_id INTEGER NULL REFERENCES places(id),
+  person_id INTEGER NULL REFERENCES people(id),
+  deadline TEXT NULL,                     -- YYYY-MM-DD local
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','dropped')),
+  attached_event_id INTEGER NULL REFERENCES events(id),
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  done_at TEXT NULL);
 """
 
 def resolve_db_path():
@@ -135,8 +146,13 @@ def init_db(conn):
                    "travel_min_road INTEGER")
     _ensure_column(conn, "events", "road_checked_at",
                    "road_checked_at TEXT")
+    # schema 3b: `plans` table (dela-without-time) is created fresh by
+    # CREATE TABLE IF NOT EXISTS above for both new and pre-3b databases
+    # -- no _ensure_column migration needed (it's a whole new table, not
+    # a new column on an existing one; see db.py:117's docstring for when
+    # that pattern is needed instead).
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','3a')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','3b')")
     conn.execute(
-        "UPDATE meta SET value='3a' WHERE key='schema_version'")
+        "UPDATE meta SET value='3b' WHERE key='schema_version'")
     conn.commit()
