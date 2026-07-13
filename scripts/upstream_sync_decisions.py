@@ -140,3 +140,32 @@ def partition(features: list[Feature], memory: dict, *, security_re=SECURITY_RE)
             remembered.append(dataclasses.replace(
                 feature, decision=match["decision"], source="memory"))
     return {"remembered": remembered, "new": new}
+
+
+def record_decisions(memory: dict, decided_features: list[Feature], *, now: str) -> dict:
+    entries = memory.setdefault("entries", [])
+    by_fingerprint = {entry["fingerprint"]: entry for entry in entries}
+    for feature in decided_features:
+        if feature.decision not in VALID_DECISIONS:
+            raise ValueError(f"invalid decision {feature.decision!r} for {feature.fingerprint}")
+        entry = by_fingerprint.get(feature.fingerprint)
+        if entry is None:
+            entry = {
+                "fingerprint": feature.fingerprint,
+                "files": list(feature.files),
+                "local_subjects": list(feature.subjects),
+                "decision": feature.decision,
+                "created_at": now,
+                "last_applied_at": now,
+                "apply_count": 1,
+            }
+            entries.append(entry)
+            by_fingerprint[feature.fingerprint] = entry
+        else:
+            entry["decision"] = feature.decision
+            if entry.get("last_applied_at") != now:
+                entry["last_applied_at"] = now
+                entry["apply_count"] = int(entry.get("apply_count", 0)) + 1
+    memory["schema"] = MEMORY_SCHEMA
+    memory["updated_at"] = now
+    return memory
