@@ -48,6 +48,11 @@ ROAD_ANCHOR_RECHECK_MIN = 10
 # this single constant, so the two can never drift apart.
 DIGEST_QUESTION = "Если появятся планы или изменения — расскажи или надиктуй, я запишу."
 
+# 3b Task 6: the evening follow-up's fixed closing question -- same
+# role as DIGEST_QUESTION (goes into raw["question"] AND the
+# deterministic human_fallback from this single constant).
+FOLLOWUP_QUESTION = "Как прошло, что удалось из планов?"
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -430,6 +435,8 @@ def reminders(conn, now_utc=None, cfg=None):
             counts[status] += 1
         conn.commit()
 
+    _followup(conn, now_utc=now, cfg=cfg)
+
     audit.log(conn, "tick.reminders", counts)
     conn.commit()
     return counts
@@ -437,6 +444,142 @@ def reminders(conn, now_utc=None, cfg=None):
 
 def _today_almaty(now_utc):
     return _parse_utc(now_utc).astimezone(ALMATY).date().isoformat()
+
+
+def _followup_related_plans(conn, event, open_plans):
+    """Open plans related to this event: attached_event_id == event.id,
+    OR plan.person_id among the event's participants. No geo/TomTom
+    matching here (Denis's decision, 3b Task 6) -- attached + person is
+    enough for an evening recap, and this must never trigger a live
+    routing call. `open_plans` is passed in (plans.list_open(conn))
+    rather than re-fetched per event, since _followup calls this once
+    per outbound event of the day.
+    """
+    participant_ids = {p["id"] for p in event.get("participants", [])}
+    related = []
+    for plan in open_plans:
+        if plan.get("attached_event_id") == event["id"]:
+            related.append(plan)
+        elif participant_ids and plan.get("person_id") in participant_ids:
+            related.append(plan)
+    return related
+
+
+def _followup(conn, now_utc, cfg):
+    """3b Task 6: the evening combined follow-up.
+
+    Fires at most once per Asia/Almaty calendar day, in the first
+    minute-tick at or after cfg["followup_local_time"] (default
+    "20:00"). Dedup is a meta row keyed "followup_sent:<date_local>",
+    checked first and set on EVERY outcome (sent, no_events, no_plans)
+    so a later tick the same day never re-evaluates -- mirrors
+    _digest_already_sent_today's role but keyed in `meta` rather than
+    derived from gate.sent audit rows, since (unlike the digest, which
+    always force=True sends or is a clean no-op) a followup's "nothing
+    to say" outcome never calls gate.deliver at all and so leaves no
+    gate.sent row to key off of.
+
+    Outbound events: today's cal.day() events (already active-only, per
+    cal.day's own contract) with a resolved place AND start_utc already
+    in the past relative to now_utc -- "already left for it", not
+    "about to". Related plans: every open plan attached to one of those
+    events, or matching one of their participants by person_id (see
+    _followup_related_plans) -- deliberately NO geo/enroute matching
+    (no live TomTom call from an unattended tick, Denis's decision).
+
+    No outbound events, or outbound events but zero related plans ->
+    silence: meta is still set (so this is never re-checked today) and
+    tick.followup is still audited, with status "no_events"/"no_plans"
+    respectively -- same "record the null outcome" contract as
+    tick.reminders' all-zero run.
+
+    Otherwise: ONE gate.deliver(kind="followup", force=False) call --
+    an ordinary budget unit, quiet hours respected exactly like any
+    other non-reminder kind (gate.deliver's own gate, not duplicated
+    here). raw carries the event list and the related plans' titles;
+    FOLLOWUP_QUESTION goes into raw["question"] AND is the last line of
+    the deterministic human_fallback (same "one constant, can't drift"
+    pattern as DIGEST_QUESTION). meta is set and tick.followup audited
+    with the gate.deliver outcome ("sent"/"quiet"/"budget"/"error") as
+    status, regardless of whether it was actually delivered -- this tick
+    checked once today and is done; a quiet/budget outcome is not
+    retried by a later tick the same day (mirrors digest's own
+    force=True/once-a-day contract, just without the force).
+
+    Returns the status string ("no_events", "no_plans", or gate.deliver's
+    outcome), mainly for tests; reminders() itself ignores the return
+    value -- there is no separate followup bucket in tick.reminders'
+    counts dict, this is audited under its own tick.followup kind
+    instead.
+    """
+    now_dt = _parse_utc(now_utc)
+    local_dt = now_dt.astimezone(ALMATY)
+    date_local = local_dt.date().isoformat()
+    meta_key = f"followup_sent:{date_local}"
+
+    already = conn.execute(
+        "SELECT value FROM meta WHERE key=?", (meta_key,)
+    ).fetchone()
+    if already is not None:
+        return None
+
+    followup_local_time = cfg.get("followup_local_time", "20:00")
+    hh, mm = (int(x) for x in followup_local_time.split(":"))
+    threshold_dt = local_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if local_dt < threshold_dt:
+        return None
+
+    events = cal.day(conn, date_local)
+    outbound_events = [
+        e for e in events
+        if e.get("place") is not None and _parse_utc(e["start_utc"]) < now_dt
+    ]
+
+    related_plans = []
+    if outbound_events:
+        open_plans = plans.list_open(conn)
+        seen_ids = set()
+        for event in outbound_events:
+            for plan in _followup_related_plans(conn, event, open_plans):
+                if plan["id"] not in seen_ids:
+                    seen_ids.add(plan["id"])
+                    related_plans.append(plan)
+
+    if not outbound_events:
+        status = "no_events"
+    elif not related_plans:
+        status = "no_plans"
+    else:
+        raw = {
+            "kind": "followup",
+            "date_local": date_local,
+            "events": [
+                {"event_id": e["id"], "title": e["title"],
+                 "start_local": e["start_local"]}
+                for e in outbound_events
+            ],
+            "plans": [{"plan_id": p["id"], "title": p["title"]}
+                      for p in related_plans],
+            "question": FOLLOWUP_QUESTION,
+        }
+        lines = ["Открытые планы:"]
+        lines.extend(p["title"] for p in related_plans)
+        lines.append(FOLLOWUP_QUESTION)
+        human_fallback = "\n".join(lines)
+
+        status = gate.deliver(conn, "followup", raw, human_fallback, cfg,
+                               now_utc=now_utc)
+
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+        (meta_key, now_utc),
+    )
+    audit.log(conn, "tick.followup",
+              {"date_local": date_local, "status": status,
+               "n_events": len(outbound_events),
+               "n_plans": len(related_plans)})
+    conn.commit()
+    return status
 
 
 def _digest_already_sent_today(conn, _real_now=None):

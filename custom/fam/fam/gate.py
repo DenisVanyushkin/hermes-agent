@@ -50,6 +50,10 @@ CONFIG_DEFAULTS = {
     # of today, inclusive -- default chosen to match reminder lead-time
     # scale (days, not hours: plans are deadline-only, no fixed slot).
     "plan_deadline_horizon_days": 3,
+    # 3b Task 6: evening combined follow-up (tick.py reminders()) fires
+    # in the first minute-tick at/after this Asia/Almaty local time (and
+    # before quiet hours) on a day with outbound events -- HH:MM.
+    "followup_local_time": "20:00",
 }
 
 GATE_STYLE_INSTRUCTION = (

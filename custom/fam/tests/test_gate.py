@@ -20,6 +20,7 @@ CFG = {
     "email_to": "hermes@vanyushk.in",
     "enroute_max_items": 2,
     "plan_deadline_horizon_days": 3,
+    "followup_local_time": "20:00",
 }
 
 
