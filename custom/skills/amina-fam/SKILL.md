@@ -312,5 +312,3 @@ The morning digest always closes with the same question: "Если появят�
 
 - `fam --json init` returns `{"ok": true, "db": ...}` — confirms the shared
   database is reachable before doing anything else if you're unsure.
-
-<!-- skill-sync-live-test-marker 1783910904 -->
