@@ -387,16 +387,15 @@ conversation.
 - **"выпила"/"приняла" (this dose taken)** and **"пропускаю"/"перестань"
   (skip this dose)** both need the pending intake_id first. The reminder
   that fired is NOT in your session context (same out-of-band constraint
-  as Reminder Reactions above) — resolve it fresh, never guess:
-  1. `fam log --kind gate.sent --grep '"name": "X"' --last-hours 8
-     --json` — the most recent row whose `payload.raw.name` matches the
-     medication the user named; note its `ts_utc`.
-  2. `fam log --kind tick.med --last-hours 8 --json` — the row sharing
-     that same `ts_utc` (its gate.sent twin, logged moments later in the
-     same tick) carries `payload.intake_id` — that's the id to use.
-  3. More than one plausible candidate (several doses of X still
-     pending) or none found → ask which dose, or say nothing's pending
-     for X — never guess an id.
+  as Reminder Reactions above) — resolve it fresh, never guess, same
+  match-then-act pattern as Shopping Verbs' "Marking bought" below:
+  1. `fam med list --pending --json` — every dose currently awaiting an
+     ack.
+  2. Match by medication name (and time, if the user gave one) against
+     that list.
+  3. Exactly one match → use its `intake_id`. Several plausible matches,
+     or none → ask which dose they mean, or say nothing's pending for X
+     — never guess an id.
   - "выпила"/"приняла" → `fam med taken <intake_id>` (singular `med`,
     not `meds` — `meds` manages med definitions, `med` acks one dose).
     If the result has `"restock": true`, mention "пора купить X" in your
