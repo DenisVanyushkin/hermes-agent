@@ -86,6 +86,35 @@ def list(conn, include_disabled=False):
     return [_row_to_dict(r) for r in rows]
 
 
+def list_pending(conn):
+    """List pending med_intakes (phase 5 T8 review round 1). Replaces
+    the amina-fam skill's old audit-log join (gate.sent "name" +
+    tick.med intake_id, matched by timestamp) for resolving "what dose
+    is Amina being asked about" -- that join breaks two ways: (1) the
+    digest logs a gate.sent row for EVERY today's dose, not only the
+    ones actually delivered as a tick.med reminder, so a grep can land
+    on the digest's row (no tick.med twin) and wrongly conclude
+    "nothing pending"; (2) tick.med carries no name, so two doses due
+    at the same timestamp are indistinguishable. This is the single,
+    unambiguous source of truth instead: JOIN med_intakes to its med
+    for the name, filtered to status='pending', ordered by
+    plan_ts_utc (earliest-due first, matching what a "выпила"/"скипнула"
+    reaction almost always means).
+
+    Returns a list of dicts: intake_id, med_id, name, plan_ts_utc,
+    status (always "pending" -- included so a caller need not assume
+    it, same as meds.take()/skip()'s result dicts always echoing
+    status back).
+    """
+    rows = conn.execute(
+        "SELECT m.id AS intake_id, m.med_id AS med_id, d.name AS name, "
+        "m.plan_ts_utc AS plan_ts_utc, m.status AS status "
+        "FROM med_intakes m JOIN meds d ON d.id = m.med_id "
+        "WHERE m.status='pending' ORDER BY m.plan_ts_utc"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 _EDIT_FIELDS = {"name", "dose", "times", "remaining", "threshold", "enabled"}
 
 

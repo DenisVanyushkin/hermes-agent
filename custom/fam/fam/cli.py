@@ -714,6 +714,30 @@ def cmd_med_taken(args):
         print(line)
     return 0
 
+def _fmt_pending_intake(r):
+    return f"{r['intake_id']}\t{r['name']}\t{r['plan_ts_utc']}\t[{r['status']}]"
+
+def cmd_med_list(args):
+    """`fam med list [--pending]` -- list pending med_intakes (phase 5
+    T8 review round 1). --pending is accepted for symmetry with the
+    skill's verb-matching call sites (and to be self-documenting) but
+    isn't otherwise load-bearing: meds.list_pending() only ever
+    returns status='pending' rows, since no other status is worth
+    listing here (taken/skipped are already resolved acks; missed is
+    tick.meds_gen's own bookkeeping) -- Denis's call, 5 T8 review.
+    This replaces the amina-fam skill's old audit-log join for
+    resolving "what dose is this ack about" (see meds.list_pending's
+    docstring for why that join was unreliable).
+    """
+    conn = famdb.connect()
+    rows = meds.list_pending(conn)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for r in rows:
+            print(_fmt_pending_intake(r))
+    return 0
+
 def cmd_med_skip(args):
     """`fam med skip <intake_id>` -- ack a scheduled dose as skipped,
     this dose only (phase 5 Task 5): remaining is left untouched and
@@ -1081,6 +1105,13 @@ def build_parser():
     sps = med_sub.add_parser("skip"); sps.set_defaults(func=cmd_med_skip)
     sps.add_argument("id", type=int, help="med_intakes row id")
     sps.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spl = med_sub.add_parser("list"); spl.set_defaults(func=cmd_med_list)
+    spl.add_argument("--pending", action="store_true",
+                      help="pending intakes only (default -- no other "
+                           "status is worth listing here)")
+    spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
     sp = sub.add_parser("shop")
