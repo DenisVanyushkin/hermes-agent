@@ -136,6 +136,17 @@ CREATE TABLE IF NOT EXISTS shopping (
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done')),
   created_at TEXT NOT NULL,
   done_at TEXT);
+CREATE TABLE IF NOT EXISTS car_metrics (
+  id INTEGER PRIMARY KEY,
+  ts_utc TEXT NOT NULL,
+  fuel_pct REAL, fuel_liters REAL,
+  odometer_km REAL,
+  engine_on INTEGER, ignition_on INTEGER,
+  cabin_temp_c REAL, coolant_temp_c REAL,
+  battery_v REAL, gsm_online INTEGER,
+  gps_lat REAL, gps_lon REAL,
+  raw_json TEXT);
+CREATE INDEX IF NOT EXISTS idx_car_metrics_ts ON car_metrics(ts_utc);
 """
 
 def resolve_db_path():
@@ -208,8 +219,10 @@ def init_db(conn):
     # exercised elsewhere in this codebase); validated at the
     # places.update() layer instead.
     _ensure_column(conn, "places", "category", "category TEXT")
+    # schema 6: car_metrics (phase 4) -- whole new table, CREATE TABLE IF
+    # NOT EXISTS covers fresh+existing, no _ensure_column needed.
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','5')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','6')")
     conn.execute(
-        "UPDATE meta SET value='5' WHERE key='schema_version'")
+        "UPDATE meta SET value='6' WHERE key='schema_version'")
     conn.commit()

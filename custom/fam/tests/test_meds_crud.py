@@ -125,10 +125,10 @@ def test_remove_unknown_returns_false(db):
     assert meds.remove(db, 9999) is False
 
 
-def test_schema_version_is_5(db):
+def test_schema_version_is_6(db):
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "5"
+    ).fetchone()["value"] == "6"
 
 
 def test_shopping_table_exists(db):

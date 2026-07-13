@@ -59,14 +59,14 @@ def test_backup_rotation_keeps_newest(tmp_path):
 
 
 def test_verify_backup_passes_on_real_db(db, tmp_path):
-    # `db` is an initialised assistant.db (schema_version=5); back it up and verify
+    # `db` is an initialised assistant.db (schema_version=6); back it up and verify
     src = maint.backup_db(Path(db.execute("PRAGMA database_list").fetchone()[2]),
                           tmp_path / "b", keep=7,
                           now=datetime(2026, 7, 13, tzinfo=timezone.utc))
     ok, detail = maint.verify_backup(src)
     assert ok is True
     assert detail["integrity"] == "ok"
-    assert detail["schema_version"] == "5"
+    assert detail["schema_version"] == "6"
 
 def test_verify_backup_fails_on_corrupt_file(tmp_path):
     bad = tmp_path / "corrupt.db"
