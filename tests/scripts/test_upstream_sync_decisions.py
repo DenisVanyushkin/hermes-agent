@@ -240,6 +240,9 @@ def test_cli_partition_reports_new_and_remembered(tmp_path, capsys):
     assert [r["files"] for r in out["remembered"]] == [["a.py"]]
     assert out["remembered"][0]["decision"] == "keep-local"
     assert [n["files"] for n in out["new"]] == [["b.py"]]
+    assert out["remembered"][0]["source"] == "memory"
+    assert "decision" not in out["new"][0]
+    assert "source" not in out["new"][0]
 
 
 def test_cli_record_persists_memory(tmp_path, capsys):
@@ -257,6 +260,28 @@ def test_cli_record_persists_memory(tmp_path, capsys):
     saved = mod.load_memory(mem)
     assert saved["entries"][0]["local_subjects"] == ["feat: a"]
     assert saved["updated_at"] == "2026-07-13T10:00:00Z"
+
+
+def test_features_from_pending_uses_local_subjects_fallback(tmp_path):
+    pending = {"schema": "upstream-sync-pending/v1", "features": [
+        {"id": 1, "name": "router", "files": ["a.py"],
+         "local_subjects": ["feat: a"], "decision": "keep-local"}
+    ]}
+    pj = tmp_path / "p.json"; pj.write_text(json.dumps(pending))
+    mem = tmp_path / "m.json"
+    mod.main(["record", "--pending", str(pj), "--memory", str(mem), "--now", "2026-07-13T10:00:00Z"])
+    saved = mod.load_memory(mem)
+    assert saved["entries"][0]["local_subjects"] == ["feat: a"]
+    # fingerprint MUST equal what partition/group_features produces for the same feature
+    assert saved["entries"][0]["fingerprint"] == mod.feature_fingerprint(["a.py"], ["feat: a"])
+
+
+def test_partition_ignores_entry_with_invalid_decision():
+    memory = _mem(_entry(["a.py"], ["feat: a"], "bogus-decision"))
+    feats = mod.group_features([_conflict("a.py", ["feat: a"])])
+    result = mod.partition(feats, memory)
+    assert not result["remembered"]
+    assert len(result["new"]) == 1
 
 
 def test_group_skips_merge_tree_noise_lines():
