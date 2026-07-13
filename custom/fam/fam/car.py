@@ -106,3 +106,35 @@ def normalize(device_data, now=None):
         "gps_lon": pos.get("x"),
         "raw_json": json.dumps(d, ensure_ascii=False),
     }
+
+
+def bootstrap(auth, app_id, app_secret, login, password,
+              prompt_sms, prompt_captcha):
+    """Full StarLine login chain -> token-store dict. Handles SMS
+    (state==2) and captcha (state==0 + captchaSid). Password stays in
+    memory only. Returns dict WITHOUT slnet fields when the caller will
+    persist; ensure_slnet() fills slnet on first poll. Here we also fetch
+    user_id/slnet once so the store is immediately usable."""
+    code = auth.get_app_code(app_id, app_secret)
+    app_token = auth.get_app_token(app_id, app_secret, code)
+    sms_code = captcha_sid = captcha_code = None
+    for _ in range(3):
+        state, desc = auth.get_slid_user_token(
+            app_token, login, password, sms_code=sms_code,
+            captcha_sid=captcha_sid, captcha_code=captcha_code)
+        if state == 1:
+            slid = desc.get("user_token") or desc.get("slid_token")
+            slnet, expires, uid = auth.get_user_id(slid)
+            return {"app_id": app_id, "app_token": app_token,
+                    "slid_token": slid, "user_id": uid,
+                    "slnet_token": slnet, "slnet_expires": expires,
+                    "device_id": None}
+        if state == 2:
+            sms_code = prompt_sms()
+        elif state == 0 and "captchaSid" in desc:
+            captcha_sid = desc["captchaSid"]
+            _, captcha_code = prompt_captcha(desc.get("captchaImg", ""))
+            captcha_sid = desc["captchaSid"]
+        else:
+            raise RuntimeError(f"StarLine login failed: state={state}")
+    raise RuntimeError("StarLine login: too many challenge retries")

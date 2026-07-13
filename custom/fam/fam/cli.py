@@ -128,6 +128,27 @@ def cmd_places_list(args):
             print(f"{r['id']}\t{r['name']}{addr_part}")
     return 0
 
+def _prompt_captcha(url):
+    print(f"captcha image: {url}")
+    return (None, input("captcha text: ").strip())
+
+def cmd_car_auth_init(args):
+    import getpass
+    from fam import car
+    from starline import StarlineAuth
+    app_id = input("app_id [15526]: ").strip() or "15526"
+    app_secret = getpass.getpass("app_secret: ")
+    login = input("SLID login: ").strip()
+    password = getpass.getpass("SLID password: ")
+    store = car.bootstrap(
+        StarlineAuth(), app_id, app_secret, login, password,
+        prompt_sms=lambda: input("SMS code: ").strip(),
+        prompt_captcha=_prompt_captcha)
+    client = car.StarlineClient()
+    client.save_store(store)
+    print("token stored. Run `fam car poll` to confirm and set device_id.")
+    return 0
+
 def _fmt_event(e):
     line = f"{e['id']}\t{e['start_local']}\t{e['title']}\t[{e['status']}]"
     if e.get("place"):
@@ -906,6 +927,11 @@ def build_parser():
     spl = places_sub.add_parser("list"); spl.set_defaults(func=cmd_places_list)
     spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
+
+    sp = sub.add_parser("car")
+    car_sub = sp.add_subparsers(dest="car_cmd", required=True)
+
+    spa = car_sub.add_parser("auth-init"); spa.set_defaults(func=cmd_car_auth_init)
 
     sp = sub.add_parser("cal")
     cal_sub = sp.add_subparsers(dest="cal_cmd", required=True)
