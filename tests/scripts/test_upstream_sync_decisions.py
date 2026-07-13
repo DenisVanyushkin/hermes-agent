@@ -146,3 +146,25 @@ def test_partition_empty_subjects_is_new():
     feats = mod.group_features([{"file": "a.py", "local_commits": [], "upstream_commits": []}])
     result = mod.partition(feats, memory)
     assert not result["remembered"] and len(result["new"]) == 1
+
+
+def test_partition_ambiguous_conflicting_decisions_is_new():
+    memory = _mem(
+        _entry(["a.py"], ["feat: a"], "keep-local"),
+        _entry(["a.py"], ["feat: a"], "take-upstream"),
+    )
+    feats = mod.group_features([_conflict("a.py", ["feat: a"])])
+    result = mod.partition(feats, memory)
+    assert not result["remembered"]
+    assert len(result["new"]) == 1
+
+
+def test_partition_ambiguous_same_decision_is_remembered():
+    memory = _mem(
+        _entry(["a.py", "b.py"], ["feat: a"], "keep-local"),
+        _entry(["a.py", "c.py"], ["feat: a"], "keep-local"),
+    )
+    feats = mod.group_features([_conflict("a.py", ["feat: a"])])
+    result = mod.partition(feats, memory)
+    assert len(result["remembered"]) == 1
+    assert result["remembered"][0].decision == "keep-local"
