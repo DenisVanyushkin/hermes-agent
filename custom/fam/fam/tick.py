@@ -25,7 +25,7 @@ dup-guard skip), so it owns a single commit at the very end rather than
 one per item.
 """
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fam import audit, cal, gate, plans, rem, road, weather
@@ -491,16 +491,82 @@ def _fallback_event_line(event):
     return f"{local_time} {event['title']}"
 
 
-def _build_digest_fallback(date_local, wx, events):
+def _burning_plans(conn, cfg, date_local):
+    """Open, not-yet-attached plans whose deadline is within
+    cfg["plan_deadline_horizon_days"] (default 3) days of date_local,
+    inclusive -- 3b Task 5. attached_event_id is already set means the
+    plan has a calendar slot and no longer needs a digest nudge (mirrors
+    plans.match_enroute's own "not yet attached" filter). A deadline in
+    the past (relative to date_local) is still included, marked
+    "overdue": True rather than silently dropped -- a missed deadline is
+    exactly the kind of thing a digest should surface, not hide.
+
+    Returns a list of {"plan_id", "title", "deadline", "overdue"} dicts,
+    ordered like plans.list_open() (deadline ascending, NULLs -- already
+    excluded here -- last).
+    """
+    horizon_days = cfg.get("plan_deadline_horizon_days", 3)
+    today = date.fromisoformat(date_local)
+    cutoff = today + timedelta(days=horizon_days)
+
+    burning = []
+    for plan in plans.list_open(conn):
+        if plan.get("attached_event_id") is not None:
+            continue
+        deadline = plan.get("deadline")
+        if deadline is None:
+            continue
+        deadline_date = date.fromisoformat(deadline)
+        if deadline_date > cutoff:
+            continue
+        burning.append({
+            "plan_id": plan["id"],
+            "title": plan["title"],
+            "deadline": deadline,
+            "overdue": deadline_date < today,
+        })
+    return burning
+
+
+def _busy_two_days(conn, date_local):
+    """Compact time+title list of today's and tomorrow's active events
+    (Asia/Almaty calendar days) -- 3b Task 5. Feeds the LLM rewrite raw
+    material to propose a free slot for a burning plan in the digest
+    text itself (Denis's decision: the MODEL formulates the slot, this
+    function only supplies the busy facts it reasons over). Never
+    appears in the deterministic fallback -- see _build_digest_fallback.
+    """
+    today = date.fromisoformat(date_local)
+    tomorrow_local = (today + timedelta(days=1)).isoformat()
+
+    busy = []
+    for e in cal.day(conn, date_local) + cal.day(conn, tomorrow_local):
+        busy.append({"start_local": e["start_local"], "title": e["title"]})
+    return busy
+
+
+def _fallback_plan_line(plan):
+    line = f"{plan['title']} — до {plan['deadline']}"
+    if plan["overdue"]:
+        line += " (просрочено)"
+    return line
+
+
+def _build_digest_fallback(date_local, wx, events, burning_plans=None):
     """Deterministic fallback text (no LLM involved) -- used verbatim
     when gate.deliver's rewrite fails, and as the source raw material the
     rewrite is asked to restyle otherwise. Sections: date header, weather
     line (omitted entirely when wx is None), event list (or "no events"),
-    and the fixed closing question. Comfortably under the 900-char digest
-    ceiling for a normal day's event count; gate.deliver's own length
-    ceiling (shorten-retry, then send-as-is with long=True) is the
+    burning-plans list (omitted entirely when empty -- 3b Task 5), and
+    the fixed closing question. Deliberately does NOT include a busy-
+    today/tomorrow section or propose any slot: slot suggestion is the
+    LLM rewrite's job (raw["busy_two_days"] feeds it), this fallback only
+    ever states plain facts. Comfortably under the 900-char digest
+    ceiling for a normal day's event/plan count; gate.deliver's own
+    length ceiling (shorten-retry, then send-as-is with long=True) is the
     backstop for the pathological case, not this function.
     """
+    burning_plans = burning_plans or []
     lines = [f"Доброе утро! Сегодня {date_local}."]
     weather_line = _fallback_weather_line(wx)
     if weather_line:
@@ -510,6 +576,9 @@ def _build_digest_fallback(date_local, wx, events):
         lines.extend(_fallback_event_line(e) for e in events)
     else:
         lines.append("Событий нет.")
+    if burning_plans:
+        lines.append("Горящие планы:")
+        lines.extend(_fallback_plan_line(p) for p in burning_plans)
     lines.append(DIGEST_QUESTION)
     return "\n".join(lines)
 
@@ -583,14 +652,20 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
             item["place_name"] = e["place"]["name"]
         event_list.append(item)
 
+    burning_plans = _burning_plans(conn, cfg, date_local)
+    busy_two_days = _busy_two_days(conn, date_local)
+
     raw = {
         "kind": "digest",
         "date_local": date_local,
         "weather": wx,
         "events": event_list,
+        "burning_plans": burning_plans,
+        "busy_two_days": busy_two_days,
         "question": DIGEST_QUESTION,
     }
-    human_fallback = _build_digest_fallback(date_local, wx, event_list)
+    human_fallback = _build_digest_fallback(date_local, wx, event_list,
+                                             burning_plans)
 
     status = gate.deliver(conn, "digest", raw, human_fallback, cfg,
                            force=True, now_utc=now)

@@ -45,6 +45,11 @@ CONFIG_DEFAULTS = {
     # leave/prepare reminder's raw text (tick.py's reminders()) --
     # laconicism, not a hard business rule.
     "enroute_max_items": 2,
+    # 3b Task 5: an open plan's deadline counts as "burning" for the
+    # digest (tick.py's _burning_plans) once it's within this many days
+    # of today, inclusive -- default chosen to match reminder lead-time
+    # scale (days, not hours: plans are deadline-only, no fixed slot).
+    "plan_deadline_horizon_days": 3,
 }
 
 GATE_STYLE_INSTRUCTION = (

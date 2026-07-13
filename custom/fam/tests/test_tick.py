@@ -863,6 +863,9 @@ def test_digest_raw_shape_with_weather_and_event(db, fake_deliver):
         "weather": WX,
         "events": [{"event_id": e["id"], "title": "Встреча",
                      "start_local": e["start_local"]}],
+        "burning_plans": [],
+        "busy_two_days": [{"start_local": e["start_local"],
+                            "title": "Встреча"}],
         "question": tick.DIGEST_QUESTION,
     }
 

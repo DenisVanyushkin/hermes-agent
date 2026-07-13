@@ -19,6 +19,7 @@ CFG = {
     "email_from": "germes@vanyushk.in",
     "email_to": "hermes@vanyushk.in",
     "enroute_max_items": 2,
+    "plan_deadline_horizon_days": 3,
 }
 
 
