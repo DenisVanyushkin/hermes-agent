@@ -1,7 +1,7 @@
 ---
 name: upstream-sync
 description: Safely update local/customizations from upstream NousResearch/hermes-agent - triage the preflight report, auto-rebase clean updates, or negotiate per-feature conflict resolution with the operator over Slack.
-version: 0.3.0
+version: 0.3.1
 metadata:
   hermes:
     tags: [devops, git, maintenance]
@@ -112,8 +112,11 @@ Do NOT modify the repo yet. First consult decision memory, then branch.
    `python3 /workspace/live-hermes/scripts/upstream_sync_decisions.py partition \
       --preflight <(printf '%s' "$PREFLIGHT_JSON") \
       --memory /root/.hermes/state/upstream-sync/decision-memory.json`
-   (Write the preflight JSON block to a temp file if process substitution is
-   awkward.) The output has `remembered` (auto-decided from memory) and `new`
+   (If process substitution is awkward, write the preflight JSON to a scratch
+   file UNDER `/tmp` — e.g. `/tmp/upstream-sync-preflight.json` — and likewise
+   keep ANY helper script or intermediate output you create under `/tmp`,
+   never inside the repo tree `/workspace/live-hermes`: a stray file in the
+   repo dirties the git baseline and blocks later pipelines.) The output has `remembered` (auto-decided from memory) and `new`
    (must ask the operator; includes anything on a security/auth path).
 
    > **pending.json feature schema (required for memory to work).** Every feature
