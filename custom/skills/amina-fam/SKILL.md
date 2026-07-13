@@ -319,14 +319,28 @@ protocol as rule 3 applies if `--place` is given and doesn't resolve.
 - **Accepting "по пути"** — the agent may mention in a reminder that an
   open plan is on the way to an event ("по пути можно заехать за..."); a
   plain agreement in reply ("да, заеду", "давай", "ок") → `fam plan
-  attach <id> --event <event_id>`, using the plan id and event id from
-  that reminder's own context (they're already resolved there — don't
-  re-look them up unless the reminder text doesn't name them, in which
-  case fall back to `fam plan list` and the event lookup used in
-  Reminder Reactions above). `leave_at` is recomputed automatically by
-  the existing road logic — don't touch `--start` or travel time
-  yourself. Confirm briefly, no need to restate the recomputed time
-  unless the user asks.
+  attach <id> --event <event_id>`. The reminder text names the plan(s)
+  by **title only, no ids** — and the reminder itself is NOT in your
+  session context (same as Reminder Reactions above: a background tick
+  sent it, you cannot recall it). Resolve both ids fresh, every time:
+  1. Plan id — `fam plan list`, match by title the same way as
+     Reporting a plan done above: exactly one match → use its id;
+     several or none → ask which plan they mean.
+  2. Event id — the same lookup as Reminder Reactions' "Finding the
+     event_id for cancel" (`fam log --kind gate.sent ...`, then match
+     against the day's events); if only one event plausibly fits, use
+     it directly.
+  `leave_at` is recomputed automatically by the existing road logic —
+  don't touch `--start` or travel time yourself. Confirm briefly, no
+  need to restate the recomputed time unless the user asks.
+
+  Example: reminder said "По пути: забрать куртку из химчистки" for the
+  дантист event; user replies "да, заеду" →
+  `fam plan list` → one open plan titled "забрать куртку из химчистки" →
+  id 7; `fam log --kind gate.sent --last-hours 6 --json` → that
+  reminder's `raw.event_id` → 42 →
+  `fam plan attach 7 --event 42` → "Записал, куртку заедете забрать по
+  пути к стоматологу."
 
 ## Digest Replies
 
