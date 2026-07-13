@@ -231,3 +231,9 @@ scripts/out/
 
 # controlled pipeline workspace report artifact (durable copy lives in ~/.hermes/controlled-runs/)
 controlled_execution_report.json
+
+# upstream-sync scratch artifacts — belt-and-suspenders; the skill writes these to
+# /tmp, but guard against a stray landing in the repo root and dirtying the baseline.
+/preflight.json
+/partition_result.json
+/gen_pending.py
