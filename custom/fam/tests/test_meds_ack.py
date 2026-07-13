@@ -154,6 +154,40 @@ def test_take_unknown_intake_raises(db):
                        ).fetchone()[0] == 0
 
 
+def test_take_on_already_taken_raises_no_double_decrement(db):
+    """Review finding (5 T5): take() must reject a retry/duplicate ack
+    on a dose that is already status='taken' -- otherwise remaining
+    decrements a second time (double stock deduction), taken_ts_utc is
+    overwritten, and a second meds.take audit row is written. A retried
+    skill call or a duplicate "выпила" must be a no-op error, not a
+    second write.
+    """
+    med_id = meds.add(db, "Магний", ["08:00"], remaining=10, threshold=2)
+    db.commit()
+    intake_id = _insert_intake(db, med_id)
+
+    first = meds.take(db, intake_id, now_utc="2026-07-20T03:10:00+00:00")
+    db.commit()
+    assert first["remaining"] == 9
+
+    with pytest.raises(ValueError):
+        meds.take(db, intake_id, now_utc="2026-07-20T03:20:00+00:00")
+    db.commit()
+
+    m = meds.get(db, med_id)
+    assert m["remaining"] == 9  # not decremented a second time
+
+    row = db.execute(
+        "SELECT taken_ts_utc FROM med_intakes WHERE id=?", (intake_id,)
+    ).fetchone()
+    assert row["taken_ts_utc"] == "2026-07-20T03:10:00+00:00"  # not overwritten
+
+    count = db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='meds.take'"
+    ).fetchone()[0]
+    assert count == 1  # no second audit entry
+
+
 def test_take_audits(db):
     med_id = meds.add(db, "Магний", ["08:00"], remaining=5, threshold=1)
     db.commit()
@@ -225,6 +259,34 @@ def test_skip_unknown_intake_raises(db):
         meds.skip(db, 9999)
     assert db.execute("SELECT COUNT(*) FROM audit_log WHERE kind='meds.skip'"
                        ).fetchone()[0] == 0
+
+
+def test_skip_on_already_taken_raises_status_unchanged(db):
+    """Review finding (5 T5): skip() must reject a dose that is already
+    status='taken' -- otherwise the status rolls back to 'skipped' even
+    though remaining was already decremented, a rescan/resync
+    desync between med_intakes.status and the actual stock deduction.
+    """
+    med_id = meds.add(db, "Магний", ["08:00"], remaining=10, threshold=2)
+    db.commit()
+    intake_id = _insert_intake(db, med_id)
+
+    meds.take(db, intake_id)
+    db.commit()
+
+    with pytest.raises(ValueError):
+        meds.skip(db, intake_id)
+    db.commit()
+
+    row = db.execute(
+        "SELECT status FROM med_intakes WHERE id=?", (intake_id,)
+    ).fetchone()
+    assert row["status"] == "taken"  # not rolled back to skipped
+
+    count = db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='meds.skip'"
+    ).fetchone()[0]
+    assert count == 0  # no skip audit for the rejected call
 
 
 def test_skip_audits(db):

@@ -170,13 +170,20 @@ def take(conn, intake_id, now_utc=None):
     same "raise, don't fail silently" contract unknown place/person/
     plan refs already use elsewhere in fam/*.py (Denis's "не падай
     молча" instruction for T5: an exception here is the CLI-visible,
-    exit-2 path via cli.main's except ValueError).
+    exit-2 path via cli.main's except ValueError). Also raises
+    ValueError, before any write, when the row is not status='pending'
+    -- a retried skill call or a duplicate "выпила" on an
+    already-taken (or already-skipped) dose must not double-decrement
+    remaining, overwrite taken_ts_utc, or write a second meds.take
+    audit row (review finding, 5 T5 round 1).
     """
     row = conn.execute(
         "SELECT * FROM med_intakes WHERE id=?", (intake_id,)
     ).fetchone()
     if row is None:
         raise ValueError(f"unknown intake: {intake_id}")
+    if row["status"] != "pending":
+        raise ValueError(f"intake {intake_id} already {row['status']}")
 
     now = now_utc or _now()
     med_id = row["med_id"]
@@ -228,13 +235,18 @@ def skip(conn, intake_id):
     audit meds.skip: {intake_id, med_id}.
 
     Raises ValueError on an unknown intake_id, before any write --
-    same contract as take().
+    same contract as take(). Also raises ValueError, before any write,
+    when the row is not status='pending' -- an already-taken dose must
+    not roll back to 'skipped' out from under an already-decremented
+    remaining (review finding, 5 T5 round 1).
     """
     row = conn.execute(
         "SELECT * FROM med_intakes WHERE id=?", (intake_id,)
     ).fetchone()
     if row is None:
         raise ValueError(f"unknown intake: {intake_id}")
+    if row["status"] != "pending":
+        raise ValueError(f"intake {intake_id} already {row['status']}")
 
     conn.execute(
         "UPDATE med_intakes SET status='skipped', series_next_utc=NULL "
