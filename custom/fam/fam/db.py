@@ -93,6 +93,36 @@ CREATE TABLE IF NOT EXISTS plans (
   notes TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   done_at TEXT NULL);
+CREATE TABLE IF NOT EXISTS meds (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  dose TEXT NOT NULL DEFAULT '',
+  times TEXT NOT NULL,                    -- JSON list of "HH:MM" local
+  remaining INTEGER,
+  threshold INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS med_intakes (
+  id INTEGER PRIMARY KEY,
+  med_id INTEGER NOT NULL REFERENCES meds(id) ON DELETE CASCADE,
+  plan_ts_utc TEXT NOT NULL,
+  taken_ts_utc TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','taken','skipped','missed')),
+  series_next_utc TEXT,
+  created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_med_intakes_status_plan ON med_intakes(status, plan_ts_utc);
+CREATE INDEX IF NOT EXISTS idx_med_intakes_status_next ON med_intakes(status, series_next_utc);
+CREATE TABLE IF NOT EXISTS shopping (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  qty TEXT NOT NULL DEFAULT '',
+  added_by TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','meds')),
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done')),
+  created_at TEXT NOT NULL,
+  done_at TEXT);
 """
 
 def resolve_db_path():
@@ -151,8 +181,12 @@ def init_db(conn):
     # -- no _ensure_column migration needed (it's a whole new table, not
     # a new column on an existing one; see db.py:117's docstring for when
     # that pattern is needed instead).
+    # schema 5: `meds`/`med_intakes`/`shopping` (phase 5, meds+shopping)
+    # are whole new tables, same as `plans` in 3b above -- CREATE TABLE
+    # IF NOT EXISTS covers both fresh and pre-5 databases, no
+    # _ensure_column migration needed.
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','3b')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','5')")
     conn.execute(
-        "UPDATE meta SET value='3b' WHERE key='schema_version'")
+        "UPDATE meta SET value='5' WHERE key='schema_version'")
     conn.commit()

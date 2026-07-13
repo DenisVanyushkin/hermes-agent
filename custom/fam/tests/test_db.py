@@ -160,7 +160,7 @@ def test_resolve_db_path_fam_db_parent_missing(monkeypatch):
 def test_fresh_db_schema_version_current(db):
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "3b"
+    ).fetchone()["value"] == "5"
 
 def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     from fam import db as famdb
@@ -177,7 +177,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "3b"
+    ).fetchone()["value"] == "5"
 
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -198,7 +198,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "3b"
+    ).fetchone()["value"] == "5"
     conn.close()
 
 def test_places_travel_min_default_zero(db):
@@ -290,7 +290,7 @@ def test_legacy_2b_db_gets_kind_column(legacy_2b_conn):
     assert "kind" in cols
     assert legacy_2b_conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "3b"
+    ).fetchone()["value"] == "5"
 
 # ---- schema 3a migration: events.travel_min_road, events.road_checked_at ----
 
@@ -341,7 +341,7 @@ CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
     assert "road_checked_at" in cols
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "3b"
+    ).fetchone()["value"] == "5"
     conn.close()
 
 def test_events_travel_min_road_nullable(db):

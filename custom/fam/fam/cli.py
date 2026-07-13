@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, gate, grid, mail, people, places, plans, rem, tick
+from fam import audit, cal, db as famdb, gate, grid, mail, meds, people, places, plans, rem, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -603,6 +603,80 @@ def cmd_plan_attach(args):
         print(f"attached plan {args.id} -> event {args.event}")
     return 0
 
+def _fmt_med(m):
+    times_str = ",".join(m["times"])
+    line = f"{m['id']}\t{m['name']}\t{times_str}"
+    if m.get("dose"):
+        line += f"\tdose={m['dose']}"
+    if m.get("remaining") is not None:
+        line += f"\tremaining={m['remaining']}"
+    line += f"\tthreshold={m['threshold']}"
+    if not m.get("enabled", True):
+        line += "\t[disabled]"
+    return line
+
+def _parse_times_arg(value):
+    """`--times 08:00,20:00` -> ["08:00", "20:00"]. No format validation
+    here -- meds.add()/meds.edit() validate each entry (ValueError ->
+    CLI exit 2 via main()'s except clause), same as the rest of this
+    module leaving domain validation to the fam/*.py layer.
+    """
+    return [t.strip() for t in value.split(",") if t.strip()]
+
+def cmd_meds_add(args):
+    conn = famdb.connect()
+    times = _parse_times_arg(args.times)
+    med_id = meds.add(conn, args.name, times, dose=args.dose,
+                       remaining=args.remaining, threshold=args.threshold)
+    conn.commit()
+    m = meds.get(conn, med_id)
+    if args.json:
+        print(json.dumps(m, ensure_ascii=False))
+    else:
+        print(f"added med: {m['name']} (id={m['id']})")
+    return 0
+
+def cmd_meds_list(args):
+    conn = famdb.connect()
+    rows = meds.list(conn, include_disabled=args.all)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for m in rows:
+            print(_fmt_med(m))
+    return 0
+
+def cmd_meds_edit(args):
+    conn = famdb.connect()
+    fields = {}
+    if args.name is not None: fields["name"] = args.name
+    if args.dose is not None: fields["dose"] = args.dose
+    if args.times is not None: fields["times"] = _parse_times_arg(args.times)
+    if args.remaining is not None: fields["remaining"] = args.remaining
+    if args.threshold is not None: fields["threshold"] = args.threshold
+    if args.enabled is not None: fields["enabled"] = bool(args.enabled)
+    if not meds.edit(conn, args.id, **fields):
+        raise ValueError(f"unknown med: {args.id}")
+    conn.commit()
+    m = meds.get(conn, args.id)
+    if args.json:
+        print(json.dumps(m, ensure_ascii=False))
+    else:
+        print(f"updated med: {m['name']} (id={m['id']})")
+    return 0
+
+def cmd_meds_rm(args):
+    conn = famdb.connect()
+    if not meds.remove(conn, args.id):
+        raise ValueError(f"unknown med: {args.id}")
+    conn.commit()
+    out = {"id": args.id}
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        print(f"removed med {args.id}")
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(prog="fam")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -854,6 +928,42 @@ def build_parser():
     sp.add_argument("event_id", type=int)
     sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                      help="machine-readable output")
+
+    sp = sub.add_parser("meds")
+    meds_sub = sp.add_subparsers(dest="meds_cmd", required=True)
+
+    spa = meds_sub.add_parser("add"); spa.set_defaults(func=cmd_meds_add)
+    spa.add_argument("name")
+    spa.add_argument("--times", required=True,
+                      help="comma-separated HH:MM list, e.g. 08:00,20:00")
+    spa.add_argument("--dose", default="")
+    spa.add_argument("--remaining", type=int)
+    spa.add_argument("--threshold", type=int, default=0)
+    spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spl = meds_sub.add_parser("list"); spl.set_defaults(func=cmd_meds_list)
+    spl.add_argument("--all", action="store_true",
+                      help="include disabled meds (default: enabled only)")
+    spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spe = meds_sub.add_parser("edit"); spe.set_defaults(func=cmd_meds_edit)
+    spe.add_argument("id", type=int)
+    spe.add_argument("--name")
+    spe.add_argument("--dose")
+    spe.add_argument("--times", help="comma-separated HH:MM list")
+    spe.add_argument("--remaining", type=int)
+    spe.add_argument("--threshold", type=int)
+    spe.add_argument("--enabled", type=int, choices=[0, 1],
+                      help="1=enabled, 0=disabled")
+    spe.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spr = meds_sub.add_parser("rm"); spr.set_defaults(func=cmd_meds_rm)
+    spr.add_argument("id", type=int)
+    spr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
 
     return p
 
