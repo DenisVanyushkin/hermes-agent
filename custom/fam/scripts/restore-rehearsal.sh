@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Phase 6a DoD: restore the latest assistant.db backup into a scratch copy,
+# Phase 6a DoD: restore an assistant.db backup into a scratch copy,
 # prove integrity + schema, and prove fam can open it. PASS/FAIL, non-destructive.
 set -euo pipefail
 REPO="/home/denis/.hermes/hermes-agent"
-BACKUP_DIR="${1:-/home/denis/.hermes/private/amina/backups}"
-LATEST="$(ls -1t "$BACKUP_DIR"/assistant-*.db 2>/dev/null | head -1 || true)"
-[ -n "$LATEST" ] || { echo "FAIL: no assistant backup in $BACKUP_DIR"; exit 1; }
+BACKUP_DIR="/home/denis/.hermes/private/amina/backups"
+if [ -n "${1:-}" ]; then
+    LATEST="$1"
+    [ -f "$LATEST" ] && [ -r "$LATEST" ] || { echo "FAIL: no such backup file: $1"; exit 1; }
+else
+    LATEST="$(ls -1t "$BACKUP_DIR"/assistant-*.db 2>/dev/null | head -1 || true)"
+    [ -n "$LATEST" ] || { echo "FAIL: no assistant backup in $BACKUP_DIR"; exit 1; }
+fi
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 cp "$LATEST" "$TMP/assistant.db"
 # 1. integrity + schema via maint.verify_backup

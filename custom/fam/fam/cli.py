@@ -462,8 +462,15 @@ def cmd_tick_maintenance(args):
     cfg = gate.load_config()
     now = None
     if getattr(args, "now", None):
-        from datetime import datetime
+        from datetime import datetime, timezone
         now = datetime.fromisoformat(args.now)
+        if now.tzinfo is None:
+            # An offset-less --now string parses naive, which would
+            # subtly shift the retention boundary vs the stored
+            # aware timestamps (prod always uses aware _now_utc()) --
+            # normalize to UTC-aware so ops/testing --now behaves the
+            # same as prod.
+            now = now.replace(tzinfo=timezone.utc)
     result = maint.run_maintenance(
         cfg, dry_run=getattr(args, "dry_run", False), now=now)
     if getattr(args, "json", False):

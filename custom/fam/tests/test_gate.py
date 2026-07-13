@@ -178,6 +178,35 @@ def test_load_config_default_merges_missing_email_keys(tmp_path):
     assert "email_enabled" not in on_disk
 
 
+def test_load_config_default_merges_missing_maintenance_keys(tmp_path):
+    # Phase 6a closeout regression lock: a live config predating the
+    # nightly-maintenance keys (audit_retention_days/backup_keep/
+    # backup_dir/state_db_path) must still load, with all four merged
+    # in at their CONFIG_DEFAULTS values -- same default-merge path as
+    # reminder_max_age_min/email_* above, so `fam tick maintenance`
+    # works against an old live config without a manual edit.
+    example = tmp_path / "fam-config.example.json"
+    example.write_text(json.dumps(CFG, ensure_ascii=False), encoding="utf-8")
+    target = tmp_path / "private" / "amina" / "fam-config.json"
+    target.parent.mkdir(parents=True)
+    legacy = {
+        k: v for k, v in CFG.items()
+        if k not in (
+            "audit_retention_days", "backup_keep", "backup_dir", "state_db_path",
+        )
+    }
+    target.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    cfg = gate.load_config(config_path=target, example_path=example)
+
+    assert cfg["audit_retention_days"] == 90
+    assert cfg["backup_keep"] == 7
+    assert "backup_dir" in cfg
+    assert "state_db_path" in cfg
+    on_disk = json.loads(target.read_text(encoding="utf-8"))
+    assert "audit_retention_days" not in on_disk
+
+
 # ---- in_quiet_hours: cross-midnight window (21:30-07:30 Almaty) ----
 
 @pytest.mark.parametrize("local_time,expected", [

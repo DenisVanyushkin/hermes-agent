@@ -23,8 +23,14 @@ def prune_audit_log(conn, days, now=None):
     return deleted
 
 def _sqlite_backup(src, dest):
-    scon = sqlite3.connect(str(src))
-    dcon = sqlite3.connect(str(dest))
+    # timeout/busy_timeout: under a concurrent minute-tick write against
+    # src, scon.backup(dcon) can otherwise raise "database is locked" --
+    # give both connections a generous window to wait out the writer
+    # instead of failing the nightly backup.
+    scon = sqlite3.connect(str(src), timeout=10.0)
+    scon.execute("PRAGMA busy_timeout=10000")
+    dcon = sqlite3.connect(str(dest), timeout=10.0)
+    dcon.execute("PRAGMA busy_timeout=10000")
     try:
         with dcon:
             scon.backup(dcon)   # online backup API -- consistent under a live writer
