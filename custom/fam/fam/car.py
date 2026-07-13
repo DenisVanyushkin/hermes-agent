@@ -54,3 +54,55 @@ class StarlineClient:
         store["slnet_expires"] = expires
         store["user_id"] = uid
         self.save_store(store)
+
+    def _device_data(self):
+        store = self.load_store()
+        api = self._api_factory(store.get("user_id"), store.get("slnet_token"))
+        api.update()
+        dev = api.devices.get(str(store["device_id"]))
+        return dev.data if hasattr(dev, "data") else dev
+
+    def poll(self):
+        try:
+            self.ensure_slnet()
+            data = self._device_data()
+            return normalize(data)
+        except Exception:
+            return None
+
+    def start_engine(self):
+        try:
+            self.ensure_slnet()
+            store = self.load_store()
+            api = self._api_factory(store.get("user_id"), store.get("slnet_token"))
+            return bool(api.set_car_state(store["device_id"], "engine", True))
+        except Exception:
+            return False
+
+
+def _iso_now(now=None):
+    return now or datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def normalize(device_data, now=None):
+    """Map a StarLine device dict to car_metrics columns. Every field is
+    optional -- StarLine/OBD shape varies by car (spec §13 discovery);
+    missing -> None, never raises. Full input kept in raw_json."""
+    d = device_data or {}
+    state = d.get("car_state") or {}
+    pos = d.get("position") or {}
+    return {
+        "ts_utc": _iso_now(now),
+        "fuel_pct": d.get("fuel_percent"),
+        "fuel_liters": d.get("fuel_litres", d.get("fuel_liters")),
+        "odometer_km": d.get("mileage"),
+        "engine_on": state.get("run"),
+        "ignition_on": state.get("ign"),
+        "cabin_temp_c": d.get("ctemp"),
+        "coolant_temp_c": d.get("etemp"),
+        "battery_v": d.get("battery"),
+        "gsm_online": d.get("gsm_lvl"),
+        "gps_lat": pos.get("y"),
+        "gps_lon": pos.get("x"),
+        "raw_json": json.dumps(d, ensure_ascii=False),
+    }
