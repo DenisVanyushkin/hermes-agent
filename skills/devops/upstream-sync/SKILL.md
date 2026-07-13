@@ -1,7 +1,7 @@
 ---
 name: upstream-sync
 description: Safely update local/customizations from upstream NousResearch/hermes-agent - triage the preflight report, auto-rebase clean updates, or negotiate per-feature conflict resolution with the operator over Slack.
-version: 0.2.0
+version: 0.3.0
 metadata:
   hermes:
     tags: [devops, git, maintenance]
@@ -25,6 +25,10 @@ local features, keeping the operator informed in plain language.
   host; the host scripts read the same files):
   - `last-synced.json` — written by the host smoketest on success; never write it yourself
   - `pending.json` — your saved conflict-decision state (schema `upstream-sync-pending/v1`)
+  - `decision-memory.json` — remembered operator decisions (schema
+    `upstream-sync-decisions/v1`), consulted to auto-apply exact-repeat
+    conflicts. Managed only via `scripts/upstream_sync_decisions.py`; never
+    hand-edit.
   - `finalize-request.json` / `finalize-result.json` — handshake with the host finalizer (below)
 - The preflight report arrives as DATA in the cron prompt (markdown + a fenced
   `upstream-sync-preflight/v1` JSON block).
@@ -102,37 +106,38 @@ commits also change, treat the whole run as the conflict path.
 
 ## Mode A — risk: conflicts
 
-Do NOT modify the repo. Instead:
+Do NOT modify the repo yet. First consult decision memory, then branch.
 
-1. Group the `conflicts` entries into FEATURES: cluster files that share the
-   same local commits (the `local_commits` lists). Name each feature from the
-   commit subjects, in plain language.
-2. Write `/root/.hermes/state/upstream-sync/pending.json`:
-   ```json
-   {
-     "schema": "upstream-sync-pending/v1",
-     "created_at": "<ISO8601>",
-     "upstream_head": "<sha>",
-     "merge_base": "<sha>",
-     "features": [
-       {"id": 1, "name": "<feature name>", "files": ["..."],
-        "local_commits": [{"sha": "...", "subject": "..."}],
-        "upstream_summary": "<what upstream did to these files>",
-        "options": ["keep-local", "take-upstream", "merge-both"]}
-     ],
-     "status": "awaiting_decision"
-   }
-   ```
-3. Respond with the conflict report (this is what lands in Slack):
-   - What upstream changed overall, in human terms, grouped by area.
-   - Per-feature sections, numbered: feature name, which local functionality
-     is at stake, what upstream did to the same files, your recommended option
-     and why.
-   - Ask the operator to reply in this thread with one decision per feature,
-     e.g. `1: keep local, 2: take upstream, 3: merge both`.
-   - End with this exact footer line so the follow-up session knows what to do:
-     `_When you reply here, I will load the upstream-sync skill, read pending.json and apply your decisions._`
-4. End the run. Do not wait or poll.
+1. Partition the conflicts against remembered decisions:
+   `python3 /workspace/live-hermes/scripts/upstream_sync_decisions.py partition \
+      --preflight <(printf '%s' "$PREFLIGHT_JSON") \
+      --memory /root/.hermes/state/upstream-sync/decision-memory.json`
+   (Write the preflight JSON block to a temp file if process substitution is
+   awkward.) The output has `remembered` (auto-decided from memory) and `new`
+   (must ask the operator; includes anything on a security/auth path).
+
+2. **If `new` is empty (full auto-apply):**
+   a. Create the backup ref (invariant 1).
+   b. Write `pending.json` with every feature pre-decided from `remembered`
+      (copy each `decision`) and `status: "auto_apply"`.
+   c. Run the Mode B application procedure below (rebase applying those
+      decisions, then `finalize`).
+   d. On `ok`: record the applied decisions —
+      `python3 .../upstream_sync_decisions.py record --pending <pending.json> \
+        --memory .../decision-memory.json --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"`
+      — then delete `pending.json` and post a **post-facto Slack notice**:
+      list each auto-resolved feature, its decision, and that it was applied
+      automatically from a prior operator decision (cite the memory entry's
+      `apply_count`/`last_applied_at` if useful). On `failed`: host rolled back;
+      lead with the failure and backup ref (invariant 5); do not touch memory.
+
+3. **If `new` is non-empty (partial):** do NOT auto-apply. Group the `new`
+   entries into features for the human report as before. Write `pending.json`
+   with `remembered` features already carrying their `decision` plus
+   `"source": "memory"`, and `new` features as `awaiting_decision`. In the
+   Slack report, ask the operator ONLY about the `new` features, and state that
+   the remembered ones will be applied automatically once the new ones are
+   decided. End the run; do not poll.
 
 ## Mode B — applying operator decisions
 
@@ -153,8 +158,17 @@ Do NOT modify the repo. Instead:
    unmanageable, `git rebase --abort` and report honestly.
 4. Write `finalize-request.json` with `action: "finalize"`, the upstream head
    SHA, and your backup ref. Poll for the result.
-5. On `ok`: delete `pending.json`, summarize per-feature what was done. On
-   `failed`: the host rolled back; keep `pending.json` and report.
+5. On `ok`: first write the operator's decision into each feature of
+   `pending.json` (set `"decision"` to the chosen option; leave `remembered`
+   features' decisions as-is), then record them:
+   `python3 /workspace/live-hermes/scripts/upstream_sync_decisions.py record \
+      --pending /root/.hermes/state/upstream-sync/pending.json \
+      --memory /root/.hermes/state/upstream-sync/decision-memory.json \
+      --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"`.
+   Then delete `pending.json` and summarize per-feature what was done, marking
+   which features were auto-applied from memory vs freshly decided. On
+   `failed`: the host rolled back; keep both `pending.json` and memory
+   unchanged and report.
 
 ## Reporting style
 
