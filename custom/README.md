@@ -1203,3 +1203,168 @@ the once-a-minute tick in prod — this is exactly what happened on 2026-07-13
 `424 passed`, zero warnings —
 `PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`
 (re-run 2026-07-13, at HEAD `b92af28d7`).
+
+
+## Phase 5 — meds + shopping (2026-07-13)
+
+Builds on top of "Phase 3b — plans + \"по пути\" + follow-up" above (the
+medication domain is new; shopping's "по пути" reuses 3b's corridor-match
+pattern). Full history: commit messages tagged `(5 T1)`..`(5 T8)` on this
+branch — `git log --oneline --grep="5 T"` — from `87e641ccf` (meds/
+med_intakes/shopping schema + CLI) through `b8bba0d83` (skill catalog fix,
+current HEAD). Unlike 3a, no `.superpowers/sdd/` per-task reports and no
+`docs/superpowers/` plan/spec doc exist for this phase (that directory is
+gitignored and not present on disk at HEAD) — the commit trail is the
+record, same as 3b.
+
+### What this phase adds
+
+- **Medications** (`custom/fam/fam/meds.py`, CLI `fam meds add/list/edit/rm`):
+  a med has `name`, optional `dose`, a `times` schedule (`--times
+  HH:MM,HH:MM`, stored sorted+deduped), optional `remaining` stock count
+  and `threshold` (default `0`) for restock triggering, and `enabled`
+  (soft-disable — keeps history instead of deleting).
+- **Daily intakes** (`med_intakes` table, one row per scheduled dose per
+  day): `fam med taken <id>` / `fam med skip <id>` ack a specific intake.
+  `meds.take()` decrements `remaining` (floored at `0`) and, once it drops
+  to/below `threshold`, auto-adds a shopping restock item; `meds.skip()`
+  closes just that one dose, `remaining` untouched. Both raise
+  `ValueError` on an intake that isn't `status='pending'` — a retried or
+  duplicate ack can't double-decrement stock or clobber an already-closed
+  row (5-T5 review). `fam med list --pending` (`--json`) is the one true
+  source for "what dose is Amina being asked about" — a JOIN of
+  `med_intakes` to its med for the name — replacing an earlier
+  audit-log-join approach that broke two ways (5-T8 review).
+- **Shopping** (`custom/fam/fam/shopping.py`, CLI `fam shop
+  add/list/done`): a plain list with manual entries plus auto-added
+  restock items (`source="meds"`), self-deduped by casefolded name
+  against other open `source="meds"` rows so repeated low-stock ticks
+  don't pile up duplicates.
+- **Geo "по пути" for shopping** (`shopping.match_enroute`, 5-T6): builds
+  on the new `places.category` field (`fam places update --category
+  grocery|pharmacy`) — a categorized place within corridor distance of an
+  event's route piggybacks onto the same `leave`/`prepare` reminder 3b's
+  plans-enroute already uses (no new message, no extra budget spend).
+  `grocery` matches ANY open shopping item; `pharmacy` only matches
+  `source="meds"` items — a pharmacy stop is pointless for a manual
+  grocery item.
+
+### Ticks
+
+- **`meds-gen`** (`fam tick meds-gen`; own systemd timer
+  `fam-meds-gen.timer` / `fam-meds-gen.service`,
+  `OnCalendar=*-*-* 19:00:00 UTC` = 00:00 Asia/Almaty): once a day,
+  generates today's `med_intakes` rows for every enabled med × scheduled
+  time (idempotent — a re-run or two overlapping fires both skip
+  already-generated rows, backstopped by a unique index on
+  `(med_id, plan_ts_utc)`, 5-T3 review), and closes out yesterday's
+  still-`pending` rows to `status='missed'`. Always audits
+  `tick.meds_gen {generated, missed}`, including an all-zero run.
+- **Minute `reminders` tick, extended** (`fam/tick.py::_meds_series`,
+  5-T4): a persistent per-dose reminder series. Every due, still-pending
+  intake with `series_next_utc <= now` gets a delivery — ordinary case:
+  "take this now" via `gate.deliver(..., force=True)`, then
+  `series_next_utc` advances `+med_repeat_min` minutes (default `45`) for
+  the next escalation, repeating until the dose is acked (`taken`/`skip`
+  clears `series_next_utc`). Quiet hours PAUSE the series (same due row
+  fires again once quiet hours end), they don't cancel it. Out-of-stock
+  case (`remaining == 0`): exactly one "go buy this" notice, then the
+  series stops for that dose for the day — `meds-gen`'s midnight
+  closeout is what eventually marks an un-acked dose missed.
+- **Digest, extended** (`fam/tick.py::_meds_digest`, 5-T7): a
+  "Лекарства:" block — today's planned intakes (time + name), yesterday's
+  missed doses, and low-stock meds — omitted entirely when all three
+  lists are empty.
+
+### Config key
+
+`fam/gate.py::CONFIG_DEFAULTS`: `med_repeat_min` (default `45`) — minutes
+between escalations in the persistent meds series above.
+
+### Budget/quiet-hours exemption (decision: Денис — health)
+
+Medication reminders must never be silently swallowed by the daily
+reminder budget: `gate.budget_spent_today` excludes `kind="med"` rows the
+same way it already excludes `kind="digest"` (`fam/gate.py`), and every
+meds-series delivery uses `gate.deliver(..., force=True)`. The persistent
+series' OWN quiet-hours check (`gate.in_quiet_hours`, inside
+`_meds_series`) is separate from that exemption — a deliberate scheduling
+pause, not a budget/ceiling effect — so meds reminders skip the daily cap
+but still respect quiet hours.
+
+### Reading the audit trail
+
+- `tick.meds_gen {generated, missed}` — the daily generation/closeout run.
+- `tick.med {intake_id, mode: "take"|"out_of_stock", status}` — one row
+  per persistent-series delivery attempt. `status` (gate.deliver's return:
+  `sent`/`quiet`/`budget`/`error`) is only carried for the `take` branch —
+  a live dose stuck on quiet/budget/error is worth seeing; the
+  `out_of_stock` branch omits it (the series pausing for the day is the
+  interesting fact there, not that one send's outcome).
+- `tick.shop_enroute {event_id, place_id, n_items}` — a reminder's
+  shopping "заодно" match (mirrors 3b's `tick.enroute` for plans).
+- `meds.take {intake_id, med_id, remaining, restock}` / `meds.skip
+  {intake_id, med_id}` — dose acks.
+- `shop.add {..., source}` — `source` distinguishes `"manual"` from
+  `"meds"` (auto-added restock).
+- `plan.bad_deadline` — pre-existing (3b) kind, still fires from the same
+  digest/follow-up code this phase extends; worth knowing when reading
+  the combined trail, not itself a Phase 5 addition.
+
+### Skill v7
+
+`custom/skills/amina-fam/SKILL.md` updated to v7 for meds + shopping verbs
+(`meds add/list/edit/rm`, `med taken/skip/list --pending`, `shop
+add/list/done`); both copies (git and deployed) confirmed at
+`sha256:3ff206f3fbaf374e7b8bf561cae7acf6f897b80f1dd988391239a0cf824c6442`.
+**Activation is NOT done yet (pending Денис):** per "Skills: activation
+caveats" above, this needs (1) `systemctl --user restart hermes-gateway`
+to refresh the cached skills-prompt, and (2) `/reset` on the pilot chat
+session to pick up the new skill list — neither step had been run for v7
+as of this writing.
+
+### ⚠️ Operator rules
+
+1. **Working-tree execution (carried over from 3b):** `fam` still
+   executes straight out of the working tree via
+   `fam-reminders.timer`/`fam-tick.service`. Hand-editing `tick.py` or
+   `gate.py` live on `hermes-home`: `systemctl --user stop
+   fam-reminders.timer` **first**, before touching either file; only
+   `start` it again once the edit has run through a green test pass.
+2. **Schema migration this phase (schema_version 5):** `meds`,
+   `med_intakes`, `shopping` are new tables, plus a new `places.category`
+   column — all applied by `db.py::init_db`'s `CREATE TABLE IF NOT
+   EXISTS` / `_ensure_column` migrations, which only run when `fam init`
+   is invoked (no other command calls `init_db` automatically). Any
+   environment carrying this code against an existing pre-Phase-5
+   database — prod included — needs `fam init` run once, explicitly,
+   before `meds`/`shop`/`med`/`places --category` will work; it is
+   idempotent and safe to re-run on an already-migrated database.
+
+### Known limitations / backlog
+
+- Double ack (`fam med taken`/`skip` on an already-closed intake) is
+  rejected with `ValueError`, not silently ignored — deliberate (5-T5
+  review), but a caller must be ready to catch it.
+- A single delivered `leave`/`prepare` reminder can trigger BOTH
+  `plans.match_enroute` (3b) and `shopping.match_enroute` (5-T6)
+  independently, and each may call `road.route_for_event` (TomTom) — two
+  route lookups per reminder instead of one shared lookup. The shared
+  `road_daily_cap` still holds (nothing breaks), it's just less efficient
+  than it could be.
+- `_meds_digest`'s `today` and `missed_yesterday` lists do NOT filter by
+  `meds.enabled` (only `low_stock` does, via `meds.list()`) — an edge
+  case where a med is disabled the same day it already had intakes
+  generated will still surface those in the digest.
+- `fam-meds-gen.timer`/`.service` are deployed directly under
+  `~/.config/systemd/user/` on `hermes-home` and are **not** tracked in
+  `custom/fam/systemd/` (unlike `fam-digest`/`fam-reminders`/`skill-sync`,
+  which all have unit files in-repo) — a repo-only review or a fresh
+  deploy will miss this timer entirely unless someone knows to look on
+  the box.
+
+### Full suite
+
+`572 passed`, zero warnings —
+`PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`
+(re-run 2026-07-13, at HEAD `b8bba0d83`).
