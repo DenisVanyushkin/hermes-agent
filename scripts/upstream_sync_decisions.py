@@ -24,6 +24,9 @@ SECURITY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# git merge-tree informational lines that must never be treated as conflict paths.
+_MERGE_TREE_NOISE_RE = re.compile(r"^Auto-merging |^CONFLICT \(|Merge conflict in ")
+
 VALID_DECISIONS = ("keep-local", "take-upstream", "merge-both")
 
 
@@ -78,6 +81,8 @@ def group_features(conflicts: list[dict]) -> list[Feature]:
     for entry in conflicts:
         file = entry.get("file")
         if not file:
+            continue
+        if _MERGE_TREE_NOISE_RE.search(file):
             continue
         subs = tuple(sorted({
             (c.get("subject") or "").strip()

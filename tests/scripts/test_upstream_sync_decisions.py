@@ -257,3 +257,20 @@ def test_cli_record_persists_memory(tmp_path, capsys):
     saved = mod.load_memory(mem)
     assert saved["entries"][0]["local_subjects"] == ["feat: a"]
     assert saved["updated_at"] == "2026-07-13T10:00:00Z"
+
+
+def test_group_skips_merge_tree_noise_lines():
+    conflicts = [
+        _conflict("agent/conversation_loop.py", ["feat: approval"]),
+        {"file": "Auto-merging agent/agent_init.py", "local_commits": [], "upstream_commits": []},
+        {"file": "CONFLICT (content): Merge conflict in agent/conversation_loop.py", "local_commits": [], "upstream_commits": []},
+    ]
+    feats = mod.group_features(conflicts)
+    all_files = [f for ft in feats for f in ft.files]
+    assert all_files == ["agent/conversation_loop.py"]
+    assert not any("Auto-merging" in f or "CONFLICT" in f for f in all_files)
+
+
+def test_group_keeps_normal_paths_when_no_noise():
+    feats = mod.group_features([_conflict("hermes_cli/config.py", ["feat: x"])])
+    assert [f for ft in feats for f in ft.files] == ["hermes_cli/config.py"]
