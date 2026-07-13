@@ -85,3 +85,64 @@ def test_group_deduplicates_and_strips_subjects():
         _conflict("x.py", ["feat: x ", "feat: x", "fix: y"]),
     ])
     assert feats[0].subjects == ("feat: x", "fix: y")
+
+
+def _entry(files, subjects, decision, apply_count=1):
+    return {
+        "fingerprint": mod.feature_fingerprint(files, subjects),
+        "files": list(files), "local_subjects": list(subjects),
+        "decision": decision, "created_at": "2026-07-01T00:00:00Z",
+        "last_applied_at": "2026-07-01T00:00:00Z", "apply_count": apply_count,
+    }
+
+
+def _mem(*entries):
+    return {"schema": "upstream-sync-decisions/v1", "updated_at": None, "entries": list(entries)}
+
+
+def test_partition_exact_match_is_remembered():
+    memory = _mem(_entry(["a.py"], ["feat: a"], "keep-local"))
+    feats = mod.group_features([_conflict("a.py", ["feat: a"])])
+    result = mod.partition(feats, memory)
+    assert len(result["remembered"]) == 1
+    assert not result["new"]
+    r = result["remembered"][0]
+    assert r.decision == "keep-local" and r.source == "memory"
+
+
+def test_partition_subset_of_files_is_remembered():
+    memory = _mem(_entry(["a.py", "b.py"], ["feat: a"], "keep-local"))
+    feats = mod.group_features([_conflict("a.py", ["feat: a"])])  # fewer files
+    result = mod.partition(feats, memory)
+    assert len(result["remembered"]) == 1
+
+
+def test_partition_superset_of_files_is_new():
+    memory = _mem(_entry(["a.py"], ["feat: a"], "keep-local"))
+    feats = mod.group_features([_conflict("a.py", ["feat: a"]), _conflict("b.py", ["feat: a"])])
+    # a.py and b.py share subject set -> one feature with 2 files (superset of memory)
+    result = mod.partition(feats, memory)
+    assert not result["remembered"]
+    assert len(result["new"]) == 1
+
+
+def test_partition_changed_subject_set_is_new():
+    memory = _mem(_entry(["a.py"], ["feat: a"], "keep-local"))
+    feats = mod.group_features([_conflict("a.py", ["feat: DIFFERENT"])])
+    result = mod.partition(feats, memory)
+    assert not result["remembered"] and len(result["new"]) == 1
+
+
+def test_partition_security_path_forced_to_new_even_on_match():
+    memory = _mem(_entry(["gateway/auth_pairing.py"], ["feat: a"], "keep-local"))
+    feats = mod.group_features([_conflict("gateway/auth_pairing.py", ["feat: a"])])
+    result = mod.partition(feats, memory)
+    assert not result["remembered"]
+    assert len(result["new"]) == 1
+
+
+def test_partition_empty_subjects_is_new():
+    memory = _mem()
+    feats = mod.group_features([{"file": "a.py", "local_commits": [], "upstream_commits": []}])
+    result = mod.partition(feats, memory)
+    assert not result["remembered"] and len(result["new"]) == 1
