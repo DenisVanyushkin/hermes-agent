@@ -103,6 +103,40 @@ def test_intake_outside_today_bounds_excluded(db, fake_deliver):
     assert fake_deliver.calls[0]["raw"]["meds"]["today"] == []
 
 
+# ---- disabled med: excluded from both today and missed_yesterday ----
+# (5 T9 final review, FIX-1) ----
+
+def test_disabled_med_intake_excluded_from_today(db, fake_deliver):
+    med_id = meds.add(db, "Магний", ["08:00"])
+    meds.edit(db, med_id, enabled=0)
+    db.commit()
+    _insert_intake(db, med_id, plan_ts_utc="2026-07-20T03:00:00+00:00")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert fake_deliver.calls[0]["raw"]["meds"]["today"] == []
+    fallback = fake_deliver.calls[0]["human_fallback"]
+    assert "Магний" not in fallback
+
+
+def test_disabled_med_intake_excluded_from_missed_yesterday(db, fake_deliver):
+    med_id = meds.add(db, "Аспирин", ["08:00"])
+    meds.edit(db, med_id, enabled=0)
+    db.commit()
+    _insert_intake(db, med_id, plan_ts_utc="2026-07-19T03:00:00+00:00",
+                    status="missed")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert fake_deliver.calls[0]["raw"]["meds"]["missed_yesterday"] == []
+    fallback = fake_deliver.calls[0]["human_fallback"]
+    assert "Аспирин" not in fallback
+
+
 # ---- yesterday's missed ----
 
 def test_yesterday_missed_in_raw(db, fake_deliver):

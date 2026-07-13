@@ -219,6 +219,121 @@ def test_remaining_none_never_treated_as_out_of_stock(db, fake_deliver):
     assert calls[0]["raw"]["mode"] == "take"
 
 
+# ---- disabled med: series stops silently, digest already excludes it ----
+# (5 T9 final review, FIX-1) ----
+
+def test_disabled_med_is_not_sent_and_series_cleared(db, fake_deliver):
+    # Skill contract: "stop reminding me about X" -> fam meds edit <id>
+    # --enabled 0. Before this fix, _meds_series ignored enabled
+    # entirely and kept nagging "пора принять" every med_repeat_min
+    # until midnight. A disabled med must never be delivered, and its
+    # series must not keep re-arming itself.
+    med_id = meds.add(db, "Магний", ["08:00"], dose="1 таб")
+    meds.edit(db, med_id, enabled=0)
+    db.commit()
+    plan_ts = "2026-07-20T03:00:00+00:00"
+    intake_id = _insert_intake(db, med_id, plan_ts, plan_ts)
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    assert _med_calls(fake_deliver) == []
+    row = db.execute(
+        "SELECT status, series_next_utc FROM med_intakes WHERE id=?",
+        (intake_id,),
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["series_next_utc"] is None
+
+    # A later tick the same day must not re-send either: series_next_utc
+    # is now NULL, so this row no longer matches the due-selection query.
+    tick.reminders(db, now_utc="2026-07-20T11:00:00+00:00", cfg=CFG)
+    assert _med_calls(fake_deliver) == []
+
+
+def test_disabled_med_does_not_raise_and_no_tick_error(db, fake_deliver):
+    # Disabling a med mid-series must be a silent no-op, never an
+    # uncaught exception that would sink the whole tick (module
+    # docstring's guard-per-hook contract, and the brief's own "не
+    # падать" requirement).
+    med_id = meds.add(db, "Магний", ["08:00"])
+    meds.edit(db, med_id, enabled=0)
+    db.commit()
+    plan_ts = "2026-07-20T03:00:00+00:00"
+    _insert_intake(db, med_id, plan_ts, plan_ts)
+
+    counts = tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    assert isinstance(counts, dict)
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='tick.error'"
+    ).fetchone()[0] == 0
+
+
+# ---- ack↔tick race guard (5 T9 final review, FIX-2 / Backlog #5) ----
+
+def _race_ack(intake_id, sentinel_next_utc):
+    """A fake gate.deliver that plants a concurrent ack on intake_id
+    right in the window between _meds_series's own SELECT (already
+    read, so the row is status='pending' in the caller's hand) and its
+    own UPDATE -- gate.deliver is exactly where that window sits in
+    production, since a real send takes real wall-clock time. Sets a
+    sentinel series_next_utc (not NULL, unlike a real ack) so the test
+    can tell "the guarded UPDATE left this alone" apart from "the
+    guarded UPDATE also happened to write NULL".
+    """
+    def _deliver(conn, kind, raw, human_fallback, cfg, force=False,
+                 now_utc=None):
+        conn.execute(
+            "UPDATE med_intakes SET status='taken', series_next_utc=? "
+            "WHERE id=?",
+            (sentinel_next_utc, intake_id),
+        )
+        return "sent"
+    return _deliver
+
+
+def test_ack_race_take_branch_update_is_guarded_by_status(db, monkeypatch):
+    med_id = meds.add(db, "Магний", ["08:00"])
+    db.commit()
+    plan_ts = "2026-07-20T03:00:00+00:00"
+    intake_id = _insert_intake(db, med_id, plan_ts, plan_ts)
+    sentinel = "2030-01-01T00:00:00+00:00"
+    monkeypatch.setattr(gate, "deliver", _race_ack(intake_id, sentinel))
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    row = db.execute(
+        "SELECT status, series_next_utc FROM med_intakes WHERE id=?",
+        (intake_id,),
+    ).fetchone()
+    # The take-branch UPDATE must not clobber the mid-flight ack: status
+    # stays 'taken' (it always would -- this UPDATE never touches
+    # status) and series_next_utc keeps the race's sentinel rather than
+    # being advanced by med_repeat_min, which is what an unguarded
+    # UPDATE ... WHERE id=? would do.
+    assert row["status"] == "taken"
+    assert row["series_next_utc"] == sentinel
+
+
+def test_ack_race_out_of_stock_branch_update_is_guarded_by_status(
+        db, monkeypatch):
+    med_id = meds.add(db, "Магний", ["08:00"], remaining=0, threshold=5)
+    db.commit()
+    plan_ts = "2026-07-20T03:00:00+00:00"
+    intake_id = _insert_intake(db, med_id, plan_ts, plan_ts)
+    sentinel = "2030-01-01T00:00:00+00:00"
+    monkeypatch.setattr(gate, "deliver", _race_ack(intake_id, sentinel))
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    row = db.execute(
+        "SELECT status, series_next_utc FROM med_intakes WHERE id=?",
+        (intake_id,),
+    ).fetchone()
+    assert row["status"] == "taken"
+    assert row["series_next_utc"] == sentinel
+
+
 # ---- budget exemption ----
 
 def _insert_gate_sent_at(db, ts_utc, payload):

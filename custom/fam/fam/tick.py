@@ -535,6 +535,16 @@ def _meds_series(conn, now_utc, cfg):
         series_next_utc left untouched. This is a PAUSE, not a cancel --
         the next tick at/after quiet hours end will find this same row
         still due (series_next_utc never moved forward) and try again.
+      - meds.get(med_id) is None, OR the med has enabled=0 (5 T9 final
+        review, FIX-1): skip entirely, no send -- "stop reminding me
+        about X" (skill contract: fam meds edit <id> --enabled 0) must
+        actually stop the series, not just the digest. series_next_utc
+        is cleared to NULL (same "never nag again today" cleanup the
+        out-of-stock branch already does) so a later tick this same day
+        doesn't re-check meds.get for this row again; status is left
+        pending -- meds_gen's midnight closeout still marks an un-acked
+        dose "missed" the same as any other pending row. Audited as
+        tick.med: {intake_id, mode:"disabled"}.
       - meds.get(med_id): if remaining is not None and remaining == 0 ->
         exactly ONE "go buy this" notice (mode="out_of_stock"), then
         series_next_utc is cleared to NULL so this same dose never nags
@@ -552,7 +562,22 @@ def _meds_series(conn, now_utc, cfg):
         series. status is left pending either way; T5 owns the ack that
         finally closes it.
 
-    Every row is audited as tick.med: {intake_id, mode:"out_of_stock"}
+    Every UPDATE that touches series_next_utc (disabled/out_of_stock/
+    take branches alike) is qualified with AND status='pending' (5 T9
+    final review, FIX-2 / Backlog #5): between this function's own
+    SELECT above and its per-row UPDATE, gate.deliver's send is real
+    wall-clock work, wide enough a window for a concurrent ack (T5's
+    meds.take/skip, e.g. via the amina-fam skill) to flip status out
+    from under this loop. Without the status filter, this loop's UPDATE
+    would still fire on an already-acked row and clobber the ack's own
+    series_next_utc=NULL back to a stale value -- a data-hygiene
+    invariant violation (every non-pending row's docstring-promised
+    state is series_next_utc IS NULL) even though it happens not to
+    resurface the row in a later tick's due-selection (that query also
+    filters status='pending').
+
+    Every row is audited as tick.med: {intake_id, mode:"disabled"} for
+    the disabled/unknown-med branch, {intake_id, mode:"out_of_stock"}
     for the out-of-stock branch, {intake_id, mode:"take", status} for
     the ordinary branch -- "status" is gate.deliver's return value, kept
     here (unlike out_of_stock, whose own delivery outcome isn't the
@@ -579,17 +604,29 @@ def _meds_series(conn, now_utc, cfg):
             continue
 
         med = meds.get(conn, row["med_id"])
-        name = med["name"] if med is not None else None
-        dose = med.get("dose") if med is not None else None
 
-        if med is not None and med.get("remaining") is not None \
-                and med["remaining"] == 0:
+        if med is None or not med.get("enabled"):
+            conn.execute(
+                "UPDATE med_intakes SET series_next_utc=NULL "
+                "WHERE id=? AND status='pending'",
+                (intake_id,),
+            )
+            audit.log(conn, "tick.med",
+                      {"intake_id": intake_id, "mode": "disabled"})
+            conn.commit()
+            continue
+
+        name = med["name"]
+        dose = med.get("dose")
+
+        if med.get("remaining") is not None and med["remaining"] == 0:
             raw = {"mode": "out_of_stock", "name": name, "dose": dose}
             human_fallback = f"Заканчивается {name} — надо купить."
             gate.deliver(conn, "med", raw, human_fallback, cfg, force=True,
                           now_utc=now_utc)
             conn.execute(
-                "UPDATE med_intakes SET series_next_utc=NULL WHERE id=?",
+                "UPDATE med_intakes SET series_next_utc=NULL "
+                "WHERE id=? AND status='pending'",
                 (intake_id,),
             )
             audit.log(conn, "tick.med",
@@ -604,7 +641,8 @@ def _meds_series(conn, now_utc, cfg):
             next_utc = (now_dt + timedelta(minutes=repeat_min)).isoformat(
                 timespec="seconds")
             conn.execute(
-                "UPDATE med_intakes SET series_next_utc=? WHERE id=?",
+                "UPDATE med_intakes SET series_next_utc=? "
+                "WHERE id=? AND status='pending'",
                 (next_utc, intake_id),
             )
             audit.log(conn, "tick.med",
@@ -936,16 +974,21 @@ def _meds_digest(conn, date_local):
     events" vs. "every dose scheduled" distinction meds_gen itself draws
     between event status and dose status) whose plan_ts_utc falls in
     date_local's Asia/Almaty calendar day (_followup_day_bounds_utc's
-    bounds, reused rather than duplicated). {name, time_local} per row,
-    name via a SQL join to meds (med_intakes has no name of its own),
-    time_local is plan_ts_utc converted to Almaty and formatted HH:MM.
-    Ordered by plan_ts_utc, same as meds_gen's own due-selection order.
+    bounds, reused rather than duplicated), AND whose med is still
+    enabled (5 T9 final review, FIX-1: a disabled med must not surface
+    here just because meds_gen already generated the row before it was
+    disabled -- "stop reminding me about X" means stop everywhere, not
+    only in _meds_series). {name, time_local} per row, name via a SQL
+    join to meds (med_intakes has no name of its own), time_local is
+    plan_ts_utc converted to Almaty and formatted HH:MM. Ordered by
+    plan_ts_utc, same as meds_gen's own due-selection order.
 
     missed_yesterday: med_intakes rows with status='missed' whose
     plan_ts_utc falls in the day BEFORE date_local (one day back, same
-    bounds helper). {name} per row -- meds_gen's midnight closeout is
-    what actually flips a stale pending row to 'missed', so this list is
-    a straight read of that outcome, not a re-derivation of it.
+    bounds helper), same enabled=1 join filter as today's list above --
+    meds_gen's midnight closeout is what actually flips a stale pending
+    row to 'missed', so this list is a straight read of that outcome
+    (filtered the same way), not a re-derivation of it.
 
     low_stock: meds.list(conn) (enabled meds only, mirrors every other
     caller of the module) filtered by the SAME low-stock formula
@@ -969,7 +1012,7 @@ def _meds_digest(conn, date_local):
     today_rows = conn.execute(
         "SELECT m.name AS name, i.plan_ts_utc AS plan_ts_utc "
         "FROM med_intakes i JOIN meds m ON m.id = i.med_id "
-        "WHERE i.plan_ts_utc >= ? AND i.plan_ts_utc < ? "
+        "WHERE i.plan_ts_utc >= ? AND i.plan_ts_utc < ? AND m.enabled=1 "
         "ORDER BY i.plan_ts_utc",
         (today_from, today_to),
     ).fetchall()
@@ -984,6 +1027,7 @@ def _meds_digest(conn, date_local):
         "SELECT m.name AS name FROM med_intakes i "
         "JOIN meds m ON m.id = i.med_id "
         "WHERE i.status='missed' AND i.plan_ts_utc >= ? AND i.plan_ts_utc < ? "
+        "AND m.enabled=1 "
         "ORDER BY i.plan_ts_utc",
         (yest_from, yest_to),
     ).fetchall()
