@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, gate, grid, mail, meds, people, places, plans, rem, tick
+from fam import audit, cal, db as famdb, gate, grid, mail, meds, people, places, plans, rem, shopping, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -677,6 +677,49 @@ def cmd_meds_rm(args):
         print(f"removed med {args.id}")
     return 0
 
+def _fmt_shop(it):
+    line = f"{it['id']}\t{it['name']}"
+    if it.get("qty"):
+        line += f"\tqty={it['qty']}"
+    if it.get("added_by"):
+        line += f"\tby={it['added_by']}"
+    if it.get("source") == "meds":
+        line += "\t[meds]"
+    return line
+
+def cmd_shop_add(args):
+    conn = famdb.connect()
+    item_id = shopping.add(conn, args.name, qty=args.qty, added_by=args.by)
+    conn.commit()
+    it = shopping.get(conn, item_id)
+    if args.json:
+        print(json.dumps(it, ensure_ascii=False))
+    else:
+        print(f"added to shopping: {it['name']} (id={it['id']})")
+    return 0
+
+def cmd_shop_list(args):
+    conn = famdb.connect()
+    rows = shopping.list_open(conn)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for it in rows:
+            print(_fmt_shop(it))
+    return 0
+
+def cmd_shop_done(args):
+    conn = famdb.connect()
+    if not shopping.mark_done(conn, args.id):
+        raise ValueError(f"unknown shopping item: {args.id}")
+    conn.commit()
+    it = shopping.get(conn, args.id)
+    if args.json:
+        print(json.dumps(it, ensure_ascii=False))
+    else:
+        print(f"done: {it['name']} (id={it['id']})")
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(prog="fam")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -963,6 +1006,25 @@ def build_parser():
     spr = meds_sub.add_parser("rm"); spr.set_defaults(func=cmd_meds_rm)
     spr.add_argument("id", type=int)
     spr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    sp = sub.add_parser("shop")
+    shop_sub = sp.add_subparsers(dest="shop_cmd", required=True)
+
+    spa = shop_sub.add_parser("add"); spa.set_defaults(func=cmd_shop_add)
+    spa.add_argument("name")
+    spa.add_argument("--qty", default="")
+    spa.add_argument("--by", default="")
+    spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spl = shop_sub.add_parser("list"); spl.set_defaults(func=cmd_shop_list)
+    spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spd = shop_sub.add_parser("done"); spd.set_defaults(func=cmd_shop_done)
+    spd.add_argument("id", type=int)
+    spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
     return p
