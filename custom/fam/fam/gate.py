@@ -396,12 +396,15 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
          continuation is free; see _reminder_sent_today, phase 2c).
       3. rewrite via hermes -z; any failure/empty output falls back to
          human_fallback (attempt="fallback" vs "rewrite").
-      3b. digest closing question (kind=="digest" and raw["question"] is
-          a non-empty string): final_text is guaranteed to end with
-          raw["question"] as its own last line, exactly once, on BOTH
-          the rewrite and fallback paths (_ensure_trailing_question) --
-          see GATE_DIGEST_NO_QUESTION_INSTRUCTION's docstring for why
-          this is deterministic rather than left to the LLM. Any other
+      3b. closing question (kind in ("digest", "followup") and
+          raw["question"] is a non-empty string): final_text is
+          guaranteed to end with raw["question"] as its own last line,
+          exactly once, on BOTH the rewrite and fallback paths
+          (_ensure_trailing_question) -- see
+          GATE_DIGEST_NO_QUESTION_INSTRUCTION's docstring for why this
+          is deterministic rather than left to the LLM (3b Task 6 fix
+          round: followup shares this guarantee, same raw["question"]
+          shape as digest). Any other
           kind (or a digest with no/blank raw["question"]) skips this
           step entirely.
       4. length ceiling (max_len_reminder for kind="reminder",
@@ -451,7 +454,7 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
         final_text = human_fallback
         attempt = "fallback"
 
-    question = raw.get("question") if kind == "digest" else None
+    question = raw.get("question") if kind in ("digest", "followup") else None
     if not (isinstance(question, str) and question.strip()):
         question = None
     if question is not None:

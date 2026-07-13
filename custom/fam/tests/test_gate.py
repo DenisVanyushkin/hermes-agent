@@ -920,3 +920,33 @@ def test_deliver_digest_still_over_ceiling_sends_with_long_flag_question_preserv
     assert payload["final"].endswith(question)
     assert payload["final"].count(question) == 1
     assert payload["long"] is True
+
+
+# Review finding (3b Task 6, fix round 1): deliver()'s deterministic
+# trailing-question guarantee (_ensure_trailing_question) was wired to
+# fire only for kind=="digest" (`question = raw.get("question") if kind
+# == "digest" else None`), even though tick._followup builds raw with
+# the exact same "question": FOLLOWUP_QUESTION shape as the digest and
+# its own docstring claims "same pattern as DIGEST_QUESTION". A followup
+# LLM rewrite that drops the question (own brevity instructions winning,
+# same failure mode as the original live digest bug) would ship with no
+# question at all. Symmetric to
+# test_deliver_digest_rewrite_appends_question_exactly_once above.
+def test_deliver_followup_rewrite_appends_question_exactly_once(db, fake_run):
+    raw = {"kind": "followup", "question": tick.FOLLOWUP_QUESTION,
+           "event_id": 42}
+    fake_run.rewrite_responses = [_completed(0, "Событие прошло.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "followup", raw, "человеческий фолбэк\n\n" + tick.FOLLOWUP_QUESTION,
+        CFG, now_utc="2026-07-11T12:00:00+05:00", force=True,
+    )
+    db.commit()
+
+    assert status == "sent"
+    rows = audit.query(db, None, "gate.sent", None)
+    final = rows[0]["payload"]["final"]
+    assert rows[0]["payload"]["attempt"] == "rewrite"
+    assert final.endswith(tick.FOLLOWUP_QUESTION)
+    assert final.count(tick.FOLLOWUP_QUESTION) == 1
