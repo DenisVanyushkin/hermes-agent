@@ -52,6 +52,26 @@ class TestParseDecisionReply:
     def test_number_without_valid_option_returns_none(self):
         assert parse_upstream_sync_decision_reply("1: do whatever, 2: yolo") is None
 
+    def test_parses_hyphenated_options(self):
+        # The conflict report presents the skill canonical hyphenated tokens
+        # (pending.json options: keep-local / take-upstream / merge-both); an
+        # operator replying verbatim must be recognized. Regression: 2026-07-13.
+        result = parse_upstream_sync_decision_reply(
+            "1: merge-both, 2: merge-both, 3: merge-both, 4: merge-both, 5: merge-both"
+        )
+        assert result == {1: "merge both", 2: "merge both", 3: "merge both",
+                          4: "merge both", 5: "merge both"}
+
+    def test_parses_mixed_hyphenated(self):
+        result = parse_upstream_sync_decision_reply(
+            "1: keep-local, 2: take-upstream, 3: merge-both"
+        )
+        assert result == {1: "keep local", 2: "take upstream", 3: "merge both"}
+
+    def test_parses_underscore_options(self):
+        result = parse_upstream_sync_decision_reply("1: merge_both, 2: keep_local")
+        assert result == {1: "merge both", 2: "keep local"}
+
     def test_invalid_option_among_valid_drops_invalid(self):
         # A recognizable decision-set with one bad option keeps the valid ones.
         result = parse_upstream_sync_decision_reply(

@@ -16,11 +16,14 @@ from typing import Optional
 
 _VALID_OPTIONS = ("merge both", "keep local", "take upstream")
 
-# Matches ``<n>: <option>`` where option is one of the allowed phrases. The
-# option is captured greedily up to the phrase boundary; surrounding prose and
-# separators (commas, newlines, "and") are tolerated.
+# Matches ``<n>: <option>`` where option is one of the allowed phrases. The two
+# option words may be joined by whitespace, a hyphen, or an underscore, so the
+# skill canonical tokens the conflict report presents (merge-both / keep-local /
+# take-upstream, per pending.json ``options``) are recognized as well as the
+# spelled-out forms. Surrounding prose and separators (commas, newlines, "and")
+# are tolerated.
 _DECISION_RE = re.compile(
-    r"(\d+)\s*:\s*(merge\s+both|keep\s+local|take\s+upstream)",
+    r"(\d+)\s*:\s*(merge[\s_-]+both|keep[\s_-]+local|take[\s_-]+upstream)",
     re.IGNORECASE,
 )
 
@@ -40,7 +43,7 @@ def parse_upstream_sync_decision_reply(text: Optional[str]) -> Optional[dict[int
             feature_id = int(raw_id)
         except ValueError:
             continue
-        option = " ".join(raw_option.lower().split())
+        option = re.sub(r"[\s_-]+", " ", raw_option.lower()).strip()
         if option in _VALID_OPTIONS:
             decisions[feature_id] = option
 
