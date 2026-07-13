@@ -18,6 +18,7 @@ CFG = {
     "email_enabled": True,
     "email_from": "germes@vanyushk.in",
     "email_to": "hermes@vanyushk.in",
+    "enroute_max_items": 2,
 }
 
 

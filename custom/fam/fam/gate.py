@@ -41,6 +41,10 @@ CONFIG_DEFAULTS = {
     "email_enabled": True,
     "email_from": "germes@vanyushk.in",
     "email_to": "hermes@vanyushk.in",
+    # 3b Task 4: max number of "по пути" plan titles piggybacked onto a
+    # leave/prepare reminder's raw text (tick.py's reminders()) --
+    # laconicism, not a hard business rule.
+    "enroute_max_items": 2,
 }
 
 GATE_STYLE_INSTRUCTION = (

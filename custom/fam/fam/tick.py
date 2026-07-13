@@ -28,7 +28,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import audit, cal, gate, rem, road, weather
+from fam import audit, cal, gate, plans, rem, road, weather
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -371,6 +371,31 @@ def reminders(conn, now_utc=None, cfg=None):
         prior = gate.prior_texts_today(conn, event["id"], now)
         if prior:
             raw["prior_texts"] = prior
+
+        # 3b Task 4: "по пути" -- open plans on the way to this event
+        # piggyback onto the SAME reminder (no new message, no extra
+        # budget spend). Only leave/prepare stages (the ones already
+        # about departure/getting ready) qualify, and only for events
+        # with a place (plans.match_enroute's geo reason needs a route
+        # to compare against; a place-less event can still match via
+        # "person", but scoping this to reminder["kind"] AND a place
+        # keeps the call rare and avoids surprising a caller-with-a-
+        # meeting reminder). plans.match_enroute is called at most ONCE
+        # here -- not on every minute tick -- because it may internally
+        # call road.route_for_event (TomTom, daily-capped); this call
+        # site is reached only for a reminder that is actually due and
+        # about to be delivered this tick.
+        if reminder["kind"] in ("leave", "prepare") and event["place"]:
+            matches = plans.match_enroute(conn, event, cfg, now_utc=now)
+            if matches:
+                max_items = cfg.get("enroute_max_items", 2)
+                chosen = matches[:max_items]
+                titles = [m["plan"]["title"] for m in chosen]
+                raw["enroute"] = "По пути: " + "; ".join(titles)
+                audit.log(conn, "tick.enroute",
+                          {"event_id": event["id"],
+                           "plan_ids": [m["plan"]["id"] for m in chosen]})
+
         human_fallback = (
             f"{reminder['label']}: {event['title']} — {event['start_local']}"
         )
