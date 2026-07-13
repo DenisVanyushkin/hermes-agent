@@ -688,6 +688,46 @@ def cmd_meds_rm(args):
         print(f"removed med {args.id}")
     return 0
 
+def cmd_med_taken(args):
+    """`fam med taken <intake_id>` -- ack a scheduled dose as taken
+    (phase 5 Task 5). meds.take raises ValueError on an unknown
+    intake_id, handled by main()'s except ValueError -> exit 2, same
+    as every other unknown-ref path in this CLI. This command never
+    sends a proactive "time to buy" message itself (Denis's decision:
+    that's the skill's job in T8, or the digest's in T7) -- it only
+    surfaces the restock fact in the returned dict / text line.
+    """
+    conn = famdb.connect()
+    result = meds.take(conn, args.id)
+    conn.commit()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        line = f"taken: intake {args.id}"
+        if result.get("remaining") is not None:
+            line += f" (remaining={result['remaining']})"
+        if result.get("restock"):
+            line += " -- restock needed, added to shopping" \
+                if result.get("restock_added") \
+                else " -- restock needed (already on shopping list)"
+        print(line)
+    return 0
+
+def cmd_med_skip(args):
+    """`fam med skip <intake_id>` -- ack a scheduled dose as skipped,
+    this dose only (phase 5 Task 5): remaining is left untouched and
+    the next scheduled intake is unaffected. Same unknown-intake_id ->
+    ValueError -> exit 2 contract as cmd_med_taken.
+    """
+    conn = famdb.connect()
+    result = meds.skip(conn, args.id)
+    conn.commit()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"skipped: intake {args.id}")
+    return 0
+
 def _fmt_shop(it):
     line = f"{it['id']}\t{it['name']}"
     if it.get("qty"):
@@ -1022,6 +1062,21 @@ def build_parser():
     spr = meds_sub.add_parser("rm"); spr.set_defaults(func=cmd_meds_rm)
     spr.add_argument("id", type=int)
     spr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    # "med" (singular) -- per-dose acks (taken/skip), distinct from
+    # "meds" (plural) above, which manages med definitions themselves.
+    sp = sub.add_parser("med")
+    med_sub = sp.add_subparsers(dest="med_cmd", required=True)
+
+    spt = med_sub.add_parser("taken"); spt.set_defaults(func=cmd_med_taken)
+    spt.add_argument("id", type=int, help="med_intakes row id")
+    spt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    sps = med_sub.add_parser("skip"); sps.set_defaults(func=cmd_med_skip)
+    sps.add_argument("id", type=int, help="med_intakes row id")
+    sps.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
     sp = sub.add_parser("shop")

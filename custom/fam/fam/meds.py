@@ -6,7 +6,7 @@ mirroring plans.py/people.py/places.py's pattern.
 import json
 from datetime import datetime, timezone
 
-from fam import audit
+from fam import audit, shopping
 
 
 def _now():
@@ -143,3 +143,109 @@ def remove(conn, med_id):
     conn.execute("DELETE FROM meds WHERE id=?", (med_id,))
     audit.log(conn, "meds.remove", {"id": med_id, "name": existing["name"]})
     return True
+
+
+def take(conn, intake_id, now_utc=None):
+    """Ack a med_intakes row as taken (phase 5 Task 5). status=taken,
+    taken_ts_utc is stamped, series_next_utc is cleared to NULL -- this
+    dose's persistent reminder series (tick._meds_series) is done
+    escalating once it's acked, same as the out-of-stock branch there
+    already does. remaining decrements by 1, floored at 0, when tracked
+    (not None); an untracked med (remaining=None) is left alone and
+    never triggers a restock.
+
+    Restock trigger: once remaining is updated, if it is not None and
+    remaining <= the med's threshold -- guarded so a med at the default
+    threshold=0 only triggers once remaining actually hits 0, not on
+    every take (threshold>0 or remaining==0) -- this calls
+    shopping.add_from_meds(conn, med_name), which self-dedups against an
+    already-open source='meds' row for the same name. The outcome is
+    reported back via restock (True whenever the threshold condition
+    fired) and restock_added (False when add_from_meds's own dedup
+    returned None, i.e. a restock item was already open).
+
+    audit meds.take: {intake_id, med_id, remaining, restock}.
+
+    Raises ValueError on an unknown intake_id, before any write --
+    same "raise, don't fail silently" contract unknown place/person/
+    plan refs already use elsewhere in fam/*.py (Denis's "не падай
+    молча" instruction for T5: an exception here is the CLI-visible,
+    exit-2 path via cli.main's except ValueError).
+    """
+    row = conn.execute(
+        "SELECT * FROM med_intakes WHERE id=?", (intake_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown intake: {intake_id}")
+
+    now = now_utc or _now()
+    med_id = row["med_id"]
+    med = get(conn, med_id)
+
+    remaining = med["remaining"] if med is not None else None
+    if remaining is not None:
+        remaining = max(0, remaining - 1)
+        edit(conn, med_id, remaining=remaining)
+
+    conn.execute(
+        "UPDATE med_intakes SET status='taken', taken_ts_utc=?, "
+        "series_next_utc=NULL WHERE id=?",
+        (now, intake_id),
+    )
+
+    restock = False
+    restock_added = False
+    if remaining is not None and remaining <= med["threshold"] \
+            and (med["threshold"] > 0 or remaining == 0):
+        restock = True
+        added_id = shopping.add_from_meds(conn, med["name"])
+        restock_added = added_id is not None
+
+    audit.log(conn, "meds.take", {
+        "intake_id": intake_id, "med_id": med_id, "remaining": remaining,
+        "restock": restock,
+    })
+
+    result = dict(row)
+    result["status"] = "taken"
+    result["taken_ts_utc"] = now
+    result["series_next_utc"] = None
+    result["remaining"] = remaining
+    result["restock"] = restock
+    result["restock_added"] = restock_added
+    return result
+
+
+def skip(conn, intake_id):
+    """Ack a med_intakes row as skipped (phase 5 Task 5) -- ONLY this
+    one dose: status=skipped, series_next_utc cleared to NULL (stops
+    just this row's own persistent-reminder escalation, same series
+    field take() clears). remaining is left untouched (a skipped dose
+    was never consumed), and the next scheduled intake is unaffected --
+    it is a separate med_intakes row, generated daily by tick.meds_gen,
+    that this call never touches.
+
+    audit meds.skip: {intake_id, med_id}.
+
+    Raises ValueError on an unknown intake_id, before any write --
+    same contract as take().
+    """
+    row = conn.execute(
+        "SELECT * FROM med_intakes WHERE id=?", (intake_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown intake: {intake_id}")
+
+    conn.execute(
+        "UPDATE med_intakes SET status='skipped', series_next_utc=NULL "
+        "WHERE id=?",
+        (intake_id,),
+    )
+
+    audit.log(conn, "meds.skip",
+              {"intake_id": intake_id, "med_id": row["med_id"]})
+
+    result = dict(row)
+    result["status"] = "skipped"
+    result["series_next_utc"] = None
+    return result
