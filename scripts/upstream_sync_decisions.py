@@ -107,6 +107,10 @@ def _best_match(feature: Feature, entries: list[dict]) -> dict | None:
         entry_files = set(entry.get("files", []))
         if not ft_files.issubset(entry_files):
             continue
+        # All candidates that reach here are supersets of feature.files, so their
+        # overlap score is constant (== len feature.files); the tie-break below
+        # therefore considers every qualifying entry and defers to the operator
+        # (returns None) whenever any of them disagree on the decision.
         candidates.append((len(ft_files & entry_files), entry))
     if not candidates:
         return None
