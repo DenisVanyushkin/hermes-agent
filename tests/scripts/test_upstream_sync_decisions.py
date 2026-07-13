@@ -168,3 +168,43 @@ def test_partition_ambiguous_same_decision_is_remembered():
     result = mod.partition(feats, memory)
     assert len(result["remembered"]) == 1
     assert result["remembered"][0].decision == "keep-local"
+
+
+def _feat(files, subjects, decision):
+    files = tuple(sorted(files)); subjects = tuple(sorted(subjects))
+    return mod.Feature(files=files, subjects=subjects,
+                       fingerprint=mod.feature_fingerprint(files, subjects), decision=decision)
+
+
+def test_record_creates_entry():
+    memory = _mem()
+    mod.record_decisions(memory, [_feat(["a.py"], ["feat: a"], "keep-local")], now="2026-07-13T10:00:00Z")
+    assert len(memory["entries"]) == 1
+    e = memory["entries"][0]
+    assert e["decision"] == "keep-local" and e["apply_count"] == 1
+    assert e["created_at"] == e["last_applied_at"] == "2026-07-13T10:00:00Z"
+    assert memory["updated_at"] == "2026-07-13T10:00:00Z"
+
+
+def test_record_bumps_on_new_run():
+    memory = _mem()
+    f = _feat(["a.py"], ["feat: a"], "keep-local")
+    mod.record_decisions(memory, [f], now="2026-07-13T10:00:00Z")
+    mod.record_decisions(memory, [f], now="2026-07-20T10:00:00Z")
+    assert len(memory["entries"]) == 1
+    assert memory["entries"][0]["apply_count"] == 2
+    assert memory["entries"][0]["last_applied_at"] == "2026-07-20T10:00:00Z"
+
+
+def test_record_idempotent_within_same_now():
+    memory = _mem()
+    f = _feat(["a.py"], ["feat: a"], "keep-local")
+    mod.record_decisions(memory, [f], now="2026-07-13T10:00:00Z")
+    mod.record_decisions(memory, [f], now="2026-07-13T10:00:00Z")
+    assert memory["entries"][0]["apply_count"] == 1
+
+
+def test_record_rejects_invalid_decision():
+    memory = _mem()
+    with pytest.raises(ValueError):
+        mod.record_decisions(memory, [_feat(["a.py"], ["feat: a"], "keep-remote")], now="2026-07-13T10:00:00Z")
