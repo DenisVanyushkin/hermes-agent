@@ -35,6 +35,14 @@ def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _wall_now():
+    """Real wall-clock now (UTC), as an ISO-8601 string -- matches the
+    string type _almaty_day_utc_bounds expects (same shape as _now()).
+    Kept as a separate seam from the caller-supplied depart anchor so
+    tests can monkeypatch wall-clock independently of it."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _http_get(url, timeout):
     with urllib.request.urlopen(url, timeout=timeout) as r:
         return r.read()
@@ -73,12 +81,14 @@ def straight_line_minutes(from_lat, from_lon, to_lat, to_lon, cfg):
     return max(1, math.ceil(km / cfg.get("road_speed_kmh", 30) * 60))
 
 
-def _tomtom_calls_today(conn, now_utc):
-    """Count of road.call audit rows within today's Asia/Almaty day
-    (relative to now_utc) -- same day-bounds pattern as
-    gate.budget_spent_today.
+def _tomtom_calls_today(conn):
+    """Count of road.call audit rows within today's Asia/Almaty day,
+    relative to real wall-clock now -- same day-bounds pattern as
+    gate.budget_spent_today. Audit rows are stamped wall-clock, so this
+    MUST use wall-clock now, never the caller's depart anchor (which for
+    a future event can be days ahead and would always find 0 rows).
     """
-    from_utc, to_utc = _almaty_day_utc_bounds(now_utc)
+    from_utc, to_utc = _almaty_day_utc_bounds(_wall_now())
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM audit_log WHERE kind='road.call' "
         "AND ts_utc >= ? AND ts_utc < ?",
@@ -116,7 +126,7 @@ def compute_travel_min(conn, event, cfg, now_utc=None):
         # a real attempt that failed (which still logs road.error below).
         if os.environ.get("TOMTOM_API_KEY", "").strip():
             cap = cfg.get("road_daily_cap", 100)
-            if _tomtom_calls_today(conn, now) >= cap:
+            if _tomtom_calls_today(conn) >= cap:
                 audit.log(conn, "road.cap", {"event_id": event_id})
             else:
                 depart_at = now if isinstance(now, str) else now.isoformat(timespec="seconds")

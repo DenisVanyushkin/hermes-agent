@@ -493,6 +493,66 @@ def test_road_hook_unexpected_exception_does_not_break_add(db, monkeypatch):
     assert rows and rows[0]["payload"] == {"event_id": e["id"]}
 
 
+def test_transport_only_update_that_changes_road_forces_regen(db, monkeypatch):
+    # transport is in _ROAD_TRIGGER_COLUMNS but NOT in _REGEN_TRIGGER_
+    # COLUMNS -- a transport-only edit that changes what recompute_road()
+    # computes must still regenerate the chain, or the fresh
+    # road_checked_at recompute_road just wrote would suppress the
+    # tick's self-heal on a now-desynced chain.
+    _seed(db)
+    _seed_rules(db)
+    places.add(db, "Лемана ПРО", lat=43.2298, lon=76.8823)
+    db.commit()
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+    e = cal.add(db, "Строймаг", "2099-01-15T05:00:00+00:00", place="Лемана ПРО",
+                transport="car")
+    db.commit()
+
+    before = {r["id"]: r["fire_at_utc"] for r in db.execute(
+        "SELECT id, fire_at_utc FROM reminders WHERE event_id=?", (e["id"],))}
+
+    # transport-only update; recompute_road returns a NEW value (33) this
+    # time -- must force a regen even though start_utc/travel_min/place_id
+    # (the regen trigger columns) are untouched.
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (33, "tomtom"))
+    cal.update(db, e["id"], transport="walk")
+    db.commit()
+
+    assert cal.get(db, e["id"])["travel_min_road"] == 33
+    after = {r["id"]: r["fire_at_utc"] for r in db.execute(
+        "SELECT id, fire_at_utc FROM reminders WHERE event_id=?", (e["id"],))}
+    assert before != after
+
+
+def test_transport_only_update_that_keeps_road_same_does_not_force_regen(db, monkeypatch):
+    _seed(db)
+    _seed_rules(db)
+    places.add(db, "Лемана ПРО", lat=43.2298, lon=76.8823)
+    db.commit()
+    monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+    e = cal.add(db, "Строймаг", "2099-01-15T05:00:00+00:00", place="Лемана ПРО",
+                transport="car")
+    db.commit()
+
+    before = {r["id"]: r["fire_at_utc"] for r in db.execute(
+        "SELECT id, fire_at_utc FROM reminders WHERE event_id=?", (e["id"],))}
+
+    # recompute_road returns the SAME value -- no regen needed.
+    monkeypatch.setattr(cal.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+    cal.update(db, e["id"], transport="walk")
+    db.commit()
+
+    after = {r["id"]: r["fire_at_utc"] for r in db.execute(
+        "SELECT id, fire_at_utc FROM reminders WHERE event_id=?", (e["id"],))}
+    assert before == after
+
+
 def test_done_cancels_pending_reminder_chain(db):
     _seed(db)
     _seed_rules(db)

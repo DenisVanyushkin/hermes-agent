@@ -161,9 +161,13 @@ def update(conn, ref, **fields):
 
     Ripple (3a, Task 5): a lat/lon/travel_min change affects FUTURE
     active events held at this place -- their reminder chains are
-    regenerated (leave_at may shift via the place-travel rung) and their
-    road_checked_at is NULLed (coords changed => any computed road figure
-    is stale; the next tick recomputes it). Past/non-active events are
+    regenerated (leave_at may shift via the place-travel rung) and both
+    travel_min_road and road_checked_at are NULLed (coords changed => any
+    previously-computed road figure is stale garbage, not just
+    unchecked; leaving it in place would keep anchoring the chain until
+    the next T-120 recompute). Nulling travel_min_road means leave_at
+    falls straight back to the manual/place rung immediately, until the
+    next tick recomputes a fresh figure. Past/non-active events are
     untouched. The audit payload carries "events_touched" with the ripple
     count. Everything happens in the caller's single transaction (this
     module never commits).
@@ -202,7 +206,8 @@ def update(conn, ref, **fields):
         ).fetchall()
         for r in rows:
             conn.execute(
-                "UPDATE events SET road_checked_at=NULL WHERE id=?",
+                "UPDATE events SET travel_min_road=NULL, road_checked_at=NULL "
+                "WHERE id=?",
                 (r["id"],),
             )
             rem.regenerate(conn, r["id"])

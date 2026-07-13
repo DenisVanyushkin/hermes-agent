@@ -128,13 +128,17 @@ def test_update_coords_ripples_future_active_events(db):
     places.update(db, "Мега", lat=43.2, lon=76.9)
     db.commit()
 
-    # future event's road freshness is invalidated; past event untouched
-    row = db.execute("SELECT road_checked_at FROM events WHERE id=?",
-                     (future["id"],)).fetchone()
+    # future event's road freshness AND its stale computed figure are
+    # invalidated (leave_at must fall back to manual/place immediately,
+    # not anchor on garbage until T-120 recompute); past event untouched
+    row = db.execute("SELECT travel_min_road, road_checked_at FROM events "
+                      "WHERE id=?", (future["id"],)).fetchone()
     assert row["road_checked_at"] is None
-    row = db.execute("SELECT road_checked_at FROM events WHERE id=?",
-                     (past["id"],)).fetchone()
+    assert row["travel_min_road"] is None
+    row = db.execute("SELECT travel_min_road, road_checked_at FROM events "
+                      "WHERE id=?", (past["id"],)).fetchone()
     assert row["road_checked_at"] is not None
+    assert row["travel_min_road"] == 26
 
     payload = audit.query(db, None, "places.update", None)[0]["payload"]
     assert payload["events_touched"] == 1

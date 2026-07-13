@@ -66,7 +66,10 @@ def test_tomtom_url_contains_traffic_and_depart(monkeypatch):
     road.tomtom_route_minutes(43.24, 76.89, 43.23, 76.78,
                                "2026-07-13T04:00:00+00:00", CFG)
     assert "traffic=true" in seen["url"] and "departAt=2026-07-13T04%3A00%3A00" in seen["url"]
-    assert CFG_KEY not in seen  # ключ не логируем в тестовых утверждениях
+    # `assert CFG_KEY not in seen` (checking dict keys, not values) was
+    # vacuous -- the key legitimately IS in the URL. Nothing meaningful
+    # to assert about key leakage here; the no-audit-leak guarantee is
+    # covered separately by the audit-payload tests below.
 
 
 def test_tomtom_no_key_returns_none_without_http(monkeypatch):
@@ -132,6 +135,10 @@ def test_successful_tomtom_call_is_audited(monkeypatch, db):
 
 
 def test_daily_cap_skips_tomtom(monkeypatch, db):
+    # _tomtom_calls_today now counts against real wall-clock (see fix #1
+    # -- caller's now_utc is only the depart anchor), so pin wall-clock to
+    # NOW here to keep the seeded rows and the cap check on the same day.
+    monkeypatch.setattr(road, "_wall_now", lambda: NOW)
     monkeypatch.setenv("TOMTOM_API_KEY", CFG_KEY)
     monkeypatch.setattr(
         road, "tomtom_route_minutes",
@@ -145,6 +152,38 @@ def test_daily_cap_skips_tomtom(monkeypatch, db):
     db.commit()
 
     mins, src = road.compute_travel_min(db, EVENT_WITH_COORDS, CFG, now_utc=NOW)
+    assert src == "straight" and mins > 0
+    rows = audit.query(db, None, "road.cap", None)
+    assert rows and rows[0]["payload"] == {"event_id": 1}
+
+
+def test_daily_cap_binds_on_wall_clock_not_depart_anchor(monkeypatch, db):
+    """now_utc passed to compute_travel_min is the DEPART anchor and can be
+    days in the future (e.g. a future event's start_utc). The cap must
+    still bind against TODAY's (wall-clock) road.call rows -- audit rows
+    are stamped wall-clock, not against the event's day."""
+    from datetime import datetime, timezone
+
+    wall_now = datetime(2026, 7, 11, 10, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(road, "_wall_now", lambda: wall_now.isoformat(timespec="seconds"))
+    monkeypatch.setenv("TOMTOM_API_KEY", CFG_KEY)
+    monkeypatch.setattr(
+        road, "tomtom_route_minutes",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("cap should block this call")))
+
+    cap = CFG["road_daily_cap"]
+    wall_now_iso = wall_now.isoformat(timespec="seconds")
+    for _ in range(cap):
+        db.execute(
+            "INSERT INTO audit_log(ts_utc, kind, actor, payload) VALUES(?,?,?,?)",
+            (wall_now_iso, "road.call", "test",
+             json.dumps({"event_id": 999, "minutes": 5, "source": "tomtom"})))
+    db.commit()
+
+    # depart anchor for an event 3 days out -- landing on a DIFFERENT
+    # Almaty day than wall-clock now.
+    future_depart = "2026-07-14T10:00:00+00:00"
+    mins, src = road.compute_travel_min(db, EVENT_WITH_COORDS, CFG, now_utc=future_depart)
     assert src == "straight" and mins > 0
     rows = audit.query(db, None, "road.cap", None)
     assert rows and rows[0]["payload"] == {"event_id": 1}

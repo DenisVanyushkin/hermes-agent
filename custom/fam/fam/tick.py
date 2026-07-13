@@ -36,6 +36,13 @@ ALMATY = ZoneInfo("Asia/Almaty")
 # rather than retried forever once its error_count reaches this many.
 ERROR_CAP = 3
 
+# Anchor re-check threshold for road recompute (see _recompute_road's
+# docstring): a shift bigger than this many minutes from the prior
+# travel_min_road is considered a "big shift" whose stale depart-time
+# anchor forces one follow-up recompute (checked_at=NULL) rather than
+# just stamping checked_at=now.
+ROAD_ANCHOR_RECHECK_MIN = 10
+
 # The digest's fixed closing question -- goes into raw["question"] (the
 # JSON the LLM rewrite sees) AND the deterministic human_fallback, from
 # this single constant, so the two can never drift apart.
@@ -105,7 +112,7 @@ def road_recompute(conn, now_utc=None, cfg=None):
     and regenerates the reminder chain (rem.regenerate -- pending stages
     move, sent stages are untouched by construction). road_checked_at is
     stamped `now` for a small change, but set to NULL when the change is
-    big (|new - old| > 10 min, old not NULL) -- the anchor re-check rule
+    big (|new - old| > ROAD_ANCHOR_RECHECK_MIN, old not NULL) -- the anchor re-check rule
     above. Unchanged minutes only bump road_checked_at (no audit, no
     regen).
     Source manual/place/none has nothing new to persist as
@@ -199,7 +206,7 @@ def road_recompute(conn, now_utc=None, cfg=None):
                         # (delta <= 10) checked_at sticks. Oscillation is
                         # bounded by road_daily_cap.
                         big_shift = (old_minutes is not None
-                                     and abs(minutes - old_minutes) > 10)
+                                     and abs(minutes - old_minutes) > ROAD_ANCHOR_RECHECK_MIN)
                         checked_stamp = None if big_shift else now
                         conn.execute(
                             "UPDATE events SET travel_min_road=?, "

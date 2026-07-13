@@ -375,10 +375,25 @@ def update(conn, event_id, **fields):
 
     # Road recompute BEFORE regen, so a fresh regen reads the just-written
     # travel_min_road (rem.regenerate re-fetches the event from DB).
+    #
+    # _REGEN_TRIGGER_COLUMNS does NOT include travel_min_road (it's a
+    # derived/computed column, not a caller-settable field), but
+    # _ROAD_TRIGGER_COLUMNS includes transport -- so a transport-only
+    # update that changes what recompute_road() computes would otherwise
+    # skip regen entirely, AND the fresh road_checked_at it just wrote
+    # would suppress the tick's self-heal from ever catching the desync.
+    # Snapshot travel_min_road before the recompute and force a regen if
+    # the computed value actually changed, even when none of
+    # _REGEN_TRIGGER_COLUMNS tripped.
+    old_travel_min_road = existing["travel_min_road"]
+    road_value_changed = False
     if new_road_state != old_road_state:
-        recompute_road(conn, event_id)
+        road_result = recompute_road(conn, event_id)
+        if road_result.get("minutes") is not None:
+            road_value_changed = road_result["minutes"] != old_travel_min_road
 
-    if (new_regen_state != old_regen_state or participants_changed):
+    if (new_regen_state != old_regen_state or participants_changed
+            or road_value_changed):
         rem.regenerate(conn, event_id)
 
     # Mail-material check derives both snapshots straight from
