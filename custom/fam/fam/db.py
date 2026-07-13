@@ -114,6 +114,17 @@ CREATE TABLE IF NOT EXISTS med_intakes (
   created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_med_intakes_status_plan ON med_intakes(status, plan_ts_utc);
 CREATE INDEX IF NOT EXISTS idx_med_intakes_status_next ON med_intakes(status, series_next_utc);
+-- 5-T3 review round 1: enforce the one-intake-per-scheduled-dose
+-- invariant at the DB level. tick.meds_gen's SELECT-then-INSERT guard
+-- (fam/tick.py:meds_gen) already prevents duplicates in the common
+-- case, but that check-then-act is a TOCTOU race (two overlapping tick
+-- runs could both pass the SELECT before either INSERTs) with no
+-- constraint backing it up. med_intakes is a medical intake log where
+-- a duplicate row would misrepresent doses actually taken, so the
+-- invariant is enforced here rather than left to application logic
+-- alone; meds_gen additionally catches the resulting IntegrityError
+-- and treats it as "already generated" (see tick.py).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_med_intakes_med_plan ON med_intakes(med_id, plan_ts_utc);
 CREATE TABLE IF NOT EXISTS shopping (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,

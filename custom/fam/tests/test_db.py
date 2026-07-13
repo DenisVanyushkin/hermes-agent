@@ -352,3 +352,63 @@ def test_events_travel_min_road_nullable(db):
         "SELECT travel_min_road, road_checked_at FROM events WHERE title='E'").fetchone()
     assert row["travel_min_road"] is None
     assert row["road_checked_at"] is None
+
+
+# ---- schema 5 review round 1: med_intakes unique index ----
+# Phase 5 Task 3 review finding: tick.meds_gen's idempotency (fam/tick.py)
+# only ever relied on a SELECT-then-INSERT app-level check, a TOCTOU race
+# with nothing enforcing it at the DB layer. med_intakes is a medical
+# intake log, so a duplicate (med_id, plan_ts_utc) row is a real-world
+# incorrectness (the same scheduled dose double-counted), not just noise
+# -- hence a UNIQUE index rather than leaving it to application logic
+# alone. Added via CREATE UNIQUE INDEX IF NOT EXISTS (db.py's SCHEMA), no
+# schema_version bump needed since it applies cleanly to the empty
+# med_intakes table on any existing install (see db.py comment at the
+# schema-5 migration block).
+
+def _insert_med(conn):
+    cur = conn.execute(
+        "INSERT INTO meds(name, times, created_at, updated_at) "
+        "VALUES ('Магний', '[\"08:00\"]', "
+        "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')")
+    return cur.lastrowid
+
+
+def test_idx_med_intakes_med_plan_exists(db):
+    idx = {r["name"] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "idx_med_intakes_med_plan" in idx
+
+
+def test_med_intakes_duplicate_med_id_plan_ts_utc_rejected(db):
+    med_id = _insert_med(db)
+    db.execute(
+        "INSERT INTO med_intakes(med_id, plan_ts_utc, status, "
+        "series_next_utc, created_at) VALUES (?,?,?,?,?)",
+        (med_id, "2026-01-01T03:00:00+00:00", "pending",
+         "2026-01-01T03:00:00+00:00", "2026-01-01T03:00:00+00:00"))
+    db.commit()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO med_intakes(med_id, plan_ts_utc, status, "
+            "series_next_utc, created_at) VALUES (?,?,?,?,?)",
+            (med_id, "2026-01-01T03:00:00+00:00", "pending",
+             "2026-01-01T03:00:00+00:00", "2026-01-01T03:00:00+00:00"))
+
+
+def test_med_intakes_same_plan_ts_utc_different_med_allowed(db):
+    # The unique index is on the (med_id, plan_ts_utc) PAIR, not
+    # plan_ts_utc alone -- two different meds legitimately scheduled for
+    # the same instant must not collide.
+    med_a = _insert_med(db)
+    med_b = _insert_med(db)
+    for med_id in (med_a, med_b):
+        db.execute(
+            "INSERT INTO med_intakes(med_id, plan_ts_utc, status, "
+            "series_next_utc, created_at) VALUES (?,?,?,?,?)",
+            (med_id, "2026-01-01T03:00:00+00:00", "pending",
+             "2026-01-01T03:00:00+00:00", "2026-01-01T03:00:00+00:00"))
+    db.commit()
+    count = db.execute("SELECT COUNT(*) c FROM med_intakes").fetchone()["c"]
+    assert count == 2

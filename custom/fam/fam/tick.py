@@ -33,6 +33,7 @@ regenerates it from scratch because generation is idempotent on
 digest.
 """
 import json
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -1001,13 +1002,24 @@ def meds_gen(conn, now_utc=None, cfg=None):
                     continue
 
                 created_at = _now()
-                conn.execute(
-                    "INSERT INTO med_intakes(med_id, plan_ts_utc, "
-                    "taken_ts_utc, status, series_next_utc, created_at) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (med["id"], plan_ts_utc, None, "pending", plan_ts_utc,
-                     created_at),
-                )
+                try:
+                    conn.execute(
+                        "INSERT INTO med_intakes(med_id, plan_ts_utc, "
+                        "taken_ts_utc, status, series_next_utc, created_at) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (med["id"], plan_ts_utc, None, "pending", plan_ts_utc,
+                         created_at),
+                    )
+                except sqlite3.IntegrityError:
+                    # idx_med_intakes_med_plan (db.py SCHEMA, 5-T3 review
+                    # round 1) backstops the SELECT-existing check above
+                    # against its own TOCTOU race -- two overlapping
+                    # meds_gen runs could both pass the SELECT before
+                    # either INSERTs. Same outcome as the existing-row
+                    # branch above: this dose was already generated, so
+                    # it is skipped rather than counted or treated as the
+                    # per-med error the outer except below is for.
+                    continue
                 generated += 1
         except Exception as e:
             audit.log(conn, "tick.error",
