@@ -116,12 +116,26 @@ Do NOT modify the repo yet. First consult decision memory, then branch.
    awkward.) The output has `remembered` (auto-decided from memory) and `new`
    (must ask the operator; includes anything on a security/auth path).
 
+   > **pending.json feature schema (required for memory to work).** Every feature
+   > you write to `pending.json` MUST include `files` and the local-commit
+   > subjects, in one of two shapes: `"local_commits": [{"subject": "..."}]`
+   > (copied verbatim from the matching preflight `conflicts[]` entries) OR
+   > `"local_subjects": ["..."]` (copied straight from `partition`'s output for a
+   > `remembered` feature). `record` derives the memory fingerprint from
+   > `files` + these subjects; if BOTH are absent the fingerprint will not match
+   > and the remembered decision is silently orphaned. Note: the preflight caps
+   > `conflicts` at 60 files; a rebase touching more than 60 conflicted files may
+   > leave some features partially invisible to the memory system — call this
+   > out in the report if the conflict count is near the cap.
+
 2. **If `new` is empty (full auto-apply):**
    a. Create the backup ref (invariant 1).
    b. Write `pending.json` with every feature pre-decided from `remembered`
       (copy each `decision`) and `status: "auto_apply"`.
-   c. Run the Mode B application procedure below (rebase applying those
-      decisions, then `finalize`).
+   c. Run **Mode B steps 2–5 only** (create backup, rebase applying the
+      remembered decisions, finalize, record) — SKIP Mode B step 1: there is no
+      operator reply to match in a full-auto cron run, decisions are already
+      known from memory.
    d. On `ok`: record the applied decisions —
       `python3 .../upstream_sync_decisions.py record --pending <pending.json> \
         --memory .../decision-memory.json --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"`
