@@ -219,3 +219,29 @@ def maybe_alert_staleness(conn, cfg, now=None):
         _meta_set(conn, "car_stale_alerted", "1")
     elif not stale and alerted:
         _meta_set(conn, "car_stale_alerted", "0")
+
+
+def _latest_cabin_temp(conn):
+    r = conn.execute(
+        "SELECT cabin_temp_c FROM car_metrics "
+        "WHERE cabin_temp_c IS NOT NULL ORDER BY ts_utc DESC LIMIT 1"
+    ).fetchone()
+    return r["cabin_temp_c"] if r else None
+
+
+def departure_hooks(conn, event, cfg):
+    """Departure-time piggyback hooks for a leave/prepare reminder --
+    fuel-low nudge and a cabin-temp warmup suggestion. Non-car events
+    never qualify (no route to a car). Never raises; callers (tick.py)
+    still wrap this in try/except per the hot-path guard, but every
+    branch here is a plain read."""
+    if event.get("transport") != "car":
+        return []
+    hooks = []
+    if fuel_is_low(conn):
+        hooks.append("заправься — топлива мало")
+    if cfg.get("car_cabin_suggest_enabled"):
+        t = _latest_cabin_temp(conn)
+        if t is not None and (t < cfg["car_cabin_temp_low_c"] or t > cfg["car_cabin_temp_high_c"]):
+            hooks.append(f"в салоне {t}°, можно завести на прогрев заранее")
+    return hooks

@@ -453,6 +453,24 @@ def reminders(conn, now_utc=None, cfg=None):
                            "place_id": match["place"]["id"],
                            "n_items": len(match["items"])})
 
+        # Phase 4 Task 8: departure hooks (fuel-low + cabin-temp warmup
+        # suggestion) piggyback onto the SAME leave/prepare reminder --
+        # same guard shape as the enroute/shop_enroute blocks above (no
+        # new message, no extra budget spend). Only for car events; a
+        # failure here is swallowed and audited as tick.error/car_hooks,
+        # mirroring the enroute guard's own try/except.
+        if reminder["kind"] in ("leave", "prepare") and event["transport"] == "car":
+            from fam import car as carmod
+            try:
+                car_hooks = carmod.departure_hooks(conn, event, cfg)
+            except Exception as e:
+                car_hooks = []
+                audit.log(conn, "tick.error", {"where": "car_hooks", "error": str(e)[:200]})
+            if car_hooks:
+                raw["car"] = "; ".join(car_hooks)
+                audit.log(conn, "tick.car_hook",
+                          {"event_id": event.get("id"), "hooks": car_hooks})
+
         human_fallback = (
             f"{reminder['label']}: {event['title']} — {event['start_local']}"
         )
