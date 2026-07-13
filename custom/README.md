@@ -1092,3 +1092,114 @@ broken, estimates are just coarser than with live traffic. Re-verify with
 
 `356 passed`, zero warnings —
 `PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`.
+
+## Phase 3b — plans + "по пути" + follow-up (2026-07-12/13)
+
+Builds on top of "Phase 3a — real road" above. Full history: commit messages
+tagged `(3b T1)`..`(3b T7)` on this branch — `git log --oneline --grep="3b T"`
+— from `cc37da945` (plans table + CLI) through `b92af28d7` (skill v6 attach
+protocol fix, current HEAD). Unlike earlier phases, no `.superpowers/sdd/`
+per-task reports were written for 3b; the commit trail is the record. Spec
+update: `docs/superpowers/specs/2026-07-10-amina-assistant-design.md` §10
+(Phase 3b acceptance).
+
+### What this phase adds
+
+- **Plans** (`custom/fam/fam/plans.py`, CLI `fam plan add/list/done/drop/attach`,
+  `custom/fam/fam/cli.py`): a lightweight open-ended todo list — "buy X", "call Y" —
+  independent of calendar events, optionally tied to a place and/or a person, with
+  a soft deadline.
+- **"По пути" ("on the way") in reminders**: `plans.py::match_enroute` runs for
+  every calendar event carrying a place, at reminder-chain `kind` `leave`/`prepare`
+  time, and surfaces open plans that are plausibly on the way to that event. Two
+  independent match reasons, checked against every open (unattached) plan:
+  - **geo**: the event has a resolvable TomTom route
+    (`road.route_for_event` — polyline, with fallback to the straight line
+    home→place when TomTom is unavailable, same ladder as Phase 3a), and the
+    plan's place lies within corridor distance of that route
+    (`road.point_to_route_km`).
+  - **person**: `plan.person_id` is among the event's participants
+    (`event_participants`).
+
+  A plan matching both is reported once, with `geo` taking priority in the
+  dedup. Surfaced plans are capped at `enroute_max_items` per event.
+- **Burning plans + busy-facts in the digest**: plans within
+  `plan_deadline_horizon_days` of their deadline ("burning") are pulled into the
+  morning digest alongside busy-facts for the day; the LLM formulates the actual
+  digest slot wording from the structured facts, this phase does not template
+  fixed text.
+- **Evening follow-up** (`fam/tick.py`, around line 470+): fires on the first
+  once-a-minute tick after `followup_local_time` (Almaty-local) each day, asking
+  about events that already happened ("how did X go") and their related open
+  plans. Dedup is a `meta` row keyed `followup_sent:<date_local>` — one
+  follow-up per calendar day, regardless of how many ticks land after the
+  threshold.
+
+### Config keys
+
+New/relevant `CONFIG_DEFAULTS` — note these are **not** all in the same file:
+`fam/gate.py::CONFIG_DEFAULTS` has `enroute_max_items` (default `2`); the
+`enroute_car_km` (default `3.0`) and `enroute_walk_km` (default `0.5`)
+thresholds default inside `fam/plans.py::match_enroute` itself (`cfg.get(...,
+default)`), not in `gate.py`. Also: `plan_deadline_horizon_days` (default `3`,
+`gate.py`), `followup_local_time` (default `"20:00"`, `gate.py`).
+
+### Reading the audit trail
+
+- `tick.enroute {event_id, plan_ids}` — a reminder tick's on-the-way match ran
+  and (if non-empty) which plans it surfaced for that event.
+- `tick.followup` — the evening follow-up ran; status can be `"no_events"` /
+  `"no_plans"` when there's nothing to ask about, still audited so a silent day
+  is distinguishable from a missed tick.
+- `road.call` — TomTom calls made while resolving a route for enroute matching
+  carry a `"points"` payload (the polyline coordinates for the corridor check).
+  These share the same daily cap as Phase 3a's road-ladder calls
+  (`road_daily_cap`, default `100`) — enroute route lookups and leave-time
+  recomputes draw from one combined budget, not separate ones.
+- `plan.add` / `plan.mark` (status `done`/`dropped`) / `plan.attach` — plan
+  lifecycle, from `fam/plans.py`.
+
+### Skill v6
+
+`custom/skills/amina-fam/SKILL.md` updated to v6 for plans + enroute + digest +
+follow-up; both copies (git and deployed) confirmed at
+`sha256:d9d0d2dca0b606b41ad76ce475840761b59f350fb8eb7783464532f6e2aa6ccd`.
+Activation needs both of the usual two steps (see "Skills: activation caveats"
+above) — gateway was restarted 2026-07-13 (`systemctl --user restart
+hermes-gateway`) to refresh the cached skills-prompt, and **any pilot chat
+session created before that restart must run `/reset`** to pick up the new
+skill list; sessions won't see v6 otherwise.
+
+### ⚠️ Operator rule (new, after the 2026-07-13 incident)
+
+`fam` (via `fam-reminders.timer`/`fam-tick.service`) executes straight out of
+the **working tree**, not a pinned/tagged checkout. If you're hand-editing
+`tick.py` or `gate.py` live on `hermes-home`:
+
+1. `systemctl --user stop fam-reminders.timer` **first**, before touching
+   either file.
+2. Make the edit, run it through a green test pass.
+3. Only then `systemctl --user start fam-reminders.timer` again.
+
+Skipping step 1 means an uncommitted, possibly-broken edit gets executed by
+the once-a-minute tick in prod — this is exactly what happened on 2026-07-13
+(broken code landed and failed every minute until caught).
+
+### Known limitations
+
+- "On the way" person-matches only fire for events that already have a place
+  set — an event with participants but no place never triggers `match_enroute`
+  at all (the function needs `route_points`, which requires a place).
+  Person-only matching without a place is not covered in this phase.
+- If the evening follow-up's send is suppressed by quiet hours or a delivery
+  budget rejection, the `meta` dedup row (`followup_sent:<date>`) is still
+  set — the follow-up is effectively lost for that day, not retried later that
+  same day.
+- The burning-plans list surfaced in the digest has no size cap — a backlog
+  of many plans all within the deadline horizon all get pulled in unbounded.
+
+### Full suite
+
+`424 passed`, zero warnings —
+`PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`
+(re-run 2026-07-13, at HEAD `b92af28d7`).
