@@ -224,3 +224,17 @@ def test_cli_meds_add_audits(db, capsys):
     assert db.execute(
         "SELECT COUNT(*) FROM audit_log WHERE kind='meds.add'"
     ).fetchone()[0] == 1
+
+
+def test_add_normalizes_unpadded_times(db):
+    med_id = meds.add(db, "Магний Б6", ["9:00", "20:00"])
+    db.commit()
+    m = meds.get(db, med_id)
+    assert m["times"] == ["09:00", "20:00"]
+
+
+def test_add_dedupes_unpadded_and_padded_time(db):
+    med_id = meds.add(db, "Омега-3", ["09:00", "9:00"])
+    db.commit()
+    m = meds.get(db, med_id)
+    assert m["times"] == ["09:00"]

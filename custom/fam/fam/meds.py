@@ -22,12 +22,13 @@ def _validate_times(times):
     """
     if not times:
         raise ValueError("times must be a non-empty list of \"HH:MM\" values")
+    normalized = []
     for t in times:
         try:
-            datetime.strptime(t, "%H:%M")
+            normalized.append(datetime.strptime(t, "%H:%M").strftime("%H:%M"))
         except (TypeError, ValueError):
             raise ValueError(f"invalid time (expected HH:MM): {t}")
-    return json.dumps(sorted(set(times)))
+    return json.dumps(sorted(set(normalized)))
 
 
 def add(conn, name, times, dose="", remaining=None, threshold=0):
