@@ -21,6 +21,7 @@ CFG = {
     "enroute_max_items": 2,
     "plan_deadline_horizon_days": 3,
     "followup_local_time": "20:00",
+    "med_repeat_min": 45,
 }
 
 
@@ -223,6 +224,19 @@ def test_budget_spent_today_zero_when_no_rows(db):
 def test_budget_spent_today_excludes_digest_kind(db):
     now_utc = "2026-07-11T10:00:00+00:00"
     _insert_audit(db, "gate.sent", "2026-07-11T12:00:00+00:00", {"kind": "digest"})
+    for _ in range(3):
+        _insert_audit(db, "gate.sent", "2026-07-11T12:00:00+00:00", {"kind": "reminder"})
+    db.commit()
+
+    assert gate.budget_spent_today(db, now_utc=now_utc) == 3
+
+
+# Phase 5 Task 4: medication reminders are delivered with force=True and
+# must never eat into (or be blocked by) the reminder daily budget --
+# same exclusion mechanism as kind=="digest" above.
+def test_budget_spent_today_excludes_med_kind(db):
+    now_utc = "2026-07-11T10:00:00+00:00"
+    _insert_audit(db, "gate.sent", "2026-07-11T12:00:00+00:00", {"kind": "med"})
     for _ in range(3):
         _insert_audit(db, "gate.sent", "2026-07-11T12:00:00+00:00", {"kind": "reminder"})
     db.commit()

@@ -54,6 +54,11 @@ CONFIG_DEFAULTS = {
     # in the first minute-tick at/after this Asia/Almaty local time (and
     # before quiet hours) on a day with outbound events -- HH:MM.
     "followup_local_time": "20:00",
+    # Phase 5 Task 4: persistent meds reminder series (tick.py's
+    # _meds_series, called at the end of reminders()) -- minutes between
+    # one delivered "take this" escalation and the next for the same
+    # still-pending med_intake, regardless of gate.deliver's own outcome.
+    "med_repeat_min": 45,
 }
 
 GATE_STYLE_INSTRUCTION = (
@@ -197,6 +202,11 @@ def budget_spent_today(conn, now_utc=None):
     payload's inner "kind" (reminder/digest/...) is what's filtered on,
     not audit_log.kind (which is always the literal string "gate.sent").
 
+    Phase 5 Task 4 (decision: Денис): kind=="med" is excluded the same
+    way as "digest" -- medication reminders are delivered with
+    force=True and must never be glossed over by, or themselves eat
+    into, the reminder daily budget (see tick.py's _meds_series).
+
     Phase 2c (decision: Денис, task 2c-5): a reminder CHAIN -- every
     gate.sent kind="reminder" row sharing the same raw.event_id, sent the
     same Almaty day -- costs one budget unit, not one per send, since a
@@ -218,6 +228,8 @@ def budget_spent_today(conn, now_utc=None):
         payload = json.loads(r["payload"])
         kind = payload.get("kind")
         if kind == "digest":
+            continue
+        if kind == "med":
             continue
         if kind == "reminder":
             eid = (payload.get("raw") or {}).get("event_id")

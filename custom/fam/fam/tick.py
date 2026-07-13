@@ -464,9 +464,120 @@ def reminders(conn, now_utc=None, cfg=None):
                   {"where": "followup", "error": str(e)[:200]})
         conn.commit()
 
+    # Phase 5 Task 4: persistent medication reminder series -- see
+    # _meds_series's own docstring. Runs last, after event reminders and
+    # the evening follow-up, wrapped in its own try/except (same guard
+    # pattern as the enroute/followup hooks above) so a failure here
+    # never sinks a tick that already delivered ordinary reminders/
+    # followup this same run.
+    try:
+        _meds_series(conn, now_utc=now, cfg=cfg)
+    except Exception:
+        audit.log(conn, "tick.error", {"where": "meds"})
+        conn.commit()
+
     audit.log(conn, "tick.reminders", counts)
     conn.commit()
     return counts
+
+
+def _meds_series(conn, now_utc, cfg):
+    """Phase 5 Task 4: persistent medication reminder series -- the
+    minute-tick counterpart to meds_gen's once-a-day generation. Called
+    from the very end of reminders(); the caller wraps this whole call in
+    a try/except (module docstring's guard-per-hook pattern), so any
+    exception here is audited as tick.error{"where":"meds"} rather than
+    sinking the tick.
+
+    Selects every med_intakes row still status='pending' whose
+    series_next_utc is set (NOT NULL) and <= now -- a row is only ever a
+    series-candidate while series_next_utc is non-NULL, so an
+    out-of-stock intake that already cleared its own series_next_utc to
+    NULL (below) is naturally excluded from every later tick this same
+    day; it will next be touched by meds_gen's midnight missed-closeout,
+    not by this function again.
+
+    Per due row:
+      - in_quiet_hours(now, cfg) -> skip entirely: no send,
+        series_next_utc left untouched. This is a PAUSE, not a cancel --
+        the next tick at/after quiet hours end will find this same row
+        still due (series_next_utc never moved forward) and try again.
+      - meds.get(med_id): if remaining is not None and remaining == 0 ->
+        exactly ONE "go buy this" notice (mode="out_of_stock"), then
+        series_next_utc is cleared to NULL so this same dose never nags
+        again today -- status is left pending; meds_gen's midnight
+        closeout is what eventually marks an un-acked dose "missed".
+      - otherwise -> an ordinary "take this now" reminder (mode="take"),
+        delivered via gate.deliver(force=True) -- Denis's decision:
+        medication reminders bypass quiet hours and the daily budget
+        entirely (see gate.budget_spent_today's kind=="med" exclusion;
+        the quiet-hours check above is this function's OWN pause logic,
+        separate from gate.deliver's own quiet-hours gate). Regardless
+        of gate.deliver's returned status (sent/quiet/budget/error),
+        series_next_utc advances to now + cfg["med_repeat_min"] (default
+        45) minutes -- the next escalation in this dose's own persistent
+        series. status is left pending either way; T5 owns the ack that
+        finally closes it.
+
+    Every row is audited as tick.med: {intake_id, mode:"out_of_stock"}
+    for the out-of-stock branch, {intake_id, mode:"take", status} for
+    the ordinary branch -- "status" is gate.deliver's return value, kept
+    here (unlike out_of_stock, whose own delivery outcome isn't the
+    operationally interesting fact -- the series being paused for the
+    day is) since a persistent "quiet"/"budget"/"error" for a live dose
+    is exactly the kind of thing worth seeing in the audit trail.
+
+    Commits once per due row (mirrors the per-reminder commit in the main
+    loop above -- gate.deliver's send is an irreversible real-world side
+    effect, so each row's outcome is narrowed to its own transaction).
+    """
+    now_dt = _parse_utc(now_utc)
+    due = conn.execute(
+        "SELECT * FROM med_intakes WHERE status='pending' "
+        "AND series_next_utc IS NOT NULL AND series_next_utc <= ? "
+        "ORDER BY series_next_utc",
+        (now_utc,),
+    ).fetchall()
+
+    for row in due:
+        intake_id = row["id"]
+
+        if gate.in_quiet_hours(now_utc, cfg):
+            continue
+
+        med = meds.get(conn, row["med_id"])
+        name = med["name"] if med is not None else None
+        dose = med.get("dose") if med is not None else None
+
+        if med is not None and med.get("remaining") is not None \
+                and med["remaining"] == 0:
+            raw = {"mode": "out_of_stock", "name": name, "dose": dose}
+            human_fallback = f"Заканчивается {name} — надо купить."
+            gate.deliver(conn, "med", raw, human_fallback, cfg, force=True,
+                          now_utc=now_utc)
+            conn.execute(
+                "UPDATE med_intakes SET series_next_utc=NULL WHERE id=?",
+                (intake_id,),
+            )
+            audit.log(conn, "tick.med",
+                      {"intake_id": intake_id, "mode": "out_of_stock"})
+        else:
+            raw = {"mode": "take", "name": name, "dose": dose}
+            human_fallback = f"Пора принять {name}" + (
+                f" ({dose})" if dose else "")
+            status = gate.deliver(conn, "med", raw, human_fallback, cfg,
+                                   force=True, now_utc=now_utc)
+            repeat_min = cfg.get("med_repeat_min", 45)
+            next_utc = (now_dt + timedelta(minutes=repeat_min)).isoformat(
+                timespec="seconds")
+            conn.execute(
+                "UPDATE med_intakes SET series_next_utc=? WHERE id=?",
+                (next_utc, intake_id),
+            )
+            audit.log(conn, "tick.med",
+                      {"intake_id": intake_id, "mode": "take",
+                       "status": status})
+        conn.commit()
 
 
 def _today_almaty(now_utc):
