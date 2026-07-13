@@ -69,3 +69,29 @@ def save_memory(path, memory: dict) -> None:
     Path(path).write_text(
         json.dumps(memory, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+
+
+def group_features(conflicts: list[dict]) -> list[Feature]:
+    buckets: dict[tuple[str, ...], dict] = {}
+    for entry in conflicts:
+        file = entry.get("file")
+        if not file:
+            continue
+        subs = tuple(sorted({
+            (c.get("subject") or "").strip()
+            for c in entry.get("local_commits", [])
+            if (c.get("subject") or "").strip()
+        }))
+        bucket = buckets.setdefault(subs, {"files": set(), "subjects": set(subs)})
+        bucket["files"].add(file)
+    features: list[Feature] = []
+    for subs, bucket in buckets.items():
+        files = tuple(sorted(bucket["files"]))
+        subjects = tuple(sorted(bucket["subjects"]))
+        features.append(Feature(
+            files=files,
+            subjects=subjects,
+            fingerprint=feature_fingerprint(files, subjects),
+        ))
+    features.sort(key=lambda ft: ft.files)
+    return features

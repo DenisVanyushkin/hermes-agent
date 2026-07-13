@@ -54,3 +54,34 @@ def test_save_then_load_roundtrips(tmp_path):
     memory = {"schema": "upstream-sync-decisions/v1", "updated_at": "2026-07-13T00:00:00Z", "entries": []}
     mod.save_memory(p, memory)
     assert mod.load_memory(p) == memory
+
+
+def _conflict(file, subjects):
+    return {"file": file, "local_commits": [{"sha": "deadbeef", "subject": s} for s in subjects], "upstream_commits": []}
+
+
+def test_group_clusters_files_sharing_subject_set():
+    conflicts = [
+        _conflict("gateway/router.py", ["feat: router"]),
+        _conflict("gateway/router_helpers.py", ["feat: router"]),
+        _conflict("agent/approval.py", ["feat: approval"]),
+    ]
+    feats = mod.group_features(conflicts)
+    assert len(feats) == 2
+    by_files = {f.files: f for f in feats}
+    assert ("gateway/router.py", "gateway/router_helpers.py") in by_files
+    assert ("agent/approval.py",) in by_files
+
+
+def test_group_fingerprint_is_rebase_stable():
+    # Same subjects, different SHAs -> same fingerprint.
+    a = mod.group_features([{"file": "x.py", "local_commits": [{"sha": "aaa", "subject": "feat: x"}], "upstream_commits": []}])
+    b = mod.group_features([{"file": "x.py", "local_commits": [{"sha": "zzz", "subject": "feat: x"}], "upstream_commits": []}])
+    assert a[0].fingerprint == b[0].fingerprint
+
+
+def test_group_deduplicates_and_strips_subjects():
+    feats = mod.group_features([
+        _conflict("x.py", ["feat: x ", "feat: x", "fix: y"]),
+    ])
+    assert feats[0].subjects == ("feat: x", "fix: y")
