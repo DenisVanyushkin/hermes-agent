@@ -108,6 +108,7 @@ def cmd_places_update(args):
     if args.travel_min is not None: fields["travel_min"] = args.travel_min
     if args.address is not None: fields["address"] = args.address
     if args.notes is not None: fields["notes"] = args.notes
+    if args.category is not None: fields["category"] = args.category
     p = places.update(conn, args.ref, **fields)
     conn.commit()
     if args.json:
@@ -844,6 +845,9 @@ def build_parser():
                       help="manual leave_at minutes fallback")
     spu.add_argument("--address")
     spu.add_argument("--notes")
+    spu.add_argument("--category", choices=["grocery", "pharmacy"],
+                      help="categorize this place for shopping.match_enroute "
+                           "'по пути' matching (phase 5 T6)")
     spu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 

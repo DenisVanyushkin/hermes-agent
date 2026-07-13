@@ -37,7 +37,7 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import audit, cal, gate, meds, plans, rem, road, weather
+from fam import audit, cal, gate, meds, plans, rem, road, shopping, weather
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -419,6 +419,39 @@ def reminders(conn, now_utc=None, cfg=None):
                 audit.log(conn, "tick.enroute",
                           {"event_id": event["id"],
                            "plan_ids": [m["plan"]["id"] for m in chosen]})
+
+        # Phase 5 Task 6: "заодно" -- a categorized place (grocery/
+        # pharmacy, places.category) on the way to this event, with a
+        # non-empty matching shopping list, piggybacks onto the SAME
+        # reminder -- reuse of the plans-enroute block directly above:
+        # same guard (reminder["kind"] in ("leave","prepare") and
+        # event["place"]), same call-at-most-once-per-delivered-reminder
+        # discipline (shopping.match_enroute may itself call
+        # road.route_for_event, TomTom, daily-capped), no new message
+        # (no extra gate.deliver call => budget doesn't grow). A failure
+        # here is swallowed and audited as tick.error/shop_enroute,
+        # mirroring the enroute guard's own try/except -- it must never
+        # take down reminder delivery. Only the single best match (the
+        # first result -- shopping.match_enroute's own place ordering)
+        # is surfaced; unlike plans-enroute this isn't a titles list, one
+        # magazin/aptека per reminder keeps the text readable.
+        if reminder["kind"] in ("leave", "prepare") and event["place"]:
+            try:
+                shop_matches = shopping.match_enroute(conn, event, cfg, now_utc=now)
+            except Exception as e:
+                audit.log(conn, "tick.error",
+                          {"where": "shop_enroute", "error": str(e)[:200]})
+                shop_matches = []
+            if shop_matches:
+                match = shop_matches[0]
+                raw["shop_enroute"] = (
+                    f"Заодно: {match['place']['name']} — "
+                    + ", ".join(match["items"])
+                )
+                audit.log(conn, "tick.shop_enroute",
+                          {"event_id": event["id"],
+                           "place_id": match["place"]["id"],
+                           "n_items": len(match["items"])})
 
         human_fallback = (
             f"{reminder['label']}: {event['title']} — {event['start_local']}"

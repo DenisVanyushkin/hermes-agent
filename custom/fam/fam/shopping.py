@@ -5,7 +5,7 @@ mirroring plans.py/meds.py's pattern.
 """
 from datetime import datetime, timezone
 
-from fam import audit
+from fam import audit, places, road
 
 
 def _now():
@@ -82,3 +82,77 @@ def add_from_meds(conn, med_name, qty=""):
             return None
 
     return add(conn, med_name, qty=qty, source="meds")
+
+
+def match_enroute(conn, event, cfg, now_utc=None):
+    """Which categorized places (grocery/pharmacy, places.category --
+    phase 5 T6) are 'on the way' for this event, with a non-empty
+    matching shopping list.
+
+    A categorized place matches when it has coordinates AND is within
+    corridor distance of the event's route -- cfg["enroute_walk_km"]
+    (default 0.5) when event.transport == "walk", else
+    cfg["enroute_car_km"] (default 3.0). Same corridor-threshold pattern
+    as plans.match_enroute (3b), but geo-only -- there's no "person"
+    reason here, a place is either in the corridor or it isn't.
+
+    The place's category also gates WHICH open shopping items count as a
+    match, and the list must be non-empty for that place to be reported
+    at all:
+
+    - category == 'grocery': any open shopping item (source doesn't
+      matter -- a grocery run covers manual entries and meds-restock
+      entries alike).
+    - category == 'pharmacy': only open shopping items with
+      source='meds' (a pharmacy stop is pointless for a manual grocery
+      item).
+
+    road.route_for_event (3b) is called at most once, and only when at
+    least one categorized place has coordinates -- skips the (possibly
+    TomTom-backed, daily-capped) call entirely when there is nothing to
+    match against, same perf guard as plans.match_enroute. Never raises.
+
+    Returns a list of {"category": "grocery"|"pharmacy", "place": <dict>,
+    "items": [name, ...]}, one entry per matching place (deduped by
+    place -- category is a single column, so a place can only ever
+    contribute one entry). items are shopping-item names, capped at
+    cfg["enroute_max_items"].
+    """
+    categorized = [
+        p for p in places.list_all(conn)
+        if p.get("category") in ("grocery", "pharmacy")
+        and p.get("lat") is not None and p.get("lon") is not None
+    ]
+    if not categorized:
+        return []
+
+    route_points, source = road.route_for_event(conn, event, cfg, now_utc=now_utc)
+    if source == "none" or not route_points:
+        return []
+
+    if event.get("transport") == "walk":
+        threshold_km = cfg.get("enroute_walk_km", 0.5)
+    else:
+        threshold_km = cfg.get("enroute_car_km", 3.0)
+
+    max_items = cfg.get("enroute_max_items", 2)
+    open_items = list_open(conn)
+    meds_items = [i for i in open_items if i.get("source") == "meds"]
+
+    results = []
+    for place in categorized:
+        dist_km = road.point_to_route_km(place["lat"], place["lon"], route_points)
+        if dist_km > threshold_km:
+            continue
+
+        candidate_items = open_items if place["category"] == "grocery" else meds_items
+        if not candidate_items:
+            continue
+
+        results.append({
+            "category": place["category"],
+            "place": place,
+            "items": [i["name"] for i in candidate_items[:max_items]],
+        })
+
+    return results

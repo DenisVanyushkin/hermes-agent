@@ -145,19 +145,27 @@ def alias(conn, place_ref, alias):
     return None
 
 
-_UPDATE_FIELDS = {"lat", "lon", "travel_min", "address", "notes"}
+_UPDATE_FIELDS = {"lat", "lon", "travel_min", "address", "notes", "category"}
 
 # Fields whose change ripples into future events at this place (see
-# update()'s docstring) -- address/notes are presentation-only.
+# update()'s docstring) -- address/notes/category are presentation/
+# matching-only (category feeds shopping.match_enroute's corridor match,
+# phase 5 T6 -- it doesn't affect road/leave_at computation at all).
 _RIPPLE_FIELDS = {"lat", "lon", "travel_min"}
+
+# category is nullable (NULL = uncategorized, never matched by
+# shopping.match_enroute) -- see db.py's places SCHEMA CHECK constraint
+# (fresh installs) and its _ensure_column migration (pre-T6 dbs, no
+# DB-level CHECK there, so this is the only guard for those).
+_CATEGORY_VALUES = ("grocery", "pharmacy", None)
 
 
 def update(conn, ref, **fields):
     """Update mutable fields on a place (whitelist: lat, lon, travel_min,
-    address, notes), following cal.update's pattern. ref resolves via
-    get() (id/name/alias, case-insensitive). Raises ValueError on an
-    unknown place, an unknown field, or an empty field set -- always
-    before any write.
+    address, notes, category), following cal.update's pattern. ref
+    resolves via get() (id/name/alias, case-insensitive). Raises
+    ValueError on an unknown place, an unknown field, an invalid
+    category, or an empty field set -- always before any write.
 
     Ripple (3a, Task 5): a lat/lon/travel_min change affects FUTURE
     active events held at this place -- their reminder chains are
@@ -171,6 +179,11 @@ def update(conn, ref, **fields):
     untouched. The audit payload carries "events_touched" with the ripple
     count. Everything happens in the caller's single transaction (this
     module never commits).
+
+    category (phase 5 T6): 'grocery'|'pharmacy'|None -- drives
+    shopping.match_enroute's "по пути" corridor match. It never ripples
+    (not in _RIPPLE_FIELDS): changing what a place is used for doesn't
+    invalidate any already-computed travel figure.
     """
     from fam import rem  # deferred: avoid an import cycle (rem -> cal -> places)
 
@@ -186,6 +199,10 @@ def update(conn, ref, **fields):
         )
     if not fields:
         raise ValueError("no fields to update")
+    if "category" in fields and fields["category"] not in _CATEGORY_VALUES:
+        raise ValueError(
+            f"invalid category (expected grocery|pharmacy|null): {fields['category']}"
+        )
 
     set_clauses = []
     params = []

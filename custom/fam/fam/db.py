@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS places (
   source TEXT NOT NULL DEFAULT 'manual',  -- manual|2gis (Phase 3)
   notes TEXT NOT NULL DEFAULT '',
   travel_min INTEGER NOT NULL DEFAULT 0,  -- manual leave_at minutes (2b); 2GIS in Phase 3
+  category TEXT CHECK (category IN ('grocery','pharmacy') OR category IS NULL),
+                                           -- "по пути" match target (phase 5 T6)
   created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS place_aliases (
   alias TEXT PRIMARY KEY COLLATE NOCASE,
@@ -196,6 +198,16 @@ def init_db(conn):
     # are whole new tables, same as `plans` in 3b above -- CREATE TABLE
     # IF NOT EXISTS covers both fresh and pre-5 databases, no
     # _ensure_column migration needed.
+    # schema 5 T6: places.category ('grocery'|'pharmacy'|NULL) drives
+    # shopping.match_enroute's "по пути" corridor match -- CREATE TABLE
+    # IF NOT EXISTS above covers fresh installs (category is now part of
+    # the places definition, with a CHECK constraint), but places
+    # already existed pre-T6 so old databases need this migration too.
+    # No CHECK on the ALTER itself -- same reasoning as reminders.kind's
+    # migration above (SQLite ADD COLUMN CHECK support/compat isn't
+    # exercised elsewhere in this codebase); validated at the
+    # places.update() layer instead.
+    _ensure_column(conn, "places", "category", "category TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','5')")
     conn.execute(
