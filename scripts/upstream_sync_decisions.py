@@ -95,3 +95,44 @@ def group_features(conflicts: list[dict]) -> list[Feature]:
         ))
     features.sort(key=lambda ft: ft.files)
     return features
+
+
+def _best_match(feature: Feature, entries: list[dict]) -> dict | None:
+    ft_subjects = set(feature.subjects)
+    ft_files = set(feature.files)
+    candidates: list[tuple[int, dict]] = []
+    for entry in entries:
+        if set(entry.get("local_subjects", [])) != ft_subjects:
+            continue
+        entry_files = set(entry.get("files", []))
+        if not ft_files.issubset(entry_files):
+            continue
+        candidates.append((len(ft_files & entry_files), entry))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    top_score = candidates[0][0]
+    top = [entry for score, entry in candidates if score == top_score]
+    if len({entry.get("decision") for entry in top}) > 1:
+        return None  # ambiguous — ask the operator
+    return top[0]
+
+
+def partition(features: list[Feature], memory: dict, *, security_re=SECURITY_RE) -> dict:
+    entries = memory.get("entries", [])
+    remembered: list[Feature] = []
+    new: list[Feature] = []
+    for feature in features:
+        if not feature.subjects:
+            new.append(feature)
+            continue
+        if any(security_re.search(path) for path in feature.files):
+            new.append(feature)
+            continue
+        match = _best_match(feature, entries)
+        if match is None:
+            new.append(feature)
+        else:
+            remembered.append(dataclasses.replace(
+                feature, decision=match["decision"], source="memory"))
+    return {"remembered": remembered, "new": new}
