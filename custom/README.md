@@ -1295,12 +1295,15 @@ but still respect quiet hours.
 ### Reading the audit trail
 
 - `tick.meds_gen {generated, missed}` — the daily generation/closeout run.
-- `tick.med {intake_id, mode: "take"|"out_of_stock", status}` — one row
-  per persistent-series delivery attempt. `status` (gate.deliver's return:
-  `sent`/`quiet`/`budget`/`error`) is only carried for the `take` branch —
-  a live dose stuck on quiet/budget/error is worth seeing; the
-  `out_of_stock` branch omits it (the series pausing for the day is the
-  interesting fact there, not that one send's outcome).
+- `tick.med {intake_id, mode: "take"|"out_of_stock"|"disabled", status}`
+  — one row per persistent-series delivery attempt. `status`
+  (gate.deliver's return: `sent`/`quiet`/`budget`/`error`) is only
+  carried for the `take` branch — a live dose stuck on quiet/budget/error
+  is worth seeing; the `out_of_stock` and `disabled` branches omit it (the
+  series pausing for the day is the interesting fact there, not that one
+  send's outcome — and `disabled` has no send at all). `disabled` (5 T9
+  final review, FIX-1) fires for a med that's `enabled=0` or no longer
+  resolves at all — the series stops silently, same as `out_of_stock`.
 - `tick.shop_enroute {event_id, place_id, n_items}` — a reminder's
   shopping "заодно" match (mirrors 3b's `tick.enroute` for plans).
 - `meds.take {intake_id, med_id, remaining, restock}` / `meds.skip
@@ -1341,6 +1344,20 @@ as of this writing.
    before `meds`/`shop`/`med`/`places --category` will work; it is
    idempotent and safe to re-run on an already-migrated database.
 
+### systemd units
+
+All four `fam` timer/service pairs — `fam-reminders`, `fam-digest`,
+`fam-meds-gen`, `skill-sync` — are tracked in `custom/fam/systemd/` (5 T9
+final review, FIX-3). These are plain copies of the live unit files under
+`~/.config/systemd/user/` on `hermes-home`; `fam-reminders`/`fam-digest`/
+`skill-sync` are in fact symlinked live -> repo (single source of truth,
+can't drift), while `fam-meds-gen` is a separate live copy (copied into
+the repo, not symlinked) — either way the repo now has all four, closing
+the earlier gap where `fam-meds-gen` alone had no in-repo unit file. Paths
+inside the units are absolute (`/home/denis/...`) and left as-is: this is
+a single-host, home-instance deployment, not a template meant to be
+portable to another user/path.
+
 ### Known limitations / backlog
 
 - Double ack (`fam med taken`/`skip` on an already-closed intake) is
@@ -1352,19 +1369,20 @@ as of this writing.
   route lookups per reminder instead of one shared lookup. The shared
   `road_daily_cap` still holds (nothing breaks), it's just less efficient
   than it could be.
-- `_meds_digest`'s `today` and `missed_yesterday` lists do NOT filter by
-  `meds.enabled` (only `low_stock` does, via `meds.list()`) — an edge
-  case where a med is disabled the same day it already had intakes
-  generated will still surface those in the digest.
-- `fam-meds-gen.timer`/`.service` are deployed directly under
-  `~/.config/systemd/user/` on `hermes-home` and are **not** tracked in
-  `custom/fam/systemd/` (unlike `fam-digest`/`fam-reminders`/`skill-sync`,
-  which all have unit files in-repo) — a repo-only review or a fresh
-  deploy will miss this timer entirely unless someone knows to look on
-  the box.
+- A dose whose scheduled time falls entirely inside quiet hours
+  (21:30–07:30 Asia/Almaty) will never actually be reminded and silently
+  becomes `missed` at midnight: `_meds_series`'s own quiet-hours check
+  only PAUSES the series (next tick at/after 07:30 retries), but if the
+  dose's `plan_ts_utc` plus every `med_repeat_min`-spaced retry all still
+  land before 07:30 the next tick that's actually outside quiet hours may
+  arrive after `meds-gen`'s midnight closeout has already flipped the row
+  to `missed` — nothing ever fires. `meds.add`/`meds.edit` don't warn
+  about this at schedule time; it does not trigger for Amina's own
+  daily schedule (08:00/20:00), both well outside the quiet window, but
+  would for any dose time added between ~21:30 and ~06:45 or so.
 
 ### Full suite
 
-`572 passed`, zero warnings —
+`578 passed`, zero warnings —
 `PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`
-(re-run 2026-07-13, at HEAD `b8bba0d83`).
+(re-run 2026-07-13, 5 T9 final review fixes, at HEAD `3d64c0215`).
