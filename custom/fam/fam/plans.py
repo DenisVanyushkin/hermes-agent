@@ -8,7 +8,7 @@ any insert.
 """
 from datetime import datetime, timezone
 
-from fam import audit, people, places
+from fam import audit, people, places, road
 
 
 def _now():
@@ -138,3 +138,63 @@ def attach(conn, plan_id, event_id):
     )
     audit.log(conn, "plan.attach", {"id": plan_id, "event_id": event_id})
     return True
+
+
+def match_enroute(conn, event, cfg, now_utc=None):
+    """Which open plans are 'on the way' for this event.
+
+    Two independent reasons a plan can match, both checked against every
+    open (not yet attached) plan:
+
+    - geo: plan has a place with lat/lon, the event has a resolvable
+      route (road.route_for_event doesn't return "none"), and the
+      plan's place is within corridor distance of that route --
+      cfg["enroute_walk_km"] (default 0.5) when event.transport == "walk",
+      else cfg["enroute_car_km"] (default 3.0).
+    - person: plan.person_id is among the event's participants.
+
+    Never raises. Returns a list of {"plan": <dict>, "reason": "geo"|"person"},
+    ordered like plans.list_open(). A plan matching both reasons is
+    reported once with reason "geo" (geo takes priority in the dedup).
+    """
+    open_plans = [p for p in list_open(conn) if p.get("attached_event_id") is None]
+    if not open_plans:
+        return []
+
+    event_id = event.get("id")
+    participant_ids = {
+        r["person_id"] for r in conn.execute(
+            "SELECT person_id FROM event_participants WHERE event_id=?",
+            (event_id,),
+        ).fetchall()
+    }
+
+    route_points = None
+    if any(p.get("place") and p["place"].get("lat") is not None
+           and p["place"].get("lon") is not None for p in open_plans):
+        route_points, source = road.route_for_event(conn, event, cfg, now_utc=now_utc)
+        if source == "none":
+            route_points = None
+
+    if event.get("transport") == "walk":
+        threshold_km = cfg.get("enroute_walk_km", 0.5)
+    else:
+        threshold_km = cfg.get("enroute_car_km", 3.0)
+
+    results = []
+    for plan in open_plans:
+        reason = None
+
+        place = plan.get("place")
+        if route_points and place and place.get("lat") is not None and place.get("lon") is not None:
+            dist_km = road.point_to_route_km(place["lat"], place["lon"], route_points)
+            if dist_km <= threshold_km:
+                reason = "geo"
+
+        if reason is None and plan.get("person_id") in participant_ids:
+            reason = "person"
+
+        if reason is not None:
+            results.append({"plan": plan, "reason": reason})
+
+    return results
