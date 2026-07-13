@@ -472,8 +472,8 @@ def reminders(conn, now_utc=None, cfg=None):
     # followup this same run.
     try:
         _meds_series(conn, now_utc=now, cfg=cfg)
-    except Exception:
-        audit.log(conn, "tick.error", {"where": "meds"})
+    except Exception as e:
+        audit.log(conn, "tick.error", {"where": "meds", "error": str(e)[:200]})
         conn.commit()
 
     audit.log(conn, "tick.reminders", counts)

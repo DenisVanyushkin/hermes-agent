@@ -271,7 +271,9 @@ def test_meds_block_exception_is_caught_and_normal_reminders_still_sent(
         "SELECT payload FROM audit_log WHERE kind='tick.error'"
     ).fetchall()
     assert len(rows) == 1
-    assert json.loads(rows[0]["payload"]) == {"where": "meds"}
+    payload = json.loads(rows[0]["payload"])
+    assert payload["where"] == "meds"
+    assert "meds series blew up" in payload["error"]
 
     # tick.reminders' own summary audit row is still written after.
     assert db.execute(
