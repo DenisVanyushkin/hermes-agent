@@ -34,6 +34,14 @@ way to read or change family data.
   план...", "надо купить...", "до пятницы", agreeing to do a plan "по
   пути" to an event, or later reporting a plan is done. See Plan Verbs
   below.
+- Meds: "добавь лекарство...", "какие лекарства", "сколько осталось X",
+  or reacting to a medication reminder the agent itself sent —
+  "выпила"/"приняла", "пропускаю"/"перестань". See Medication Verbs
+  below.
+- Shopping: "добавь в покупки...", "что купить", "купила X". See
+  Shopping Verbs below.
+- Place category: "это аптека", "там продуктовый" — categorizing a place
+  for the shopping "по пути" match. See Place Category below.
 
 ## Tool
 
@@ -51,6 +59,9 @@ way to read or change family data.
   - `cal add|update|cancel|done|show|day|range|grid`
   - `rem list|ack|cancel|rules|active`
   - `plan add|list|done|drop|attach`
+  - `meds add|list|edit|rm`
+  - `med taken|skip`
+  - `shop add|list|done`
   - `road <event_id>`
 - Time: the household lives in Asia/Almaty (+05:00). "Now" comes from the
   timestamp prefix on the **latest** user message, `[Dow YYYY-MM-DD
@@ -203,6 +214,15 @@ make a second, separate terminal call.
 | Mark a plan done | `fam plan done <id>` |
 | Drop a plan | `fam plan drop <id>` |
 | Attach a plan to an event ("по пути") | `fam plan attach <id> --event <event_id>` |
+| Add a med | `fam meds add "NAME" --times HH:MM,HH:MM --remaining N [--dose D] [--threshold N]` |
+| See meds / stock | `fam meds list` |
+| Edit a med | `fam meds edit <id> [--name] [--dose] [--times] [--remaining] [--threshold] [--enabled 0\|1]` |
+| Mark a dose taken | `fam med taken <intake_id>` |
+| Skip one dose | `fam med skip <intake_id>` |
+| Add to shopping list | `fam shop add "NAME" [--qty Q] [--by WHO]` |
+| See shopping list | `fam shop list` |
+| Mark item bought | `fam shop done <id>` |
+| Categorize a place (аптека/продуктовый) | `fam places update <ref> --category pharmacy\|grocery` |
 
 ## Calendar Grid
 
@@ -341,6 +361,78 @@ protocol as rule 3 applies if `--place` is given and doesn't resolve.
   reminder's `raw.event_id` → 42 →
   `fam plan attach 7 --event 42` → "Записал, куртку заедете забрать по
   пути к стоматологу."
+
+## Medication Verbs
+
+A med has a schedule (`--times`, comma-separated `HH:MM`), a stock count
+(`--remaining`), and a low-stock cutoff (`--threshold`, defaults to 0
+server-side). The household's own persistent reminder series fires
+"пора принять X" (and, out of stock, "пора купить X") out-of-band —
+a background tick, same as calendar reminders above, not this
+conversation.
+
+- **Adding a med** — "добавь лекарство X, утром и вечером, осталось 20"
+  → `fam meds add "X" --times 08:00,20:00 --remaining 20 [--dose D]
+  [--threshold N]`. The named times are literal clock times, not offsets
+  from "now" — rule 1's no-arithmetic rule doesn't apply here. Only pass
+  `--dose`/`--threshold` if the user actually mentions a dose or a
+  specific low-stock cutoff; don't invent one. Confirm in one line:
+  "Записал лекарство: X, 08:00 и 20:00, осталось 20."
+- **Checking meds** ("какие лекарства", "сколько X осталось") → `fam
+  meds list`.
+- **Editing a med** ("поменяй время X", "теперь осталось Y", "отключи
+  X") → resolve `<id>` from `fam meds list` by name first — never guess
+  it — then `fam meds edit <id> [--name] [--dose] [--times]
+  [--remaining] [--threshold] [--enabled 0|1]`.
+- **"выпила"/"приняла" (this dose taken)** and **"пропускаю"/"перестань"
+  (skip this dose)** both need the pending intake_id first. The reminder
+  that fired is NOT in your session context (same out-of-band constraint
+  as Reminder Reactions above) — resolve it fresh, never guess:
+  1. `fam log --kind gate.sent --grep '"name": "X"' --last-hours 8
+     --json` — the most recent row whose `payload.raw.name` matches the
+     medication the user named; note its `ts_utc`.
+  2. `fam log --kind tick.med --last-hours 8 --json` — the row sharing
+     that same `ts_utc` (its gate.sent twin, logged moments later in the
+     same tick) carries `payload.intake_id` — that's the id to use.
+  3. More than one plausible candidate (several doses of X still
+     pending) or none found → ask which dose, or say nothing's pending
+     for X — never guess an id.
+  - "выпила"/"приняла" → `fam med taken <intake_id>` (singular `med`,
+    not `meds` — `meds` manages med definitions, `med` acks one dose).
+    If the result has `"restock": true`, mention "пора купить X" in your
+    reply — it's already on the shopping list (auto-added just now, or
+    already open there); don't add it yourself.
+  - "пропускаю"/"перестань" → `fam med skip <intake_id>` — closes only
+    that one dose; `remaining` and the next scheduled dose are
+    untouched. If the user actually means "stop reminding me about X
+    altogether", that's `fam meds edit <id> --enabled 0`, not a skip.
+
+## Shopping Verbs
+
+- **Adding an item** — "добавь в покупки молоко" → `fam shop add
+  "молоко"` (`--qty`/`--by` only if the user mentions a quantity or who
+  it's for). Confirm in one line: "Добавил в покупки: молоко."
+- **Checking the list** ("что купить", "список покупок") → `fam shop
+  list` (open items only).
+- **Marking bought** ("купила молоко", "молоко взяли") → find the
+  matching item, then mark it done, same pattern as Plan Verbs' "done"
+  above:
+  1. `fam shop list`.
+  2. Exactly one item plausibly matches what the user said → `fam shop
+     done <id>`, confirm briefly ("Отметил: молоко куплено.").
+  3. Several plausible matches, or none → ask which item they mean, or
+     say there's nothing open like that — never guess an id.
+- An item with `"source": "meds"` in `fam shop list`'s JSON was
+  auto-added by a low-stock restock (see Medication Verbs above) — treat
+  it the same as any manually-added item once the user says it's bought.
+
+## Place Category
+
+"это аптека" / "там продуктовый" categorizes a place for the restock
+"по пути" shopping match — it doesn't touch address or coordinates:
+`fam places update <place> --category pharmacy` or `--category
+grocery`. Same unknown-place stop-and-ask protocol as rule 3 applies if
+`<place>` doesn't resolve.
 
 ## Digest Replies
 
