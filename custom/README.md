@@ -969,3 +969,126 @@ settle it; if `17:15:23` is still the newest row, silence is confirmed.
 
 `308 passed`, zero warnings —
 `PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`.
+
+## Phase 3a — real road (2026-07-12/13)
+
+Accepted (Task 8; `.superpowers/sdd/task-3a-8-report.md`). Builds on top of
+"Phase 2c — escalation chains" above; full history: `.superpowers/sdd/progress.md`
+(`PHASE 3a` entries, `3a-T1`..`3a-T9`), plan
+`docs/superpowers/plans/2026-07-12-amina-phase3a-real-road.md`. Spec update:
+`docs/superpowers/specs/2026-07-10-amina-assistant-design.md` §3/§5/§9
+(traffic-aware road replaces "no traffic needed" 2GIS assumption; provider is
+TomTom, not 2GIS — the 2GIS API key is opaque and unusable for this).
+
+### Road ladder and sources
+
+`travel_min_road` is computed by `fam/road.py::compute_travel_min` with a
+fallback ladder, each rung auditing its own `road.*` kind and never raising:
+TomTom Routing API (`traffic=true`, real departure time) → straight-line
+distance × `road_coef` (default 1.4) at `road_speed_kmh` (default 30) →
+manual `travel_min` on the event → the place's own `travel_min` → `0`.
+`leave_at` priority (since 3a-T2) is road-first: a non-NULL
+`travel_min_road` beats a manually-said `travel_min`, which beats the
+place default. Every rung failure is `road.error`; a successful compute is
+`road.computed {minutes, source}`; the TomTom key is read only from env,
+never logged or put in audit/exception text (`fam/road.py` docstring).
+`fam/cal.py::recompute_road` is the single call site cal add/update's hook
+and the tick's threshold recompute and `fam road <id>` all share.
+
+### TOMTOM_API_KEY and env sourcing
+
+The key lives in `~/.hermes/.env` (`TOMTOM_API_KEY=...`), never in the repo.
+Both fam systemd user units (`fam-tick.service`/`fam-tick.timer` and any
+other fam unit that shells out to `fam`) got `EnvironmentFile=-%h/.hermes/.env`
+(commit `5a632179e`) so ticks pick up the key automatically; the leading `-`
+makes a missing file non-fatal (falls back to no-key/straight-line). Manual
+CLI invocations (`fam road <id>`, ad-hoc `fam` commands run interactively)
+do **not** inherit systemd's `EnvironmentFile` and must source the file by
+hand first:
+
+```sh
+set -a; . ~/.hermes/.env; set +a
+```
+
+### Config keys
+
+`fam/road.py::CONFIG_DEFAULTS`: `road_provider` (`"tomtom"`),
+`road_home_lat` / `road_home_lon` (home coordinates the road ladder departs
+from — Denis's live values: `43.197391` / `76.872737`, parked in
+`fam-config.json`), `road_coef` (straight-line fallback multiplier, default
+`1.4`), `road_speed_kmh` (fallback speed, default `30`), `road_daily_cap`
+(TomTom call budget per day, default `100`, guarded independently of
+`cal.py` so every call site is covered), `road_timeout_sec` (default `10`),
+`road_recompute_min` (threshold minutes before departure that trigger a
+recompute, default `[120, 60]`).
+
+### Thresholds T−120/T−60 and anchor re-check
+
+The tick recomputes `travel_min_road` for events crossing `T−120` or `T−60`
+minutes before their (road-adjusted) leave time. A recompute that changes
+the minutes value audits `road.recompute {old, new, source}` and
+regenerates the reminder chain so it reflects the corrected `leave_at`; an
+unchanged value just bumps `road_checked_at` with no separate audit row (the
+`road.error`/`road.computed` row from the underlying compute call is the
+evidence trail). **Anchor re-check**: when a recompute shifts the departure
+anchor by more than 10 minutes (`|Δ|>10`), `road_checked_at` is set back to
+`NULL` — this forces exactly one bounded follow-up recompute on the next
+tick using the corrected anchor, rather than leaving a stale estimate live
+until the next scheduled threshold. This is a self-healing freshness
+invariant, not a missed-window bug (adjudicated in 3a-T4 review).
+
+### `fam road <id>`
+
+`fam road EVENT_ID [--json]` runs the same `cal.recompute_road` path as the
+`cal add`/`cal update` hook (identical audit kinds), then regenerates that
+event's reminder chain — useful for debugging or forcing a recompute outside
+the tick's threshold windows. A recompute that can't produce minutes is
+informational, not an error (exit 0, `source: "none"`), with one of four
+distinguishable reasons: `no_place_coords` (event's place has no lat/lon),
+`no_home_config` (`road_home_lat`/`road_home_lon` not set), a
+`fallback_source:<src>` reason (recompute didn't run but `leave_at` still
+falls back to a non-road source), or a bare `error` (a real failure — see
+`fam log --kind road`).
+
+### `places update` ripple
+
+`fam places update REF --lat ... --lon ... --travel-min ...` changing
+`lat`/`lon`/`travel_min` on a place ripples to every **future active** event
+held at that place: their reminder chains are regenerated (the place-travel
+rung of `leave_at` may shift) and their `road_checked_at` is NULLed so the
+next tick recomputes with fresh coordinates. Past and non-active (cancelled)
+events are untouched. The audit payload carries `events_touched` with the
+ripple count; everything runs inside the caller's single transaction
+(`fam/places.py::update` docstring, 3a-T5). Live-verified 2026-07-12: Лемана
+coordinates backfilled via `places update`, alias resolve confirmed, ripple
+regenerated the event's chain.
+
+### Skill-sync curator drift auto-commit (3a-T9)
+
+Hermes's upstream `skill_manage` background curator can patch *deployed*
+skill files (`~/.hermes/skills/<name>/SKILL.md`) directly, bypassing git —
+first observed live 2026-07-12 ~17:16 UTC. Denis's decision: keep the
+curator on, close the drift automatically instead. `custom/fam/bin/skill-sync`
+compares each deployed `SKILL.md` against its git counterpart
+(`custom/skills/<name>/SKILL.md`); when they differ and the deployed copy is
+newer, it copies deployed→git and commits
+(`chore(amina): curator patch auto-commit (<name>)`) + pushes (a push
+failure is non-fatal — the commit stays local). When git is newer or equal,
+it does nothing (our own edits sync forward normally). Installed as a
+systemd user timer `skill-sync.timer`, `custom/fam/systemd/`, symlink
+pattern, cadence every 30 minutes. Live-verified: a deploy-side patch was
+folded into git and then reverted in a full cycle, final sha256 matched.
+
+### Open item
+
+TomTom returns `401` on the live key currently in `~/.hermes/.env` —
+activation/dashboard issue on Denis's TomTom account, not a code bug. Until
+resolved, the road ladder correctly and silently falls through to the
+straight-line fallback (`source: "straight"`) on every compute; nothing is
+broken, estimates are just coarser than with live traffic. Re-verify with
+`fam road <id> --json` once the key is confirmed active.
+
+### Full suite
+
+`356 passed`, zero warnings —
+`PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`.
