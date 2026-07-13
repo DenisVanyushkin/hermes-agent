@@ -445,6 +445,17 @@ def cmd_tick_digest(args):
         print(" ".join(f"{k}={v}" for k, v in summary.items()))
     return 0
 
+def cmd_tick_meds_gen(args):
+    conn = famdb.connect()
+    # tick.meds_gen() owns its own commit (see fam/tick.py) -- no
+    # conn.commit() here, same as cmd_tick_reminders/cmd_tick_digest above.
+    counts = tick.meds_gen(conn, now_utc=args.now)
+    if args.json:
+        print(json.dumps(counts, ensure_ascii=False))
+    else:
+        print(" ".join(f"{k}={v}" for k, v in counts.items()))
+    return 0
+
 def cmd_mail_test(args):
     """`fam mail test EVENT_ID` -- manually trigger the .ics email for one
     event, unconditionally (no email_enabled/denis-participant gating --
@@ -923,6 +934,11 @@ def build_parser():
     sptd = tick_sub.add_parser("digest"); sptd.set_defaults(func=cmd_tick_digest)
     sptd.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
     sptd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    sptm = tick_sub.add_parser("meds-gen"); sptm.set_defaults(func=cmd_tick_meds_gen)
+    sptm.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
+    sptm.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
 
     sp = sub.add_parser("mail")

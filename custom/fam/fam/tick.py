@@ -23,12 +23,20 @@ fam tick digest (Task 7) is a much simpler single-message tick: unlike
 reminders, there is exactly one thing to send per run (or zero, on the
 dup-guard skip), so it owns a single commit at the very end rather than
 one per item.
+
+fam tick meds-gen (Phase 5 Task 3) is simpler still: no gate.deliver call
+at all, so nothing it does is irreversible in the digest/reminders sense
+-- a crash mid-run just loses that run's uncommitted work, and the very
+next run (whether that's a retry or tomorrow's own scheduled fire)
+regenerates it from scratch because generation is idempotent on
+(med_id, plan_ts_utc). It owns one commit at the very end, same as
+digest.
 """
 import json
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import audit, cal, gate, plans, rem, road, weather
+from fam import audit, cal, gate, meds, plans, rem, road, weather
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -895,3 +903,131 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
     audit.log(conn, "tick.digest", summary)
     conn.commit()
     return summary
+
+
+def meds_gen(conn, now_utc=None, cfg=None):
+    """Phase 5 Task 3: midnight Asia/Almaty generation of today's
+    med_intakes rows, plus closing out yesterday's still-pending rows as
+    missed. Fires once a day via its own systemd timer (OnCalendar
+    19:00 UTC = 00:00 Almaty, Task 3 step 5) -- NOT a minute-tick like
+    reminders(), so there is no due-selection here, only "what does
+    today look like".
+
+    cfg is accepted (not loaded via gate.load_config() when omitted, the
+    way digest()/reminders() do) purely for signature parity with the
+    other tick entry points -- meds_gen has nothing today that reads
+    config (no gate.deliver call, no quiet-hours/budget gate to
+    respect), so it is accepted and otherwise ignored.
+
+    now = now_utc or _now() drives BOTH date_local (which Almaty
+    calendar day is "today") and the missed-closeout boundary below --
+    unlike rem.regenerate's created_at, which always stamps the real
+    wall clock separately (see created_at = _now() below), because that
+    bookkeeping timestamp has no business logic riding on it the way
+    date_local does.
+
+    Step 1 -- generate: for every enabled med (meds.list(conn) already
+    filters disabled=0 by default), for every "HH:MM" in its `times`,
+    build plan_ts_utc = that HH:MM on TODAY's Almaty calendar date,
+    converted to UTC. Skipped (not inserted) if a med_intakes row for
+    this exact (med_id, plan_ts_utc) already exists -- the idempotency
+    check a re-run (retry, or two timer fires close together) relies on
+    to avoid duplicate intakes for the same scheduled dose. A fresh
+    insert is status=pending, taken_ts_utc=NULL, series_next_utc=
+    plan_ts_utc (T4's persistent-series minute-tick is what advances
+    series_next_utc later; at creation it always starts equal to its
+    own plan_ts_utc). One med whose times somehow fail to parse (e.g. a
+    row that bypassed meds._validate_times via direct DB surgery) is
+    caught, audited as tick.error {where: "meds_gen", med_id, error},
+    and skipped -- same "one bad item must not sink the whole tick"
+    contract as road_recompute's per-event try/except (see that
+    function's docstring) -- rather than letting one malformed med's
+    exception take down generation for every other med this run.
+
+    Step 2 -- close yesterday's tail: every med_intakes row still
+    status=pending with plan_ts_utc BEFORE the start of today's Almaty
+    calendar day (computed the same way _followup_day_bounds_utc
+    computes its from_utc, duplicated inline here rather than reusing
+    that helper since meds_gen only ever needs the single lower bound,
+    not a [from, to) pair) is flipped to status=missed. A pending row
+    from EARLIER today (e.g. an 08:00 dose not yet acked by the time
+    this tick runs, which it never does since this only runs once at
+    midnight -- but a manually-backdated or test-inserted row could
+    still land there) is left alone; only taken/skipped/missed rows are
+    already-closed and are never revisited either way (the SQL filters
+    on status='pending').
+
+    ALWAYS audits tick.meds_gen {generated, missed} -- including an
+    all-zero run, so "nothing to generate, nothing stale" is a recorded
+    fact rather than indistinguishable from "the tick didn't run",
+    mirroring tick.reminders'/tick.digest's own always-audit contract.
+
+    Owns a single commit at the very end (see module docstring) --
+    generation is idempotent and closing the tail is naturally
+    re-derivable, so there is no per-item blast-radius reason to commit
+    more often than that, unlike reminders()'s per-item gate.deliver
+    commits.
+
+    Returns the same {generated, missed} dict that was audited.
+    """
+    now = now_utc or _now()
+    date_local = _today_almaty(now)
+    year, month, day = (int(x) for x in date_local.split("-"))
+
+    # Start of TODAY's Almaty calendar day, in UTC -- the lower bound
+    # below which a still-pending intake is yesterday's (or older)
+    # unacknowledged tail. Same construction as
+    # _followup_day_bounds_utc's from_utc, inlined here since only the
+    # single lower bound is needed (see docstring above).
+    start_of_today_local = datetime(year, month, day, 0, 0, 0, tzinfo=ALMATY)
+    start_of_today_utc = start_of_today_local.astimezone(timezone.utc).isoformat(
+        timespec="seconds")
+
+    generated = 0
+    for med in meds.list(conn):
+        try:
+            for hhmm in med["times"]:
+                hour, minute = (int(x) for x in hhmm.split(":"))
+                plan_dt_local = datetime(year, month, day, hour, minute, 0,
+                                          tzinfo=ALMATY)
+                plan_ts_utc = plan_dt_local.astimezone(timezone.utc).isoformat(
+                    timespec="seconds")
+
+                existing = conn.execute(
+                    "SELECT 1 FROM med_intakes WHERE med_id=? AND plan_ts_utc=?",
+                    (med["id"], plan_ts_utc),
+                ).fetchone()
+                if existing is not None:
+                    continue
+
+                created_at = _now()
+                conn.execute(
+                    "INSERT INTO med_intakes(med_id, plan_ts_utc, "
+                    "taken_ts_utc, status, series_next_utc, created_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (med["id"], plan_ts_utc, None, "pending", plan_ts_utc,
+                     created_at),
+                )
+                generated += 1
+        except Exception as e:
+            audit.log(conn, "tick.error",
+                      {"where": "meds_gen", "med_id": med.get("id"),
+                       "error": str(e)[:200]})
+
+    missed_ids = [
+        row["id"] for row in conn.execute(
+            "SELECT id FROM med_intakes WHERE status='pending' "
+            "AND plan_ts_utc < ?",
+            (start_of_today_utc,),
+        ).fetchall()
+    ]
+    for intake_id in missed_ids:
+        conn.execute(
+            "UPDATE med_intakes SET status='missed' WHERE id=?",
+            (intake_id,),
+        )
+
+    counts = {"generated": generated, "missed": len(missed_ids)}
+    audit.log(conn, "tick.meds_gen", counts)
+    conn.commit()
+    return counts
