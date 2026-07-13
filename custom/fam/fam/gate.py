@@ -10,6 +10,7 @@ via subprocess.run -- tests monkeypatch subprocess.run and never touch a
 real hermes process.
 """
 import json
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -397,6 +398,26 @@ def _call_send(text, cfg):
     try:
         result = subprocess.run(
             HERMES + ["send", "-t", cfg["target"]],
+            input=text, capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
+def notify_denis(text):
+    """Send raw technical text to Denis's Telegram home channel via
+    `hermes send`. Bypasses quiet hours, daily budget and the LLM rewrite
+    -- an operator alert must always arrive, unshaped (spec §6.4/§9). NOT
+    a variant of deliver(): different contract (always-through, raw),
+    kept separate rather than adding a flag to deliver's Amina pipeline.
+    Returns True on zero exit, False on any failure or missing channel."""
+    chan = os.environ.get("TELEGRAM_HOME_CHANNEL", "").strip()
+    if not chan:
+        return False
+    try:
+        result = subprocess.run(
+            HERMES + ["send", "-t", f"telegram:{chan}"],
             input=text, capture_output=True, text=True, timeout=60,
         )
     except (subprocess.TimeoutExpired, OSError):
