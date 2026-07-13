@@ -25,3 +25,34 @@ def test_prune_records_itself_and_is_not_self_pruned(db):
     rec = db.execute(
         "SELECT payload FROM audit_log WHERE kind='tick.maintenance'").fetchall()
     assert len(rec) == 1  # the maintenance record survives (ts=now)
+
+import sqlite3
+from pathlib import Path
+from datetime import datetime, timezone
+
+def _make_db(path):
+    con = sqlite3.connect(str(path))
+    con.execute("CREATE TABLE t(x)"); con.execute("INSERT INTO t VALUES(1)")
+    con.commit(); con.close()
+
+def test_backup_creates_dated_copy(tmp_path):
+    src = tmp_path / "assistant.db"; _make_db(src)
+    dest_dir = tmp_path / "backups"
+    now = datetime(2026, 7, 13, 22, 30, tzinfo=timezone.utc)
+    out = maint.backup_db(src, dest_dir, keep=7, now=now)
+    assert out == dest_dir / "assistant-20260713.db"
+    assert out.exists()
+    con = sqlite3.connect(str(out))
+    assert con.execute("SELECT x FROM t").fetchone()[0] == 1
+    con.close()
+    assert oct(dest_dir.stat().st_mode)[-3:] == "700"
+
+def test_backup_rotation_keeps_newest(tmp_path):
+    src = tmp_path / "assistant.db"; _make_db(src)
+    dest_dir = tmp_path / "backups"; dest_dir.mkdir()
+    for day in (10, 11, 12):  # pre-existing older copies
+        (dest_dir / f"assistant-202607{day:02d}.db").write_bytes(b"x")
+    now = datetime(2026, 7, 13, 22, 30, tzinfo=timezone.utc)
+    maint.backup_db(src, dest_dir, keep=2, now=now)
+    names = sorted(p.name for p in dest_dir.glob("assistant-*.db"))
+    assert names == ["assistant-20260712.db", "assistant-20260713.db"]

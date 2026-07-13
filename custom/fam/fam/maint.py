@@ -1,5 +1,7 @@
 """Phase 6a maintenance: audit_log retention + DB backups + verify."""
 from datetime import datetime, timezone, timedelta
+import sqlite3
+from pathlib import Path
 from . import audit
 
 def _now_utc():
@@ -18,3 +20,28 @@ def prune_audit_log(conn, days, now=None):
               actor="tick")
     conn.commit()
     return deleted
+
+def _sqlite_backup(src, dest):
+    scon = sqlite3.connect(str(src))
+    dcon = sqlite3.connect(str(dest))
+    try:
+        with dcon:
+            scon.backup(dcon)   # online backup API -- consistent under a live writer
+    finally:
+        scon.close(); dcon.close()
+
+def _rotate(dest_dir, stem, keep):
+    files = sorted(Path(dest_dir).glob(f"{stem}-*.db"))  # YYYYMMDD sorts chronologically
+    if keep > 0:
+        for old in files[:-keep]:
+            old.unlink()
+
+def backup_db(src, dest_dir, keep, now=None):
+    now = now or _now_utc()
+    src = Path(src); dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir.chmod(0o700)
+    dest = dest_dir / f"{src.stem}-{now.strftime('%Y%m%d')}.db"
+    _sqlite_backup(src, dest)
+    _rotate(dest_dir, src.stem, keep)
+    return dest
