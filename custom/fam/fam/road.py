@@ -145,3 +145,135 @@ def compute_travel_min(conn, event, cfg, now_utc=None):
         return place["travel_min"], "place"
 
     return None, "none"
+
+
+def tomtom_route_points(from_lat, from_lon, to_lat, to_lon, depart_at_utc, cfg):
+    """Raw TomTom calculateRoute call collecting the route polyline.
+    Returns a flat list of (lat, lon) tuples from routes[0].legs[*].points[*],
+    or None on any failure (missing key, HTTP error, malformed response).
+    Never raises. Separate HTTP call from tomtom_route_minutes -- points
+    aren't reused from a prior minutes-call because the minutes rung may
+    have already run (and possibly failed) earlier in the ladder.
+    """
+    key = os.environ.get("TOMTOM_API_KEY", "").strip()
+    if not key:
+        return None
+    locs = f"{from_lat},{from_lon}:{to_lat},{to_lon}"
+    q = urllib.parse.urlencode({
+        "key": key, "traffic": "true", "departAt": depart_at_utc,
+        "routeType": "fastest", "travelMode": "car",
+    })
+    url = f"https://api.tomtom.com/routing/1/calculateRoute/{locs}/json?{q}"
+    try:
+        data = json.loads(_http_get(url, cfg.get("road_timeout_sec", 10)))
+        points = []
+        for leg in data["routes"][0]["legs"]:
+            for p in leg["points"]:
+                points.append((p["latitude"], p["longitude"]))
+        if not points:
+            return None
+        return points
+    except Exception:
+        return None
+
+
+def point_to_route_km(lat, lon, route_points):
+    """Minimum distance from (lat, lon) to a polyline given as a list of
+    (lat, lon) tuples, taking the min over consecutive-pair segments.
+    Uses an equirectangular-projection approximation for the point-to-
+    segment distance (acceptable for short, city-scale segments). Pure
+    function -- no I/O, never raises for well-formed input.
+
+    Empty route -> +inf (no segments to measure against). A single-point
+    route is treated as a degenerate segment (distance to that point).
+    """
+    if not route_points:
+        return float("inf")
+    if len(route_points) == 1:
+        return _haversine_km(lat, lon, *route_points[0])
+
+    best = float("inf")
+    for (lat1, lon1), (lat2, lon2) in zip(route_points, route_points[1:]):
+        d = _point_to_segment_km(lat, lon, lat1, lon1, lat2, lon2)
+        if d < best:
+            best = d
+    return best
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _point_to_segment_km(lat, lon, lat1, lon1, lat2, lon2):
+    """Equirectangular-projection point-to-segment distance in km. Projects
+    lat/lon to a local flat xy plane (scaled by cos of mean latitude for
+    the lon axis), then does standard 2D point-to-segment math. Good
+    enough for short city-scale segments; not valid for long segments or
+    near the poles.
+    """
+    r = 6371.0
+    lat0 = math.radians((lat1 + lat2) / 2.0)
+    kx = r * math.cos(lat0)  # km per radian of longitude at this latitude
+    ky = r  # km per radian of latitude
+
+    def to_xy(la, lo):
+        return (math.radians(lo) * kx, math.radians(la) * ky)
+
+    x, y = to_xy(lat, lon)
+    x1, y1 = to_xy(lat1, lon1)
+    x2, y2 = to_xy(lat2, lon2)
+
+    dx, dy = x2 - x1, y2 - y1
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq == 0:
+        px, py = x1, y1
+    else:
+        t = ((x - x1) * dx + (y - y1) * dy) / seg_len_sq
+        t = max(0.0, min(1.0, t))
+        px, py = x1 + t * dx, y1 + t * dy
+
+    return math.hypot(x - px, y - py)
+
+
+def route_for_event(conn, event, cfg, now_utc=None):
+    """Fallback ladder for an event's route polyline, guarded by TomTom's
+    daily call cap (shared with compute_travel_min's counter). Never
+    raises.
+
+    1. event["place"] has lat AND lon, and cfg has road_home_lat/lon:
+       try tomtom_route_points (source "tomtom"); if it returns None,
+       fall back to the straight home->place pair (source "straight").
+       The cap check happens before the TomTom attempt -- when
+       exhausted, the ladder skips straight to the straight-pair rung
+       and logs road.cap instead of attempting the call.
+    2. No usable coordinates -> (None, "none").
+    """
+    now = now_utc or _now()
+    event_id = event.get("id")
+    place = event.get("place") or {}
+    home_lat = cfg.get("road_home_lat")
+    home_lon = cfg.get("road_home_lon")
+    to_lat = place.get("lat")
+    to_lon = place.get("lon")
+
+    if to_lat is not None and to_lon is not None and home_lat is not None and home_lon is not None:
+        if os.environ.get("TOMTOM_API_KEY", "").strip():
+            cap = cfg.get("road_daily_cap", 100)
+            if _tomtom_calls_today(conn) >= cap:
+                audit.log(conn, "road.cap", {"event_id": event_id})
+            else:
+                depart_at = now if isinstance(now, str) else now.isoformat(timespec="seconds")
+                points = tomtom_route_points(home_lat, home_lon, to_lat, to_lon, depart_at, cfg)
+                if points is not None:
+                    audit.log(conn, "road.call",
+                               {"event_id": event_id, "points": len(points), "source": "tomtom"})
+                    return points, "tomtom"
+                audit.log(conn, "road.error", {"event_id": event_id})
+        return [(home_lat, home_lon), (to_lat, to_lon)], "straight"
+
+    return None, "none"
