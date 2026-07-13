@@ -30,6 +30,10 @@ way to read or change family data.
   earlier — "уже выходим", "не напоминай про это", "какие напоминания",
   or a reply to the digest's closing question. See Reminder Reactions and
   Digest Replies below.
+- Plans: an errand or a "надо сделать" without a fixed time — "запиши
+  план...", "надо купить...", "до пятницы", agreeing to do a plan "по
+  пути" to an event, or later reporting a plan is done. See Plan Verbs
+  below.
 
 ## Tool
 
@@ -46,6 +50,7 @@ way to read or change family data.
   - `places add|update|alias|resolve|list`
   - `cal add|update|cancel|done|show|day|range|grid`
   - `rem list|ack|cancel|rules|active`
+  - `plan add|list|done|drop|attach`
   - `road <event_id>`
 - Time: the household lives in Asia/Almaty (+05:00). "Now" comes from the
   timestamp prefix on the **latest** user message, `[Dow YYYY-MM-DD
@@ -158,6 +163,12 @@ make a second, separate terminal call.
    id from `cal show`/`cal day --json`/`cal range --json`, never guess it.
 9. `cal day` / `cal range` / `cal grid` only ever list **active** events —
    cancelled events are hidden by design, not gone.
+10. **A plan's `--deadline` follows the same no-arithmetic rule as rule 1.**
+    "до пятницы", "к концу недели" → resolve to a plain `YYYY-MM-DD` from
+    "now" as established under Time above (the message's timestamp prefix,
+    or one `date` call) — never from a date mentioned earlier in the
+    conversation. A plan with no relative date in the request gets no
+    `--deadline`; don't invent one.
 
 ## Quick Reference
 
@@ -187,6 +198,11 @@ make a second, separate terminal call.
 | Already on the way (ack whole chain) | `fam rem ack EVENT_ID` |
 | Stop nagging about it (cancel chain) | `fam rem cancel EVENT_ID` |
 | What rules generate reminders | `fam rem rules --json` |
+| Record a plan/errand | `fam plan add "TITLE" [--place P] [--person NAME] [--deadline YYYY-MM-DD]` |
+| See open plans | `fam plan list` (add `--all` for done/dropped too) |
+| Mark a plan done | `fam plan done <id>` |
+| Drop a plan | `fam plan drop <id>` |
+| Attach a plan to an event ("по пути") | `fam plan attach <id> --event <event_id>` |
 
 ## Calendar Grid
 
@@ -279,16 +295,53 @@ still-pending departure reminder. If the user then says they are leaving,
 acknowledge the full chain with `rem ack EVENT_ID` and confirm that remaining
 reminders were stopped.
 
+## Plan Verbs
+
+A plan is an errand or a to-do without a fixed time — unlike a calendar
+event, it never gets a `--start`. Same unknown-place stop-and-ask
+protocol as rule 3 applies if `--place` is given and doesn't resolve.
+
+- **Recording a plan** — "запиши план...", "надо купить...", "не забыть
+  ..." → `fam plan add "TITLE" [--place P] [--person NAME] [--deadline
+  YYYY-MM-DD]`. A relative deadline ("до пятницы") is resolved per rule
+  10 above. Confirm in one line, same style as calendar adds: "Записал в
+  планы: купить куртку, до пятницы."
+- **Reporting a plan done** (typically answering the evening follow-up
+  the agent itself sent, but also mid-conversation — "куртку купила",
+  "всё сделали", "готово") → find the matching plan, then mark it done:
+  1. `fam plan list` (open plans only, no `--all` needed).
+  2. Exactly one plan plausibly matches what the user said → `fam plan
+     done <id>`, confirm briefly ("Отметил: куртка куплена.").
+  3. Several plausible matches, or none → ask which plan they mean, or
+     say there's no open plan like that — never guess an id.
+- **Dropping a plan** ("уже не надо", "отменяется", "передумали") →
+  `fam plan drop <id>`, found the same way as done above.
+- **Accepting "по пути"** — the agent may mention in a reminder that an
+  open plan is on the way to an event ("по пути можно заехать за..."); a
+  plain agreement in reply ("да, заеду", "давай", "ок") → `fam plan
+  attach <id> --event <event_id>`, using the plan id and event id from
+  that reminder's own context (they're already resolved there — don't
+  re-look them up unless the reminder text doesn't name them, in which
+  case fall back to `fam plan list` and the event lookup used in
+  Reminder Reactions above). `leave_at` is recomputed automatically by
+  the existing road logic — don't touch `--start` or travel time
+  yourself. Confirm briefly, no need to restate the recomputed time
+  unless the user asks.
+
 ## Digest Replies
 
 The morning digest always closes with the same question: "Если появятся
 планы или изменения — расскажи или надиктуй, я запишу."
 
 - Plans or changes in the reply → ordinary calendar intake, the same
-  add/update rules as any other conversation — nothing digest-specific
-  about it.
+  add/update rules as any other conversation, or a new plan per Plan
+  Verbs above if it has no fixed time — nothing digest-specific about
+  either.
 - A plain "всё в силе" / "без изменений" / "как обычно" acknowledgment →
   no fam call needed; one short line back is enough.
+- The digest itself may list plans with an approaching deadline
+  alongside the day's events — reacting to those follows the same Plan
+  Verbs rules as any other plan mention.
 
 ## Reply Style
 
