@@ -118,13 +118,18 @@ def mark(conn, plan_id, status):
 
 def attach(conn, plan_id, event_id):
     """Attach a plan to a calendar event (sets attached_event_id). Returns
-    False on an unknown plan_id (no write, no audit); True on success.
-    Does not validate event_id against the events table (mirrors the
-    brief's minimal contract; callers that need the guarantee should
-    check cal.get() first, as cli.py's cmd_plan_attach does).
+    False on an unknown plan_id or an unknown event_id (no write, no
+    audit); True on success. Mirrors mark()'s unknown-id contract: a
+    bad id is reported via return value, not an exception -- the FK
+    (PRAGMA foreign_keys=ON in db.connect) would otherwise surface an
+    sqlite3.IntegrityError for an unknown event_id.
     """
     existing = conn.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
     if existing is None:
+        return False
+
+    event = conn.execute("SELECT id FROM events WHERE id=?", (event_id,)).fetchone()
+    if event is None:
         return False
 
     conn.execute(

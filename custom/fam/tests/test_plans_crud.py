@@ -93,6 +93,24 @@ def test_attach_unknown_plan_returns_false(db):
     assert plans.attach(db, 9999, e["id"]) is False
 
 
+def test_attach_unknown_event_returns_false(db):
+    _seed(db)
+    pid = plans.add(db, "Записаться к врачу")
+    db.commit()
+
+    ok = plans.attach(db, pid, 9999)
+    db.commit()
+    assert ok is False
+
+    row = db.execute("SELECT attached_event_id FROM plans WHERE id=?", (pid,)).fetchone()
+    assert row["attached_event_id"] is None
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind=?"
+        " AND json_extract(payload, '$.event_id')=9999",
+        ("plan.attach",),
+    ).fetchone()[0] == 0
+
+
 def test_add_unknown_place_raises(db):
     _seed(db)
     with pytest.raises(ValueError):
