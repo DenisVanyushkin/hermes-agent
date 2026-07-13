@@ -34,3 +34,15 @@ def test_warmup_blocked_when_engine_on(db, monkeypatch):
     cl = OkClient()
     r = car.do_warmup(db, cl, _cfg(), requester="amina")
     assert r["reason"] == "already_on" and cl.started == 0
+
+def test_warmup_attempt_row_committed_before_engine(db, monkeypatch):
+    monkeypatch.setattr(gate, "notify_denis", lambda t: True)
+    class CheckClient:
+        def start_engine(self):
+            # attempt row must be durable (committed) before the engine starts
+            assert not db.in_transaction, "attempt audit not committed before engine start"
+            n = db.execute("SELECT COUNT(*) c FROM audit_log WHERE kind='car.warmup'").fetchone()["c"]
+            assert n == 1  # the 'attempt' row is already persisted
+            return True
+    r = car.do_warmup(db, CheckClient(), {"car_warmup_daily_limit": 5}, requester="denis")
+    assert r["ok"] is True

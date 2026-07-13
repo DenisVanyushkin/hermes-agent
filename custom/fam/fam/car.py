@@ -282,6 +282,7 @@ def do_warmup(conn, client, cfg, requester, now=None):
         audit.log(conn, "car.warmup", {"requester": requester, "result": "already_on"}, actor="agent")
         return {"ok": False, "reason": "already_on"}
     audit.log(conn, "car.warmup", {"requester": requester, "result": "attempt"}, actor="agent")
+    conn.commit()  # attempt row must be durable before the physical engine start (spec §6.4)
     ok = client.start_engine()
     audit.log(conn, "car.warmup",
               {"requester": requester, "result": "started" if ok else "failed"}, actor="agent")
