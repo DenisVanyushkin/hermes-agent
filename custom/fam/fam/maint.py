@@ -45,3 +45,24 @@ def backup_db(src, dest_dir, keep, now=None):
     _sqlite_backup(src, dest)
     _rotate(dest_dir, src.stem, keep)
     return dest
+
+
+def verify_backup(path):
+    """(ok, detail) for a backup file: PRAGMA integrity_check == 'ok'
+    AND a schema_version present in meta. A non-sqlite/corrupt file
+    surfaces as ok=False, not an exception."""
+    try:
+        con = sqlite3.connect(str(path))
+    except sqlite3.Error as e:
+        return False, {"integrity": f"open-error: {e}", "schema_version": None}
+    try:
+        integ = con.execute("PRAGMA integrity_check").fetchone()[0]
+        row = con.execute(
+            "SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        schema = row[0] if row else None
+        return (integ == "ok" and schema is not None,
+                {"integrity": integ, "schema_version": schema})
+    except sqlite3.DatabaseError as e:
+        return False, {"integrity": f"error: {e}", "schema_version": None}
+    finally:
+        con.close()
