@@ -478,6 +478,18 @@ def cmd_tick_meds_gen(args):
         print(" ".join(f"{k}={v}" for k, v in counts.items()))
     return 0
 
+def cmd_tick_car(args):
+    conn = famdb.connect()
+    # tick.car() owns its own commit (see fam/tick.py) -- no
+    # conn.commit() here, same as cmd_tick_reminders/cmd_tick_digest/
+    # cmd_tick_meds_gen above.
+    counts = tick.car(conn, now_utc=args.now)
+    if args.json:
+        print(json.dumps(counts, ensure_ascii=False))
+    else:
+        print(" ".join(f"{k}={v}" for k, v in counts.items()))
+    return 0
+
 def cmd_tick_maintenance(args):
     from fam import maint
     cfg = gate.load_config()
@@ -933,6 +945,11 @@ def build_parser():
 
     spa = car_sub.add_parser("auth-init"); spa.set_defaults(func=cmd_car_auth_init)
 
+    spp = car_sub.add_parser("poll"); spp.set_defaults(func=cmd_tick_car)
+    spp.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
+    spp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
     sp = sub.add_parser("cal")
     cal_sub = sp.add_subparsers(dest="cal_cmd", required=True)
     transport_choices = ["car", "walk", "public", "unknown"]
@@ -1056,6 +1073,11 @@ def build_parser():
     sptm = tick_sub.add_parser("meds-gen"); sptm.set_defaults(func=cmd_tick_meds_gen)
     sptm.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
     sptm.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    sptc = tick_sub.add_parser("car"); sptc.set_defaults(func=cmd_tick_car)
+    sptc.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
+    sptc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
 
     sptx = tick_sub.add_parser("maintenance"); sptx.set_defaults(func=cmd_tick_maintenance)

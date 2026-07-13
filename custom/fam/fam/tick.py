@@ -1347,3 +1347,33 @@ def meds_gen(conn, now_utc=None, cfg=None):
     audit.log(conn, "tick.meds_gen", counts)
     conn.commit()
     return counts
+
+
+def car(conn, client=None, now_utc=None, cfg=None):
+    """Phase 4 Task 7: poll StarLine -> record_metrics -> update the
+    fuel-low flag -> check/alert staleness. Owns its own commit (same
+    contract as meds_gen/digest above -- this tick has no external
+    caller managing a shared transaction, so the tick run IS the
+    transaction boundary).
+
+    StarLine being unavailable (client.poll() returns None, e.g. token
+    expired or the API is down) is not an error: it is audited as
+    tick.car {skipped: "unavailable"} and no car_metrics row is written
+    this run, but staleness is still checked/alerted below -- an
+    extended outage is exactly what the staleness alert exists to catch.
+    """
+    from fam import car as carmod
+    cfg = cfg or gate.load_config()
+    if client is None:
+        client = carmod.StarlineClient()
+    metrics = client.poll()
+    result = {"recorded": 0}
+    if metrics is None:
+        audit.log(conn, "tick.car", {"skipped": "unavailable"}, actor="tick")
+    else:
+        carmod.record_metrics(conn, metrics)
+        carmod.update_fuel_flag(conn, metrics.get("fuel_pct"), cfg)
+        result["recorded"] = 1
+    carmod.maybe_alert_staleness(conn, cfg, now=now_utc)
+    conn.commit()
+    return result

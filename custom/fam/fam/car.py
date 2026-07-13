@@ -8,6 +8,8 @@ import os
 import stat
 from datetime import datetime, timezone
 
+from fam import audit, gate
+
 TOKEN_PATH = "/home/denis/.hermes/private/amina/starline-token.json"
 
 
@@ -138,3 +140,82 @@ def bootstrap(auth, app_id, app_secret, login, password,
         else:
             raise RuntimeError(f"StarLine login failed: state={state}")
     raise RuntimeError("StarLine login: too many challenge retries")
+
+
+def _meta_get(conn, key, default=None):
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def _meta_set(conn, key, value):
+    conn.execute("INSERT INTO meta(key,value) VALUES(?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+
+def record_metrics(conn, metrics, now=None):
+    """Insert one car_metrics row and audit the tick. Returns the new
+    row id. Negative decisions (StarLine unavailable) are audited by the
+    caller (tick.car), not here -- this fn only runs when there IS data."""
+    cols = ("ts_utc", "fuel_pct", "fuel_liters", "odometer_km", "engine_on",
+            "ignition_on", "cabin_temp_c", "coolant_temp_c", "battery_v",
+            "gsm_online", "gps_lat", "gps_lon", "raw_json")
+    cur = conn.execute(
+        f"INSERT INTO car_metrics({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
+        tuple(metrics.get(c) for c in cols))
+    audit.log(conn, "tick.car",
+              {"fuel_pct": metrics.get("fuel_pct"), "engine_on": metrics.get("engine_on")},
+              actor="tick")
+    return cur.lastrowid
+
+
+def update_fuel_flag(conn, fuel_pct, cfg):
+    """Hysteresis: below car_fuel_low_pct sets the flag, above
+    car_fuel_low_pct + car_fuel_hysteresis clears it; the band between
+    the two thresholds holds whatever the flag already was (no
+    flapping on borderline fuel readings). fuel_pct=None (no fresh
+    reading) leaves the flag untouched. Returns the flag's current
+    value after this call."""
+    if fuel_pct is None:
+        return fuel_is_low(conn)
+    low = cfg["car_fuel_low_pct"]
+    hyst = cfg["car_fuel_hysteresis"]
+    flag = fuel_is_low(conn)
+    if fuel_pct < low:
+        flag = True
+    elif fuel_pct > low + hyst:
+        flag = False
+    _meta_set(conn, "car_fuel_low", "1" if flag else "0")
+    return flag
+
+
+def fuel_is_low(conn):
+    return _meta_get(conn, "car_fuel_low", "0") == "1"
+
+
+def check_staleness(conn, cfg, now=None):
+    """True when the newest car_metrics row is older than
+    car_staleness_hours, or when there is no row at all (never polled
+    successfully -> definitely stale)."""
+    row = conn.execute("SELECT MAX(ts_utc) AS m FROM car_metrics").fetchone()
+    if not row or not row["m"]:
+        return True
+    now_dt = datetime.now(timezone.utc) if now is None else now
+    if isinstance(now_dt, str):
+        now_dt = datetime.fromisoformat(now_dt)
+    last = datetime.fromisoformat(row["m"])
+    from datetime import timedelta
+    return (now_dt - last) > timedelta(hours=cfg["car_staleness_hours"])
+
+
+def maybe_alert_staleness(conn, cfg, now=None):
+    """One-shot alert on the not-stale -> stale transition (meta
+    car_stale_alerted), so a tick every 30 min doesn't spam Denis every
+    run while data stays stale; clears the flag once fresh data is
+    recorded again so the next staleness episode alerts anew."""
+    stale = check_staleness(conn, cfg, now=now)
+    alerted = _meta_get(conn, "car_stale_alerted", "0") == "1"
+    if stale and not alerted:
+        gate.notify_denis(f"StarLine: нет данных о машине > {cfg['car_staleness_hours']}ч")
+        _meta_set(conn, "car_stale_alerted", "1")
+    elif not stale and alerted:
+        _meta_set(conn, "car_stale_alerted", "0")
