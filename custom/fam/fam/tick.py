@@ -925,21 +925,126 @@ def _fallback_plan_line(plan):
     return line
 
 
-def _build_digest_fallback(date_local, wx, events, burning_plans=None):
+def _meds_digest(conn, date_local):
+    """Phase 5 Task 7: the digest's medication facts -- today's planned
+    intakes, yesterday's missed ones, and low-stock meds. Three
+    independent lists, each queried separately (no single "meds status"
+    concept ties them together):
+
+    today: every med_intakes row (any status -- this mirrors "what's on
+    the plan today", not "what's still pending", the same "active-only
+    events" vs. "every dose scheduled" distinction meds_gen itself draws
+    between event status and dose status) whose plan_ts_utc falls in
+    date_local's Asia/Almaty calendar day (_followup_day_bounds_utc's
+    bounds, reused rather than duplicated). {name, time_local} per row,
+    name via a SQL join to meds (med_intakes has no name of its own),
+    time_local is plan_ts_utc converted to Almaty and formatted HH:MM.
+    Ordered by plan_ts_utc, same as meds_gen's own due-selection order.
+
+    missed_yesterday: med_intakes rows with status='missed' whose
+    plan_ts_utc falls in the day BEFORE date_local (one day back, same
+    bounds helper). {name} per row -- meds_gen's midnight closeout is
+    what actually flips a stale pending row to 'missed', so this list is
+    a straight read of that outcome, not a re-derivation of it.
+
+    low_stock: meds.list(conn) (enabled meds only, mirrors every other
+    caller of the module) filtered by the SAME low-stock formula
+    meds.take's restock trigger uses (T5): remaining is not None and
+    remaining <= threshold, guarded so the default threshold=0 only
+    fires once remaining has actually hit 0 (threshold>0 or
+    remaining==0) -- an untracked med (remaining=None) never appears
+    here. {name, remaining} per med.
+
+    Returns {"today": [...], "missed_yesterday": [...], "low_stock":
+    [...]} -- always all three keys, each an empty list (never omitted)
+    when there is nothing to report; digest()/_build_digest_fallback
+    decide what to do with an all-empty result.
+    """
+    today_from, today_to = _followup_day_bounds_utc(date_local)
+    yesterday_local = (
+        date.fromisoformat(date_local) - timedelta(days=1)
+    ).isoformat()
+    yest_from, yest_to = _followup_day_bounds_utc(yesterday_local)
+
+    today_rows = conn.execute(
+        "SELECT m.name AS name, i.plan_ts_utc AS plan_ts_utc "
+        "FROM med_intakes i JOIN meds m ON m.id = i.med_id "
+        "WHERE i.plan_ts_utc >= ? AND i.plan_ts_utc < ? "
+        "ORDER BY i.plan_ts_utc",
+        (today_from, today_to),
+    ).fetchall()
+    today = [
+        {"name": row["name"],
+         "time_local": _parse_utc(row["plan_ts_utc"]).astimezone(ALMATY)
+         .strftime("%H:%M")}
+        for row in today_rows
+    ]
+
+    missed_rows = conn.execute(
+        "SELECT m.name AS name FROM med_intakes i "
+        "JOIN meds m ON m.id = i.med_id "
+        "WHERE i.status='missed' AND i.plan_ts_utc >= ? AND i.plan_ts_utc < ? "
+        "ORDER BY i.plan_ts_utc",
+        (yest_from, yest_to),
+    ).fetchall()
+    missed_yesterday = [{"name": row["name"]} for row in missed_rows]
+
+    low_stock = []
+    for med in meds.list(conn):
+        remaining = med.get("remaining")
+        threshold = med.get("threshold", 0)
+        if remaining is not None and remaining <= threshold \
+                and (threshold > 0 or remaining == 0):
+            low_stock.append({"name": med["name"], "remaining": remaining})
+
+    return {"today": today, "missed_yesterday": missed_yesterday,
+            "low_stock": low_stock}
+
+
+def _fallback_meds_lines(meds_digest):
+    """Deterministic "Лекарства:" section lines for the digest fallback
+    -- omitted entirely (returns []) when all three of meds_digest's
+    lists are empty. Order: today's planned intakes (time + name),
+    yesterday's missed (name), then low-stock ("пора купить" -- the
+    literal phrase the task brief specifies, distinct from
+    _meds_series's own out-of-stock wording since that's a different,
+    immediate-nag message).
+    """
+    today = meds_digest.get("today") or []
+    missed = meds_digest.get("missed_yesterday") or []
+    low_stock = meds_digest.get("low_stock") or []
+    if not (today or missed or low_stock):
+        return []
+
+    lines = ["Лекарства:"]
+    lines.extend(f"{item['time_local']} {item['name']}" for item in today)
+    lines.extend(f"{item['name']} — пропущено вчера" for item in missed)
+    lines.extend(
+        f"{item['name']} — пора купить (осталось {item['remaining']})"
+        for item in low_stock
+    )
+    return lines
+
+
+def _build_digest_fallback(date_local, wx, events, burning_plans=None,
+                            meds=None):
     """Deterministic fallback text (no LLM involved) -- used verbatim
     when gate.deliver's rewrite fails, and as the source raw material the
     rewrite is asked to restyle otherwise. Sections: date header, weather
     line (omitted entirely when wx is None), event list (or "no events"),
-    burning-plans list (omitted entirely when empty -- 3b Task 5), and
-    the fixed closing question. Deliberately does NOT include a busy-
+    burning-plans list (omitted entirely when empty -- 3b Task 5),
+    medication list (omitted entirely when today/missed_yesterday/
+    low_stock are all empty -- Phase 5 Task 7, see _fallback_meds_lines),
+    and the fixed closing question. Deliberately does NOT include a busy-
     today/tomorrow section or propose any slot: slot suggestion is the
     LLM rewrite's job (raw["busy_two_days"] feeds it), this fallback only
     ever states plain facts. Comfortably under the 900-char digest
-    ceiling for a normal day's event/plan count; gate.deliver's own
+    ceiling for a normal day's event/plan/meds count; gate.deliver's own
     length ceiling (shorten-retry, then send-as-is with long=True) is the
     backstop for the pathological case, not this function.
     """
     burning_plans = burning_plans or []
+    meds = meds or {}
     lines = [f"Доброе утро! Сегодня {date_local}."]
     weather_line = _fallback_weather_line(wx)
     if weather_line:
@@ -952,6 +1057,7 @@ def _build_digest_fallback(date_local, wx, events, burning_plans=None):
     if burning_plans:
         lines.append("Горящие планы:")
         lines.extend(_fallback_plan_line(p) for p in burning_plans)
+    lines.extend(_fallback_meds_lines(meds))
     lines.append(DIGEST_QUESTION)
     return "\n".join(lines)
 
@@ -987,6 +1093,14 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
     today's plan belongs in a "what's the plan today" message. Each event
     item includes event_id so a later ack/cancel-from-context (Task 9)
     can address it.
+
+    meds: raw["meds"] = _meds_digest(conn, date_local) (Phase 5 Task 7) --
+    today's planned intakes, yesterday's missed ones, and low-stock meds
+    (same restock formula meds.take's T5 trigger uses). Always present as
+    a dict with all three keys (each an empty list when there's nothing),
+    never omitted from raw the way the fallback's "Лекарства:" section is
+    (see _build_digest_fallback/_fallback_meds_lines) -- the LLM rewrite
+    always gets the full facts even on a day with nothing to report.
 
     question: the fixed closing ask (DIGEST_QUESTION) goes into raw
     verbatim -- not a bare flag -- since raw is the JSON the LLM rewrite
@@ -1027,6 +1141,7 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
 
     burning_plans = _burning_plans(conn, cfg, date_local)
     busy_two_days = _busy_two_days(conn, date_local)
+    meds_digest = _meds_digest(conn, date_local)
 
     raw = {
         "kind": "digest",
@@ -1035,10 +1150,11 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
         "events": event_list,
         "burning_plans": burning_plans,
         "busy_two_days": busy_two_days,
+        "meds": meds_digest,
         "question": DIGEST_QUESTION,
     }
     human_fallback = _build_digest_fallback(date_local, wx, event_list,
-                                             burning_plans)
+                                             burning_plans, meds_digest)
 
     status = gate.deliver(conn, "digest", raw, human_fallback, cfg,
                            force=True, now_utc=now)
