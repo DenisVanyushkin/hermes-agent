@@ -490,6 +490,68 @@ def cmd_tick_car(args):
         print(" ".join(f"{k}={v}" for k, v in counts.items()))
     return 0
 
+def cmd_car_warmup(args):
+    """`fam car warmup [--confirm] [--requester X]` -- remote-start the
+    engine via car.do_warmup, guarded by the daily limit and
+    already-on checks (phase 4 T9). Without --confirm this is a dry
+    preview only: it never touches the StarLine API or the audit log,
+    so an agent/operator can safely ask "what would happen" first."""
+    from fam import car
+    requester = args.requester or "denis"
+    if not args.confirm:
+        out = {"ok": None, "preview": True, "requester": requester}
+        if args.json:
+            print(json.dumps(out, ensure_ascii=False))
+        else:
+            print(f"dry run: would warm up the car for {requester} (use --confirm to actually start)")
+        return 0
+    conn = famdb.connect()
+    cfg = gate.load_config()
+    client = car.StarlineClient()
+    result = car.do_warmup(conn, client, cfg, requester)
+    conn.commit()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"warmup: {result['reason']}" if not result["ok"] else "warmup: started")
+    return 0
+
+def cmd_car_status(args):
+    """`fam car status` -- latest car_metrics row + the fuel-low flag,
+    so an agent can answer Amina about fuel/car state without reaching
+    into the DB directly."""
+    from fam import car
+    conn = famdb.connect()
+    row = conn.execute(
+        "SELECT * FROM car_metrics ORDER BY ts_utc DESC LIMIT 1").fetchone()
+    out = {k: row[k] for k in row.keys()} if row else {}
+    out.pop("raw_json", None)
+    out["fuel_is_low"] = car.fuel_is_low(conn)
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        if not row:
+            print("no car data yet")
+        else:
+            print(f"ts={out.get('ts_utc')}\tfuel={out.get('fuel_pct')}%\t"
+                  f"engine_on={out.get('engine_on')}\tfuel_is_low={out['fuel_is_low']}")
+    return 0
+
+def cmd_car_set_transport(args):
+    """`fam car set-transport <event_id> car|walk|public` -- a focused
+    shortcut over cal.update(transport=...) (same underlying field as
+    `fam cal update --transport`) for the common case of only touching
+    transport, with no other event fields in play."""
+    conn = famdb.connect()
+    e = cal.update(conn, args.event_id, transport=args.transport)
+    conn.commit()
+    e.pop("_material_changed", None)
+    if args.json:
+        print(json.dumps(e, ensure_ascii=False))
+    else:
+        print(f"transport set: event {e['id']} -> {args.transport}")
+    return 0
+
 def cmd_tick_maintenance(args):
     from fam import maint
     cfg = gate.load_config()
@@ -948,6 +1010,23 @@ def build_parser():
     spp = car_sub.add_parser("poll"); spp.set_defaults(func=cmd_tick_car)
     spp.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
     spp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spw = car_sub.add_parser("warmup"); spw.set_defaults(func=cmd_car_warmup)
+    spw.add_argument("--confirm", action="store_true",
+                      help="actually start the engine (default: dry preview only)")
+    spw.add_argument("--requester", help="who asked for the warmup (default: denis)")
+    spw.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    sps = car_sub.add_parser("status"); sps.set_defaults(func=cmd_car_status)
+    sps.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spt = car_sub.add_parser("set-transport"); spt.set_defaults(func=cmd_car_set_transport)
+    spt.add_argument("event_id", type=int)
+    spt.add_argument("transport", choices=["car", "walk", "public"])
+    spt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
     sp = sub.add_parser("cal")

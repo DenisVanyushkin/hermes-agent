@@ -245,3 +245,47 @@ def departure_hooks(conn, event, cfg):
         if t is not None and (t < cfg["car_cabin_temp_low_c"] or t > cfg["car_cabin_temp_high_c"]):
             hooks.append(f"в салоне {t}°, можно завести на прогрев заранее")
     return hooks
+
+
+def warmup_count_today(conn, now=None):
+    """Count car.warmup audit rows with payload.result=='started' in
+    today's Asia/Almaty day (reuses gate's day-bounds helper so the
+    warmup daily limit resets at Almaty local midnight, same as the
+    proactive-message budget)."""
+    from fam.gate import _almaty_day_utc_bounds, _now
+    frm, to = _almaty_day_utc_bounds(now or _now())
+    rows = conn.execute(
+        "SELECT payload FROM audit_log WHERE kind='car.warmup' "
+        "AND ts_utc >= ? AND ts_utc < ?", (frm, to)).fetchall()
+    return sum(1 for r in rows if json.loads(r["payload"]).get("result") == "started")
+
+
+def _latest_engine_on(conn):
+    r = conn.execute(
+        "SELECT engine_on FROM car_metrics WHERE engine_on IS NOT NULL "
+        "ORDER BY ts_utc DESC LIMIT 1").fetchone()
+    return bool(r["engine_on"]) if r else False
+
+
+def do_warmup(conn, client, cfg, requester, now=None):
+    """Remote-start the engine, guarded in this mandatory order (spec
+    §6): (1) daily limit, (2) engine already on, else (3) audit the
+    attempt BEFORE calling the StarLine API, then audit the outcome and
+    notify Denis. The audit-before-engine ordering is locked by a test
+    (2 audit rows exist before start_engine() runs on the happy path) so
+    a failed/ambiguous StarLine call never leaves us without a record
+    that a warmup was attempted."""
+    if warmup_count_today(conn, now=now) >= cfg["car_warmup_daily_limit"]:
+        audit.log(conn, "car.warmup", {"requester": requester, "result": "limit"}, actor="agent")
+        return {"ok": False, "reason": "limit"}
+    if _latest_engine_on(conn):
+        audit.log(conn, "car.warmup", {"requester": requester, "result": "already_on"}, actor="agent")
+        return {"ok": False, "reason": "already_on"}
+    audit.log(conn, "car.warmup", {"requester": requester, "result": "attempt"}, actor="agent")
+    ok = client.start_engine()
+    audit.log(conn, "car.warmup",
+              {"requester": requester, "result": "started" if ok else "failed"}, actor="agent")
+    n = warmup_count_today(conn, now=now)
+    gate.notify_denis(f"Прогрев машины: {requester}, "
+                       f"{'ок' if ok else 'НЕ УДАЛОСЬ'} ({n}/{cfg['car_warmup_daily_limit']})")
+    return {"ok": ok, "reason": "started" if ok else "failed"}

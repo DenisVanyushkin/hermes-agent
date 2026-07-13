@@ -12,6 +12,8 @@ metadata:
 
 # Amina Fam Skill
 
+_Body version: v8 (phase 4 T9 — car status/warmup/set-transport)._
+
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
 This skill drives it entirely through its CLI; there is no other supported
@@ -223,6 +225,9 @@ make a second, separate terminal call.
 | See shopping list | `fam shop list` |
 | Mark item bought | `fam shop done <id>` |
 | Categorize a place (аптека/продуктовый) | `fam places update <ref> --category pharmacy\|grocery` |
+| Fuel / car status | `fam car status` |
+| Warm up the car (after explicit yes) | `fam car warmup --confirm [--requester WHO]` |
+| Set an event's transport | `fam car set-transport <event_id> car\|walk\|public` |
 
 ## Calendar Grid
 
@@ -424,6 +429,37 @@ conversation.
 - An item with `"source": "meds"` in `fam shop list`'s JSON was
   auto-added by a low-stock restock (see Medication Verbs above) — treat
   it the same as any manually-added item once the user says it's bought.
+
+## Car Verbs
+
+`fam` also tracks the car's StarLine telemetry (fuel, engine state) and can
+remote-start the engine.
+
+- **Checking fuel/car state** ("сколько бензина", "машина заведена?",
+  "как машина") → `fam car status` — report fuel % and, only if relevant
+  to what was asked, engine state. If `fuel_is_low` is true, mention it
+  even if not asked ("топлива мало, скоро понадобится заправка").
+- **Warming up the car** ("заведи машину", "прогрей машину") is
+  **always two steps** — never call `warmup --confirm` on the first
+  message:
+  1. Ask for explicit confirmation first: "завести машину? да?" (or
+     similarly worded — it must be a yes/no question, not a statement).
+  2. Only on an explicit yes ("да", "давай", "заводи") → `fam car
+     warmup --confirm [--requester WHO]` (`--requester` only if it's
+     someone other than the person you're talking to — default is
+     fine otherwise).
+  3. A "нет"/no answer, or no reply → don't call `warmup` at all, plain
+     dry run without `--confirm` is not needed either — just drop it.
+  - If the result's `"ok"` is `false`, translate `"reason"` naturally:
+    `"limit"` → "на сегодня лимит прогревов исчерпан", `"already_on"` →
+    "машина уже заведена", `"failed"` → "не получилось завести, гляну
+    попозже" — never surface the raw reason string.
+- **Changing an event's transport** ("поедем на машине к врачу", "к
+  зубному пешком") → resolve the event the same way as any other
+  update (by name/time from `fam cal day`/`fam cal show`, never guess
+  the id), then `fam car set-transport <event_id> car|walk|public`.
+  This is the same underlying field as `fam cal update --transport`;
+  use `set-transport` when transport is the only thing changing.
 
 ## Place Category
 
