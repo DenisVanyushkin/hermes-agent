@@ -73,8 +73,10 @@ if [ "$UPSTREAM_AHEAD" -gt 0 ]; then
   merge_tree_out="$tmpdir/merge_tree.txt"
   if ! git -C "$REPO" merge-tree --write-tree --name-only \
       --merge-base="$BASE" HEAD "$UPSTREAM_REF" >"$merge_tree_out" 2>/dev/null; then
-    # On conflict, output is: tree OID line, then conflicted paths.
-    tail -n +2 "$merge_tree_out" | sed '/^$/d' >"$conflicts_file"
+    # Output is: tree OID, the conflicted paths, a blank line, then
+    # informational messages (Auto-merging.../CONFLICT...). Take only the
+    # paths before the blank separator. (Was sed '/^$/d', which kept the noise.)
+    tail -n +2 "$merge_tree_out" | sed -n '/^$/q;p' >"$conflicts_file"
   fi
 fi
 
