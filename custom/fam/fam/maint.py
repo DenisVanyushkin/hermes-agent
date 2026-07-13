@@ -37,12 +37,17 @@ def _rotate(dest_dir, stem, keep):
         for old in files[:-keep]:
             old.unlink()
 
+def _backup_dest(src, dest_dir, now):
+    """Single source of truth for the dated backup filename, shared by
+    backup_db and run_maintenance's dry-run preview so they cannot drift."""
+    return Path(dest_dir) / f"{Path(src).stem}-{now.strftime('%Y%m%d')}.db"
+
 def backup_db(src, dest_dir, keep, now=None):
     now = now or _now_utc()
     src = Path(src); dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_dir.chmod(0o700)
-    dest = dest_dir / f"{src.stem}-{now.strftime('%Y%m%d')}.db"
+    dest = _backup_dest(src, dest_dir, now)
     _sqlite_backup(src, dest)
     _rotate(dest_dir, src.stem, keep)
     return dest
@@ -90,15 +95,19 @@ def run_maintenance(cfg, dry_run=False, now=None):
     except Exception as e:                       # noqa: BLE001 -- guard: one step failing must not skip the other
         result["errors"].append(f"prune: {e}")
     # 2. backups: assistant.db (resolve_db_path) + state.db if present
-    targets = [famdb.resolve_db_path()]
-    state = cfg.get("state_db_path")
-    if state and Path(state).exists():
-        targets.append(state)
+    targets = []
+    try:
+        targets.append(famdb.resolve_db_path())
+        state = cfg.get("state_db_path")
+        if state and Path(state).exists():
+            targets.append(state)
+    except Exception as e:                       # noqa: BLE001 -- guard: target resolution must not crash the tick
+        result["errors"].append(f"resolve targets: {e}")
     for src in targets:
         try:
             if dry_run:
                 result["backups"].append(str(
-                    Path(cfg["backup_dir"]) / f"{Path(src).stem}-{now.strftime('%Y%m%d')}.db"))
+                    _backup_dest(src, cfg["backup_dir"], now)))
             else:
                 result["backups"].append(str(
                     backup_db(src, cfg["backup_dir"], cfg["backup_keep"], now=now)))

@@ -125,3 +125,28 @@ def test_run_maintenance_records_errors(db, tmp_path):
     ).fetchone()[0]
     c.close()
     assert n == 1                                             # failure recorded in the journal
+
+
+def test_run_maintenance_dry_run_path_matches_real_naming(db, tmp_path):
+    # the dry-run preview path must never drift from the real backup naming
+    now = datetime(2026, 7, 13, 22, 30, tzinfo=timezone.utc)
+    dest_dir = tmp_path / "bk"
+    cfg = {"audit_retention_days": 90, "backup_keep": 7,
+           "backup_dir": str(dest_dir), "state_db_path": str(tmp_path / "no.db")}
+    res = maint.run_maintenance(cfg, dry_run=True, now=now)
+    src = Path(db.execute("PRAGMA database_list").fetchone()[2])
+    expected = str(maint._backup_dest(src, dest_dir, now))
+    assert res["backups"] == [expected]
+    real = maint.backup_db(src, dest_dir, keep=7, now=now)
+    assert res["backups"] == [str(real)]
+
+def test_run_maintenance_captures_target_resolution_error(db, tmp_path, monkeypatch):
+    def _boom():
+        raise RuntimeError("boom")
+    monkeypatch.setattr(maint.famdb, "resolve_db_path", _boom)
+    now = datetime(2026, 7, 13, 22, 30, tzinfo=timezone.utc)
+    cfg = {"audit_retention_days": 90, "backup_keep": 7,
+           "backup_dir": str(tmp_path / "bk"), "state_db_path": str(tmp_path / "no.db")}
+    res = maint.run_maintenance(cfg, now=now)  # must not raise
+    assert any("boom" in e for e in res["errors"])
+    assert "pruned" in res and "backups" in res

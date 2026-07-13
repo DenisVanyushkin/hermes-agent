@@ -63,7 +63,7 @@ CONFIG_DEFAULTS = {
     "audit_retention_days": 90,   # prune audit_log rows older than this (§6.5)
     "backup_keep": 7,             # daily .backup copies to keep per DB (§8.4)
     "backup_dir": "/home/denis/.hermes/private/amina/backups",
-    "state_db_path": "/home/denis/.hermes/state.db",  # assistant.db via resolve_db_path()
+    "state_db_path": "/home/denis/.hermes/state.db",  # 2nd backup target (hermes dialogue DB); assistant.db is auto-resolved, not configured here
 }
 
 GATE_STYLE_INSTRUCTION = (
