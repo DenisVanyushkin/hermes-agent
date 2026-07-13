@@ -2,12 +2,16 @@
 
 One message per day, kind="followup", sent in the first minute-tick at or
 after cfg["followup_local_time"] (default 20:00 Asia/Almaty) and before
-quiet hours -- ONLY when today had at least one outbound event (active,
-place_id NOT NULL, start_utc already in the past relative to the tick)
-AND at least one open plan related to those events (attached_event_id ==
-event.id, or plan.person_id among the event's participants). Dedup via
-meta key followup_sent:<date_local> -- set on every outcome (sent,
-no_events, no_plans) so a later tick the same day never re-checks.
+quiet hours -- ONLY when today had at least one outbound event (active OR
+done, place_id NOT NULL, start_utc already in the past relative to the
+tick) AND at least one open plan related to those events (attached_event_id
+== event.id, or plan.person_id among the event's participants). Dedup via
+meta key followup_sent:<date_local> -- set for the "nothing to say"
+outcomes (no_events, no_plans) immediately, and for "sent", so a later
+tick the same day never re-checks. A real gate.deliver refusal
+(quiet/budget/error) leaves meta UNSET (Task 8 acceptance fix) so the
+next minute tick retries the same send, until it succeeds or quiet hours
+begin.
 """
 import pytest
 
@@ -214,3 +218,84 @@ def test_event_not_yet_started_does_not_count_as_outbound(db, fake_deliver):
 
     followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
     assert followup_calls == []
+
+
+# -- Task 8 acceptance fix 1: retry until quiet hours -----------------
+
+@pytest.mark.parametrize("refusal", ["budget", "quiet", "error"])
+def test_deliver_refusal_does_not_set_meta_and_retries_next_tick(
+        db, fake_deliver, refusal):
+    e = _place_event(db)
+    _plan_attached(db, e["id"])
+    fake_deliver.responses = [refusal, "sent"]
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert len(followup_calls) == 1
+    row = db.execute(
+        "SELECT value FROM meta WHERE key='followup_sent:2026-07-20'"
+    ).fetchone()
+    assert row is None, f"meta must stay unset after a {refusal!r} refusal"
+
+    fake_deliver.calls = []
+    tick.reminders(db, now_utc=AFTER_FOLLOWUP, cfg=CFG)
+
+    followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert len(followup_calls) == 1, "next tick must retry the same send"
+    row = db.execute(
+        "SELECT value FROM meta WHERE key='followup_sent:2026-07-20'"
+    ).fetchone()
+    assert row is not None, "meta must be set once deliver finally sends"
+
+
+def test_silence_still_sets_meta_immediately_no_retry(db, fake_deliver):
+    # No outbound events at all -- deliver is never called, and unlike a
+    # real refusal this "nothing to say" outcome must not be re-checked
+    # every minute for the rest of the day.
+    cal.add(db, "Звонок", EVENT_START)
+    db.commit()
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    row = db.execute(
+        "SELECT value FROM meta WHERE key='followup_sent:2026-07-20'"
+    ).fetchone()
+    assert row is not None
+
+    tick.reminders(db, now_utc=AFTER_FOLLOWUP, cfg=CFG)
+    followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert followup_calls == []
+
+
+# -- Task 8 acceptance fix 2: done events count as outbound too -------
+
+def test_done_event_with_attached_plan_counts_as_outbound(db, fake_deliver):
+    e = _place_event(db)
+    cal.done(db, e["id"])
+    db.commit()
+    _plan_attached(db, e["id"], title="Забрать справку")
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert len(followup_calls) == 1
+    text_blob = str(followup_calls[0]["raw"])
+    assert "Забрать справку" in text_blob
+
+
+def test_cancelled_event_does_not_count_as_outbound(db, fake_deliver):
+    e = _place_event(db)
+    cal.cancel(db, e["id"])
+    db.commit()
+    _plan_attached(db, e["id"])
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert followup_calls == []
+    row = db.execute(
+        "SELECT value FROM meta WHERE key='followup_sent:2026-07-20'"
+    ).fetchone()
+    assert row is not None

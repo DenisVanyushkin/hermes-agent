@@ -483,25 +483,62 @@ def _followup_related_plans(conn, event, open_plans):
     return related
 
 
+def _followup_day_bounds_utc(date_local):
+    """UTC [from, to) bounds for date_local's Asia/Almaty calendar day --
+    same math as cal.day, duplicated here (Task 8 acceptance fix 2)
+    because _followup needs active AND done events for the day, whereas
+    cal.day itself is hardcoded to status="active" and cal.list_range's
+    only other option (status=None) is EVERY status, including
+    cancelled. Computing the bounds here and calling cal.list_range with
+    status=None, then filtering client-side to {active, done}, is the
+    smallest change that doesn't touch cal.py's contract for its other
+    callers (digest, etc. still want active-only "what's still on the
+    plan").
+    """
+    y, m, d = (int(x) for x in date_local.split("-"))
+    start_of_day = datetime(y, m, d, 0, 0, 0, tzinfo=ALMATY)
+    end_of_day = start_of_day + timedelta(days=1)
+    from_utc = start_of_day.astimezone(timezone.utc).isoformat(timespec="seconds")
+    to_utc = end_of_day.astimezone(timezone.utc).isoformat(timespec="seconds")
+    return from_utc, to_utc
+
+
 def _followup(conn, now_utc, cfg):
     """3b Task 6: the evening combined follow-up.
 
     Fires at most once per Asia/Almaty calendar day, in the first
     minute-tick at or after cfg["followup_local_time"] (default
     "20:00"). Dedup is a meta row keyed "followup_sent:<date_local>",
-    checked first and set on EVERY outcome (sent, no_events, no_plans)
-    so a later tick the same day never re-evaluates -- mirrors
-    _digest_already_sent_today's role but keyed in `meta` rather than
-    derived from gate.sent audit rows, since (unlike the digest, which
-    always force=True sends or is a clean no-op) a followup's "nothing
-    to say" outcome never calls gate.deliver at all and so leaves no
-    gate.sent row to key off of.
+    checked first. Unlike the original 3b Task 6 cut, meta is set on the
+    "nothing to say" outcomes (no_events, no_plans) AND on "sent", but
+    NOT on a real gate.deliver refusal (quiet/budget/error) -- Task 8
+    acceptance fix 1 (Denis, live sweep): the original "set on every
+    outcome" contract meant a quiet/budget/error refusal silently lost
+    the whole day's follow-up, since the next tick would see meta
+    already set and never re-evaluate. Leaving meta unset on a refusal
+    makes every subsequent minute-tick this same Asia/Almaty day retry
+    the identical send (outbound events + related plans are re-derived
+    fresh each time, so a plan closed/event added in between is picked
+    up too) until either gate.deliver finally returns "sent", or quiet
+    hours begin -- at which point gate.deliver itself keeps returning
+    "quiet" every tick (followup is not reminder-exempt from quiet
+    hours, see gate.deliver's own docstring), so it never spuriously
+    recovers after 21:30 anyway. The no_events/no_plans "silence"
+    outcomes still set meta immediately: there is nothing there to
+    retry into existing, so re-checking every minute for the rest of
+    the day would be pure waste -- mirrors _digest_already_sent_today's
+    role but keyed in `meta` rather than derived from gate.sent audit
+    rows, since a followup's "nothing to say" outcome never calls
+    gate.deliver at all and so leaves no gate.sent row to key off of.
 
-    Outbound events: today's cal.day() events (already active-only, per
-    cal.day's own contract) with a resolved place AND start_utc already
-    in the past relative to now_utc -- "already left for it", not
-    "about to". Related plans: every open plan attached to one of those
-    events, or matching one of their participants by person_id (see
+    Outbound events: today's events (Task 8 acceptance fix 2: status
+    active OR done -- see _followup_day_bounds_utc; an event that was
+    actually driven to and marked done must still surface in the
+    evening recap, not just one still sitting "active" because nobody
+    checked it off) with a resolved place AND start_utc already in the
+    past relative to now_utc -- "already left for it", not "about to".
+    Related plans: every open plan attached to one of those events, or
+    matching one of their participants by person_id (see
     _followup_related_plans) -- deliberately NO geo/enroute matching
     (no live TomTom call from an unattended tick, Denis's decision).
 
@@ -511,18 +548,18 @@ def _followup(conn, now_utc, cfg):
     respectively -- same "record the null outcome" contract as
     tick.reminders' all-zero run.
 
-    Otherwise: ONE gate.deliver(kind="followup", force=False) call --
-    an ordinary budget unit, quiet hours respected exactly like any
-    other non-reminder kind (gate.deliver's own gate, not duplicated
+    Otherwise: ONE gate.deliver(kind="followup", force=False) call per
+    tick -- an ordinary budget unit, quiet hours respected exactly like
+    any other non-reminder kind (gate.deliver's own gate, not duplicated
     here). raw carries the event list and the related plans' titles;
     FOLLOWUP_QUESTION goes into raw["question"] AND is the last line of
     the deterministic human_fallback (same "one constant, can't drift"
-    pattern as DIGEST_QUESTION). meta is set and tick.followup audited
+    pattern as DIGEST_QUESTION). tick.followup is audited every tick
     with the gate.deliver outcome ("sent"/"quiet"/"budget"/"error") as
-    status, regardless of whether it was actually delivered -- this tick
-    checked once today and is done; a quiet/budget outcome is not
-    retried by a later tick the same day (mirrors digest's own
-    force=True/once-a-day contract, just without the force).
+    status regardless of whether it was actually delivered, but meta is
+    only written for "sent" (see above) -- a quiet/budget/error outcome
+    IS retried by a later tick the same day, unlike digest's own
+    force=True/once-a-day contract.
 
     Returns the status string ("no_events", "no_plans", or gate.deliver's
     outcome), mainly for tests; reminders() itself ignores the return
@@ -547,10 +584,13 @@ def _followup(conn, now_utc, cfg):
     if local_dt < threshold_dt:
         return None
 
-    events = cal.day(conn, date_local)
+    from_utc, to_utc = _followup_day_bounds_utc(date_local)
+    events = cal.list_range(conn, from_utc, to_utc, status=None)
     outbound_events = [
         e for e in events
-        if e.get("place") is not None and _parse_utc(e["start_utc"]) < now_dt
+        if e.get("status") in ("active", "done")
+        and e.get("place") is not None
+        and _parse_utc(e["start_utc"]) < now_dt
     ]
 
     related_plans = []
@@ -588,10 +628,15 @@ def _followup(conn, now_utc, cfg):
         status = gate.deliver(conn, "followup", raw, human_fallback, cfg,
                                now_utc=now_utc)
 
-    conn.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
-        (meta_key, now_utc),
-    )
+    # Task 8 acceptance fix 1: only a "sent" or a "nothing to say" outcome
+    # (no_events/no_plans) is a permanent verdict for today -- a real
+    # gate.deliver refusal (quiet/budget/error) leaves meta unset so the
+    # next minute tick retries (see this function's docstring).
+    if status in ("no_events", "no_plans", "sent"):
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+            (meta_key, now_utc),
+        )
     audit.log(conn, "tick.followup",
               {"date_local": date_local, "status": status,
                "n_events": len(outbound_events),
