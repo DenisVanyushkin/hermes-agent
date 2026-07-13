@@ -218,3 +218,42 @@ def test_record_invalid_in_batch_is_atomic():
         mod.record_decisions(memory, [good, bad], now="2026-07-13T10:00:00Z")
     assert memory["entries"] == []          # nothing partially applied
     assert memory.get("updated_at") in (None,)  # untouched
+
+
+def test_load_memory_non_dict_json_raises(tmp_path):
+    p = tmp_path / "arr.json"
+    p.write_text("[1, 2, 3]")
+    with pytest.raises(ValueError):
+        mod.load_memory(p)
+
+
+def test_cli_partition_reports_new_and_remembered(tmp_path, capsys):
+    preflight = {"schema": "upstream-sync-preflight/v1", "conflicts": [
+        _conflict("a.py", ["feat: a"]),
+        _conflict("b.py", ["feat: b"]),
+    ]}
+    pf = tmp_path / "preflight.json"; pf.write_text(json.dumps(preflight))
+    mem = tmp_path / "memory.json"
+    mod.save_memory(mem, _mem(_entry(["a.py"], ["feat: a"], "keep-local")))
+    mod.main(["partition", "--preflight", str(pf), "--memory", str(mem)])
+    out = json.loads(capsys.readouterr().out)
+    assert [r["files"] for r in out["remembered"]] == [["a.py"]]
+    assert out["remembered"][0]["decision"] == "keep-local"
+    assert [n["files"] for n in out["new"]] == [["b.py"]]
+
+
+def test_cli_record_persists_memory(tmp_path, capsys):
+    pending = {"schema": "upstream-sync-pending/v1", "features": [
+        {"id": 1, "name": "A", "files": ["a.py"],
+         "local_commits": [{"sha": "x", "subject": "feat: a"}], "decision": "keep-local"},
+        {"id": 2, "name": "B (undecided)", "files": ["b.py"],
+         "local_commits": [{"sha": "y", "subject": "feat: b"}]},  # no decision -> skipped
+    ]}
+    pj = tmp_path / "pending.json"; pj.write_text(json.dumps(pending))
+    mem = tmp_path / "memory.json"
+    mod.main(["record", "--pending", str(pj), "--memory", str(mem), "--now", "2026-07-13T10:00:00Z"])
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"entries": 1}
+    saved = mod.load_memory(mem)
+    assert saved["entries"][0]["local_subjects"] == ["feat: a"]
+    assert saved["updated_at"] == "2026-07-13T10:00:00Z"

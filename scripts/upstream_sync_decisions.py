@@ -58,6 +58,8 @@ def load_memory(path) -> dict:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"malformed decision memory at {p}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"decision memory is not a JSON object: {p}")
     if data.get("schema") != MEMORY_SCHEMA:
         raise ValueError(f"unexpected memory schema: {data.get('schema')!r}")
     data.setdefault("entries", [])
@@ -170,3 +172,82 @@ def record_decisions(memory: dict, decided_features: list[Feature], *, now: str)
     memory["schema"] = MEMORY_SCHEMA
     memory["updated_at"] = now
     return memory
+
+
+def _read_json(src: str) -> dict:
+    if src == "-":
+        return json.loads(sys.stdin.read())
+    return json.loads(Path(src).read_text(encoding="utf-8"))
+
+
+def _feature_to_dict(feature: Feature) -> dict:
+    payload = {
+        "fingerprint": feature.fingerprint,
+        "files": list(feature.files),
+        "local_subjects": list(feature.subjects),
+    }
+    if feature.decision:
+        payload["decision"] = feature.decision
+    if feature.source:
+        payload["source"] = feature.source
+    return payload
+
+
+def _features_from_pending(pending: dict) -> list[Feature]:
+    features: list[Feature] = []
+    for feat in pending.get("features", []):
+        decision = feat.get("decision")
+        if not decision:
+            continue
+        files = tuple(sorted(feat.get("files", [])))
+        subjects = tuple(sorted({
+            (c.get("subject") or "").strip()
+            for c in feat.get("local_commits", [])
+            if (c.get("subject") or "").strip()
+        }))
+        features.append(Feature(
+            files=files, subjects=subjects,
+            fingerprint=feature_fingerprint(files, subjects), decision=decision))
+    return features
+
+
+def _cmd_partition(args) -> None:
+    preflight = _read_json(args.preflight)
+    memory = load_memory(args.memory)
+    features = group_features(preflight.get("conflicts", []))
+    result = partition(features, memory)
+    print(json.dumps({
+        "remembered": [_feature_to_dict(f) for f in result["remembered"]],
+        "new": [_feature_to_dict(f) for f in result["new"]],
+    }, indent=1, ensure_ascii=False))
+
+
+def _cmd_record(args) -> None:
+    pending = _read_json(args.pending)
+    memory = load_memory(args.memory)
+    record_decisions(memory, _features_from_pending(pending), now=args.now)
+    save_memory(args.memory, memory)
+    print(json.dumps({"entries": len(memory["entries"])}))
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description="Upstream-sync decision memory helper")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("partition", help="partition preflight conflicts vs memory")
+    p.add_argument("--preflight", required=True, help="preflight JSON file or '-' for stdin")
+    p.add_argument("--memory", required=True)
+    p.set_defaults(func=_cmd_partition)
+
+    r = sub.add_parser("record", help="merge decided pending features into memory")
+    r.add_argument("--pending", required=True)
+    r.add_argument("--memory", required=True)
+    r.add_argument("--now", required=True, help="ISO8601 timestamp injected by caller")
+    r.set_defaults(func=_cmd_record)
+
+    args = parser.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
