@@ -60,7 +60,7 @@ way to read or change family data.
   - `rem list|ack|cancel|rules|active`
   - `plan add|list|done|drop|attach`
   - `meds add|list|edit|rm`
-  - `med taken|skip`
+  - `med list|taken|skip`
   - `shop add|list|done`
   - `road <event_id>`
 - Time: the household lives in Asia/Almaty (+05:00). "Now" comes from the
