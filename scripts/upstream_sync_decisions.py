@@ -109,6 +109,8 @@ def _best_match(feature: Feature, entries: list[dict]) -> dict | None:
     ft_files = set(feature.files)
     candidates: list[tuple[int, dict]] = []
     for entry in entries:
+        if entry.get("decision") not in VALID_DECISIONS:
+            continue
         if set(entry.get("local_subjects", [])) != ft_subjects:
             continue
         entry_files = set(entry.get("files", []))
@@ -205,11 +207,12 @@ def _features_from_pending(pending: dict) -> list[Feature]:
         if not decision:
             continue
         files = tuple(sorted(feat.get("files", [])))
-        subjects = tuple(sorted({
-            (c.get("subject") or "").strip()
-            for c in feat.get("local_commits", [])
-            if (c.get("subject") or "").strip()
-        }))
+        commits = feat.get("local_commits") or []
+        if commits:
+            raw = [(c.get("subject") or "") for c in commits]
+        else:
+            raw = [(s or "") for s in feat.get("local_subjects", [])]
+        subjects = tuple(sorted({s.strip() for s in raw if s.strip()}))
         features.append(Feature(
             files=files, subjects=subjects,
             fingerprint=feature_fingerprint(files, subjects), decision=decision))
