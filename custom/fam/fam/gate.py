@@ -59,6 +59,11 @@ CONFIG_DEFAULTS = {
     # one delivered "take this" escalation and the next for the same
     # still-pending med_intake, regardless of gate.deliver's own outcome.
     "med_repeat_min": 45,
+    # Phase 6a: nightly maintenance tick (fam tick maintenance).
+    "audit_retention_days": 90,   # prune audit_log rows older than this (§6.5)
+    "backup_keep": 7,             # daily .backup copies to keep per DB (§8.4)
+    "backup_dir": "/home/denis/.hermes/private/amina/backups",
+    "state_db_path": "/home/denis/.hermes/state.db",  # assistant.db via resolve_db_path()
 }
 
 GATE_STYLE_INSTRUCTION = (

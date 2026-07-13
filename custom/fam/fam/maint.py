@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 import sqlite3
 from pathlib import Path
 from . import audit
+from . import db as famdb
 
 def _now_utc():
     return datetime.now(timezone.utc)
@@ -66,3 +67,55 @@ def verify_backup(path):
         return False, {"integrity": f"error: {e}", "schema_version": None}
     finally:
         con.close()
+
+
+def run_maintenance(cfg, dry_run=False, now=None):
+    now = now or _now_utc()
+    result = {"pruned": 0, "backups": [], "errors": []}
+    # 1. retention (own connection, like the cmd_tick_* handlers)
+    try:
+        conn = famdb.connect()
+        try:
+            if dry_run:
+                cutoff = (now - timedelta(days=cfg["audit_retention_days"])
+                          ).isoformat(timespec="seconds")
+                result["pruned"] = conn.execute(
+                    "SELECT COUNT(*) FROM audit_log WHERE ts_utc < ?", (cutoff,)
+                ).fetchone()[0]
+            else:
+                result["pruned"] = prune_audit_log(
+                    conn, cfg["audit_retention_days"], now=now)
+        finally:
+            conn.close()
+    except Exception as e:                       # noqa: BLE001 -- guard: one step failing must not skip the other
+        result["errors"].append(f"prune: {e}")
+    # 2. backups: assistant.db (resolve_db_path) + state.db if present
+    targets = [famdb.resolve_db_path()]
+    state = cfg.get("state_db_path")
+    if state and Path(state).exists():
+        targets.append(state)
+    for src in targets:
+        try:
+            if dry_run:
+                result["backups"].append(str(
+                    Path(cfg["backup_dir"]) / f"{Path(src).stem}-{now.strftime('%Y%m%d')}.db"))
+            else:
+                result["backups"].append(str(
+                    backup_db(src, cfg["backup_dir"], cfg["backup_keep"], now=now)))
+        except Exception as e:                   # noqa: BLE001
+            result["errors"].append(f"backup {src}: {e}")
+    # failures are recorded into the same journal `fam log` reads (design §7);
+    # best-effort -- journald + the non-zero CLI exit are the backstop if even
+    # this write fails. Skipped on dry-run.
+    if result["errors"] and not dry_run:
+        try:
+            c = famdb.connect()
+            try:
+                audit.log(c, "tick.maintenance",
+                          {"op": "errors", "errors": result["errors"]}, actor="tick")
+                c.commit()
+            finally:
+                c.close()
+        except Exception:                        # noqa: BLE001
+            pass
+    return result

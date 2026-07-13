@@ -18,5 +18,9 @@
   "road_speed_kmh": 30,
   "road_daily_cap": 100,
   "road_timeout_sec": 10,
-  "road_recompute_min": [120, 60]
+  "road_recompute_min": [120, 60],
+  "audit_retention_days": 90,
+  "backup_keep": 7,
+  "backup_dir": "/home/denis/.hermes/private/amina/backups",
+  "state_db_path": "/home/denis/.hermes/state.db"
 }

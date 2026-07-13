@@ -457,6 +457,22 @@ def cmd_tick_meds_gen(args):
         print(" ".join(f"{k}={v}" for k, v in counts.items()))
     return 0
 
+def cmd_tick_maintenance(args):
+    from fam import maint
+    cfg = gate.load_config()
+    now = None
+    if getattr(args, "now", None):
+        from datetime import datetime
+        now = datetime.fromisoformat(args.now)
+    result = maint.run_maintenance(
+        cfg, dry_run=getattr(args, "dry_run", False), now=now)
+    if getattr(args, "json", False):
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"pruned={result['pruned']} "
+              f"backups={len(result['backups'])} errors={len(result['errors'])}")
+    return 1 if result["errors"] else 0
+
 def cmd_mail_test(args):
     """`fam mail test EVENT_ID` -- manually trigger the .ics email for one
     event, unconditionally (no email_enabled/denis-participant gating --
@@ -1007,6 +1023,13 @@ def build_parser():
     sptm = tick_sub.add_parser("meds-gen"); sptm.set_defaults(func=cmd_tick_meds_gen)
     sptm.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
     sptm.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    sptx = tick_sub.add_parser("maintenance"); sptx.set_defaults(func=cmd_tick_maintenance)
+    sptx.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
+    sptx.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS,
+                       help="report actions without deleting/writing")
+    sptx.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
 
     sp = sub.add_parser("mail")

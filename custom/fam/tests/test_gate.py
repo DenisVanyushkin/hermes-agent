@@ -22,6 +22,10 @@ CFG = {
     "plan_deadline_horizon_days": 3,
     "followup_local_time": "20:00",
     "med_repeat_min": 45,
+    "audit_retention_days": 90,
+    "backup_keep": 7,
+    "backup_dir": "/home/denis/.hermes/private/amina/backups",
+    "state_db_path": "/home/denis/.hermes/state.db",
 }
 
 

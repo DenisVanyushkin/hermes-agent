@@ -73,3 +73,55 @@ def test_verify_backup_fails_on_corrupt_file(tmp_path):
     bad.write_bytes(b"this is not a sqlite database")
     ok, _ = maint.verify_backup(bad)
     assert ok is False
+
+
+def test_run_maintenance_prunes_and_backups(db, tmp_path, monkeypatch):
+    # `db` fixture already set FAM_DB to its tmp assistant.db (schema 5)
+    now = datetime(2026, 7, 13, 22, 30, tzinfo=timezone.utc)
+    db.execute("INSERT INTO audit_log(ts_utc,kind,actor,payload) VALUES(?,?,?,'{}')",
+               ((now - timedelta(days=200)).isoformat(timespec="seconds"), "cal.add", "agent"))
+    db.commit()
+    cfg = {"audit_retention_days": 90, "backup_keep": 7,
+           "backup_dir": str(tmp_path / "bk"),
+           "state_db_path": str(tmp_path / "missing-state.db")}  # absent → skipped
+    res = maint.run_maintenance(cfg, now=now)
+    assert res["pruned"] == 1
+    assert res["errors"] == []
+    assert len(res["backups"]) == 1  # only assistant.db (state absent)
+    assert Path(res["backups"][0]).exists()
+
+def test_run_maintenance_dry_run_writes_nothing(db, tmp_path):
+    now = datetime(2026, 7, 13, 22, 30, tzinfo=timezone.utc)
+    db.execute("INSERT INTO audit_log(ts_utc,kind,actor,payload) VALUES(?,?,?,'{}')",
+               ((now - timedelta(days=200)).isoformat(timespec="seconds"), "cal.add", "agent"))
+    db.commit()
+    cfg = {"audit_retention_days": 90, "backup_keep": 7,
+           "backup_dir": str(tmp_path / "bk"), "state_db_path": str(tmp_path / "no.db")}
+    res = maint.run_maintenance(cfg, dry_run=True, now=now)
+    assert res["pruned"] == 1  # counted, not deleted
+    assert db.execute("SELECT COUNT(*) FROM audit_log WHERE kind='cal.add'").fetchone()[0] == 1
+    assert not (tmp_path / "bk").exists()
+
+def test_config_defaults_present():
+    from fam import gate
+    cfg = gate.CONFIG_DEFAULTS
+    assert cfg["audit_retention_days"] == 90
+    assert cfg["backup_keep"] == 7
+    assert cfg["backup_dir"].endswith("/backups")
+    assert cfg["state_db_path"].endswith("/state.db")
+
+def test_run_maintenance_records_errors(db, tmp_path):
+    now = datetime(2026, 7, 13, 22, 30, tzinfo=timezone.utc)
+    blocker = tmp_path / "blocker"; blocker.write_text("x")   # a file, not a dir
+    cfg = {"audit_retention_days": 90, "backup_keep": 7,
+           "backup_dir": str(blocker / "sub"),                # mkdir under a file → error
+           "state_db_path": str(tmp_path / "no.db")}
+    res = maint.run_maintenance(cfg, now=now)
+    assert res["errors"]                                      # backup failure surfaced
+    from fam import db as famdb
+    c = famdb.connect()
+    n = c.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE payload LIKE '%\"op\": \"errors\"%'"
+    ).fetchone()[0]
+    c.close()
+    assert n == 1                                             # failure recorded in the journal
