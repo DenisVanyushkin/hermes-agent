@@ -85,6 +85,34 @@ def test_no_message_before_followup_time(db, fake_deliver):
     assert row is None
 
 
+def test_followup_exception_does_not_break_reminders_tick(db, fake_deliver, monkeypatch):
+    # Final review Finding 2: an exception raised from _followup must not
+    # propagate out of tick.reminders() -- reminders already processed
+    # this tick stay committed, and the failure is audited as tick.error.
+    e = _place_event(db)
+    _plan_attached(db, e["id"])
+
+    def boom(conn, now_utc, cfg):
+        raise RuntimeError("followup blew up")
+
+    monkeypatch.setattr(tick, "_followup", boom)
+
+    counts = tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    assert isinstance(counts, dict)  # tick.reminders itself completed
+    rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.error'"
+    ).fetchall()
+    assert len(rows) == 1
+    import json
+    payload = json.loads(rows[0]["payload"])
+    assert payload["where"] == "followup"
+    # tick.reminders' own summary audit row still gets written after.
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='tick.reminders'"
+    ).fetchone()[0] == 1
+
+
 def test_sends_one_followup_with_plan_titles_and_sets_meta(db, fake_deliver):
     e = _place_event(db)
     _plan_attached(db, e["id"], title="Забрать справку")

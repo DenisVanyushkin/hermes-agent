@@ -121,6 +121,36 @@ def test_enroute_block_added_for_prepare_kind_too(db, fake_deliver, monkeypatch)
     assert raw["enroute"] == "По пути: Забрать заказ"
 
 
+def test_enroute_exception_does_not_break_tick(db, fake_deliver, monkeypatch):
+    # Final review Finding 2: match_enroute blowing up must not take down
+    # the whole minute tick -- the reminder still gets delivered (just
+    # without the "по пути" block), and the failure is audited.
+    e = _event_with_place(db)
+    plans.add(db, "Забрать заказ", place="стоматолог")
+    db.commit()
+
+    def boom(conn, event, cfg, now_utc=None):
+        raise RuntimeError("tomtom down")
+
+    monkeypatch.setattr(plans, "match_enroute", boom)
+    _insert_reminder(db, e["id"], kind="leave")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    counts = tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    assert counts["sent"] == 1
+    raw = fake_deliver.calls[0]["raw"]
+    assert "enroute" not in raw
+    rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.error'"
+    ).fetchall()
+    assert len(rows) == 1
+    import json
+    payload = json.loads(rows[0]["payload"])
+    assert payload["where"] == "enroute"
+
+
 def test_no_open_plans_leaves_raw_unchanged_regression(db, fake_deliver):
     e = _event_with_place(db)
     db.commit()

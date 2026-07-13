@@ -125,6 +125,22 @@ def test_add_unknown_person_raises(db):
     assert db.execute("SELECT COUNT(*) FROM plans").fetchone()[0] == 0
 
 
+def test_add_invalid_deadline_raises(db):
+    # Final review Finding 1: a malformed deadline must be rejected at
+    # add() time, not silently stored and crash the digest later
+    # (tick._burning_plans does date.fromisoformat with no guard).
+    _seed(db)
+    with pytest.raises(ValueError):
+        plans.add(db, "Что-то", deadline="не дата")
+    assert db.execute("SELECT COUNT(*) FROM plans").fetchone()[0] == 0
+
+
+def test_add_invalid_deadline_message_mentions_deadline(db):
+    _seed(db)
+    with pytest.raises(ValueError, match="deadline"):
+        plans.add(db, "Что-то", deadline="2026-13-40")
+
+
 # --- CLI ---
 
 def test_cli_plan_add_and_list(db, capsys, monkeypatch):
@@ -181,3 +197,59 @@ def test_cli_plan_attach(db, capsys):
     assert rc == 0
     row = db.execute("SELECT attached_event_id FROM plans WHERE id=?", (pid,)).fetchone()
     assert row["attached_event_id"] == e["id"]
+
+
+def test_cli_plan_add_invalid_deadline_exits_2(db, capsys):
+    from fam import cli
+    _seed(db)
+    db.commit()
+    rc = cli.main(["plan", "add", "Дело", "--deadline", "не дата"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "deadline" in err.lower()
+    assert db.execute("SELECT COUNT(*) FROM plans").fetchone()[0] == 0
+
+
+def test_cli_plan_attach_recomputes_road(db, capsys, monkeypatch):
+    # Final review Finding 3: attach should trigger the same per-event
+    # road recompute mechanism cal.add/cal.update/`fam road` already use.
+    from fam import cal as cal_mod, cli
+
+    _seed(db)
+    pid = plans.add(db, "Дело4")
+    e = cal.add(db, "Событие4", "2026-07-15T05:00:00+00:00")
+    db.commit()
+
+    calls = []
+    monkeypatch.setattr(
+        cal_mod, "recompute_road",
+        lambda conn, event_id: calls.append(event_id) or
+        {"minutes": None, "reason": "no_place_coords"},
+    )
+
+    rc = cli.main(["plan", "attach", str(pid), "--event", str(e["id"]), "--json"])
+    assert rc == 0
+    assert calls == [e["id"]]
+
+
+def test_cli_plan_attach_recompute_failure_does_not_break_attach(db, capsys, monkeypatch):
+    from fam import cal as cal_mod, cli
+
+    _seed(db)
+    pid = plans.add(db, "Дело5")
+    e = cal.add(db, "Событие5", "2026-07-15T05:00:00+00:00")
+    db.commit()
+
+    def boom(conn, event_id):
+        raise RuntimeError("road down")
+
+    monkeypatch.setattr(cal_mod, "recompute_road", boom)
+
+    rc = cli.main(["plan", "attach", str(pid), "--event", str(e["id"]), "--json"])
+    assert rc == 0
+    row = db.execute("SELECT attached_event_id FROM plans WHERE id=?", (pid,)).fetchone()
+    assert row["attached_event_id"] == e["id"]
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='tick.error' "
+        "AND json_extract(payload, '$.where')='plan_attach_recompute'"
+    ).fetchone()[0] == 1

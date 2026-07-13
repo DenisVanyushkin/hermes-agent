@@ -6,13 +6,29 @@ resolved via places.resolve()/people.resolve() (id/name/alias, same
 resolvers cal.py uses) -- an unresolvable ref raises ValueError, before
 any insert.
 """
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from fam import audit, people, places, road
 
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _validate_deadline(value):
+    """deadline must be a real YYYY-MM-DD date, or None. Raises
+    ValueError with a human-readable message otherwise -- same
+    "raise before any insert" contract as _resolve_place/_resolve_person,
+    and the same ValueError -> CLI exit 2 path (see cli.main's
+    except ValueError), matching the unknown-place/unknown-person
+    error UX (Final review Finding 1).
+    """
+    if value is None:
+        return
+    try:
+        date.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid deadline (expected YYYY-MM-DD): {value}")
 
 
 def _resolve_place(conn, ref):
@@ -35,11 +51,16 @@ def _resolve_person(conn, ref):
 
 def add(conn, title, place=None, person=None, deadline=None, notes=""):
     """Create a plan. place/person are text refs (id/name/alias/slug); an
-    unresolvable ref raises ValueError and nothing is inserted. Returns
-    the new plan's id.
+    unresolvable ref raises ValueError and nothing is inserted. deadline,
+    if given, must be a real YYYY-MM-DD date -- a malformed value raises
+    ValueError (before any insert) rather than being stored as-is (Final
+    review Finding 1: tick._burning_plans parses deadline with
+    date.fromisoformat and would otherwise crash the daily digest on a
+    bad value). Returns the new plan's id.
     """
     pl = _resolve_place(conn, place)
     pe = _resolve_person(conn, person)
+    _validate_deadline(deadline)
 
     now = _now()
     cur = conn.execute(

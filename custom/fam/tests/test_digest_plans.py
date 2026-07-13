@@ -114,6 +114,27 @@ def test_plan_deadline_beyond_horizon_is_not_burning(db, fake_deliver):
     assert fake_deliver.calls[0]["raw"]["burning_plans"] == []
 
 
+def test_malformed_deadline_is_skipped_not_crashed(db, fake_deliver):
+    # Final review Finding 1 (defense-in-depth): plans.add() now rejects
+    # a bad deadline, but a row that reached the table via some other
+    # path (direct SQL) must not crash the whole digest tick -- it's
+    # skipped and audited as plan.bad_deadline instead.
+    pid = plans.add(db, "Обычный план")
+    db.commit()
+    db.execute("UPDATE plans SET deadline=? WHERE id=?", ("не дата", pid))
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert fake_deliver.calls[0]["raw"]["burning_plans"] == []
+    row = db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='plan.bad_deadline' "
+        "AND json_extract(payload, '$.plan_id')=?", (pid,)
+    ).fetchone()
+    assert row[0] == 1
+
+
 def test_attached_plan_is_not_burning(db, fake_deliver):
     e = _event(db, start="2026-07-21T05:00:00+00:00")
     pid = plans.add(db, "Уже привязано", deadline="2026-07-21")

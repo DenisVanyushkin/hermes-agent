@@ -390,8 +390,18 @@ def reminders(conn, now_utc=None, cfg=None):
         # call road.route_for_event (TomTom, daily-capped); this call
         # site is reached only for a reminder that is actually due and
         # about to be delivered this tick.
+        # Final review Finding 2: match_enroute may call road.route_for_event
+        # (TomTom) and must never be allowed to take down the whole minute
+        # tick -- an exception here is swallowed and audited as
+        # tick.error/enroute; the reminder itself still gets delivered
+        # below, just without the "по пути" piggyback.
         if reminder["kind"] in ("leave", "prepare") and event["place"]:
-            matches = plans.match_enroute(conn, event, cfg, now_utc=now)
+            try:
+                matches = plans.match_enroute(conn, event, cfg, now_utc=now)
+            except Exception as e:
+                audit.log(conn, "tick.error",
+                          {"where": "enroute", "error": str(e)[:200]})
+                matches = []
             if matches:
                 max_items = cfg.get("enroute_max_items", 2)
                 chosen = matches[:max_items]
@@ -435,7 +445,15 @@ def reminders(conn, now_utc=None, cfg=None):
             counts[status] += 1
         conn.commit()
 
-    _followup(conn, now_utc=now, cfg=cfg)
+    # Final review Finding 2: an exception from _followup must not take
+    # down the reminders tick that already ran above it -- swallow and
+    # audit, same contract as the enroute guard.
+    try:
+        _followup(conn, now_utc=now, cfg=cfg)
+    except Exception as e:
+        audit.log(conn, "tick.error",
+                  {"where": "followup", "error": str(e)[:200]})
+        conn.commit()
 
     audit.log(conn, "tick.reminders", counts)
     conn.commit()
@@ -647,6 +665,15 @@ def _burning_plans(conn, cfg, date_local):
     Returns a list of {"plan_id", "title", "deadline", "overdue"} dicts,
     ordered like plans.list_open() (deadline ascending, NULLs -- already
     excluded here -- last).
+
+    Defense-in-depth (Final review Finding 1): plans.add() now validates
+    deadline before insert, but a malformed deadline could still reach
+    this table via some other write path (direct SQL, a future caller
+    that bypasses plans.add). A plan whose deadline fails
+    date.fromisoformat is skipped here rather than raising -- one bad
+    row must not crash the whole digest tick -- and audited as
+    plan.bad_deadline so it stays visible for cleanup instead of just
+    silently vanishing from the digest.
     """
     horizon_days = cfg.get("plan_deadline_horizon_days", 3)
     today = date.fromisoformat(date_local)
@@ -659,7 +686,12 @@ def _burning_plans(conn, cfg, date_local):
         deadline = plan.get("deadline")
         if deadline is None:
             continue
-        deadline_date = date.fromisoformat(deadline)
+        try:
+            deadline_date = date.fromisoformat(deadline)
+        except (TypeError, ValueError):
+            audit.log(conn, "plan.bad_deadline",
+                      {"plan_id": plan["id"], "deadline": deadline})
+            continue
         if deadline_date > cutoff:
             continue
         burning.append({

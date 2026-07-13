@@ -579,6 +579,23 @@ def cmd_plan_attach(args):
         raise ValueError(f"unknown event: {args.event}")
     plans.attach(conn, args.id, args.event)
     conn.commit()
+    # Final review Finding 3: the amina-fam skill promises the event's
+    # road leave_at "recomputes automatically" after an attach. Reuse the
+    # same per-event mechanism cal.add/cal.update/`fam road` already use
+    # (cal.recompute_road) rather than inventing a second one -- it is
+    # already best-effort/never-raises and self-audits (road.computed /
+    # road.hook_error), so a recompute failure here must not fail the
+    # attach itself. This recomputes the SAME route the event already
+    # had (home -> event place); it does NOT route through the newly
+    # attached plan's place as a waypoint -- a deliberate backlog item,
+    # not this fix's scope.
+    try:
+        cal.recompute_road(conn, args.event)
+        conn.commit()
+    except Exception as e:
+        audit.log(conn, "tick.error",
+                  {"where": "plan_attach_recompute", "error": str(e)[:200]})
+        conn.commit()
     p = plans.get(conn, args.id)
     if args.json:
         print(json.dumps(p, ensure_ascii=False))
