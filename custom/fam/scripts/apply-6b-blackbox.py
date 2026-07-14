@@ -63,12 +63,22 @@ def main():
         shutil.copy2(f"{RULES}.{STAMP}", RULES)
         sys.exit(3)
 
-    # reload
-    r = sh("curl", "-sS", "-X", "POST", "http://localhost:9090/-/reload")
-    print("reload rc:", r.returncode, r.stdout[-200:], r.stderr[-200:])
-    if r.returncode != 0:
+    # reload: /-/reload needs --web.enable-lifecycle; when that flag is off
+    # prometheus answers 403 while curl still exits 0, so check the HTTP status
+    # and fall back to SIGHUP (reloads config unconditionally). Revert only if
+    # both fail. (2026-07-14: the old rc-only check reported false success.)
+    r = sh("curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", "http://localhost:9090/-/reload")
+    code = (r.stdout or "").strip()
+    print("reload http:", r.returncode, code, r.stderr[-200:])
+    reloaded = (r.returncode == 0 and code.startswith("2"))
+    if not reloaded:
+        print(f"/-/reload not accepted (http={code}); falling back to SIGHUP")
+        h = sh("docker", "kill", "--signal=HUP", cid)
+        print("SIGHUP rc:", h.returncode, h.stderr[-200:])
+        reloaded = (h.returncode == 0)
+    if not reloaded:
         print("RELOAD FAILED -> reverting"); shutil.copy2(f"{PROM}.{STAMP}", PROM); shutil.copy2(f"{RULES}.{STAMP}", RULES)
-        sh("curl", "-sS", "-X", "POST", "http://localhost:9090/-/reload"); sys.exit(4)
+        sys.exit(4)
 
     # verify probe green (allow up to ~90s for first scrape at 60s interval)
     q = 'probe_success{instance="http://192.168.20.10:80"}'

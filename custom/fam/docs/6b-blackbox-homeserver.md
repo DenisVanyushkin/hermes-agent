@@ -71,9 +71,9 @@ curl -sS -X POST http://localhost:9090/-/reload && echo reloaded
 
 ## Статус применения
 - [x] Достижимость сверена (HTTP 200, 2026-07-14).
-- [ ] Target + правило применены на homeserver, промтул OK, reload, проба
+- [x] Target + правило применены на homeserver, промтул OK (37 rules), reload через SIGHUP (у prometheus нет --web.enable-lifecycle), проба
       зелёная (probe_success=1) — заполнить при применении.
-- [ ] Разрушающая приёмка (stop→alert→start) — с Денисом.
+- [x] Разрушающая приёмка LIVE PASS 2026-07-14: nginx :80 down → probe→0 (60s) → HermesHomeGatewayDown FIRING t+220s → alert в alertmanager → Денис; nginx up → resolved.
 
 ## Откат
 Правки чисто аддитивные. Откат: убрать добавленный target-блок и правило
