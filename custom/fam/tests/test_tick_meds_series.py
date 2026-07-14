@@ -394,3 +394,58 @@ def test_meds_block_exception_is_caught_and_normal_reminders_still_sent(
     assert db.execute(
         "SELECT COUNT(*) FROM audit_log WHERE kind='tick.reminders'"
     ).fetchone()[0] == 1
+
+
+def test_one_bad_med_row_does_not_defer_the_other(db, fake_deliver, monkeypatch):
+    # Backlog: _meds_series used to wrap its whole per-med loop in a
+    # single try/except (at the tick.reminders() call site) -- one bad
+    # row's exception would sink the remaining meds for that minute,
+    # deferring them to next tick. It must be a PER-ROW guard instead:
+    # each med's own processing is isolated so one bad row can't take
+    # down the others in the same tick.
+    bad_med_id = meds.add(db, "Плохой", ["08:00"])
+    good_med_id = meds.add(db, "Магний", ["08:00"])
+    db.commit()
+    plan_ts = "2026-07-20T03:00:00+00:00"
+    bad_intake_id = _insert_intake(db, bad_med_id, plan_ts, plan_ts)
+    good_intake_id = _insert_intake(db, good_med_id, plan_ts, plan_ts)
+    fake_deliver.responses = ["sent"]
+
+    real_get = meds.get
+
+    def _boom_for_bad(conn, med_id):
+        if med_id == bad_med_id:
+            raise RuntimeError("boom on bad med")
+        return real_get(conn, med_id)
+
+    monkeypatch.setattr(meds, "get", _boom_for_bad)
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    calls = _med_calls(fake_deliver)
+    assert len(calls) == 1
+    assert calls[0]["raw"]["name"] == "Магний"
+
+    good_row = db.execute(
+        "SELECT status, series_next_utc FROM med_intakes WHERE id=?",
+        (good_intake_id,),
+    ).fetchone()
+    assert good_row["status"] == "pending"
+    assert good_row["series_next_utc"] == "2026-07-20T10:45:00+00:00"
+
+    # The bad row is left untouched (still due) -- it was never
+    # processed, not silently marked done -- but the error IS audited.
+    bad_row = db.execute(
+        "SELECT series_next_utc FROM med_intakes WHERE id=?",
+        (bad_intake_id,),
+    ).fetchone()
+    assert bad_row["series_next_utc"] == plan_ts
+
+    error_rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.error'"
+    ).fetchall()
+    assert len(error_rows) == 1
+    payload = json.loads(error_rows[0]["payload"])
+    assert payload["where"] == "meds_row"
+    assert payload["intake_id"] == bad_intake_id
+    assert "boom on bad med" in payload["error"]

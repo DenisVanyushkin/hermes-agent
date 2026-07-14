@@ -647,55 +647,72 @@ def _meds_series(conn, now_utc, cfg):
     for row in due:
         intake_id = row["id"]
 
-        if gate.in_quiet_hours(now_utc, cfg):
-            continue
+        # Per-row guard (backlog): each med's own processing is isolated
+        # in its own try/except so one bad row's exception can't sink the
+        # remaining due meds for this same tick -- they'd otherwise be
+        # silently deferred to the next tick (a whole-block guard around
+        # this loop, or around the caller's _meds_series call, would let
+        # one exception abort every row still to come in `due`). A row
+        # that raises is left exactly as it was found (no partial
+        # UPDATE/commit for it) and is picked up again next tick since
+        # series_next_utc is untouched; the outer try/except at the
+        # reminders() call site remains as a final safety net for
+        # failures outside this per-row body (e.g. the SELECT above).
+        try:
+            if gate.in_quiet_hours(now_utc, cfg):
+                continue
 
-        med = meds.get(conn, row["med_id"])
+            med = meds.get(conn, row["med_id"])
 
-        if med is None or not med.get("enabled"):
-            conn.execute(
-                "UPDATE med_intakes SET series_next_utc=NULL "
-                "WHERE id=? AND status='pending'",
-                (intake_id,),
-            )
-            audit.log(conn, "tick.med",
-                      {"intake_id": intake_id, "mode": "disabled"})
+            if med is None or not med.get("enabled"):
+                conn.execute(
+                    "UPDATE med_intakes SET series_next_utc=NULL "
+                    "WHERE id=? AND status='pending'",
+                    (intake_id,),
+                )
+                audit.log(conn, "tick.med",
+                          {"intake_id": intake_id, "mode": "disabled"})
+                conn.commit()
+                continue
+
+            name = med["name"]
+            dose = med.get("dose")
+
+            if med.get("remaining") is not None and med["remaining"] == 0:
+                raw = {"mode": "out_of_stock", "name": name, "dose": dose}
+                human_fallback = f"Заканчивается {name} — надо купить."
+                gate.deliver(conn, "med", raw, human_fallback, cfg, force=True,
+                              now_utc=now_utc)
+                conn.execute(
+                    "UPDATE med_intakes SET series_next_utc=NULL "
+                    "WHERE id=? AND status='pending'",
+                    (intake_id,),
+                )
+                audit.log(conn, "tick.med",
+                          {"intake_id": intake_id, "mode": "out_of_stock"})
+            else:
+                raw = {"mode": "take", "name": name, "dose": dose}
+                human_fallback = f"Пора принять {name}" + (
+                    f" ({dose})" if dose else "")
+                status = gate.deliver(conn, "med", raw, human_fallback, cfg,
+                                       force=True, now_utc=now_utc)
+                repeat_min = cfg.get("med_repeat_min", 45)
+                next_utc = (now_dt + timedelta(minutes=repeat_min)).isoformat(
+                    timespec="seconds")
+                conn.execute(
+                    "UPDATE med_intakes SET series_next_utc=? "
+                    "WHERE id=? AND status='pending'",
+                    (next_utc, intake_id),
+                )
+                audit.log(conn, "tick.med",
+                          {"intake_id": intake_id, "mode": "take",
+                           "status": status})
             conn.commit()
-            continue
-
-        name = med["name"]
-        dose = med.get("dose")
-
-        if med.get("remaining") is not None and med["remaining"] == 0:
-            raw = {"mode": "out_of_stock", "name": name, "dose": dose}
-            human_fallback = f"Заканчивается {name} — надо купить."
-            gate.deliver(conn, "med", raw, human_fallback, cfg, force=True,
-                          now_utc=now_utc)
-            conn.execute(
-                "UPDATE med_intakes SET series_next_utc=NULL "
-                "WHERE id=? AND status='pending'",
-                (intake_id,),
-            )
-            audit.log(conn, "tick.med",
-                      {"intake_id": intake_id, "mode": "out_of_stock"})
-        else:
-            raw = {"mode": "take", "name": name, "dose": dose}
-            human_fallback = f"Пора принять {name}" + (
-                f" ({dose})" if dose else "")
-            status = gate.deliver(conn, "med", raw, human_fallback, cfg,
-                                   force=True, now_utc=now_utc)
-            repeat_min = cfg.get("med_repeat_min", 45)
-            next_utc = (now_dt + timedelta(minutes=repeat_min)).isoformat(
-                timespec="seconds")
-            conn.execute(
-                "UPDATE med_intakes SET series_next_utc=? "
-                "WHERE id=? AND status='pending'",
-                (next_utc, intake_id),
-            )
-            audit.log(conn, "tick.med",
-                      {"intake_id": intake_id, "mode": "take",
-                       "status": status})
-        conn.commit()
+        except Exception as e:
+            audit.log(conn, "tick.error",
+                      {"where": "meds_row", "intake_id": intake_id,
+                       "error": str(e)[:200]})
+            conn.commit()
 
 
 def _today_almaty(now_utc):
