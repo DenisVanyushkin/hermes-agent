@@ -1,0 +1,9 @@
+[Unit]
+Description=Amina fam: weekly brevity audit schedule
+
+[Timer]
+OnCalendar=Sun *-*-* 10:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -606,6 +606,22 @@ def cmd_tick_maintenance(args):
               f"backups={len(result['backups'])} errors={len(result['errors'])}")
     return 1 if result["errors"] else 0
 
+def cmd_tick_brevity(args):
+    from fam import brevity
+    cfg = gate.load_config()
+    now = None
+    if getattr(args, "now", None):
+        from datetime import datetime, timezone
+        now = datetime.fromisoformat(args.now)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+    result = brevity.run_audit(cfg, now=now)
+    if getattr(args, "json", False):
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"sent={result['sent']} reason={result['reason']}")
+    return 0
+
 def cmd_mail_test(args):
     """`fam mail test EVENT_ID` -- manually trigger the .ics email for one
     event, unconditionally (no email_enabled/denis-participant gating --
@@ -1196,6 +1212,9 @@ def build_parser():
                        help="report actions without deleting/writing")
     sptx.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
+
+    spb = tick_sub.add_parser("brevity"); spb.set_defaults(func=cmd_tick_brevity)
+    spb.add_argument("--now"); spb.add_argument("--json", action="store_true")
 
     sp = sub.add_parser("mail")
     mail_sub = sp.add_subparsers(dest="mail_cmd", required=True)
