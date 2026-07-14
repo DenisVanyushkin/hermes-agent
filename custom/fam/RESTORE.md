@@ -35,3 +35,24 @@ backup instead of the latest:
 state.db (hermes dialogue history) restores the same way — stop the gateway,
 copy `state-YYYYMMDD.db` over `~/.hermes/state.db`, restart. Losing it drops
 recent conversation context, not the source-of-truth family data.
+
+## NAS offsite (age-encrypted) — weekly, 192.168.1.25:/volume1/hermes-backups
+
+Weekly `fam-offsite.timer` (Sun 23:30 UTC) writes age-encrypted copies of both
+DBs to the NFS mount `/mnt/nas-hermes` as `<stem>-YYYYMMDD.db.age`, keeping the
+newest 8. The **private age key is NOT on the VM** — it is held off-VM by Denis.
+Local daily backups (`~/.hermes/private/amina/backups/`, keep 7) are unaffected.
+
+### Restore from a NAS offsite copy
+1. Ensure the mount is up: `mountpoint /mnt/nas-hermes` (unit `mnt-nas\x2dhermes.mount`).
+2. Decrypt with the off-VM private key (bring the key in transiently; do not persist it on the VM):
+   `age -d -i /path/to/amina-offsite.key -o /tmp/restored.db /mnt/nas-hermes/assistant-YYYYMMDD.db.age`
+3. Verify: `cd ~/.hermes/hermes-agent/custom/fam && python3 -c "from fam import maint; print(maint.verify_backup('/tmp/restored.db'))"`
+   → expect `(True, {'integrity': 'ok', 'schema_version': '6'})`.
+4. Swap in (stop the minute timer first): `systemctl --user stop fam-reminders.timer`,
+   copy `/tmp/restored.db` over `~/.hermes/private/amina/assistant.db`, then restart it.
+
+### Rehearsal (non-destructive)
+`bash custom/fam/scripts/offsite-restore-rehearsal.sh /path/to/amina-offsite.key`
+Pulls newest `assistant-*.db.age` from the NAS, decrypts to a temp copy, runs
+`verify_backup`. Live DB never touched. Rehearsed live 2026-07-14 → PASS.
