@@ -9,7 +9,7 @@ be delivered), because it may internally call road.route_for_event
 """
 import pytest
 
-from fam import audit, cal, gate, people, places, plans, road, tick
+from fam import audit, cal, gate, people, places, plans, road, shopping, tick
 
 
 class FakeDeliver:
@@ -292,9 +292,9 @@ def test_match_enroute_called_once_per_delivered_reminder(db, fake_deliver, monk
     calls = []
     real_match = plans.match_enroute
 
-    def _spy(conn, event, cfg, now_utc=None):
+    def _spy(conn, event, cfg, now_utc=None, route=None):
         calls.append(1)
-        return real_match(conn, event, cfg, now_utc=now_utc)
+        return real_match(conn, event, cfg, now_utc=now_utc, route=route)
 
     monkeypatch.setattr(plans, "match_enroute", _spy)
     monkeypatch.setattr(
@@ -307,3 +307,62 @@ def test_match_enroute_called_once_per_delivered_reminder(db, fake_deliver, monk
     tick.reminders(db, now_utc=NOW, cfg=CFG)
 
     assert len(calls) == 1
+
+
+def test_route_for_event_called_once_when_both_plans_and_shop_match(
+    db, fake_deliver, monkeypatch
+):
+    # B1: plans.match_enroute AND shopping.match_enroute both run for the
+    # same due leave/prepare reminder -- before the fix each called
+    # road.route_for_event independently (up to 2 TomTom calls for one
+    # event). tick.reminders must now compute the route once and thread
+    # it into both matchers via their route= kwarg.
+    e = _event_with_place(db)
+    plans.add(db, "Забрать заказ", place="стоматолог")
+    places.add(db, "Магнум", lat=43.2262, lon=76.8672)
+    places.update(db, "Магнум", category="grocery")
+    shopping.add(db, "Молоко")
+    db.commit()
+
+    calls = []
+    real_route_for_event = road.route_for_event
+
+    def _counting_route(conn, ev, cfg, now_utc=None):
+        calls.append(1)
+        return (ROUTE, "straight")
+
+    monkeypatch.setattr(road, "route_for_event", _counting_route)
+    _insert_reminder(db, e["id"], kind="leave")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    assert len(calls) == 1
+
+    raw = fake_deliver.calls[0]["raw"]
+    assert raw["enroute"] == "По пути: Забрать заказ"
+    assert raw["shop_enroute"] == "Заодно: Магнум — Молоко"
+
+
+def test_plans_match_enroute_still_self_calls_route_for_event_when_route_not_passed(
+    db, monkeypatch
+):
+    # Back-compat: direct callers that don't pass route= (e.g. existing
+    # tests, other call sites) keep the old self-calling behavior.
+    e = _event_with_place(db)
+    plans.add(db, "Забрать заказ", place="стоматолог")
+    db.commit()
+
+    calls = []
+
+    def _counting_route(conn, ev, cfg, now_utc=None):
+        calls.append(1)
+        return (ROUTE, "straight")
+
+    monkeypatch.setattr(road, "route_for_event", _counting_route)
+
+    results = plans.match_enroute(db, e, CFG, now_utc=NOW)
+
+    assert len(calls) == 1
+    assert results and results[0]["reason"] == "geo"

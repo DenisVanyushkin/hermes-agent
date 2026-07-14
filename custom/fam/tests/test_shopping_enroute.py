@@ -476,9 +476,9 @@ def test_shop_enroute_called_once_per_delivered_reminder(db, fake_deliver, monke
     calls = []
     real_match = shopping.match_enroute
 
-    def _spy(conn, event, cfg, now_utc=None):
+    def _spy(conn, event, cfg, now_utc=None, route=None):
         calls.append(1)
-        return real_match(conn, event, cfg, now_utc=now_utc)
+        return real_match(conn, event, cfg, now_utc=now_utc, route=route)
 
     monkeypatch.setattr(shopping, "match_enroute", _spy)
     monkeypatch.setattr(road, "route_for_event", _route_stub)

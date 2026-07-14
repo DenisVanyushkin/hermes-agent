@@ -84,7 +84,7 @@ def add_from_meds(conn, med_name, qty=""):
     return add(conn, med_name, qty=qty, source="meds")
 
 
-def match_enroute(conn, event, cfg, now_utc=None):
+def match_enroute(conn, event, cfg, now_utc=None, route=None):
     """Which categorized places (grocery/pharmacy, places.category --
     phase 5 T6) are 'on the way' for this event, with a non-empty
     matching shopping list.
@@ -117,6 +117,14 @@ def match_enroute(conn, event, cfg, now_utc=None):
     place -- category is a single column, so a place can only ever
     contribute one entry). items are shopping-item names, capped at
     cfg["enroute_max_items"].
+
+    route: optional pre-computed (route_points, source) tuple (same
+    shape road.route_for_event returns). When given, it is used instead
+    of calling road.route_for_event -- lets a caller (tick.reminders)
+    compute the route once per event and share it with
+    plans.match_enroute, instead of each matcher hitting TomTom
+    separately (B1). When omitted, behavior is unchanged: this function
+    calls road.route_for_event itself.
     """
     categorized = [
         p for p in places.list_all(conn)
@@ -126,7 +134,10 @@ def match_enroute(conn, event, cfg, now_utc=None):
     if not categorized:
         return []
 
-    route_points, source = road.route_for_event(conn, event, cfg, now_utc=now_utc)
+    if route is not None:
+        route_points, source = route
+    else:
+        route_points, source = road.route_for_event(conn, event, cfg, now_utc=now_utc)
     if source == "none" or not route_points:
         return []
 

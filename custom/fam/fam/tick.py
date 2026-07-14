@@ -404,9 +404,27 @@ def reminders(conn, now_utc=None, cfg=None):
         # tick -- an exception here is swallowed and audited as
         # tick.error/enroute; the reminder itself still gets delivered
         # below, just without the "по пути" piggyback.
+        # B1: compute the route ONCE per event per tick and share it
+        # between plans.match_enroute and shopping.match_enroute below --
+        # both may otherwise independently call road.route_for_event
+        # (TomTom, daily-capped) for the exact same event, doubling the
+        # TomTom spend for no benefit. Same try/except discipline as the
+        # matchers themselves: a failure here degrades to route=None, so
+        # each matcher falls back to computing (or skipping) its own
+        # route exactly as it did before this change.
+        route = None
         if reminder["kind"] in ("leave", "prepare") and event["place"]:
             try:
-                matches = plans.match_enroute(conn, event, cfg, now_utc=now)
+                route = road.route_for_event(conn, event, cfg, now_utc=now)
+            except Exception as e:
+                audit.log(conn, "tick.error",
+                          {"where": "route_for_event", "error": str(e)[:200]})
+                route = None
+
+        if reminder["kind"] in ("leave", "prepare") and event["place"]:
+            try:
+                matches = plans.match_enroute(conn, event, cfg, now_utc=now,
+                                               route=route)
             except Exception as e:
                 audit.log(conn, "tick.error",
                           {"where": "enroute", "error": str(e)[:200]})
@@ -437,7 +455,8 @@ def reminders(conn, now_utc=None, cfg=None):
         # magazin/aptека per reminder keeps the text readable.
         if reminder["kind"] in ("leave", "prepare") and event["place"]:
             try:
-                shop_matches = shopping.match_enroute(conn, event, cfg, now_utc=now)
+                shop_matches = shopping.match_enroute(conn, event, cfg, now_utc=now,
+                                                       route=route)
             except Exception as e:
                 audit.log(conn, "tick.error",
                           {"where": "shop_enroute", "error": str(e)[:200]})

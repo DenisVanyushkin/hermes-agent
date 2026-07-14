@@ -161,7 +161,7 @@ def attach(conn, plan_id, event_id):
     return True
 
 
-def match_enroute(conn, event, cfg, now_utc=None):
+def match_enroute(conn, event, cfg, now_utc=None, route=None):
     """Which open plans are 'on the way' for this event.
 
     Two independent reasons a plan can match, both checked against every
@@ -177,6 +177,14 @@ def match_enroute(conn, event, cfg, now_utc=None):
     Never raises. Returns a list of {"plan": <dict>, "reason": "geo"|"person"},
     ordered like plans.list_open(). A plan matching both reasons is
     reported once with reason "geo" (geo takes priority in the dedup).
+
+    route: optional pre-computed (route_points, source) tuple (same
+    shape road.route_for_event returns). When given, it is used instead
+    of calling road.route_for_event -- lets a caller (tick.reminders)
+    compute the route once per event and share it with
+    shopping.match_enroute, instead of each matcher hitting TomTom
+    separately (B1). When omitted, behavior is unchanged: this function
+    calls road.route_for_event itself.
     """
     open_plans = [p for p in list_open(conn) if p.get("attached_event_id") is None]
     if not open_plans:
@@ -193,7 +201,10 @@ def match_enroute(conn, event, cfg, now_utc=None):
     route_points = None
     if any(p.get("place") and p["place"].get("lat") is not None
            and p["place"].get("lon") is not None for p in open_plans):
-        route_points, source = road.route_for_event(conn, event, cfg, now_utc=now_utc)
+        if route is not None:
+            route_points, source = route
+        else:
+            route_points, source = road.route_for_event(conn, event, cfg, now_utc=now_utc)
         if source == "none":
             route_points = None
 
