@@ -527,6 +527,15 @@ def reminders(conn, now_utc=None, cfg=None):
         audit.log(conn, "tick.error", {"where": "meds", "error": str(e)[:200]})
         conn.commit()
 
+    # 6b: edge-triggered bridge-down alert (health owns the meta flag; we
+    # own the commit, same as every other write in this tick).
+    try:
+        from fam import health as _health
+        from fam import gate as _gate
+        _health.maybe_alert_readiness(conn, _gate.load_config())
+    except Exception:                                # noqa: BLE001 -- never fail the tick
+        pass
+
     audit.log(conn, "tick.reminders", counts)
     conn.commit()
     return counts
