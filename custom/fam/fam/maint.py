@@ -1,5 +1,6 @@
 """Phase 6a maintenance: audit_log retention + DB backups + verify."""
 from datetime import datetime, timezone, timedelta
+import json
 import sqlite3
 from pathlib import Path
 from . import audit
@@ -15,9 +16,10 @@ def _summary_watermark(conn, now):
         return val
     return (now - timedelta(hours=24)).isoformat(timespec="seconds")
 
-def problem_summary(cfg, now=None, notify=None):
+def problem_summary(cfg, now=None, notify=None, run_errors=None):
     """Nightly day-wide health sweep. Scans audit_log since the last run
-    for failure markers, snapshots probes, and (if anything is non-clean)
+    for minute-tick failure markers, snapshots probes, folds in this run's
+    maintenance errors (run_errors), and (if anything is non-clean)
     delivers ONE consolidated message to Denis. Clean -> silence.
     notify defaults to gate.notify_denis; injected in tests."""
     now = now or _now_utc()
@@ -27,18 +29,15 @@ def problem_summary(cfg, now=None, notify=None):
         since = _summary_watermark(conn, now)
         rows = conn.execute(
             "SELECT kind, payload FROM audit_log WHERE ts_utc >= ? "
-            "AND (kind = 'tick.error' OR kind = 'tick.maintenance') "
+            "AND kind = 'tick.error' "
             "ORDER BY id", (since,)).fetchall()
         problems = []
-        import json as _json
         for r in rows:
-            payload = _json.loads(r["payload"])
-            if r["kind"] == "tick.error":
-                problems.append(
-                    f"тик {payload.get('where','?')}: {payload.get('error','')}")
-            elif payload.get("op") == "errors":
-                for e in payload.get("errors", []):
-                    problems.append(f"maintenance: {e}")
+            payload = json.loads(r["payload"])
+            problems.append(
+                f"тик {payload.get('where','?')}: {payload.get('error','')}")
+        for e in run_errors or []:
+            problems.append(f"maintenance: {e}")
         probes = health.all_probes(conn, cfg, now=now)
         probe_problems = [f"{p['name']}: {p['detail'] or p['status']}"
                           for p in probes if p["status"] != "ok"]
@@ -170,7 +169,7 @@ def run_maintenance(cfg, dry_run=False, now=None):
     # not prevent the errors-audit block below from seeing prior errors)
     try:
         if not dry_run:
-            result["summary"] = problem_summary(cfg, now=now)
+            result["summary"] = problem_summary(cfg, now=now, run_errors=list(result["errors"]))
         else:
             result["summary"] = {"skipped_clean": None, "dry_run": True}
     except Exception as e:                           # noqa: BLE001 -- guard
