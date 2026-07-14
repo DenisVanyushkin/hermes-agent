@@ -508,3 +508,33 @@ def test_shop_enroute_max_items_cap_configurable(db, fake_deliver, monkeypatch):
 
     raw = fake_deliver.calls[0]["raw"]
     assert raw["shop_enroute"] == "Заодно: Магнум — Молоко"
+
+
+def test_shop_enroute_both_grocery_and_pharmacy_surfaced(db, fake_deliver, monkeypatch):
+    # B2: when both a grocery AND a pharmacy match the route corridor,
+    # both must be surfaced -- not just the first (shopping.match_enroute's
+    # own place ordering).
+    e = _event_with_place(db)
+    _grocery(db, name="Магнум", lat=43.2262, lon=76.8672)
+    _pharmacy(db, name="Аптека Апрель", lat=43.2265, lon=76.8672)
+    shopping.add(db, "Молоко")
+    shopping.add(db, "Магний", source="meds")
+    db.commit()
+    monkeypatch.setattr(road, "route_for_event", _route_stub)
+    _insert_reminder(db, e["id"], kind="leave")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    raw = fake_deliver.calls[0]["raw"]
+    assert "Магнум — Молоко" in raw["shop_enroute"]
+    assert "Аптека Апрель — Магний" in raw["shop_enroute"]
+
+    rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.shop_enroute'").fetchall()
+    assert len(rows) == 2
+    place_ids = {json.loads(r["payload"])["place_id"] for r in rows}
+    grocery_place = places.get(db, "Магнум")
+    pharmacy_place = places.get(db, "Аптека Апрель")
+    assert place_ids == {grocery_place["id"], pharmacy_place["id"]}

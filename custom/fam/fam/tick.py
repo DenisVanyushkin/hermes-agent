@@ -449,10 +449,11 @@ def reminders(conn, now_utc=None, cfg=None):
         # (no extra gate.deliver call => budget doesn't grow). A failure
         # here is swallowed and audited as tick.error/shop_enroute,
         # mirroring the enroute guard's own try/except -- it must never
-        # take down reminder delivery. Only the single best match (the
-        # first result -- shopping.match_enroute's own place ordering)
-        # is surfaced; unlike plans-enroute this isn't a titles list, one
-        # magazin/aptека per reminder keeps the text readable.
+        # take down reminder delivery. B2: BOTH categorized matches
+        # (grocery AND pharmacy) are surfaced when both are in-corridor --
+        # not just shopping.match_enroute's first result -- joined into
+        # one "; "-separated line so the reminder stays a single message
+        # (no new gate.deliver call => budget doesn't grow).
         if reminder["kind"] in ("leave", "prepare") and event["place"]:
             try:
                 shop_matches = shopping.match_enroute(conn, event, cfg, now_utc=now,
@@ -462,15 +463,15 @@ def reminders(conn, now_utc=None, cfg=None):
                           {"where": "shop_enroute", "error": str(e)[:200]})
                 shop_matches = []
             if shop_matches:
-                match = shop_matches[0]
-                raw["shop_enroute"] = (
-                    f"Заодно: {match['place']['name']} — "
-                    + ", ".join(match["items"])
+                raw["shop_enroute"] = "Заодно: " + "; ".join(
+                    f"{match['place']['name']} — " + ", ".join(match["items"])
+                    for match in shop_matches
                 )
-                audit.log(conn, "tick.shop_enroute",
-                          {"event_id": event["id"],
-                           "place_id": match["place"]["id"],
-                           "n_items": len(match["items"])})
+                for match in shop_matches:
+                    audit.log(conn, "tick.shop_enroute",
+                              {"event_id": event["id"],
+                               "place_id": match["place"]["id"],
+                               "n_items": len(match["items"])})
 
         # Phase 4 Task 8: departure hooks (fuel-low + cabin-temp warmup
         # suggestion) piggyback onto the SAME leave/prepare reminder --
