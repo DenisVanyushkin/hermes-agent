@@ -14,3 +14,15 @@ def test_tick_offsite_errors_exit_1(monkeypatch):
                         lambda *a, **k: {"written": [], "errors": ["offsite ...: boom"]})
     rc = cli.cmd_tick_offsite(types.SimpleNamespace(now=None))
     assert rc == 1
+
+
+def test_tick_offsite_errors_audits_tick_error(monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: {"offsite_enabled": True})
+    monkeypatch.setattr(cli.maint, "offsite_backup",
+                        lambda *a, **k: {"written": [], "errors": ["offsite: /mnt/nas-hermes not mounted"]})
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append((where, exc)))
+    rc = cli.cmd_tick_offsite(types.SimpleNamespace(now=None))
+    assert rc == 1
+    assert len(calls) == 1
+    assert calls[0][0] == "offsite"

@@ -628,6 +628,7 @@ def cmd_tick_offsite(args):
     if result["errors"]:
         for e in result["errors"]:
             print(f"error: {e}")
+        _audit_tick_error("offsite", "; ".join(result["errors"]))
         return 1
     return 0
 
