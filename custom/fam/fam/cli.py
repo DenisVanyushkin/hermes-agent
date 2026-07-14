@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, gate, grid, mail, meds, people, places, plans, rem, shopping, tick
+from fam import audit, cal, db as famdb, gate, grid, mail, maint, meds, people, places, plans, rem, shopping, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -605,6 +605,31 @@ def cmd_tick_maintenance(args):
         print(f"pruned={result['pruned']} "
               f"backups={len(result['backups'])} errors={len(result['errors'])}")
     return 1 if result["errors"] else 0
+
+def cmd_tick_offsite(args):
+    cfg = gate.load_config()
+    if not cfg.get("offsite_enabled"):
+        print("offsite disabled; skipping")
+        return 0
+    now = None
+    if getattr(args, "now", None):
+        from datetime import datetime, timezone
+        now = datetime.fromisoformat(args.now)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+    try:
+        result = maint.offsite_backup(cfg, now=now)
+    except Exception as e:                       # noqa: BLE001
+        _audit_tick_error("offsite", e)
+        print(f"offsite failed: {e}")
+        return 1
+    for w in result["written"]:
+        print(f"wrote {w}")
+    if result["errors"]:
+        for e in result["errors"]:
+            print(f"error: {e}")
+        return 1
+    return 0
 
 def cmd_tick_brevity(args):
     from fam import brevity
@@ -1212,6 +1237,9 @@ def build_parser():
                        help="report actions without deleting/writing")
     sptx.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
+
+    spof = tick_sub.add_parser("offsite"); spof.set_defaults(func=cmd_tick_offsite)
+    spof.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
 
     spb = tick_sub.add_parser("brevity"); spb.set_defaults(func=cmd_tick_brevity)
     spb.add_argument("--now"); spb.add_argument("--json", action="store_true")
