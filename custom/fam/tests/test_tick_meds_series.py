@@ -409,6 +409,11 @@ def test_one_bad_med_row_does_not_defer_the_other(db, fake_deliver, monkeypatch)
     plan_ts = "2026-07-20T03:00:00+00:00"
     bad_intake_id = _insert_intake(db, bad_med_id, plan_ts, plan_ts)
     good_intake_id = _insert_intake(db, good_med_id, plan_ts, plan_ts)
+    db.commit()  # both intakes exist as durably-committed rows before the
+    # tick runs, same as real meds_gen-inserted rows would -- otherwise
+    # the fix's conn.rollback() (connection-wide, not row-scoped) would
+    # also undo this fixture's own still-uncommitted sibling insert,
+    # which isn't a real-world scenario.
     fake_deliver.responses = ["sent"]
 
     real_get = meds.get
@@ -449,3 +454,65 @@ def test_one_bad_med_row_does_not_defer_the_other(db, fake_deliver, monkeypatch)
     assert payload["where"] == "meds_row"
     assert payload["intake_id"] == bad_intake_id
     assert "boom on bad med" in payload["error"]
+
+
+def test_failure_after_update_but_before_audit_leaves_no_partial_commit(
+        db, fake_deliver, monkeypatch):
+    # Review finding (Important, atomicity gap in the per-row guard added
+    # by the backlog fix above): the row's own UPDATE to series_next_utc
+    # happens BEFORE its own audit.log("tick.med", ...) call. If audit.log
+    # itself raises -- after the UPDATE already ran in this same
+    # (uncommitted) transaction -- the except handler must not let that
+    # partial UPDATE survive. The row must be left exactly as it was
+    # found (series_next_utc unchanged), a tick.error must still be
+    # recorded for it, and the OTHER due med in the same tick must still
+    # be processed and committed normally.
+    bad_med_id = meds.add(db, "Плохой", ["08:00"])
+    good_med_id = meds.add(db, "Магний", ["08:00"])
+    db.commit()
+    plan_ts = "2026-07-20T03:00:00+00:00"
+    bad_intake_id = _insert_intake(db, bad_med_id, plan_ts, plan_ts)
+    good_intake_id = _insert_intake(db, good_med_id, plan_ts, plan_ts)
+    db.commit()
+    fake_deliver.responses = ["sent", "sent"]
+
+    real_log = audit.log
+
+    def _boom_on_bad_tick_med(conn, kind, payload, actor="agent"):
+        if kind == "tick.med" and payload.get("intake_id") == bad_intake_id:
+            raise RuntimeError("boom on tick.med audit")
+        return real_log(conn, kind, payload, actor=actor)
+
+    monkeypatch.setattr(audit, "log", _boom_on_bad_tick_med)
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    # (a) the bad row's series_next_utc is UNCHANGED -- no partial
+    # persist of the UPDATE that ran before the audit.log raise.
+    bad_row = db.execute(
+        "SELECT status, series_next_utc FROM med_intakes WHERE id=?",
+        (bad_intake_id,),
+    ).fetchone()
+    assert bad_row["status"] == "pending"
+    assert bad_row["series_next_utc"] == plan_ts
+
+    # (b) a tick.error was still recorded for the bad row.
+    error_rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.error'"
+    ).fetchall()
+    assert len(error_rows) == 1
+    payload = json.loads(error_rows[0]["payload"])
+    assert payload["where"] == "meds_row"
+    assert payload["intake_id"] == bad_intake_id
+    assert "boom on tick.med audit" in payload["error"]
+
+    # (c) the other (good) med was still processed and committed.
+    good_row = db.execute(
+        "SELECT status, series_next_utc FROM med_intakes WHERE id=?",
+        (good_intake_id,),
+    ).fetchone()
+    assert good_row["status"] == "pending"
+    assert good_row["series_next_utc"] == "2026-07-20T10:45:00+00:00"
+
+    calls = _med_calls(fake_deliver)
+    assert len(calls) == 2

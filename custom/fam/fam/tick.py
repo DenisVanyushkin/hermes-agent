@@ -709,6 +709,17 @@ def _meds_series(conn, now_utc, cfg):
                            "status": status})
             conn.commit()
         except Exception as e:
+            # Undo whatever this row's own body left uncommitted (its
+            # UPDATE and/or gate.deliver's own audit rows) BEFORE
+            # auditing the failure -- otherwise a raise between the row's
+            # UPDATE and its own tick.med audit/commit above would let
+            # this commit() persist that partial UPDATE without the
+            # tick.med row that's supposed to accompany it, contradicting
+            # this function's "left exactly as it was found" guarantee.
+            # The rollback makes that guarantee actually atomic: the
+            # tick.error audit below is inserted fresh on a clean
+            # transaction and is the only thing this except commits.
+            conn.rollback()
             audit.log(conn, "tick.error",
                       {"where": "meds_row", "intake_id": intake_id,
                        "error": str(e)[:200]})
