@@ -1,7 +1,10 @@
 """Phase 6a maintenance: audit_log retention + DB backups + verify."""
 from datetime import datetime, timezone, timedelta
 import json
+import os
 import sqlite3
+import subprocess
+import tempfile
 from pathlib import Path
 from . import audit
 from . import db as famdb
@@ -188,4 +191,57 @@ def run_maintenance(cfg, dry_run=False, now=None):
                 c.close()
         except Exception:                        # noqa: BLE001
             pass
+    return result
+
+
+def _age_encrypt(plain_path, dest_age, recipient):
+    """Encrypt plain_path -> dest_age for `recipient`. Shells out to age
+    (v1.1.1). Raises CalledProcessError on failure (caught by offsite_backup)."""
+    subprocess.run(["age", "-r", recipient, "-o", str(dest_age), str(plain_path)],
+                   check=True, capture_output=True)
+
+
+def _rotate_age(dest_dir, stem, keep):
+    files = sorted(Path(dest_dir).glob(f"{stem}-*.db.age"))  # YYYYMMDD sorts chrono
+    if keep > 0:
+        for old in files[:-keep]:
+            old.unlink()
+
+
+def offsite_backup(cfg, now=None):
+    """Weekly offsite: online .backup -> age-encrypt -> atomically publish
+    <stem>-YYYYMMDD.db.age onto the NFS mount; rotate to offsite_keep.
+    Never raises; failures land in result['errors'] for problem_summary."""
+    now = now or _now_utc()
+    off = cfg["offsite_dir"]
+    recipient = cfg["offsite_age_recipient"]
+    result = {"written": [], "pruned": [], "errors": []}
+    if not recipient:
+        result["errors"].append("offsite: no age recipient configured")
+        return result
+    if not os.path.ismount(off):
+        result["errors"].append(f"offsite: {off} not mounted")
+        return result
+    targets = []
+    try:
+        targets.append(famdb.resolve_db_path())
+        state = cfg.get("state_db_path")
+        if state and Path(state).exists():
+            targets.append(Path(state))
+    except Exception as e:                       # noqa: BLE001 -- guard
+        result["errors"].append(f"offsite resolve: {e}")
+    for src in targets:
+        src = Path(src)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                plain = Path(td) / f"{src.stem}.db"
+                _sqlite_backup(src, plain)                       # online, consistent
+                final = Path(off) / f"{src.stem}-{now.strftime('%Y%m%d')}.db.age"
+                tmp_age = Path(off) / (final.name + ".tmp")
+                _age_encrypt(plain, tmp_age, recipient)
+                os.replace(tmp_age, final)                       # atomic publish on NFS
+            result["written"].append(str(final))
+            _rotate_age(off, src.stem, cfg["offsite_keep"])
+        except Exception as e:                   # noqa: BLE001 -- guard: one DB failing must not skip the other
+            result["errors"].append(f"offsite {src.name}: {e}")
     return result
