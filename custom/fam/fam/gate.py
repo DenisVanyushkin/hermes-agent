@@ -65,6 +65,10 @@ CONFIG_DEFAULTS = {
     "backup_keep": 7,             # daily .backup copies to keep per DB (§8.4)
     "backup_dir": "/home/denis/.hermes/private/amina/backups",
     "state_db_path": "/home/denis/.hermes/state.db",  # 2nd backup target (hermes dialogue DB); assistant.db is auto-resolved, not configured here
+    "offsite_enabled": False,          # weekly age-encrypted offsite to NAS (§8.4)
+    "offsite_dir": "/mnt/nas-hermes",  # NFS mount point of 192.168.1.25:/volume1/hermes-backups
+    "offsite_age_recipient": "",       # age public key; private key lives off-VM with Denis
+    "offsite_keep": 8,                 # weekly .age dumps to keep per DB (~2 months)
     # phase 4: car / StarLine
     "car_poll_interval_min": 30,
     "car_fuel_low_pct": 25,

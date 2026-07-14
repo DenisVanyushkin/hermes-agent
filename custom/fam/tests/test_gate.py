@@ -26,6 +26,10 @@ CFG = {
     "backup_keep": 7,
     "backup_dir": "/home/denis/.hermes/private/amina/backups",
     "state_db_path": "/home/denis/.hermes/state.db",
+    "offsite_enabled": False,
+    "offsite_dir": "/mnt/nas-hermes",
+    "offsite_age_recipient": "",
+    "offsite_keep": 8,
     "car_poll_interval_min": 30,
     "car_fuel_low_pct": 25,
     "car_fuel_hysteresis": 5,
@@ -219,6 +223,16 @@ def test_load_config_default_merges_missing_maintenance_keys(tmp_path):
     assert "state_db_path" in cfg
     on_disk = json.loads(target.read_text(encoding="utf-8"))
     assert "audit_retention_days" not in on_disk
+
+
+def test_offsite_defaults_merge(tmp_path):
+    p = tmp_path / "fam-config.json"
+    p.write_text('{"backup_keep": 7}')  # pre-offsite config
+    cfg = gate.load_config(str(p))
+    assert cfg["offsite_enabled"] is False
+    assert cfg["offsite_dir"] == "/mnt/nas-hermes"
+    assert cfg["offsite_keep"] == 8
+    assert "offsite_age_recipient" in cfg
 
 
 # ---- in_quiet_hours: cross-midnight window (21:30-07:30 Almaty) ----
