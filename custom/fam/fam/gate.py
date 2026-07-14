@@ -79,6 +79,12 @@ CONFIG_DEFAULTS = {
     "gateway_log_path": "/home/denis/.hermes/logs/gateway.log",
     "readiness_markers_connect": ["✓ telegram connected", "✓ whatsapp connected"],
     "readiness_markers_disconnect": ["✓ telegram disconnected", "✓ whatsapp disconnected", "[Whatsapp] Bridge exited"],
+    # Phase 6c: weekly brevity audit (fam tick brevity). Aux model kept
+    # separate from gate_model -- offline batch review, not the interactive
+    # path. Defaults to a cheap model; tune live.
+    "brevity_window_days": 7,
+    "brevity_model": "gpt-5.4-mini",
+    "brevity_provider": "openai-codex",
 }
 
 GATE_STYLE_INSTRUCTION = (

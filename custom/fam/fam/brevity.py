@@ -40,3 +40,59 @@ def collect_corpus(conn, cfg, now=None):
              "rewrite_ratio": round(rewritten / total, 2) if total else 0.0,
              "avg_len": round(avg_len, 1)}
     return {"items": items, "stats": stats}
+
+
+import subprocess
+from . import gate
+
+REVIEW_INSTRUCTION = (
+    "Ты — ревьюер стиля ассистента Гермеса. На вход — исходящие сообщения "
+    "за неделю (kind, raw_text — до шлюза, final — как отправлено). Оцени: "
+    "многословие, повторяемость, тон; отдельно отметь, где шлюз заметно "
+    "переписывал (raw_text≠final) — полезно это или пере-редактирование. "
+    "Выбери 3–5 худших примеров и перепиши их короче. Предложи правки "
+    "стиль-промпта/SOUL.md. Ответь СТРОГО одним JSON-объектом с ключами: "
+    "assessment (str), rewrite_gap (str), examples (list of {before, after}), "
+    "edits (list of str). Без текста вне JSON."
+)
+
+def _call_reviewer(prompt, cfg):
+    """Run the aux model via the same security-pinned path as
+    gate._call_rewrite (-t clarify). Returns stdout text or None on any
+    failure (timeout, OSError, non-zero exit, empty)."""
+    try:
+        result = subprocess.run(
+            gate.HERMES + ["-z", prompt, "-m", cfg["brevity_model"],
+                           "--provider", cfg["brevity_provider"], "-t", "clarify"],
+            capture_output=True, text=True, timeout=180)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return (result.stdout or "").strip() or None
+
+def _extract_json(text):
+    """Parse the first {...} block; tolerate model chatter around it.
+    Unparseable -> None."""
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+
+def review(corpus, cfg, caller=None):
+    """Aux-LLM review of the corpus. Returns the parsed dict on success, or
+    None on any failure (caller down / unparseable / wrong shape) so the
+    orchestrator emits a 'skipped' note instead of a fabricated report."""
+    caller = caller or _call_reviewer
+    prompt = (f"{REVIEW_INSTRUCTION}\nДанные: "
+              f"{json.dumps(corpus['items'], ensure_ascii=False)}")
+    raw = caller(prompt, cfg)
+    if not raw:
+        return None
+    parsed = _extract_json(raw)
+    if not isinstance(parsed, dict) or "examples" not in parsed:
+        return None
+    return parsed
