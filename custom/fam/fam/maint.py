@@ -4,9 +4,56 @@ import sqlite3
 from pathlib import Path
 from . import audit
 from . import db as famdb
+from . import gate, health
 
 def _now_utc():
     return datetime.now(timezone.utc)
+
+def _summary_watermark(conn, now):
+    val = famdb.meta_get(conn, "maint_summary_last_run")
+    if val:
+        return val
+    return (now - timedelta(hours=24)).isoformat(timespec="seconds")
+
+def problem_summary(cfg, now=None, notify=None):
+    """Nightly day-wide health sweep. Scans audit_log since the last run
+    for failure markers, snapshots probes, and (if anything is non-clean)
+    delivers ONE consolidated message to Denis. Clean -> silence.
+    notify defaults to gate.notify_denis; injected in tests."""
+    now = now or _now_utc()
+    notify = notify or gate.notify_denis
+    conn = famdb.connect()
+    try:
+        since = _summary_watermark(conn, now)
+        rows = conn.execute(
+            "SELECT kind, payload FROM audit_log WHERE ts_utc >= ? "
+            "AND (kind = 'tick.error' OR kind = 'tick.maintenance') "
+            "ORDER BY id", (since,)).fetchall()
+        problems = []
+        import json as _json
+        for r in rows:
+            payload = _json.loads(r["payload"])
+            if r["kind"] == "tick.error":
+                problems.append(
+                    f"тик {payload.get('where','?')}: {payload.get('error','')}")
+            elif payload.get("op") == "errors":
+                for e in payload.get("errors", []):
+                    problems.append(f"maintenance: {e}")
+        probes = health.all_probes(conn, cfg, now=now)
+        probe_problems = [f"{p['name']}: {p['detail'] or p['status']}"
+                          for p in probes if p["status"] != "ok"]
+        all_problems = problems + probe_problems
+        famdb.meta_set(conn, "maint_summary_last_run",
+                       now.isoformat(timespec="seconds"))
+        conn.commit()
+    finally:
+        conn.close()
+    if not all_problems:
+        return {"problems": [], "probes": probes, "sent": False, "skipped_clean": True}
+    body = "Гермес — сводка за сутки:\n" + "\n".join(f"• {p}" for p in all_problems)
+    sent = bool(notify(body))
+    return {"problems": all_problems, "probes": probes,
+            "sent": sent, "skipped_clean": False}
 
 def prune_audit_log(conn, days, now=None):
     """Delete audit_log rows older than `days`; return deleted count.
@@ -119,6 +166,15 @@ def run_maintenance(cfg, dry_run=False, now=None):
                     backup_db(src, cfg["backup_dir"], cfg["backup_keep"], now=now)))
         except Exception as e:                   # noqa: BLE001
             result["errors"].append(f"backup {src}: {e}")
+    # 3. nightly problem summary sweep (guarded: a summary failure must
+    # not prevent the errors-audit block below from seeing prior errors)
+    try:
+        if not dry_run:
+            result["summary"] = problem_summary(cfg, now=now)
+        else:
+            result["summary"] = {"skipped_clean": None, "dry_run": True}
+    except Exception as e:                           # noqa: BLE001 -- guard
+        result["errors"].append(f"summary: {e}")
     # failures are recorded into the same journal `fam log` reads (design §7);
     # best-effort -- journald + the non-zero CLI exit are the backstop if even
     # this write fails. Skipped on dry-run.
