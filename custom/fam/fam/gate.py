@@ -74,6 +74,11 @@ CONFIG_DEFAULTS = {
     "car_cabin_temp_low_c": 0,
     "car_cabin_temp_high_c": 30,
     "car_staleness_hours": 24,
+    # Phase 6b: bridge readiness probe (health.py) scans this log for the
+    # last connect/disconnect marker. Markers configurable (gateway-code detail).
+    "gateway_log_path": "/home/denis/.hermes/logs/gateway.log",
+    "readiness_markers_connect": ["✓ telegram connected", "✓ whatsapp connected"],
+    "readiness_markers_disconnect": ["✓ telegram disconnected", "✓ whatsapp disconnected", "[Whatsapp] Bridge exited"],
 }
 
 GATE_STYLE_INSTRUCTION = (
