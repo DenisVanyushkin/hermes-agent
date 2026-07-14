@@ -61,9 +61,11 @@ def _insert_intake(db, med_id, plan_ts_utc="2026-07-20T03:00:00+00:00",
     return cur.lastrowid
 
 
-# ---- today's planned intakes ----
+# ---- routine today's intakes are NOT a morning-digest topic ----
+# They are reminded by their own minute-tick during the day; the digest
+# surfaces only meds *exceptions* (missed yesterday / low stock).
 
-def test_today_intake_in_raw(db, fake_deliver):
+def test_routine_today_intake_not_surfaced(db, fake_deliver):
     med_id = meds.add(db, "Магний", ["08:00"])
     db.commit()
     _insert_intake(db, med_id, plan_ts_utc="2026-07-20T03:00:00+00:00")
@@ -72,56 +74,18 @@ def test_today_intake_in_raw(db, fake_deliver):
 
     tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
 
-    today = fake_deliver.calls[0]["raw"]["meds"]["today"]
-    assert today == [{"name": "Магний", "time_local": "08:00"}]
-
-
-def test_today_intake_in_fallback(db, fake_deliver):
-    med_id = meds.add(db, "Магний", ["08:00"])
-    db.commit()
-    _insert_intake(db, med_id, plan_ts_utc="2026-07-20T03:00:00+00:00")
-    db.commit()
-    fake_deliver.responses = ["sent"]
-
-    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
-
+    raw = fake_deliver.calls[0]["raw"]
+    # Only a routine intake, no exceptions -> meds omitted from raw entirely.
+    assert "meds" not in raw
     fallback = fake_deliver.calls[0]["human_fallback"]
-    assert "Лекарства:" in fallback
-    assert "08:00 Магний" in fallback
-
-
-def test_intake_outside_today_bounds_excluded(db, fake_deliver):
-    med_id = meds.add(db, "Магний", ["08:00"])
-    db.commit()
-    # Just before today's Almaty-day lower bound (2026-07-19T19:00:00+00:00).
-    _insert_intake(db, med_id, plan_ts_utc="2026-07-19T18:59:00+00:00")
-    db.commit()
-    fake_deliver.responses = ["sent"]
-
-    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
-
-    assert fake_deliver.calls[0]["raw"]["meds"]["today"] == []
-
-
-# ---- disabled med: excluded from both today and missed_yesterday ----
-# (5 T9 final review, FIX-1) ----
-
-def test_disabled_med_intake_excluded_from_today(db, fake_deliver):
-    med_id = meds.add(db, "Магний", ["08:00"])
-    meds.edit(db, med_id, enabled=0)
-    db.commit()
-    _insert_intake(db, med_id, plan_ts_utc="2026-07-20T03:00:00+00:00")
-    db.commit()
-    fake_deliver.responses = ["sent"]
-
-    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
-
-    assert fake_deliver.calls[0]["raw"]["meds"]["today"] == []
-    fallback = fake_deliver.calls[0]["human_fallback"]
+    assert "Лекарства" not in fallback
     assert "Магний" not in fallback
 
 
 def test_disabled_med_intake_excluded_from_missed_yesterday(db, fake_deliver):
+    # 5 T9 final review, FIX-1: a disabled med must not surface even
+    # though a pre-disable row exists. With no other exceptions, meds is
+    # omitted from raw entirely.
     med_id = meds.add(db, "Аспирин", ["08:00"])
     meds.edit(db, med_id, enabled=0)
     db.commit()
@@ -132,7 +96,7 @@ def test_disabled_med_intake_excluded_from_missed_yesterday(db, fake_deliver):
 
     tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
 
-    assert fake_deliver.calls[0]["raw"]["meds"]["missed_yesterday"] == []
+    assert "meds" not in fake_deliver.calls[0]["raw"]
     fallback = fake_deliver.calls[0]["human_fallback"]
     assert "Аспирин" not in fallback
 
@@ -182,7 +146,7 @@ def test_pending_yesterday_intake_is_not_missed(db, fake_deliver):
 
     tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
 
-    assert fake_deliver.calls[0]["raw"]["meds"]["missed_yesterday"] == []
+    assert "meds" not in fake_deliver.calls[0]["raw"]
 
 
 def test_missed_two_days_ago_excluded(db, fake_deliver):
@@ -195,7 +159,7 @@ def test_missed_two_days_ago_excluded(db, fake_deliver):
 
     tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
 
-    assert fake_deliver.calls[0]["raw"]["meds"]["missed_yesterday"] == []
+    assert "meds" not in fake_deliver.calls[0]["raw"]
 
 
 # ---- low stock ----
@@ -225,7 +189,7 @@ def test_low_stock_zero_threshold_only_fires_at_zero(db, fake_deliver):
 
     tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
 
-    assert fake_deliver.calls[0]["raw"]["meds"]["low_stock"] == []
+    assert "meds" not in fake_deliver.calls[0]["raw"]
 
 
 def test_low_stock_zero_threshold_zero_remaining_fires(db, fake_deliver):
@@ -247,17 +211,16 @@ def test_untracked_remaining_never_low_stock(db, fake_deliver):
 
     tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
 
-    assert fake_deliver.calls[0]["raw"]["meds"]["low_stock"] == []
+    assert "meds" not in fake_deliver.calls[0]["raw"]
 
 
-# ---- fully empty: section omitted ----
+# ---- fully empty: key omitted from raw entirely ----
 
-def test_meds_section_omitted_when_all_empty(db, fake_deliver):
+def test_meds_key_omitted_when_no_exceptions(db, fake_deliver):
     fake_deliver.responses = ["sent"]
 
     tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
 
-    raw_meds = fake_deliver.calls[0]["raw"]["meds"]
-    assert raw_meds == {"today": [], "missed_yesterday": [], "low_stock": []}
+    assert "meds" not in fake_deliver.calls[0]["raw"]
     fallback = fake_deliver.calls[0]["human_fallback"]
     assert "Лекарства" not in fallback

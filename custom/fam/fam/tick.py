@@ -982,31 +982,24 @@ def _fallback_plan_line(plan):
 
 
 def _meds_digest(conn, date_local):
-    """Phase 5 Task 7: the digest's medication facts -- today's planned
-    intakes, yesterday's missed ones, and low-stock meds. Three
-    independent lists, each queried separately (no single "meds status"
-    concept ties them together):
+    """The digest's medication *exceptions* -- yesterday's missed doses
+    and low-stock meds. Two independent lists, each queried separately
+    (no single "meds status" concept ties them together).
 
-    today: every med_intakes row (any status -- this mirrors "what's on
-    the plan today", not "what's still pending", the same "active-only
-    events" vs. "every dose scheduled" distinction meds_gen itself draws
-    between event status and dose status) whose plan_ts_utc falls in
-    date_local's Asia/Almaty calendar day (_followup_day_bounds_utc's
-    bounds, reused rather than duplicated), AND whose med is still
-    enabled (5 T9 final review, FIX-1: a disabled med must not surface
-    here just because meds_gen already generated the row before it was
-    disabled -- "stop reminding me about X" means stop everywhere, not
-    only in _meds_series). {name, time_local} per row, name via a SQL
-    join to meds (med_intakes has no name of its own), time_local is
-    plan_ts_utc converted to Almaty and formatted HH:MM. Ordered by
-    plan_ts_utc, same as meds_gen's own due-selection order.
+    Routine "today's planned intakes" are deliberately NOT surfaced here
+    (originally the digest's third list): those doses are reminded by
+    their own minute-tick during the day, so repeating the day's schedule
+    in the morning message is noise -- medication belongs in the digest
+    only as an exception the user should act on, not as a daily roster.
 
     missed_yesterday: med_intakes rows with status='missed' whose
-    plan_ts_utc falls in the day BEFORE date_local (one day back, same
-    bounds helper), same enabled=1 join filter as today's list above --
-    meds_gen's midnight closeout is what actually flips a stale pending
-    row to 'missed', so this list is a straight read of that outcome
-    (filtered the same way), not a re-derivation of it.
+    plan_ts_utc falls in the day BEFORE date_local, joined to an enabled
+    med (5 T9 final review, FIX-1: a disabled med must not surface just
+    because meds_gen generated the row before it was disabled -- "stop
+    reminding me about X" means stop everywhere). meds_gen's midnight
+    closeout is what actually flips a stale pending row to 'missed', so
+    this is a straight read of that outcome, not a re-derivation.
+    {name} per row.
 
     low_stock: meds.list(conn) (enabled meds only, mirrors every other
     caller of the module) filtered by the SAME low-stock formula
@@ -1016,30 +1009,15 @@ def _meds_digest(conn, date_local):
     remaining==0) -- an untracked med (remaining=None) never appears
     here. {name, remaining} per med.
 
-    Returns {"today": [...], "missed_yesterday": [...], "low_stock":
-    [...]} -- always all three keys, each an empty list (never omitted)
-    when there is nothing to report; digest()/_build_digest_fallback
-    decide what to do with an all-empty result.
+    Returns {"missed_yesterday": [...], "low_stock": [...]} -- both keys
+    always present, each an empty list when there is nothing to report;
+    digest() omits the whole "meds" key from raw (and
+    _build_digest_fallback its section) when both are empty.
     """
-    today_from, today_to = _followup_day_bounds_utc(date_local)
     yesterday_local = (
         date.fromisoformat(date_local) - timedelta(days=1)
     ).isoformat()
     yest_from, yest_to = _followup_day_bounds_utc(yesterday_local)
-
-    today_rows = conn.execute(
-        "SELECT m.name AS name, i.plan_ts_utc AS plan_ts_utc "
-        "FROM med_intakes i JOIN meds m ON m.id = i.med_id "
-        "WHERE i.plan_ts_utc >= ? AND i.plan_ts_utc < ? AND m.enabled=1 "
-        "ORDER BY i.plan_ts_utc",
-        (today_from, today_to),
-    ).fetchall()
-    today = [
-        {"name": row["name"],
-         "time_local": _parse_utc(row["plan_ts_utc"]).astimezone(ALMATY)
-         .strftime("%H:%M")}
-        for row in today_rows
-    ]
 
     missed_rows = conn.execute(
         "SELECT m.name AS name FROM med_intakes i "
@@ -1059,27 +1037,24 @@ def _meds_digest(conn, date_local):
                 and (threshold > 0 or remaining == 0):
             low_stock.append({"name": med["name"], "remaining": remaining})
 
-    return {"today": today, "missed_yesterday": missed_yesterday,
-            "low_stock": low_stock}
+    return {"missed_yesterday": missed_yesterday, "low_stock": low_stock}
 
 
 def _fallback_meds_lines(meds_digest):
     """Deterministic "Лекарства:" section lines for the digest fallback
-    -- omitted entirely (returns []) when all three of meds_digest's
-    lists are empty. Order: today's planned intakes (time + name),
-    yesterday's missed (name), then low-stock ("пора купить" -- the
-    literal phrase the task brief specifies, distinct from
+    -- omitted entirely (returns []) when both of meds_digest's lists are
+    empty. Order: yesterday's missed (name), then low-stock ("пора
+    купить" -- the literal phrase the task brief specifies, distinct from
     _meds_series's own out-of-stock wording since that's a different,
-    immediate-nag message).
+    immediate-nag message). Routine today's intakes are no longer part of
+    the digest at all (see _meds_digest).
     """
-    today = meds_digest.get("today") or []
     missed = meds_digest.get("missed_yesterday") or []
     low_stock = meds_digest.get("low_stock") or []
-    if not (today or missed or low_stock):
+    if not (missed or low_stock):
         return []
 
     lines = ["Лекарства:"]
-    lines.extend(f"{item['time_local']} {item['name']}" for item in today)
     lines.extend(f"{item['name']} — пропущено вчера" for item in missed)
     lines.extend(
         f"{item['name']} — пора купить (осталось {item['remaining']})"
@@ -1156,13 +1131,12 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
     item includes event_id so a later ack/cancel-from-context (Task 9)
     can address it.
 
-    meds: raw["meds"] = _meds_digest(conn, date_local) (Phase 5 Task 7) --
-    today's planned intakes, yesterday's missed ones, and low-stock meds
-    (same restock formula meds.take's T5 trigger uses). Always present as
-    a dict with all three keys (each an empty list when there's nothing),
-    never omitted from raw the way the fallback's "Лекарства:" section is
-    (see _build_digest_fallback/_fallback_meds_lines) -- the LLM rewrite
-    always gets the full facts even on a day with nothing to report.
+    meds: _meds_digest(conn, date_local) -- yesterday's missed doses and
+    low-stock meds only (routine today's intakes are no longer surfaced;
+    see _meds_digest). raw["meds"] is set ONLY when at least one of those
+    exception lists is non-empty; on an ordinary day it is absent from
+    raw entirely, so the rewrite never mentions medication when there is
+    nothing to act on.
 
     question: the fixed closing ask (DIGEST_QUESTION) goes into raw
     verbatim -- not a bare flag -- since raw is the JSON the LLM rewrite
@@ -1205,16 +1179,25 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
     busy_two_days = _busy_two_days(conn, date_local)
     meds_digest = _meds_digest(conn, date_local)
 
+    # Empty/unavailable sections are dropped from raw entirely rather
+    # than sent as null/[] -- the rewrite prompt tells the LLM to reflect
+    # every field it IS given, so a present-but-empty field would make it
+    # narrate the absence ("Погода не указана", "без ... лекарств").
+    # weather: omitted when unavailable. meds: omitted unless there is an
+    # exception to report (missed dose / low stock). events/burning_plans
+    # stay always-present, so "Событий нет." is still stated by design.
     raw = {
         "kind": "digest",
         "date_local": date_local,
-        "weather": wx,
         "events": event_list,
         "burning_plans": burning_plans,
         "busy_two_days": busy_two_days,
-        "meds": meds_digest,
         "question": DIGEST_QUESTION,
     }
+    if wx is not None:
+        raw["weather"] = wx
+    if meds_digest["missed_yesterday"] or meds_digest["low_stock"]:
+        raw["meds"] = meds_digest
     human_fallback = _build_digest_fallback(date_local, wx, event_list,
                                              burning_plans, meds_digest)
 

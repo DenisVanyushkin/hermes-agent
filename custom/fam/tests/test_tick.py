@@ -857,6 +857,8 @@ def test_digest_raw_shape_with_weather_and_event(db, fake_deliver):
     assert call["kind"] == "digest"
     assert call["force"] is True
     raw = call["raw"]
+    # meds key omitted entirely: no missed/low-stock exceptions today
+    # (routine intakes are no longer surfaced in the digest at all).
     assert raw == {
         "kind": "digest",
         "date_local": "2026-07-20",
@@ -866,7 +868,6 @@ def test_digest_raw_shape_with_weather_and_event(db, fake_deliver):
         "burning_plans": [],
         "busy_two_days": [{"start_local": e["start_local"],
                             "title": "Встреча"}],
-        "meds": {"today": [], "missed_yesterday": [], "low_stock": []},
         "question": tick.DIGEST_QUESTION,
     }
 
@@ -888,12 +889,15 @@ def test_digest_raw_event_includes_place_name_when_present(db, fake_deliver):
     ]
 
 
-def test_digest_raw_weather_none_when_fetch_returns_none(db, fake_deliver):
+def test_digest_raw_weather_key_omitted_when_fetch_returns_none(db, fake_deliver):
+    # Weather unavailable -> the key is dropped from raw entirely (not
+    # sent as null), so the LLM rewrite can't state its absence
+    # ("Погода не указана").
     fake_deliver.responses = ["sent"]
 
     tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=lambda: None)
 
-    assert fake_deliver.calls[0]["raw"]["weather"] is None
+    assert "weather" not in fake_deliver.calls[0]["raw"]
 
 
 def test_digest_raw_events_empty_when_none_today(db, fake_deliver):

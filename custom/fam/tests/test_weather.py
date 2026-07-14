@@ -68,7 +68,7 @@ def test_fetch_almaty_urlerror_returns_none(capsys):
     def fake(url, timeout=10):
         raise urllib.error.URLError("network down")
 
-    assert weather.fetch_almaty(_urlopen=fake) is None
+    assert weather.fetch_almaty(_urlopen=fake, _sleep=lambda _s: None) is None
     err = capsys.readouterr().err
     assert err.strip() != ""
 
@@ -77,7 +77,7 @@ def test_fetch_almaty_timeout_returns_none(capsys):
     def fake(url, timeout=10):
         raise socket.timeout("timed out")
 
-    assert weather.fetch_almaty(_urlopen=fake) is None
+    assert weather.fetch_almaty(_urlopen=fake, _sleep=lambda _s: None) is None
     assert capsys.readouterr().err.strip() != ""
 
 
@@ -85,12 +85,13 @@ def test_fetch_almaty_http_error_returns_none(capsys):
     def fake(url, timeout=10):
         raise urllib.error.HTTPError(url, 500, "Internal Server Error", None, None)
 
-    assert weather.fetch_almaty(_urlopen=fake) is None
+    assert weather.fetch_almaty(_urlopen=fake, _sleep=lambda _s: None) is None
     assert capsys.readouterr().err.strip() != ""
 
 
 def test_fetch_almaty_non_200_status_returns_none(capsys):
-    assert weather.fetch_almaty(_urlopen=_urlopen_returning(FIXTURE, status=204)) is None
+    assert weather.fetch_almaty(_urlopen=_urlopen_returning(FIXTURE, status=204),
+                                _sleep=lambda _s: None) is None
     assert capsys.readouterr().err.strip() != ""
 
 
@@ -100,7 +101,7 @@ def test_fetch_almaty_malformed_json_returns_none(capsys):
     def fake(url, timeout=10):
         return FakeResponse(b"not json at all {{{")
 
-    assert weather.fetch_almaty(_urlopen=fake) is None
+    assert weather.fetch_almaty(_urlopen=fake, _sleep=lambda _s: None) is None
     assert capsys.readouterr().err.strip() != ""
 
 
@@ -108,7 +109,7 @@ def test_fetch_almaty_missing_daily_key_returns_none(capsys):
     def fake(url, timeout=10):
         return FakeResponse(json.dumps({"latitude": 43.2}).encode())
 
-    assert weather.fetch_almaty(_urlopen=fake) is None
+    assert weather.fetch_almaty(_urlopen=fake, _sleep=lambda _s: None) is None
     assert capsys.readouterr().err.strip() != ""
 
 
@@ -117,7 +118,8 @@ def test_fetch_almaty_short_daily_arrays_returns_none(capsys):
     for key in short["daily"]:
         short["daily"][key] = short["daily"][key][:1]
 
-    assert weather.fetch_almaty(_urlopen=_urlopen_returning(short)) is None
+    assert weather.fetch_almaty(_urlopen=_urlopen_returning(short),
+                                _sleep=lambda _s: None) is None
     assert capsys.readouterr().err.strip() != ""
 
 
@@ -132,3 +134,49 @@ def test_fetch_almaty_forwards_timeout():
 
     weather.fetch_almaty(timeout=3, _urlopen=fake)
     assert seen["timeout"] == 3
+
+
+# ---- retry on transient failure ----
+
+def test_fetch_almaty_retries_until_success():
+    # A transient blip (first attempt raises) must not lose the day's
+    # weather: fetch_almaty retries and returns the later success.
+    calls = {"n": 0}
+
+    def fake(url, timeout=10):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.URLError("transient")
+        return FakeResponse(json.dumps(FIXTURE).encode())
+
+    result = weather.fetch_almaty(_urlopen=fake, _sleep=lambda _s: None)
+    assert calls["n"] == 3
+    assert result is not None
+    assert result["today"]["tmin"] == 18.5
+
+
+def test_fetch_almaty_gives_up_after_attempts(capsys):
+    calls = {"n": 0}
+
+    def fake(url, timeout=10):
+        calls["n"] += 1
+        raise urllib.error.URLError("still down")
+
+    result = weather.fetch_almaty(attempts=3, _urlopen=fake,
+                                  _sleep=lambda _s: None)
+    assert result is None
+    assert calls["n"] == 3
+
+
+def test_fetch_almaty_sleeps_between_attempts():
+    calls = {"n": 0}
+    sleeps = []
+
+    def fake(url, timeout=10):
+        calls["n"] += 1
+        raise urllib.error.URLError("down")
+
+    weather.fetch_almaty(attempts=3, retry_delay=2,
+                         _urlopen=fake, _sleep=sleeps.append)
+    # One pause between each of the 3 attempts, none after the last.
+    assert sleeps == [2, 2]
