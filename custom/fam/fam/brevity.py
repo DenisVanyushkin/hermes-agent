@@ -96,3 +96,44 @@ def review(corpus, cfg, caller=None):
     if not isinstance(parsed, dict) or "examples" not in parsed:
         return None
     return parsed
+
+from . import db as famdb
+
+def _format_report(stats, review_out):
+    lines = ["Гермес — аудит лаконичности за неделю:",
+             f"сообщений: {stats['total']} (~{stats.get('per_day', 0)}/день), "
+             f"правок шлюзом: {int(stats.get('rewrite_ratio', 0) * 100)}%, "
+             f"средняя длина: {stats.get('avg_len', 0)} зн."]
+    if review_out.get("assessment"):
+        lines.append(f"\nОценка: {review_out['assessment']}")
+    if review_out.get("rewrite_gap"):
+        lines.append(f"Шлюз: {review_out['rewrite_gap']}")
+    if review_out.get("examples"):
+        lines.append("\nБыло → надо:")
+        for ex in review_out["examples"][:5]:
+            lines.append(f"— «{ex.get('before','')}» → «{ex.get('after','')}»")
+    if review_out.get("edits"):
+        lines.append("\nПравки (совет, применяешь ты):")
+        for e in review_out["edits"]:
+            lines.append(f"• {e}")
+    return "\n".join(lines)
+
+def run_audit(cfg, now=None, notify=None, caller=None):
+    """Weekly brevity audit: build corpus, review via aux LLM, deliver ONE
+    message to Denis. Returns {sent, reason}. reason in {empty, llm_skip, ok}.
+    Never fabricates a report (empty week / LLM failure send a short note)."""
+    notify = notify or gate.notify_denis
+    conn = famdb.connect()
+    try:
+        corpus = collect_corpus(conn, cfg, now=now)
+    finally:
+        conn.close()
+    if corpus["stats"]["total"] == 0:
+        notify("Гермес: за неделю исходящих Амине нет — аудит лаконичности пропущен.")
+        return {"sent": True, "reason": "empty"}
+    review_out = review(corpus, cfg, caller=caller)
+    if review_out is None:
+        notify("Гермес: аудит лаконичности пропущен: ревьюер недоступен.")
+        return {"sent": True, "reason": "llm_skip"}
+    notify(_format_report(corpus["stats"], review_out))
+    return {"sent": True, "reason": "ok"}
