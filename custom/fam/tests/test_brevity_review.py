@@ -48,3 +48,33 @@ def test_review_tolerates_chatter_around_json():
     result = brevity.review(CORPUS, CFG, caller=caller)
     assert result is not None
     assert result["examples"] == []
+
+
+def test_review_prompt_includes_persona_from_soul_path(tmp_path):
+    soul_file = tmp_path / "SOUL.md"
+    soul_file.write_text("ТЕСТ-ПЕРСОНА-МАРКЕР", encoding="utf-8")
+    cfg = dict(CFG, brevity_soul_path=str(soul_file))
+    captured = {}
+
+    def caller(prompt, cfg_):
+        captured["prompt"] = prompt
+        return json.dumps({"examples": [], "assessment": "x"})
+
+    brevity.review(CORPUS, cfg, caller=caller)
+    assert "ТЕСТ-ПЕРСОНА-МАРКЕР" in captured["prompt"]
+    assert "НЕ рекомендуй убирать теплоту" in captured["prompt"]
+
+
+def test_review_prompt_falls_back_to_embedded_persona(tmp_path):
+    missing = tmp_path / "nope" / "SOUL.md"
+    cfg = dict(CFG, brevity_soul_path=str(missing))
+    captured = {}
+
+    def caller(prompt, cfg_):
+        captured["prompt"] = prompt
+        return json.dumps({"examples": [], "assessment": "x"})
+
+    brevity.review(CORPUS, cfg, caller=caller)
+    assert "тёплый" in captured["prompt"]
+    assert "1–3 предложения" in captured["prompt"]
+

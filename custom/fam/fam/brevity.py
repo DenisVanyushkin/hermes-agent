@@ -46,15 +46,57 @@ import subprocess
 from . import gate
 
 REVIEW_INSTRUCTION = (
-    "Ты — ревьюер стиля ассистента Гермеса. На вход — исходящие сообщения "
-    "за неделю (kind, raw_text — до шлюза, final — как отправлено). Оцени: "
-    "многословие, повторяемость, тон; отдельно отметь, где шлюз заметно "
-    "переписывал (raw_text≠final) — полезно это или пере-редактирование. "
-    "Выбери 3–5 худших примеров и перепиши их короче. Предложи правки "
-    "стиль-промпта/SOUL.md. Ответь СТРОГО одним JSON-объектом с ключами: "
-    "assessment (str), rewrite_gap (str), examples (list of {before, after}), "
-    "edits (list of str). Без текста вне JSON."
+    "Ты — ревьюер стиля ассистента Гермеса. Ниже — ЖЕЛАЕМАЯ ПЕРСОНА Гермеса "
+    "(каким он ДОЛЖЕН быть) и его исходящие сообщения за неделю (kind, "
+    "raw_text — до шлюза, final — как отправлено).\n\n"
+    "ПЕРСОНА (эталон, к которому приводим стиль):\n{soul}\n\n"
+    "Твоя задача — оценить, насколько сообщения соответствуют ЭТОЙ персоне, "
+    "а НЕ сделать их максимально сухими. Гермес лаконичен (1–3 предложения), "
+    "но остаётся тёплым, дружелюбным и живым: уместный юмор, умеренные "
+    "эмодзи, проактивные предложения — это ЧАСТЬ персоны, а не дефекты. НЕ "
+    "рекомендуй убирать теплоту, эмодзи, юмор или проактивность и не своди "
+    "всё к одной сухой фразе.\n\n"
+    "Флагуй ТОЛЬКО настоящие отклонения от персоны:\n"
+    "— реальное многословие и служебный мусор (простыни, лишние цифры, "
+    "внутренняя диагностика вроде «погода не указана»);\n"
+    "— дословное дублирование (одна фраза повторена в сообщении дважды);\n"
+    "— подмену намерения сообщения (например, дайджест о планах "
+    "превратился в погодный отчёт);\n"
+    "— выдуманные факты, адресаты или события (шлюз добавил то, чего нет "
+    "в raw_text).\n"
+    "Отдельно отметь, где шлюз переписывал (raw_text≠final): полезно "
+    "уточнял (время/место/действие) или искажал/выдумывал.\n\n"
+    "Выбери 3–5 худших примеров и перепиши их короче/честнее, НО с "
+    "сохранением тёплого живого тона персоны (не в сухого робота). Предложи "
+    "правки стиль-промпта/SOUL.md в том же духе: «сохранить характер, "
+    "убрать лишнее», а не «сделать суше».\n\n"
+    "Ответь СТРОГО одним JSON-объектом с ключами: assessment (str), "
+    "rewrite_gap (str), examples (list of {{before, after}}), edits (list of "
+    "str). Без текста вне JSON."
 )
+
+_PERSONA_FALLBACK = (
+    "Гермес — тёплый, дружелюбный личный ассистент Амины (мужской род, на «ты», "
+    "по-русски). Лаконичен: 1–3 предложения. Но живой — уместный юмор, умеренные "
+    "эмодзи, проактивные предложения. Не выдумывает факты; техпроблемы сообщает "
+    "Денису, не грузит ими Амину."
+)
+
+def _load_persona(cfg):
+    """Read the desired persona (SOUL.md) for the reviewer; fall back to a short
+    embedded summary if the file is missing/unreadable so the reviewer always
+    gets the character."""
+    import os
+    path = cfg.get("brevity_soul_path")
+    if path:
+        try:
+            with open(os.path.expanduser(path), encoding="utf-8") as f:
+                text = f.read().strip()
+            if text:
+                return text
+        except OSError:
+            pass
+    return _PERSONA_FALLBACK
 
 def _call_reviewer(prompt, cfg):
     """Run the aux model via the same security-pinned path as
@@ -87,7 +129,8 @@ def review(corpus, cfg, caller=None):
     None on any failure (caller down / unparseable / wrong shape) so the
     orchestrator emits a 'skipped' note instead of a fabricated report."""
     caller = caller or _call_reviewer
-    prompt = (f"{REVIEW_INSTRUCTION}\nДанные: "
+    persona = _load_persona(cfg)
+    prompt = (f"{REVIEW_INSTRUCTION.format(soul=persona)}\nДанные: "
               f"{json.dumps(corpus['items'], ensure_ascii=False)}")
     raw = caller(prompt, cfg)
     if not raw:
