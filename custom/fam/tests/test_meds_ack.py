@@ -407,3 +407,28 @@ def test_cli_med_skip_audits(db, capsys):
     assert db.execute(
         "SELECT COUNT(*) FROM audit_log WHERE kind='meds.skip'"
     ).fetchone()[0] == 1
+
+
+def test_take_with_tracked_remaining_writes_no_redundant_meds_edit_audit(db):
+    # Backlog: take()'s internal call to edit(conn, med_id,
+    # remaining=remaining) writes its own meds.edit audit row (the same
+    # remaining value take()'s own meds.take audit already carries) --
+    # a redundant double-audit of one logical event (decrementing stock
+    # as part of acking a dose). A single take() must produce exactly
+    # one audit row for the decrement (meds.take), not two.
+    med_id = meds.add(db, "Магний", ["08:00"], remaining=10, threshold=2)
+    db.commit()
+    intake_id = _insert_intake(db, med_id)
+
+    meds.take(db, intake_id, now_utc="2026-07-20T03:10:00+00:00")
+    db.commit()
+
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='meds.edit'"
+    ).fetchone()[0] == 0
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='meds.take'"
+    ).fetchone()[0] == 1
+
+    m = meds.get(db, med_id)
+    assert m["remaining"] == 9

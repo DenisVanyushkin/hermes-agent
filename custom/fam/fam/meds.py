@@ -221,7 +221,18 @@ def take(conn, intake_id, now_utc=None):
     remaining = med["remaining"] if med is not None else None
     if remaining is not None:
         remaining = max(0, remaining - 1)
-        edit(conn, med_id, remaining=remaining)
+        # Backlog: this used to go through edit(conn, med_id,
+        # remaining=remaining), which writes its own meds.edit audit
+        # row -- a redundant double-audit of the same logical event,
+        # since the decrement is already carried by this function's own
+        # meds.take audit below (the "remaining" field). Write the
+        # column directly (mirroring edit()'s own UPDATE/updated_at
+        # shape) so a single take() produces a single audit row for the
+        # decrement.
+        conn.execute(
+            "UPDATE meds SET remaining=?, updated_at=? WHERE id=?",
+            (remaining, _now(), med_id),
+        )
 
     conn.execute(
         "UPDATE med_intakes SET status='taken', taken_ts_utc=?, "
