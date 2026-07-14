@@ -445,11 +445,30 @@ def cmd_rem_active(args):
             print(_fmt_active_chain(r))
     return 0
 
+def _audit_tick_error(where, exc):
+    """Persist a tick.error marker so the nightly problem_summary sweep
+    (6b) can see a failure that would otherwise only hit journald.
+    Best-effort: a failure to record must not mask the original error."""
+    try:
+        conn = famdb.connect()
+        try:
+            audit.log(conn, "tick.error",
+                      {"where": where, "error": str(exc)[:200]}, actor="tick")
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:                                # noqa: BLE001
+        pass
+
 def cmd_tick_reminders(args):
     conn = famdb.connect()
     # tick.reminders() owns its own commits (see fam/tick.py docstring) --
     # unlike the other cmd_* handlers above, no conn.commit() here.
-    counts = tick.reminders(conn, now_utc=args.now)
+    try:
+        counts = tick.reminders(conn, now_utc=args.now)
+    except Exception as e:                           # noqa: BLE001 -- mark then re-raise
+        _audit_tick_error("reminders", e)
+        raise
     if args.json:
         print(json.dumps(counts, ensure_ascii=False))
     else:
@@ -460,7 +479,11 @@ def cmd_tick_digest(args):
     conn = famdb.connect()
     # tick.digest() owns its own commit (see fam/tick.py) -- no
     # conn.commit() here, same as cmd_tick_reminders above.
-    summary = tick.digest(conn, now_utc=args.now)
+    try:
+        summary = tick.digest(conn, now_utc=args.now)
+    except Exception as e:                           # noqa: BLE001 -- mark then re-raise
+        _audit_tick_error("digest", e)
+        raise
     if args.json:
         print(json.dumps(summary, ensure_ascii=False))
     else:
@@ -471,7 +494,11 @@ def cmd_tick_meds_gen(args):
     conn = famdb.connect()
     # tick.meds_gen() owns its own commit (see fam/tick.py) -- no
     # conn.commit() here, same as cmd_tick_reminders/cmd_tick_digest above.
-    counts = tick.meds_gen(conn, now_utc=args.now)
+    try:
+        counts = tick.meds_gen(conn, now_utc=args.now)
+    except Exception as e:                           # noqa: BLE001 -- mark then re-raise
+        _audit_tick_error("meds_gen", e)
+        raise
     if args.json:
         print(json.dumps(counts, ensure_ascii=False))
     else:
@@ -483,7 +510,11 @@ def cmd_tick_car(args):
     # tick.car() owns its own commit (see fam/tick.py) -- no
     # conn.commit() here, same as cmd_tick_reminders/cmd_tick_digest/
     # cmd_tick_meds_gen above.
-    counts = tick.car(conn, now_utc=args.now)
+    try:
+        counts = tick.car(conn, now_utc=args.now)
+    except Exception as e:                           # noqa: BLE001 -- mark then re-raise
+        _audit_tick_error("car", e)
+        raise
     if args.json:
         print(json.dumps(counts, ensure_ascii=False))
     else:
