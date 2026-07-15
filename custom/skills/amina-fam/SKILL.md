@@ -12,7 +12,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v8 (phase 4 T9 — car status/warmup/set-transport)._
+_Body version: v9 (2GIS link resolver — fam extracts coordinates itself)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -139,19 +139,15 @@ make a second, separate terminal call.
    Exception: the user named a departure time — then the
    departure-vs-start rule above governs (уточни дорогу или
    время-на-месте).
-5. **A 2GIS link carries the place's coordinates — extract them.** A
-   2GIS URL ends in `.../geo/<id>/LON,LAT`, and the order is LON,LAT
-   (сначала долгота, потом широта — NOT lat,lon). Example:
-   `https://2gis.kz/almaty/geo/70000001030764296/76.781529,43.233821`
-   → `--lon 76.781529 --lat 43.233821`. When creating a place from such
-   a link, pass them along with the link:
-   `fam places add "Name" --address <link> --lat <LAT> --lon <LON>`.
-   When the place already exists WITHOUT coordinates and the user sends
-   a 2GIS link for it: `fam places update <ref> --lat <LAT> --lon <LON>
-   --address <link>`. Double-check the order every time — the first
-   number in the URL is the longitude (долгота), the second is the
-   latitude (широта); swapping them puts the place in the ocean and the
-   computed road becomes garbage.
+5. **A 2GIS link — pass it straight to `--address`; fam extracts the
+   coordinates itself.** Both the short `https://go.2gis.com/<code>` form
+   and the long `https://2gis.kz/.../LON,LAT` form work:
+   `fam places add "Name" --address <link>` (or `fam places update <ref>
+   --address <link>` for an existing place without coordinates). Do NOT
+   parse LON/LAT out of the URL yourself, do NOT pass `--lat/--lon` from a
+   link — fam resolves the redirect and the coordinates for you. If fam can't
+   resolve them (a dead or non-2GIS link), it still saves the place with
+   the address as-is; that is fine, not an error to retry.
 6. **Other stderr + exit 2 failures are real errors, not retry bait.**
    Examples: `alias already in use by ...`, `unknown field: ...`, `unknown
    event: ...`. Read the message and fix the actual problem (different

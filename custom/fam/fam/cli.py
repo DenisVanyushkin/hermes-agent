@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, gate, grid, mail, maint, meds, people, places, plans, rem, shopping, tick
+from fam import audit, cal, db as famdb, gate, geo2gis, grid, mail, maint, meds, people, places, plans, rem, shopping, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -74,10 +74,23 @@ def cmd_people_list(args):
             print(f"{r['id']}\t{r['kind']}\t{r['name']}{slug_part}")
     return 0
 
+def _maybe_resolve_2gis(address, lat, lon):
+    """If a 2GIS link was given as the address and no explicit coords,
+    resolve coordinates from the link. Returns (lat, lon) -- unchanged
+    when coords were explicit, the link is not 2GIS, or resolution fails.
+    """
+    if lat is None and lon is None and address and geo2gis.is_2gis_link(address):
+        coords = geo2gis.resolve_place_coords(address)
+        if coords:
+            return coords
+    return lat, lon
+
+
 def cmd_places_add(args):
     conn = famdb.connect()
-    p = places.add(conn, args.name, address=args.address, lat=args.lat,
-                    lon=args.lon, aliases=args.alias)
+    lat, lon = _maybe_resolve_2gis(args.address, args.lat, args.lon)
+    p = places.add(conn, args.name, address=args.address, lat=lat,
+                    lon=lon, aliases=args.alias)
     conn.commit()
     print(f"added place: {p['name']} (id={p['id']})")
     return 0
@@ -102,9 +115,10 @@ def cmd_places_resolve(args):
 
 def cmd_places_update(args):
     conn = famdb.connect()
+    lat, lon = _maybe_resolve_2gis(args.address, args.lat, args.lon)
     fields = {}
-    if args.lat is not None: fields["lat"] = args.lat
-    if args.lon is not None: fields["lon"] = args.lon
+    if lat is not None: fields["lat"] = lat
+    if lon is not None: fields["lon"] = lon
     if args.travel_min is not None: fields["travel_min"] = args.travel_min
     if args.address is not None: fields["address"] = args.address
     if args.notes is not None: fields["notes"] = args.notes
