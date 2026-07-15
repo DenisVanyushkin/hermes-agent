@@ -12,6 +12,13 @@ from fam import audit, gate
 
 TOKEN_PATH = "/home/denis/.hermes/private/amina/starline-token.json"
 
+_SET_PARAM_URL = "https://developer.starline.ru/json/v1/device/{}/set_param"
+
+
+def _http_post(url, json, headers, timeout=20):
+    import requests
+    return requests.post(url, json=json, headers=headers, timeout=timeout)
+
 
 class AuthExpired(Exception):
     """slid_token no longer valid -> operator must re-run `fam car auth-init`."""
@@ -109,9 +116,14 @@ class StarlineClient:
         try:
             self.ensure_slnet()
             store = self.load_store()
-            api = self._api_factory(store.get("user_id"), store.get("slnet_token"))
-            return bool(api.set_car_state(store["device_id"], "engine", True))
-        except Exception:
+            resp = _http_post(
+                _SET_PARAM_URL.format(store["device_id"]),
+                json={"type": "ign", "ign": 1},
+                headers={"Cookie": "slnet=" + store["slnet_token"]},
+            )
+            body = resp.json()
+            return int(body.get("code", 0)) == 200
+        except Exception:      # noqa: BLE001 -- never raise; warmup guard treats False as failure
             return False
 
 

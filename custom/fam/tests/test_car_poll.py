@@ -76,17 +76,62 @@ def test_poll_returns_none_on_auth_failure(tmp_path, monkeypatch):
     c = car.StarlineClient(token_path=str(p), _auth=Boom())
     assert c.poll() is None
 
-def test_start_engine_calls_set_car_state(tmp_path):
+def _car_store(tmp_path):
     import json
     p = tmp_path / "t.json"
     p.write_text(json.dumps({"slid_token": "S", "slnet_token": "N",
                              "slnet_expires": 9999999999, "user_id": "U", "device_id": "DEV"}))
+    return p
+
+
+class _NoAuth:
+    def get_user_id(self, slid):
+        raise AssertionError("should not refresh")
+
+
+class _FakeResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+def test_start_engine_posts_ign_and_returns_true_on_code_200(tmp_path, monkeypatch):
+    p = _car_store(tmp_path)
     seen = {}
-    class FakeApi:
-        def __init__(self, uid, slnet): pass
-        def set_car_state(self, dev, name, state): seen["args"] = (dev, name, state); return True
-    class NoAuth:
-        def get_user_id(self, slid): raise AssertionError("should not refresh")
-    c = car.StarlineClient(token_path=str(p), _auth=NoAuth(), _api_factory=FakeApi)
+
+    def fake_post(url, json, headers, timeout=20):
+        seen["url"] = url
+        seen["json"] = json
+        seen["headers"] = headers
+        return _FakeResponse({"code": 200})
+
+    monkeypatch.setattr(car, "_http_post", fake_post)
+    c = car.StarlineClient(token_path=str(p), _auth=_NoAuth(), _api_factory=None)
     assert c.start_engine() is True
-    assert seen["args"] == ("DEV", "engine", True)
+    assert "DEV" in seen["url"]
+    assert seen["json"] == {"type": "ign", "ign": 1}
+    assert seen["headers"] == {"Cookie": "slnet=N"}
+
+
+def test_start_engine_returns_false_on_code_400(tmp_path, monkeypatch):
+    p = _car_store(tmp_path)
+
+    def fake_post(url, json, headers, timeout=20):
+        return _FakeResponse({"code": 400, "codestring": "Bad Request"})
+
+    monkeypatch.setattr(car, "_http_post", fake_post)
+    c = car.StarlineClient(token_path=str(p), _auth=_NoAuth(), _api_factory=None)
+    assert c.start_engine() is False
+
+
+def test_start_engine_returns_false_on_network_error(tmp_path, monkeypatch):
+    p = _car_store(tmp_path)
+
+    def fake_post(url, json, headers, timeout=20):
+        raise ConnectionError("network down")
+
+    monkeypatch.setattr(car, "_http_post", fake_post)
+    c = car.StarlineClient(token_path=str(p), _auth=_NoAuth(), _api_factory=None)
+    assert c.start_engine() is False
