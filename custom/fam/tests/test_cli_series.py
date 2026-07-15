@@ -13,7 +13,8 @@ def test_cal_add_repeat_creates_series_and_occurrences(db, capsys):
     assert cli.main(["places", "add", "Invictus"]) == 0
     rc = cli.main(["cal", "add", "--title", "Тренировка", "--repeat", "weekly",
                    "--days", "mon,wed,fri", "--start-time", "10:00",
-                   "--end-time", "12:00", "--place", "Invictus"])
+                   "--end-time", "12:00", "--place", "Invictus",
+                   "--transport", "car"])
     assert rc == 0
     sid = db.execute("SELECT id FROM event_series").fetchone()["id"]
     evs = _series_events(db, sid)
@@ -74,3 +75,14 @@ def test_regular_cal_add_unchanged(db, capsys):
     assert rc == 0
     assert db.execute("SELECT COUNT(*) c FROM events WHERE series_id IS NULL "
                       "AND title=\x27Разовое\x27").fetchone()["c"] == 1
+
+
+def test_cal_add_series_place_without_transport_exit_2(db, capsys):
+    assert cli.main(["places", "add", "Invictus"]) == 0
+    rc = cli.main(["cal", "add", "--title", "Тренировка", "--repeat", "weekly",
+                   "--days", "mon,wed,fri", "--start-time", "10:00",
+                   "--end-time", "12:00", "--place", "Invictus"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--transport car|walk|public" in captured.err
+    assert db.execute("SELECT COUNT(*) c FROM event_series").fetchone()["c"] == 0

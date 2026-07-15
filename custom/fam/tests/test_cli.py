@@ -279,7 +279,7 @@ def test_cal_add_travel_min_zero_overrides_place(db, capsys):
 
     rc = cli.main(["cal", "add", "--title", "Т", "--start",
                    "2099-01-01T05:00:00+00:00", "--place", "Клиника",
-                   "--travel-min", "0", "--json"])
+                   "--transport", "car", "--travel-min", "0", "--json"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["travel_min"] == 0
@@ -1045,3 +1045,48 @@ def test_places_update_no_fields_exit_2(db, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert captured.err.strip() != ""
+
+
+# --- transport-required guardrail for trips (events with a place) ---
+# A place-bound event is a trip: its car/warmup departure hooks and road/
+# leave_at math depend on knowing HOW Amina gets there. Leaving transport
+# 'unknown' silently disables those hooks (the 15.07 "posyolok" incident:
+# fuel at 16%%, flag set, yet no "zapravsya" because transport was unknown).
+# So a place-bound add/series with no concrete transport is rejected at the
+# CLI layer, forcing the skill to set it (asking Amina if unclear). Placeless
+# events (calls, birthdays) never trip hooks -> unknown stays allowed there.
+_TRANSPORT_HINT = "--transport car|walk|public"
+
+def test_cal_add_place_without_transport_exit_2(db, capsys):
+    places.add(db, "Поселок"); db.commit()
+    rc = cli.main(["cal", "add", "--title", "Поездка", "--start",
+                   _future_start(), "--place", "Поселок"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert _TRANSPORT_HINT in captured.err
+    assert db.execute("SELECT COUNT(*) c FROM events").fetchone()["c"] == 0
+
+def test_cal_add_place_explicit_unknown_transport_exit_2(db, capsys):
+    places.add(db, "Поселок"); db.commit()
+    rc = cli.main(["cal", "add", "--title", "Поездка", "--start",
+                   _future_start(), "--place", "Поселок",
+                   "--transport", "unknown"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert _TRANSPORT_HINT in captured.err
+
+def test_cal_add_place_with_transport_succeeds(db, capsys):
+    places.add(db, "Поселок"); db.commit()
+    rc = cli.main(["cal", "add", "--title", "Поездка", "--start",
+                   _future_start(), "--place", "Поселок",
+                   "--transport", "car", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["transport"] == "car"
+
+def test_cal_add_no_place_allows_unknown_transport(db, capsys):
+    rc = cli.main(["cal", "add", "--title", "Созвон", "--start",
+                   _future_start(), "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["title"] == "Созвон"

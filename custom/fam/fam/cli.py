@@ -276,6 +276,21 @@ def _check_start_not_past(start_value, allow_past):
             "the date (run date)."
         )
 
+def _check_trip_has_transport(place, transport):
+    """A place-bound event is a trip: its car/warmup departure hooks and the
+    road/leave_at math depend on HOW Amina gets there. Leaving transport
+    'unknown' silently disables those hooks (15.07 "posyolok": fuel 16%%,
+    low-fuel flag set, yet no "zapravsya" because transport was unknown).
+    So a trip with no concrete mode is rejected at the CLI layer, forcing the
+    skill to set it (asking Amina if unclear). Placeless events -- calls,
+    birthdays -- never trip hooks, so 'unknown' stays allowed there."""
+    if place and (transport is None or transport == "unknown"):
+        raise ValueError(
+            "trip to a place needs a transport mode -- pass "
+            "--transport car|walk|public (ask Amina: машина/пешком/такси). "
+            "Transport is unknown."
+        )
+
 def cmd_cal_add(args):
     if getattr(args, "repeat", None):
         return _cmd_cal_add_series(args)
@@ -284,6 +299,7 @@ def cmd_cal_add(args):
               file=sys.stderr)
         return 2
     _check_start_not_past(args.start, args.allow_past)
+    _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
     e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
                 participants=args.with_, transport=args.transport, notes=args.notes,
@@ -304,6 +320,7 @@ def _cmd_cal_add_series(args):
         print("error: --repeat weekly requires --days and --start-time",
               file=sys.stderr)
         return 2
+    _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
     try:
         s = series.add(conn, args.title, args.days, args.start_time,

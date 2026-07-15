@@ -12,7 +12,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v10 (recurring event series + confirm-only-after-save)._
+_Body version: v11 (trip transport required + recurring event series + confirm-only-after-save)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -193,12 +193,22 @@ make a second, separate terminal call.
     the fam command that saves it (or it failed). If you cannot save it —
     no matching command, an error, or a missing detail — say so plainly and
     ask for what you need; do not imitate a memory you did not persist.
+13. **A trip needs a transport mode — `unknown` is rejected for place-bound
+    events.** Whenever you record an event WITH a `--place` (a one-off
+    `fam cal add ... --place P` OR a `--repeat` series with `--place`), you
+    MUST pass `--transport car|walk|public`; fam exits 2 otherwise. This is
+    what makes the car hooks fire (заправка при низком топливе, прогрев по
+    погоде — оба привязаны к выезду). If the request does not make the mode
+    clear, ask Amina one short question ("на машине, пешком или на такси?")
+    BEFORE saving — never guess, never default silently. Events without a
+    `--place` (созвон, день рождения) do not need transport. To change it
+    later: `fam car set-transport <event_id> car|walk|public`.
 
 ## Quick Reference
 
 | Goal | Command |
 | --- | --- |
-| Record an event (`--start` = время начала, не выезда) | `fam cal add --title T --start ISO [--end ISO] [--place P] [--with NAME]... [--transport car\|walk\|public\|unknown] [--notes N]` |
+| Record an event (`--start` = время начала, не выезда; `--transport` обязателен при `--place`) | `fam cal add --title T --start ISO [--end ISO] [--place P --transport car\|walk\|public] [--with NAME]... [--notes N]` |
 | Change an event | `fam cal update <id> [--start ISO] [--place P] [--add-person N] [--rm-person N] ...` |
 | Cancel an event | `fam cal cancel <id>` |
 | Mark an event done | `fam cal done <id>` |
