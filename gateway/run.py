@@ -2358,6 +2358,25 @@ def _platform_config_key(platform: "Platform") -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
+def _pipeline_platform_allowed(config, platform_key: str) -> bool:
+    """Channel gate for the pipeline router/orchestrator.
+
+    `pipelines.allowed_platforms` (list of config platform keys, e.g.
+    ["telegram"]) restricts the engineering/recruiter pipeline machinery
+    to specific channels. Empty/absent => no restriction (every platform
+    allowed), preserving prior behavior. When set, a platform not in the
+    list bypasses routing entirely and goes straight to the default
+    conversation agent.
+    """
+    allowed = cfg_get(config, "pipelines", "allowed_platforms", default=None)
+    if not allowed:
+        return True
+    try:
+        return str(platform_key) in {str(pf).strip().lower() for pf in allowed}
+    except TypeError:
+        return True
+
+
 def _teams_pipeline_plugin_enabled() -> bool:
     """Return True when the standalone Teams pipeline plugin is enabled."""
     config = _load_gateway_config()
@@ -17337,26 +17356,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
+        _pipeline_platform_ok = _pipeline_platform_allowed(user_config, platform_key)
         router_decision = None
 
-        try:
-            from hermes_cli.pipeline_observe import observe_pipeline_router_decision
+        if _pipeline_platform_ok:
+            try:
+                from hermes_cli.pipeline_observe import observe_pipeline_router_decision
 
-            router_decision = observe_pipeline_router_decision(
-                config=user_config,
-                user_message=message,
-                session_id=session_id,
-                session_key=session_key,
-                platform=platform_key,
-                chat_id=str(getattr(source, "chat_id", "") or "") or None,
-                thread_id=str(getattr(source, "thread_id", "") or "") or None,
-                user_id=str(getattr(source, "user_id", "") or "") or None,
-                selected_provider=str(cfg_get(user_config, "model", "provider", default="") or "").strip() or None,
-                selected_model=_resolve_gateway_model() or None,
-                logger=logger,
-            )
-        except Exception:
-            logger.warning("pipeline observe hook import/invocation failed", exc_info=True)
+                router_decision = observe_pipeline_router_decision(
+                    config=user_config,
+                    user_message=message,
+                    session_id=session_id,
+                    session_key=session_key,
+                    platform=platform_key,
+                    chat_id=str(getattr(source, "chat_id", "") or "") or None,
+                    thread_id=str(getattr(source, "thread_id", "") or "") or None,
+                    user_id=str(getattr(source, "user_id", "") or "") or None,
+                    selected_provider=str(cfg_get(user_config, "model", "provider", default="") or "").strip() or None,
+                    selected_model=_resolve_gateway_model() or None,
+                    logger=logger,
+                )
+            except Exception:
+                logger.warning("pipeline observe hook import/invocation failed", exc_info=True)
+        else:
+            logger.info("pipeline router skipped for platform=%s (not in pipelines.allowed_platforms)", platform_key)
 
         # Upstream-sync operator decisions must reach the upstream-sync skill
         # (Mode B), not the pipeline orchestrator below - which runs observe-only
@@ -17407,7 +17430,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         pipeline_orchestrator_report = None
         _orchestrator_mode = str(cfg_get(user_config, "pipelines", "orchestrator", "mode", default="disabled") or "disabled").strip().lower()
-        if bool(cfg_get(user_config, "pipelines", "enabled", default=False)) and _orchestrator_mode in {"observe", "controlled_manual", "autonomous"}:
+        if _pipeline_platform_ok and bool(cfg_get(user_config, "pipelines", "enabled", default=False)) and _orchestrator_mode in {"observe", "controlled_manual", "autonomous"}:
             try:
                 from hermes_cli.orchestrator import observe_gateway_turn
 
