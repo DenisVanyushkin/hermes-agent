@@ -78,8 +78,24 @@ class StarlineClient:
         store = self.load_store()
         api = self._api_factory(store.get("user_id"), store.get("slnet_token"))
         api.update()
-        dev = api.devices.get(str(store["device_id"]))
-        return dev.data if hasattr(dev, "data") else dev
+        try:
+            api.update_obd()  # fuel + mileage; tolerate failure (some units/None)
+        except Exception:
+            pass
+        dev = api.devices.get(str(store.get("device_id")))
+        if dev is None:
+            return {}
+        return {
+            "battery": getattr(dev, "_battery", None),
+            "ctemp": getattr(dev, "_ctemp", None),
+            "etemp": getattr(dev, "_etemp", None),
+            "status": getattr(dev, "_status", None),
+            "gsm_lvl": getattr(dev, "_gsm_lvl", None),
+            "car_state": getattr(dev, "_car_state", {}) or {},
+            "position": getattr(dev, "_position", {}) or {},
+            "fuel": getattr(dev, "_fuel", {}) or {},
+            "mileage": getattr(dev, "_mileage", {}) or {},
+        }
 
     def poll(self):
         try:
@@ -104,25 +120,37 @@ def _iso_now(now=None):
 
 
 def normalize(device_data, now=None):
-    """Map a StarLine device dict to car_metrics columns. Every field is
+    """Map a StarLine device dict (as returned by
+    StarlineClient._device_data) to car_metrics columns. Every field is
     optional -- StarLine/OBD shape varies by car (spec §13 discovery);
     missing -> None, never raises. Full input kept in raw_json."""
     d = device_data or {}
     state = d.get("car_state") or {}
     pos = d.get("position") or {}
+    fuel = d.get("fuel") or {}
+    mileage = d.get("mileage") or {}
+    status = d.get("status")
+
+    fuel_pct = fuel_liters = None
+    fuel_type = fuel.get("type")
+    if fuel_type == "percents":
+        fuel_pct = fuel.get("val")
+    elif fuel_type in ("litres", "liters"):
+        fuel_liters = fuel.get("val")
+
     return {
         "ts_utc": _iso_now(now),
-        "fuel_pct": d.get("fuel_percent"),
-        "fuel_liters": d.get("fuel_litres", d.get("fuel_liters")),
-        "odometer_km": d.get("mileage"),
-        "engine_on": state.get("run"),
-        "ignition_on": state.get("ign"),
+        "fuel_pct": fuel_pct,
+        "fuel_liters": fuel_liters,
+        "odometer_km": mileage.get("val"),
+        "engine_on": bool(state["run"]) if "run" in state else None,
+        "ignition_on": bool(state["ign"]) if "ign" in state else None,
         "cabin_temp_c": d.get("ctemp"),
         "coolant_temp_c": d.get("etemp"),
         "battery_v": d.get("battery"),
-        "gsm_online": d.get("gsm_lvl"),
-        "gps_lat": pos.get("y"),
-        "gps_lon": pos.get("x"),
+        "gsm_online": (status == 1) if status is not None else None,
+        "gps_lat": pos.get("x"),
+        "gps_lon": pos.get("y"),
         "raw_json": json.dumps(d, ensure_ascii=False),
     }
 

@@ -13,7 +13,7 @@ def test_fuel_flag_hysteresis(db):
     assert car.fuel_is_low(db) is False
 
 def test_record_metrics_inserts_and_audits(db):
-    m = car.normalize({"fuel_percent": 40})
+    m = car.normalize({"fuel": {"val": 40, "type": "percents"}})
     rid = car.record_metrics(db, m); db.commit()
     assert db.execute("SELECT COUNT(*) n FROM car_metrics").fetchone()["n"] == 1
     assert db.execute("SELECT COUNT(*) n FROM audit_log WHERE kind='tick.car'").fetchone()["n"] == 1
@@ -29,7 +29,7 @@ def test_staleness_true_when_no_data_and_alerts_once(db, monkeypatch):
 
 def test_tick_car_records_via_fake_client(db, monkeypatch):
     class FakeClient:
-        def poll(self): return car.normalize({"fuel_percent": 20, "ctemp": -3})
+        def poll(self): return car.normalize({"fuel": {"val": 20, "type": "percents"}, "ctemp": -3})
     from fam import tick
     tick.car(db, client=FakeClient(), cfg=_cfg())
     assert db.execute("SELECT COUNT(*) n FROM car_metrics").fetchone()["n"] == 1
