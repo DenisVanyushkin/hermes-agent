@@ -41,3 +41,43 @@ def test_ensure_slnet_raises_authexpired_on_failure(tmp_path):
     import pytest
     with pytest.raises(car.AuthExpired):
         car.StarlineClient(token_path=str(p), _auth=Boom()).ensure_slnet(now_ts=1000)
+
+
+class FakeDevice:
+    def __init__(self, alias):
+        self._alias = alias
+
+
+def test_list_devices_returns_id_to_alias_map(tmp_path):
+    p = _store(tmp_path, slnet_expires=9999999999)
+
+    class FakeApi:
+        def __init__(self, uid, slnet):
+            self.devices = {"D1": FakeDevice("Car1")}
+
+        def update(self):
+            pass
+
+    c = car.StarlineClient(token_path=str(p), _auth=FakeAuth(), _api_factory=FakeApi)
+    assert c.list_devices() == {"D1": "Car1"}
+
+
+def test_list_devices_multiple(tmp_path):
+    p = _store(tmp_path, slnet_expires=9999999999)
+
+    class FakeApi:
+        def __init__(self, uid, slnet):
+            self.devices = {"D1": FakeDevice("Car1"), "D2": FakeDevice("Car2")}
+
+        def update(self):
+            pass
+
+    c = car.StarlineClient(token_path=str(p), _auth=FakeAuth(), _api_factory=FakeApi)
+    assert c.list_devices() == {"D1": "Car1", "D2": "Car2"}
+
+
+def test_set_device_persists_to_store(tmp_path):
+    p = _store(tmp_path, device_id=None)
+    c = car.StarlineClient(token_path=str(p), _auth=FakeAuth())
+    c.set_device("D2")
+    assert json.loads(p.read_text())["device_id"] == "D2"

@@ -163,6 +163,30 @@ def cmd_car_auth_init(args):
     print("token stored. Run `fam car poll` to confirm and set device_id.")
     return 0
 
+def cmd_car_set_device(args):
+    """`fam car set-device [device_id]` -- discover/select which
+    StarLine device fam polls. No arg: auto-set if exactly one device
+    is reachable, else list them (never guess among several)."""
+    from fam import car
+    client = car.StarlineClient()
+    if args.device_id:
+        client.set_device(args.device_id)
+        print(f"set device_id={args.device_id}")
+        return 0
+    devices = client.list_devices()
+    if not devices:
+        print("no devices")
+        return 0
+    if len(devices) == 1:
+        (dev_id, alias), = devices.items()
+        client.set_device(dev_id)
+        print(f"set device_id={dev_id} ({alias})")
+        return 0
+    for dev_id, alias in devices.items():
+        print(f"{dev_id}\t{alias}")
+    print("multiple devices found; re-run `fam car set-device <device_id>` with the one you want")
+    return 0
+
 def _fmt_event(e):
     line = f"{e['id']}\t{e['start_local']}\t{e['title']}\t[{e['status']}]"
     if e.get("place"):
@@ -1093,6 +1117,9 @@ def build_parser():
     car_sub = sp.add_subparsers(dest="car_cmd", required=True)
 
     spa = car_sub.add_parser("auth-init"); spa.set_defaults(func=cmd_car_auth_init)
+
+    spsd = car_sub.add_parser("set-device"); spsd.set_defaults(func=cmd_car_set_device)
+    spsd.add_argument("device_id", nargs="?", help="StarLine device id (omit to auto-discover)")
 
     spp = car_sub.add_parser("poll"); spp.set_defaults(func=cmd_tick_car)
     spp.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")

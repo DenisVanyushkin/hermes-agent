@@ -57,6 +57,23 @@ class StarlineClient:
         store["user_id"] = uid
         self.save_store(store)
 
+    def list_devices(self):
+        """Discover devices reachable with the current credentials ->
+        {device_id: alias}. Used by `fam car set-device` since the
+        token store starts with device_id=None and nothing else ever
+        populates it."""
+        self.ensure_slnet()
+        store = self.load_store()
+        api = self._api_factory(store.get("user_id"), store.get("slnet_token"))
+        api.update()
+        return {dev_id: (getattr(dev, "_alias", None) or getattr(dev, "alias", None))
+                for dev_id, dev in api.devices.items()}
+
+    def set_device(self, device_id):
+        store = self.load_store()
+        store["device_id"] = str(device_id)
+        self.save_store(store)
+
     def _device_data(self):
         store = self.load_store()
         api = self._api_factory(store.get("user_id"), store.get("slnet_token"))
