@@ -5,6 +5,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fam import audit, cal, cli, gate, mail, people, places, rem
 
+def _future_start(hours=0):
+    """A start comfortably in the future so cal-add's past guard never trips.
+    Fixed-offset from real now keeps these mail/update tests deterministic in
+    behaviour (always future) without rotting like a hardcoded date."""
+    return (datetime.now(timezone.utc) + timedelta(days=30, hours=hours)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
 def test_json_flag_works_before_and_after_subcommand(db, capsys, monkeypatch):
     # db fixture sets FAM_DB to tmp DB; init writes to it
     assert cli.main(["--json", "init"]) == 0
@@ -641,7 +647,7 @@ def test_cal_add_with_denis_participant_sends_mail_and_audits(db, capsys, monkey
     monkeypatch.setattr(cli.mail, "send_event_email", fake_send)
 
     rc = cli.main(["cal", "add", "--title", "Событие", "--start",
-                    "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+                    _future_start(), "--with", "Денис", "--json"])
     out = json.loads(capsys.readouterr().out)
 
     assert rc == 0
@@ -658,7 +664,7 @@ def test_cal_add_without_denis_participant_does_not_send_mail(db, capsys, monkey
     monkeypatch.setattr(cli.mail, "send_event_email", lambda *a, **k: calls.append(1))
 
     rc = cli.main(["cal", "add", "--title", "Событие", "--start",
-                    "2026-07-15T05:00:00+00:00", "--with", "Тая"])
+                    _future_start(), "--with", "Тая"])
 
     assert rc == 0
     assert calls == []
@@ -682,7 +688,7 @@ def test_cal_add_denis_participant_but_email_disabled_does_not_send(db, capsys, 
     monkeypatch.setattr(cli.mail, "send_event_email", lambda *a, **k: calls.append(1))
 
     rc = cli.main(["cal", "add", "--title", "Событие", "--start",
-                    "2026-07-15T05:00:00+00:00", "--with", "Денис"])
+                    _future_start(), "--with", "Денис"])
 
     assert rc == 0
     assert calls == []
@@ -700,7 +706,7 @@ def test_cal_add_mail_hook_config_load_failure_does_not_fail_cal_op(db, capsys, 
     )
 
     rc = cli.main(["cal", "add", "--title", "Событие", "--start",
-                    "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+                    _future_start(), "--with", "Денис", "--json"])
     out = json.loads(capsys.readouterr().out)
 
     assert rc == 0
@@ -721,7 +727,7 @@ def test_cal_add_mail_failure_audits_error_and_does_not_fail_cal_op(db, capsys, 
     )
 
     rc = cli.main(["cal", "add", "--title", "Событие", "--start",
-                    "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+                    _future_start(), "--with", "Денис", "--json"])
     out = json.loads(capsys.readouterr().out)
 
     # The cal operation itself must succeed regardless of the mail failure.
@@ -776,7 +782,7 @@ def test_cal_update_notes_only_on_denis_event_does_not_resend_mail(db, capsys, m
     monkeypatch.setattr(cli.mail, "send_event_email", fake_send)
 
     rc_add = cli.main(["cal", "add", "--title", "Событие", "--start",
-                        "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+                        _future_start(), "--with", "Денис", "--json"])
     out = json.loads(capsys.readouterr().out)
     assert rc_add == 0
     assert len(calls) == 1  # the add fired the hook once, unconditionally
@@ -797,13 +803,13 @@ def test_cal_update_start_utc_on_denis_event_resends_mail(db, capsys, monkeypatc
     monkeypatch.setattr(cli.mail, "send_event_email", fake_send)
 
     rc_add = cli.main(["cal", "add", "--title", "Событие", "--start",
-                        "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+                        _future_start(), "--with", "Денис", "--json"])
     out = json.loads(capsys.readouterr().out)
     assert rc_add == 0
     assert len(calls) == 1
 
     rc_update = cli.main(["cal", "update", str(out["id"]), "--start",
-                           "2026-07-15T06:00:00+00:00"])
+                           _future_start(hours=1)])
     assert rc_update == 0
 
     # start_utc IS material -- the hook must fire again.
@@ -822,7 +828,7 @@ def test_cal_update_title_only_on_denis_event_resends_mail(db, capsys, monkeypat
     monkeypatch.setattr(cli.mail, "send_event_email", fake_send)
 
     rc_add = cli.main(["cal", "add", "--title", "Событие", "--start",
-                        "2026-07-15T05:00:00+00:00", "--with", "Денис", "--json"])
+                        _future_start(), "--with", "Денис", "--json"])
     out = json.loads(capsys.readouterr().out)
     assert rc_add == 0
     assert len(calls) == 1
