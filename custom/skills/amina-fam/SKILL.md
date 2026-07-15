@@ -12,7 +12,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v9 (2GIS link resolver — fam extracts coordinates itself)._
+_Body version: v10 (recurring event series + confirm-only-after-save)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -178,6 +178,21 @@ make a second, separate terminal call.
     or one `date` call) — never from a date mentioned earlier in the
     conversation. A plan with no relative date in the request gets no
     `--deadline`; don't invent one.
+11. **A recurring schedule is a series, not a one-off and not just a
+    memory.** "каждую неделю по понедельникам/средам/пятницам", "по будням",
+    "каждый вторник" + a time ⇒ `fam cal add --title <T> --repeat weekly
+    --days mon,wed,fri --start-time 10:00 [--end-time 12:00] [--place <P>]
+    [--with <who>]`. Days are the 3-letter English set mon,tue,wed,thu,fri,
+    sat,sun; `--start-time`/`--end-time` are local `HH:MM` (no date). fam
+    materializes the concrete occurrences itself — do NOT add each week by
+    hand with separate `cal add --start` calls. To stop a whole series:
+    `fam cal series cancel <id>` (list them with `fam cal series list`); to
+    drop just one week, cancel that single occurrence by its event id.
+12. **Confirm "сохранил/записал/запомнил" ONLY after a fam call exits 0.**
+    Never tell the user something is saved when you have not actually run
+    the fam command that saves it (or it failed). If you cannot save it —
+    no matching command, an error, or a missing detail — say so plainly and
+    ask for what you need; do not imitate a memory you did not persist.
 
 ## Quick Reference
 

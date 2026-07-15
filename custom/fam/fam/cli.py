@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, gate, geo2gis, grid, mail, maint, meds, people, places, plans, rem, shopping, tick
+from fam import audit, cal, db as famdb, gate, geo2gis, grid, mail, maint, meds, people, places, plans, rem, series, shopping, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -277,6 +277,12 @@ def _check_start_not_past(start_value, allow_past):
         )
 
 def cmd_cal_add(args):
+    if getattr(args, "repeat", None):
+        return _cmd_cal_add_series(args)
+    if not args.start:
+        print("error: --start is required (or use --repeat for a recurring schedule)",
+              file=sys.stderr)
+        return 2
     _check_start_not_past(args.start, args.allow_past)
     conn = famdb.connect()
     e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
@@ -288,6 +294,60 @@ def cmd_cal_add(args):
         print(json.dumps(e, ensure_ascii=False))
     else:
         print(f"added event: {e['title']} (id={e['id']}) {e['start_local']}")
+    return 0
+
+
+def _cmd_cal_add_series(args):
+    """--repeat weekly path: create an event_series and materialize its first
+    occurrences immediately (so the next one shows up right away)."""
+    if not args.days or not args.start_time:
+        print("error: --repeat weekly requires --days and --start-time",
+              file=sys.stderr)
+        return 2
+    conn = famdb.connect()
+    try:
+        s = series.add(conn, args.title, args.days, args.start_time,
+                       end_time=args.end_time, place=args.place,
+                       participants=args.with_, transport=args.transport,
+                       notes=args.notes, until_local=args.until)
+    except (ValueError, cal.UnknownRefError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    created = series.generate(conn)
+    conn.commit()
+    if args.json:
+        print(json.dumps({"series": s, "generated": created}, ensure_ascii=False))
+    else:
+        span = f" {args.start_time}-{args.end_time}" if args.end_time else f" {args.start_time}"
+        print(f"added series: {s['title']} (id={s['id']}) {s['weekdays']}{span} "
+              f"[{created} upcoming]")
+    return 0
+
+
+def cmd_cal_series_list(args):
+    conn = famdb.connect()
+    rows = series.list_active(conn)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    elif not rows:
+        print("no active series")
+    else:
+        for sr in rows:
+            span = f"{sr['start_time']}-{sr['end_time']}" if sr['end_time'] else sr['start_time']
+            print(f"{sr['id']}	{sr['title']}	{sr['weekdays']} {span}	"
+                  f"{sr['future_count']} upcoming")
+    return 0
+
+
+def cmd_cal_series_cancel(args):
+    conn = famdb.connect()
+    try:
+        removed = series.cancel(conn, args.id)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    conn.commit()
+    print(f"cancelled series {args.id}; removed {removed} upcoming occurrence(s)")
     return 0
 
 def cmd_cal_update(args):
@@ -527,6 +587,22 @@ def cmd_tick_digest(args):
     else:
         print(" ".join(f"{k}={v}" for k, v in summary.items()))
     return 0
+
+def cmd_tick_cal_gen(args):
+    conn = famdb.connect()
+    try:
+        created = series.generate(conn, now_utc=args.now)
+    except Exception as e:                           # noqa: BLE001 -- mark then re-raise
+        _audit_tick_error("cal_gen", e)
+        raise
+    audit.log(conn, "tick.cal_gen", {"created": created})
+    conn.commit()
+    if getattr(args, "json", False):
+        print(json.dumps({"created": created}, ensure_ascii=False))
+    else:
+        print(f"created={created}")
+    return 0
+
 
 def cmd_tick_meds_gen(args):
     conn = famdb.connect()
@@ -1149,9 +1225,20 @@ def build_parser():
 
     spa = cal_sub.add_parser("add"); spa.set_defaults(func=cmd_cal_add)
     spa.add_argument("--title", required=True)
-    spa.add_argument("--start", required=True,
-                      help="ISO-8601, any offset (e.g. 2026-07-15T10:00:00+05:00)")
+    spa.add_argument("--start",
+                      help="ISO-8601, any offset (e.g. 2026-07-15T10:00:00+05:00); "
+                           "one-off events only")
     spa.add_argument("--end")
+    spa.add_argument("--repeat", choices=["weekly"],
+                      help="make this a recurring series (with --days/--start-time)")
+    spa.add_argument("--days",
+                      help="weekdays for --repeat, e.g. mon,wed,fri")
+    spa.add_argument("--start-time", dest="start_time",
+                      help="HH:MM local start time for --repeat")
+    spa.add_argument("--end-time", dest="end_time",
+                      help="HH:MM local end time for --repeat")
+    spa.add_argument("--until",
+                      help="YYYY-MM-DD last date for --repeat (default: open-ended)")
     spa.add_argument("--place", help="place name/alias/id")
     spa.add_argument("--with", dest="with_", action="append", default=[],
                       help="participant ref: name/alias/slug/group (repeatable)")
@@ -1185,6 +1272,14 @@ def build_parser():
 
     spc = cal_sub.add_parser("cancel"); spc.set_defaults(func=cmd_cal_cancel)
     spc.add_argument("id", type=int)
+
+    spser = cal_sub.add_parser("series")
+    series_sub = spser.add_subparsers(dest="series_cmd", required=True)
+    spsl = series_sub.add_parser("list"); spsl.set_defaults(func=cmd_cal_series_list)
+    spsl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+    spsc = series_sub.add_parser("cancel"); spsc.set_defaults(func=cmd_cal_series_cancel)
+    spsc.add_argument("id", type=int)
     spc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
@@ -1262,6 +1357,11 @@ def build_parser():
     sptd.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
     sptd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
+
+    sptcg = tick_sub.add_parser("cal-gen"); sptcg.set_defaults(func=cmd_tick_cal_gen)
+    sptcg.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
+    sptcg.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable output")
 
     sptm = tick_sub.add_parser("meds-gen"); sptm.set_defaults(func=cmd_tick_meds_gen)
     sptm.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")

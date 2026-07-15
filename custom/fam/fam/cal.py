@@ -151,7 +151,7 @@ def recompute_road(conn, event_id):
 
 
 def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
-        transport="unknown", notes="", travel_min=None):
+        transport="unknown", notes="", travel_min=None, series_id=None):
     """Create an event. place/participants are text refs (id/name/alias/
     slug); an unresolvable ref raises UnknownRefError and nothing is
     inserted. Group participants expand to their members at add-time (the
@@ -172,10 +172,10 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
 
     cur = conn.execute(
         "INSERT INTO events(title, start_utc, end_utc, place_id, transport, "
-        "status, notes, travel_min, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "status, notes, travel_min, series_id, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (title, start, end, pl["id"] if pl else None, transport, "active",
-         notes, travel_min, now, now),
+         notes, travel_min, series_id, now, now),
     )
     event_id = cur.lastrowid
 

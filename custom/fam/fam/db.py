@@ -56,6 +56,25 @@ CREATE TABLE IF NOT EXISTS event_participants (
   event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
   person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
   PRIMARY KEY (event_id, person_id));
+CREATE TABLE IF NOT EXISTS event_series (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  place_id INTEGER REFERENCES places(id),
+  weekdays TEXT NOT NULL,                  -- CSV canon: mon,tue,wed,thu,fri,sat,sun
+  start_time TEXT NOT NULL,                -- HH:MM local (Asia/Almaty)
+  end_time TEXT,                           -- HH:MM local, nullable
+  transport TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (transport IN ('car','walk','public','unknown')),
+  notes TEXT NOT NULL DEFAULT '',
+  until_local TEXT,                        -- YYYY-MM-DD, nullable = open-ended
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active','cancelled')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS event_series_participants (
+  series_id INTEGER NOT NULL REFERENCES event_series(id) ON DELETE CASCADE,
+  person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  PRIMARY KEY (series_id, person_id));
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY,
   ts_utc TEXT NOT NULL,
@@ -221,10 +240,20 @@ def init_db(conn):
     _ensure_column(conn, "places", "category", "category TEXT")
     # schema 6: car_metrics (phase 4) -- whole new table, CREATE TABLE IF
     # NOT EXISTS covers fresh+existing, no _ensure_column needed.
+    # schema 7: recurring event series. event_series /
+    # event_series_participants are whole new tables (CREATE TABLE IF NOT
+    # EXISTS covers fresh+existing). events.series_id links a materialized
+    # occurrence back to its series (NULL = one-off, unchanged behavior);
+    # the partial UNIQUE index makes generation idempotent per slot.
+    _ensure_column(conn, "events", "series_id",
+                   "series_id INTEGER REFERENCES event_series(id)")
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','6')")
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_series_start "
+        "ON events(series_id, start_utc) WHERE series_id IS NOT NULL")
     conn.execute(
-        "UPDATE meta SET value='6' WHERE key='schema_version'")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','7')")
+    conn.execute(
+        "UPDATE meta SET value='7' WHERE key='schema_version'")
     conn.commit()
 
 
