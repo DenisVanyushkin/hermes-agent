@@ -1,0 +1,10 @@
+[Unit]
+Description=Amina fam: reminders tick schedule
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

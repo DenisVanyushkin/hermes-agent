@@ -1,0 +1,7 @@
+[Unit]
+Description=Amina fam: nightly maintenance (retention + backups)
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.hermes/.env
+ExecStart=/home/denis/.hermes/hermes-agent/custom/fam/bin/fam tick maintenance
