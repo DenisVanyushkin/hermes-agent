@@ -83,10 +83,15 @@ way to read or change family data.
 Run each fam call as ONE plain command line, exactly:
 `/workspace/live-hermes/custom/fam/bin/fam <subcommand> ... --json`
 Never chain commands with `&&` or `;`, never wrap in `bash -c` /
-`${SHELL} -lc`, never pipe. Chained or shell-wrapped commands trip the
-dangerous-command approval gate and stall the conversation waiting for
-admin approval. If you need a second result (e.g. show after cancel),
-make a second, separate terminal call.
+`${SHELL} -lc`, never pipe. Each fam call must stay one self-contained
+command so its arguments are predictable and auditable: the terminal runs
+your command through a shell, so stray `&&`/`;`/`|`/`$()`/backticks/
+redirects are interpreted by that shell instead of reaching fam and
+silently corrupt the call. A literal `bash -c` / `sh -c` will also trip the
+dangerous-command approval gate and stall on admin approval — but the bare
+metacharacters above do NOT trip any gate, so following this rule is on
+you, not a guardrail that catches you. If you need a second result (e.g.
+show after cancel), make a second, separate terminal call.
 
 
 1. **Never do date/time arithmetic in your head or in prose.** Turn the
