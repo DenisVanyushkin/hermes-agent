@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import update_openrouter_fallback as u
 
 FIXTURE = Path(__file__).parent / "fixtures" / "free_llm_top_models.json"
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 
 def _model(**over):
@@ -22,6 +23,19 @@ def _model(**over):
     return base
 
 
+def _eval(passed, total, used_tool):
+    """Minimal evalSummary mirroring the shir-man lite-agent-eval payload:
+    the empirical tool-use signal lives in task_files_lite.details.usedTool."""
+    return {
+        "suite": "lite-agent-eval-v1",
+        "passed": passed,
+        "total": total,
+        "tasks": [
+            {"id": "task_files_lite", "details": {"usedTool": used_tool}},
+        ],
+    }
+
+
 def test_select_on_live_fixture_shapes():
     data = json.loads(FIXTURE.read_text())
     sel = u.select_models(data)
@@ -31,26 +45,67 @@ def test_select_on_live_fixture_shapes():
         assert mid.endswith(":free")
 
 
-def test_fallback_requires_tools_response_format_health_ctx():
+def test_fallback_requires_tools_and_ctx_but_not_response_format():
+    # supportsResponseFormat is NOT required for a tool-calling fallback chat
+    # model (tools use the `tools` param, not response_format). Only tool
+    # support, adequate context, and non-broken health matter.
     models = [
-        _model(rank=1, id="a:free", supportsTools=False),
-        _model(rank=2, id="b:free", supportsResponseFormat=False),
-        _model(rank=3, id="c:free", healthStatus="not_probed"),
-        _model(rank=4, id="d:free", contextLength=32000),
-        _model(rank=5, id="e:free", healthStatus="imperfect"),
+        _model(rank=1, id="a:free", supportsTools=False),        # no tools -> out
+        _model(rank=2, id="b:free", supportsResponseFormat=False),  # still in
+        _model(rank=4, id="d:free", contextLength=32000),        # ctx too small -> out
+        _model(rank=5, id="e:free", healthStatus="imperfect"),   # in
     ]
     sel = u.select_models({"models": models})
-    assert sel["fallback"] == ["e:free"]
+    assert sel["fallback"] == ["b:free", "e:free"]
 
 
-def test_fallback_prefers_structured_outputs_then_rank_top2():
+def test_fallback_admits_not_probed_but_excludes_broken_health():
+    # not_probed models were previously discarded even when they are strong
+    # tool users; only explicit error states (http_4xx/5xx, failed) are broken.
     models = [
-        _model(rank=1, id="plain:free", supportsStructuredOutputs=False),
-        _model(rank=2, id="s2:free"),
-        _model(rank=3, id="s3:free"),
+        _model(rank=1, id="np:free", healthStatus="not_probed"),
+        _model(rank=2, id="rate:free", healthStatus="http_429"),
+        _model(rank=3, id="dead:free", healthStatus="failed"),
     ]
     sel = u.select_models({"models": models})
-    assert sel["fallback"] == ["s2:free", "s3:free"]
+    assert sel["fallback"] == ["np:free"]
+
+
+def test_fallback_ranks_by_lite_eval_score_then_rank():
+    # Ordering must follow empirical agent performance (liteEvalScore), not the
+    # metadata-driven overall rank / structured-output flag.
+    models = [
+        _model(rank=1, id="low:free", liteEvalScore=100),
+        _model(rank=2, id="high:free", liteEvalScore=700),
+        _model(rank=3, id="mid:free", liteEvalScore=400),
+    ]
+    sel = u.select_models({"models": models})
+    assert sel["fallback"] == ["high:free", "mid:free"]
+
+
+def test_fallback_excludes_models_that_failed_tool_use_eval():
+    # A model may advertise supportsTools=True yet fail to actually call a tool
+    # in the empirical eval (usedTool=False). It must not enter the fallback
+    # chain even when its metadata rank is best.
+    models = [
+        _model(rank=1, id="pretender:free", liteEvalScore=27,
+               evalSummary=_eval(0, 3, used_tool=False)),
+        _model(rank=6, id="realtool:free", liteEvalScore=585,
+               evalSummary=_eval(2, 3, used_tool=True)),
+    ]
+    sel = u.select_models({"models": models})
+    assert sel["fallback"] == ["realtool:free"]
+
+
+def test_fallback_on_20260716_snapshot_prefers_real_tool_users():
+    # Regression guard: on the live 2026-07-16 feed the only model passing the
+    # old (metadata-only) filter was google/gemma-4-26b (eval 0/3, usedTool
+    # False) — the exact "fallback can't call tools" failure. The corrected
+    # criteria must pick the empirically strongest tool users instead.
+    data = json.loads((FIXTURE_DIR / "free_llm_top_models_2026-07-16.json").read_text())
+    sel = u.select_models(data)
+    assert "google/gemma-4-26b-a4b-it:free" not in sel["fallback"]
+    assert sel["fallback"] == ["tencent/hy3:free", "cohere/north-mini-code:free"]
 
 
 def test_compression_needs_128k_healthy():
