@@ -59,16 +59,20 @@ def test_fallback_requires_tools_and_ctx_but_not_response_format():
     assert sel["fallback"] == ["b:free", "e:free"]
 
 
-def test_fallback_admits_not_probed_but_excludes_broken_health():
-    # not_probed models were previously discarded even when they are strong
-    # tool users; only explicit error states (http_4xx/5xx, failed) are broken.
+def test_strict_admits_not_probed_but_excludes_broken_health():
+    # Strict tier: not_probed is admitted; explicit error states (http_4xx/5xx,
+    # failed) are not. The final chain then backfills the broken ones via the
+    # relaxed tier to keep two slots (see test_plan_fallback_* below).
     models = [
         _model(rank=1, id="np:free", healthStatus="not_probed"),
         _model(rank=2, id="rate:free", healthStatus="http_429"),
         _model(rank=3, id="dead:free", healthStatus="failed"),
     ]
-    sel = u.select_models({"models": models})
-    assert sel["fallback"] == ["np:free"]
+    plan = u.plan_fallback(models)
+    assert plan["strict"] == ["np:free"]
+    # only 1 strict -> relaxed backfills a broken model, less-broken first
+    assert plan["chosen"] == ["np:free", "rate:free"]
+    assert plan["backfill"] == ["rate:free"]
 
 
 def test_fallback_ranks_by_lite_eval_score_then_rank():
@@ -106,6 +110,147 @@ def test_fallback_on_20260716_snapshot_prefers_real_tool_users():
     sel = u.select_models(data)
     assert "google/gemma-4-26b-a4b-it:free" not in sel["fallback"]
     assert sel["fallback"] == ["tencent/hy3:free", "cohere/north-mini-code:free"]
+
+
+# --- degradation tiers: plan_fallback ---------------------------------------
+
+def test_plan_fallback_two_strict_no_backfill():
+    models = [
+        _model(rank=1, id="a:free", liteEvalScore=700),
+        _model(rank=2, id="b:free", liteEvalScore=600),
+        _model(rank=3, id="c:free", liteEvalScore=500),
+    ]
+    plan = u.plan_fallback(models)
+    assert plan["chosen"] == ["a:free", "b:free"]
+    assert plan["backfill"] == []
+
+
+def test_plan_fallback_backfills_one_from_relaxed_when_strict_short():
+    # one strict survivor + a rate-limited (relaxed) tool user -> keep two slots
+    models = [
+        _model(rank=1, id="good:free", healthStatus="passed", liteEvalScore=500),
+        _model(rank=2, id="rate:free", healthStatus="http_429", liteEvalScore=400),
+    ]
+    plan = u.plan_fallback(models)
+    assert plan["strict"] == ["good:free"]
+    assert plan["chosen"] == ["good:free", "rate:free"]
+    assert plan["backfill"] == ["rate:free"]
+
+
+def test_plan_fallback_relaxed_orders_less_broken_first():
+    # no strict survivors; relaxed tier orders by health penalty
+    # (not_probed < transient http_4xx < failed), then lite score.
+    models = [
+        _model(rank=1, id="failed:free", healthStatus="failed", liteEvalScore=900),
+        _model(rank=2, id="rate:free", healthStatus="http_500", liteEvalScore=100),
+        _model(rank=3, id="np:free", healthStatus="not_probed", liteEvalScore=50),
+    ]
+    plan = u.plan_fallback(models)
+    assert plan["strict"] == ["np:free"]  # not_probed passes strict health
+    assert plan["chosen"] == ["np:free", "rate:free"]  # rate(2) before failed(3)
+
+
+def test_plan_fallback_relaxed_still_excludes_failed_tool_use():
+    # a model proven not to call tools must never enter, even in the relaxed tier
+    models = [
+        _model(rank=1, id="cant-tool:free", healthStatus="http_429",
+               liteEvalScore=900, evalSummary=_eval(0, 3, used_tool=False)),
+        _model(rank=2, id="ok:free", healthStatus="passed", liteEvalScore=200),
+    ]
+    plan = u.plan_fallback(models)
+    assert "cant-tool:free" not in plan["chosen"]
+    assert plan["chosen"] == ["ok:free"]
+
+
+def test_plan_fallback_empty_when_nothing_tool_capable():
+    models = [
+        _model(rank=1, id="notools:free", supportsTools=False),
+        _model(rank=2, id="small:free", contextLength=1000),
+    ]
+    plan = u.plan_fallback(models)
+    assert plan == {"chosen": [], "strict": [], "backfill": []}
+
+
+# --- degradation alert: build_fallback_alert --------------------------------
+
+def test_alert_none_when_two_strict():
+    models = [_model(id="a:free"), _model(id="b:free")]
+    alert = u.build_fallback_alert(["a:free", "b:free"], ["a:free", "b:free"],
+                                   models, source="feed")
+    assert alert is None
+
+
+def test_alert_warns_when_backfilled_to_two():
+    models = [_model(id="a:free"), _model(id="rate:free", healthStatus="http_429")]
+    alert = u.build_fallback_alert(["a:free", "rate:free"], ["a:free"],
+                                   models, source="feed")
+    assert alert is not None
+    assert "⚠️" in alert and "degraded" in alert
+    assert "🚨" not in alert
+
+
+def test_alert_critical_low_when_single_fallback():
+    models = [_model(id="a:free")]
+    alert = u.build_fallback_alert(["a:free"], ["a:free"], models, source="feed")
+    assert alert is not None
+    assert "⚠️" in alert and "only 1" in alert
+
+
+def test_alert_critical_when_empty_primary_only():
+    alert = u.build_fallback_alert([], [], [], source="empty")
+    assert alert is not None
+    assert "🚨" in alert and "EMPTY" in alert
+
+
+def test_alert_warns_when_holding_previous():
+    alert = u.build_fallback_alert(["old:free", "old2:free"], [], [],
+                                   source="previous", note="feed unreachable")
+    assert alert is not None
+    assert "⚠️" in alert and "previous" in alert.lower()
+    assert "feed unreachable" in alert
+
+
+# --- tier 3/4 glue: resolve_degradation -------------------------------------
+
+def test_resolve_degradation_healthy_feed_no_alert():
+    sel = {"fallback": ["a:free", "b:free"]}
+    plan = {"chosen": ["a:free", "b:free"], "strict": ["a:free", "b:free"],
+            "backfill": []}
+    out, source, alert = u.resolve_degradation(sel, plan, previous=None, models=[])
+    assert source == "feed"
+    assert alert is None
+    assert out["fallback"] == ["a:free", "b:free"]
+
+
+def test_resolve_degradation_empty_feed_holds_previous():
+    sel = {"fallback": []}
+    plan = {"chosen": [], "strict": [], "backfill": []}
+    previous = {"fallback": ["old:free", "old2:free"]}
+    out, source, alert = u.resolve_degradation(sel, plan, previous, models=[])
+    assert source == "previous"
+    assert out["fallback"] == ["old:free", "old2:free"]
+    assert alert is not None and "⚠️" in alert
+
+
+def test_resolve_degradation_empty_feed_no_previous_is_primary_only():
+    sel = {"fallback": []}
+    plan = {"chosen": [], "strict": [], "backfill": []}
+    out, source, alert = u.resolve_degradation(sel, plan, previous=None, models=[])
+    assert source == "empty"
+    assert out["fallback"] == []
+    assert alert is not None and "🚨" in alert
+
+
+def test_resolve_degradation_backfilled_feed_alerts_but_keeps_chain():
+    sel = {"fallback": ["a:free", "rate:free"]}
+    plan = {"chosen": ["a:free", "rate:free"], "strict": ["a:free"],
+            "backfill": ["rate:free"]}
+    out, source, alert = u.resolve_degradation(sel, plan, previous=None,
+                                               models=[_model(id="a:free"),
+                                                       _model(id="rate:free")])
+    assert source == "feed"
+    assert out["fallback"] == ["a:free", "rate:free"]
+    assert alert is not None and "degraded" in alert
 
 
 def test_compression_needs_128k_healthy():
