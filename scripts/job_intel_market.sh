@@ -7,6 +7,15 @@ export JOB_INTEL_SERVICE_USER
 source "$script_dir/job_intel_service_user.sh"
 job_intel_require_service_user
 
+_job_intel_is_package() {
+  # A directory *named* job_intel is not enough.  $HERMES_HOME/job_intel holds
+  # databases, and python treats any such directory as an implicit namespace
+  # package (PEP 420), which shadows the real one and makes `-m job_intel` fail
+  # with "is a package and cannot be directly executed".  Probe for the
+  # executable package marker instead.
+  [[ -f "$1/job_intel/__main__.py" ]]
+}
+
 resolve_workdir() {
   local repo_root
   local candidates=(
@@ -19,10 +28,11 @@ resolve_workdir() {
   if [[ -d "$script_dir/../job_intel" ]]; then
     candidates+=("$(cd -- "$script_dir/.." && pwd)")
   fi
+  candidates+=("${HERMES_HOME:-$HOME/.hermes}/hermes-agent")
   local candidate
   for candidate in "${candidates[@]}"; do
     [[ -n "${candidate:-}" ]] || continue
-    if [[ -d "$candidate/job_intel" ]]; then
+    if _job_intel_is_package "$candidate"; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -31,19 +41,13 @@ resolve_workdir() {
 }
 
 resolve_db_path() {
-  local workdir="$1"
-  local candidates=(
-    "${JOB_INTEL_DB_PATH:-}"
-    "$HOME/.hermes/job_intel/job_intel.sqlite3"
-    "$workdir/.hermes/job_intel/job_intel.sqlite3"
-  )
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    [[ -n "${candidate:-}" ]] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done
-  return 1
+  # Mirror job_intel_host_wrapper.sh: the live database lives under the state
+  # dir.  $HOME/.hermes/job_intel/job_intel.sqlite3 was a stale copy frozen in
+  # May 2026 (deleted 2026-07-16) and must never be resolved again -- this
+  # function never checked existence, so naming it would make sqlite silently
+  # recreate an empty database and operate on nothing.
+  local state_dir="${JOB_INTEL_STATE_DIR:-/var/lib/job-intel/state}"
+  printf '%s\n' "${JOB_INTEL_DB_PATH:-$state_dir/job_intel.sqlite3}"
 }
 
 resolve_python() {
@@ -76,7 +80,7 @@ resolve_python() {
 }
 
 workdir="$(resolve_workdir)"
-db_path="$(resolve_db_path "$workdir")"
+db_path="$(resolve_db_path)"
 python_bin="$(resolve_python "$workdir")"
 cd "$workdir"
 export JOB_INTEL_WORKDIR="$workdir"
