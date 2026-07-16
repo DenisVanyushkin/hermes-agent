@@ -89,10 +89,45 @@ esac
 EOF
   chmod 700 "$askpass_script"
   if ! GIT_ASKPASS="$askpass_script" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$github_token" git -C "$REPO" push --force-with-lease "$PERSONAL_REMOTE" "$BRANCH" >/dev/null; then
-    echo "Warning: push to $PERSONAL_REMOTE failed; continuing without remote sync." >&2
+    rm -rf "$askpass_dir"
+    # A rejected push means another host advanced the shared branch after
+    # our fetch. Swallowing this (pre-2026-07-16 behavior) let the hosts
+    # silently diverge for days; fail loudly so the next run re-integrates.
+    echo "FAILED: push to $PERSONAL_REMOTE/$BRANCH rejected (lease stale) — another host pushed after our fetch. Re-run to integrate their commits." >&2
+    return 1
   fi
   rm -rf "$askpass_dir"
   return 0
+}
+
+# Fold in commits other hosts pushed to the shared personal branch since our
+# last sync. Must run BEFORE the upstream rebase: rebasing first and pushing
+# with a stale view is exactly how the two lineages diverged for days
+# (2026-07-13..16 incident). No token needed — fetch is read-only.
+integrate_personal_remote() {
+  if ! git -C "$REPO" fetch "$PERSONAL_REMOTE_URL" "+refs/heads/$BRANCH:refs/remotes/$PERSONAL_REMOTE/$BRANCH" >/dev/null 2>&1; then
+    echo "Warning: could not fetch $PERSONAL_REMOTE_URL; proceeding with local view only." >&2
+    return 0
+  fi
+  local remote_tip
+  remote_tip="$(git -C "$REPO" rev-parse "$PERSONAL_REMOTE/$BRANCH" 2>/dev/null || true)"
+  [ -n "$remote_tip" ] || return 0
+  if git -C "$REPO" merge-base --is-ancestor "$remote_tip" HEAD; then
+    return 0
+  fi
+  echo "Shared branch on $PERSONAL_REMOTE has $(git -C "$REPO" rev-list --count "HEAD..$remote_tip") commit(s) from another host — integrating before the upstream rebase..." >&2
+  local integrate_log
+  integrate_log="$(mktemp)"
+  if ! git -C "$REPO" rebase "$remote_tip" >"$integrate_log" 2>&1; then
+    abort_rebase_if_needed
+    echo "FAILED: could not rebase local commits onto $PERSONAL_REMOTE/$BRANCH ($remote_tip)." >&2
+    echo "Another host's commits conflict with unpushed local ones; integrate manually (git rebase $PERSONAL_REMOTE/$BRANCH)." >&2
+    echo "Rebase output:" >&2
+    cat "$integrate_log" >&2
+    rm -f "$integrate_log"
+    return 1
+  fi
+  rm -f "$integrate_log"
 }
 
 resolve_hermes_bin() {
@@ -357,6 +392,9 @@ if ! git -C "$REPO" remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
 fi
 
 BEFORE_HEAD="$(git -C "$REPO" rev-parse --short HEAD)"
+
+integrate_personal_remote
+
 BASE_BEFORE="$(git -C "$REPO" rev-parse --short "$UPSTREAM_REF" 2>/dev/null || true)"
 
 git -C "$REPO" fetch --prune "$UPSTREAM_FETCH_URL" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH" >/dev/null
