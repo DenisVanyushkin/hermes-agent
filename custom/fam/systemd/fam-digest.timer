@@ -1,0 +1,9 @@
+[Unit]
+Description=Amina fam: morning digest tick schedule
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

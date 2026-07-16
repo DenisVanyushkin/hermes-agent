@@ -1186,6 +1186,14 @@ class SlackAdapter(BasePlatformAdapter):
             async def handle_reaction_removed(event, say):
                 await self._handle_reaction_event(event)
 
+            @self._app.event("reaction_added")
+            async def handle_reaction_added(event, say):
+                await self._handle_reaction_event(event)
+
+            @self._app.event("reaction_removed")
+            async def handle_reaction_removed(event, say):
+                await self._handle_reaction_event(event)
+
             # File lifecycle events can arrive around snippet uploads even when
             # the actual user message is what we care about. Ack them so Slack
             # doesn't log noisy 404 "unhandled request" warnings.

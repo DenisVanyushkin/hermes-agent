@@ -148,6 +148,21 @@ def _bridge_pid_is_ours(pid: int, session_path: Path, expected_start) -> bool:
     return ("node" in cmdline) and (str(session_path) in cmdline)
 
 
+def _rotate_bridge_log_if_large(path, max_bytes=5 * 1024 * 1024):
+    """Keep bridge.log bounded: if it exceeds max_bytes, rename it to
+    bridge.log.1 (replacing any prior .1) before it is reopened in append
+    mode, so one generation of post-mortem history is retained without
+    unbounded growth. Best-effort: any OS error here must not block the
+    bridge from starting."""
+    try:
+        p = Path(path)
+        if p.exists() and p.stat().st_size > max_bytes:
+            backup = Path(str(p) + ".1")
+            p.replace(backup)
+    except OSError:
+        pass
+
+
 def _kill_stale_bridge_by_pidfile(session_path: Path) -> None:
     """Kill a bridge process recorded in a PID file from a previous run.
 
@@ -876,6 +891,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             # messages are preserved for troubleshooting.
             whatsapp_mode = os.getenv("WHATSAPP_MODE", "self-chat")
             self._bridge_log = self._session_path.parent / "bridge.log"
+            _rotate_bridge_log_if_large(self._bridge_log)
             bridge_log_fh = open(self._bridge_log, "a", encoding="utf-8")
             self._bridge_log_fh = bridge_log_fh
 

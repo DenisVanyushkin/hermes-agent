@@ -1,0 +1,7 @@
+[Unit]
+Description=Amina fam: weekly offsite backup to NAS (age->NFS)
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.hermes/.env
+ExecStart=/home/denis/.hermes/hermes-agent/custom/fam/bin/fam tick offsite

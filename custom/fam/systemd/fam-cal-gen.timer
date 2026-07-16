@@ -1,0 +1,9 @@
+[Unit]
+Description=Amina fam: cal-gen tick schedule
+
+[Timer]
+OnCalendar=*-*-* 19:10:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

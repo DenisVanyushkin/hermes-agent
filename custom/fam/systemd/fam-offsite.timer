@@ -1,0 +1,9 @@
+[Unit]
+Description=Amina fam: weekly offsite backup schedule
+
+[Timer]
+OnCalendar=Sun *-*-* 23:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

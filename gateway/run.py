@@ -504,6 +504,38 @@ def _is_internal_clarify_activity_text(text: str) -> bool:
     )
 
 
+_INFRA_STATUS_RE = re.compile(
+    r"switching\s+to\s+fallback"
+    r"|authentication\s+failed\s+and\s+could\s+not\s+be\s+refreshed"
+    r"|primary\s+model\s+failed"
+    r"|primary\s+auth\s+failed",
+    re.IGNORECASE,
+)
+
+
+def _suppress_infra_status_platform(platform: Any) -> bool:
+    """True when gateway.suppress_infra_status_platforms lists this platform.
+
+    Infra chatter (fallback switches, provider-error statuses) is dropped on
+    these user-facing surfaces; the final degraded reply still arrives and the
+    operator gets the detail via turn-error alerts (spec 2026-07-16 §8а).
+    Empty/absent list or any malformed value => no suppression (VPS-safe).
+    """
+    try:
+        from hermes_cli.config import cfg_get
+
+        allowed = cfg_get(
+            _load_gateway_config(),
+            "gateway", "suppress_infra_status_platforms", default=None,
+        )
+        if not allowed:
+            return False
+        key = str(getattr(platform, "value", platform) or "").strip().lower()
+        return key in {str(p).strip().lower() for p in allowed}
+    except Exception:
+        return False
+
+
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
     """Filter/sanitize agent status callbacks before platform delivery.
 
@@ -517,6 +549,15 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
         return None
     if _gateway_surface_passes_raw_text(platform):
         return text
+
+    # Infra chatter suppression for user-facing surfaces (config-gated,
+    # spec 2026-07-16 §8а): drop fallback-switch/auth-refresh statuses AND
+    # provider-error-shaped statuses entirely instead of stubbing them —
+    # the user should see only the single final degraded reply.
+    if _suppress_infra_status_platform(platform) and (
+        _INFRA_STATUS_RE.search(text) or _looks_like_gateway_provider_error(text)
+    ):
+        return None
 
     text = _redact_gateway_user_facing_secrets(text)
     if _TELEGRAM_NOISY_STATUS_RE.search(text):
@@ -2575,6 +2616,25 @@ def _check_unavailable_skill(command_name: str) -> str | None:
 def _platform_config_key(platform: "Platform") -> str:
     """Map a Platform enum to its config.yaml key (LOCAL→"cli", rest→enum value)."""
     return "cli" if platform == Platform.LOCAL else platform.value
+
+
+def _pipeline_platform_allowed(config, platform_key: str) -> bool:
+    """Channel gate for the pipeline router/orchestrator.
+
+    `pipelines.allowed_platforms` (list of config platform keys, e.g.
+    ["telegram"]) restricts the engineering/recruiter pipeline machinery
+    to specific channels. Empty/absent => no restriction (every platform
+    allowed), preserving prior behavior. When set, a platform not in the
+    list bypasses routing entirely and goes straight to the default
+    conversation agent.
+    """
+    allowed = cfg_get(config, "pipelines", "allowed_platforms", default=None)
+    if not allowed:
+        return True
+    try:
+        return str(platform_key) in {str(pf).strip().lower() for pf in allowed}
+    except TypeError:
+        return True
 
 
 def _teams_pipeline_plugin_enabled() -> bool:
@@ -13156,6 +13216,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 response = _sanitize_gateway_final_response(source.platform, response)
 
+            # Turn-error alert to the admin channel (config-gated, no-op
+            # without gateway.error_alerts). Runs after normalize/sanitize so
+            # detection sees the exact stub the user receives. Never raises.
+            if not _intentional_silence:
+                from gateway.turn_error_alerts import maybe_alert_turn_error
+                maybe_alert_turn_error(
+                    _load_gateway_config(),
+                    platform=_platform_name,
+                    chat_id=source.chat_id,
+                    user_message=event.text,
+                    agent_result=agent_result,
+                    final_response=response,
+                )
+
             # Ordering contract: the agent thread already updated the contextvar
             # in conversation_compression.py; propagate to SessionEntry + _save().
             # If the agent's session_id changed during compression, update
@@ -19527,26 +19601,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
+        _pipeline_platform_ok = _pipeline_platform_allowed(user_config, platform_key)
         router_decision = None
 
-        try:
-            from hermes_cli.pipeline_observe import observe_pipeline_router_decision
+        if _pipeline_platform_ok:
+            try:
+                from hermes_cli.pipeline_observe import observe_pipeline_router_decision
 
-            router_decision = observe_pipeline_router_decision(
-                config=user_config,
-                user_message=message,
-                session_id=session_id,
-                session_key=session_key,
-                platform=platform_key,
-                chat_id=str(getattr(source, "chat_id", "") or "") or None,
-                thread_id=str(getattr(source, "thread_id", "") or "") or None,
-                user_id=str(getattr(source, "user_id", "") or "") or None,
-                selected_provider=str(cfg_get(user_config, "model", "provider", default="") or "").strip() or None,
-                selected_model=_resolve_gateway_model() or None,
-                logger=logger,
-            )
-        except Exception:
-            logger.warning("pipeline observe hook import/invocation failed", exc_info=True)
+                router_decision = observe_pipeline_router_decision(
+                    config=user_config,
+                    user_message=message,
+                    session_id=session_id,
+                    session_key=session_key,
+                    platform=platform_key,
+                    chat_id=str(getattr(source, "chat_id", "") or "") or None,
+                    thread_id=str(getattr(source, "thread_id", "") or "") or None,
+                    user_id=str(getattr(source, "user_id", "") or "") or None,
+                    selected_provider=str(cfg_get(user_config, "model", "provider", default="") or "").strip() or None,
+                    selected_model=_resolve_gateway_model() or None,
+                    logger=logger,
+                )
+            except Exception:
+                logger.warning("pipeline observe hook import/invocation failed", exc_info=True)
+        else:
+            logger.info("pipeline router skipped for platform=%s (not in pipelines.allowed_platforms)", platform_key)
 
         # Upstream-sync operator decisions must reach the upstream-sync skill
         # (Mode B), not the pipeline orchestrator below - which runs observe-only
@@ -19597,7 +19675,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         pipeline_orchestrator_report = None
         _orchestrator_mode = str(cfg_get(user_config, "pipelines", "orchestrator", "mode", default="disabled") or "disabled").strip().lower()
-        if bool(cfg_get(user_config, "pipelines", "enabled", default=False)) and _orchestrator_mode in {"observe", "controlled_manual", "autonomous"}:
+        if _pipeline_platform_ok and bool(cfg_get(user_config, "pipelines", "enabled", default=False)) and _orchestrator_mode in {"observe", "controlled_manual", "autonomous"}:
             try:
                 from hermes_cli.orchestrator import observe_gateway_turn
 

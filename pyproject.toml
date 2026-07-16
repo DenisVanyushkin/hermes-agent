@@ -107,6 +107,14 @@ dependencies = [
   "websockets==15.0.1",
   # .gitignore-aware file matching for desktop build stamp.
   "pathspec==1.1.1",
+  # StarLine API client (custom/fam/fam/car.py) — the Amina family
+  # assistant's car-status/remote-control integration for the StarLine
+  # alarm/telematics system. custom/fam has no pyproject.toml of its own
+  # (its bin/fam launcher runs against this venv via PYTHONPATH), so this
+  # is the only manifest that governs its install. Exact-pinned per repo
+  # policy; the code relies on this version's exact request-hashing
+  # behavior.
+  "starline==0.1.5",
   "fastapi>=0.104.0,<1",
   "uvicorn[standard]>=0.24.0,<1",
   # Streaming multipart uploads for the dashboard file manager (NS-501).
