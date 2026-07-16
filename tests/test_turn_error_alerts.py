@@ -160,3 +160,108 @@ def test_format_alert_truncates_and_omits_optional():
     )
     assert "Сообщение:" not in text2
     assert "Ошибка:" not in text2
+
+
+# --- maybe_alert_turn_error ----------------------------------------------------
+
+CFG = {"gateway": {"error_alerts": {"channel": "telegram:79564752"}}}
+
+
+def _fail_result():
+    return {"failed": True, "error": "API call failed: HTTP 500"}
+
+
+def test_maybe_alert_sends_on_degraded_turn(monkeypatch):
+    tea._ALERT_STATE.clear()
+    sent = []
+    monkeypatch.setattr(tea, "_send_alert", lambda ch, txt: sent.append((ch, txt)))
+    tea.maybe_alert_turn_error(
+        CFG, platform="whatsapp", chat_id="77011102626",
+        user_message="привет", agent_result=_fail_result(),
+        final_response="The request failed: API call failed: HTTP 500\nTry again...",
+    )
+    assert len(sent) == 1
+    ch, txt = sent[0]
+    assert ch == "telegram:79564752"
+    assert "Категория: failed" in txt and "«привет»" in txt
+
+
+def test_maybe_alert_noop_paths(monkeypatch):
+    tea._ALERT_STATE.clear()
+    sent = []
+    monkeypatch.setattr(tea, "_send_alert", lambda ch, txt: sent.append(txt))
+    ok = dict(platform="whatsapp", chat_id="1", user_message="hi")
+    # выключено конфигом
+    tea.maybe_alert_turn_error({}, **ok, agent_result=_fail_result(),
+                               final_response="The request failed: x")
+    # здоровый ответ
+    tea.maybe_alert_turn_error(CFG, **ok, agent_result={},
+                               final_response="Готово!")
+    # сам админ-канал (петля/дубль)
+    tea.maybe_alert_turn_error(
+        CFG, platform="telegram", chat_id="79564752", user_message="hi",
+        agent_result=_fail_result(), final_response="The request failed: x",
+    )
+    assert sent == []
+
+
+def test_maybe_alert_dedup_and_repeat_note(monkeypatch):
+    tea._ALERT_STATE.clear()
+    sent = []
+    monkeypatch.setattr(tea, "_send_alert", lambda ch, txt: sent.append(txt))
+    kw = dict(platform="whatsapp", chat_id="1", user_message="hi",
+              agent_result=_fail_result(),
+              final_response="The request failed: API call failed: HTTP 500")
+    t0 = 1_000_000.0
+    tea.maybe_alert_turn_error(CFG, now=t0, **kw)
+    tea.maybe_alert_turn_error(CFG, now=t0 + 60, **kw)      # молчит
+    tea.maybe_alert_turn_error(CFG, now=t0 + 120, **kw)     # молчит
+    tea.maybe_alert_turn_error(CFG, now=t0 + 16 * 60, **kw) # шлёт + N
+    assert len(sent) == 2
+    assert "повторилась 2 раза" in sent[1]
+
+
+def test_maybe_alert_respects_include_user_message(monkeypatch):
+    tea._ALERT_STATE.clear()
+    sent = []
+    monkeypatch.setattr(tea, "_send_alert", lambda ch, txt: sent.append(txt))
+    cfg = {"gateway": {"error_alerts": {
+        "channel": "telegram:79564752", "include_user_message": False}}}
+    tea.maybe_alert_turn_error(
+        cfg, platform="whatsapp", chat_id="1", user_message="секретик",
+        agent_result=_fail_result(), final_response="The request failed: x",
+    )
+    assert "секретик" not in sent[0]
+
+
+def test_maybe_alert_never_raises(monkeypatch):
+    tea._ALERT_STATE.clear()
+    def boom(ch, txt):
+        raise RuntimeError("telegram down")
+    monkeypatch.setattr(tea, "_send_alert", boom)
+    tea.maybe_alert_turn_error(
+        CFG, platform="whatsapp", chat_id="1", user_message="hi",
+        agent_result=_fail_result(), final_response="The request failed: x",
+    )  # не бросило — тест пройден
+
+
+def test_send_alert_spawns_daemon_thread_with_hermes_send(monkeypatch):
+    calls = {}
+    class FakeThread:
+        def __init__(self, target=None, daemon=None, name=None):
+            calls["daemon"] = daemon
+            self._target = target
+        def start(self):
+            self._target()
+    monkeypatch.setattr(tea.threading, "Thread", FakeThread)
+    monkeypatch.setattr(tea, "_resolve_hermes_argv", lambda: ["/usr/bin/hermes"])
+    def fake_run(argv, **kw):
+        calls["argv"] = argv
+        calls["input"] = kw.get("input")
+        class R: returncode = 0
+        return R()
+    monkeypatch.setattr(tea.subprocess, "run", fake_run)
+    tea._send_alert("telegram:79564752", "текст алерта")
+    assert calls["daemon"] is True
+    assert calls["argv"] == ["/usr/bin/hermes", "send", "-t", "telegram:79564752"]
+    assert calls["input"] == "текст алерта"
