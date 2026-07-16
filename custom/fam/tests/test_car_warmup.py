@@ -91,12 +91,54 @@ def test_warmup_attempt_row_committed_before_engine(db, monkeypatch):
     r = car.do_warmup(db, CheckClient(), {"car_warmup_daily_limit": 5}, requester="denis")
     assert r["ok"] is True
 
-def test_failed_attempt_consumes_daily_limit(db, monkeypatch):
+def test_failed_attempt_does_not_consume_daily_limit(db, monkeypatch):
+    # Policy change 2026-07-16: a failed attempt is refunded, so a retry
+    # is allowed; only successful starts pin the limit.
     monkeypatch.setattr(gate, "notify_denis", lambda t: True)
     cfg = {"car_warmup_daily_limit": 1}
     client = _FakeClient(start_ok=False)      # reuse this file's fake pattern
     r1 = car.do_warmup(db, client, cfg, "amina")
     assert r1 == {"ok": False, "reason": "failed"}
     r2 = car.do_warmup(db, client, cfg, "amina")
-    assert r2 == {"ok": False, "reason": "limit"}   # attempt already counted
+    assert r2 == {"ok": False, "reason": "failed"}  # retried, not limit-blocked
     assert not db.in_transaction                     # every path commits
+
+
+# --- 2026-07-16 fixes: failed attempts must not consume the daily limit,
+# --- and the failed audit row must carry the client's error detail.
+
+def _seed_warmup_rows(db, results):
+    import json
+    for res in results:
+        db.execute("INSERT INTO audit_log(ts_utc,kind,actor,payload) VALUES("
+                   "strftime('%Y-%m-%dT%H:%M:%S+00:00','now'),'car.warmup','agent',?)",
+                   (json.dumps({"result": res}),))
+    db.commit()
+
+def test_count_refunds_failed_attempts(db):
+    # attempt+failed pair = refunded; attempt+started = consumed;
+    # bare attempt (in-flight racer) = still conservatively consumed.
+    _seed_warmup_rows(db, ["attempt", "failed", "attempt", "started", "attempt"])
+    assert car.warmup_count_today(db) == 2
+
+def test_warmup_allowed_after_failed_attempts(db, monkeypatch):
+    monkeypatch.setattr(gate, "notify_denis", lambda t: True)
+    _seed_warmup_rows(db, ["attempt", "failed"] * 5)  # 5 failures, limit 5
+    cl = OkClient()
+    r = car.do_warmup(db, cl, _cfg(), requester="denis")
+    assert r["ok"] is True and cl.started == 1
+
+def test_warmup_failed_audit_carries_error_detail(db, monkeypatch):
+    import json
+    monkeypatch.setattr(gate, "notify_denis", lambda t: True)
+    class FailClient:
+        last_error = None
+        def start_engine(self):
+            self.last_error = "FileNotFoundError: no token store"
+            return False
+    r = car.do_warmup(db, FailClient(), _cfg(), requester="amina"); db.commit()
+    assert r["ok"] is False
+    rows = db.execute("SELECT payload FROM audit_log WHERE kind='car.warmup'").fetchall()
+    failed = [json.loads(x["payload"]) for x in rows
+              if json.loads(x["payload"])["result"] == "failed"]
+    assert failed and failed[0]["error"] == "FileNotFoundError: no token store"

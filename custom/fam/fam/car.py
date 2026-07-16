@@ -11,6 +11,17 @@ from datetime import datetime, timezone
 from fam import audit, gate
 
 TOKEN_PATH = "/home/denis/.hermes/private/amina/starline-token.json"
+# The fam CLI also runs inside the docker sandbox, where the private dir
+# is mounted under /root instead of /home/denis (same dual-path situation
+# as db.resolve_db_path's HOST_DB/SANDBOX_DB).
+SANDBOX_TOKEN_PATH = "/root/.hermes/private/amina/starline-token.json"
+
+
+def _resolve_token_path():
+    for p in (TOKEN_PATH, SANDBOX_TOKEN_PATH):
+        if os.path.exists(p):
+            return p
+    return TOKEN_PATH
 
 _SET_PARAM_URL = "https://developer.starline.ru/json/v1/device/{}/set_param"
 
@@ -30,7 +41,8 @@ def _now_ts():
 
 class StarlineClient:
     def __init__(self, token_path=None, _auth=None, _api_factory=None):
-        self._path = token_path or TOKEN_PATH
+        self._path = token_path or _resolve_token_path()
+        self.last_error = None
         if _auth is None:
             from starline import StarlineAuth
             _auth = StarlineAuth()
@@ -113,6 +125,7 @@ class StarlineClient:
             return None
 
     def start_engine(self):
+        self.last_error = None
         try:
             self.ensure_slnet()
             store = self.load_store()
@@ -122,8 +135,13 @@ class StarlineClient:
                 headers={"Cookie": "slnet=" + store["slnet_token"]},
             )
             body = resp.json()
-            return int(body.get("code", 0)) == 200
-        except Exception:      # noqa: BLE001 -- never raise; warmup guard treats False as failure
+            if int(body.get("code", 0)) == 200:
+                return True
+            # codedesc/body never carries credentials -- safe for audit
+            self.last_error = f"api code={body.get('code')} desc={body.get('codestring') or body.get('desc')}"
+            return False
+        except Exception as e:  # noqa: BLE001 -- never raise; warmup guard treats False as failure
+            self.last_error = f"{type(e).__name__}: {e}"
             return False
 
 
@@ -310,18 +328,20 @@ def warmup_count_today(conn, now=None):
     warmup daily limit resets at Almaty local midnight, same as the
     proactive-message budget).
 
-    Counts 'attempt', not 'started': the attempt row commits before the
-    physical start (see do_warmup), so it is the conservative unit the
-    limit must count -- two racers can no longer both pass the check
-    between each other's attempt and started rows (finding 12). A failed
-    attempt consuming the limit is intended for a physical actuator: we
-    do not want to retry-hammer a real engine start."""
+    Counts 'attempt' rows minus 'failed' rows: the attempt row commits
+    before the physical start (see do_warmup), so an in-flight attempt
+    is conservatively counted -- two racers can not both pass the check
+    between each other's attempt and started rows (finding 12). A
+    'failed' outcome refunds its attempt (decision 2026-07-16): a failed
+    call never reached the physical actuator's happy path, and eating
+    the daily limit on e.g. a config error locked out real warmups."""
     from fam.gate import _almaty_day_utc_bounds, _now
     frm, to = _almaty_day_utc_bounds(now or _now())
     rows = conn.execute(
         "SELECT payload FROM audit_log WHERE kind='car.warmup' "
         "AND ts_utc >= ? AND ts_utc < ?", (frm, to)).fetchall()
-    return sum(1 for r in rows if json.loads(r["payload"]).get("result") == "attempt")
+    results = [json.loads(r["payload"]).get("result") for r in rows]
+    return max(0, results.count("attempt") - results.count("failed"))
 
 
 def _latest_engine_on(conn):
@@ -375,8 +395,10 @@ def do_warmup(conn, client, cfg, requester, now=None):
     audit.log(conn, "car.warmup", {"requester": requester, "result": "attempt"}, actor="agent")
     conn.commit()  # attempt row must be durable before the physical engine start (spec §6.4)
     ok = client.start_engine()
-    audit.log(conn, "car.warmup",
-              {"requester": requester, "result": "started" if ok else "failed"}, actor="agent")
+    outcome = {"requester": requester, "result": "started" if ok else "failed"}
+    if not ok and getattr(client, "last_error", None):
+        outcome["error"] = client.last_error
+    audit.log(conn, "car.warmup", outcome, actor="agent")
     n = warmup_count_today(conn, now=now)
     conn.commit()  # close out the outcome row too -- no dangling transaction on any path
     gate.notify_denis(f"Прогрев машины: {requester}, "

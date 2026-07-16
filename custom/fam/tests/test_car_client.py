@@ -81,3 +81,34 @@ def test_set_device_persists_to_store(tmp_path):
     c = car.StarlineClient(token_path=str(p), _auth=FakeAuth())
     c.set_device("D2")
     assert json.loads(p.read_text())["device_id"] == "D2"
+
+
+# --- 2026-07-16 fixes: token path must resolve host/sandbox (the fam CLI
+# --- runs inside the docker sandbox where /home/denis does not exist),
+# --- and start_engine must record what went wrong instead of a bare False.
+
+def test_default_token_path_falls_back_to_sandbox(tmp_path, monkeypatch):
+    host = tmp_path / "host" / "starline-token.json"
+    sandbox = tmp_path / "sandbox" / "starline-token.json"
+    sandbox.parent.mkdir()
+    sandbox.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(car, "TOKEN_PATH", str(host))
+    monkeypatch.setattr(car, "SANDBOX_TOKEN_PATH", str(sandbox))
+    c = car.StarlineClient(_auth=FakeAuth())
+    assert c._path == str(sandbox)
+
+def test_default_token_path_host_wins_when_present(tmp_path, monkeypatch):
+    host = tmp_path / "host" / "starline-token.json"
+    sandbox = tmp_path / "sandbox" / "starline-token.json"
+    for p in (host, sandbox):
+        p.parent.mkdir()
+        p.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(car, "TOKEN_PATH", str(host))
+    monkeypatch.setattr(car, "SANDBOX_TOKEN_PATH", str(sandbox))
+    assert car.StarlineClient(_auth=FakeAuth())._path == str(host)
+
+def test_start_engine_records_last_error(tmp_path):
+    missing = tmp_path / "nope" / "starline-token.json"
+    c = car.StarlineClient(token_path=str(missing), _auth=FakeAuth())
+    assert c.start_engine() is False
+    assert "FileNotFoundError" in c.last_error
