@@ -98,6 +98,27 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     text = (error or "unknown error").strip()
     lower = text.lower()
 
+    # A review-gate block is an agent-workflow outcome, not a provider
+    # failure. Classify it before the provider substring heuristics below:
+    # the blocked-completion report is large and routinely quotes logs
+    # containing words like "timeout", which mislabeled a review-gate block
+    # as "provider timeout" (2026-07-16 rebase cron incident).
+    if "Review gate mode:" in text or (
+        text.startswith("Hermes role:") and "\nReviewer:" in text
+    ):
+        verdict_match = re.search(r"^Reviewer:.*/\s*(\S+)\s*$", text, re.MULTILINE)
+        verdict = verdict_match.group(1) if verdict_match else "blocked"
+        approval = (
+            " and explicit approval is required"
+            if re.search(r"^Approval:\s*required\s*$", text, re.MULTILINE)
+            else ""
+        )
+        return (
+            f"⚠️ Cron '{job_name}' failed: review gate blocked completion "
+            f"(reviewer verdict: {verdict}{approval}). "
+            "Full details saved in cron output."
+        )
+
     # Provider/API failures are the common noisy path. Keep these short.
     if "429" in text or "rate limit" in lower or "usage limit" in lower:
         reason = "rate limit"
