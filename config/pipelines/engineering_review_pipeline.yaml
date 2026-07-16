@@ -2,12 +2,10 @@ schema_version: 1
 id: engineering_review_pipeline
 display_name: Engineering Review Pipeline
 version: 1
-purpose: Execute code-changing engineering tasks with mandatory review, bounded rework, disagreement handling, and explicit completion gating.
+purpose: Execute code-CHANGING engineering tasks (write, modify, or fix code; produce a diff; open a PR) with mandatory review, bounded rework, disagreement handling, and explicit completion gating. Select ONLY when the user is asking to change code. Do NOT select for read-only diagnostics, investigations, log or config inspection, status checks, or "why did X happen" / "check why X" questions that do not modify code — those go to default_conversation_pipeline.
 entry_conditions:
   any:
-    - task_classification.domain == engineering
     - task_intent includes code_mutation
-    - target_paths match engineering_path_patterns
 subagents:
   engineer: hermes_engineer_core
   reviewer: hermes_code_reviewer
