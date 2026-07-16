@@ -578,10 +578,16 @@ def _meds_series(conn, now_utc, cfg):
     not by this function again.
 
     Per due row:
-      - in_quiet_hours(now, cfg) -> skip entirely: no send,
-        series_next_utc left untouched. This is a PAUSE, not a cancel --
-        the next tick at/after quiet hours end will find this same row
-        still due (series_next_utc never moved forward) and try again.
+      - Denis's decision (2026-07-16 go-live review): the ENTIRE series
+        (initial reminder and every +45min escalation alike) fires
+        through quiet hours -- this loop no longer pauses on
+        in_quiet_hours at all. A dose scheduled 21:30-23:59 used to be
+        paused here until quiet hours ended, but meds_gen's midnight
+        closeout marks a still-pending row missed first -- silent total
+        non-delivery for a medical feature. The row is only ever closed
+        by an explicit ack (taken/skip) or by that same midnight
+        closeout; this function itself never withholds a send for time
+        of day.
       - meds.get(med_id) is None, OR the med has enabled=0 (5 T9 final
         review, FIX-1): skip entirely, no send -- "stop reminding me
         about X" (skill contract: fam meds edit <id> --enabled 0) must
@@ -601,9 +607,9 @@ def _meds_series(conn, now_utc, cfg):
         delivered via gate.deliver(force=True) -- Denis's decision:
         medication reminders bypass quiet hours and the daily budget
         entirely (see gate.budget_spent_today's kind=="med" exclusion;
-        the quiet-hours check above is this function's OWN pause logic,
-        separate from gate.deliver's own quiet-hours gate). Regardless
-        of gate.deliver's returned status (sent/quiet/budget/error),
+        this function itself has no quiet-hours pause of its own either,
+        per the go-live decision above). Regardless of gate.deliver's
+        returned status (sent/quiet/budget/error),
         series_next_utc advances to now + cfg["med_repeat_min"] (default
         45) minutes -- the next escalation in this dose's own persistent
         series. status is left pending either way; T5 owns the ack that
@@ -659,9 +665,14 @@ def _meds_series(conn, now_utc, cfg):
         # reminders() call site remains as a final safety net for
         # failures outside this per-row body (e.g. the SELECT above).
         try:
-            if gate.in_quiet_hours(now_utc, cfg):
-                continue
-
+            # Denis's decision (2026-07-16 go-live review): the ENTIRE med
+            # series -- initial reminder and every +45min escalation --
+            # fires through quiet hours. A dose scheduled 21:30-23:59 was
+            # previously never delivered at all: this loop paused it until
+            # "quiet ends", but meds_gen's midnight closeout marked it
+            # missed first (silent total failure for a medical feature).
+            # gate.deliver below is already force=True, so no other gate
+            # applies. The midnight closeout itself is unchanged.
             med = meds.get(conn, row["med_id"])
 
             if med is None or not med.get("enabled"):

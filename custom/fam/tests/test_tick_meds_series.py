@@ -142,26 +142,64 @@ def test_not_yet_due_intake_is_left_alone(db, fake_deliver):
     assert row["series_next_utc"] == future_next
 
 
-# ---- quiet hours: pause, don't move series ----
+# ---- quiet hours: series fires through, per Denis's 2026-07-16 go-live
+# decision (was "pause, don't move series" before that) ----
 
-def test_quiet_hours_skips_send_and_does_not_move_series(db, fake_deliver):
+def test_quiet_hours_no_longer_pauses_send_or_series(db, fake_deliver):
+    # Was test_quiet_hours_skips_send_and_does_not_move_series before
+    # Denis's 2026-07-16 go-live decision: a dose due at 22:00 Almaty
+    # (inside the 21:30-07:30 quiet window) used to be skipped by this
+    # loop and then marked missed by meds_gen's midnight closeout -- a
+    # scheduled dose was silently never delivered at all. Now the whole
+    # series (initial + escalations) fires through quiet hours instead.
     med_id = meds.add(db, "Магний", ["08:00"])
     db.commit()
     plan_ts = "2026-07-20T03:00:00+00:00"
     intake_id = _insert_intake(db, med_id, plan_ts, plan_ts)
+    fake_deliver.responses = ["sent"]
 
     tick.reminders(db, now_utc=QUIET_NOW, cfg=CFG)
 
-    assert _med_calls(fake_deliver) == []
+    calls = _med_calls(fake_deliver)
+    assert len(calls) == 1
+    assert calls[0]["force"] is True
+    assert calls[0]["raw"]["mode"] == "take"
     row = db.execute(
         "SELECT status, series_next_utc FROM med_intakes WHERE id=?",
         (intake_id,),
     ).fetchone()
     assert row["status"] == "pending"
-    assert row["series_next_utc"] == plan_ts
+    # QUIET_NOW (17:00 UTC) + 45 min = 17:45 UTC -- series keeps advancing.
+    assert row["series_next_utc"] == "2026-07-20T17:45:00+00:00"
     assert db.execute(
         "SELECT COUNT(*) FROM audit_log WHERE kind='tick.med'"
-    ).fetchone()[0] == 0
+    ).fetchone()[0] == 1
+
+
+def test_med_series_escalation_also_fires_through_quiet_hours(db, fake_deliver):
+    # Denis's decision explicitly covers "+45-min escalations" too, not
+    # just the very first reminder -- exercise a dose whose series is
+    # already mid-escalation (series_next_utc != plan_ts) to prove the
+    # repeat path isn't paused by quiet hours either.
+    med_id = meds.add(db, "Магний", ["22:00"], dose="1 таб")
+    db.commit()
+    plan_ts = "2026-07-20T17:00:00+00:00"  # 22:00 Almaty
+    series_next = "2026-07-20T17:30:00+00:00"  # 22:30 Almaty, first escalation
+    intake_id = _insert_intake(db, med_id, plan_ts, series_next)
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc="2026-07-20T17:30:00+00:00", cfg=CFG)
+
+    calls = _med_calls(fake_deliver)
+    assert len(calls) == 1
+    assert calls[0]["force"] is True
+    assert calls[0]["raw"]["mode"] == "take"
+    row = db.execute(
+        "SELECT status, series_next_utc FROM med_intakes WHERE id=?",
+        (intake_id,),
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["series_next_utc"] == "2026-07-20T18:15:00+00:00"  # +45 min
 
 
 # ---- out of stock: one "buy" message, series cleared ----
