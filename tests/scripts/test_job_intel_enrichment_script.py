@@ -32,6 +32,9 @@ ENTRYPOINTS = ("job_intel_enrichment.sh",)
 
 ALL_ENTRYPOINTS = ("job_intel_enrichment.sh", "job_intel_host_wrapper.sh")
 
+# Every shell entrypoint, so the fix cannot rot back in via a sibling script.
+SHELL_ENTRYPOINTS = tuple(sorted(p.name for p in SCRIPTS.glob("job_intel_*.sh")))
+
 
 def _build_runtime_layout(tmp_path: Path, entrypoint: str) -> tuple[Path, Path, Path]:
     """Mirror the production layout: runtime scripts copy + decoy data dir."""
@@ -150,4 +153,30 @@ def test_entrypoints_probe_for_package_marker(entrypoint: str) -> None:
 
     assert '[[ -f "$1/job_intel/__main__.py" ]]' in text
     assert "_job_intel_is_package" in text
+    assert 'if [[ -d "$candidate/job_intel" ]]; then' not in text
+
+
+@pytest.mark.parametrize("entrypoint", SHELL_ENTRYPOINTS)
+def test_no_entrypoint_resolves_the_deleted_stale_database(entrypoint: str) -> None:
+    """No script may name ~/.hermes/job_intel as a database or state location.
+
+    That database was deleted on 2026-07-16.  resolve_db_path() never checked
+    existence, so naming the path again would make sqlite silently recreate an
+    empty database there -- turning the old stale-data bug into an
+    empty-data bug that looks perfectly healthy.
+    """
+    text = (SCRIPTS / entrypoint).read_text()
+    code = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    assert '"$HOME/.hermes/job_intel/job_intel.sqlite3"' not in code
+    assert '"$workdir/.hermes/job_intel/job_intel.sqlite3"' not in code
+    assert '"${JOB_INTEL_STATE_DIR:-$HOME/.hermes/job_intel}"' not in code
+
+
+@pytest.mark.parametrize("entrypoint", SHELL_ENTRYPOINTS)
+def test_no_entrypoint_probes_job_intel_by_name(entrypoint: str) -> None:
+    """The name-only package probe must not survive in any sibling script."""
+    text = (SCRIPTS / entrypoint).read_text()
     assert 'if [[ -d "$candidate/job_intel" ]]; then' not in text
