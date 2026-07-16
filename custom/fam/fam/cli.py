@@ -690,6 +690,9 @@ def cmd_car_status(args):
     out = {k: row[k] for k in row.keys()} if row else {}
     out.pop("raw_json", None)
     out["fuel_is_low"] = car.fuel_is_low(conn)
+    # run OR ign, same rule as the warmup guard: the S96v2 auto-start
+    # reports ign=true while run stays false, so engine_on alone lies.
+    out["engine_running"] = car._latest_engine_on(conn) if row else False
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
     else:
@@ -697,7 +700,7 @@ def cmd_car_status(args):
             print("no car data yet")
         else:
             print(f"ts={out.get('ts_utc')}\tfuel={out.get('fuel_pct')}%\t"
-                  f"engine_on={out.get('engine_on')}\tfuel_is_low={out['fuel_is_low']}")
+                  f"engine_running={out['engine_running']}\tfuel_is_low={out['fuel_is_low']}")
     return 0
 
 def cmd_car_set_transport(args):
