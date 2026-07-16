@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from fam import audit, road
+from fam import audit, cal, places, rem, road, tick
 
 CFG = {
     "road_provider": "tomtom",
@@ -199,3 +199,90 @@ def test_no_key_skips_tomtom_silently(monkeypatch, db):
     assert audit.query(db, None, "road.error", None) == []
     assert audit.query(db, None, "road.call", None) == []
     assert audit.query(db, None, "road.cap", None) == []
+
+
+# ==== golive finding 3: road_recompute rolls back partial state on error ====
+# Setup below is copied verbatim from test_tick.py's road_recompute suite
+# (there is no separate helper module for this -- those tests are the
+# canonical setup pattern for a T-window road_recompute candidate):
+# rem.seed_default_rules + a place with home-distance coords + an event
+# 119 minutes out (opens the T-120 window with travel_min_road still
+# None -> leave_at == start), and neutralizing compute_travel_min during
+# cal.add so its own add-time road hook -- which reads the REAL on-disk
+# config on this prod host -- doesn't fire for real.
+
+ROAD_RECOMPUTE_NOW = "2026-07-20T04:30:00+00:00"
+ROAD_RECOMPUTE_CFG = {
+    "road_home_lat": 43.2220, "road_home_lon": 76.8512, "road_coef": 1.4,
+    "road_speed_kmh": 30, "road_daily_cap": 100, "road_timeout_sec": 10,
+    "road_recompute_min": [120, 60],
+}
+
+
+def test_road_recompute_error_rolls_back_partial_state(db, monkeypatch):
+    """Mirrors the fix already applied to _meds_series' except-branch
+    (fam/tick.py): road_recompute's per-event try body can UPDATE
+    events.travel_min_road, log a road.recompute audit row, and then
+    call rem.regenerate -- which itself DELETEs the event's pending
+    reminder chain before INSERTing a fresh one. If rem.regenerate
+    raises AFTER that DELETE (a mid-regenerate failure), the surrounding
+    except must roll back the WHOLE transaction before auditing
+    road.hook_error -- otherwise the event is committed with
+    travel_min_road changed, a road.recompute audit row, and ZERO
+    pending reminders (the fresh chain's INSERTs never happened).
+    """
+    rem.seed_default_rules(db)
+    db.commit()
+    places.add(db, "Клиника", lat=43.2298, lon=76.8823)
+    db.commit()
+
+    # Neutralize the add-time hook (see module-comment above) -- keeps
+    # travel_min_road at None like a from-scratch DB, exactly as
+    # test_tick.py's _add_event_neutral_road does.
+    monkeypatch.setattr(tick.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+    event = cal.add(db, "Врач", "2026-07-20T06:29:00+00:00", place="Клиника")
+    db.commit()
+
+    before = db.execute(
+        "SELECT COUNT(*) c FROM reminders WHERE event_id=? AND status='pending'",
+        (event["id"],)).fetchone()["c"]
+    assert before > 0
+
+    # Now the recompute call under test finds a CHANGED minute figure,
+    # entering the UPDATE + audit.log(road.recompute) + rem.regenerate
+    # branch (see tick.road_recompute's docstring).
+    monkeypatch.setattr(tick.road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (45, "tomtom"))
+
+    # rem.regenerate's real contract is DELETE pending, then INSERT a
+    # fresh chain. Simulate a failure mid-regenerate by performing the
+    # real DELETE (the partial write that must NOT survive) and then
+    # raising -- this is the only way to prove the fix's rollback
+    # actually undoes writes that happened BEFORE the exception, rather
+    # than merely skip a no-op (see brief step 2's warning: if
+    # rem.regenerate is monkeypatched to raise before ever touching the
+    # DB, the test would pass even without the fix).
+    def boom_after_delete(conn, event_id, now_utc=None):
+        conn.execute(
+            "DELETE FROM reminders WHERE event_id=? AND status='pending'",
+            (event_id,))
+        raise RuntimeError("regen failed mid-way")
+
+    monkeypatch.setattr(tick.rem, "regenerate", boom_after_delete)
+
+    touched = tick.road_recompute(
+        db, now_utc=ROAD_RECOMPUTE_NOW, cfg=ROAD_RECOMPUTE_CFG)
+    assert touched == 0  # this event's own try body never finished cleanly
+
+    after = db.execute(
+        "SELECT COUNT(*) c FROM reminders WHERE event_id=? AND status='pending'",
+        (event["id"],)).fetchone()["c"]
+    assert after == before  # partial UPDATE/DELETE rolled back
+
+    got = cal.get(db, event["id"])
+    assert got["travel_min_road"] is None  # the UPDATE was rolled back too
+
+    assert not audit.query(db, None, "road.recompute", None)  # rolled back
+    err = audit.query(db, None, "road.hook_error", None)
+    assert err and err[0]["payload"] == {"event_id": event["id"]}

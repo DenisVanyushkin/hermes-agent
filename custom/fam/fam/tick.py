@@ -250,6 +250,13 @@ def road_recompute(conn, now_utc=None, cfg=None):
                 touched += 1
                 break
         except Exception:
+            # Same lesson _meds_series already learned: the try body may
+            # have UPDATEd events and let rem.regenerate DELETE the
+            # pending chain before raising -- committing that partial
+            # state would leave the event with NO reminders at all until
+            # the next regen trigger. Roll back first; the audit row is
+            # then the only thing this except commits.
+            conn.rollback()
             audit.log(conn, "road.hook_error", {"event_id": event_id})
             conn.commit()
 
