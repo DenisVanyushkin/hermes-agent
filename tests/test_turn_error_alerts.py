@@ -265,3 +265,15 @@ def test_send_alert_spawns_daemon_thread_with_hermes_send(monkeypatch):
     assert calls["daemon"] is True
     assert calls["argv"] == ["/usr/bin/hermes", "send", "-t", "telegram:79564752"]
     assert calls["input"] == "текст алерта"
+
+
+def test_run_py_hook_wired():
+    # run.py содержит вызов и все обязательные kwargs — дешёвая защита от
+    # рассинхрона сигнатуры при будущих правках гигантского run.py
+    import inspect
+    import gateway.run as run
+    src = inspect.getsource(run)
+    assert "maybe_alert_turn_error(" in src
+    tail = src.split("maybe_alert_turn_error(", 1)[1][:600]
+    for kw in ("platform=", "chat_id=", "user_message=", "agent_result=", "final_response="):
+        assert kw in tail, kw

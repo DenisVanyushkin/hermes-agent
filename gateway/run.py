@@ -11632,6 +11632,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 response = _sanitize_gateway_final_response(source.platform, response)
 
+            # Turn-error alert to the admin channel (config-gated, no-op
+            # without gateway.error_alerts). Runs after normalize/sanitize so
+            # detection sees the exact stub the user receives. Never raises.
+            if not _intentional_silence:
+                from gateway.turn_error_alerts import maybe_alert_turn_error
+                maybe_alert_turn_error(
+                    _load_gateway_config(),
+                    platform=_platform_name,
+                    chat_id=source.chat_id,
+                    user_message=event.text,
+                    agent_result=agent_result,
+                    final_response=response,
+                )
+
             # Ordering contract: the agent thread already updated the contextvar
             # in conversation_compression.py; propagate to SessionEntry + _save().
             # If the agent's session_id changed during compression, update
