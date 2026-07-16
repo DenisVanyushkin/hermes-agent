@@ -820,25 +820,30 @@ def _followup(conn, now_utc, cfg):
     "20:00"). Dedup is a meta row keyed "followup_sent:<date_local>",
     checked first. Unlike the original 3b Task 6 cut, meta is set on the
     "nothing to say" outcomes (no_events, no_plans) AND on "sent", but
-    NOT on a real gate.deliver refusal (quiet/budget/error) -- Task 8
+    NOT on a real gate.deliver refusal of "budget" or "error" -- Task 8
     acceptance fix 1 (Denis, live sweep): the original "set on every
-    outcome" contract meant a quiet/budget/error refusal silently lost
-    the whole day's follow-up, since the next tick would see meta
-    already set and never re-evaluate. Leaving meta unset on a refusal
-    makes every subsequent minute-tick this same Asia/Almaty day retry
-    the identical send (outbound events + related plans are re-derived
-    fresh each time, so a plan closed/event added in between is picked
-    up too) until either gate.deliver finally returns "sent", or quiet
-    hours begin -- at which point gate.deliver itself keeps returning
-    "quiet" every tick (followup is not reminder-exempt from quiet
-    hours, see gate.deliver's own docstring), so it never spuriously
-    recovers after 21:30 anyway. The no_events/no_plans "silence"
-    outcomes still set meta immediately: there is nothing there to
-    retry into existing, so re-checking every minute for the rest of
-    the day would be pure waste -- mirrors _digest_already_sent_today's
-    role but keyed in `meta` rather than derived from gate.sent audit
-    rows, since a followup's "nothing to say" outcome never calls
-    gate.deliver at all and so leaves no gate.sent row to key off of.
+    outcome" contract meant a budget/error refusal silently lost the
+    whole day's follow-up, since the next tick would see meta already
+    set and never re-evaluate. Leaving meta unset on a budget/error
+    refusal makes every subsequent minute-tick this same Asia/Almaty day
+    retry the identical send (outbound events + related plans are
+    re-derived fresh each time, so a plan closed/event added in between
+    is picked up too) until either gate.deliver finally returns "sent",
+    or quiet hours begin. A "quiet" refusal, however, IS a permanent
+    verdict for the day (go-live review, finding 9): followup_local_time
+    (20:00) always precedes quiet_start (21:30), and the quiet window
+    runs past midnight, so once gate.deliver has returned "quiet" there
+    is nothing left in the day to retry into -- the original "retry
+    quiet too" contract just meant every minute-tick from 21:30 to
+    midnight re-derived outbound events/plans and re-called gate.deliver
+    only to get "quiet" back again, ~300 wasted gate.skip/tick.followup
+    audit rows a day. The no_events/no_plans "silence" outcomes still
+    set meta immediately: there is nothing there to retry into existing,
+    so re-checking every minute for the rest of the day would be pure
+    waste -- mirrors _digest_already_sent_today's role but keyed in
+    `meta` rather than derived from gate.sent audit rows, since a
+    followup's "nothing to say" outcome never calls gate.deliver at all
+    and so leaves no gate.sent row to key off of.
 
     Outbound events: today's events (Task 8 acceptance fix 2: status
     active OR done -- see _followup_day_bounds_utc; an event that was
@@ -866,8 +871,8 @@ def _followup(conn, now_utc, cfg):
     pattern as DIGEST_QUESTION). tick.followup is audited every tick
     with the gate.deliver outcome ("sent"/"quiet"/"budget"/"error") as
     status regardless of whether it was actually delivered, but meta is
-    only written for "sent" (see above) -- a quiet/budget/error outcome
-    IS retried by a later tick the same day, unlike digest's own
+    only written for "sent" and "quiet" (see above) -- a budget/error
+    outcome IS retried by a later tick the same day, unlike digest's own
     force=True/once-a-day contract.
 
     Returns the status string ("no_events", "no_plans", or gate.deliver's
@@ -937,11 +942,15 @@ def _followup(conn, now_utc, cfg):
         status = gate.deliver(conn, "followup", raw, human_fallback, cfg,
                                now_utc=now_utc)
 
-    # Task 8 acceptance fix 1: only a "sent" or a "nothing to say" outcome
-    # (no_events/no_plans) is a permanent verdict for today -- a real
-    # gate.deliver refusal (quiet/budget/error) leaves meta unset so the
-    # next minute tick retries (see this function's docstring).
-    if status in ("no_events", "no_plans", "sent"):
+    # "quiet" joined the permanent verdicts (go-live review, finding 9):
+    # followup_local_time (20:00) precedes quiet start (21:30), and the
+    # quiet window runs past midnight -- once quiet has refused, the day
+    # is over for the follow-up, so retrying every minute until 00:00
+    # only grinds ~300 gate.skip/tick.followup audit rows. budget/error
+    # keep retrying (error may be transient). NOTE: this assumes the
+    # quiet window always extends to midnight; revisit if quiet_hours
+    # config ever becomes an intra-day window.
+    if status in ("no_events", "no_plans", "sent", "quiet"):
         conn.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
             (meta_key, now_utc),

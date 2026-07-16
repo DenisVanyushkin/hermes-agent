@@ -8,10 +8,13 @@ tick) AND at least one open plan related to those events (attached_event_id
 == event.id, or plan.person_id among the event's participants). Dedup via
 meta key followup_sent:<date_local> -- set for the "nothing to say"
 outcomes (no_events, no_plans) immediately, and for "sent", so a later
-tick the same day never re-checks. A real gate.deliver refusal
-(quiet/budget/error) leaves meta UNSET (Task 8 acceptance fix) so the
-next minute tick retries the same send, until it succeeds or quiet hours
-begin.
+tick the same day never re-checks. A gate.deliver refusal of "budget" or "error" leaves meta UNSET (Task 8
+acceptance fix) so the next minute tick retries the same send, until it
+succeeds or quiet hours begin. A "quiet" refusal (go-live review, finding
+9) is instead a permanent verdict for the day, same as "sent": the
+followup_local_time (20:00) always precedes quiet_start (21:30), and the
+quiet window runs past midnight, so once "quiet" has been returned there
+is nothing left to retry into before the day rolls over.
 """
 import pytest
 
@@ -222,7 +225,7 @@ def test_event_not_yet_started_does_not_count_as_outbound(db, fake_deliver):
 
 # -- Task 8 acceptance fix 1: retry until quiet hours -----------------
 
-@pytest.mark.parametrize("refusal", ["budget", "quiet", "error"])
+@pytest.mark.parametrize("refusal", ["budget", "error"])
 def test_deliver_refusal_does_not_set_meta_and_retries_next_tick(
         db, fake_deliver, refusal):
     e = _place_event(db)
@@ -247,6 +250,39 @@ def test_deliver_refusal_does_not_set_meta_and_retries_next_tick(
         "SELECT value FROM meta WHERE key='followup_sent:2026-07-20'"
     ).fetchone()
     assert row is not None, "meta must be set once deliver finally sends"
+
+
+# -- Go-live review finding 9: "quiet" is a final verdict for the day -
+
+def test_followup_quiet_refusal_is_final_for_the_day(db, monkeypatch):
+    # Unlike "budget"/"error", a "quiet" refusal must NOT be retried every
+    # minute-tick for the rest of the day: followup_local_time (20:00)
+    # always precedes quiet_start (21:30), and the quiet window runs past
+    # midnight, so there is nothing left to retry into before the day
+    # rolls over -- grinding every minute until 00:00 only piles up
+    # gate.skip/tick.followup audit rows.
+    now = "2026-07-16T16:31:00+00:00"           # 21:31 Almaty, inside quiet
+    event_start = "2026-07-16T09:00:00+00:00"   # 14:00 Almaty -- already past
+    e = _place_event(db, start=event_start)
+    _plan_attached(db, e["id"])
+    monkeypatch.setattr(tick.gate, "deliver", lambda *a, **k: "quiet")
+    cfg = dict(gate.CONFIG_DEFAULTS)
+
+    assert tick._followup(db, now_utc=now, cfg=cfg) == "quiet"
+    row = db.execute(
+        "SELECT value FROM meta WHERE key='followup_sent:2026-07-16'"
+    ).fetchone()
+    assert row is not None, "quiet must set meta -- permanent verdict for the day"
+
+    # second minute tick: meta already set -> early None, no new audit row
+    n_before = db.execute(
+        "SELECT COUNT(*) c FROM audit_log WHERE kind='tick.followup'"
+    ).fetchone()["c"]
+    assert tick._followup(db, now_utc="2026-07-16T16:32:00+00:00", cfg=cfg) is None
+    n_after = db.execute(
+        "SELECT COUNT(*) c FROM audit_log WHERE kind='tick.followup'"
+    ).fetchone()["c"]
+    assert n_after == n_before
 
 
 def test_silence_still_sets_meta_immediately_no_retry(db, fake_deliver):
