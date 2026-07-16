@@ -327,14 +327,19 @@ def warmup_count_today(conn, now=None):
 def _latest_engine_on(conn):
     # An auto-started S96v2 reports ign=true while run stays false
     # (phase-4 field notes), so engine_on alone under-reports a
-    # warmed-up engine and the "already on" guard never fired for it.
-    r = conn.execute(
-        "SELECT engine_on, ignition_on FROM car_metrics "
-        "WHERE engine_on IS NOT NULL OR ignition_on IS NOT NULL "
-        "ORDER BY ts_utc DESC LIMIT 1").fetchone()
-    if r is None:
-        return False
-    return bool(r["engine_on"]) or bool(r["ignition_on"])
+    # warmed-up engine. Each flag is read at its own latest non-NULL
+    # row: the two fields can go stale independently across polls
+    # (normalize() sets each only when the device reported it), and a
+    # newer row that reported only one flag must not mask the other
+    # flag's last known value. Conservative direction for an actuator
+    # guard: any flag's latest "on" refuses the start.
+    row = conn.execute(
+        "SELECT "
+        "(SELECT engine_on FROM car_metrics WHERE engine_on IS NOT NULL "
+        " ORDER BY ts_utc DESC LIMIT 1) AS run_flag, "
+        "(SELECT ignition_on FROM car_metrics WHERE ignition_on IS NOT NULL "
+        " ORDER BY ts_utc DESC LIMIT 1) AS ign_flag").fetchone()
+    return bool(row["run_flag"]) or bool(row["ign_flag"])
 
 
 def do_warmup(conn, client, cfg, requester, now=None):

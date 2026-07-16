@@ -11,16 +11,18 @@ class _FakeClient:
     def __init__(self, start_ok=True): self.start_ok = start_ok
     def start_engine(self): return self.start_ok
 
-def _insert_metric(db, engine_on=None, ignition_on=None):
+def _insert_metric(db, engine_on=None, ignition_on=None, now=None):
     # Build the car_state dict the way StarlineClient._device_data would,
     # then reuse normalize()+record_metrics so the row shape matches
-    # production exactly (bool-or-None per flag).
+    # production exactly (bool-or-None per flag). `now` pins ts_utc when
+    # a test needs deterministic row ordering (iso timestamps have
+    # seconds precision; two inserts in one test can otherwise tie).
     state = {}
     if engine_on is not None:
         state["run"] = engine_on
     if ignition_on is not None:
         state["ign"] = ignition_on
-    car.record_metrics(db, car.normalize({"car_state": state}))
+    car.record_metrics(db, car.normalize({"car_state": state}, now=now))
     db.commit()
 
 def test_warmup_started_audits_and_notifies(db, monkeypatch):
@@ -61,6 +63,18 @@ def test_already_on_via_ignition_only(db, monkeypatch):
     # daily limit isn't the only protection against a double-start.
     monkeypatch.setattr(gate, "notify_denis", lambda t: True)
     _insert_metric(db, engine_on=0, ignition_on=1)   # auto-started S96v2 shape
+    cfg = {"car_warmup_daily_limit": 5}
+    r = car.do_warmup(db, _FakeClient(start_ok=True), cfg, "amina")
+    assert r == {"ok": False, "reason": "already_on"}
+
+def test_already_on_survives_newer_partial_row(db, monkeypatch):
+    # Flags go stale independently across polls: normalize() sets each
+    # only when the device reported it. A newer row carrying only
+    # ignition_on=0 (engine_on NULL) must not mask an older row's
+    # engine_on=1 -- each flag is read at its own latest non-NULL row.
+    monkeypatch.setattr(gate, "notify_denis", lambda t: True)
+    _insert_metric(db, engine_on=1, now="2026-07-16T09:00:00+00:00")
+    _insert_metric(db, ignition_on=0, now="2026-07-16T09:05:00+00:00")
     cfg = {"car_warmup_daily_limit": 5}
     r = car.do_warmup(db, _FakeClient(start_ok=True), cfg, "amina")
     assert r == {"ok": False, "reason": "already_on"}
