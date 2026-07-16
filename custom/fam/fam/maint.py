@@ -24,7 +24,13 @@ def problem_summary(cfg, now=None, notify=None, run_errors=None):
     for minute-tick failure markers, snapshots probes, folds in this run's
     maintenance errors (run_errors), and (if anything is non-clean)
     delivers ONE consolidated message to Denis. Clean -> silence.
-    notify defaults to gate.notify_denis; injected in tests."""
+    notify defaults to gate.notify_denis; injected in tests.
+
+    Watermark contract: maint_summary_last_run advances on a clean sweep
+    (nothing to report) or once notify() has returned truthy. If notify()
+    returns falsy (e.g. Telegram is down), the watermark stays put so the
+    next sweep re-covers the same window instead of the day's problems
+    vanishing behind a fresh watermark."""
     now = now or _now_utc()
     notify = notify or gate.notify_denis
     conn = famdb.connect()
@@ -45,17 +51,30 @@ def problem_summary(cfg, now=None, notify=None, run_errors=None):
         probe_problems = [f"{p['name']}: {p['detail'] or p['status']}"
                           for p in probes if p["status"] != "ok"]
         all_problems = problems + probe_problems
-        famdb.meta_set(conn, "maint_summary_last_run",
-                       now.isoformat(timespec="seconds"))
-        conn.commit()
+        if not all_problems:
+            famdb.meta_set(conn, "maint_summary_last_run",
+                           now.isoformat(timespec="seconds"))
+            conn.commit()
+            return {"problems": [], "probes": probes, "sent": False,
+                    "skipped_clean": True}
+        body = ("Гермес — сводка за сутки:\n"
+                + "\n".join(f"• {p}" for p in all_problems))
+        sent = bool(notify(body))
+        # The watermark only advances once the summary actually reached
+        # Denis (go-live review, finding 6): if the alert channel itself
+        # is down, yesterday's problems must survive into the next sweep
+        # instead of vanishing behind a fresh watermark. Trade-off:
+        # run_errors passed by THIS run are args, not audit rows, so a
+        # failed-notify night re-reports audit problems but loses those;
+        # maintenance errors recur if real, acceptable.
+        if sent:
+            famdb.meta_set(conn, "maint_summary_last_run",
+                           now.isoformat(timespec="seconds"))
+            conn.commit()
+        return {"problems": all_problems, "probes": probes,
+                "sent": sent, "skipped_clean": False}
     finally:
         conn.close()
-    if not all_problems:
-        return {"problems": [], "probes": probes, "sent": False, "skipped_clean": True}
-    body = "Гермес — сводка за сутки:\n" + "\n".join(f"• {p}" for p in all_problems)
-    sent = bool(notify(body))
-    return {"problems": all_problems, "probes": probes,
-            "sent": sent, "skipped_clean": False}
 
 def prune_audit_log(conn, days, now=None):
     """Delete audit_log rows older than `days`; return deleted count.

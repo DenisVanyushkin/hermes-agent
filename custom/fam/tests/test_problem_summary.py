@@ -66,6 +66,45 @@ def test_watermark_advances_on_clean_run(db, monkeypatch):
     assert famdb.meta_get(db, "maint_summary_last_run") == now.isoformat(timespec="seconds")
 
 
+def test_watermark_not_advanced_when_notify_fails(db, monkeypatch):
+    # Go-live review finding 6: a failed delivery must not burn the
+    # watermark -- otherwise the day's problems vanish silently.
+    monkeypatch.setattr(maint.health, "bridge_readiness",
+                         lambda conn, cfg, now=None: _ok_probe("bridge"))
+    monkeypatch.setattr(maint.health, "starline_staleness",
+                         lambda conn, cfg, now=None: _ok_probe("starline"))
+    monkeypatch.setattr(maint.health, "degradation_flags",
+                         lambda conn, cfg, now=None: _ok_probe("degradation"))
+    from fam import db as famdb
+    famdb.meta_set(db, "maint_summary_last_run", "2026-07-13T03:00:00+00:00")
+    db.commit()
+    audit.log(db, "tick.error", {"where": "digest", "error": "boom"}, actor="tick")
+    db.commit()
+    before = famdb.meta_get(db, "maint_summary_last_run")
+    out = maint.problem_summary({}, notify=lambda body: False)
+    assert out["sent"] is False
+    assert out["problems"]
+    after = famdb.meta_get(db, "maint_summary_last_run")
+    assert after == before        # next night re-sweeps the same window
+
+
+def test_watermark_advances_when_notify_succeeds(db, monkeypatch):
+    monkeypatch.setattr(maint.health, "bridge_readiness",
+                         lambda conn, cfg, now=None: _ok_probe("bridge"))
+    monkeypatch.setattr(maint.health, "starline_staleness",
+                         lambda conn, cfg, now=None: _ok_probe("starline"))
+    monkeypatch.setattr(maint.health, "degradation_flags",
+                         lambda conn, cfg, now=None: _ok_probe("degradation"))
+    from fam import db as famdb
+    from datetime import datetime, timezone
+    audit.log(db, "tick.error", {"where": "digest", "error": "boom"}, actor="tick")
+    db.commit()
+    now = datetime(2026, 7, 14, 3, 0, 0, tzinfo=timezone.utc)
+    out = maint.problem_summary({}, now=now, notify=lambda body: True)
+    assert out["sent"] is True
+    assert famdb.meta_get(db, "maint_summary_last_run") == now.isoformat(timespec="seconds")
+
+
 def test_run_errors_reported_same_night(db, monkeypatch):
     monkeypatch.setattr(maint.health, "bridge_readiness",
                          lambda conn, cfg, now=None: _ok_probe("bridge"))
