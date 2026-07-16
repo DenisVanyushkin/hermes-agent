@@ -21,6 +21,8 @@ CFG = {
     "enroute_max_items": 2,
     "plan_deadline_horizon_days": 3,
     "followup_local_time": "20:00",
+    "digest_retry_from": "07:40",
+    "digest_retry_until": "12:00",
     "med_repeat_min": 45,
     "audit_retention_days": 90,
     "backup_keep": 7,

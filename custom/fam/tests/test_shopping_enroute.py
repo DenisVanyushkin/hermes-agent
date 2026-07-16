@@ -393,6 +393,10 @@ def test_shop_enroute_exception_does_not_break_tick(db, fake_deliver, monkeypatc
     # match_enroute blowing up must not take down the whole minute tick
     # -- the reminder still gets delivered (just without the "заодно"
     # block), and the failure is audited.
+    # NOW is 09:30 Almaty, inside the default digest_retry window (finding
+    # 5); neutralized so the tick.error count below stays scoped to the
+    # shop-enroute failure this test is actually about.
+    monkeypatch.setattr(tick, "_digest_retry", lambda *a, **k: None)
     e = _event_with_place(db)
     _grocery(db, name="Магнум", lat=43.2262, lon=76.8672)
     shopping.add(db, "Молоко")

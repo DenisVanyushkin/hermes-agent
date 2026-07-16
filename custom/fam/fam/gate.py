@@ -55,6 +55,11 @@ CONFIG_DEFAULTS = {
     # in the first minute-tick at/after this Asia/Almaty local time (and
     # before quiet hours) on a day with outbound events -- HH:MM.
     "followup_local_time": "20:00",
+    # go-live review finding 5: a digest whose 07:30 send errored is
+    # re-attempted by the minute tick inside this Almaty-local window.
+    # from = timer time + grace so the timer itself normally wins.
+    "digest_retry_from": "07:40",
+    "digest_retry_until": "12:00",
     # Phase 5 Task 4: persistent meds reminder series (tick.py's
     # _meds_series, called at the end of reminders()) -- minutes between
     # one delivered "take this" escalation and the next for the same

@@ -542,6 +542,16 @@ def reminders(conn, now_utc=None, cfg=None):
                   {"where": "followup", "error": str(e)[:200]})
         conn.commit()
 
+    # go-live review finding 5: retry a failed morning digest (see
+    # _digest_retry). Same swallow-and-audit contract as the hooks
+    # around it -- a digest failure must not sink the reminders tick.
+    try:
+        _digest_retry(conn, now_utc=now, cfg=cfg)
+    except Exception as e:
+        audit.log(conn, "tick.error",
+                  {"where": "digest_retry", "error": str(e)[:200]})
+        conn.commit()
+
     # Phase 5 Task 4: persistent medication reminder series -- see
     # _meds_series's own docstring. Runs last, after event reminders and
     # the evening follow-up, wrapped in its own try/except (same guard
@@ -995,6 +1005,28 @@ def _digest_already_sent_today(conn, _real_now=None):
     return any(json.loads(r["payload"]).get("kind") == "digest" for r in rows)
 
 
+def _digest_retry(conn, now_utc, cfg):
+    """Re-attempt a failed morning digest from the minute tick (go-live
+    review, finding 5). The digest normally fires once from its own
+    timer (02:30 UTC = 07:30 Almaty); if that send errored (bridge or
+    LLM provider down) nothing retried it before this hook. Between
+    digest_retry_from and digest_retry_until (Almaty local) any minute
+    tick that sees no gate.sent digest row for today calls digest()
+    again -- digest()'s own dup guard makes the first success stop all
+    further attempts. Persistent failure = one attempt per minute for
+    the window; bounded, and each failure is already a tick.error."""
+    local_dt = _parse_utc(now_utc).astimezone(ALMATY)
+    fh, fm = (int(x) for x in cfg.get("digest_retry_from", "07:40").split(":"))
+    uh, um = (int(x) for x in cfg.get("digest_retry_until", "12:00").split(":"))
+    frm = local_dt.replace(hour=fh, minute=fm, second=0, microsecond=0)
+    until = local_dt.replace(hour=uh, minute=um, second=0, microsecond=0)
+    if not (frm <= local_dt < until):
+        return None
+    if _digest_already_sent_today(conn):
+        return None
+    return digest(conn, cfg=cfg, now_utc=now_utc)
+
+
 def _fallback_weather_line(wx):
     if wx is None:
         return None
@@ -1312,6 +1344,15 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
 
     status = gate.deliver(conn, "digest", raw, human_fallback, cfg,
                            force=True, now_utc=now)
+
+    if status == "error":
+        # A failed morning digest was previously invisible: "error" is a
+        # return value, not an exception, so no tick.error reached the
+        # nightly problem_summary, and nothing retried the send (finding
+        # 5, go-live review). The marker feeds the summary; the actual
+        # retry lives in _digest_retry (minute tick).
+        audit.log(conn, "tick.error",
+                  {"where": "digest", "error": "deliver returned error"})
 
     summary = {"status": status, "date_local": date_local,
                "weather_present": wx is not None, "n_events": len(event_list)}

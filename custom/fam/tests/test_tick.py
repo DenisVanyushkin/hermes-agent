@@ -68,7 +68,13 @@ def _event(db, title="Событие", start="2026-07-20T05:00:00+00:00", **kw):
 
 # ---- due selection by time ----
 
-def test_due_selection_only_past_fire_at_is_processed(db, fake_deliver):
+def test_due_selection_only_past_fire_at_is_processed(db, fake_deliver,
+                                                        monkeypatch):
+    # NOW is 09:30 Almaty, inside the default digest_retry window (finding
+    # 5) -- this test is about reminder due-selection, not digest, so the
+    # incidental digest() call is neutralized to keep fake_deliver.calls
+    # scoped to what this test actually asserts.
+    monkeypatch.setattr(tick, "_digest_retry", lambda *a, **k: None)
     e = _event(db)
     db.commit()
     due_id = _insert_reminder(db, e["id"], fire_at=PAST)
@@ -107,7 +113,11 @@ def test_sent_updates_status_and_sent_at(db, fake_deliver):
 
 # ---- raw/fallback payload shape passed to gate.deliver ----
 
-def test_raw_and_fallback_shape(db, fake_deliver):
+def test_raw_and_fallback_shape(db, fake_deliver, monkeypatch):
+    # NOW is 09:30 Almaty, inside the default digest_retry window (finding
+    # 5) -- neutralized here since this test asserts on the LAST reminder
+    # call, which an incidental trailing digest() call would shadow.
+    monkeypatch.setattr(tick, "_digest_retry", lambda *a, **k: None)
     people.add(db, "Тая", slug="taya")
     places.add(db, "Клиника")
     db.commit()
@@ -250,7 +260,12 @@ def test_non_sent_outcomes_leave_reminder_pending(db, fake_deliver, gate_status)
 
 @pytest.mark.parametrize("event_status", ["cancelled", "done"])
 def test_inactive_event_cancels_reminder_without_delivering(db, fake_deliver,
-                                                              event_status):
+                                                              event_status,
+                                                              monkeypatch):
+    # NOW is 09:30 Almaty, inside the default digest_retry window (finding
+    # 5); neutralized so the "fake_deliver.calls == []" assertion below
+    # isn't tripped by an incidental digest() call.
+    monkeypatch.setattr(tick, "_digest_retry", lambda *a, **k: None)
     e = _event(db)
     db.commit()
     # Flip status directly via SQL (not cal.cancel()/cal.done()) so this
@@ -282,10 +297,14 @@ def test_inactive_event_cancels_reminder_without_delivering(db, fake_deliver,
 # ---- stale-age guard: parked-too-long reminders are cancelled, not sent
 # (Fix 1, pre-live guards review round) ----
 
-def test_stale_pending_reminder_8h_old_is_cancelled_not_delivered(db, fake_deliver):
+def test_stale_pending_reminder_8h_old_is_cancelled_not_delivered(db, fake_deliver,
+                                                                    monkeypatch):
     # Models a reminder repeatedly parked by quiet hours until it's 8h
     # old -- well past reminder_max_age_min (120 min default) -- which
     # must now be cancelled as stale rather than delivered late.
+    # NOW is 09:30 Almaty, inside the default digest_retry window (finding
+    # 5); neutralized so "fake_deliver.calls == []" isn't tripped below.
+    monkeypatch.setattr(tick, "_digest_retry", lambda *a, **k: None)
     e = _event(db)  # start 2026-07-20T05:00:00+00:00, 30 min after NOW
     db.commit()
     old_fire_at = "2026-07-19T20:30:00+00:00"  # 8h before NOW
@@ -313,8 +332,12 @@ def test_stale_pending_reminder_8h_old_is_cancelled_not_delivered(db, fake_deliv
     }
 
 
-def test_fresh_reminder_10_min_late_is_delivered_normally(db, fake_deliver):
+def test_fresh_reminder_10_min_late_is_delivered_normally(db, fake_deliver,
+                                                            monkeypatch):
     # Age < reminder_max_age_min (120): delivered as normal, not stale.
+    # NOW is 09:30 Almaty, inside the default digest_retry window (finding
+    # 5); neutralized so "len(fake_deliver.calls) == 1" isn't tripped below.
+    monkeypatch.setattr(tick, "_digest_retry", lambda *a, **k: None)
     e = _event(db)
     db.commit()
     rid = _insert_reminder(db, e["id"], fire_at=PAST)  # 10 min before NOW
@@ -333,10 +356,14 @@ def test_fresh_reminder_10_min_late_is_delivered_normally(db, fake_deliver):
     assert row["status"] == "sent"
 
 
-def test_stale_via_event_start_far_in_past_even_with_fresh_fire_at(db, fake_deliver):
+def test_stale_via_event_start_far_in_past_even_with_fresh_fire_at(db, fake_deliver,
+                                                                     monkeypatch):
     # The OR branch: a fresh fire_at (age 0) is still stale if the
     # event's own start_utc is already more than max_age in the past --
     # e.g. a reminder regenerated late for an event that already happened.
+    # NOW is 09:30 Almaty, inside the default digest_retry window (finding
+    # 5); neutralized so "fake_deliver.calls == []" isn't tripped below.
+    monkeypatch.setattr(tick, "_digest_retry", lambda *a, **k: None)
     e = _event(db, start="2026-07-20T02:00:00+00:00")  # 2h30m before NOW
     db.commit()
     rid = _insert_reminder(db, e["id"], fire_at=NOW)
@@ -443,7 +470,11 @@ def test_tick_reminders_audit_payload_matches_counts_on_mixed_run(db, fake_deliv
 
 # ---- idempotence: immediate re-run sees due=0 ----
 
-def test_idempotent_rerun_sees_zero_due(db, fake_deliver):
+def test_idempotent_rerun_sees_zero_due(db, fake_deliver, monkeypatch):
+    # NOW is 09:30 Almaty, inside the default digest_retry window (finding
+    # 5); neutralized so the second run's "would raise IndexError if
+    # called again" guard below is only exercised by the reminder path.
+    monkeypatch.setattr(tick, "_digest_retry", lambda *a, **k: None)
     e = _event(db)
     db.commit()
     _insert_reminder(db, e["id"])
@@ -1155,3 +1186,43 @@ def test_digest_defaults_fetch_weather_to_weather_fetch_almaty(db, fake_deliver,
     tick.digest(db, now_utc=NOW, cfg=CFG)
 
     assert fake_deliver.calls[0]["raw"]["weather"] == WX
+
+
+# ---- go-live review finding 5: tick.error on digest error + minute retry ----
+
+def test_digest_error_status_writes_tick_error(db, monkeypatch):
+    monkeypatch.setattr(tick.gate, "deliver", lambda *a, **k: "error")
+
+    tick.digest(db, cfg=dict(gate.CONFIG_DEFAULTS),
+                now_utc="2026-07-16T02:30:00+00:00",
+                _fetch_weather=lambda: None)
+
+    row = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.error'").fetchone()
+    assert row is not None and "digest" in row["payload"]
+
+
+def test_digest_retry_fires_in_window_when_not_sent(db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(tick, "_digest_already_sent_today", lambda c: False)
+    monkeypatch.setattr(tick, "digest", lambda *a, **k: calls.append(1) or {})
+    cfg = dict(gate.CONFIG_DEFAULTS)
+
+    tick._digest_retry(db, "2026-07-16T03:00:00+00:00", cfg)   # 08:00 Almaty
+
+    assert calls == [1]
+
+
+def test_digest_retry_skips_outside_window_or_when_sent(db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(tick, "digest", lambda *a, **k: calls.append(1) or {})
+    cfg = dict(gate.CONFIG_DEFAULTS)
+    monkeypatch.setattr(tick, "_digest_already_sent_today", lambda c: False)
+
+    tick._digest_retry(db, "2026-07-16T08:00:00+00:00", cfg)   # 13:00 Almaty: late
+    tick._digest_retry(db, "2026-07-16T02:35:00+00:00", cfg)   # 07:35: before from
+
+    monkeypatch.setattr(tick, "_digest_already_sent_today", lambda c: True)
+    tick._digest_retry(db, "2026-07-16T03:00:00+00:00", cfg)   # sent already
+
+    assert calls == []

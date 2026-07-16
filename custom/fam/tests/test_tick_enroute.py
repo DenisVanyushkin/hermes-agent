@@ -125,6 +125,10 @@ def test_enroute_exception_does_not_break_tick(db, fake_deliver, monkeypatch):
     # Final review Finding 2: match_enroute blowing up must not take down
     # the whole minute tick -- the reminder still gets delivered (just
     # without the "по пути" block), and the failure is audited.
+    # NOW is 09:30 Almaty, inside the default digest_retry window (finding
+    # 5); neutralized so the tick.error count below stays scoped to the
+    # enroute failure this test is actually about.
+    monkeypatch.setattr(tick, "_digest_retry", lambda *a, **k: None)
     e = _event_with_place(db)
     plans.add(db, "Забрать заказ", place="стоматолог")
     db.commit()
