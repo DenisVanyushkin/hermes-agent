@@ -52,11 +52,17 @@ UPSTREAM_SHA="$(json_field upstream_sha)"
 BACKUP_REF="$(json_field backup_ref)"
 
 write_result() {
+  # Keep the complete log next to the result: the JSON detail is truncated
+  # to its tail, which has already hidden the actual failure cause once
+  # (2026-07-16: a pre-report error line was cut off, leaving a causeless
+  # rollback). One file, overwritten per run.
+  cp -f "$DETAIL_LOG" "$STATE_DIR/finalize-detail.log" 2>/dev/null || true
   python3 - "$RESULT" "$ACTION" "$1" "$2" "$BACKUP_REF" <<'PY'
 import json, sys, datetime
 path, action, status, detail, backup = sys.argv[1:6]
 json.dump({
     "action": action, "status": status, "detail": detail[-4000:],
+    "detail_log": "finalize-detail.log",
     "backup_ref": backup,
     "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }, open(path, "w"), ensure_ascii=False, indent=1)

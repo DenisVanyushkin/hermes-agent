@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Under `set -e` an unguarded command failure kills the script with no
+# indication of where it died; log consumers (finalizer, cron delivery)
+# keep only the output tail, so such deaths look causeless. Name the
+# failing command and line in the tail. -E propagates the trap into
+# functions and subshells.
+set -E
+trap 'echo "ERROR: rebase-local-customizations.sh: command failed (rc=$?) at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 # If there are root-owned files anywhere in the repo, elevate to root so the
 # ownership-repair logic below can fix them and re-exec as the repo owner.
 # Check FIRST to avoid an infinite loop: after root repairs ALL ownership and
@@ -122,6 +130,7 @@ report_post_update() {
   local before="$1"
   local after="$2"
   local restart_status="${3:-yes}"
+  local synced_status="${4:-yes}"
   local changed_commits changed_files clean_status
 
   changed_commits="$(git -C "$REPO" log --no-merges --format='%h %s' "$before..$after" 2>/dev/null || true)"
@@ -159,7 +168,7 @@ EOF
 ### Verification
 - repo branch: $(git -C "$REPO" branch --show-current)
 - git status clean: $( [ -z "$clean_status" ] && echo yes || echo no )
-- runtime scripts synced: yes
+- runtime scripts synced: $synced_status
 - gateway restarted: $restart_status
 EOF
 }
@@ -359,6 +368,17 @@ if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor
   exit 0
 fi
 
+# A merge commit in the local range means the branch carries a second
+# lineage; a plain rebase would linearize BOTH parents and replay hundreds
+# of stale commits with guaranteed conflicts (observed 2026-07-16: 1228
+# replayed commits, conflict at #530). Refuse loudly instead.
+MERGE_COUNT="$(git -C "$REPO" rev-list --merges --count "$UPSTREAM_REF..HEAD" 2>/dev/null || echo 0)"
+if [ "${MERGE_COUNT:-0}" -gt 0 ]; then
+  echo "FAILED: $MERGE_COUNT merge commit(s) in $UPSTREAM_REF..HEAD — plain rebase would replay both lineages and conflict." >&2
+  echo "Linearize first: git commit-tree HEAD^{tree} -p <linear-parent> -m 'flatten merge', point $BRANCH at it, then re-run." >&2
+  exit 1
+fi
+
 REBASE_LOG="$(mktemp)"
 if ! git -C "$REPO" rebase "$UPSTREAM_REF" >"$REBASE_LOG" 2>&1; then
   abort_rebase_if_needed
@@ -383,7 +403,12 @@ if [ "$AFTER_HEAD" = "$BEFORE_HEAD" ]; then
 fi
 
 if ! verify_tree_compiles; then
-  report_post_update "$BEFORE_HEAD" "$AFTER_HEAD" "no"
+  report_post_update "$BEFORE_HEAD" "$AFTER_HEAD" "no" "no"
+  # Repeat the failure reason AFTER the report: downstream consumers
+  # (upstream-sync finalizer, cron delivery) keep only the tail of the
+  # output, so a reason printed before the report gets truncated away
+  # and the failure looks causeless (2026-07-16 finalize incident).
+  echo "FAILED: post-rebase syntax check failed — not syncing scripts, not pushing, not restarting (see SYNTAX ERROR lines above)." >&2
   exit 1
 fi
 
