@@ -144,6 +144,25 @@ class StarlineClient:
             self.last_error = f"{type(e).__name__}: {e}"
             return False
 
+    def stop_engine(self):
+        self.last_error = None
+        try:
+            self.ensure_slnet()
+            store = self.load_store()
+            resp = _http_post(
+                _SET_PARAM_URL.format(store["device_id"]),
+                json={"type": "ign", "ign": 0},
+                headers={"Cookie": "slnet=" + store["slnet_token"]},
+            )
+            body = resp.json()
+            if int(body.get("code", 0)) == 200:
+                return True
+            self.last_error = f"api code={body.get('code')} desc={body.get('codestring') or body.get('desc')}"
+            return False
+        except Exception as e:  # noqa: BLE001 -- never raise; do_stop treats False as failure
+            self.last_error = f"{type(e).__name__}: {e}"
+            return False
+
 
 def _iso_now(now=None):
     return now or datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -404,3 +423,31 @@ def do_warmup(conn, client, cfg, requester, now=None):
     gate.notify_denis(f"Прогрев машины: {requester}, "
                        f"{'ок' if ok else 'НЕ УДАЛОСЬ'} ({n}/{cfg['car_warmup_daily_limit']})")
     return {"ok": ok, "reason": "started" if ok else "failed"}
+
+
+def do_stop(conn, client, cfg, requester, now=None):
+    """Remote engine stop -- do_warmup's mirror minus the daily limit
+    (stopping an engine is physically harmless, unlike retry-hammering a
+    starter). Freshness first: the latest car_metrics row is up to a
+    poll interval (30 min) old and routinely predates a remote start, so
+    the already_off guard re-polls live telemetry before trusting the
+    DB. The attempt row commits before the physical stop, same
+    durability rule as warmup (spec §6.4)."""
+    data = client.poll()
+    if data:
+        record_metrics(conn, data)
+        conn.commit()
+    if not _latest_engine_on(conn):
+        audit.log(conn, "car.stop", {"requester": requester, "result": "already_off"}, actor="agent")
+        conn.commit()
+        return {"ok": False, "reason": "already_off"}
+    audit.log(conn, "car.stop", {"requester": requester, "result": "attempt"}, actor="agent")
+    conn.commit()
+    ok = client.stop_engine()
+    outcome = {"requester": requester, "result": "stopped" if ok else "failed"}
+    if not ok and getattr(client, "last_error", None):
+        outcome["error"] = client.last_error
+    audit.log(conn, "car.stop", outcome, actor="agent")
+    conn.commit()
+    gate.notify_denis(f"Глушение машины: {requester}, {'ок' if ok else 'НЕ УДАЛОСЬ'}")
+    return {"ok": ok, "reason": "stopped" if ok else "failed"}

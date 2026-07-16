@@ -679,12 +679,46 @@ def cmd_car_warmup(args):
         print(f"warmup: {result['reason']}" if not result["ok"] else "warmup: started")
     return 0
 
+def cmd_car_stop(args):
+    """`fam car stop [--confirm] [--requester X]` -- remote engine stop
+    via car.do_stop (warmup's mirror: dry preview without --confirm,
+    fresh-poll + already_off guard, attempt-before-actuator audit,
+    notify; no daily limit -- stopping is physically harmless)."""
+    from fam import car
+    requester = args.requester or "denis"
+    if not args.confirm:
+        out = {"ok": None, "preview": True, "requester": requester}
+        if args.json:
+            print(json.dumps(out, ensure_ascii=False))
+        else:
+            print(f"dry run: would stop the engine for {requester} (use --confirm to actually stop)")
+        return 0
+    conn = famdb.connect()
+    cfg = gate.load_config()
+    client = car.StarlineClient()
+    result = car.do_stop(conn, client, cfg, requester)
+    conn.commit()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"stop: {result['reason']}" if not result["ok"] else "stop: stopped")
+    return 0
+
 def cmd_car_status(args):
     """`fam car status` -- latest car_metrics row + the fuel-low flag,
     so an agent can answer Amina about fuel/car state without reaching
     into the DB directly."""
     from fam import car
     conn = famdb.connect()
+    if getattr(args, "live", False):
+        # Poll StarLine now instead of trusting the last 30-min tick --
+        # the only honest way to answer "машина заведена?" right after a
+        # remote start/stop. poll() never raises; None -> fall back to
+        # whatever the DB already has.
+        data = car.StarlineClient().poll()
+        if data:
+            car.record_metrics(conn, data)
+            conn.commit()
     row = conn.execute(
         "SELECT * FROM car_metrics ORDER BY ts_utc DESC LIMIT 1").fetchone()
     out = {k: row[k] for k in row.keys()} if row else {}
@@ -1230,7 +1264,16 @@ def build_parser():
     spw.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
+    spst = car_sub.add_parser("stop"); spst.set_defaults(func=cmd_car_stop)
+    spst.add_argument("--confirm", action="store_true",
+                      help="actually stop the engine (default: dry preview only)")
+    spst.add_argument("--requester", help="who asked for the stop (default: denis)")
+    spst.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
     sps = car_sub.add_parser("status"); sps.set_defaults(func=cmd_car_status)
+    sps.add_argument("--live", action="store_true",
+                      help="poll StarLine now instead of the last tick's row")
     sps.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 

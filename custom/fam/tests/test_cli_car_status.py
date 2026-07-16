@@ -29,3 +29,19 @@ def test_status_engine_running_false_when_all_off(db, monkeypatch, capsys):
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["engine_running"] is False
+
+
+def test_status_live_polls_and_records(db, monkeypatch, capsys):
+    # --live refreshes telemetry before reporting: without it the answer
+    # to "машина заведена?" can be up to a tick interval (30 min) stale.
+    monkeypatch.setenv("FAM_DB", db.execute("PRAGMA database_list").fetchone()[2])
+
+    class LiveClient:
+        def poll(self):
+            return car.normalize({"car_state": {"ign": True, "run": False}})
+
+    monkeypatch.setattr(car, "StarlineClient", lambda *a, **k: LiveClient())
+    rc = cli.main(["car", "status", "--live", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["engine_running"] is True  # no pre-existing rows: row came from --live

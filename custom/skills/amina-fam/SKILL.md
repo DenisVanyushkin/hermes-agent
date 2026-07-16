@@ -12,7 +12,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v11 (trip transport required + recurring event series + confirm-only-after-save)._
+_Body version: v12 (car stop command + live engine status)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -251,8 +251,9 @@ show after cancel), make a second, separate terminal call.
 | See shopping list | `fam shop list` |
 | Mark item bought | `fam shop done <id>` |
 | Categorize a place (аптека/продуктовый) | `fam places update <ref> --category pharmacy\|grocery` |
-| Fuel / car status | `fam car status` |
+| Fuel / car status | `fam car status` (`--live` for engine on/off questions) |
 | Warm up the car (after explicit yes) | `fam car warmup --confirm [--requester WHO]` |
+| Stop the engine (after explicit yes) | `fam car stop --confirm [--requester WHO]` |
 | Set an event's transport | `fam car set-transport <event_id> car\|walk\|public` |
 
 ## Calendar Grid
@@ -461,10 +462,14 @@ conversation.
 `fam` also tracks the car's StarLine telemetry (fuel, engine state) and can
 remote-start the engine.
 
-- **Checking fuel/car state** ("сколько бензина", "машина заведена?",
-  "как машина") → `fam car status` — report fuel % and, only if relevant
-  to what was asked, engine state. If `fuel_is_low` is true, mention it
-  even if not asked ("топлива мало, скоро понадобится заправка").
+- **Checking fuel/car state** ("сколько бензина", "как машина") →
+  `fam car status` — report fuel % and, only if relevant to what was
+  asked, engine state. If `fuel_is_low` is true, mention it even if not
+  asked ("топлива мало, скоро понадобится заправка"). For questions
+  about the engine specifically ("машина заведена?", "работает
+  двигатель?") add `--live`: `fam car status --live` — the plain status
+  row can be up to 30 minutes stale and lies right after a remote
+  start/stop. Engine state is the `engine_running` field.
 - **Warming up the car** ("заведи машину", "прогрей машину") is
   **always two steps** — never call `warmup --confirm` on the first
   message:
@@ -480,6 +485,16 @@ remote-start the engine.
     `"limit"` → "на сегодня лимит прогревов исчерпан", `"already_on"` →
     "машина уже заведена", `"failed"` → "не получилось завести, гляну
     попозже" — never surface the raw reason string.
+- **Stopping the engine** ("заглуши машину", "выключи двигатель") is the
+  same two-step protocol as warming up — never call `stop --confirm` on
+  the first message:
+  1. Ask for explicit confirmation: "заглушить машину? да?".
+  2. Only on an explicit yes → `fam car stop --confirm [--requester
+     WHO]`. It re-checks live telemetry itself, so don't pre-check
+     status first.
+  3. No/без ответа → don't call `stop` at all.
+  - Translate a `false` result's `"reason"`: `"already_off"` → "она уже
+    заглушена", `"failed"` → "не получилось заглушить, гляну попозже".
 - **Changing an event's transport** ("поедем на машине к врачу", "к
   зубному пешком") → resolve the event the same way as any other
   update (by name/time from `fam cal day`/`fam cal show`, never guess
