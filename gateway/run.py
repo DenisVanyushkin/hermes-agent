@@ -476,6 +476,38 @@ def _is_internal_clarify_activity_text(text: str) -> bool:
     )
 
 
+_INFRA_STATUS_RE = re.compile(
+    r"switching\s+to\s+fallback"
+    r"|authentication\s+failed\s+and\s+could\s+not\s+be\s+refreshed"
+    r"|primary\s+model\s+failed"
+    r"|primary\s+auth\s+failed",
+    re.IGNORECASE,
+)
+
+
+def _suppress_infra_status_platform(platform: Any) -> bool:
+    """True when gateway.suppress_infra_status_platforms lists this platform.
+
+    Infra chatter (fallback switches, provider-error statuses) is dropped on
+    these user-facing surfaces; the final degraded reply still arrives and the
+    operator gets the detail via turn-error alerts (spec 2026-07-16 §8а).
+    Empty/absent list or any malformed value => no suppression (VPS-safe).
+    """
+    try:
+        from hermes_cli.config import cfg_get
+
+        allowed = cfg_get(
+            _load_gateway_config(),
+            "gateway", "suppress_infra_status_platforms", default=None,
+        )
+        if not allowed:
+            return False
+        key = str(getattr(platform, "value", platform) or "").strip().lower()
+        return key in {str(p).strip().lower() for p in allowed}
+    except Exception:
+        return False
+
+
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
     """Filter/sanitize agent status callbacks before platform delivery.
 
@@ -489,6 +521,15 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
         return None
     if _gateway_surface_passes_raw_text(platform):
         return text
+
+    # Infra chatter suppression for user-facing surfaces (config-gated,
+    # spec 2026-07-16 §8а): drop fallback-switch/auth-refresh statuses AND
+    # provider-error-shaped statuses entirely instead of stubbing them —
+    # the user should see only the single final degraded reply.
+    if _suppress_infra_status_platform(platform) and (
+        _INFRA_STATUS_RE.search(text) or _looks_like_gateway_provider_error(text)
+    ):
+        return None
 
     text = _redact_gateway_user_facing_secrets(text)
     if _TELEGRAM_NOISY_STATUS_RE.search(text):
