@@ -93,15 +93,134 @@ def _tool_use_failed(m: dict) -> bool:
     return saw_tool_task
 
 
+def _health_penalty(m: dict) -> int:
+    """Relaxed-tier ordering: prefer the least-broken model. 0 healthy
+    (passed/imperfect), 1 not_probed, 2 transient error (http_4xx/5xx, timeout,
+    refused), 3 anything else (failed, unknown)."""
+    h = _health(m)
+    if h in HEALTHY:
+        return 0
+    if h == "not_probed":
+        return 1
+    if h.startswith("http_") or "timeout" in h or "refused" in h:
+        return 2
+    return 3
+
+
+def plan_fallback(models: list) -> dict:
+    """Pick up to two tool-capable fallback models, degrading through tiers.
+
+    Tier 1 (strict): supportsTools + ctx + non-broken health + proven tool use.
+    Tier 2 (relaxed backfill): same but health ignored — admits rate-limited /
+    unprobed / failed-health models to keep two slots — yet STILL excludes
+    models empirically shown not to call tools (that reintroduces the original
+    bug). Returns the strict list, the chosen chain, and which ids were
+    backfilled so callers can alert on degradation."""
+    models = [m for m in (models or []) if m.get("id")]
+
+    def _ctx_ok(m):
+        return (m.get("contextLength") or 0) >= FALLBACK_MIN_CTX
+
+    strict = [m for m in models
+              if m.get("supportsTools") and _ctx_ok(m)
+              and _fallback_health_ok(m) and not _tool_use_failed(m)]
+    strict.sort(key=lambda m: (-_lite_score(m), _rank(m)))
+    chosen = [m["id"] for m in strict[:2]]
+
+    backfill = []
+    if len(chosen) < 2:
+        relaxed = [m for m in models
+                   if m.get("supportsTools") and _ctx_ok(m)
+                   and not _tool_use_failed(m)]
+        relaxed.sort(key=lambda m: (_health_penalty(m), -_lite_score(m), _rank(m)))
+        for m in relaxed:
+            if m["id"] in chosen:
+                continue
+            chosen.append(m["id"])
+            backfill.append(m["id"])
+            if len(chosen) >= 2:
+                break
+
+    return {"chosen": chosen, "strict": [m["id"] for m in strict], "backfill": backfill}
+
+
+def _find_model(models: list, mid: str) -> dict:
+    for m in models or []:
+        if m.get("id") == mid:
+            return m
+    return {}
+
+
+def _fallback_shortfall_reasons(models: list) -> str:
+    tool_models = [m for m in (models or []) if m.get("supportsTools")]
+    small = sum(1 for m in tool_models
+                if (m.get("contextLength") or 0) < FALLBACK_MIN_CTX)
+    failed = sum(1 for m in tool_models if _tool_use_failed(m))
+    unhealthy = sum(1 for m in tool_models
+                    if (m.get("contextLength") or 0) >= FALLBACK_MIN_CTX
+                    and not _tool_use_failed(m) and not _fallback_health_ok(m))
+    return (f"  strict shortfall: feed={len(models or [])}, "
+            f"tool-capable={len(tool_models)}, unhealthy={unhealthy}, "
+            f"failed-tool-eval={failed}, ctx<64k={small}")
+
+
+def build_fallback_alert(chosen: list, strict: list, models: list,
+                         source: str = "feed", note: str = "") -> str:
+    """Return a Slack-bound warning when the fallback chain is degraded, else
+    None. `chosen` is the applied chain, `strict` the ids that passed strict
+    criteria, `models` the feed (for the shortfall breakdown), `source` one of
+    feed|previous|empty."""
+    if source == "feed" and len(strict) >= 2:
+        return None
+
+    note_sfx = f" ({note})" if note else ""
+    if source == "empty" or not chosen:
+        head = ("🚨 openrouter fallback EMPTY — primary (codex) only; "
+                "no free-model safety net if codex auth fails" + note_sfx)
+    elif source == "previous":
+        head = ("⚠️ openrouter fallback holding PREVIOUS selection — no model "
+                "passed strict or relaxed criteria this run" + note_sfx)
+    elif len(chosen) == 1:
+        head = "⚠️ openrouter fallback critically low — only 1 model in the chain"
+    else:
+        head = (f"⚠️ openrouter fallback degraded — {len(strict)} passed strict, "
+                f"{len(chosen) - len(strict)} backfilled from the relaxed tier "
+                "(may be rate-limited / unproven)")
+
+    lines = [head]
+    for mid in chosen:
+        m = _find_model(models, mid)
+        if m:
+            lines.append(f"  {mid} — health={_health(m) or '?'}, "
+                         f"liteEval={_lite_score(m)}")
+        else:
+            lines.append(f"  {mid}")
+    if source == "feed":
+        lines.append(_fallback_shortfall_reasons(models))
+    return "\n".join(lines)
+
+
+def resolve_degradation(sel: dict, plan: dict, previous, models: list):
+    """Apply tier 3 (hold previous) / tier 4 (primary-only) when the feed chose
+    no fallback, and compute the degradation alert. Returns
+    (sel, source, alert_or_None). `sel` is copied before mutation."""
+    source = "feed"
+    if not sel.get("fallback"):
+        if previous and previous.get("fallback"):
+            sel = dict(sel)
+            sel["fallback"] = list(previous["fallback"])
+            source = "previous"
+        else:
+            source = "empty"
+    alert = build_fallback_alert(sel.get("fallback") or [],
+                                 plan.get("strict") or [], models, source=source)
+    return sel, source, alert
+
+
 def select_models(data: dict) -> dict:
     models = [m for m in (data.get("models") or []) if m.get("id")]
 
-    fb = [m for m in models
-          if m.get("supportsTools")
-          and (m.get("contextLength") or 0) >= FALLBACK_MIN_CTX
-          and _fallback_health_ok(m)
-          and not _tool_use_failed(m)]
-    fb.sort(key=lambda m: (-_lite_score(m), _rank(m)))
+    fb_chosen = plan_fallback(models)["chosen"]
 
     big = [m for m in models
            if _is_healthy(m) and (m.get("contextLength") or 0) >= LARGE_CTX]
@@ -118,7 +237,7 @@ def select_models(data: dict) -> dict:
     ))
 
     return {
-        "fallback": [m["id"] for m in fb[:2]],
+        "fallback": fb_chosen,
         "compression": big_id,
         "web_extract": big_id,
         "title_generation": title[0]["id"] if title else None,
@@ -220,8 +339,33 @@ def main() -> int:
     if not config_path.exists():
         raise RuntimeError(f"Config not found: {config_path}")
 
-    data = fetch_json(args.url)
+    previous = None
+    if state_path.exists():
+        try:
+            previous = json.loads(state_path.read_text(encoding="utf-8")).get("selection")
+        except Exception:
+            previous = None
+
+    # Feed unreachable (tier 3): hold the previous selection rather than crash,
+    # so a transient network failure does not clear the fallback chain. With no
+    # previous state there is nothing to hold — fail loudly (exit 1).
+    try:
+        data = fetch_json(args.url)
+    except Exception as exc:
+        if previous and previous.get("fallback"):
+            alert = build_fallback_alert(previous["fallback"], [], [],
+                                         source="previous",
+                                         note=f"feed unreachable: {exc}")
+            if alert:
+                print(alert)
+            return 0
+        raise
+
+    models = data.get("models") or []
     sel = select_models(data)
+    plan = plan_fallback(models)
+    sel, source, alert = resolve_degradation(sel, plan, previous, models)
+
     result = {
         "selection": sel,
         "rankingVersion": data.get("rankingVersion"),
@@ -231,31 +375,29 @@ def main() -> int:
 
     if args.print_only:
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        if alert:
+            print(alert)
         return 0
 
-    previous = None
-    if state_path.exists():
-        try:
-            previous = json.loads(state_path.read_text(encoding="utf-8")).get("selection")
-        except Exception:
-            previous = None
-
-    if previous == sel and not args.force:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(state_path, json.dumps(result, ensure_ascii=False, indent=2) + "\n")
-        return 0  # unchanged: stay quiet
-
-    update_config(config_path, sel)
     state_path.parent.mkdir(parents=True, exist_ok=True)
+    unchanged = previous == sel and not args.force
+    if not unchanged:
+        update_config(config_path, sel)
     _atomic_write(state_path, json.dumps(result, ensure_ascii=False, indent=2) + "\n")
 
-    lines = ["openrouter free-model refresh: config updated"]
-    lines.append(f"fallback_providers: {', '.join(sel['fallback']) or '(empty — primary only)'}")
-    for task in AUX_TASKS:
-        lines.append(f"auxiliary.{task}: {sel[task] or 'primary (gpt-5.4-mini)'}")
-    if previous is not None:
-        lines.append(f"previous fallback: {', '.join(previous.get('fallback', [])) or '(empty)'}")
-    print("\n".join(lines))
+    if not unchanged:
+        lines = ["openrouter free-model refresh: config updated"]
+        lines.append(f"fallback_providers: {', '.join(sel['fallback']) or '(empty — primary only)'}")
+        for task in AUX_TASKS:
+            lines.append(f"auxiliary.{task}: {sel[task] or 'primary (gpt-5.4-mini)'}")
+        if previous is not None:
+            lines.append(f"previous fallback: {', '.join(previous.get('fallback', [])) or '(empty)'}")
+        print("\n".join(lines))
+
+    # Degraded state is re-reported on every run (even when unchanged) so a
+    # persisting collapse stays visible; healthy + unchanged stays fully silent.
+    if alert:
+        print(alert)
     return 0
 
 
