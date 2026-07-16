@@ -47,6 +47,13 @@ def test_backup_creates_dated_copy(tmp_path):
     con.close()
     assert oct(dest_dir.stat().st_mode)[-3:] == "700"
 
+def test_backup_file_mode_600(tmp_path):
+    # the backup carries the same PII as the live DB -- must not be group/world readable
+    src = tmp_path / "assistant.db"
+    con = sqlite3.connect(str(src)); con.execute("CREATE TABLE t(x)"); con.close()
+    dest = maint.backup_db(src, tmp_path / "backups", keep=7)
+    assert (dest.stat().st_mode & 0o777) == 0o600
+
 def test_backup_rotation_keeps_newest(tmp_path):
     src = tmp_path / "assistant.db"; _make_db(src)
     dest_dir = tmp_path / "backups"; dest_dir.mkdir()

@@ -9,6 +9,7 @@ def cmd_init(args):
     rem.seed_default_rules(conn)
     rem.migrate_rules_2c(conn)
     conn.commit()
+    famdb.harden_perms(famdb.resolve_db_path())
     out = {"ok": True, "db": famdb.resolve_db_path()}
     print(json.dumps(out, ensure_ascii=False) if args.json else f"initialized {out['db']}")
     return 0

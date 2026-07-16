@@ -151,6 +151,20 @@ def test_resolve_db_path_fam_db_parent_missing(monkeypatch):
     with pytest.raises(SystemExit):
         famdb.resolve_db_path()
 
+def test_harden_perms(tmp_path):
+    import os
+    from fam import db as famdb
+    d = tmp_path / "amina"; d.mkdir()
+    f = d / "assistant.db"; f.write_bytes(b"")
+    os.chmod(f, 0o644); os.chmod(d, 0o775)
+    famdb.harden_perms(str(f))
+    assert (f.stat().st_mode & 0o777) == 0o600
+    assert (d.stat().st_mode & 0o777) == 0o700
+
+def test_harden_perms_missing_file_never_raises(tmp_path):
+    from fam import db as famdb
+    famdb.harden_perms(str(tmp_path / "nope.db"))  # no exception
+
 
 # ---- schema 2b migration ----
 

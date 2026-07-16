@@ -104,6 +104,7 @@ def backup_db(src, dest_dir, keep, now=None):
     dest_dir.chmod(0o700)
     dest = _backup_dest(src, dest_dir, now)
     _sqlite_backup(src, dest)
+    os.chmod(dest, 0o600)   # backups carry the same PII as the live DB
     _rotate(dest_dir, src.stem, keep)
     return dest
 

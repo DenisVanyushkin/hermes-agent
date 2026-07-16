@@ -179,6 +179,17 @@ def resolve_db_path():
             return p
     raise SystemExit(2)
 
+def harden_perms(db_path):
+    """Best-effort chmod: the DB file itself 600, its parent dir 700.
+    The DB holds meds schedules, car GPS and full outbound message
+    texts -- nothing on this VM besides the owner should read it.
+    Never raises (a read-only FS or foreign owner must not break init)."""
+    try:
+        os.chmod(db_path, 0o600)
+        os.chmod(os.path.dirname(db_path) or ".", 0o700)
+    except OSError:
+        pass
+
 def connect(db_path=None):
     path = db_path or resolve_db_path()
     conn = sqlite3.connect(path, timeout=5.0)
