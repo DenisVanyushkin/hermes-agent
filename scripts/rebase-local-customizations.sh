@@ -304,8 +304,13 @@ verify_tree_compiles() {
   local py
   py="$(resolve_repo_python)"
   [ -n "$py" ] || return 0
+  # NB: the program must be passed via -c, NOT a stdin heredoc: `... | python - <<EOF`
+  # points python's stdin at the heredoc, so the piped file list was never read
+  # (the check was vacuous) and once `git ls-files` output outgrew the 64K pipe
+  # buffer the unread pipe raised SIGPIPE and failed the check with no output
+  # at all (root cause of the 2026-07-16 causeless finalize failure).
   if ! (cd "$REPO" && git ls-files -z -- 'agent/*.py' 'gateway/*.py' 'hermes_cli/*.py' 'tools/*.py' 'cron/*.py' 'plugins/*.py' 'job_intel/*.py' 'run_agent.py' 'hermes_state.py' \
-      | "$py" - <<'PYEOF'
+      | "$py" -c '
 import ast, sys
 failed = 0
 for path in sys.stdin.buffer.read().split(b"\0"):
@@ -321,7 +326,7 @@ for path in sys.stdin.buffer.read().split(b"\0"):
     except OSError:
         pass
 sys.exit(failed)
-PYEOF
+'
   ); then
     echo "Post-rebase syntax check FAILED — see errors above. Not pushing, not restarting." >&2
     return 1
