@@ -2,7 +2,7 @@ schema_version: 1
 id: default_conversation_pipeline
 display_name: Default Conversation Pipeline
 version: 1
-purpose: Handles conversational, explanatory, planning, and other low-risk requests that do not match a specialized pipeline.
+purpose: Handles conversational, explanatory, planning, and other low-risk requests that do not match a specialized pipeline. This includes read-only diagnostics, investigations, status checks, log and config inspection, and "why did X happen" / "check why X" questions about Hermes itself — as long as no code change is requested.
 entry_conditions:
   any:
     - router_status == no_specialized_pipeline and no_policy_block == true

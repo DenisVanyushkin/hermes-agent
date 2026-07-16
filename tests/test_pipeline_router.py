@@ -243,7 +243,7 @@ def test_llm_router_selects_engineering_pipeline_for_russian_mutation_prompt(tmp
     assert captured["timeout_seconds"] == 9
 
 
-def test_llm_router_prompt_routes_infrastructure_diagnostics_to_engineering(tmp_path: Path) -> None:
+def test_llm_router_prompt_routes_infrastructure_diagnostics_to_default(tmp_path: Path) -> None:
     loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
 
     def _fake_llm_call(
@@ -254,24 +254,24 @@ def test_llm_router_prompt_routes_infrastructure_diagnostics_to_engineering(tmp_
         messages: list[dict[str, str]],
     ) -> dict:
         prompt = "\n".join(message["content"] for message in messages)
-        if "diagnose or investigate code or infrastructure" in prompt:
+        if "Read-only diagnostics and investigations are NOT engineering" in prompt:
             return {
-                "status": "selected",
-                "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
-                "fallback_pipeline_id": None,
+                "status": "no_specialized_pipeline",
+                "selected_pipeline_id": None,
+                "fallback_pipeline_id": DEFAULT_PIPELINE_ID,
                 "confidence": 0.92,
-                "reasoning_summary": "The request asks for infrastructure diagnosis.",
+                "reasoning_summary": "Read-only diagnostics stay on the default pipeline.",
                 "requires_clarification": False,
-                "fallback_safe": False,
+                "fallback_safe": True,
             }
         return {
-            "status": "no_specialized_pipeline",
-            "selected_pipeline_id": None,
-            "fallback_pipeline_id": DEFAULT_PIPELINE_ID,
+            "status": "selected",
+            "selected_pipeline_id": ENGINEERING_PIPELINE_ID,
+            "fallback_pipeline_id": None,
             "confidence": 0.92,
-            "reasoning_summary": "No diagnostic routing rule was supplied.",
+            "reasoning_summary": "No mutation-only routing rule was supplied.",
             "requires_clarification": False,
-            "fallback_safe": True,
+            "fallback_safe": False,
         }
 
     router = LlmPipelineRouter(
@@ -286,6 +286,67 @@ def test_llm_router_prompt_routes_infrastructure_diagnostics_to_engineering(tmp_
         "почему cron-джоб ушёл на OpenRouter, а не на базовую модель?",
         pipeline_session_id="sess-llm-infrastructure-diagnostic",
     )
+
+    assert decision.status == "no_specialized_pipeline"
+    assert decision.selected_pipeline_id is None
+    assert decision.fallback_pipeline_id == DEFAULT_PIPELINE_ID
+
+
+def test_router_prompt_no_longer_routes_diagnostics_to_engineering() -> None:
+    loaded_specs = load_pipeline_specs(repo_root=REPO_ROOT)
+    messages = _build_router_messages(loaded_specs, "Why did the cron job fail?")
+    prompt = "\n".join(message["content"] for message in messages)
+    assert "as engineering even when no mutation is requested" not in prompt
+    assert "belongs to engineering even without a mutation request" not in prompt
+    assert "Read-only diagnostics and investigations are NOT engineering" in prompt
+
+
+def test_engineering_entry_conditions_require_code_mutation_only() -> None:
+    spec = _load_yaml(REPO_ROOT / "config" / "pipelines" / "engineering_review_pipeline.yaml")
+    conditions = spec["entry_conditions"]["any"]
+    assert conditions == ["task_intent includes code_mutation"]
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # read-only diagnostics / investigations
+        "почему упал cron hermes-rebase-local-customizations?",
+        "check why the morning digest was not delivered",
+        "why did the gateway restart at night?",
+        # status checks
+        "какой статус у job-intel pipeline сегодня?",
+        "what is the current status of the engineering pipeline?",
+        # log / config inspection
+        "покажи ошибки в gateway.log за сегодня",
+        "inspect config/pipelines/engineering_review_pipeline.yaml and explain the entry conditions",
+        # explanation requests
+        "объясни как работает review gate в Hermes",
+        "explain how the pipeline router selects a pipeline",
+    ],
+)
+def test_read_only_engineering_requests_stay_on_default_pipeline(tmp_path: Path, prompt: str) -> None:
+    router = _build_router(_copy_spec_tree(tmp_path))
+
+    decision = router.route(prompt, pipeline_session_id="sess-read-only")
+
+    assert decision.selected_pipeline_id != ENGINEERING_PIPELINE_ID
+    assert decision.status != "selected"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "fix test tests/test_pipeline_router.py and update tests",
+        "patch hermes_cli/pipeline_router.py to handle the null case",
+        "исправь баг в gateway/run.py и добавь regression test",
+        "refactor cron/scheduler.py error classifier",
+    ],
+)
+def test_code_mutation_requests_select_engineering_pipeline(tmp_path: Path, prompt: str) -> None:
+    router = _build_router(_copy_spec_tree(tmp_path))
+
+    decision = router.route(prompt, pipeline_session_id="sess-mutation")
 
     assert decision.status == "selected"
     assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID

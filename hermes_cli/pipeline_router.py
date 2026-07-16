@@ -145,9 +145,11 @@ _ENGINEERING_MUTATION_KEYWORDS = (
     "patch",
     "write file",
     "write_file",
-    "modify code",
-    "modify config",
-    "modify tests",
+    "modify",
+    "rewrite",
+    "produce a diff",
+    "open a pr",
+    "open a pull request",
     "fix test",
     "refactor",
     "git commit",
@@ -628,12 +630,17 @@ class HeuristicPipelineRouter(PipelineRouter):
         has_path_signal = bool(_ENGINEERING_PATH_PATTERN.search(normalized))
         has_mutation_signal = _matches_any(normalized, _ENGINEERING_MUTATION_KEYWORDS)
         has_domain_signal = _matches_any(normalized, _ENGINEERING_DOMAIN_KEYWORDS)
-        has_debug_signal = _matches_any(normalized, _ENGINEERING_DEBUG_KEYWORDS)
 
-        if has_domain_signal and (has_mutation_signal or has_debug_signal):
+        # Mutation intent is mandatory: read-only diagnostics, log/config
+        # inspection, and "why did X happen" questions must stay on the
+        # default pipeline even when they mention engineering paths or
+        # debug vocabulary. Path/domain signals are supplementary only.
+        if not has_mutation_signal:
+            return ()
+
+        matched_signals.append("task_intent includes code_mutation")
+        if has_domain_signal:
             matched_signals.append("task_classification.domain == engineering")
-        if has_mutation_signal:
-            matched_signals.append("task_intent includes code_mutation")
         if has_path_signal:
             matched_signals.append("target_paths match engineering_path_patterns")
 
@@ -1558,11 +1565,12 @@ def _build_router_messages(
                 "You are the Hermes pipeline router. Select only from the declared pipeline registry. "
                 "Use semantic intent, requested mutations, and target paths. "
                 "Deterministic keywords are incomplete; rely on the registry semantics instead. "
-                "Treat requests to diagnose or investigate code or infrastructure as engineering even when no mutation is requested. "
-                "This includes questions about why something failed, how a technical path works, where a request was routed, "
-                "and analysis of errors, logs, server configuration, or agent configuration. "
+                "Select the engineering pipeline ONLY when the user asks to change code: write, modify, or fix code or config, "
+                "produce a diff, or open a PR. Read-only diagnostics and investigations are NOT engineering: questions about "
+                "why something failed, how a technical path works, where a request was routed, and analysis of errors, logs, "
+                "server configuration, or agent configuration all belong on the default pipeline when no code change is requested. "
                 "Keep casual conversation, acknowledgements, and nontechnical explanations on the default pipeline. "
-                "A read-only infrastructure diagnostic is not ambiguous merely because it requests no mutation. "
+                "A read-only infrastructure diagnostic is not ambiguous merely because it requests no mutation; route it to the default pipeline. "
                 "Never invent pipeline ids or statuses. If the request is ambiguous between read-only audit and mutation, "
                 "return needs_clarification. If the request asks for unsafe bypass, secret exfiltration, or destructive misuse, "
                 "return blocked_by_policy. Return JSON only. confidence must be a JSON number between 0 and 1 inclusive. "
@@ -1612,16 +1620,16 @@ def _build_router_messages(
                 '  "fallback_safe": true,\n'
                 '  "reasoning_summary": "Career writing is not an engineering code-change pipeline."\n'
                 '}\n\n'
-                'Example D - infrastructure diagnostic prompt:\n'
+                'Example D - read-only infrastructure diagnostic prompt:\n'
                 'Input: "Why did the cron job use OpenRouter instead of the base model?"\n'
                 '{\n'
-                '  "status": "selected",\n'
-                '  "selected_pipeline_id": "engineering_review_pipeline",\n'
-                '  "fallback_pipeline_id": null,\n'
+                '  "status": "no_specialized_pipeline",\n'
+                '  "selected_pipeline_id": null,\n'
+                '  "fallback_pipeline_id": "default_conversation_pipeline",\n'
                 '  "confidence": 0.9,\n'
                 '  "requires_clarification": false,\n'
-                '  "fallback_safe": false,\n'
-                '  "reasoning_summary": "Infrastructure diagnosis belongs to engineering even without a mutation request."\n'
+                '  "fallback_safe": true,\n'
+                '  "reasoning_summary": "Read-only diagnostics without a code-change request stay on the default pipeline."\n'
                 '}\n\n'
                 f"User message:\n{user_message.strip()}\n"
             ),
