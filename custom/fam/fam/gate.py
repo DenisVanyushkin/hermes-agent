@@ -24,7 +24,21 @@ ALMATY = ZoneInfo("Asia/Almaty")
 HERMES = ["/home/denis/.hermes/hermes-agent/venv/bin/python", "-m", "hermes_cli.main"]
 
 CONFIG_PATH = Path("/home/denis/.hermes/private/amina/fam-config.json")
+# The fam CLI also runs inside the docker sandbox, where the private dir is
+# mounted under /root. Resolving host->sandbox (like db.resolve_db_path /
+# car._resolve_token_path) matters twice over: the sandbox must read the
+# LIVE config, and the bootstrap below must not mkdir /home/denis inside
+# the container -- a stray /home/denis/.hermes/private/amina there flips
+# db.resolve_db_path onto an empty HOST_DB (2026-07-16 incident).
+SANDBOX_CONFIG_PATH = Path("/root/.hermes/private/amina/fam-config.json")
 CONFIG_EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "fam-config.example.json"
+
+
+def _resolve_config_path():
+    for p in (CONFIG_PATH, SANDBOX_CONFIG_PATH):
+        if p.exists():
+            return p
+    return CONFIG_PATH
 
 # Keys added to fam-config.example.json after a live config may already
 # exist on disk. load_config() default-merges any of these missing from
@@ -195,7 +209,7 @@ def load_config(config_path=None, example_path=None):
     that predates that key) is default-merged into the returned dict --
     see CONFIG_DEFAULTS's docstring.
     """
-    cfg_path = Path(config_path) if config_path is not None else CONFIG_PATH
+    cfg_path = Path(config_path) if config_path is not None else _resolve_config_path()
     ex_path = Path(example_path) if example_path is not None else CONFIG_EXAMPLE_PATH
     if not cfg_path.exists():
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
