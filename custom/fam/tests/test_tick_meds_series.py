@@ -241,13 +241,17 @@ def test_out_of_stock_sends_one_buy_message_and_clears_series(db, fake_deliver):
     assert len(_med_calls(fake_deliver)) == 1
 
 
-def test_out_of_stock_notice_once_per_med_per_day(db, fake_deliver):
+def test_out_of_stock_notice_once_per_med_per_day(db, fake_deliver, monkeypatch):
     # Finding 10 (go-live review): a multi-dose schedule (times=08:00,
     # 20:00) opens one med_intakes row PER dose (meds_gen's own
     # contract), so without a per-med/per-day dedup, an out-of-stock med
     # would nag "надо купить" twice in the same day -- once per dose.
     # The dedup key is med_oos_sent:<med_id>:<Almaty date>, same raw-SQL
     # meta pattern _followup already uses for its own once-a-day guard.
+    # The 08:00 Almaty tick falls inside Task 6's digest-retry window
+    # (07:40-12:00), so neutralize the hook to keep this test hermetic --
+    # otherwise it would trigger a live digest() -> Open-Meteo fetch.
+    monkeypatch.setattr(tick, "_digest_retry", lambda *a, **k: None)
     med_id = meds.add(db, "Витамин", ["08:00", "20:00"], remaining=0,
                        threshold=5)
     db.commit()
