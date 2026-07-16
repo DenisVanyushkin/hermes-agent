@@ -98,3 +98,25 @@ def test_is_2gis_link():
     assert not geo2gis.is_2gis_link("https://maps.google.com/x")
     assert not geo2gis.is_2gis_link("Invictus, ул. Абая 10")
     assert not geo2gis.is_2gis_link("")
+
+
+# --- T4: scheme guard (only http/https are ever expanded) ------------------
+
+def test_non_http_scheme_rejected_no_fetch():
+    # host allowlist alone still lets ftp://go.2gis.com/... reach urllib's
+    # FTP handler; the scheme guard must reject it before any fetch, and
+    # before the inline-coords fast path too.
+    called = []
+
+    def fetch(url, timeout):
+        called.append(url)
+        return None
+
+    assert geo2gis.resolve_place_coords(
+        "ftp://go.2gis.com/01L46", _fetch_location=fetch) is None
+    assert called == []
+
+
+def test_is_2gis_link_rejects_non_http():
+    assert geo2gis.is_2gis_link("ftp://go.2gis.com/abc") is False
+    assert geo2gis.is_2gis_link("https://go.2gis.com/abc") is True

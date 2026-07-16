@@ -29,12 +29,24 @@ ALLOWED_HOSTS = ("go.2gis.com", "2gis.kz", "2gis.ru", "2gis.com")
 DEFAULT_TIMEOUT = 8
 
 
+def _scheme_ok(url):
+    # Host allowlist alone still lets ftp://go.2gis.com/... reach
+    # urllib's FTP handler; only web URLs are ever expanded.
+    try:
+        return urlsplit(url).scheme.lower() in ("http", "https")
+    except Exception:
+        return False
+
+
 def is_2gis_link(text):
     """True if text looks like a 2GIS URL on an allowed host."""
     if not text or "://" not in text:
         return False
-    host = urlsplit(text.strip()).hostname or ""
+    text = text.strip()
+    host = urlsplit(text).hostname or ""
     host = host.lower()
+    if not _scheme_ok(text):
+        return False
     return any(host == h or host.endswith("." + h) for h in ALLOWED_HOSTS)
 
 
@@ -123,6 +135,9 @@ def resolve_place_coords(url, *, timeout=DEFAULT_TIMEOUT, _fetch_location=None):
     if not url or "://" not in url:
         return None
     url = url.strip()
+
+    if not _scheme_ok(url):
+        return None
 
     direct = _extract_lonlat(url)
     if direct is not None:
