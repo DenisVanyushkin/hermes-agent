@@ -1,5 +1,5 @@
 """series.generate: materialize occurrences (Asia/Almaty), idempotent, horizon."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fam import series, cal, people, places
 
@@ -102,6 +102,30 @@ def test_cancelled_occurrence_is_not_resurrected(db):
     same = db.execute("SELECT COUNT(*) c FROM events WHERE series_id=? AND "
                       "start_utc=?", (s["id"], ev["start_utc"])).fetchone()["c"]
     assert same == 1
+
+
+def test_reschedule_occurrence_leaves_tombstone_no_dup(db):
+    s = series.add(db, "Тренировка", "mon,wed,fri", "10:00"); db.commit()
+    series.generate(db, now_utc=NOW, horizon_weeks=2); db.commit()
+    occ = db.execute(
+        "SELECT * FROM events WHERE series_id=? AND status='active' "
+        "ORDER BY start_utc LIMIT 1", (s["id"],)).fetchone()
+    old_start = occ["start_utc"]
+    new_start = (datetime.fromisoformat(old_start)
+                 + timedelta(hours=2)).isoformat(timespec="seconds")
+    cal.update(db, occ["id"], start_utc=new_start)
+    db.commit()
+    series.generate(db, now_utc=NOW, horizon_weeks=2)  # regen that used to duplicate
+    db.commit()
+    at_old = db.execute(
+        "SELECT status FROM events WHERE series_id=? AND start_utc=?",
+        (s["id"], old_start)).fetchall()
+    assert [r["status"] for r in at_old] == ["cancelled"]   # tombstone only
+    moved = db.execute("SELECT * FROM events WHERE id=?", (occ["id"],)).fetchone()
+    assert moved["start_utc"] == new_start and moved["series_id"] == s["id"]
+    ts = db.execute(
+        "SELECT 1 FROM audit_log WHERE kind='cal.series.tombstone'").fetchone()
+    assert ts is not None
 
 
 def test_series_cancel_deletes_future_untouched(db):

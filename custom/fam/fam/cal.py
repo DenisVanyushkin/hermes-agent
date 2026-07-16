@@ -275,6 +275,18 @@ def update(conn, event_id, **fields):
     notes-only edit. Callers that don't care (get()/add() callers, most
     test assertions) can simply ignore the key; cli.py's cmd_cal_update
     pops it off before further use (JSON output, etc.).
+
+    Rescheduling a series occurrence (event_id has series_id set and the
+    normalized start_utc differs from its pre-update value) additionally
+    leaves a minimal cancelled tombstone row behind at the ORIGINAL slot
+    (same series_id, old start_utc) -- see the tombstone block below for
+    why. Known edge, accepted: moving an occurrence onto a slot already
+    claimed by another occurrence of the SAME series (active, or a past
+    tombstone -- idx_events_series_start's partial UNIQUE(series_id,
+    start_utc) covers every status, not just active) raises
+    sqlite3.IntegrityError out of the UPDATE above. This is intentional
+    protection against two occurrences of one series colliding on a
+    single slot, not a bug to work around.
     """
     existing = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
     if existing is None:
@@ -341,6 +353,48 @@ def update(conn, event_id, **fields):
     conn.execute(
         f"UPDATE events SET {', '.join(set_clauses)} WHERE id=?", params
     )
+
+    # A rescheduled series occurrence must leave a tombstone at its
+    # ORIGINAL slot (go-live review, finding 4): series.generate's
+    # occupied-check is exact (series_id, start_utc), so a freed slot
+    # would be regenerated as a duplicate on the next cal-gen tick. The
+    # moved event keeps its series_id -- it is still "the Tuesday
+    # training", just at a different time (and series.cancel correctly
+    # sweeps it as a future occurrence).
+    #
+    # idx_events_series_start (db.py) is UNIQUE(series_id, start_utc)
+    # WHERE series_id IS NOT NULL -- it does NOT exclude cancelled rows,
+    # so once a slot has a tombstone it stays permanently claimed. That
+    # index is what turns "move onto a slot already used by the same
+    # series" (active occurrence OR earlier tombstone) into an
+    # IntegrityError out of the UPDATE above, before this code runs --
+    # accepted per the docstring. The same index also guarantees this
+    # row was the sole occupant of (series_id, old start_utc) up until
+    # the UPDATE just moved it away, so the freed slot cannot already
+    # hold another row at this point; the SELECT below is a defensive
+    # belt-and-suspenders guard for that invariant, not expected to ever
+    # find one in practice.
+    new_start_utc = fields.get("start_utc")
+    if (existing["series_id"] is not None
+            and new_start_utc is not None
+            and new_start_utc != existing["start_utc"]):
+        slot_taken = conn.execute(
+            "SELECT 1 FROM events WHERE series_id=? AND start_utc=?",
+            (existing["series_id"], existing["start_utc"]),
+        ).fetchone()
+        if slot_taken is None:
+            conn.execute(
+                "INSERT INTO events(title, start_utc, end_utc, place_id, "
+                "transport, status, notes, travel_min, series_id, "
+                "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (existing["title"], existing["start_utc"], existing["end_utc"],
+                 existing["place_id"], existing["transport"], "cancelled",
+                 existing["notes"], existing["travel_min"],
+                 existing["series_id"], now, now),
+            )
+            audit.log(conn, "cal.series.tombstone",
+                      {"series_id": existing["series_id"], "event_id": event_id,
+                       "freed_slot_utc": existing["start_utc"]})
 
     for person in to_add:
         conn.execute(
