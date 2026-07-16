@@ -294,6 +294,68 @@ def test_out_of_stock_notice_once_per_med_per_day(db, fake_deliver, monkeypatch)
     }
 
 
+def test_out_of_stock_buy_notice_deferred_past_quiet_hours(db, fake_deliver):
+    # Denis's decision (2026-07-16, go-live T2 follow-up): unlike the
+    # take-now reminder (which fires through quiet hours per the go-live
+    # decision exercised above), the out-of-stock "buy more" notice has
+    # no time urgency and must NOT land during quiet hours. A tick inside
+    # quiet must send nothing and leave the row pending/still-due; a
+    # later tick past quiet then sends the notice once and closes the row.
+    med_id = meds.add(db, "Магний", ["22:00"], dose="1 таб", remaining=0,
+                       threshold=5)
+    db.commit()
+    plan_ts = "2026-07-20T17:00:00+00:00"  # 22:00 Almaty
+    intake_id = _insert_intake(db, med_id, plan_ts, plan_ts)
+
+    # Tick inside quiet hours (22:00 Almaty == QUIET_NOW).
+    tick.reminders(db, now_utc=QUIET_NOW, cfg=CFG)
+
+    assert _med_calls(fake_deliver) == []
+    row = db.execute(
+        "SELECT status, series_next_utc FROM med_intakes WHERE id=?",
+        (intake_id,),
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["series_next_utc"] == plan_ts  # untouched -- still due
+    assert db.execute(
+        "SELECT COUNT(*) FROM meta WHERE key LIKE 'med_oos_sent:%'"
+    ).fetchone()[0] == 0
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='tick.med'"
+    ).fetchone()[0] == 0
+
+    # A later tick past quiet hours delivers the deferred notice once and
+    # closes the row. 13:00 Almaty next day -- past quiet AND outside the
+    # 07:40-12:00 Almaty digest-retry window (Task 6), which would
+    # otherwise trigger a live digest() call in this same tick.
+    fake_deliver.responses = ["sent"]
+    after_quiet = "2026-07-21T08:00:00+00:00"  # 13:00 Almaty next day
+    tick.reminders(db, now_utc=after_quiet, cfg=CFG)
+
+    calls = _med_calls(fake_deliver)
+    assert len(calls) == 1
+    assert calls[0]["raw"]["mode"] == "out_of_stock"
+    assert calls[0]["raw"]["name"] == "Магний"
+    row = db.execute(
+        "SELECT status, series_next_utc FROM med_intakes WHERE id=?",
+        (intake_id,),
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["series_next_utc"] is None
+    assert db.execute(
+        "SELECT COUNT(*) FROM meta WHERE key=?",
+        (f"med_oos_sent:{med_id}:2026-07-21",),
+    ).fetchone()[0] == 1
+
+    audit_rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.med'"
+    ).fetchall()
+    assert len(audit_rows) == 1
+    assert json.loads(audit_rows[0]["payload"]) == {
+        "intake_id": intake_id, "mode": "out_of_stock", "deduped": False,
+    }
+
+
 def test_remaining_none_never_treated_as_out_of_stock(db, fake_deliver):
     # remaining=None means "not tracked" -- must take the ordinary "take"
     # path, never the out_of_stock one (only remaining == 0 counts).

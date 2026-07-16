@@ -627,6 +627,21 @@ def _meds_series(conn, now_utc, cfg):
         either way (deduped or not) so this same dose never nags again
         today -- status is left pending; meds_gen's midnight closeout is
         what eventually marks an un-acked dose "missed".
+        Go-live T2 follow-up (Denis, 2026-07-16): unlike the take-now
+        reminder above (which deliberately fires through quiet hours),
+        the buy-more notice has no time urgency and must NOT land during
+        quiet hours. When the dedup meta key isn't set yet AND now_utc is
+        inside quiet hours, the row is left exactly as found (series_next_
+        utc untouched, still due, no meta write, no gate.deliver call, no
+        tick.med audit row) and this iteration moves on -- a later tick,
+        once quiet ends, re-examines the same still-pending row: `already`
+        is still None, so it sends the notice once, writes the meta key,
+        and closes the row via the same UPDATE below. When the meta key
+        IS already set (an earlier dose today already sent the notice),
+        the row is closed immediately regardless of quiet hours -- there
+        is nothing left to defer, only the row bookkeeping to finish. The
+        disabled/unknown-med branch above and the take branch below are
+        unaffected by this guard.
       - otherwise -> an ordinary "take this now" reminder (mode="take"),
         delivered via gate.deliver(force=True) -- Denis's decision:
         medication reminders bypass quiet hours and the daily budget
@@ -653,8 +668,8 @@ def _meds_series(conn, now_utc, cfg):
     resurface the row in a later tick's due-selection (that query also
     filters status='pending').
 
-    Every row is audited as tick.med: {intake_id, mode:"disabled"} for
-    the disabled/unknown-med branch, {intake_id, mode:"out_of_stock",
+    Every PROCESSED row is audited as tick.med: {intake_id, mode:"disabled"}
+    for the disabled/unknown-med branch, {intake_id, mode:"out_of_stock",
     deduped} for the out-of-stock branch, {intake_id, mode:"take",
     status} for the ordinary branch -- "status" is gate.deliver's return
     value, kept here (unlike out_of_stock, whose own delivery outcome
@@ -665,11 +680,18 @@ def _meds_series(conn, now_utc, cfg):
     notice was actually sent (False, meta key was unset) or silently
     absorbed by another dose's earlier notice the same Almaty day (True)
     -- the series is closed either way, but only a non-deduped row
-    corresponds to a real gate.deliver call.
+    corresponds to a real gate.deliver call. The one exception: the
+    out_of_stock quiet-hours defer (above) audits nothing at all for that
+    iteration -- the row isn't actually being closed, just left pending
+    for a later tick to re-examine, and auditing every deferred minute
+    of a ~10h quiet window would add hundreds of no-op rows for one
+    still-open dose.
 
     Commits once per due row (mirrors the per-reminder commit in the main
     loop above -- gate.deliver's send is an irreversible real-world side
     effect, so each row's outcome is narrowed to its own transaction).
+    The out_of_stock quiet-hours defer commits nothing either -- there is
+    nothing to persist, since the row was left exactly as SELECTed.
     """
     now_dt = _parse_utc(now_utc)
     due = conn.execute(
@@ -728,6 +750,13 @@ def _meds_series(conn, now_utc, cfg):
                 already = conn.execute(
                     "SELECT value FROM meta WHERE key=?", (oos_key,)).fetchone()
                 if already is None:
+                    # The buy-more nudge has no time urgency (unlike the
+                    # take-now reminder, which fires through quiet by
+                    # Denis's decision). Defer it out of quiet hours:
+                    # leave the intake row pending so a later tick past
+                    # quiet delivers it once. (Go-live T2 side-effect fix.)
+                    if gate.in_quiet_hours(now_utc, cfg):
+                        continue
                     raw = {"mode": "out_of_stock", "name": name, "dose": dose}
                     human_fallback = f"Заканчивается {name} — надо купить."
                     gate.deliver(conn, "med", raw, human_fallback, cfg,
