@@ -599,10 +599,17 @@ def _meds_series(conn, now_utc, cfg):
         dose "missed" the same as any other pending row. Audited as
         tick.med: {intake_id, mode:"disabled"}.
       - meds.get(med_id): if remaining is not None and remaining == 0 ->
-        exactly ONE "go buy this" notice (mode="out_of_stock"), then
-        series_next_utc is cleared to NULL so this same dose never nags
-        again today -- status is left pending; meds_gen's midnight
-        closeout is what eventually marks an un-acked dose "missed".
+        at most ONE "go buy this" notice (mode="out_of_stock") per med
+        PER ASIA/ALMATY DAY (go-live review, Finding 10) -- a multi-dose
+        schedule (times=08:00,20:00) opens one med_intakes row per dose,
+        so without this dedup an out-of-stock med would nag twice a day,
+        once per dose. Dedup is a meta row keyed
+        "med_oos_sent:<med_id>:<date_local>", checked/written with the
+        same raw-SQL SELECT + INSERT OR REPLACE pattern _followup uses
+        for its own once-a-day guard. series_next_utc is cleared to NULL
+        either way (deduped or not) so this same dose never nags again
+        today -- status is left pending; meds_gen's midnight closeout is
+        what eventually marks an un-acked dose "missed".
       - otherwise -> an ordinary "take this now" reminder (mode="take"),
         delivered via gate.deliver(force=True) -- Denis's decision:
         medication reminders bypass quiet hours and the daily budget
@@ -630,13 +637,18 @@ def _meds_series(conn, now_utc, cfg):
     filters status='pending').
 
     Every row is audited as tick.med: {intake_id, mode:"disabled"} for
-    the disabled/unknown-med branch, {intake_id, mode:"out_of_stock"}
-    for the out-of-stock branch, {intake_id, mode:"take", status} for
-    the ordinary branch -- "status" is gate.deliver's return value, kept
-    here (unlike out_of_stock, whose own delivery outcome isn't the
-    operationally interesting fact -- the series being paused for the
-    day is) since a persistent "quiet"/"budget"/"error" for a live dose
-    is exactly the kind of thing worth seeing in the audit trail.
+    the disabled/unknown-med branch, {intake_id, mode:"out_of_stock",
+    deduped} for the out-of-stock branch, {intake_id, mode:"take",
+    status} for the ordinary branch -- "status" is gate.deliver's return
+    value, kept here (unlike out_of_stock, whose own delivery outcome
+    isn't the operationally interesting fact -- the series being paused
+    for the day is) since a persistent "quiet"/"budget"/"error" for a
+    live dose is exactly the kind of thing worth seeing in the audit
+    trail. out_of_stock's own "deduped" flag records whether THIS row's
+    notice was actually sent (False, meta key was unset) or silently
+    absorbed by another dose's earlier notice the same Almaty day (True)
+    -- the series is closed either way, but only a non-deduped row
+    corresponds to a real gate.deliver call.
 
     Commits once per due row (mirrors the per-reminder commit in the main
     loop above -- gate.deliver's send is an irreversible real-world side
@@ -690,17 +702,30 @@ def _meds_series(conn, now_utc, cfg):
             dose = med.get("dose")
 
             if med.get("remaining") is not None and med["remaining"] == 0:
-                raw = {"mode": "out_of_stock", "name": name, "dose": dose}
-                human_fallback = f"Заканчивается {name} — надо купить."
-                gate.deliver(conn, "med", raw, human_fallback, cfg, force=True,
-                              now_utc=now_utc)
+                # One "buy more" notice per med per Almaty day: each dose
+                # of a multi-dose schedule opens its own intake row, so
+                # without this dedup a times=08:00,20:00 med out of stock
+                # would nag twice a day. The series row is still closed
+                # (series_next_utc=NULL) either way.
+                oos_key = f"med_oos_sent:{med['id']}:{_today_almaty(now_utc)}"
+                already = conn.execute(
+                    "SELECT value FROM meta WHERE key=?", (oos_key,)).fetchone()
+                if already is None:
+                    raw = {"mode": "out_of_stock", "name": name, "dose": dose}
+                    human_fallback = f"Заканчивается {name} — надо купить."
+                    gate.deliver(conn, "med", raw, human_fallback, cfg,
+                                  force=True, now_utc=now_utc)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                        (oos_key, now_utc))
                 conn.execute(
                     "UPDATE med_intakes SET series_next_utc=NULL "
                     "WHERE id=? AND status='pending'",
                     (intake_id,),
                 )
                 audit.log(conn, "tick.med",
-                          {"intake_id": intake_id, "mode": "out_of_stock"})
+                          {"intake_id": intake_id, "mode": "out_of_stock",
+                           "deduped": already is not None})
             else:
                 raw = {"mode": "take", "name": name, "dose": dose}
                 human_fallback = f"Пора принять {name}" + (

@@ -232,13 +232,62 @@ def test_out_of_stock_sends_one_buy_message_and_clears_series(db, fake_deliver):
     ).fetchall()
     assert len(audit_rows) == 1
     assert json.loads(audit_rows[0]["payload"]) == {
-        "intake_id": intake_id, "mode": "out_of_stock",
+        "intake_id": intake_id, "mode": "out_of_stock", "deduped": False,
     }
 
     # A later tick the same day must not re-send: series_next_utc is now
     # NULL, so this row no longer matches the due-selection query at all.
     tick.reminders(db, now_utc="2026-07-20T11:00:00+00:00", cfg=CFG)
     assert len(_med_calls(fake_deliver)) == 1
+
+
+def test_out_of_stock_notice_once_per_med_per_day(db, fake_deliver):
+    # Finding 10 (go-live review): a multi-dose schedule (times=08:00,
+    # 20:00) opens one med_intakes row PER dose (meds_gen's own
+    # contract), so without a per-med/per-day dedup, an out-of-stock med
+    # would nag "надо купить" twice in the same day -- once per dose.
+    # The dedup key is med_oos_sent:<med_id>:<Almaty date>, same raw-SQL
+    # meta pattern _followup already uses for its own once-a-day guard.
+    med_id = meds.add(db, "Витамин", ["08:00", "20:00"], remaining=0,
+                       threshold=5)
+    db.commit()
+    morning_ts = "2026-07-20T03:00:00+00:00"  # 08:00 Almaty
+    evening_ts = "2026-07-20T15:00:00+00:00"  # 20:00 Almaty, same Almaty day
+    morning_id = _insert_intake(db, med_id, morning_ts, morning_ts)
+    evening_id = _insert_intake(db, med_id, evening_ts, evening_ts)
+    fake_deliver.responses = ["sent", "sent"]
+
+    tick.reminders(db, now_utc=morning_ts, cfg=CFG)  # first dose due
+
+    calls = _med_calls(fake_deliver)
+    assert len(calls) == 1
+    assert calls[0]["raw"]["mode"] == "out_of_stock"
+    morning_row = db.execute(
+        "SELECT series_next_utc FROM med_intakes WHERE id=?", (morning_id,)
+    ).fetchone()
+    assert morning_row["series_next_utc"] is None  # series still closes
+
+    tick.reminders(db, now_utc=evening_ts, cfg=CFG)  # second dose due, same day
+
+    # Second dose's series is still closed, but no second "надо купить" --
+    # gate.deliver was only ever called once across both ticks.
+    calls = _med_calls(fake_deliver)
+    assert len(calls) == 1
+    evening_row = db.execute(
+        "SELECT series_next_utc FROM med_intakes WHERE id=?", (evening_id,)
+    ).fetchone()
+    assert evening_row["series_next_utc"] is None
+
+    audit_rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.med' ORDER BY id"
+    ).fetchall()
+    assert len(audit_rows) == 2
+    assert json.loads(audit_rows[0]["payload"]) == {
+        "intake_id": morning_id, "mode": "out_of_stock", "deduped": False,
+    }
+    assert json.loads(audit_rows[1]["payload"]) == {
+        "intake_id": evening_id, "mode": "out_of_stock", "deduped": True,
+    }
 
 
 def test_remaining_none_never_treated_as_out_of_stock(db, fake_deliver):
