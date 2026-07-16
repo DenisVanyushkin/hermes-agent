@@ -599,6 +599,32 @@ def _get_lock_paths() -> tuple[Path, Path]:
     return lock_dir, lock_dir / ".tick.lock"
 
 
+def _same_conversation(origin: dict, target: dict) -> bool:
+    """True when *target* addresses the very conversation the job came from."""
+    if not origin or not target:
+        return False
+    origin_platform = str(origin.get("platform") or "").strip().lower()
+    target_platform = str(target.get("platform") or "").strip().lower()
+    if not origin_platform or origin_platform != target_platform:
+        return False
+    origin_chat = str(origin.get("chat_id") or "").strip()
+    target_chat = str(target.get("chat_id") or "").strip()
+    return bool(origin_chat) and origin_chat == target_chat
+
+
+def _thread_id_dropped_for_origin_conversation(origin: dict, target: dict) -> bool:
+    """True only when a same-conversation delivery silently lost its thread.
+
+    Fan-out to another channel or platform legitimately has no origin thread:
+    a Slack thread ts means nothing on Telegram, and a different channel has no
+    such thread at all.  Comparing thread ids across conversations reported
+    correct routing as breakage every fire.
+    """
+    if not _same_conversation(origin, target):
+        return False
+    return bool(origin.get("thread_id")) and not target.get("thread_id")
+
+
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job, preserving any extra routing metadata.
 
@@ -1534,10 +1560,12 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         chat_id = target["chat_id"]
         thread_id = target.get("thread_id")
 
-        # Diagnostic: log thread_id for topic-aware delivery debugging
+        # Diagnostic: log thread_id for topic-aware delivery debugging.  Only
+        # the origin conversation can "lose" a thread -- fan-out to another
+        # channel/platform has no origin thread to begin with.
         origin = _resolve_origin(job) or {}
         origin_thread = origin.get("thread_id")
-        if origin_thread and not thread_id:
+        if _thread_id_dropped_for_origin_conversation(origin, target):
             logger.warning(
                 "Job '%s': origin has thread_id=%s but delivery target lost it "
                 "(deliver=%s, target=%s)",

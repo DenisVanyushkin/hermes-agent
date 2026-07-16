@@ -13,6 +13,15 @@ fail() {
   exit 1
 }
 
+_job_intel_is_package() {
+  # A directory *named* job_intel is not enough.  $HERMES_HOME/job_intel holds
+  # databases, and python treats any such directory as an implicit namespace
+  # package (PEP 420), which shadows the real one and makes `-m job_intel` fail
+  # with "is a package and cannot be directly executed".  Probe for the
+  # executable package marker instead.
+  [[ -f "$1/job_intel/__main__.py" ]]
+}
+
 resolve_workdir() {
   local repo_root
   local candidates=(
@@ -25,10 +34,11 @@ resolve_workdir() {
   if [[ -d "$script_dir/../job_intel" ]]; then
     candidates+=("$(cd -- "$script_dir/.." && pwd)")
   fi
+  candidates+=("${HERMES_HOME:-$HOME/.hermes}/hermes-agent")
   local candidate
   for candidate in "${candidates[@]}"; do
     [[ -n "${candidate:-}" ]] || continue
-    if [[ -d "$candidate/job_intel" ]]; then
+    if _job_intel_is_package "$candidate"; then
       printf '%s\n' "$candidate"
       return 0
     fi
