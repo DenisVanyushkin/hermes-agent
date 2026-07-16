@@ -57,13 +57,51 @@ def _rank(m: dict) -> int:
     return m.get("rank") if isinstance(m.get("rank"), int) else 10**6
 
 
+def _lite_score(m: dict) -> float:
+    """Empirical agent-eval score (lite-agent-eval-v1). Higher = better tool
+    user. Absent/invalid -> 0 so unproven models sort below proven ones."""
+    v = m.get("liteEvalScore")
+    return v if isinstance(v, (int, float)) else 0
+
+
+def _fallback_health_ok(m: dict) -> bool:
+    """A fallback candidate must not be in an explicit error state. `passed`
+    and `imperfect` are healthy; `not_probed` is admitted (many strong tool
+    users simply were not probed this cycle); anything else (http_4xx/5xx,
+    failed, timeout, ...) is treated as broken."""
+    return _is_healthy(m) or _health(m) == "not_probed"
+
+
+def _tool_use_failed(m: dict) -> bool:
+    """True only when the empirical eval proves the model does NOT invoke tools.
+
+    `supportsTools` is a metadata claim; the ground truth is the per-task
+    `details.usedTool` signal in evalSummary. If any eval task shows the model
+    used a tool it is trusted; if the model was exercised on a tool task and
+    never used one it is rejected; with no tool-use signal at all we stay
+    agnostic (do not reject on this basis)."""
+    ev = m.get("evalSummary")
+    if not isinstance(ev, dict):
+        return False
+    saw_tool_task = False
+    for task in ev.get("tasks") or []:
+        used = (task.get("details") or {}).get("usedTool")
+        if used is True:
+            return False
+        if used is False:
+            saw_tool_task = True
+    return saw_tool_task
+
+
 def select_models(data: dict) -> dict:
     models = [m for m in (data.get("models") or []) if m.get("id")]
 
     fb = [m for m in models
-          if m.get("supportsTools") and m.get("supportsResponseFormat")
-          and _is_healthy(m) and (m.get("contextLength") or 0) >= FALLBACK_MIN_CTX]
-    fb.sort(key=lambda m: (not m.get("supportsStructuredOutputs"), _rank(m)))
+          if m.get("supportsTools")
+          and (m.get("contextLength") or 0) >= FALLBACK_MIN_CTX
+          and _fallback_health_ok(m)
+          and not _tool_use_failed(m)]
+    fb.sort(key=lambda m: (-_lite_score(m), _rank(m)))
 
     big = [m for m in models
            if _is_healthy(m) and (m.get("contextLength") or 0) >= LARGE_CTX]
