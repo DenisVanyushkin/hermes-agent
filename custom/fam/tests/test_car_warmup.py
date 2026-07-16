@@ -11,6 +11,18 @@ class _FakeClient:
     def __init__(self, start_ok=True): self.start_ok = start_ok
     def start_engine(self): return self.start_ok
 
+def _insert_metric(db, engine_on=None, ignition_on=None):
+    # Build the car_state dict the way StarlineClient._device_data would,
+    # then reuse normalize()+record_metrics so the row shape matches
+    # production exactly (bool-or-None per flag).
+    state = {}
+    if engine_on is not None:
+        state["run"] = engine_on
+    if ignition_on is not None:
+        state["ign"] = ignition_on
+    car.record_metrics(db, car.normalize({"car_state": state}))
+    db.commit()
+
 def test_warmup_started_audits_and_notifies(db, monkeypatch):
     sent = []
     monkeypatch.setattr(gate, "notify_denis", lambda t: sent.append(t) or True)
@@ -42,6 +54,16 @@ def test_warmup_blocked_when_engine_on(db, monkeypatch):
     cl = OkClient()
     r = car.do_warmup(db, cl, _cfg(), requester="amina")
     assert r["reason"] == "already_on" and cl.started == 0
+
+def test_already_on_via_ignition_only(db, monkeypatch):
+    # Auto-started S96v2 shape: reports ign=true while run stays false
+    # (phase-4 field notes). The already_on guard must still fire so the
+    # daily limit isn't the only protection against a double-start.
+    monkeypatch.setattr(gate, "notify_denis", lambda t: True)
+    _insert_metric(db, engine_on=0, ignition_on=1)   # auto-started S96v2 shape
+    cfg = {"car_warmup_daily_limit": 5}
+    r = car.do_warmup(db, _FakeClient(start_ok=True), cfg, "amina")
+    assert r == {"ok": False, "reason": "already_on"}
 
 def test_warmup_attempt_row_committed_before_engine(db, monkeypatch):
     monkeypatch.setattr(gate, "notify_denis", lambda t: True)

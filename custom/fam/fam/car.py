@@ -325,10 +325,16 @@ def warmup_count_today(conn, now=None):
 
 
 def _latest_engine_on(conn):
+    # An auto-started S96v2 reports ign=true while run stays false
+    # (phase-4 field notes), so engine_on alone under-reports a
+    # warmed-up engine and the "already on" guard never fired for it.
     r = conn.execute(
-        "SELECT engine_on FROM car_metrics WHERE engine_on IS NOT NULL "
+        "SELECT engine_on, ignition_on FROM car_metrics "
+        "WHERE engine_on IS NOT NULL OR ignition_on IS NOT NULL "
         "ORDER BY ts_utc DESC LIMIT 1").fetchone()
-    return bool(r["engine_on"]) if r else False
+    if r is None:
+        return False
+    return bool(r["engine_on"]) or bool(r["ignition_on"])
 
 
 def do_warmup(conn, client, cfg, requester, now=None):
