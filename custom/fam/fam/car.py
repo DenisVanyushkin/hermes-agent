@@ -305,16 +305,23 @@ def departure_hooks(conn, event, cfg):
 
 
 def warmup_count_today(conn, now=None):
-    """Count car.warmup audit rows with payload.result=='started' in
+    """Count car.warmup audit rows with payload.result=='attempt' in
     today's Asia/Almaty day (reuses gate's day-bounds helper so the
     warmup daily limit resets at Almaty local midnight, same as the
-    proactive-message budget)."""
+    proactive-message budget).
+
+    Counts 'attempt', not 'started': the attempt row commits before the
+    physical start (see do_warmup), so it is the conservative unit the
+    limit must count -- two racers can no longer both pass the check
+    between each other's attempt and started rows (finding 12). A failed
+    attempt consuming the limit is intended for a physical actuator: we
+    do not want to retry-hammer a real engine start."""
     from fam.gate import _almaty_day_utc_bounds, _now
     frm, to = _almaty_day_utc_bounds(now or _now())
     rows = conn.execute(
         "SELECT payload FROM audit_log WHERE kind='car.warmup' "
         "AND ts_utc >= ? AND ts_utc < ?", (frm, to)).fetchall()
-    return sum(1 for r in rows if json.loads(r["payload"]).get("result") == "started")
+    return sum(1 for r in rows if json.loads(r["payload"]).get("result") == "attempt")
 
 
 def _latest_engine_on(conn):
@@ -331,12 +338,28 @@ def do_warmup(conn, client, cfg, requester, now=None):
     notify Denis. The audit-before-engine ordering is locked by a test
     (2 audit rows exist before start_engine() runs on the happy path) so
     a failed/ambiguous StarLine call never leaves us without a record
-    that a warmup was attempted."""
+    that a warmup was attempted.
+
+    BEGIN IMMEDIATE takes SQLite's single write lock up front: the
+    count-check plus the attempt-audit below become atomic against any
+    concurrent warmup caller (check-then-act race, finding 12). Every
+    exit path commits (the limit/already_on early returns as well as the
+    final started/failed outcome), so the connection is never left with
+    an open transaction between calls -- required both for the write
+    lock to actually release and so a second do_warmup call on the same
+    conn can take its own BEGIN IMMEDIATE without "cannot start a
+    transaction within a transaction"."""
+    # BEGIN IMMEDIATE takes SQLite's single write lock up front: the
+    # count-check plus the attempt-audit below become atomic against any
+    # concurrent warmup caller (check-then-act race, finding 12).
+    conn.execute("BEGIN IMMEDIATE")
     if warmup_count_today(conn, now=now) >= cfg["car_warmup_daily_limit"]:
         audit.log(conn, "car.warmup", {"requester": requester, "result": "limit"}, actor="agent")
+        conn.commit()
         return {"ok": False, "reason": "limit"}
     if _latest_engine_on(conn):
         audit.log(conn, "car.warmup", {"requester": requester, "result": "already_on"}, actor="agent")
+        conn.commit()
         return {"ok": False, "reason": "already_on"}
     audit.log(conn, "car.warmup", {"requester": requester, "result": "attempt"}, actor="agent")
     conn.commit()  # attempt row must be durable before the physical engine start (spec §6.4)
@@ -344,6 +367,7 @@ def do_warmup(conn, client, cfg, requester, now=None):
     audit.log(conn, "car.warmup",
               {"requester": requester, "result": "started" if ok else "failed"}, actor="agent")
     n = warmup_count_today(conn, now=now)
+    conn.commit()  # close out the outcome row too -- no dangling transaction on any path
     gate.notify_denis(f"Прогрев машины: {requester}, "
                        f"{'ок' if ok else 'НЕ УДАЛОСЬ'} ({n}/{cfg['car_warmup_daily_limit']})")
     return {"ok": ok, "reason": "started" if ok else "failed"}
