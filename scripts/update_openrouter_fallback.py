@@ -274,12 +274,24 @@ def _atomic_write(path: Path, text: str) -> None:
 
 def update_config(config_path: Path, sel: dict) -> None:
     raw = config_path.read_text(encoding="utf-8")
-    if re.search(r"^\s*#", raw, flags=re.M):
-        raise RuntimeError(
-            f"{config_path} contains comment lines; refusing YAML round-trip. "
-            "Update the config manually or extend this script."
-        )
-    cfg = yaml.safe_load(raw)
+    has_comments = bool(re.search(r"^\s*#", raw, flags=re.M))
+    yaml_rt = None
+    if has_comments:
+        # A plain yaml.safe_dump round-trip would destroy comments; use
+        # ruamel's comment-preserving round-trip instead.
+        try:
+            from ruamel.yaml import YAML
+        except ImportError as exc:
+            raise RuntimeError(
+                f"{config_path} contains comment lines and ruamel.yaml is not "
+                "installed; refusing comment-destroying YAML round-trip."
+            ) from exc
+        yaml_rt = YAML()
+        yaml_rt.preserve_quotes = True
+        yaml_rt.width = 4096
+        cfg = yaml_rt.load(raw)
+    else:
+        cfg = yaml.safe_load(raw)
     if not isinstance(cfg, dict):
         raise RuntimeError(f"{config_path} did not parse to a mapping")
 
@@ -288,8 +300,14 @@ def update_config(config_path: Path, sel: dict) -> None:
     shutil.copy2(config_path, backup)
 
     apply_selection(cfg, sel)
-    new_text = yaml.safe_dump(cfg, sort_keys=True, allow_unicode=True,
-                              default_flow_style=False)
+    if yaml_rt is not None:
+        import io
+        buf = io.StringIO()
+        yaml_rt.dump(cfg, buf)
+        new_text = buf.getvalue()
+    else:
+        new_text = yaml.safe_dump(cfg, sort_keys=True, allow_unicode=True,
+                                  default_flow_style=False)
     _atomic_write(config_path, new_text)
 
     try:

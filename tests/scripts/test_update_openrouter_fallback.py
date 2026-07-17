@@ -11,6 +11,14 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(update_openrouter_fallback)
 
 
+SEL = {
+    "fallback": ["new/model", "second/model"],
+    "compression": "big/model",
+    "web_extract": "big/model",
+    "title_generation": "small/model",
+}
+
+
 def test_update_config_replaces_existing_fallback_providers(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(
@@ -25,7 +33,7 @@ def test_update_config_replaces_existing_fallback_providers(tmp_path):
         encoding="utf-8",
     )
 
-    update_openrouter_fallback.update_config(config, ["new/model", "second/model"])
+    update_openrouter_fallback.update_config(config, SEL)
 
     loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
     assert loaded["fallback_providers"] == [
@@ -33,73 +41,75 @@ def test_update_config_replaces_existing_fallback_providers(tmp_path):
         {"provider": "openrouter", "model": "second/model"},
     ]
     assert loaded["agent"]["max_turns"] == 120
+    assert loaded["auxiliary"]["compression"]["model"] == "big/model"
+    assert loaded["auxiliary"]["title_generation"]["provider"] == "openrouter"
 
 
-def test_update_config_repairs_orphaned_top_level_fallback_provider_items(tmp_path):
+def test_update_config_reverts_aux_to_primary_when_no_free_model(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(
         "model:\n"
         "  default: gpt-5.4-mini\n"
-        "providers: {}\n"
-        "fallback_providers:\n"
-        "  - provider: openrouter\n"
-        "    model: old/model\n"
-        "- provider: openrouter\n"
-        "  model: orphan/model\n"
-        "credential_pool_strategies: {}\n"
-        "toolsets:\n"
-        "- hermes-cli\n",
+        "fallback_providers: []\n",
         encoding="utf-8",
     )
+    sel = dict(SEL, title_generation=None)
 
-    update_openrouter_fallback.update_config(config, ["new/model"])
+    update_openrouter_fallback.update_config(config, sel)
 
     loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
-    assert loaded["fallback_providers"] == [{"provider": "openrouter", "model": "new/model"}]
-    assert loaded["credential_pool_strategies"] == {}
-    assert loaded["toolsets"] == ["hermes-cli"]
-    assert "orphan/model" not in config.read_text(encoding="utf-8")
+    title = loaded["auxiliary"]["title_generation"]
+    assert title["provider"] == update_openrouter_fallback.PRIMARY["provider"]
+    assert title["model"] == update_openrouter_fallback.PRIMARY["model"]
 
 
-def test_update_config_preserves_quoted_top_level_key_after_fallback_providers(tmp_path):
+def test_update_config_preserves_comments_and_quoted_keys(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(
         "model:\n"
         "  default: gpt-5.4-mini\n"
         "fallback_providers:\n"
-        "  - provider: openrouter\n"
-        "    model: old/model\n"
+        "- provider: openrouter\n"
+        "  model: old/model\n"
+        "pipelines:\n"
+        "  # Channel gate (host-local, not in git): only these platforms\n"
+        "  # use the pipeline router.\n"
+        "  channels:\n"
+        "  - telegram\n"
         "'quoted key':\n"
         "  value: preserved\n",
         encoding="utf-8",
     )
 
-    update_openrouter_fallback.update_config(config, ["new/model"])
+    update_openrouter_fallback.update_config(config, SEL)
 
-    loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
-    assert loaded["fallback_providers"] == [{"provider": "openrouter", "model": "new/model"}]
+    text = config.read_text(encoding="utf-8")
+    loaded = yaml.safe_load(text)
+    assert loaded["fallback_providers"] == [
+        {"provider": "openrouter", "model": "new/model"},
+        {"provider": "openrouter", "model": "second/model"},
+    ]
+    assert "# Channel gate (host-local, not in git)" in text
+    assert "# use the pipeline router." in text
+    assert loaded["pipelines"]["channels"] == ["telegram"]
     assert loaded["quoted key"] == {"value": "preserved"}
 
 
-def test_find_block_keeps_flush_left_sequence_items_with_parent_key():
-    lines = [
-        "toolsets:",
-        "- hermes-cli",
-        "agent:",
-        "  max_turns: 120",
-    ]
+def test_update_config_restores_backup_on_validation_failure(tmp_path, monkeypatch):
+    config = tmp_path / "config.yaml"
+    original = "model:\n  default: gpt-5.4-mini\nfallback_providers: []\n"
+    config.write_text(original, encoding="utf-8")
 
-    assert update_openrouter_fallback._find_block(lines, "toolsets") == (0, 2)
+    def broken_apply(cfg, sel):
+        cfg["fallback_providers"] = [{"provider": "openrouter", "model": "wrong/model"}]
+        return cfg
 
+    monkeypatch.setattr(update_openrouter_fallback, "apply_selection", broken_apply)
 
-def test_find_block_stops_at_top_level_comment_before_next_key():
-    lines = [
-        "fallback_providers:",
-        "  - provider: openrouter",
-        "    model: old/model",
-        "# next section comment",
-        "agent:",
-        "  max_turns: 120",
-    ]
+    try:
+        update_openrouter_fallback.update_config(config, SEL)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError:
+        pass
 
-    assert update_openrouter_fallback._find_block(lines, "fallback_providers") == (0, 3)
+    assert config.read_text(encoding="utf-8") == original
