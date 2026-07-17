@@ -20,8 +20,11 @@ test runner at ``scripts/run_tests.sh``.
 """
 
 import asyncio
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,6 +33,29 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# ── Import-time HERMES_HOME guard ───────────────────────────────────────────
+# pytest imports this conftest BEFORE any test module, and that window is the
+# only one that matters here. ``cli.py`` calls ``setup_logging()`` at *module*
+# scope, so the first test module that transitively imports it attaches
+# RotatingFileHandlers to the root logger, resolved via ``get_hermes_home()``
+# right then. The per-test ``_hermetic_environment`` fixture below runs far too
+# late to prevent that, and ``setup_logging()`` latches on
+# ``_logging_initialized`` — so those handlers stick for the entire session and
+# every later test logs into the operator's REAL ~/.hermes/logs/errors.log.
+#
+# Not hypothetical: on 2026-07-16 fixture noise (`poison`, `RuntimeError: boom`,
+# `Too late`, `exfil`, `../../../etc/passwd`, MagicMock thread ids) reached the
+# production errors.log, where the nightly diagnostics collector ingested it and
+# the morning report presented it as real incidents.
+#
+# Setting the env var here means import-time side effects land in a throwaway
+# dir. ``_hermetic_environment`` still re-points HERMES_HOME per test for
+# storage isolation; this only covers what happens before it can run.
+_IMPORT_TIME_HERMES_HOME = tempfile.mkdtemp(prefix="hermes-test-import-home-")
+os.environ["HERMES_HOME"] = _IMPORT_TIME_HERMES_HOME
+atexit.register(shutil.rmtree, _IMPORT_TIME_HERMES_HOME, True)
 
 
 # ── Per-file process isolation ──────────────────────────────────────────────
