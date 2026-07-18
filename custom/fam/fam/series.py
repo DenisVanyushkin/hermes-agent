@@ -11,7 +11,7 @@ mirroring cal.py / places.py.
 """
 from datetime import datetime, timedelta, timezone
 
-from fam import audit, cal
+from fam import audit, cal, rem
 
 _WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 _WD_INDEX = {w: i for i, w in enumerate(_WEEKDAYS)}
@@ -206,3 +206,68 @@ def generate(conn, now_utc=None, horizon_weeks=8):
                         created += 1
             d += timedelta(days=1)
     return created
+
+
+def update_participants(conn, sid, add=(), remove=(), now_utc=None):
+    """Change the series' participant set and propagate it to every future
+    UNTOUCHED occurrence (status='active', start_utc>now, local start time
+    still matching the series' own start_time slot -- a rescheduled
+    occurrence has drifted off the grid and is left alone, same as
+    cancel()'s "future untouched" semantics). Past, done, cancelled/
+    tombstone and rescheduled occurrences are never touched.
+
+    add/remove are participant refs (name/alias/slug/group -- groups
+    expand to members), resolved via cal._resolve_participants BEFORE any
+    write (UnknownRefError on the first bad ref). For each affected
+    occurrence, the same add/remove is applied to event_participants and
+    rem.regenerate(conn, event_id) runs in the same transaction, so a
+    newly-added participant's slug-scoped reminder rule (e.g. Тая's
+    lead-60 chain) takes effect immediately.
+
+    now_utc is a test seam (defaults to wall-clock now), mirroring
+    cancel()'s now_utc parameter.
+
+    Returns {"series_id": sid, "updated_events": [event_id, ...]}.
+    """
+    s = get(conn, sid)
+    if s is None:
+        raise ValueError(f"unknown series: {sid}")
+
+    to_add = cal._resolve_participants(conn, add) if add else []
+    to_remove = cal._resolve_participants(conn, remove) if remove else []
+
+    for person in to_add:
+        conn.execute(
+            "INSERT OR IGNORE INTO event_series_participants"
+            "(series_id, person_id) VALUES (?,?)", (sid, person["id"]))
+    for person in to_remove:
+        conn.execute(
+            "DELETE FROM event_series_participants WHERE series_id=? "
+            "AND person_id=?", (sid, person["id"]))
+
+    now = _to_utc_iso(now_utc) if now_utc else _now()
+    candidates = conn.execute(
+        "SELECT id, start_utc FROM events WHERE series_id=? AND "
+        "status='active' AND start_utc > ?", (sid, now)).fetchall()
+
+    updated_events = []
+    for row in candidates:
+        local_hm = cal._to_local_iso(row["start_utc"])[11:16]
+        if local_hm != s["start_time"]:
+            continue  # rescheduled off the series grid -- leave alone
+        event_id = row["id"]
+        for person in to_add:
+            conn.execute(
+                "INSERT OR IGNORE INTO event_participants"
+                "(event_id, person_id) VALUES (?,?)", (event_id, person["id"]))
+        for person in to_remove:
+            conn.execute(
+                "DELETE FROM event_participants WHERE event_id=? AND "
+                "person_id=?", (event_id, person["id"]))
+        rem.regenerate(conn, event_id)
+        updated_events.append(event_id)
+
+    audit.log(conn, "cal.series.update", {
+        "id": sid, "add": list(add), "remove": list(remove),
+        "updated_events": updated_events})
+    return {"series_id": sid, "updated_events": updated_events}

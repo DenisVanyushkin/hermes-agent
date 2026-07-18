@@ -381,6 +381,22 @@ def cmd_cal_series_cancel(args):
     print(f"cancelled series {args.id}; removed {removed} upcoming occurrence(s)")
     return 0
 
+def cmd_cal_series_update(args):
+    conn = famdb.connect()
+    try:
+        result = series.update_participants(
+            conn, args.id, add=args.add_person, remove=args.rm_person)
+    except (ValueError, cal.UnknownRefError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    conn.commit()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        n = len(result["updated_events"])
+        print(f"updated series {args.id}: {n} future occurrence(s) touched")
+    return 0
+
 def cmd_cal_update(args):
     if args.start is not None:
         _check_start_not_past(args.start, args.allow_past)
@@ -1431,6 +1447,14 @@ def build_parser():
                        help="machine-readable output")
     spsc = series_sub.add_parser("cancel"); spsc.set_defaults(func=cmd_cal_series_cancel)
     spsc.add_argument("id", type=int)
+    spsu = series_sub.add_parser("update"); spsu.set_defaults(func=cmd_cal_series_update)
+    spsu.add_argument("id", type=int)
+    spsu.add_argument("--add-person", dest="add_person", action="append", default=[],
+                       help="participant ref to add to the series and its future untouched occurrences (repeatable)")
+    spsu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
+                       help="participant ref to remove from the series and its future untouched occurrences (repeatable)")
+    spsu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
     spc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
