@@ -1175,7 +1175,7 @@ def test_deliver_digest_kind_never_gets_enroute_append(db, fake_run):
 # "завести её на прогрев"), and the instruction + a deterministic
 # direction-stem guard both defend against it ----
 
-CAR_COOL = "в салоне 41.0°, можно заранее завести машину, чтобы остудить"
+CAR_COOL = "в салоне 41.0°, могу машину завести заранее, чтобы остудить"
 
 
 def test_reminder_instruction_forbids_meaning_inversion():
@@ -1210,7 +1210,7 @@ def test_deliver_reminder_car_hook_direction_preserved_no_append(db, fake_run):
     raw = {"label": "пора выходить", "event": {"title": "Врач"},
            "car": CAR_COOL}
     fake_run.rewrite_responses = [
-        _completed(0, "Пора выходить. В салоне жарко — заведи машину заранее, чтобы остудить салон.")
+        _completed(0, "Пора выходить. В салоне жарко — могу заранее завести машину, чтобы остудить салон.")
     ]
     fake_run.send_response = _completed(0, "")
 
@@ -1224,6 +1224,27 @@ def test_deliver_reminder_car_hook_direction_preserved_no_append(db, fake_run):
     final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
     assert final.count("остудить") == 1
     assert not final.endswith(CAR_COOL)
+
+
+def test_deliver_reminder_car_hook_offer_degraded_gets_raw_appended(db, fake_run):
+    # F4b: direction stem survived but the offer form («могу») degraded
+    # into a bare observation -- the raw offer text must be appended.
+    raw = {"label": "пора выходить", "event": {"title": "Врач"},
+           "car": CAR_COOL}
+    fake_run.rewrite_responses = [
+        _completed(0, "Пора выходить. В салоне 41°, салон стоит остудить.")
+    ]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert final.endswith(CAR_COOL)
 
 
 def test_deliver_reminder_car_hook_dropped_entirely_gets_appended(db, fake_run):
