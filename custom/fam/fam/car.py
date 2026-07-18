@@ -336,8 +336,17 @@ def departure_hooks(conn, event, cfg):
         hooks.append("заправься — топлива мало")
     if cfg.get("car_cabin_suggest_enabled"):
         t = _latest_cabin_temp(conn)
-        if t is not None and (t < cfg["car_cabin_temp_low_c"] or t > cfg["car_cabin_temp_high_c"]):
-            hooks.append(f"в салоне {t}°, можно завести на прогрев заранее")
+        if t is not None:
+            # Live-found bug (F3): a live cabin reading of 41.0C ("в
+            # салоне 41.0°") produced a "прогрев" (warmup) suggestion --
+            # wrong direction for a HOT cabin. Below the low threshold
+            # the cabin is cold and warming up makes sense; above the
+            # high threshold it's hot and the useful suggestion is to
+            # cool it down instead.
+            if t < cfg["car_cabin_temp_low_c"]:
+                hooks.append(f"в салоне {t}°, можно завести на прогрев заранее")
+            elif t > cfg["car_cabin_temp_high_c"]:
+                hooks.append(f"в салоне {t}°, можно заранее завести машину, чтобы остудить")
     return hooks
 
 

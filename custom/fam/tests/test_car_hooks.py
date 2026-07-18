@@ -23,6 +23,15 @@ def test_cabin_cold_suggests_warmup(db):
     hooks = car.departure_hooks(db, {"transport": "car"}, _cfg())
     assert any("прогрев" in h for h in hooks)
 
+
+def test_cabin_hot_suggests_cooldown_not_warmup(db):
+    # F3 live bug: a 41.0C cabin reading suggested "прогрев" (warmup) --
+    # a hot cabin should suggest cooling it down instead.
+    _add_metric(db, fuel_percent=80, ctemp=41.0)
+    hooks = car.departure_hooks(db, {"transport": "car"}, _cfg())
+    assert any("остуд" in h for h in hooks)
+    assert not any("прогрев" in h for h in hooks)
+
 def test_cabin_in_band_no_suggestion(db):
     _add_metric(db, fuel_percent=80, ctemp=18)
     assert car.departure_hooks(db, {"transport": "car"}, _cfg()) == []
