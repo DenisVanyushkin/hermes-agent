@@ -1008,25 +1008,19 @@ def cmd_plan_attach(args):
         raise ValueError(f"unknown plan: {args.id}")
     if cal.get(conn, args.event) is None:
         raise ValueError(f"unknown event: {args.event}")
+    # Final review Finding 3 (now superseded, Phase 7b Task 2): the
+    # amina-fam skill promises the event's road leave_at "recomputes
+    # automatically" after an attach. That used to be bolted on here as a
+    # best-effort post-call to cal.recompute_road (never routing through
+    # the newly attached plan's place -- a deliberate backlog item at the
+    # time). plans.attach() now does the recompute (waypoint-aware,
+    # through every attached OPEN plan's place) AND the reminder-chain
+    # regenerate itself, in the same transaction as the attach write --
+    # cal.recompute_road is itself best-effort/never-raises and
+    # self-audits (road.computed/road.hook_error), so nothing extra needs
+    # wrapping here anymore.
     plans.attach(conn, args.id, args.event)
     conn.commit()
-    # Final review Finding 3: the amina-fam skill promises the event's
-    # road leave_at "recomputes automatically" after an attach. Reuse the
-    # same per-event mechanism cal.add/cal.update/`fam road` already use
-    # (cal.recompute_road) rather than inventing a second one -- it is
-    # already best-effort/never-raises and self-audits (road.computed /
-    # road.hook_error), so a recompute failure here must not fail the
-    # attach itself. This recomputes the SAME route the event already
-    # had (home -> event place); it does NOT route through the newly
-    # attached plan's place as a waypoint -- a deliberate backlog item,
-    # not this fix's scope.
-    try:
-        cal.recompute_road(conn, args.event)
-        conn.commit()
-    except Exception as e:
-        audit.log(conn, "tick.error",
-                  {"where": "plan_attach_recompute", "error": str(e)[:200]})
-        conn.commit()
     p = plans.get(conn, args.id)
     if args.json:
         print(json.dumps(p, ensure_ascii=False))

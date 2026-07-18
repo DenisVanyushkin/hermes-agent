@@ -97,16 +97,42 @@ def _tomtom_calls_today(conn):
     return row["n"] if row else 0
 
 
+def _attached_via_latlons(conn, event):
+    """Local-import shim onto plans.attached_via_points -- road.py can't
+    import plans at module level (plans.py already imports road at
+    module level; a module-level `from fam import plans` here would make
+    the two modules load each other mid-import). Same local-import
+    pattern plans.add()/attach()/mark() already use in reverse for cal.
+    Never raises: a bare AttributeError/ImportError during import would
+    be a packaging bug, not something to swallow, but a lookup failure
+    inside plans.attached_via_points itself already can't raise (pure
+    SQL + dict lookups) -- so nothing extra is caught here.
+    """
+    from fam import plans as plans_mod
+    return plans_mod.attached_via_points(conn, event)
+
+
 def compute_travel_min(conn, event, cfg, now_utc=None):
     """Fallback ladder for an event's travel time, guarded by TomTom's
     daily call cap. Never raises.
 
-    1. event["place"] has lat AND lon, and cfg has road_home_lat/lon:
-       try tomtom_route_minutes (source "tomtom"); if it returns None,
-       fall back to straight_line_minutes (source "straight"). The cap
-       check happens before the TomTom attempt -- when exhausted, the
-       ladder skips straight to straight_line_minutes and logs
-       road.cap instead of attempting the call.
+    0. (Phase 7b, detours) event has usable coordinates AND at least one
+       OPEN plan is attached_event_id-linked to it with a resolvable
+       via point (road.py's plans.attached_via_points, guarded against a
+       via identical to the event's own place): try route_via through
+       those waypoints (source "tomtom"). A successful via probe is
+       returned as-is; a failed one (cap/no-key/error/non-tomtom
+       provider) falls back to straight_line_minutes (source "straight")
+       -- NOT to the plain no-via tomtom rung below, since route_via
+       already spent this event's one attempt against the shared daily
+       counter and audited its own road.cap/road.error.
+    1. No attached vias (or none resolvable): event["place"] has lat AND
+       lon, and cfg has road_home_lat/lon: try tomtom_route_minutes
+       (source "tomtom"); if it returns None, fall back to
+       straight_line_minutes (source "straight"). The cap check happens
+       before the TomTom attempt -- when exhausted, the ladder skips
+       straight to straight_line_minutes and logs road.cap instead of
+       attempting the call.
     2. No usable coordinates: event["travel_min"] is not None ->
        ("manual").
     3. place["travel_min"] > 0 -> ("place").
@@ -121,6 +147,14 @@ def compute_travel_min(conn, event, cfg, now_utc=None):
     to_lon = place.get("lon")
 
     if to_lat is not None and to_lon is not None and home_lat is not None and home_lon is not None:
+        vias = _attached_via_latlons(conn, event)
+        if vias:
+            minutes, _points, source = route_via(
+                conn, (home_lat, home_lon), vias, (to_lat, to_lon), cfg, now_utc=now)
+            if source == "tomtom":
+                return minutes, "tomtom"
+            return straight_line_minutes(home_lat, home_lon, to_lat, to_lon, cfg), "straight"
+
         # No key at all: skip the tomtom rung silently -- no road.call,
         # no road.cap, no road.error. Distinguishes "not configured" from
         # a real attempt that failed (which still logs road.error below).
@@ -245,12 +279,21 @@ def route_for_event(conn, event, cfg, now_utc=None):
     daily call cap (shared with compute_travel_min's counter). Never
     raises.
 
-    1. event["place"] has lat AND lon, and cfg has road_home_lat/lon:
-       try tomtom_route_points (source "tomtom"); if it returns None,
-       fall back to the straight home->place pair (source "straight").
-       The cap check happens before the TomTom attempt -- when
-       exhausted, the ladder skips straight to the straight-pair rung
-       and logs road.cap instead of attempting the call.
+    0. (Phase 7b, detours) event has usable coordinates AND at least one
+       OPEN plan is attached_event_id-linked to it with a resolvable via
+       point: try route_via through those waypoints (source "tomtom") --
+       same via-gathering (plans.attached_via_points, via the local
+       _attached_via_latlons shim) and same "failed via probe falls to
+       the straight pair, not to the plain no-via tomtom rung" contract
+       as compute_travel_min above, since route_via already spent the
+       shared daily counter's one attempt.
+    1. No attached vias (or none resolvable): event["place"] has lat AND
+       lon, and cfg has road_home_lat/lon: try tomtom_route_points
+       (source "tomtom"); if it returns None, fall back to the straight
+       home->place pair (source "straight"). The cap check happens
+       before the TomTom attempt -- when exhausted, the ladder skips
+       straight to the straight-pair rung and logs road.cap instead of
+       attempting the call.
     2. No usable coordinates -> (None, "none").
     """
     now = now_utc or _now()
@@ -262,6 +305,14 @@ def route_for_event(conn, event, cfg, now_utc=None):
     to_lon = place.get("lon")
 
     if to_lat is not None and to_lon is not None and home_lat is not None and home_lon is not None:
+        vias = _attached_via_latlons(conn, event)
+        if vias:
+            minutes, points, source = route_via(
+                conn, (home_lat, home_lon), vias, (to_lat, to_lon), cfg, now_utc=now)
+            if source == "tomtom":
+                return points, "tomtom"
+            return [(home_lat, home_lon), (to_lat, to_lon)], "straight"
+
         if os.environ.get("TOMTOM_API_KEY", "").strip():
             cap = cfg.get("road_daily_cap", 100)
             if _tomtom_calls_today(conn) >= cap:
