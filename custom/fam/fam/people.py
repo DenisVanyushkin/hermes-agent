@@ -12,8 +12,20 @@ def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _attach_home(conn, d):
+    """Add a 'home_place' key (place dict, or None) to a person/group dict,
+    joined from home_place_id. Local import to avoid a module-level
+    people<->places import cycle (mirrors set_home's local import).
+    """
+    from fam import places
+    home_id = d.get("home_place_id")
+    d["home_place"] = places.get(conn, home_id) if home_id else None
+    return d
+
+
 def get(conn, ref):
     """Resolve ref (id|name|alias|slug) to a person/group dict, or None.
+    The dict always carries a 'home_place' key (joined place dict, or None).
 
     Lookup order for string refs: exact name (case-insensitive), then
     alias (case-insensitive), then slug (exact). SQLite's built-in NOCASE
@@ -24,30 +36,36 @@ def get(conn, ref):
     if ref is None:
         return None
 
+    row = None
+
     if isinstance(ref, int):
         row = conn.execute("SELECT * FROM people WHERE id=?", (ref,)).fetchone()
-        return dict(row) if row else None
+    else:
+        ref_fold = ref.casefold()
 
-    ref_fold = ref.casefold()
+        for r in conn.execute("SELECT * FROM people").fetchall():
+            if r["name"].casefold() == ref_fold:
+                row = r
+                break
 
-    for row in conn.execute("SELECT * FROM people").fetchall():
-        if row["name"].casefold() == ref_fold:
-            return dict(row)
+        if row is None:
+            for r in conn.execute(
+                "SELECT a.alias AS _alias, p.* FROM people_aliases a "
+                "JOIN people p ON p.id = a.person_id"
+            ).fetchall():
+                if r["_alias"].casefold() == ref_fold:
+                    row = r
+                    break
 
-    for row in conn.execute(
-        "SELECT a.alias AS _alias, p.* FROM people_aliases a "
-        "JOIN people p ON p.id = a.person_id"
-    ).fetchall():
-        if row["_alias"].casefold() == ref_fold:
-            d = dict(row)
-            d.pop("_alias", None)
-            return d
+        if row is None:
+            row = conn.execute("SELECT * FROM people WHERE slug = ?", (ref,)).fetchone()
 
-    row = conn.execute("SELECT * FROM people WHERE slug = ?", (ref,)).fetchone()
-    if row:
-        return dict(row)
+    if row is None:
+        return None
 
-    return None
+    d = dict(row)
+    d.pop("_alias", None)
+    return _attach_home(conn, d)
 
 
 def resolve(conn, text):
@@ -187,7 +205,8 @@ def add_member(conn, group_ref, person_ref):
 
 
 def list_people(conn, kind=None):
-    """List all people/groups, optionally filtered by kind."""
+    """List all people/groups, optionally filtered by kind. Each dict
+    carries a 'home_place' key (joined place dict, or None)."""
     if kind:
         rows = conn.execute(
             "SELECT * FROM people WHERE kind=? ORDER BY name COLLATE NOCASE",
@@ -197,4 +216,26 @@ def list_people(conn, kind=None):
         rows = conn.execute(
             "SELECT * FROM people ORDER BY name COLLATE NOCASE"
         ).fetchall()
-    return [dict(r) for r in rows]
+    return [_attach_home(conn, dict(r)) for r in rows]
+
+
+def set_home(conn, person_ref, place_ref):
+    """Attach/clear (place_ref=None) a person's home place. Raises
+    ValueError if person_ref or place_ref is unknown (nothing is written
+    on either error). Returns the updated person dict (see get()).
+    """
+    p = get(conn, person_ref)
+    if p is None:
+        raise ValueError(f"unknown person: {person_ref}")
+
+    place_id = None
+    if place_ref is not None:
+        from fam import places
+        pl = places.resolve(conn, place_ref)
+        if pl is None:
+            raise ValueError(f"unknown place: {place_ref}")
+        place_id = pl["id"]
+
+    conn.execute("UPDATE people SET home_place_id=? WHERE id=?", (place_id, p["id"]))
+    audit.log(conn, "people.home", {"person": p["name"], "place_id": place_id})
+    return get(conn, p["id"])

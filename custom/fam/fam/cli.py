@@ -64,6 +64,18 @@ def cmd_people_resolve(args):
         print(line)
     return 0
 
+def cmd_people_update(args):
+    conn = famdb.connect()
+    home = None if args.home == "" else args.home
+    p = people.set_home(conn, args.ref, home)
+    conn.commit()
+    if getattr(args, "json", False):
+        print(json.dumps(p, ensure_ascii=False))
+    else:
+        home_name = p["home_place"]["name"] if p["home_place"] else "(none)"
+        print(f"updated {p['name']}: home={home_name}")
+    return 0
+
 def cmd_people_list(args):
     conn = famdb.connect()
     rows = people.list_people(conn)
@@ -1232,6 +1244,13 @@ def build_parser():
 
     spl = people_sub.add_parser("list"); spl.set_defaults(func=cmd_people_list)
     spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spu = people_sub.add_parser("update"); spu.set_defaults(func=cmd_people_update)
+    spu.add_argument("ref", help="id, name, alias, or slug of the person/group")
+    spu.add_argument("--home", required=True,
+                      help="place ref to set as home, or \"\" to clear it")
+    spu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
     sp = sub.add_parser("places")

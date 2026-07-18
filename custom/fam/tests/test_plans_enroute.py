@@ -125,3 +125,47 @@ def test_no_route_and_no_person_no_geo_hit(db, monkeypatch):
 
     matches = plans.match_enroute(db, e, CFG, now_utc=NOW)
     assert matches == []
+
+
+# --- T2: effective place via person's home ---
+
+def test_enroute_person_plan_matches_home_geo(db, monkeypatch):
+    _seed(db)
+    people.set_home(db, "Тая", "стоматолог")
+    pid = plans.add(db, "Дело без места", person="Тая")
+    db.commit()
+    # Тая NOT a participant of this event -- match must come from her home,
+    # not from the person-participant reason.
+    e = _event(db)
+    monkeypatch.setattr(road, "route_for_event", lambda conn, ev, cfg, now_utc=None: (ROUTE, "straight"))
+
+    matches = plans.match_enroute(db, e, CFG, now_utc=NOW)
+    assert len(matches) == 1
+    assert matches[0]["plan"]["id"] == pid
+    assert matches[0]["reason"] == "geo"
+
+
+def test_enroute_person_without_home_unchanged(db, monkeypatch):
+    _seed(db)
+    plans.add(db, "Дело без места и дома", person="Тая")
+    db.commit()
+    e = _event(db)
+    monkeypatch.setattr(road, "route_for_event", lambda conn, ev, cfg, now_utc=None: (ROUTE, "straight"))
+
+    matches = plans.match_enroute(db, e, CFG, now_utc=NOW)
+    assert matches == []
+
+
+def test_enroute_dedup_participant_and_home(db, monkeypatch):
+    _seed(db)
+    people.set_home(db, "Тая", "стоматолог")
+    pid = plans.add(db, "Дело Таи", person="Тая")
+    db.commit()
+    e = cal.add(db, "Событие с Таей", NOW, participants=["Тая"], transport="car")
+    db.commit()
+    monkeypatch.setattr(road, "route_for_event", lambda conn, ev, cfg, now_utc=None: (ROUTE, "straight"))
+
+    matches = plans.match_enroute(db, e, CFG, now_utc=NOW)
+    assert len(matches) == 1
+    assert matches[0]["plan"]["id"] == pid
+    assert matches[0]["reason"] == "geo"

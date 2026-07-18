@@ -98,3 +98,49 @@ def test_add_member_duplicate_call_adds_no_new_audit_row(db):
     db.commit()
     count_after_second = len(audit.query(db, None, "people.member", None))
     assert count_after_second == count_after_first
+
+
+# --- T2: home place ---
+
+def test_set_home_and_get(db):
+    from fam import places
+    people.add(db, "Аишка")
+    places.add(db, "Казакова", lat=43.25, lon=76.95)
+    db.commit()
+    p = people.set_home(db, "Аишка", "Казакова")
+    assert p["home_place"]["name"] == "Казакова"
+    p2 = people.set_home(db, "Аишка", None)
+    assert p2["home_place"] is None
+
+
+def test_set_home_unknown_person_raises(db):
+    with pytest.raises(ValueError):
+        people.set_home(db, "НетТакой", None)
+
+
+def test_set_home_unknown_place_raises(db):
+    people.add(db, "Аишка"); db.commit()
+    with pytest.raises(ValueError):
+        people.set_home(db, "Аишка", "НетМеста")
+    db.rollback()
+    row = db.execute("SELECT home_place_id FROM people WHERE name='Аишка'").fetchone()
+    assert row["home_place_id"] is None
+
+
+def test_get_and_list_people_expose_home_place(db):
+    from fam import places
+    people.add(db, "Аишка")
+    places.add(db, "Казакова", lat=43.25, lon=76.95)
+    db.commit()
+    people.set_home(db, "Аишка", "Казакова")
+    db.commit()
+    p = people.get(db, "Аишка")
+    assert p["home_place"]["name"] == "Казакова"
+    listed = {r["name"]: r for r in people.list_people(db)}
+    assert listed["Аишка"]["home_place"]["name"] == "Казакова"
+
+
+def test_get_person_without_home_has_none(db):
+    people.add(db, "Салтанат"); db.commit()
+    p = people.get(db, "Салтанат")
+    assert p["home_place"] is None

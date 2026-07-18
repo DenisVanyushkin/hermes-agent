@@ -198,9 +198,21 @@ def match_enroute(conn, event, cfg, now_utc=None, route=None):
         ).fetchall()
     }
 
+    def _effective_place(plan):
+        """The plan's own place, or -- when the plan has no place but does
+        have a person -- that person's home place. Lets a homebound plan
+        (e.g. "return Aisha's book" with no explicit place) match on the
+        route via where the person lives, same as an explicit-place plan.
+        """
+        place = plan.get("place")
+        if place is None and plan.get("person_id"):
+            person = people.get(conn, plan["person_id"])
+            place = person.get("home_place") if person else None
+        return place
+
     route_points = None
-    if any(p.get("place") and p["place"].get("lat") is not None
-           and p["place"].get("lon") is not None for p in open_plans):
+    if any(_effective_place(p) and _effective_place(p).get("lat") is not None
+           and _effective_place(p).get("lon") is not None for p in open_plans):
         if route is not None:
             route_points, source = route
         else:
@@ -217,7 +229,7 @@ def match_enroute(conn, event, cfg, now_utc=None, route=None):
     for plan in open_plans:
         reason = None
 
-        place = plan.get("place")
+        place = _effective_place(plan)
         if route_points and place and place.get("lat") is not None and place.get("lon") is not None:
             dist_km = road.point_to_route_km(place["lat"], place["lon"], route_points)
             if dist_km <= threshold_km:
