@@ -47,6 +47,7 @@ CFG = {
     "brevity_model": "gpt-5.4-mini",
     "brevity_provider": "openai-codex",
     "brevity_soul_path": "/home/denis/.hermes/SOUL.md",
+    "prep_check_days": 5,
 }
 
 
