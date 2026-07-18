@@ -301,3 +301,57 @@ def skip(conn, intake_id):
     result["status"] = "skipped"
     result["series_next_utc"] = None
     return result
+
+
+def restock_by_name(conn, name, n, now_utc=None):
+    """Replenish a med's stock after a purchase (phase 5 T10, finding
+    F1). Closes the restock loop that meds.take/shopping.add_from_meds
+    only half-implemented: they auto-*add* a low-stock med to the
+    shopping list, but nothing ever pushed the bought quantity back into
+    meds.remaining, so a med at remaining<=threshold kept re-triggering
+    "time to buy" on every subsequent take even after it was purchased.
+
+    Matches a med by casefolded name (same linkage add_from_meds already
+    uses to dedup its shopping rows -- no med_id FK on shopping), across
+    enabled and disabled meds. Returns:
+      - None when no med matches the name (a plain grocery item like
+        "Молоко" being marked bought is simply not a restock);
+      - {"med_id", "name", "remaining", "restocked": False} when the med
+        is untracked (remaining is None) -- an untracked med intentionally
+        keeps no count, so a purchase is a no-op, not a jump from None;
+      - {..., "restocked": True, "remaining": <new>} when it added n to a
+        tracked remaining. Lifting remaining above threshold is exactly
+        what stops the next take() from re-triggering a restock.
+
+    n must be a positive count -- ValueError (before any write, CLI-visible
+    as exit 2 via main's except ValueError) on n <= 0. audit meds.restock:
+    {med_id, name, added, remaining}.
+    """
+    if n <= 0:
+        raise ValueError(f"restock quantity must be positive: {n}")
+
+    target = name.casefold()
+    row = None
+    for candidate in conn.execute("SELECT * FROM meds ORDER BY id").fetchall():
+        if candidate["name"].casefold() == target:
+            row = candidate
+            break
+    if row is None:
+        return None
+
+    med_id = row["id"]
+    if row["remaining"] is None:
+        return {"med_id": med_id, "name": row["name"],
+                "remaining": None, "restocked": False}
+
+    remaining = row["remaining"] + n
+    conn.execute(
+        "UPDATE meds SET remaining=?, updated_at=? WHERE id=?",
+        (remaining, now_utc or _now(), med_id),
+    )
+    audit.log(conn, "meds.restock",
+              {"med_id": med_id, "name": row["name"], "added": n,
+               "remaining": remaining})
+
+    return {"med_id": med_id, "name": row["name"],
+            "remaining": remaining, "restocked": True}
