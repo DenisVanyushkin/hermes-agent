@@ -174,7 +174,7 @@ def test_harden_perms_missing_file_never_raises(tmp_path):
 def test_fresh_db_schema_version_current(db):
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "7"
+    ).fetchone()["value"] == "8"
 
 def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     from fam import db as famdb
@@ -191,7 +191,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "7"
+    ).fetchone()["value"] == "8"
 
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -212,7 +212,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "7"
+    ).fetchone()["value"] == "8"
     conn.close()
 
 def test_places_travel_min_default_zero(db):
@@ -304,7 +304,7 @@ def test_legacy_2b_db_gets_kind_column(legacy_2b_conn):
     assert "kind" in cols
     assert legacy_2b_conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "7"
+    ).fetchone()["value"] == "8"
 
 # ---- schema 3a migration: events.travel_min_road, events.road_checked_at ----
 
@@ -355,7 +355,7 @@ CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
     assert "road_checked_at" in cols
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "7"
+    ).fetchone()["value"] == "8"
     conn.close()
 
 def test_events_travel_min_road_nullable(db):
@@ -426,3 +426,125 @@ def test_med_intakes_same_plan_ts_utc_different_med_allowed(db):
     db.commit()
     count = db.execute("SELECT COUNT(*) c FROM med_intakes").fetchone()["c"]
     assert count == 2
+
+
+# ---- schema 8 migration: prep & social graph columns ----
+
+def test_schema_v8_columns(db):
+    cols = lambda t: {r[1] for r in db.execute(f"PRAGMA table_info({t})")}
+    assert {"prep_for_event_id", "prep_when"} <= cols("plans")
+    assert {"prep_min", "prep_asked"} <= cols("events")
+    assert "prep_min" in cols("event_series")
+    assert "home_place_id" in cols("people")
+    ver = db.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()[0]
+    assert int(ver) == 8
+
+def test_schema_v8_migrates_from_v7(tmp_path):
+    from fam import db as famdb
+    conn = sqlite3.connect(str(tmp_path / "legacy_7.db"))
+    conn.row_factory = sqlite3.Row
+    # A v7-shaped db is the current SCHEMA (which already includes the v8
+    # columns) minus those columns -- drop/recreate the affected tables
+    # without them to get a genuine pre-v8 shape, matching the pattern
+    # used for the 2c->3a migration test above.
+    conn.executescript(famdb.SCHEMA)
+    conn.execute("DROP TABLE plans")
+    conn.execute("DROP TABLE events")
+    conn.execute("DROP TABLE event_series")
+    conn.execute("DROP TABLE people")
+    conn.executescript("""
+CREATE TABLE people (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL DEFAULT 'person' CHECK (kind IN ('person','group')),
+  slug TEXT UNIQUE,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL);
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  start_utc TEXT NOT NULL,
+  end_utc TEXT,
+  place_id INTEGER REFERENCES places(id),
+  transport TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (transport IN ('car','walk','public','unknown')),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active','cancelled','done')),
+  notes TEXT NOT NULL DEFAULT '',
+  travel_min INTEGER,
+  travel_min_road INTEGER,
+  road_checked_at TEXT,
+  series_id INTEGER REFERENCES event_series(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
+CREATE TABLE event_series (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  place_id INTEGER REFERENCES places(id),
+  weekdays TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT,
+  transport TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (transport IN ('car','walk','public','unknown')),
+  notes TEXT NOT NULL DEFAULT '',
+  until_local TEXT,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active','cancelled')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL);
+CREATE TABLE plans (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  place_id INTEGER NULL REFERENCES places(id),
+  person_id INTEGER NULL REFERENCES people(id),
+  deadline TEXT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','dropped')),
+  attached_event_id INTEGER NULL REFERENCES events(id),
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  done_at TEXT NULL);
+""")
+    conn.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','7')")
+    conn.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
+    # existing rows that must survive the migration untouched
+    conn.execute(
+        "INSERT INTO events(id,title,start_utc,created_at,updated_at) "
+        "VALUES (1,'старое событие','2026-07-01T00:00:00Z',"
+        "'2026-07-01T00:00:00Z','2026-07-01T00:00:00Z')")
+    conn.execute(
+        "INSERT INTO plans(id,title,status,created_at) "
+        "VALUES (1,'старый план','open','2026-07-01T00:00:00Z')")
+    conn.commit()
+
+    cols = lambda t: {r["name"] for r in conn.execute(f"PRAGMA table_info({t})")}
+    assert "prep_for_event_id" not in cols("plans")
+    assert "prep_min" not in cols("events")
+    assert "prep_min" not in cols("event_series")
+    assert "home_place_id" not in cols("people")
+
+    famdb.init_db(conn)  # migrate
+
+    assert {"prep_for_event_id", "prep_when"} <= cols("plans")
+    assert {"prep_min", "prep_asked"} <= cols("events")
+    assert "prep_min" in cols("event_series")
+    assert "home_place_id" in cols("people")
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "8"
+
+    # pre-existing rows survived the ALTER TABLE ADD COLUMN migration
+    ev = conn.execute("SELECT title FROM events WHERE id=1").fetchone()
+    assert ev["title"] == "старое событие"
+    pl = conn.execute("SELECT title FROM plans WHERE id=1").fetchone()
+    assert pl["title"] == "старый план"
+
+    # re-run is harmless (idempotent migration)
+    famdb.init_db(conn)
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "8"
+    conn.close()
