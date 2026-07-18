@@ -335,3 +335,88 @@ def test_cancelled_event_does_not_count_as_outbound(db, fake_deliver):
         "SELECT value FROM meta WHERE key='followup_sent:2026-07-20'"
     ).fetchone()
     assert row is not None
+
+
+# -- Phase 7 Task 6: prep-check question piggybacks onto the evening
+# follow-up -- a future event (tomorrow..now+prep_check_days, default 5)
+# with prep_asked=0 and a place or participants is enough BY ITSELF to
+# trigger a follow-up send, even with zero outbound events/plans for
+# today. events.prep_asked is only flipped to 1 once gate.deliver
+# actually returns "sent" (a quiet/budget/error refusal must not burn
+# the one-shot ask).
+
+# AT_FOLLOWUP is 2026-07-20T15:00:00+00:00 (20:00 Almaty). Almaty is
+# UTC+5, so "tomorrow" starts at 2026-07-20T19:00:00+00:00 and the
+# default 5-day prep_check window ends at 2026-07-25T15:00:00+00:00.
+PREP_EVENT_NEAR = "2026-07-23T09:00:00+00:00"   # +3 days -- in window
+PREP_EVENT_FAR = "2026-07-24T09:00:00+00:00"    # +4 days -- also in window, farther
+PREP_EVENT_TOO_FAR = "2026-07-26T09:00:00+00:00"  # +6 days -- past the 5-day window
+
+
+def _prep_place_event(db, start, title="Прививка"):
+    if db.execute(
+        "SELECT 1 FROM places WHERE name='Клиника Дента'"
+    ).fetchone() is None:
+        places.add(db, "Клиника Дента", aliases=["клиника"],
+                   lat=43.2260, lon=76.8670)
+        db.commit()
+    e = cal.add(db, title, start, place="Клиника Дента")
+    db.commit()
+    return e
+
+
+def test_followup_prep_check_candidate(db, fake_deliver):
+    near = _prep_place_event(db, PREP_EVENT_NEAR, title="Прививка")
+    far = _prep_place_event(db, PREP_EVENT_FAR, title="Стоматолог")
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert len(followup_calls) == 1
+    prep_check = followup_calls[0]["raw"]["prep_check"]
+    assert prep_check["event_id"] == near["id"]
+    assert prep_check["title"] == "Прививка"
+
+
+def test_followup_prep_check_marks_asked_on_sent(db, fake_deliver):
+    e = _prep_place_event(db, PREP_EVENT_NEAR)
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    row = db.execute(
+        "SELECT prep_asked FROM events WHERE id=?", (e["id"],)
+    ).fetchone()
+    assert row["prep_asked"] == 1
+
+
+def test_followup_prep_check_skips_asked_and_far(db, fake_deliver):
+    already_asked = _prep_place_event(db, PREP_EVENT_NEAR, title="Уже спросили")
+    db.execute("UPDATE events SET prep_asked=1 WHERE id=?",
+               (already_asked["id"],))
+    db.commit()
+    too_far = _prep_place_event(db, PREP_EVENT_TOO_FAR, title="Далеко")
+    no_place_no_people = cal.add(db, "Просто звонок", PREP_EVENT_NEAR)
+    db.commit()
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert followup_calls == []
+    row = db.execute(
+        "SELECT value FROM meta WHERE key='followup_sent:2026-07-20'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_followup_prep_check_not_marked_when_not_sent(db, fake_deliver):
+    e = _prep_place_event(db, PREP_EVENT_NEAR)
+    fake_deliver.responses = ["quiet"]
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    row = db.execute(
+        "SELECT prep_asked FROM events WHERE id=?", (e["id"],)
+    ).fetchone()
+    assert row["prep_asked"] == 0

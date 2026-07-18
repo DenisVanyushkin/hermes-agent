@@ -109,6 +109,11 @@ CONFIG_DEFAULTS = {
     "brevity_model": "gpt-5.4-mini",
     "brevity_provider": "openai-codex",
     "brevity_soul_path": "/home/denis/.hermes/SOUL.md",   # persona fed to the brevity reviewer
+    # Phase 7 Task 6: an upcoming event (tomorrow..now+N days) with
+    # prep_asked=0 and a place or participants is eligible for a
+    # prep-check question piggybacked onto the evening follow-up
+    # (tick.py's _followup_prep_check_candidate) -- N days.
+    "prep_check_days": 5,
 }
 
 GATE_STYLE_INSTRUCTION = (

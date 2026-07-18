@@ -880,6 +880,38 @@ def _followup_day_bounds_utc(date_local):
     return from_utc, to_utc
 
 
+def _followup_prep_check_candidate(conn, now_dt, date_local, cfg):
+    """Phase 7 Task 6: the single nearest upcoming event worth a
+    prep-check question in the evening follow-up, or None.
+
+    Candidate = an active event with prep_asked=0, a resolved place OR
+    at least one participant, whose start_utc falls strictly after
+    today's Asia/Almaty calendar day (i.e. "tomorrow" onward -- today's
+    own events are already covered by the outbound-events/related-plans
+    branch above) and no later than now_utc + cfg["prep_check_days"]
+    (default 5) days. Ties/multiple matches: the nearest by start_utc
+    wins -- ORDER BY start_utc ASC LIMIT 1, exactly one candidate is
+    ever surfaced per tick (brief: "ровно одно ближайшее будущее
+    событие").
+    """
+    _, tomorrow_start_utc = _followup_day_bounds_utc(date_local)
+    prep_check_days = cfg.get("prep_check_days", 5)
+    horizon_utc = (now_dt + timedelta(days=prep_check_days)).isoformat(
+        timespec="seconds")
+    row = conn.execute(
+        "SELECT id FROM events WHERE status='active' AND prep_asked=0 "
+        "AND start_utc >= ? AND start_utc <= ? "
+        "AND (place_id IS NOT NULL OR EXISTS ("
+        "  SELECT 1 FROM event_participants ep WHERE ep.event_id=events.id"
+        ")) "
+        "ORDER BY start_utc ASC LIMIT 1",
+        (tomorrow_start_utc, horizon_utc),
+    ).fetchone()
+    if row is None:
+        return None
+    return cal.get(conn, row["id"])
+
+
 def _followup(conn, now_utc, cfg):
     """3b Task 6: the evening combined follow-up.
 
@@ -985,10 +1017,11 @@ def _followup(conn, now_utc, cfg):
                     seen_ids.add(plan["id"])
                     related_plans.append(plan)
 
-    if not outbound_events:
-        status = "no_events"
-    elif not related_plans:
-        status = "no_plans"
+    prep_candidate = _followup_prep_check_candidate(conn, now_dt, date_local, cfg)
+
+    has_recap = bool(outbound_events and related_plans)
+    if not has_recap and prep_candidate is None:
+        status = "no_events" if not outbound_events else "no_plans"
     else:
         raw = {
             "kind": "followup",
@@ -1002,13 +1035,30 @@ def _followup(conn, now_utc, cfg):
                       for p in related_plans],
             "question": FOLLOWUP_QUESTION,
         }
-        lines = ["Открытые планы:"]
-        lines.extend(p["title"] for p in related_plans)
+        lines = []
+        if related_plans:
+            lines.append("Открытые планы:")
+            lines.extend(p["title"] for p in related_plans)
+        if prep_candidate is not None:
+            raw["prep_check"] = {
+                "event_id": prep_candidate["id"],
+                "title": prep_candidate["title"],
+                "start_local": prep_candidate["start_local"],
+            }
+            lines.append(
+                f"Не забыли подготовиться к «{prep_candidate['title']}» "
+                f"({prep_candidate['start_local']})?"
+            )
         lines.append(FOLLOWUP_QUESTION)
         human_fallback = "\n".join(lines)
 
         status = gate.deliver(conn, "followup", raw, human_fallback, cfg,
                                now_utc=now_utc)
+        if status == "sent" and prep_candidate is not None:
+            conn.execute(
+                "UPDATE events SET prep_asked=1 WHERE id=?",
+                (prep_candidate["id"],),
+            )
 
     # "quiet" joined the permanent verdicts (go-live review, finding 9):
     # followup_local_time (20:00) precedes quiet start (21:30), and the
