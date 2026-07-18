@@ -151,13 +151,19 @@ def recompute_road(conn, event_id):
 
 
 def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
-        transport="unknown", notes="", travel_min=None, series_id=None):
+        transport="unknown", notes="", travel_min=None, series_id=None,
+        prep_min=None):
     """Create an event. place/participants are text refs (id/name/alias/
     slug); an unresolvable ref raises UnknownRefError and nothing is
     inserted. Group participants expand to their members at add-time (the
     audit payload keeps the original ref, e.g. "татешки"). travel_min
     overrides the place's travel_min for rem.leave_at() -- None (default)
-    means "take it from the place" (see rem.leave_at).
+    means "take it from the place" (see rem.leave_at). prep_min (phase 7,
+    Task 4), when set, overrides the reminder-rule engine entirely for
+    this event: rem.regenerate builds its chain from
+    rem.build_stages(prep_min) instead of the default/slug reminder_rules
+    (event > slug > default precedence) -- None (default) leaves the
+    existing rule-based behavior unchanged.
 
     Regenerates the event's reminder chain (rem.regenerate) in the same
     transaction, after the insert.
@@ -172,10 +178,10 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
 
     cur = conn.execute(
         "INSERT INTO events(title, start_utc, end_utc, place_id, transport, "
-        "status, notes, travel_min, series_id, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "status, notes, travel_min, series_id, prep_min, created_at, "
+        "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (title, start, end, pl["id"] if pl else None, transport, "active",
-         notes, travel_min, series_id, now, now),
+         notes, travel_min, series_id, prep_min, now, now),
     )
     event_id = cur.lastrowid
 
@@ -190,7 +196,8 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
         "cal.add",
         {"id": event_id, "title": title, "start_utc": start, "end_utc": end,
          "place": place, "participants": list(participants),
-         "transport": transport, "notes": notes, "travel_min": travel_min},
+         "transport": transport, "notes": notes, "travel_min": travel_min,
+         "prep_min": prep_min},
     )
 
     recompute_road(conn, event_id)
@@ -228,14 +235,18 @@ def get(conn, event_id):
 
 _UPDATE_FIELDS = {
     "title", "start_utc", "end_utc", "place", "transport", "notes",
-    "add_person", "rm_person", "travel_min",
+    "add_person", "rm_person", "travel_min", "prep_min",
 }
 
 # Fields whose change should trigger a reminder-chain regeneration
 # (compared as actual DB column values before vs. after the write --
 # NOT "was the field passed", so an offset-only start_utc rewrite that
 # normalizes to the same instant correctly does not trigger a regen).
-_REGEN_TRIGGER_COLUMNS = ("start_utc", "travel_min", "place_id")
+# prep_min (Task 4, phase 7) is included: it changes which stages
+# rem.regenerate builds (event.prep_min beats the rule engine), so
+# flipping it -- including clearing it back to NULL to fall back to
+# rule-based reminders -- must regenerate same as travel_min/place.
+_REGEN_TRIGGER_COLUMNS = ("start_utc", "travel_min", "place_id", "prep_min")
 
 # Fields whose change should (re-)trigger cli.py's cal-update mail hook
 # (_maybe_email_event -> Denis's .ics email, Task 10) -- a superset of
@@ -254,8 +265,9 @@ _MAIL_TRIGGER_COLUMNS = _REGEN_TRIGGER_COLUMNS + ("end_utc", "title")
 
 def update(conn, event_id, **fields):
     """Update mutable fields on an event. Accepts any of: title, start_utc,
-    end_utc, place, transport, notes, travel_min, add_person (list of
-    refs), rm_person (list of refs). Any other keyword raises ValueError
+    end_utc, place, transport, notes, travel_min, prep_min, add_person
+    (list of refs), rm_person (list of refs). Any other keyword raises
+    ValueError
     before any write. place/add_person refs are resolved (UnknownRefError
     on failure) before any write. start_utc/end_utc are normalized to UTC
     exactly once, and that same normalized string is used for both the
@@ -336,6 +348,7 @@ def update(conn, event_id, **fields):
         "transport": "transport",
         "notes": "notes",
         "travel_min": "travel_min",
+        "prep_min": "prep_min",
     }
     for key, col in column_map.items():
         if key in fields:

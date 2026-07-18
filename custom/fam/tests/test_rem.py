@@ -745,3 +745,100 @@ def test_build_stages_short_lead_degrades_gracefully():
         (-10, "уже начали собираться?", "prepare"),
         (0, "пора выходить", "leave"),
     ]
+"""Task 4 (phase 7): prep_min precedence over reminder_rules. Appended to
+test_rem.py -- these tests assume _seed_people/conn_with_taya_event
+fixtures already defined above in the same module.
+"""
+
+
+def test_prep_min_overrides_default(db):
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+    e = cal.add(db, "Стрижка", "2026-07-20T05:00:00+00:00",
+                participants=["Денис"], prep_min=120)
+    db.commit()
+
+    # reminders table has no offset_min column -- derive offsets from
+    # fire_at_utc vs leave_at instead, mirroring existing tests' pattern.
+    leave = rem.leave_at(db, cal.get(db, e["id"]))
+    leave_dt = rem._parse_utc(leave)
+    fires = db.execute(
+        "SELECT fire_at_utc, rule_id FROM reminders WHERE event_id=? "
+        "ORDER BY fire_at_utc", (e["id"],)).fetchall()
+    offsets = {round((leave_dt - rem._parse_utc(r["fire_at_utc"])).total_seconds() / 60)
+               for r in fires}
+    assert offsets == {120, 115, 105, 30, 15, 0}
+    # every synthesized reminder from a prep_min chain has rule_id=None
+    # (no reminder_rules row backs it) per the brief's schema check.
+    assert all(r["rule_id"] is None for r in fires)
+
+
+def test_prep_min_overrides_taya(db):
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+    e = cal.add(db, "С Таей", "2026-07-20T05:00:00+00:00",
+                participants=["Тая"], prep_min=90)
+    db.commit()
+
+    leave_dt = rem._parse_utc(rem.leave_at(db, cal.get(db, e["id"])))
+    fires = db.execute(
+        "SELECT fire_at_utc FROM reminders WHERE event_id=?", (e["id"],)).fetchall()
+    offsets = {round((leave_dt - rem._parse_utc(r["fire_at_utc"])).total_seconds() / 60)
+               for r in fires}
+    # build_stages(90) shape, NOT build_stages(60) (Taya's slug default).
+    assert offsets == set(
+        off for off, _ in [(s["offset_min"] * -1, None) for s in rem.build_stages(90)])
+
+
+def test_no_prep_min_taya_unchanged(db):
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+    e = cal.add(db, "С Таей", "2026-07-20T05:00:00+00:00",
+                participants=["Тая"])
+    db.commit()
+
+    leave_dt = rem._parse_utc(rem.leave_at(db, cal.get(db, e["id"])))
+    fires = db.execute(
+        "SELECT fire_at_utc, rule_id FROM reminders WHERE event_id=?", (e["id"],)).fetchall()
+    offsets = {round((leave_dt - rem._parse_utc(r["fire_at_utc"])).total_seconds() / 60)
+               for r in fires}
+    expected = {off for off, _ in [(s["offset_min"] * -1, None) for s in rem.build_stages(60)]}
+    assert offsets == expected
+    # regression: without prep_min, reminders still come from a real rule row.
+    assert all(r["rule_id"] is not None for r in fires)
+
+
+def test_update_prep_min_regenerates(db):
+    _seed_people(db)
+    rem.seed_default_rules(db)
+    db.commit()
+    e = cal.add(db, "Стрижка", "2026-07-20T05:00:00+00:00",
+                participants=["Денис"])
+    db.commit()
+    before = db.execute(
+        "SELECT rule_id FROM reminders WHERE event_id=? AND status='pending'",
+        (e["id"],)).fetchall()
+    assert before  # sanity: default rule produced pending reminders
+    assert all(r["rule_id"] is not None for r in before)  # rule-based, pre-update
+
+    cal.update(db, e["id"], prep_min=45)
+    db.commit()
+
+    after = db.execute(
+        "SELECT fire_at_utc, rule_id FROM reminders WHERE event_id=? AND status='pending'",
+        (e["id"],)).fetchall()
+    # regenerated from the synthetic prep_min chain (rule_id=None), not
+    # the pre-update rule-based reminders -- fire_at set differs (build_
+    # stages(45) vs default's build_stages(30)) and rule_id is now NULL.
+    assert after
+    assert all(r["rule_id"] is None for r in after)
+    leave_dt = rem._parse_utc(rem.leave_at(db, cal.get(db, e["id"])))
+    offsets = {round((leave_dt - rem._parse_utc(r["fire_at_utc"])).total_seconds() / 60)
+               for r in after}
+    assert offsets == {off for off, _ in
+                        [(s["offset_min"] * -1, None) for s in rem.build_stages(45)]}
+
+
