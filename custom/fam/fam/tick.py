@@ -498,9 +498,38 @@ def reminders(conn, now_utc=None, cfg=None):
                 audit.log(conn, "tick.car_hook",
                           {"event_id": event.get("id"), "hooks": car_hooks})
 
+        # Phase 7 Task 5: departure checklist -- open plans with
+        # prep_when='departure' for THIS event piggyback onto the
+        # prepare-stage reminder only (not leave, and not repeated on
+        # every stage): raw["departure_checklist"] gives the rewrite
+        # LLM the list to weave into "возьми..."-style phrasing, and
+        # human_fallback (used verbatim when the rewrite is skipped/
+        # unavailable) gets the same titles appended so the checklist
+        # is never silently dropped on a fallback send. Scoped to
+        # kind == "prepare" specifically -- unlike the enroute/
+        # shop_enroute/car blocks above, which piggyback on BOTH leave
+        # and prepare -- because the checklist is naturally a
+        # "before you start getting ready" thing, not a
+        # "you're about to walk out the door" thing, and showing it on
+        # both stages would just repeat the same list twice per event.
+        checklist = []
+        if reminder["kind"] == "prepare":
+            rows = conn.execute(
+                "SELECT id, title FROM plans WHERE prep_for_event_id=? "
+                "AND prep_when='departure' AND status='open' "
+                "ORDER BY created_at",
+                (event["id"],)).fetchall()
+            if rows:
+                checklist = [{"plan_id": r["id"], "title": r["title"]}
+                             for r in rows]
+                raw["departure_checklist"] = checklist
+
         human_fallback = (
             f"{reminder['label']}: {event['title']} — {event['start_local']}"
         )
+        if checklist:
+            human_fallback += " (" + ", ".join(
+                item["title"] for item in checklist) + ")"
 
         status = gate.deliver(conn, "reminder", raw, human_fallback, cfg,
                                now_utc=now)
