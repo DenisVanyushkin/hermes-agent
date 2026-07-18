@@ -389,7 +389,37 @@ def route_via(conn, origin_latlon, via_latlons, dest_latlon, cfg, now_utc=None):
         return None, None, "none"
 
 
-def detour_min(conn, event, plan_place, cfg):
+def direct_leg_min(conn, event, cfg):
+    """Live TomTom minutes for the direct home->event leg (no waypoints) --
+    the shared baseline detour_min compares every candidate against.
+
+    Phase 7b, Task 3 (fam cal detours): iterating N candidate plans for
+    the same event must NOT spend N+1 TomTom calls on the direct leg (one
+    per detour_min call, as the original single-candidate detour_min did)
+    -- that's the whole daily cap gone on one event. Callers computing
+    detour_min for multiple candidates against the same event call this
+    ONCE and pass the result into detour_min's direct_min= param instead.
+
+    Same "never raises, None on anything not live" contract as
+    detour_min: missing home/event coords or a non-tomtom route_via
+    result -> None.
+    """
+    home_lat = cfg.get("road_home_lat")
+    home_lon = cfg.get("road_home_lon")
+    place = (event or {}).get("place") or {}
+    dest_lat, dest_lon = place.get("lat"), place.get("lon")
+
+    if None in (home_lat, home_lon, dest_lat, dest_lon):
+        return None
+
+    direct_min, _, direct_src = route_via(
+        conn, (home_lat, home_lon), [], (dest_lat, dest_lon), cfg)
+    if direct_src != "tomtom":
+        return None
+    return direct_min
+
+
+def detour_min(conn, event, plan_place, cfg, direct_min=None):
     """How many extra minutes a stop at plan_place would add to the trip
     to event's place, vs going there directly -- both legs measured live
     via route_via (never the straight-line/manual/place fallback rungs,
@@ -399,6 +429,14 @@ def detour_min(conn, event, plan_place, cfg):
     None (a detour figure built from a stale/estimated leg would be
     misleading, not merely approximate). Negative deltas (via ends up
     "faster" than direct, e.g. traffic-model noise) clamp to 0.
+
+    direct_min: optional pre-computed direct-leg minutes (from
+    direct_leg_min, or a prior detour_min call for the same event) --
+    when given, the direct leg is NOT re-fetched from TomTom, letting a
+    caller iterating several candidate plans for one event spend only one
+    TomTom call on the direct leg total instead of one per candidate
+    (Phase 7b, Task 3 budget concern). When omitted, behaves exactly as
+    before: fetches the direct leg itself via route_via.
     """
     home_lat = cfg.get("road_home_lat")
     home_lon = cfg.get("road_home_lon")
@@ -409,10 +447,11 @@ def detour_min(conn, event, plan_place, cfg):
     if None in (home_lat, home_lon, dest_lat, dest_lon, via_lat, via_lon):
         return None
 
-    direct_min, _, direct_src = route_via(
-        conn, (home_lat, home_lon), [], (dest_lat, dest_lon), cfg)
-    if direct_src != "tomtom":
-        return None
+    if direct_min is None:
+        direct_min, _, direct_src = route_via(
+            conn, (home_lat, home_lon), [], (dest_lat, dest_lon), cfg)
+        if direct_src != "tomtom":
+            return None
 
     via_min, _, via_src = route_via(
         conn, (home_lat, home_lon), [(via_lat, via_lon)], (dest_lat, dest_lon), cfg)

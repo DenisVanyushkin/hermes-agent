@@ -477,6 +477,30 @@ def cmd_cal_show(args):
         print(_fmt_event(e))
     return 0
 
+def cmd_cal_detours(args):
+    """Phase 7b, Task 3: `fam cal detours <event_id>` -- geo-matched open
+    plans "on the way" to this event with a live TomTom detour figure
+    (plans.detours), same filters as the first-prepare-stage offer in
+    tick.reminders(). unknown event_id -> ValueError (exit 2), same
+    contract as cal show/update/cancel.
+    """
+    conn = famdb.connect()
+    e = cal.get(conn, args.id)
+    if e is None:
+        raise ValueError(f"unknown event: {args.id}")
+    cfg = gate.load_config()
+    offers = plans.detours(conn, e, cfg)
+    rows = [{"plan_id": o["plan"]["id"], "title": o["plan"]["title"],
+              "detour_min": o["detour_min"]} for o in offers]
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        if not rows:
+            print("no detour candidates")
+        for r in rows:
+            print(f"+{r['detour_min']} мин: {r['title']} (plan_id={r['plan_id']})")
+    return 0
+
 def cmd_cal_day(args):
     conn = famdb.connect()
     rows = cal.day(conn, args.date)
@@ -1464,6 +1488,11 @@ def build_parser():
     sps.add_argument("id", type=int)
     sps.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
+
+    spdet = cal_sub.add_parser("detours"); spdet.set_defaults(func=cmd_cal_detours)
+    spdet.add_argument("id", type=int)
+    spdet.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable output")
 
     spday = cal_sub.add_parser("day"); spday.set_defaults(func=cmd_cal_day)
     spday.add_argument("date", help="YYYY-MM-DD in Asia/Almaty")

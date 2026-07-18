@@ -78,6 +78,37 @@ def _parse_utc(value):
     return dt.astimezone(timezone.utc)
 
 
+def _is_first_prepare_stage(conn, event_id, reminder):
+    """True when `reminder` (kind='prepare') is the earliest-firing
+    prepare-stage reminder for event_id -- Phase 7b, Task 3's "first
+    prepare stage gets the detour offer, later stages get the plain
+    fact" rule.
+
+    Scoped to status IN ('pending','sent') -- NOT 'pending' alone. A
+    pending-only scan would misfire across the normal multi-tick
+    lifecycle: reminders fire roughly in fire_at order, so by the time a
+    SECOND prepare stage's own fire_at arrives, the first stage has
+    almost always already been delivered and flipped to status='sent' --
+    a pending-only MIN() would then see only the second stage's own row
+    and wrongly call IT "first" too (a second offer, exactly what this
+    rule exists to prevent). Including 'sent' rows keeps the earlier
+    stage in the comparison pool even after delivery, so a later stage
+    reliably loses the MIN() to it. 'cancelled'/'stale' rows are excluded
+    -- a stage that never actually fired shouldn't anchor "first".
+
+    `reminder` is queried by reminders() while it is still status=
+    'pending' itself (the delivery outcome only updates it after this
+    check runs), so its own row is naturally included in the scan.
+    fire_at_utc is ISO-8601 UTC, so plain string MIN/comparison sorts
+    correctly without parsing.
+    """
+    row = conn.execute(
+        "SELECT MIN(fire_at_utc) AS min_fire FROM reminders "
+        "WHERE event_id=? AND kind='prepare' AND status IN ('pending','sent')",
+        (event_id,)).fetchone()
+    return bool(row) and row["min_fire"] == reminder["fire_at_utc"]
+
+
 def road_recompute(conn, now_utc=None, cfg=None):
     """Threshold road recompute (Phase 3a Task 4): at T-120 and T-60
     before an active future event's leave_at (cfg["road_recompute_min"],
@@ -439,8 +470,55 @@ def reminders(conn, now_utc=None, cfg=None):
             if matches:
                 max_items = cfg.get("enroute_max_items", 2)
                 chosen = matches[:max_items]
-                titles = [m["plan"]["title"] for m in chosen]
-                raw["enroute"] = "По пути: " + "; ".join(titles)
+
+                # Phase 7b, Task 3: the FIRST prepare-stage of an event's
+                # reminder chain (earliest fire_at_utc among this event's
+                # still-pending kind='prepare' rows -- which, at this
+                # point in the loop, includes THIS reminder's own row,
+                # still status='pending' until the delivery outcome below
+                # updates it) gets a live detour_min per geo candidate and
+                # an offer-shaped line ("По пути (+N мин): X — заехать?").
+                # Any later stage (a subsequent prepare stage, or a leave
+                # stage) gets the plain fact line, same as before this
+                # task -- repeating the offer question on every stage of
+                # the same event would be noise, and by the leave stage
+                # the moment to actually detour has usually passed.
+                #
+                # plans.detours() reuses THIS tick's own already-computed
+                # `matches` (passed in below) instead of calling
+                # match_enroute a second time -- avoids doubling the
+                # road.route_for_event/TomTom spend for the same event on
+                # the same tick (same B1 discipline as route= above).
+                detour_by_plan_id = {}
+                if reminder["kind"] == "prepare" and _is_first_prepare_stage(
+                        conn, event["id"], reminder):
+                    try:
+                        offers = plans.detours(conn, event, cfg, matches=matches)
+                        detour_by_plan_id = {
+                            o["plan"]["id"]: o["detour_min"] for o in offers}
+                    except Exception as e:
+                        audit.log(conn, "tick.error",
+                                  {"where": "detours", "error": str(e)[:200]})
+                        detour_by_plan_id = {}
+
+                parts = []
+                has_offer = False
+                for m in chosen:
+                    plan = m["plan"]
+                    d = detour_by_plan_id.get(plan["id"])
+                    if d is not None:
+                        has_offer = True
+                        parts.append(f"(+{d} мин): {plan['title']} — заехать?")
+                    else:
+                        parts.append(plan["title"])
+                if has_offer:
+                    # At least one chosen item is an offer -- lead with
+                    # "По пути" once, followed by each item (offer items
+                    # keep their own "(+N мин): ... — заехать?" shape,
+                    # plain items stay bare titles), "; "-joined.
+                    raw["enroute"] = "По пути " + "; ".join(parts)
+                else:
+                    raw["enroute"] = "По пути: " + "; ".join(parts)
                 audit.log(conn, "tick.enroute",
                           {"event_id": event["id"],
                            "plan_ids": [m["plan"]["id"] for m in chosen]})
