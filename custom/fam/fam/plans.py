@@ -49,7 +49,8 @@ def _resolve_person(conn, ref):
     return p
 
 
-def add(conn, title, place=None, person=None, deadline=None, notes=""):
+def add(conn, title, place=None, person=None, deadline=None, notes="",
+        prep_for_event=None, prep_when=None):
     """Create a plan. place/person are text refs (id/name/alias/slug); an
     unresolvable ref raises ValueError and nothing is inserted. deadline,
     if given, must be a real YYYY-MM-DD date -- a malformed value raises
@@ -57,25 +58,57 @@ def add(conn, title, place=None, person=None, deadline=None, notes=""):
     review Finding 1: tick._burning_plans parses deadline with
     date.fromisoformat and would otherwise crash the daily digest on a
     bad value). Returns the new plan's id.
+
+    prep_for_event/prep_when mark this plan as "prep" for a calendar
+    event -- something that needs doing ahead of the event, not the
+    event itself (e.g. "собрать документы" before a doctor visit).
+    Both or neither must be given (ValueError otherwise); prep_when must
+    be "date" (deadline required) or "departure" (deadline optional --
+    the prep has no fixed date of its own, it just needs doing before
+    departure). prep_for_event must resolve to a real event (ValueError
+    on an unknown id), checked -- like place/person -- before any insert.
+    On success, the referenced event's prep_asked flag is set to 1 (if
+    not already), so a caller can tell "has prep already been asked
+    about for this event" without re-querying plans.
     """
     pl = _resolve_place(conn, place)
     pe = _resolve_person(conn, person)
     _validate_deadline(deadline)
 
+    if (prep_for_event is None) != (prep_when is None):
+        raise ValueError("prep_for_event and prep_when go together")
+
+    ev = None
+    if prep_for_event is not None:
+        if prep_when not in ("date", "departure"):
+            raise ValueError(f"invalid prep_when: {prep_when}")
+        if prep_when == "date" and deadline is None:
+            raise ValueError("prep 'date' plan requires a deadline")
+        from fam import cal
+        ev = cal.get(conn, int(prep_for_event))
+        if ev is None:
+            raise ValueError(f"unknown event: {prep_for_event}")
+
     now = _now()
     cur = conn.execute(
         "INSERT INTO plans(title, place_id, person_id, deadline, status, "
-        "notes, created_at) VALUES (?,?,?,?,?,?,?)",
+        "notes, created_at, prep_for_event_id, prep_when) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
         (title, pl["id"] if pl else None, pe["id"] if pe else None,
-         deadline, "open", notes, now),
+         deadline, "open", notes, now,
+         ev["id"] if ev else None, prep_when),
     )
     plan_id = cur.lastrowid
 
     audit.log(
         conn, "plan.add",
         {"id": plan_id, "title": title, "place": place, "person": person,
-         "deadline": deadline, "notes": notes},
+         "deadline": deadline, "notes": notes,
+         "prep_for_event": prep_for_event, "prep_when": prep_when},
     )
+
+    if ev is not None and not ev.get("prep_asked"):
+        conn.execute("UPDATE events SET prep_asked=1 WHERE id=?", (ev["id"],))
 
     return plan_id
 

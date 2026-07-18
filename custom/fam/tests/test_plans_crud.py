@@ -232,6 +232,85 @@ def test_cli_plan_attach_recomputes_road(db, capsys, monkeypatch):
     assert calls == [e["id"]]
 
 
+# --- Task 3: prep plans (add(prep_for_event=, prep_when=)) ---
+
+def test_plan_add_prep_date(db):
+    _seed(db)
+    e = cal.add(db, "Стоматолог", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    assert e["prep_asked"] == 0
+
+    pid = plans.add(db, "Собрать документы", deadline="2026-07-10",
+                     prep_for_event=e["id"], prep_when="date")
+    db.commit()
+
+    p = plans.get(db, pid)
+    assert p["prep_for_event_id"] == e["id"]
+    assert p["prep_when"] == "date"
+    assert p["deadline"] == "2026-07-10"
+
+    got = cal.get(db, e["id"])
+    assert got["prep_asked"] == 1
+
+
+def test_plan_add_prep_departure(db):
+    _seed(db)
+    e = cal.add(db, "Стоматолог", "2026-07-15T05:00:00+00:00")
+    db.commit()
+
+    pid = plans.add(db, "Собраться", prep_for_event=e["id"], prep_when="departure")
+    db.commit()
+
+    p = plans.get(db, pid)
+    assert p["prep_for_event_id"] == e["id"]
+    assert p["prep_when"] == "departure"
+    assert p["deadline"] is None
+
+    got = cal.get(db, e["id"])
+    assert got["prep_asked"] == 1
+
+
+def test_plan_add_prep_invariants(db):
+    _seed(db)
+    e = cal.add(db, "Стоматолог", "2026-07-15T05:00:00+00:00")
+    db.commit()
+
+    def _count():
+        return db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+
+    # prep_for_event without prep_when
+    n = _count()
+    with pytest.raises(ValueError):
+        plans.add(db, "Дело", prep_for_event=e["id"])
+    assert _count() == n
+
+    # prep_when without prep_for_event
+    n = _count()
+    with pytest.raises(ValueError):
+        plans.add(db, "Дело", prep_when="date")
+    assert _count() == n
+
+    # prep_when='date' without deadline
+    n = _count()
+    with pytest.raises(ValueError):
+        plans.add(db, "Дело", prep_for_event=e["id"], prep_when="date")
+    assert _count() == n
+
+    # prep_when not in {date, departure}
+    n = _count()
+    with pytest.raises(ValueError):
+        plans.add(db, "Дело", deadline="2026-07-10",
+                  prep_for_event=e["id"], prep_when="bogus")
+    assert _count() == n
+
+    # unknown event id
+    n = _count()
+    with pytest.raises(ValueError):
+        plans.add(db, "Дело", deadline="2026-07-10",
+                  prep_for_event=999999, prep_when="date")
+    assert _count() == n
+
+
 def test_cli_plan_attach_recompute_failure_does_not_break_attach(db, capsys, monkeypatch):
     from fam import cal as cal_mod, cli
 
