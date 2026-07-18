@@ -11,6 +11,7 @@ real hermes process.
 """
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -413,6 +414,60 @@ def _ensure_trailing_question(text, question):
     return f"{_strip_trailing_question(text, question)}\n\n{question}"
 
 
+def _title_words(text):
+    """Words of length > 4 from `text`, casefolded -- the unit used to
+    decide whether an enroute/checklist plan title survived the LLM
+    rewrite (see _append_piggyback_if_missing)."""
+    return [w.casefold() for w in re.findall(r"\w+", text, flags=re.UNICODE) if len(w) > 4]
+
+
+def _mentions_any(final_text, words):
+    if not words:
+        return False
+    final_cf = final_text.casefold()
+    return any(w in final_cf for w in words)
+
+
+def _append_piggyback_if_missing(final_text, raw):
+    """Live-found bug (F2): the LLM rewrite for kind="reminder" sometimes
+    drops the enroute/departure_checklist piggyback entirely (a live
+    reminder's raw carried raw["enroute"] == "По пути: Отдать кастрюлю
+    Аишке" but two consecutive final texts never mentioned it). The fix
+    is deterministic, not prompt-based: after the rewrite (and after the
+    length ceiling -- see deliver()'s step 4/4b ordering, this call sits
+    AFTER truncation so the piggyback text is never cut) check whether
+    any long (>4 char) word from the plan title(s) survived into
+    final_text; if not, append the raw piggyback text verbatim so the
+    information is never silently lost. If the rewrite (or fallback)
+    already mentioned it, nothing is appended -- no duplication.
+
+    Only two raw keys are recognized (Phase 7 Task 5's
+    departure_checklist and 3b Task 4's enroute); raw without either key,
+    or a raw missing/blank/malformed value for either, is a no-op for
+    that key.
+    """
+    if not isinstance(raw, dict):
+        return final_text
+
+    enroute_text = raw.get("enroute")
+    if isinstance(enroute_text, str) and enroute_text.strip():
+        title_part = enroute_text.split(":", 1)[-1] if ":" in enroute_text else enroute_text
+        words = _title_words(title_part)
+        if words and not _mentions_any(final_text, words):
+            final_text = f"{final_text} {enroute_text.strip()}"
+
+    checklist = raw.get("departure_checklist")
+    if isinstance(checklist, list) and checklist:
+        titles = [item.get("title") for item in checklist
+                  if isinstance(item, dict) and item.get("title")]
+        if titles:
+            words = _title_words(" ".join(titles))
+            if words and not _mentions_any(final_text, words):
+                final_text = f"{final_text} Не забыть: " + ", ".join(titles)
+
+    return final_text
+
+
 def _call_rewrite(prompt, cfg):
     """Run `hermes -z PROMPT -m MODEL --provider PROVIDER -t clarify`.
     Returns the stripped stdout text, or None on ANY failure (timeout,
@@ -576,6 +631,14 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
                 final_text = shortened
             else:
                 long_flag = True
+
+    # F2 fix: deterministic enroute/departure_checklist piggyback
+    # guarantee -- runs AFTER the length ceiling above so the piggyback
+    # text is appended untruncated (see _append_piggyback_if_missing's
+    # docstring). Reminder-only: enroute/departure_checklist are only
+    # ever set on raw for kind="reminder" (tick.py's reminders()).
+    if kind == "reminder":
+        final_text = _append_piggyback_if_missing(final_text, raw)
 
     if not _call_send(final_text, cfg):
         audit.log(conn, "gate.error",

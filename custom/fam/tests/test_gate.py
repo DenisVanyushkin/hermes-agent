@@ -1048,3 +1048,122 @@ def test_deliver_followup_rewrite_appends_question_exactly_once(db, fake_run):
     assert rows[0]["payload"]["attempt"] == "rewrite"
     assert final.endswith(tick.FOLLOWUP_QUESTION)
     assert final.count(tick.FOLLOWUP_QUESTION) == 1
+
+
+# ---- deliver: F2 fix -- deterministic enroute/departure_checklist
+# piggyback guarantee for kind="reminder" (live bug: LLM rewrite dropped
+# raw["enroute"] entirely from the final text on two consecutive sends) ----
+
+def test_deliver_reminder_appends_enroute_when_rewrite_drops_it(db, fake_run):
+    raw = {"label": "пора выходить", "event": {"title": "Врач"},
+           "enroute": "По пути: Отдать кастрюлю Аишке"}
+    fake_run.rewrite_responses = [_completed(0, "Пора выходить к врачу.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    rows = audit.query(db, None, "gate.sent", None)
+    final = rows[0]["payload"]["final"]
+    assert "По пути: Отдать кастрюлю Аишке" in final
+    send_args, send_kwargs = fake_run.calls[-1]
+    assert send_kwargs["input"] == final
+
+
+def test_deliver_reminder_no_duplicate_when_rewrite_already_mentions_enroute(db, fake_run):
+    raw = {"label": "пора выходить", "event": {"title": "Врач"},
+           "enroute": "По пути: Отдать кастрюлю Аишке"}
+    fake_run.rewrite_responses = [
+        _completed(0, "Пора выходить к врачу, по пути занеси кастрюлю Аишке.")
+    ]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert final.count("кастрюл") == 1
+    assert "По пути:" not in final
+
+
+def test_deliver_reminder_enroute_appended_on_fallback_path_too(db, fake_run):
+    raw = {"label": "пора выходить", "event": {"title": "Врач"},
+           "enroute": "По пути: Отдать кастрюлю Аишке"}
+    fake_run.rewrite_responses = [_completed(1, "", "boom")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "человеческий фолбэк", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert final.startswith("человеческий фолбэк")
+    assert "По пути: Отдать кастрюлю Аишке" in final
+
+
+def test_deliver_reminder_enroute_appended_after_truncation_not_cut(db, fake_run):
+    tight_cfg = dict(CFG, max_len_reminder=20)
+    raw = {"label": "пора выходить", "event": {"title": "Врач"},
+           "enroute": "По пути: Отдать кастрюлю Аишке"}
+    long_text = "Очень длинное сообщение про врача и дорогу туда и обратно."
+    fake_run.rewrite_responses = [_completed(0, long_text),
+                                   _completed(0, "Короткий текст.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", tight_cfg,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    # the enroute tail must survive whole, even though it pushes the
+    # combined text back over the ceiling (long=True is still fine here).
+    assert final.endswith("По пути: Отдать кастрюлю Аишке")
+
+
+def test_deliver_reminder_no_enroute_key_is_noop(db, fake_run):
+    raw = {"label": "пора выходить", "event": {"title": "Врач"}}
+    fake_run.rewrite_responses = [_completed(0, "Пора выходить к врачу.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert final == "Пора выходить к врачу."
+
+
+def test_deliver_digest_kind_never_gets_enroute_append(db, fake_run):
+    # enroute/departure_checklist only ever appear on reminder raw; guard
+    # against accidental cross-kind application even if raw happened to
+    # carry the key (defensive test, not a real digest scenario).
+    raw = {"kind": "digest", "enroute": "По пути: Что-то"}
+    fake_run.rewrite_responses = [_completed(0, "Сводка дня.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "digest", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00", force=True,
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert "По пути:" not in final

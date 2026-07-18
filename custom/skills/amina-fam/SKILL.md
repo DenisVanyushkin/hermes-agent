@@ -209,22 +209,34 @@ show after cancel), make a second, separate terminal call.
     without `cal update --add-person/--rm-person` (or `cal series update`
     for a series) exiting 0.
 13. **A trip needs a transport mode — `unknown` is rejected for place-bound
-    events.** Whenever you record an event WITH a `--place` (a one-off
-    `fam cal add ... --place P` OR a `--repeat` series with `--place`), you
-    MUST pass `--transport car|walk|public`; fam exits 2 otherwise. This is
-    what makes the car hooks fire (заправка при низком топливе, прогрев по
-    погоде — оба привязаны к выезду). If the request does not make the mode
-    clear, ask Amina one short question ("на машине, пешком или на такси?")
-    BEFORE saving — never guess, never default silently. Events without a
-    `--place` (созвон, день рождения) do not need transport. To change it
-    later: `fam car set-transport <event_id> car|walk|public`.
-    Alongside transport, if it's not already recorded, ask one more short
-    question: "сколько времени на сборы?" → pass the answer as `--prep-min
-    N` on the same `fam cal add`/`fam cal update` call (minutes needed to
-    get ready before leave_at). If the user says nothing, or answers "как
-    обычно"/"обычное время", do NOT pass `--prep-min` — leave the
-    default/slug reminder rules in place. For a `--repeat` series, pass
-    `--prep-min N` at `cal add --repeat` time — it's copied onto every
+    events. Ask it TOGETHER with the prep-time question, in ONE message.**
+    Whenever you record an event WITH a `--place` (a one-off `fam cal add
+    ... --place P` OR a `--repeat` series with `--place`), you MUST pass
+    `--transport car|walk|public`; fam exits 2 otherwise. This is what
+    makes the car hooks fire (заправка при низком топливе, прогрев/охлаждение
+    салона по погоде — оба привязаны к выезду). If the request does not
+    make the mode clear, ask Amina ONE combined question BEFORE saving —
+    never guess, never default silently, and never split this into two
+    separate messages/turns: "на машине, пешком или такси? и сколько
+    времени на сборы?" (Live-found bug: asking these as two separate
+    questions meant the second one — prep time — sometimes never got
+    asked at all.) Events without a `--place` (созвон, день рождения) do
+    not need transport. To change transport later: `fam car set-transport
+    <event_id> car|walk|public`.
+    Route each half of the answer independently: the transport half →
+    `--transport car|walk|public` on the same `fam cal add`/`fam cal
+    update` call (same fam-exits-2 rule as above if omitted for a
+    place-bound event). The prep-time half, if not already recorded →
+    pass it as `--prep-min N` on that same call (minutes needed to get
+    ready before leave_at). If the user's answer doesn't address prep
+    time at all, or answers "как обычно"/"обычное время", do NOT pass
+    `--prep-min` — leave the default/slug reminder rules in place. If the
+    place-bound event's mode was already clear from the request (no need
+    to ask about transport), still ask the prep-time question alone
+    ("сколько времени на сборы?") if it isn't already recorded — the
+    combined phrasing above is only for the case where BOTH are unknown.
+    For a `--repeat` series, pass `--prep-min N` at `cal add --repeat`
+    time — it's copied onto every
     occurrence (`cal series update` has no `--prep-min`, so set it at
     creation).
 14. **A "подготовко-ёмкое" event gets ONE prep question, asked once.**
