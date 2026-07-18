@@ -379,6 +379,25 @@ def test_followup_prep_check_candidate(db, fake_deliver):
     assert prep_check["title"] == "Прививка"
 
 
+def test_followup_prep_check_participant_only_candidate(db, fake_deliver):
+    # "place ИЛИ участники": no place at all, but a participant is
+    # enough to make the event a prep-check candidate.
+    people.add(db, "Тая")
+    db.commit()
+    e = cal.add(db, "Кружок", PREP_EVENT_NEAR, participants=["Тая"])
+    db.commit()
+    assert e.get("place") is None or e.get("place_id") is None
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert len(followup_calls) == 1
+    prep_check = followup_calls[0]["raw"]["prep_check"]
+    assert prep_check["event_id"] == e["id"]
+    assert prep_check["title"] == "Кружок"
+
+
 def test_followup_prep_check_marks_asked_on_sent(db, fake_deliver):
     e = _prep_place_event(db, PREP_EVENT_NEAR)
     fake_deliver.responses = ["sent"]
