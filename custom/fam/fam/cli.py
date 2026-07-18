@@ -1145,15 +1145,43 @@ def cmd_shop_list(args):
     return 0
 
 def cmd_shop_done(args):
+    """`fam shop done <id> [--restock N]` -- mark a shopping item bought.
+    --restock N closes finding F1's loop: after the item is marked done it
+    pushes N units back into the matching med's remaining via
+    meds.restock_by_name (matched by casefolded name -- for a source='meds'
+    item that name is the med's). Restock is gated on the mark_done
+    transition above, which only fires once per item, so a repeat done on an
+    already-bought item exits 2 before restock runs -- N is never applied
+    twice (idempotency). A plain grocery item with no matching med restocks
+    nothing (restock_by_name returns None).
+    """
     conn = famdb.connect()
-    if not shopping.mark_done(conn, args.id):
-        raise ValueError(f"unknown shopping item: {args.id}")
-    conn.commit()
     it = shopping.get(conn, args.id)
+    if it is None:
+        raise ValueError(f"unknown shopping item: {args.id}")
+    # shopping.mark_done returns True for any existing row (even an
+    # already-done one), so it is NOT the idempotency gate. Gate restock on
+    # the prior status being 'open' -- the real open->done transition -- so a
+    # repeat `shop done` on an already-bought item is a genuine no-op and N is
+    # never applied twice (finding F1 loop close).
+    was_open = it["status"] == "open"
+    shopping.mark_done(conn, args.id)
+    it = shopping.get(conn, args.id)
+    restock = None
+    n = getattr(args, "restock", None)
+    if n is not None and was_open:
+        restock = meds.restock_by_name(conn, it["name"], n)
+    conn.commit()
     if args.json:
-        print(json.dumps(it, ensure_ascii=False))
+        out = dict(it)
+        if restock is not None:
+            out["restock"] = restock
+        print(json.dumps(out, ensure_ascii=False))
     else:
-        print(f"done: {it['name']} (id={it['id']})")
+        line = f"done: {it['name']} (id={it['id']})"
+        if restock and restock.get("restocked"):
+            line += f" -- restocked {it['name']} to {restock['remaining']}"
+        print(line)
     return 0
 
 def build_parser():
@@ -1571,6 +1599,9 @@ def build_parser():
 
     spd = shop_sub.add_parser("done"); spd.set_defaults(func=cmd_shop_done)
     spd.add_argument("id", type=int)
+    spd.add_argument("--restock", type=int,
+                      help="units bought -> add to the matching med's "
+                           "remaining (close finding F1's restock loop)")
     spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 

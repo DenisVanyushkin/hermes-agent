@@ -249,7 +249,7 @@ show after cancel), make a second, separate terminal call.
 | Skip one dose | `fam med skip <intake_id>` |
 | Add to shopping list | `fam shop add "NAME" [--qty Q] [--by WHO]` |
 | See shopping list | `fam shop list` |
-| Mark item bought | `fam shop done <id>` |
+| Mark item bought | `fam shop done <id>` (bought med: add `--restock N`) |
 | Categorize a place (аптека/продуктовый) | `fam places update <ref> --category pharmacy\|grocery` |
 | Fuel / car status | `fam car status` (`--live` for engine on/off questions) |
 | Warm up the car (after explicit yes) | `fam car warmup --confirm [--requester WHO]` |
@@ -453,9 +453,21 @@ conversation.
      done <id>`, confirm briefly ("Отметил: молоко куплено.").
   3. Several plausible matches, or none → ask which item they mean, or
      say there's nothing open like that — never guess an id.
-- An item with `"source": "meds"` in `fam shop list`'s JSON was
-  auto-added by a low-stock restock (see Medication Verbs above) — treat
-  it the same as any manually-added item once the user says it's bought.
+- **Buying back a medication** ("купила 30 таблеток магния", "взяла
+  магний, упаковка 60") — an item whose `fam shop list` JSON has
+  `"source": "meds"` was auto-added by a low-stock restock (see Medication
+  Verbs above), and marking it bought must ALSO replenish the med's stock —
+  otherwise the "пора купить" reminder loops forever (it fires again on the
+  next dose). After finding the one matching item (steps 1–3 above), pass
+  the quantity bought: `fam shop done <id> --restock N`, where N is the
+  number of tablets/units the user named. Confirm with the new total from
+  the result's `"restock": {"remaining": ...}` ("Отметил: магний куплен,
+  остаток 31.").
+  - If the user names NO quantity for a `source: "meds"` item ("купила
+    магний") → ask "Сколько купила — сколько таблеток?" first. Do NOT guess
+    N, and do NOT mark it done yet.
+  - A plain (non-meds) item never needs `--restock` — mark it done as
+    above.
 
 ## Car Verbs
 
