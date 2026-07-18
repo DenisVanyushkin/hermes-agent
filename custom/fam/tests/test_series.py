@@ -181,3 +181,84 @@ def test_series_update_unknown_series_raises(db):
     with pytest.raises(ValueError):
         series.update_participants(db, 999, add=[])
 
+
+# --- Final review C1: series.cancel FK-safe prep-plan cascade ---
+#
+# series.cancel() deletes future active occurrences outright (DELETE FROM
+# events), but plans.prep_for_event_id and plans.attached_event_id both
+# REFERENCE events(id), and the app runs with PRAGMA foreign_keys=ON. A
+# future occurrence carrying an open prep-plan, a done prep-plan, or an
+# attached plan must not turn series.cancel() into an IntegrityError -- the
+# occurrence deletion has to cascade through cal._prep_cascade_cancel()
+# (drops OPEN prep-plans) and null out any surviving plan's dangling
+# event reference first.
+
+def _series_with_future_occurrence(db, now_utc="2026-07-15T00:00:00+00:00"):
+    """A weekly Monday series with exactly one future occurrence, plus the
+    series row and that occurrence's id."""
+    s = series.add(db, "Тренировка", "mon", "10:00")
+    db.commit()
+    series.generate(db, now_utc=now_utc)
+    db.commit()
+    occ = db.execute(
+        "SELECT id FROM events WHERE series_id=? AND status='active' "
+        "ORDER BY start_utc", (s["id"],)).fetchall()
+    assert occ, "expected at least one future occurrence"
+    return s, occ[-1]["id"]
+
+
+def test_cancel_series_with_open_prep_plan_on_future_occurrence(db):
+    from fam import plans
+    s, event_id = _series_with_future_occurrence(db)
+    pid = plans.add(db, "Собрать форму", prep_for_event=event_id,
+                     prep_when="departure")
+    db.commit()
+
+    series.cancel(db, s["id"], now_utc="2026-07-15T00:00:00+00:00")
+    db.commit()
+
+    assert series.get(db, s["id"])["status"] == "cancelled"
+    assert db.execute(
+        "SELECT id FROM events WHERE id=?", (event_id,)).fetchone() is None
+    p = plans.get(db, pid)
+    assert p["status"] == "dropped"
+
+
+def test_cancel_series_with_done_prep_plan_on_future_occurrence(db):
+    from fam import plans
+    s, event_id = _series_with_future_occurrence(db)
+    pid = plans.add(db, "Собрать форму", prep_for_event=event_id,
+                     prep_when="departure")
+    db.commit()
+    plans.mark(db, pid, "done")
+    db.commit()
+
+    series.cancel(db, s["id"], now_utc="2026-07-15T00:00:00+00:00")
+    db.commit()
+
+    assert series.get(db, s["id"])["status"] == "cancelled"
+    assert db.execute(
+        "SELECT id FROM events WHERE id=?", (event_id,)).fetchone() is None
+    p = plans.get(db, pid)
+    assert p["status"] == "done"
+    assert p["prep_for_event_id"] is None
+
+
+def test_cancel_series_with_attached_plan_on_future_occurrence(db):
+    from fam import plans
+    s, event_id = _series_with_future_occurrence(db)
+    pid = plans.add(db, "Взять форму")
+    db.commit()
+    plans.attach(db, pid, event_id)
+    db.commit()
+
+    series.cancel(db, s["id"], now_utc="2026-07-15T00:00:00+00:00")
+    db.commit()
+
+    assert series.get(db, s["id"])["status"] == "cancelled"
+    assert db.execute(
+        "SELECT id FROM events WHERE id=?", (event_id,)).fetchone() is None
+    p = plans.get(db, pid)
+    assert p["status"] == "open"
+    assert p["attached_event_id"] is None
+

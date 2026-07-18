@@ -439,3 +439,53 @@ def test_followup_prep_check_not_marked_when_not_sent(db, fake_deliver):
         "SELECT prep_asked FROM events WHERE id=?", (e["id"],)
     ).fetchone()
     assert row["prep_asked"] == 0
+
+
+# --- Final review I2 (coordinator decision): prep-check skips series
+# occurrences -- a weekly recurring event (e.g. training) would otherwise
+# get asked "what do you need to prep?" every single week it enters the
+# horizon window, which is noise for a routine that never changes.
+
+def test_prep_check_skips_series_occurrence(db, fake_deliver):
+    from fam import series
+    places.add(db, "Invictus")
+    db.commit()
+    s = series.add(db, "Тренировка", "thu", "10:00", place="Invictus")
+    db.commit()
+    # PREP_EVENT_NEAR (2026-07-23) is a Thursday -- lands exactly on the
+    # series grid slot, well inside the prep-check horizon. Carries a
+    # resolved place so it WOULD be a candidate by every other rule --
+    # only the series_id exclusion should keep it out.
+    e = cal.add(db, "Тренировка", PREP_EVENT_NEAR, place="Invictus",
+                series_id=s["id"])
+    db.commit()
+    assert e["series_id"] == s["id"]
+    fake_deliver.responses = ["sent"]  # only reachable if a candidate exists;
+    # "no_plans"/quiet-outcome paths don't consume a response, so an
+    # unconsumed response here would surface as a StopIteration-free pass
+    # even with the bug -- assert directly on the follow-up payload instead.
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    if followup_calls:
+        assert "prep_check" not in followup_calls[0]["raw"]
+
+
+def test_prep_check_picks_single_event_when_series_occurrence_also_in_window(db, fake_deliver):
+    from fam import series
+    places.add(db, "Invictus")
+    db.commit()
+    s = series.add(db, "Тренировка", "thu", "10:00", place="Invictus")
+    db.commit()
+    cal.add(db, "Тренировка", PREP_EVENT_NEAR, place="Invictus", series_id=s["id"])
+    single = _prep_place_event(db, PREP_EVENT_FAR, title="Стоматолог")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=AT_FOLLOWUP, cfg=CFG)
+
+    followup_calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert len(followup_calls) == 1
+    prep_check = followup_calls[0]["raw"]["prep_check"]
+    assert prep_check["event_id"] == single["id"]
