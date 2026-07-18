@@ -486,10 +486,24 @@ def reminders(conn, now_utc=None, cfg=None):
         # new message, no extra budget spend). Only for car events; a
         # failure here is swallowed and audited as tick.error/car_hooks,
         # mirroring the enroute guard's own try/except.
+        #
+        # F4 (live feedback, Денис 2026-07-18): the hook must land ONLY
+        # on stages firing within car_hook_window_min (default 15) of the
+        # event's leave_at -- i.e. the T-15/T0 leave stages, NOT the
+        # prepare stage 2h out (a warmup/cooldown offer two hours before
+        # departure is useless: the cabin re-heats/re-cools). The window
+        # is measured leave_at - fire_at using this reminder's own
+        # fire_at_utc, so a moved leave_at is naturally respected.
         if reminder["kind"] in ("leave", "prepare") and event["transport"] == "car":
             from fam import car as carmod
             try:
-                car_hooks = carmod.departure_hooks(conn, event, cfg)
+                window_min = cfg.get("car_hook_window_min", 15)
+                leave_dt = _parse_utc(rem.leave_at(conn, event))
+                fire_dt = _parse_utc(reminder["fire_at_utc"])
+                if (leave_dt - fire_dt) <= timedelta(minutes=window_min):
+                    car_hooks = carmod.departure_hooks(conn, event, cfg)
+                else:
+                    car_hooks = []
             except Exception as e:
                 car_hooks = []
                 audit.log(conn, "tick.error", {"where": "car_hooks", "error": str(e)[:200]})

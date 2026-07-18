@@ -98,6 +98,11 @@ CONFIG_DEFAULTS = {
     "car_cabin_temp_low_c": 0,
     "car_cabin_temp_high_c": 30,
     "car_staleness_hours": 24,
+    # F4 (live feedback, 2026-07-18): departure car hook (warmup/cool
+    # offer) only lands on reminder stages firing within this many
+    # minutes of the event's leave_at (T-15/T0 leave stages, not the
+    # prepare stage hours out) -- see tick.py's reminders().
+    "car_hook_window_min": 15,
     # Phase 6b: bridge readiness probe (health.py) scans this log for the
     # last connect/disconnect marker. Markers configurable (gateway-code detail).
     "gateway_log_path": "/home/denis/.hermes/logs/gateway.log",
