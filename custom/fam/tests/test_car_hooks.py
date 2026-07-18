@@ -22,9 +22,10 @@ def test_cabin_cold_suggests_warmup(db):
     _add_metric(db, fuel_percent=80, ctemp=-8)
     hooks = car.departure_hooks(db, {"transport": "car"}, _cfg())
     assert any("прогрев" in h for h in hooks)
-    # F4: actionable offer, not a bare observation -- the reply routes
-    # into the skill's warmup flow.
-    assert any("могу завести" in h and "скажи «заведи»" in h for h in hooks)
+    # F4b (Denis's final wording): actionable offer, not a bare
+    # observation -- the reply routes into the skill's warmup flow.
+    assert any("могу машину завести заранее, на прогрев" in h for h in hooks)
+    assert not any("скажи" in h for h in hooks)
 
 
 def test_cabin_hot_suggests_cooldown_not_warmup(db):
@@ -34,8 +35,9 @@ def test_cabin_hot_suggests_cooldown_not_warmup(db):
     hooks = car.departure_hooks(db, {"transport": "car"}, _cfg())
     assert any("остуд" in h for h in hooks)
     assert not any("прогрев" in h for h in hooks)
-    # F4: actionable offer wording on the hot branch too.
-    assert any("могу завести" in h and "скажи «заведи»" in h for h in hooks)
+    # F4b: actionable offer wording on the hot branch too.
+    assert any("могу машину завести заранее, чтобы остудить" in h for h in hooks)
+    assert not any("скажи" in h for h in hooks)
 
 def test_cabin_in_band_no_suggestion(db):
     _add_metric(db, fuel_percent=80, ctemp=18)

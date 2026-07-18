@@ -489,7 +489,15 @@ def _append_piggyback_if_missing(final_text, raw):
         final_cf = final_text.casefold()
         stems = [s for s in ("остуд", "прогрев") if s in car_cf]
         if stems:
-            if any(s not in final_cf for s in stems):
+            # F4b (Denis): the cabin hook is an OFFER («могу ... завести»)
+            # -- the rewrite must keep both the direction stem AND the
+            # offer form. "могу" anywhere in final counts as the offer
+            # surviving (kept deliberately simple: a reminder final is
+            # 1-3 short sentences, so a stray unrelated "могу" is
+            # unlikely); a rewrite that degraded the offer into a bare
+            # observation (no "могу") gets the raw hook text appended
+            # verbatim, same as a dropped/flipped direction.
+            if any(s not in final_cf for s in stems) or "могу" not in final_cf:
                 final_text = f"{final_text} {car_text.strip()}"
         else:
             words = _title_words(car_text)

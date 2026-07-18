@@ -343,13 +343,15 @@ def departure_hooks(conn, event, cfg):
             # the cabin is cold and warming up makes sense; above the
             # high threshold it's hot and the useful suggestion is to
             # cool it down instead.
-            # F4 (live feedback): the hook is an actionable OFFER, not a
-            # bare observation -- «скажи «заведи»» routes the reply into
-            # the skill's warmup flow (skill v12, `fam car warmup`).
+            # F4/F4b (live feedback, wording — Denis): the hook is an
+            # actionable OFFER («могу ... завести»), not a bare
+            # observation; the reply routes into the skill's warmup flow
+            # (skill v12, `fam car warmup`). F4b dropped the trailing
+            # «скажи «заведи»» — Denis's final wording.
             if t < cfg["car_cabin_temp_low_c"]:
-                hooks.append(f"в салоне {t}°, могу завести на прогрев — скажи «заведи»")
+                hooks.append(f"в салоне {t}°, могу машину завести заранее, на прогрев")
             elif t > cfg["car_cabin_temp_high_c"]:
-                hooks.append(f"в салоне {t}°, могу завести, чтобы остудить — скажи «заведи»")
+                hooks.append(f"в салоне {t}°, могу машину завести заранее, чтобы остудить")
     return hooks
 
 
