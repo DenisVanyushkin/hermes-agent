@@ -22,6 +22,9 @@ def test_cabin_cold_suggests_warmup(db):
     _add_metric(db, fuel_percent=80, ctemp=-8)
     hooks = car.departure_hooks(db, {"transport": "car"}, _cfg())
     assert any("прогрев" in h for h in hooks)
+    # F4: actionable offer, not a bare observation -- the reply routes
+    # into the skill's warmup flow.
+    assert any("могу завести" in h and "скажи «заведи»" in h for h in hooks)
 
 
 def test_cabin_hot_suggests_cooldown_not_warmup(db):
@@ -31,6 +34,8 @@ def test_cabin_hot_suggests_cooldown_not_warmup(db):
     hooks = car.departure_hooks(db, {"transport": "car"}, _cfg())
     assert any("остуд" in h for h in hooks)
     assert not any("прогрев" in h for h in hooks)
+    # F4: actionable offer wording on the hot branch too.
+    assert any("могу завести" in h and "скажи «заведи»" in h for h in hooks)
 
 def test_cabin_in_band_no_suggestion(db):
     _add_metric(db, fuel_percent=80, ctemp=18)
@@ -105,6 +110,55 @@ def test_reminders_piggybacks_car_hook(db, monkeypatch):
     fd.responses = ["sent"]
 
     tick.reminders(db, now_utc=NOW, cfg=TICK_CFG)
+
+    raw = fd.calls[0]["raw"]
+    assert "заправься" in raw["car"]
+
+
+# ---- F4: car hook only within car_hook_window_min of leave_at ----
+# The event in _car_event has no travel_min anywhere -> leave_at ==
+# start_utc (NOW, 04:30). The leave reminder at PAST (04:20) is 10 min
+# before leave_at -> inside the default 15-min window (covered by
+# test_reminders_piggybacks_car_hook above). A prepare stage 2 hours out
+# must NOT get the hook.
+
+PREP_FIRE = "2026-07-20T02:30:00+00:00"   # 2h before leave_at (04:30)
+PREP_NOW = "2026-07-20T02:35:00+00:00"    # 5 min after fire -> not stale
+
+
+def test_reminders_no_car_hook_on_prepare_outside_window(db, monkeypatch):
+    fd = FakeDeliver()
+    monkeypatch.setattr(gate, "deliver", fd)
+    # 2h before leave_at the road-recompute threshold hook would fire and
+    # regenerate the chain, deleting the hand-inserted reminder row --
+    # not what's under test here.
+    monkeypatch.setattr(tick, "road_recompute", lambda *a, **k: 0)
+    e = _car_event(db)
+    car._meta_set(db, "car_fuel_low", "1")
+    _add_metric(db, fuel_percent=80, ctemp=41.0)
+    _insert_reminder(db, e["id"], kind="prepare", fire_at=PREP_FIRE)
+    fd.responses = ["sent"]
+
+    tick.reminders(db, now_utc=PREP_NOW, cfg=TICK_CFG)
+
+    assert len(fd.calls) == 1  # the reminder itself still goes out
+    raw = fd.calls[0]["raw"]
+    assert "car" not in raw
+
+
+def test_reminders_car_hook_respects_config_window(db, monkeypatch):
+    # widening car_hook_window_min lets the same 2h-out prepare stage
+    # qualify -- proves the threshold reads the config key.
+    fd = FakeDeliver()
+    monkeypatch.setattr(gate, "deliver", fd)
+    monkeypatch.setattr(tick, "road_recompute", lambda *a, **k: 0)
+    e = _car_event(db)
+    car._meta_set(db, "car_fuel_low", "1"); db.commit()
+    _insert_reminder(db, e["id"], kind="prepare", fire_at=PREP_FIRE)
+    fd.responses = ["sent"]
+
+    cfg = dict(TICK_CFG, car_hook_window_min=180)
+    tick.reminders(db, now_utc=PREP_NOW, cfg=cfg)
 
     raw = fd.calls[0]["raw"]
     assert "заправься" in raw["car"]

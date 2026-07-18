@@ -40,6 +40,7 @@ CFG = {
     "car_cabin_temp_low_c": 0,
     "car_cabin_temp_high_c": 30,
     "car_staleness_hours": 24,
+    "car_hook_window_min": 15,
     "gateway_log_path": "/home/denis/.hermes/logs/gateway.log",
     "readiness_markers_connect": ["✓ telegram connected", "✓ whatsapp connected"],
     "readiness_markers_disconnect": ["✓ telegram disconnected", "✓ whatsapp disconnected", "[Whatsapp] Bridge exited"],
