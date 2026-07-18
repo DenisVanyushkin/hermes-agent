@@ -277,3 +277,95 @@ def route_for_event(conn, event, cfg, now_utc=None):
         return [(home_lat, home_lon), (to_lat, to_lon)], "straight"
 
     return None, "none"
+
+
+def route_via(conn, origin_latlon, via_latlons, dest_latlon, cfg, now_utc=None):
+    """TomTom calculateRoute through one or more waypoints, in path form
+    `{lat},{lon}:{via_lat},{via_lon}:...:{dest_lat},{dest_lon}` (TomTom's
+    coordinate order is lat,lon, same as the rest of this module).
+
+    Cap-guarded like compute_travel_min/route_for_event and shares the
+    SAME daily counter (_tomtom_calls_today counts all road.call rows
+    regardless of which function logged them) -- a detour probe spends
+    from the same TomTom budget as a normal recompute. Only attempts the
+    call when cfg's provider is "tomtom" and TOMTOM_API_KEY is set;
+    otherwise -- like a cap hit or any HTTP/parse failure -- returns
+    (None, None, "none") without raising.
+
+    Returns (travel_min, route_points, source) where route_points is a
+    flat list of (lat, lon) tuples from routes[0].legs[*].points[*] (same
+    shape as tomtom_route_points), or (None, None, "none") on failure.
+    """
+    if cfg.get("road_provider", "tomtom") != "tomtom":
+        return None, None, "none"
+    key = os.environ.get("TOMTOM_API_KEY", "").strip()
+    if not key:
+        return None, None, "none"
+
+    cap = cfg.get("road_daily_cap", 100)
+    if _tomtom_calls_today(conn) >= cap:
+        audit.log(conn, "road.cap", {"via": len(via_latlons)})
+        return None, None, "none"
+
+    now = now_utc or _now()
+    depart_at = now if isinstance(now, str) else now.isoformat(timespec="seconds")
+
+    o_lat, o_lon = origin_latlon
+    d_lat, d_lon = dest_latlon
+    waypoints = [f"{o_lat},{o_lon}"]
+    waypoints += [f"{v_lat},{v_lon}" for v_lat, v_lon in via_latlons]
+    waypoints.append(f"{d_lat},{d_lon}")
+    locs = ":".join(waypoints)
+
+    q = urllib.parse.urlencode({
+        "key": key, "traffic": "true", "departAt": depart_at,
+        "routeType": "fastest", "travelMode": "car",
+    })
+    url = f"https://api.tomtom.com/routing/1/calculateRoute/{locs}/json?{q}"
+    try:
+        data = json.loads(_http_get(url, cfg.get("road_timeout_sec", 10)))
+        secs = data["routes"][0]["summary"]["travelTimeInSeconds"]
+        minutes = max(1, math.ceil(secs / 60))
+        points = []
+        for leg in data["routes"][0]["legs"]:
+            for p in leg["points"]:
+                points.append((p["latitude"], p["longitude"]))
+        audit.log(conn, "road.call",
+                  {"via": len(via_latlons), "minutes": minutes, "source": "tomtom"})
+        return minutes, (points or None), "tomtom"
+    except Exception:
+        audit.log(conn, "road.error", {"via": len(via_latlons)})
+        return None, None, "none"
+
+
+def detour_min(conn, event, plan_place, cfg):
+    """How many extra minutes a stop at plan_place would add to the trip
+    to event's place, vs going there directly -- both legs measured live
+    via route_via (never the straight-line/manual/place fallback rungs,
+    which aren't comparable traffic estimates). Requires home coords
+    (cfg), event's place coords, and plan_place's lat/lon; missing
+    coordinates, a non-tomtom provider, or either live call failing ->
+    None (a detour figure built from a stale/estimated leg would be
+    misleading, not merely approximate). Negative deltas (via ends up
+    "faster" than direct, e.g. traffic-model noise) clamp to 0.
+    """
+    home_lat = cfg.get("road_home_lat")
+    home_lon = cfg.get("road_home_lon")
+    place = (event or {}).get("place") or {}
+    dest_lat, dest_lon = place.get("lat"), place.get("lon")
+    via_lat, via_lon = (plan_place or {}).get("lat"), (plan_place or {}).get("lon")
+
+    if None in (home_lat, home_lon, dest_lat, dest_lon, via_lat, via_lon):
+        return None
+
+    direct_min, _, direct_src = route_via(
+        conn, (home_lat, home_lon), [], (dest_lat, dest_lon), cfg)
+    if direct_src != "tomtom":
+        return None
+
+    via_min, _, via_src = route_via(
+        conn, (home_lat, home_lon), [(via_lat, via_lon)], (dest_lat, dest_lon), cfg)
+    if via_src != "tomtom":
+        return None
+
+    return max(0, via_min - direct_min)
