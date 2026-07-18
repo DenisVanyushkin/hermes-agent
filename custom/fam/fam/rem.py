@@ -160,7 +160,16 @@ def regenerate(conn, event_id, now_utc=None):
             "leave_at": _parse_utc(leave_at(conn, event)),
         }
         created_at = _now()
-        for rule in applicable_rules(conn, event):
+        # Task 4 (phase 7): an explicit event.prep_min overrides the rule
+        # engine entirely -- event > slug > default precedence. It is
+        # synthesized as a single rule_id=None rule (reminders.rule_id is
+        # nullable, see db.py) rather than picking/mutating a DB row,
+        # since this lead applies to exactly this one event.
+        if event.get("prep_min"):
+            rules = [{"id": None, "stages": build_stages(int(event["prep_min"]))}]
+        else:
+            rules = applicable_rules(conn, event)
+        for rule in rules:
             for stage_idx, stage in enumerate(rule["stages"]):
                 fire_dt = anchors[stage["anchor"]] + timedelta(
                     minutes=stage["offset_min"])

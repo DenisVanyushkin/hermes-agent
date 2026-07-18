@@ -50,10 +50,14 @@ def _validate_hhmm(t):
 
 
 def add(conn, title, weekdays, start_time, end_time=None, place=None,
-        participants=(), transport="unknown", notes="", until_local=None):
+        participants=(), transport="unknown", notes="", until_local=None,
+        prep_min=None):
     """Create an active event_series. Validates refs/weekdays/times before any
     insert (mirrors cal.add). Groups in participants expand to members. Does
-    NOT generate occurrences -- the caller runs generate() next.
+    NOT generate occurrences -- the caller runs generate() next. prep_min
+    (Task 4, phase 7), when set, is copied onto every occurrence generate()
+    materializes (via cal.add's prep_min), so each one gets its reminder
+    chain from rem.build_stages(prep_min) instead of the rule engine.
     """
     pl = cal._resolve_place(conn, place)
     resolved = cal._resolve_participants(conn, participants)
@@ -66,10 +70,10 @@ def add(conn, title, weekdays, start_time, end_time=None, place=None,
     now = _now()
     cur = conn.execute(
         "INSERT INTO event_series(title, place_id, weekdays, start_time, "
-        "end_time, transport, notes, until_local, status, created_at, "
-        "updated_at) VALUES (?,?,?,?,?,?,?,?,'active',?,?)",
+        "end_time, transport, notes, until_local, prep_min, status, "
+        "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,'active',?,?)",
         (title, pl["id"] if pl else None, wd, start_time, end_time,
-         transport, notes, until_local, now, now),
+         transport, notes, until_local, prep_min, now, now),
     )
     sid = cur.lastrowid
     for m in resolved:
@@ -79,7 +83,8 @@ def add(conn, title, weekdays, start_time, end_time=None, place=None,
     audit.log(conn, "cal.series.add", {
         "id": sid, "title": title, "weekdays": wd, "start_time": start_time,
         "end_time": end_time, "place": place,
-        "participants": list(participants), "until_local": until_local})
+        "participants": list(participants), "until_local": until_local,
+        "prep_min": prep_min})
     return get(conn, sid)
 
 
@@ -197,7 +202,7 @@ def generate(conn, now_utc=None, horizon_weeks=8):
                         cal.add(conn, s["title"], start_utc, end_utc,
                                 place=s["place_id"], participants=participants,
                                 transport=s["transport"], notes=s["notes"],
-                                series_id=s["id"])
+                                series_id=s["id"], prep_min=s["prep_min"])
                         created += 1
             d += timedelta(days=1)
     return created

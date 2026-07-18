@@ -59,3 +59,23 @@ def test_list_active_and_cancel(db):
 def test_cancel_unknown_raises(db):
     with pytest.raises(ValueError):
         series.cancel(db, 999)
+def test_series_copies_prep_min(db):
+    from fam import rem
+    people.add(db, "Денис", slug="denis")
+    rem.seed_default_rules(db)
+    db.commit()
+    s = series.add(db, "Тренировка", "mon", "10:00",
+                   participants=["Денис"], prep_min=20)
+    db.commit()
+    assert s["prep_min"] == 20
+    created = series.generate(db, now_utc="2026-07-19T00:00:00+00:00")
+    db.commit()
+    assert created >= 1
+    occ = db.execute(
+        "SELECT id, prep_min FROM events WHERE series_id=?", (s["id"],)).fetchall()
+    assert occ
+    for row in occ:
+        assert row["prep_min"] == 20
+        fires = db.execute(
+            "SELECT rule_id FROM reminders WHERE event_id=?", (row["id"],)).fetchall()
+        assert fires and all(r["rule_id"] is None for r in fires)

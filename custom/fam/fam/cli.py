@@ -316,7 +316,7 @@ def cmd_cal_add(args):
     conn = famdb.connect()
     e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
                 participants=args.with_, transport=args.transport, notes=args.notes,
-                travel_min=args.travel_min)
+                travel_min=args.travel_min, prep_min=args.prep_min)
     conn.commit()
     _maybe_email_event(conn, e)
     if args.json:
@@ -339,7 +339,8 @@ def _cmd_cal_add_series(args):
         s = series.add(conn, args.title, args.days, args.start_time,
                        end_time=args.end_time, place=args.place,
                        participants=args.with_, transport=args.transport,
-                       notes=args.notes, until_local=args.until)
+                       notes=args.notes, until_local=args.until,
+                       prep_min=args.prep_min)
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -392,6 +393,7 @@ def cmd_cal_update(args):
     if args.transport is not None: fields["transport"] = args.transport
     if args.notes is not None: fields["notes"] = args.notes
     if args.travel_min is not None: fields["travel_min"] = args.travel_min
+    if args.prep_min is not None: fields["prep_min"] = args.prep_min
     if args.add_person: fields["add_person"] = args.add_person
     if args.rm_person: fields["rm_person"] = args.rm_person
     e = cal.update(conn, args.id, **fields)
@@ -1383,6 +1385,11 @@ def build_parser():
     spa.add_argument("--notes", default="")
     spa.add_argument("--travel-min", dest="travel_min", type=int,
                       help="override place travel minutes for leave_at (default: take from place)")
+    spa.add_argument("--prep-min", dest="prep_min", type=int,
+                      help="minutes needed to get ready before leave_at; "
+                           "overrides the default/slug reminder rules with "
+                           "this event's own escalation chain (also applies "
+                           "with --repeat, copied onto every occurrence)")
     spa.add_argument("--allow-past", dest="allow_past", action="store_true",
                       help="skip the past-start guardrail (retroactive event entry)")
     spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
@@ -1398,6 +1405,10 @@ def build_parser():
     spu.add_argument("--notes")
     spu.add_argument("--travel-min", dest="travel_min", type=int,
                       help="override place travel minutes for leave_at")
+    spu.add_argument("--prep-min", dest="prep_min", type=int,
+                      help="minutes needed to get ready before leave_at; "
+                           "overrides the default/slug reminder rules with "
+                           "this event's own escalation chain")
     spu.add_argument("--add-person", dest="add_person", action="append", default=[],
                       help="participant ref to add (repeatable)")
     spu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
