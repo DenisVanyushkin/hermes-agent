@@ -254,3 +254,120 @@ def test_periodic_recompute_preserves_detour(db, tmp_path, monkeypatch):
     assert touched == 1
     after = cal.get(db, e["id"])
     assert after["travel_min_road"] == 35  # crook preserved by the periodic tick
+
+
+# --- Review round 2 (Important #1): re-attach and re-open wiring ---
+
+def _second_event(db, monkeypatch, name="Школа", lat=43.2100, lon=76.9000,
+                   start="2026-08-26T09:00:00+00:00"):
+    places.add(db, name, lat=lat, lon=lon)
+    db.commit()
+    real = road.compute_travel_min
+    monkeypatch.setattr(road, "compute_travel_min",
+                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+    e = cal.add(db, "Второе событие", start, place=name)
+    db.commit()
+    monkeypatch.setattr(road, "compute_travel_min", real)
+    return e
+
+
+def test_reattach_recomputes_old_event_back_to_direct(db, tmp_path, monkeypatch):
+    e1 = _event(db, tmp_path, monkeypatch)
+    e2 = _second_event(db, monkeypatch)
+    _stub_route_via(monkeypatch)
+    monkeypatch.setenv("TOMTOM_API_KEY", "sekrit")
+
+    places.add(db, "Аптека", lat=VIA[0], lon=VIA[1])
+    db.commit()
+    pid = plans.add(db, "Забрать заказ", place="Аптека")
+    db.commit()
+    plans.attach(db, pid, e1["id"])
+    db.commit()
+    assert cal.get(db, e1["id"])["travel_min_road"] == 35
+
+    # Re-attach to the second event: the OLD event's crook must come off
+    # in the same transaction, not linger until an unrelated recompute.
+    plans.attach(db, pid, e2["id"])
+    db.commit()
+
+    assert cal.get(db, e1["id"])["travel_min_road"] == 20  # old: direct again
+    assert cal.get(db, e2["id"])["travel_min_road"] == 35  # new: crook on
+
+
+def test_reattach_same_event_single_recompute(db, tmp_path, monkeypatch):
+    e = _event(db, tmp_path, monkeypatch)
+    _stub_route_via(monkeypatch)
+    monkeypatch.setenv("TOMTOM_API_KEY", "sekrit")
+
+    places.add(db, "Аптека", lat=VIA[0], lon=VIA[1])
+    db.commit()
+    pid = plans.add(db, "Забрать заказ", place="Аптека")
+    db.commit()
+    plans.attach(db, pid, e["id"])
+    db.commit()
+
+    calls = []
+    real_recompute = cal.recompute_road
+    monkeypatch.setattr(cal, "recompute_road",
+                         lambda conn, event_id: calls.append(event_id)
+                         or real_recompute(conn, event_id))
+    plans.attach(db, pid, e["id"])  # same event -- no old-event pass
+    db.commit()
+    assert calls == [e["id"]]
+
+
+def test_mark_open_on_attached_plan_restores_detour(db, tmp_path, monkeypatch):
+    e = _event(db, tmp_path, monkeypatch)
+    _stub_route_via(monkeypatch)
+    monkeypatch.setenv("TOMTOM_API_KEY", "sekrit")
+
+    places.add(db, "Аптека", lat=VIA[0], lon=VIA[1])
+    db.commit()
+    pid = plans.add(db, "Забрать заказ", place="Аптека")
+    db.commit()
+    plans.attach(db, pid, e["id"])
+    db.commit()
+    plans.mark(db, pid, "done")
+    db.commit()
+    assert cal.get(db, e["id"])["travel_min_road"] == 20  # direct while done
+
+    # Re-open: plan is still attached_event_id-linked, so its waypoint
+    # goes back on the route -- mark("open") must recompute the event.
+    plans.mark(db, pid, "open")
+    db.commit()
+    assert cal.get(db, e["id"])["travel_min_road"] == 35
+
+
+# --- Review round 2 (Important #2): attach atomicity regression test.
+# Replaces the removed CLI-level test_cli_plan_attach_recompute_failure_
+# does_not_break_attach: cal.recompute_road's own contract is "never
+# raises", and rem.regenerate is called bare here exactly as cal.add()
+# calls it (the project's accepted pattern). What IS guaranteed -- and
+# what this test pins down -- is transactional atomicity: domain
+# functions never commit, so if anything in attach's recompute/regen
+# path DID raise, the exception propagates before any commit and the
+# caller's rollback leaves the plan fully un-attached (no half-attached
+# row, no orphaned audit row). ---
+
+def test_attach_recompute_failure_rolls_back_cleanly(db, tmp_path, monkeypatch):
+    import pytest as _pytest
+    e = _event(db, tmp_path, monkeypatch)
+
+    pid = plans.add(db, "Дело", place="Клиника")
+    db.commit()
+
+    def boom(conn, event_id):
+        raise RuntimeError("road down")
+
+    monkeypatch.setattr(cal, "recompute_road", boom)
+
+    with _pytest.raises(RuntimeError):
+        plans.attach(db, pid, e["id"])
+    db.rollback()
+
+    row = db.execute("SELECT attached_event_id FROM plans WHERE id=?",
+                     (pid,)).fetchone()
+    assert row["attached_event_id"] is None  # no half-attached state
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='plan.attach'"
+    ).fetchone()[0] == 0  # audit row rolled back with the write

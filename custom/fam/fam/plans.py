@@ -163,8 +163,10 @@ def mark(conn, plan_id, status):
     this same transaction (recompute first, so the regen sees the
     now-direct travel_min_road) so the route collapses back to direct
     immediately instead of drifting stale until the next unrelated
-    trigger. Re-opening a plan (status='open') is NOT handled here --
-    only done/dropped remove a plan from the waypoint set.
+    trigger. Re-opening a plan (status='open') is the symmetric case --
+    a still-attached plan re-entering the OPEN set puts its waypoint
+    BACK on the event's route -- so it triggers the same recompute+
+    regenerate for the attached event.
     """
     existing = conn.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
     if existing is None:
@@ -180,7 +182,7 @@ def mark(conn, plan_id, status):
 
     audit.log(conn, "plan.mark", {"id": plan_id, "status": status})
 
-    if status in ("done", "dropped") and existing["attached_event_id"] is not None:
+    if status in ("done", "dropped", "open") and existing["attached_event_id"] is not None:
         from fam import cal, rem
         cal.recompute_road(conn, existing["attached_event_id"])
         rem.regenerate(conn, existing["attached_event_id"])
@@ -206,6 +208,12 @@ def attach(conn, plan_id, event_id):
     rem.regenerate(conn, event_id). Local imports (cal imports road at
     module level, and this mirrors add()'s existing local `from fam
     import cal` below) to avoid a module-load cycle.
+
+    Re-attach: when the plan was ALREADY attached to a different event,
+    that OLD event's route just lost its waypoint too -- so the same
+    recompute+regenerate runs for the old event first (its crook comes
+    off), then for the new one (its crook goes on). Attaching to the
+    same event it's already on skips the redundant old-event pass.
     """
     existing = conn.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
     if existing is None:
@@ -215,6 +223,8 @@ def attach(conn, plan_id, event_id):
     if event is None:
         return False
 
+    old_event_id = existing["attached_event_id"]
+
     conn.execute(
         "UPDATE plans SET attached_event_id=? WHERE id=?",
         (event_id, plan_id),
@@ -222,6 +232,9 @@ def attach(conn, plan_id, event_id):
     audit.log(conn, "plan.attach", {"id": plan_id, "event_id": event_id})
 
     from fam import cal, rem
+    if old_event_id is not None and old_event_id != event_id:
+        cal.recompute_road(conn, old_event_id)
+        rem.regenerate(conn, old_event_id)
     cal.recompute_road(conn, event_id)
     rem.regenerate(conn, event_id)
 
