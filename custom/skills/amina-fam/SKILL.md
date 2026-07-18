@@ -50,9 +50,12 @@ way to read or change family data.
 - Binary: `/workspace/live-hermes/custom/fam/bin/fam` — a bash shim
   (executable), **not** a Python file. Run it directly with the `terminal`
   tool; never prefix it with `python3`.
-- Always pass `--json`. It works before or after the subcommand
-  (`fam --json cal show 1` and `fam cal show 1 --json` are identical) — parse
-  this output, don't scrape the human-readable line.
+- Prefer the global `--json` flag immediately after `fam`, before the
+  subcommand: `fam --json <subcommand> ...`. Most commands also accept a
+  trailing `--json`, but some nested commands (notably `people add`) reject
+  it as an unrecognized argument. Parse JSON where returned; if a successful
+  mutating command returns a short human-readable confirmation instead, treat
+  exit code 0 as success and do not retry.
 - Subcommands:
   - `init`
   - `log [--since|--last-hours] [--kind] [--grep] [--limit]`
