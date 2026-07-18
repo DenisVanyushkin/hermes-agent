@@ -211,8 +211,13 @@ def test_cli_plan_add_invalid_deadline_exits_2(db, capsys):
 
 
 def test_cli_plan_attach_recomputes_road(db, capsys, monkeypatch):
-    # Final review Finding 3: attach should trigger the same per-event
-    # road recompute mechanism cal.add/cal.update/`fam road` already use.
+    # Final review Finding 3, now superseded by Phase 7b Task 2: attach
+    # should trigger the same per-event road recompute mechanism
+    # cal.add/cal.update/`fam road` already use. This used to be a
+    # separate best-effort call bolted onto the CLI handler; it now
+    # lives inside plans.attach() itself (waypoint-aware, same
+    # transaction as the attach write) -- one call, not two, and the CLI
+    # no longer has its own copy of this wiring.
     from fam import cal as cal_mod, cli
 
     _seed(db)
@@ -311,27 +316,15 @@ def test_plan_add_prep_invariants(db):
     assert _count() == n
 
 
-def test_cli_plan_attach_recompute_failure_does_not_break_attach(db, capsys, monkeypatch):
-    from fam import cal as cal_mod, cli
-
-    _seed(db)
-    pid = plans.add(db, "Дело5")
-    e = cal.add(db, "Событие5", "2026-07-15T05:00:00+00:00")
-    db.commit()
-
-    def boom(conn, event_id):
-        raise RuntimeError("road down")
-
-    monkeypatch.setattr(cal_mod, "recompute_road", boom)
-
-    rc = cli.main(["plan", "attach", str(pid), "--event", str(e["id"]), "--json"])
-    assert rc == 0
-    row = db.execute("SELECT attached_event_id FROM plans WHERE id=?", (pid,)).fetchone()
-    assert row["attached_event_id"] == e["id"]
-    assert db.execute(
-        "SELECT COUNT(*) FROM audit_log WHERE kind='tick.error' "
-        "AND json_extract(payload, '$.where')='plan_attach_recompute'"
-    ).fetchone()[0] == 1
+# The old "recompute failure does not break attach" CLI-layer test is
+# gone: that swallow-and-audit behavior lived in cmd_plan_attach's own
+# try/except around a *separate* cal.recompute_road call, which Phase 7b
+# Task 2 removed once plans.attach() started doing the (waypoint-aware)
+# recompute itself. cal.recompute_road's own contract ("Never raises:
+# calendar operations must not fail because of road logic" -- see its
+# docstring, and its own test suite in test_cal.py) is what actually
+# backs this guarantee now; there is no longer a second, CLI-level copy
+# of it to test.
 
 
 # --- Final review I1: prep-link marker in `fam plan list` ---

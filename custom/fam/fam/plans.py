@@ -153,6 +153,18 @@ def mark(conn, plan_id, status):
     """Set a plan's status (open|done|dropped). 'done' also stamps
     done_at; any other status leaves done_at untouched. Returns False on
     an unknown plan_id (no write, no audit); True on success.
+
+    Phase 7b (detours): attached_via_points only ever considers OPEN
+    plans, so marking a done/dropped plan that was attached_event_id-
+    linked to an event drops it out of that event's waypoint set on the
+    very next recompute -- but nothing re-triggers that recompute on its
+    own. Same fix as attach(): when the plan being marked done/dropped
+    carries an attached_event_id, recompute + regenerate that event in
+    this same transaction (recompute first, so the regen sees the
+    now-direct travel_min_road) so the route collapses back to direct
+    immediately instead of drifting stale until the next unrelated
+    trigger. Re-opening a plan (status='open') is NOT handled here --
+    only done/dropped remove a plan from the waypoint set.
     """
     existing = conn.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
     if existing is None:
@@ -167,6 +179,12 @@ def mark(conn, plan_id, status):
         conn.execute("UPDATE plans SET status=? WHERE id=?", (status, plan_id))
 
     audit.log(conn, "plan.mark", {"id": plan_id, "status": status})
+
+    if status in ("done", "dropped") and existing["attached_event_id"] is not None:
+        from fam import cal, rem
+        cal.recompute_road(conn, existing["attached_event_id"])
+        rem.regenerate(conn, existing["attached_event_id"])
+
     return True
 
 
@@ -177,6 +195,17 @@ def attach(conn, plan_id, event_id):
     bad id is reported via return value, not an exception -- the FK
     (PRAGMA foreign_keys=ON in db.connect) would otherwise surface an
     sqlite3.IntegrityError for an unknown event_id.
+
+    Phase 7b (detours): once attached, an OPEN plan becomes a candidate
+    waypoint for the event's road route (road.route_for_event/
+    compute_travel_min pick it up via attached_via_points below) -- so
+    the event's road figure and reminder chain are stale the instant
+    this returns unless recomputed. Same transaction, same order cal.py
+    itself uses (recompute BEFORE regen, so the regen reads the fresh
+    travel_min_road): cal.recompute_road(conn, event_id) then
+    rem.regenerate(conn, event_id). Local imports (cal imports road at
+    module level, and this mirrors add()'s existing local `from fam
+    import cal` below) to avoid a module-load cycle.
     """
     existing = conn.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
     if existing is None:
@@ -191,7 +220,77 @@ def attach(conn, plan_id, event_id):
         (event_id, plan_id),
     )
     audit.log(conn, "plan.attach", {"id": plan_id, "event_id": event_id})
+
+    from fam import cal, rem
+    cal.recompute_road(conn, event_id)
+    rem.regenerate(conn, event_id)
+
     return True
+
+
+def effective_place(conn, plan):
+    """The plan's own place, or -- when the plan has no place but does
+    have a person -- that person's home place. Lets a homebound plan
+    (e.g. "return Aisha's book" with no explicit place) match on the
+    route via where the person lives, same as an explicit-place plan.
+    Extracted from match_enroute's original inline closure (Phase 7b,
+    Task 2) so attached_via_points below can share the exact same
+    resolution rule instead of duplicating it.
+    """
+    place = plan.get("place")
+    if place is None and plan.get("person_id"):
+        person = people.get(conn, plan["person_id"])
+        place = person.get("home_place") if person else None
+    return place
+
+
+def attached_via_points(conn, event):
+    """Coordinates of every OPEN plan attached to event (attached_event_id
+    == event["id"]), via each plan's effective_place() -- its own place,
+    or its person's home place. Phase 7b (detours): these are the
+    waypoints road.route_for_event/compute_travel_min detour the route
+    through, so travel_min_road grows by however much the stop costs.
+
+    Guard: a via point identical to the event's own place is skipped --
+    detouring "through" the destination isn't a waypoint. Identity is
+    checked two ways since either can be the only information available:
+    same place_id (when both plan and event resolve to the same places
+    row), or, failing that, identical lat/lon (covers a plan whose
+    effective place is a different places row that happens to sit at the
+    exact same coordinates as the event's place).
+
+    Plans without a resolvable lat/lon effective place are skipped
+    silently -- same "as before, no via" behavior a place-less plan had
+    prior to this feature. Never raises. Returns a list of (lat, lon)
+    tuples, ordered by plan id.
+    """
+    event_id = event.get("id")
+    if event_id is None:
+        return []
+
+    event_place = event.get("place") or {}
+    event_place_id = event_place.get("id")
+    event_lat, event_lon = event_place.get("lat"), event_place.get("lon")
+
+    rows = conn.execute(
+        "SELECT id FROM plans WHERE attached_event_id=? AND status='open' "
+        "ORDER BY id",
+        (event_id,),
+    ).fetchall()
+
+    points = []
+    for row in rows:
+        plan = get(conn, row["id"])
+        place = effective_place(conn, plan)
+        if place is None or place.get("lat") is None or place.get("lon") is None:
+            continue
+        if event_place_id is not None and place.get("id") == event_place_id:
+            continue
+        if (event_lat is not None and event_lon is not None
+                and place["lat"] == event_lat and place["lon"] == event_lon):
+            continue
+        points.append((place["lat"], place["lon"]))
+    return points
 
 
 def match_enroute(conn, event, cfg, now_utc=None, route=None):
@@ -232,16 +331,7 @@ def match_enroute(conn, event, cfg, now_utc=None, route=None):
     }
 
     def _effective_place(plan):
-        """The plan's own place, or -- when the plan has no place but does
-        have a person -- that person's home place. Lets a homebound plan
-        (e.g. "return Aisha's book" with no explicit place) match on the
-        route via where the person lives, same as an explicit-place plan.
-        """
-        place = plan.get("place")
-        if place is None and plan.get("person_id"):
-            person = people.get(conn, plan["person_id"])
-            place = person.get("home_place") if person else None
-        return place
+        return effective_place(conn, plan)
 
     route_points = None
     if any(_effective_place(p) and _effective_place(p).get("lat") is not None
