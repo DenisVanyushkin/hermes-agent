@@ -1167,3 +1167,94 @@ def test_deliver_digest_kind_never_gets_enroute_append(db, fake_run):
     assert status == "sent"
     final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
     assert "По пути:" not in final
+
+
+# ---- F3b: car-hook semantics -- rewrite must not invert the cabin-temp
+# direction (live audit 8918: raw said "чтобы остудить", rewrite wrote
+# "завести её на прогрев"), and the instruction + a deterministic
+# direction-stem guard both defend against it ----
+
+CAR_COOL = "в салоне 41.0°, можно заранее завести машину, чтобы остудить"
+
+
+def test_reminder_instruction_forbids_meaning_inversion():
+    instr = gate.GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION
+    assert "остудить" in instr and "прогре" in instr
+    assert "противоположн" in instr
+
+
+def test_deliver_reminder_car_hook_inverted_direction_gets_raw_appended(db, fake_run):
+    raw = {"label": "пора выходить", "event": {"title": "Врач"},
+           "car": CAR_COOL}
+    # rewrite shares words with raw ("завести", "машину") but flips the
+    # direction -- word-overlap alone would pass; the stem check must not.
+    fake_run.rewrite_responses = [
+        _completed(0, "Пора выходить. В салоне 41°, можно завести её на прогрев.")
+    ]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert "остудить" in final
+    assert final.endswith(CAR_COOL)
+
+
+def test_deliver_reminder_car_hook_direction_preserved_no_append(db, fake_run):
+    raw = {"label": "пора выходить", "event": {"title": "Врач"},
+           "car": CAR_COOL}
+    fake_run.rewrite_responses = [
+        _completed(0, "Пора выходить. В салоне жарко — заведи машину заранее, чтобы остудить салон.")
+    ]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert final.count("остудить") == 1
+    assert not final.endswith(CAR_COOL)
+
+
+def test_deliver_reminder_car_hook_dropped_entirely_gets_appended(db, fake_run):
+    raw = {"label": "пора выходить", "event": {"title": "Врач"},
+           "car": CAR_COOL}
+    fake_run.rewrite_responses = [_completed(0, "Пора выходить к врачу.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert final.endswith(CAR_COOL)
+
+
+def test_deliver_reminder_fuel_hook_word_overlap_check(db, fake_run):
+    # a car text with no direction stem (fuel-only hook) falls back to
+    # the generic word-overlap check.
+    raw = {"label": "пора выходить", "event": {"title": "Врач"},
+           "car": "заправься — топлива мало"}
+    fake_run.rewrite_responses = [_completed(0, "Пора выходить к врачу.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert "заправься — топлива мало" in final

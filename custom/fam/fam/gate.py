@@ -185,6 +185,16 @@ GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION = (
     " Если в данных есть prior_texts — это уже отправленные сообщения "
     "этой же цепочки: не повторяй их формулировки дословно, передай "
     "новый label своими словами, не пересказывая прежние сообщения."
+    # F3b (live bug, audit 8918): raw["car"] already said "чтобы
+    # остудить" (cool the cabin down) but the rewrite flipped it back to
+    # "завести её на прогрев" (warm it up) -- meaning inversion. The
+    # rewrite may rephrase, but never replace an action/direction with
+    # its opposite or a different one.
+    " Факты из переданных данных передавай дословно по смыслу: не "
+    "заменяй действия и направления на другие или противоположные "
+    "(«остудить» не равно «прогреть», «отдать» не равно «забрать»), не "
+    "меняй числа, температуры и имена. Если в данных сказано остудить "
+    "салон — пиши про охлаждение, а не про прогрев, и наоборот."
 )
 
 
@@ -441,10 +451,10 @@ def _append_piggyback_if_missing(final_text, raw):
     information is never silently lost. If the rewrite (or fallback)
     already mentioned it, nothing is appended -- no duplication.
 
-    Only two raw keys are recognized (Phase 7 Task 5's
-    departure_checklist and 3b Task 4's enroute); raw without either key,
-    or a raw missing/blank/malformed value for either, is a no-op for
-    that key.
+    Three raw keys are recognized (3b Task 4's enroute, Phase 4 Task 8's
+    car -- F3b, see the inline comment on its direction-stem check --
+    and Phase 7 Task 5's departure_checklist); raw without a key, or a
+    missing/blank/malformed value for one, is a no-op for that key.
     """
     if not isinstance(raw, dict):
         return final_text
@@ -455,6 +465,31 @@ def _append_piggyback_if_missing(final_text, raw):
         words = _title_words(title_part)
         if words and not _mentions_any(final_text, words):
             final_text = f"{final_text} {enroute_text.strip()}"
+
+    # F3b: car hook (raw["car"], tick.py's departure-hooks piggyback).
+    # Word-overlap alone can't catch a MEANING INVERSION -- live audit
+    # 8918: raw said "...чтобы остудить" but the rewrite wrote "завести
+    # её на прогрев", sharing plenty of words with raw. So the cabin-temp
+    # hook is checked by its direction stem instead: if raw's car text
+    # carries one direction ("остуд..." vs "прогрев...") and final lacks
+    # that stem (dropped or flipped to the opposite), the raw hook text
+    # is appended verbatim -- the correct fact always reaches the user,
+    # even if an inverted LLM sentence sits next to it (guard of last
+    # resort; the rewrite instruction above is the first line of
+    # defense). A car text with no direction stem (e.g. only the fuel
+    # hook "заправься...") falls back to the generic word-overlap check.
+    car_text = raw.get("car")
+    if isinstance(car_text, str) and car_text.strip():
+        car_cf = car_text.casefold()
+        final_cf = final_text.casefold()
+        stems = [s for s in ("остуд", "прогрев") if s in car_cf]
+        if stems:
+            if any(s not in final_cf for s in stems):
+                final_text = f"{final_text} {car_text.strip()}"
+        else:
+            words = _title_words(car_text)
+            if words and not _mentions_any(final_text, words):
+                final_text = f"{final_text} {car_text.strip()}"
 
     checklist = raw.get("departure_checklist")
     if isinstance(checklist, list) and checklist:
