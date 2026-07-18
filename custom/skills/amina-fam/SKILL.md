@@ -12,7 +12,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v13 (prep-ahead question, home places, participant edits)._
+_Body version: v14 (detour offers on place-bound trips)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -207,7 +207,9 @@ show after cancel), make a second, separate terminal call.
     actually running, don't say someone's home is set without `people
     update --home` exiting 0, and don't say a participant was added/dropped
     without `cal update --add-person/--rm-person` (or `cal series update`
-    for a series) exiting 0.
+    for a series) exiting 0, and don't say a detour is planned ("заедем к
+    X") without an exit-0 `fam plan attach` — the detour offer and the
+    user's "да" are not by themselves a save (see rule 17).
 13. **A trip needs a transport mode — `unknown` is rejected for place-bound
     events. Ask it TOGETHER with the prep-time question, in ONE message.**
     Whenever you record an event WITH a `--place` (a one-off `fam cal add
@@ -282,6 +284,39 @@ show after cancel), make a second, separate terminal call.
     `--rm-person X` (series id from `fam cal series list`, not a single
     occurrence's event id).
 
+17. **After recording a trip WITH a place, check for a detour and make AT
+    MOST ONE offer.** Right after any `cal add`/`cal update` that sets a
+    `--place` on the event (a fresh trip, or a place added to an
+    existing event) exits 0, run `fam cal detours <event_id> --json`.
+    Empty list (`[]`) → say nothing, no offer. One or more candidates →
+    pick the single best one (top of the list) and make exactly ONE
+    offer, naming the place and the extra time: "по пути можно заехать
+    к <место> — плюс N минут, заехать?" Never list multiple candidates
+    or ask about more than one place in the same turn, and never re-ask
+    about a detour you already offered for this event in this
+    conversation, even if it comes up again.
+    - **Agreement → attach.** "да"/"заезжай"/"давай"/"ок" — whether it's
+      an immediate reply to your offer, or a later reply to the same
+      offer resurfaced by an out-of-band reminder (same NOT-in-your-
+      session-context caveat as Reminder Reactions/Plan Verbs "по пути"
+      above: resolve the event fresh, don't assume it's still the last
+      thing discussed) — run `fam plan attach <plan_id> --event
+      <event_id>`. Resolve `<plan_id>`/`<event_id>` the same way as Plan
+      Verbs' "Accepting по пути" above (`fam plan list` match by title,
+      `fam log --kind gate.sent ...` / day lookup for the event) if a
+      detour candidate implies a plan rather than a bare place — if
+      `fam cal detours` itself returned a `plan_id` for the chosen
+      candidate, use that id directly instead of re-resolving it.
+    - **Refusal → drop it, don't re-ask.** "нет"/"не надо"/"в другой
+      раз"/no reply — do not call `attach`, and do not offer the same
+      detour again later in the same conversation (a later conversation,
+      e.g. the next day's trip, may re-offer if `fam cal detours` still
+      returns a candidate).
+    - **Confirm the крюк only after `attach` exits 0** — same
+      anti-confabulation discipline as rule 12: never say "заеду
+      записал"/"заезжаем" from the offer or the "да" alone, only after
+      the `plan attach` call itself has actually succeeded.
+
 ## Quick Reference
 
 | Goal | Command |
@@ -302,6 +337,7 @@ show after cancel), make a second, separate terminal call.
 | Add a place | `fam places add "Name" [--address A] [--lat LAT] [--lon LON] [--alias A]` |
 | Update a place (coords from a 2GIS link, address) | `fam places update <ref> [--lat LAT] [--lon LON] [--address A] [--travel-min M]` |
 | Пересчитать дорогу / когда выходить | `fam road <event_id>` |
+| Detour candidates for a place-bound trip | `fam cal detours <event_id> --json` |
 | Recent activity | `fam log --last-hours 24` |
 | Reminders for one event | `fam rem list --event ID --json` |
 | Reminders due right now | `fam rem list --due --json` |
