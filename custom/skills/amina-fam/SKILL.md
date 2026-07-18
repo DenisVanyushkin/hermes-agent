@@ -613,8 +613,16 @@ The morning digest always closes with the same question: "Если появят�
 
 ## Pitfalls
 
-- `--json` position (before/after the subcommand) doesn't matter; either
-  works — don't second-guess it.
+- Prefer global `--json` placement immediately after `fam`. Some nested
+  mutating commands (notably `people add` and `places add`) reject trailing
+  `--json`; retry with `fam --json <subcommand> ...` if that happens. A
+  successful human-readable confirmation with exit code 0 is still a valid
+  save when JSON was not returned.
+- The plan CLI has no edit/update operation. To change an existing plan's
+  deadline or prep linkage, first identify it with `fam plan list`, then
+  explicitly drop the old plan and recreate it with the desired
+  `--deadline`/`--prep-for`/`--when` fields; verify the new open plan before
+  confirming.
 - `bin/fam` is a shim script — call it directly, no `python3` in front.
 - A group passed via `--with <group>` expands to its members automatically;
   you don't need to resolve members yourself.
