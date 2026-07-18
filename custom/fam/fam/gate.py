@@ -120,6 +120,13 @@ CONFIG_DEFAULTS = {
     # prep-check question piggybacked onto the evening follow-up
     # (tick.py's _followup_prep_check_candidate) -- N days.
     "prep_check_days": 5,
+    # Phase 7b Task 3: fam cal detours / first-prepare-stage detour offer
+    # (plans.detours, tick.py's reminders()) -- a candidate plan's live
+    # detour_min must fall in [detour_offer_min_min, detour_max_min]
+    # (inclusive) to be offered. Below the min: not worth interrupting
+    # for. Above the max: too far off-route to call it "on the way".
+    "detour_offer_min_min": 2,
+    "detour_max_min": 30,
 }
 
 GATE_STYLE_INSTRUCTION = (
@@ -468,7 +475,21 @@ def _append_piggyback_if_missing(final_text, raw):
     if isinstance(enroute_text, str) and enroute_text.strip():
         title_part = enroute_text.split(":", 1)[-1] if ":" in enroute_text else enroute_text
         words = _title_words(title_part)
-        if words and not _mentions_any(final_text, words):
+        needs_append = bool(words and not _mentions_any(final_text, words))
+        # Phase 7b, Task 3: a first-prepare-stage detour offer carries a
+        # "(+N мин)" figure in raw["enroute"] (e.g. "По пути (+15 мин): X
+        # — заехать?") -- the plan title alone surviving the rewrite
+        # isn't enough here, the offer is meaningless without its minute
+        # figure. So even when the word-overlap check above already
+        # found the title present, separately require the exact "+N мин"
+        # substring to survive too; if the rewrite dropped or altered the
+        # number, the raw text is appended verbatim (same "never silently
+        # lost" contract as the title check).
+        if not needs_append:
+            detour_match = re.search(r"\+\d+\s*мин", enroute_text)
+            if detour_match and detour_match.group(0) not in final_text:
+                needs_append = True
+        if needs_append:
             final_text = f"{final_text} {enroute_text.strip()}"
 
     # F3b: car hook (raw["car"], tick.py's departure-hooks piggyback).

@@ -306,6 +306,89 @@ def attached_via_points(conn, event):
     return points
 
 
+def _is_event_place(event_place, place):
+    """True when `place` is the same as event_place -- by id when both
+    resolve to a places row, else by identical lat/lon. Shared identity
+    check between attached_via_points' via-guard and detours' candidate
+    filter (Phase 7b, Task 3) so "detouring through the destination"
+    is excluded the same way in both places.
+    """
+    if place is None:
+        return False
+    event_place = event_place or {}
+    event_place_id = event_place.get("id")
+    if event_place_id is not None and place.get("id") == event_place_id:
+        return True
+    event_lat, event_lon = event_place.get("lat"), event_place.get("lon")
+    if (event_lat is not None and event_lon is not None
+            and place.get("lat") == event_lat and place.get("lon") == event_lon):
+        return True
+    return False
+
+
+def detours(conn, event, cfg, matches=None):
+    """Detour candidates for event: open, not-yet-attached plans that
+    match_enroute's "geo" reason found on the way, whose effective place
+    differs from the event's own place, with a live (TomTom-only)
+    detour_min between cfg's detour_offer_min_min and detour_max_min
+    inclusive. Never raises externally -- a missing/failed direct leg or
+    per-candidate detour simply drops that candidate (or yields []).
+
+    Backs `fam cal detours <event_id>` (CLI, Phase 7b Task 3) and the
+    first-prepare-stage detour offer in tick.reminders(). Returns a list
+    of {"plan": <dict>, "detour_min": <int>}, ordered like match_enroute
+    (plan id order).
+
+    matches: optional pre-computed match_enroute(conn, event, cfg, ...)
+    result. tick.reminders() already calls match_enroute once per due
+    leave/prepare reminder (and shares its route with shopping.match_
+    enroute) -- passing that same result in here avoids a SECOND
+    match_enroute call (and the road.route_for_event/TomTom spend it may
+    trigger) for the exact same event on the exact same tick. When
+    omitted (the CLI path, a one-off manual lookup), match_enroute is
+    called here instead.
+
+    Budget: regardless of how many geo candidates there are, the direct
+    home->event leg is fetched from TomTom at most ONCE per call (via
+    road.direct_leg_min), then reused (road.detour_min's direct_min=)
+    for every candidate's via leg -- not once per candidate.
+    """
+    if matches is None:
+        matches = match_enroute(conn, event, cfg)
+
+    event_place = event.get("place") or {}
+    candidates = []
+    for m in matches:
+        if m["reason"] != "geo":
+            continue
+        plan = m["plan"]
+        place = effective_place(conn, plan)
+        if place is None or place.get("lat") is None or place.get("lon") is None:
+            continue
+        if _is_event_place(event_place, place):
+            continue
+        candidates.append((plan, place))
+
+    if not candidates:
+        return []
+
+    direct_min = road.direct_leg_min(conn, event, cfg)
+    if direct_min is None:
+        return []
+
+    lo = cfg.get("detour_offer_min_min", 2)
+    hi = cfg.get("detour_max_min", 30)
+
+    results = []
+    for plan, place in candidates:
+        d = road.detour_min(conn, event, place, cfg, direct_min=direct_min)
+        if d is None:
+            continue
+        if lo <= d <= hi:
+            results.append({"plan": plan, "detour_min": d})
+    return results
+
+
 def match_enroute(conn, event, cfg, now_utc=None, route=None):
     """Which open plans are 'on the way' for this event.
 

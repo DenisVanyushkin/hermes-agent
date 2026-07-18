@@ -49,6 +49,8 @@ CFG = {
     "brevity_provider": "openai-codex",
     "brevity_soul_path": "/home/denis/.hermes/SOUL.md",
     "prep_check_days": 5,
+    "detour_offer_min_min": 2,
+    "detour_max_min": 30,
 }
 
 
@@ -228,6 +230,29 @@ def test_load_config_default_merges_missing_maintenance_keys(tmp_path):
     assert "state_db_path" in cfg
     on_disk = json.loads(target.read_text(encoding="utf-8"))
     assert "audit_retention_days" not in on_disk
+
+
+def test_detour_config_defaults_merge(tmp_path):
+    # Phase 7b, Task 3: a live config predating detour_offer_min_min/
+    # detour_max_min (plans.detours, tick.py's first-prepare-stage offer)
+    # must still load, both merged in at their CONFIG_DEFAULTS values --
+    # same default-merge path as the other keys above.
+    example = tmp_path / "fam-config.example.json"
+    example.write_text(json.dumps(CFG, ensure_ascii=False), encoding="utf-8")
+    target = tmp_path / "private" / "amina" / "fam-config.json"
+    target.parent.mkdir(parents=True)
+    legacy = {
+        k: v for k, v in CFG.items()
+        if k not in ("detour_offer_min_min", "detour_max_min")
+    }
+    target.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    cfg = gate.load_config(config_path=target, example_path=example)
+
+    assert cfg["detour_offer_min_min"] == 2
+    assert cfg["detour_max_min"] == 30
+    on_disk = json.loads(target.read_text(encoding="utf-8"))
+    assert "detour_offer_min_min" not in on_disk
 
 
 def test_offsite_defaults_merge(tmp_path):
@@ -1133,6 +1158,73 @@ def test_deliver_reminder_enroute_appended_after_truncation_not_cut(db, fake_run
     # the enroute tail must survive whole, even though it pushes the
     # combined text back over the ceiling (long=True is still fine here).
     assert final.endswith("По пути: Отдать кастрюлю Аишке")
+
+
+# ---- Phase 7b, Task 3: the "+N мин" detour figure must survive the
+# rewrite too -- title-word overlap alone isn't enough for an offer line
+# ("По пути (+15 мин): X — заехать?"), since a rewrite could keep the
+# plan title but drop or garble the minute figure that makes it an offer
+# at all. ----
+
+def test_deliver_reminder_appends_detour_offer_when_number_dropped(db, fake_run):
+    raw = {"label": "пора собираться", "event": {"title": "Врач"},
+           "enroute": "По пути (+15 мин): Отдать кастрюлю Аишке — заехать?"}
+    # Rewrite kept the plan title (word overlap check alone would pass)
+    # but dropped the "+15 мин" figure entirely.
+    fake_run.rewrite_responses = [
+        _completed(0, "Пора собираться, по пути занеси кастрюлю Аишке.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert "+15 мин" in final
+    assert final.endswith("По пути (+15 мин): Отдать кастрюлю Аишке — заехать?")
+
+
+def test_deliver_reminder_no_duplicate_when_rewrite_keeps_detour_number(db, fake_run):
+    raw = {"label": "пора собираться", "event": {"title": "Врач"},
+           "enroute": "По пути (+15 мин): Отдать кастрюлю Аишке — заехать?"}
+    fake_run.rewrite_responses = [
+        _completed(0, "Пора собираться, по пути (+15 мин) занеси кастрюлю "
+                       "Аишке, заедешь?")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert final.count("+15 мин") == 1
+    assert "заехать?" not in final  # raw text not re-appended verbatim
+
+
+def test_deliver_reminder_plain_enroute_unaffected_by_detour_guard(db, fake_run):
+    # No "(+N мин)" in raw["enroute"] at all -- the new number-survival
+    # check must be a no-op, same behavior as before this task.
+    raw = {"label": "пора выходить", "event": {"title": "Врач"},
+           "enroute": "По пути: Отдать кастрюлю Аишке"}
+    fake_run.rewrite_responses = [
+        _completed(0, "Пора выходить к врачу, по пути занеси кастрюлю Аишке.")]
+    fake_run.send_response = _completed(0, "")
+
+    status = gate.deliver(
+        db, "reminder", raw, "fallback", CFG,
+        now_utc="2026-07-11T12:00:00+05:00",
+    )
+    db.commit()
+
+    assert status == "sent"
+    final = audit.query(db, None, "gate.sent", None)[0]["payload"]["final"]
+    assert "По пути:" not in final  # not re-appended -- title already survived
 
 
 def test_deliver_reminder_no_enroute_key_is_noop(db, fake_run):
