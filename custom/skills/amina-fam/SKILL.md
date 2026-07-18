@@ -12,7 +12,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v12 (car stop command + live engine status)._
+_Body version: v13 (prep-ahead question, home places, participant edits)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -198,6 +198,13 @@ show after cancel), make a second, separate terminal call.
     the fam command that saves it (or it failed). If you cannot save it —
     no matching command, an error, or a missing detail — say so plainly and
     ask for what you need; do not imitate a memory you did not persist.
+    This applies just as much to the newer commands below: don't say a
+    prep task is recorded without an exit-0 `plan add --prep-for`, don't
+    say a prep question was skipped/noted without `cal update --prep-asked`
+    actually running, don't say someone's home is set without `people
+    update --home` exiting 0, and don't say a participant was added/dropped
+    without `cal update --add-person/--rm-person` (or `cal series update`
+    for a series) exiting 0.
 13. **A trip needs a transport mode — `unknown` is rejected for place-bound
     events.** Whenever you record an event WITH a `--place` (a one-off
     `fam cal add ... --place P` OR a `--repeat` series with `--place`), you
@@ -208,6 +215,57 @@ show after cancel), make a second, separate terminal call.
     BEFORE saving — never guess, never default silently. Events without a
     `--place` (созвон, день рождения) do not need transport. To change it
     later: `fam car set-transport <event_id> car|walk|public`.
+    Alongside transport, if it's not already recorded, ask one more short
+    question: "сколько времени на сборы?" → pass the answer as `--prep-min
+    N` on the same `fam cal add`/`fam cal update` call (minutes needed to
+    get ready before leave_at). If the user says nothing, or answers "как
+    обычно"/"обычное время", do NOT pass `--prep-min` — leave the
+    default/slug reminder rules in place. For a `--repeat` series, pass
+    `--prep-min N` at `cal add --repeat` time — it's copied onto every
+    occurrence (`cal series update` has no `--prep-min`, so set it at
+    creation).
+14. **A "подготовко-ёмкое" event gets ONE prep question, asked once.**
+    Recording an event that plausibly needs advance prep — гости, день
+    рождения, банкет, поездка за город/на дачу, приём с документами —
+    ask exactly one question after saving it: "нужно что-то подготовить
+    заранее?". Route the answer:
+    - Concrete task(s) named → `fam plan add "TITLE" --prep-for
+      <event_id> --due YYYY-MM-DD` (a task with its own deadline,
+      resolved per rule 10) or `fam plan add "TITLE" --prep-for
+      <event_id> --when departure` (just needs doing before the event,
+      no separate deadline) — one `plan add` call per task.
+    - "ничего"/"не надо"/no reply → `fam cal update <event_id>
+      --prep-asked` (records that the question was asked so it isn't
+      repeated).
+    Never ask this question twice for the same event in the same
+    conversation — once asked (either branch), don't re-ask even if the
+    event comes up again later in the same conversation. Ordinary events
+    (врач, созвон, обычная поездка) don't need this question at all.
+15. **"X живёт на Y" sets a person's home; "к X" as a destination means
+    X's home.** Recording where someone lives → `fam people update X
+    --home Y` (Y resolved as a place the same way as any `--place`,
+    unknown-place stop-and-ask per rule 3 applies; an empty value,
+    `--home ""`, clears a previously set home). When the user names a
+    destination as a person rather than a place — "съездим к Аишке",
+    "к бабушке" — that IS the destination-phrasing case in rule 4, but
+    the place itself is that person's home: run `fam people resolve X`
+    first (its result shows the person's `home`); if set, use it as
+    `--place` for `cal add`/`cal update` and also add X via `--with`
+    (they're not just the destination, they're who you're visiting). If
+    `home` is empty/unset on that person, fall back to the ordinary
+    unknown-place stop-and-ask ("это где — записать?") — don't guess an
+    address.
+16. **Participants change after the event is recorded — update them,
+    don't re-record.** "присоединится X" (adding someone) →
+    `fam cal update <id> --add-person X`; "X не идёт" (dropping someone)
+    → `fam cal update <id> --rm-person X` — both resolve X the same way
+    as any person reference (unknown → rule 3's stop-and-ask). Both flags
+    are repeatable in one call for several people at once. For a
+    standing change on a recurring series ("теперь всегда с X", "X
+    больше не ходит на секцию") — apply to the series and its future
+    untouched occurrences: `fam cal series update <id> --add-person X` /
+    `--rm-person X` (series id from `fam cal series list`, not a single
+    occurrence's event id).
 
 ## Quick Reference
 
@@ -238,6 +296,12 @@ show after cancel), make a second, separate terminal call.
 | Stop nagging about it (cancel chain) | `fam rem cancel EVENT_ID` |
 | What rules generate reminders | `fam rem rules --json` |
 | Record a plan/errand | `fam plan add "TITLE" [--place P] [--person NAME] [--deadline YYYY-MM-DD]` |
+| Prep task for an event | `fam plan add "TITLE" --prep-for <event_id> (--due YYYY-MM-DD \| --when departure)` |
+| Mark prep question asked, no task | `fam cal update <id> --prep-asked` |
+| Set/clear a person's home | `fam people update <ref> --home <place>` (empty `--home ""` clears it) |
+| Add/remove a participant | `fam cal update <id> --add-person NAME` / `--rm-person NAME` |
+| Add/remove a participant on a series | `fam cal series update <id> --add-person NAME` / `--rm-person NAME` |
+| Minutes needed to get ready | `--prep-min N` on `cal add`/`cal update` (also on `cal add --repeat`) |
 | See open plans | `fam plan list` (add `--all` for done/dropped too) |
 | Mark a plan done | `fam plan done <id>` |
 | Drop a plan | `fam plan drop <id>` |
