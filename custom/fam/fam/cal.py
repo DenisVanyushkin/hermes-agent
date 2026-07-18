@@ -7,7 +7,7 @@ Events store UTC ISO timestamps only (start_utc/end_utc). Local-time
 presentation fields (start_local/end_local) and the `day()` boundary query
 convert through Asia/Almaty via zoneinfo.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fam import audit, gate, people, places, rem, road
@@ -450,6 +450,16 @@ def update(conn, event_id, **fields):
             or road_value_changed):
         rem.regenerate(conn, event_id)
 
+    # Reschedule cascade: if start_utc actually changed, shift the
+    # deadlines of open prep-'date' plans tied to this event by the same
+    # local-date delta (Asia/Almaty), clamped to not land in the past.
+    if new_row["start_utc"] != existing["start_utc"]:
+        old_local_date = date.fromisoformat(_to_local_iso(existing["start_utc"])[:10])
+        new_local_date = date.fromisoformat(_to_local_iso(new_row["start_utc"])[:10])
+        delta_days = (new_local_date - old_local_date).days
+        today_local = datetime.now(ALMATY).date().isoformat()
+        _prep_cascade_shift(conn, event_id, delta_days, today_local)
+
     # Mail-material check derives both snapshots straight from
     # _MAIL_TRIGGER_COLUMNS (a superset of the regen columns -- see its
     # docstring, incl. why title is in it) plus the participant-change
@@ -468,6 +478,48 @@ def update(conn, event_id, **fields):
     return result
 
 
+def _prep_cascade_cancel(conn, event_id):
+    """Drop every OPEN prep-plan tied to event_id (prep_for_event_id=
+    event_id, status='open') -- a cancelled event no longer needs prep.
+    Done/dropped prep-plans, and plans merely attached to the event via
+    plans.attach() (a different mechanism -- attached_event_id, not
+    prep_for_event_id), are untouched. Returns the dropped rows (as
+    dicts) so cal.cancel() can surface them to the caller.
+    """
+    rows = conn.execute(
+        "SELECT id, title FROM plans WHERE prep_for_event_id=? AND status='open' "
+        "AND attached_event_id IS NULL",
+        (event_id,)).fetchall()
+    for r in rows:
+        conn.execute("UPDATE plans SET status='dropped' WHERE id=?", (r["id"],))
+    if rows:
+        audit.log(conn, "cal.prep_cascade",
+                  {"event_id": event_id, "dropped": [r["id"] for r in rows]})
+    return [dict(r) for r in rows]
+
+
+def _prep_cascade_shift(conn, event_id, delta_days, today_local):
+    """Shift the deadline of every open prep-'date' plan tied to event_id
+    by delta_days (the event's local-date shift on reschedule). A
+    shifted deadline landing before today_local (YYYY-MM-DD, Asia/Almaty)
+    is clamped to today_local rather than left in the past. 'departure'
+    plans have no deadline to shift and done/dropped plans are untouched.
+    """
+    rows = conn.execute(
+        "SELECT id, deadline FROM plans WHERE prep_for_event_id=? "
+        "AND status='open' AND prep_when='date' AND deadline IS NOT NULL",
+        (event_id,)).fetchall()
+    for r in rows:
+        new = (date.fromisoformat(r["deadline"]) + timedelta(days=delta_days)).isoformat()
+        if new < today_local:
+            new = today_local
+        conn.execute("UPDATE plans SET deadline=? WHERE id=?", (new, r["id"]))
+    if rows:
+        audit.log(conn, "cal.prep_cascade",
+                  {"event_id": event_id, "shift_days": delta_days,
+                   "plans": [r["id"] for r in rows]})
+
+
 def _set_status(conn, event_id, status, kind):
     existing = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
     if existing is None:
@@ -481,9 +533,16 @@ def _set_status(conn, event_id, status, kind):
 
 
 def cancel(conn, event_id):
-    """Mark an event cancelled and cancel its pending reminder chain."""
+    """Mark an event cancelled and cancel its pending reminder chain. Also
+    drops any open prep-plans tied to it (see _prep_cascade_cancel) --
+    the returned dict carries them under the transient "dropped_prep_plans"
+    key (same "not persisted, just returned" pattern as update()'s
+    "_material_changed"), so a caller can tell the user which prep-plans
+    got dropped.
+    """
     result = _set_status(conn, event_id, "cancelled", "cal.cancel")
     rem.cancel_chain(conn, event_id)
+    result["dropped_prep_plans"] = _prep_cascade_cancel(conn, event_id)
     return result
 
 

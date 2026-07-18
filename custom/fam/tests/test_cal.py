@@ -1,5 +1,7 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
-from fam import audit, cal, gate, people, places, rem
+from fam import audit, cal, gate, people, places, plans, rem
 
 ROAD_CFG = {
     "road_home_lat": 43.2220, "road_home_lon": 76.8512,
@@ -551,6 +553,75 @@ def test_transport_only_update_that_keeps_road_same_does_not_force_regen(db, mon
     after = {r["id"]: r["fire_at_utc"] for r in db.execute(
         "SELECT id, fire_at_utc FROM reminders WHERE event_id=?", (e["id"],))}
     assert before == after
+
+
+# --- Task 3: prep-plan cascades (cancel drops, reschedule shifts) ---
+
+def test_cancel_event_drops_open_prep_plans(db):
+    _seed(db)
+    e = cal.add(db, "Стоматолог", "2026-07-15T05:00:00+00:00")
+    db.commit()
+
+    open_pid = plans.add(db, "Собрать документы", deadline="2026-07-10",
+                          prep_for_event=e["id"], prep_when="date")
+    done_pid = plans.add(db, "Уже готово", deadline="2026-07-10",
+                          prep_for_event=e["id"], prep_when="date")
+    plans.mark(db, done_pid, "done")
+    attached_pid = plans.add(db, "Отдельное дело")
+    plans.attach(db, attached_pid, e["id"])
+    db.commit()
+
+    result = cal.cancel(db, e["id"])
+    db.commit()
+
+    dropped_ids = {p["id"] for p in result["dropped_prep_plans"]}
+    assert dropped_ids == {open_pid}
+
+    assert plans.get(db, open_pid)["status"] == "dropped"
+    assert plans.get(db, done_pid)["status"] == "done"
+    assert plans.get(db, attached_pid)["status"] == "open"
+
+
+def test_reschedule_shifts_prep_deadlines(db):
+    _seed(db)
+    e = cal.add(db, "Стоматолог", "2099-01-15T05:00:00+00:00")
+    db.commit()
+
+    date_pid = plans.add(db, "Собрать документы", deadline="2099-01-10",
+                          prep_for_event=e["id"], prep_when="date")
+    departure_pid = plans.add(db, "Собраться",
+                               prep_for_event=e["id"], prep_when="departure")
+    done_pid = plans.add(db, "Готово", deadline="2099-01-10",
+                          prep_for_event=e["id"], prep_when="date")
+    plans.mark(db, done_pid, "done")
+    db.commit()
+
+    cal.update(db, e["id"], start_utc="2099-01-22T05:00:00+00:00")
+    db.commit()
+
+    assert plans.get(db, date_pid)["deadline"] == "2099-01-17"
+    assert plans.get(db, departure_pid)["deadline"] is None
+    assert plans.get(db, done_pid)["deadline"] == "2099-01-10"
+
+
+def test_reschedule_shift_clamps_to_today(db):
+    _seed(db)
+    e = cal.add(db, "Стоматолог", "2099-01-15T05:00:00+00:00")
+    db.commit()
+
+    date_pid = plans.add(db, "Собрать документы", deadline="2099-01-10",
+                          prep_for_event=e["id"], prep_when="date")
+    db.commit()
+
+    # Move the event far into the past relative to its prep deadline so
+    # the shifted deadline would land before today; must clamp to today.
+    # (The CLI layer has a past-start guardrail; cal.update() itself
+    # does not, so this is fine at the domain level.)
+    cal.update(db, e["id"], start_utc="2000-01-15T05:00:00+00:00")
+    db.commit()
+
+    today_local = datetime.now(cal.ALMATY).date().isoformat()
+    assert plans.get(db, date_pid)["deadline"] == today_local
 
 
 def test_done_cancels_pending_reminder_chain(db):

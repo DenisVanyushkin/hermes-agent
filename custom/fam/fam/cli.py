@@ -401,6 +401,15 @@ def cmd_cal_update(args):
     # (JSON output below) sees the dict, so it never leaks as public API.
     material_changed = e.pop("_material_changed", True)
     _maybe_email_event(conn, e, material_changed=material_changed)
+    # --prep-asked is a small additive flag, orthogonal to the regular
+    # update() fields above (it isn't a valid cal.update() kwarg -- there's
+    # no reminder/road/mail consequence to it): a direct column write plus
+    # its own audit entry, applied alongside whatever else was requested.
+    if getattr(args, "prep_asked", False):
+        conn.execute("UPDATE events SET prep_asked=1 WHERE id=?", (args.id,))
+        audit.log(conn, "cal.update", {"id": args.id, "prep_asked": 1})
+        conn.commit()
+        e["prep_asked"] = 1
     if args.json:
         print(json.dumps(e, ensure_ascii=False))
     else:
@@ -411,10 +420,19 @@ def cmd_cal_cancel(args):
     conn = famdb.connect()
     e = cal.cancel(conn, args.id)
     conn.commit()
+    # cal.cancel()'s "dropped_prep_plans" is transient (not persisted --
+    # see cal.py's docstring), surfaced here so a human/LLM caller sees
+    # which prep-plans got dropped as a side effect of the cancellation.
+    dropped = e.pop("dropped_prep_plans", [])
     if args.json:
-        print(json.dumps(e, ensure_ascii=False))
+        out = dict(e)
+        out["dropped_prep_plans"] = dropped
+        print(json.dumps(out, ensure_ascii=False))
     else:
         print(f"cancelled event: {e['title']} (id={e['id']})")
+        if dropped:
+            titles = ", ".join(p["title"] for p in dropped)
+            print(f"dropped prep plan(s): {titles}")
     return 0
 
 def cmd_cal_done(args):
@@ -911,8 +929,16 @@ def _fmt_plan(p):
 
 def cmd_plan_add(args):
     conn = famdb.connect()
+    # --when default: computed here at the CLI layer, not inside
+    # plans.add() -- "date" when --deadline is given, "departure"
+    # otherwise. Only applies when --prep-for is actually used; a
+    # plain (non-prep) `plan add` never touches prep_when.
+    prep_when = args.when
+    if args.prep_for is not None and prep_when is None:
+        prep_when = "date" if args.deadline is not None else "departure"
     plan_id = plans.add(conn, args.title, place=args.place, person=args.person,
-                         deadline=args.deadline, notes=args.notes)
+                         deadline=args.deadline, notes=args.notes,
+                         prep_for_event=args.prep_for, prep_when=prep_when)
     conn.commit()
     p = plans.get(conn, plan_id)
     if args.json:
@@ -1378,6 +1404,9 @@ def build_parser():
                       help="participant ref to remove (repeatable)")
     spu.add_argument("--allow-past", dest="allow_past", action="store_true",
                       help="skip the past-start guardrail (retroactive event entry)")
+    spu.add_argument("--prep-asked", dest="prep_asked", action="store_true",
+                      help="mark this event as having already been asked "
+                           "about prep (sets events.prep_asked=1)")
     spu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
@@ -1512,8 +1541,15 @@ def build_parser():
     spa.add_argument("title")
     spa.add_argument("--place", help="place name/alias/id")
     spa.add_argument("--person", help="person name/alias/slug")
-    spa.add_argument("--deadline", help="YYYY-MM-DD local")
+    spa.add_argument("--deadline", "--due", dest="deadline", help="YYYY-MM-DD local")
     spa.add_argument("--notes", default="")
+    spa.add_argument("--prep-for", dest="prep_for", type=int,
+                      help="event id this plan is prep for")
+    spa.add_argument("--when", choices=["date", "departure"],
+                      help="prep_when: 'date' (has its own deadline) or "
+                           "'departure' (just needs doing before the event); "
+                           "default: 'date' if --deadline/--due given, else "
+                           "'departure' (only meaningful with --prep-for)")
     spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
