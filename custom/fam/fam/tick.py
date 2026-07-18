@@ -892,7 +892,11 @@ def _followup_prep_check_candidate(conn, now_dt, date_local, cfg):
     (default 5) days. Ties/multiple matches: the nearest by start_utc
     wins -- ORDER BY start_utc ASC LIMIT 1, exactly one candidate is
     ever surfaced per tick (brief: "ровно одно ближайшее будущее
-    событие").
+    событие"). Series occurrences (series_id NOT NULL) are excluded --
+    a recurring event (final review, coordinator decision) would
+    otherwise re-enter the horizon window and get asked about prep
+    every single occurrence, e.g. a weekly training asking "что
+    подготовить?" every week.
     """
     _, tomorrow_start_utc = _followup_day_bounds_utc(date_local)
     prep_check_days = cfg.get("prep_check_days", 5)
@@ -900,6 +904,7 @@ def _followup_prep_check_candidate(conn, now_dt, date_local, cfg):
         timespec="seconds")
     row = conn.execute(
         "SELECT id FROM events WHERE status='active' AND prep_asked=0 "
+        "AND series_id IS NULL "
         "AND start_utc >= ? AND start_utc <= ? "
         "AND (place_id IS NOT NULL OR EXISTS ("
         "  SELECT 1 FROM event_participants ep WHERE ep.event_id=events.id"

@@ -943,6 +943,9 @@ def _fmt_plan(p):
         line += f"\t@{p['place']['name']}"
     if p.get("person"):
         line += f"\tfor:{p['person']['name']}"
+    if p.get("prep_for_event_id"):
+        marker = p["deadline"] if p.get("prep_when") == "date" else "departure"
+        line += f"\tprep:{p['prep_for_event_id']}/{marker}"
     return line
 
 def cmd_plan_add(args):

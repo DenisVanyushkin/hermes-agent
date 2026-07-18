@@ -142,7 +142,24 @@ def cancel(conn, sid, now_utc=None):
         "SELECT id FROM events WHERE series_id=? AND status='active' AND "
         "start_utc > ?", (sid, now)).fetchall()
     for r in future:
-        conn.execute("DELETE FROM events WHERE id=?", (r["id"],))
+        event_id = r["id"]
+        # plans.prep_for_event_id and plans.attached_event_id both
+        # REFERENCE events(id) with foreign_keys=ON, so deleting the
+        # event out from under a plan that still points at it raises
+        # IntegrityError. Drop any open prep-plan first (same cascade
+        # cal.cancel() uses), then null out the dangling reference on
+        # every OTHER plan still pointing at this event (a done/dropped
+        # prep-plan, or a plan merely attached via plans.attach()) --
+        # the plan row itself is kept, only the FK is cleared, so
+        # history isn't lost.
+        cal._prep_cascade_cancel(conn, event_id)
+        conn.execute(
+            "UPDATE plans SET prep_for_event_id=NULL "
+            "WHERE prep_for_event_id=?", (event_id,))
+        conn.execute(
+            "UPDATE plans SET attached_event_id=NULL "
+            "WHERE attached_event_id=?", (event_id,))
+        conn.execute("DELETE FROM events WHERE id=?", (event_id,))
     audit.log(conn, "cal.series.cancel",
               {"id": sid, "deleted_future": len(future)})
     return len(future)

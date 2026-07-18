@@ -332,3 +332,38 @@ def test_cli_plan_attach_recompute_failure_does_not_break_attach(db, capsys, mon
         "SELECT COUNT(*) FROM audit_log WHERE kind='tick.error' "
         "AND json_extract(payload, '$.where')='plan_attach_recompute'"
     ).fetchone()[0] == 1
+
+
+# --- Final review I1: prep-link marker in `fam plan list` ---
+
+def test_fmt_plan_shows_prep_marker_for_date_plan(db):
+    from fam import cli
+    _seed(db)
+    e = cal.add(db, "Стоматолог", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    pid = plans.add(db, "Собрать документы", deadline="2026-07-10",
+                     prep_for_event=e["id"], prep_when="date")
+    db.commit()
+    p = plans.get(db, pid)
+    assert f"prep:{e['id']}/2026-07-10" in cli._fmt_plan(p)
+
+
+def test_fmt_plan_shows_prep_marker_for_departure_plan(db):
+    from fam import cli
+    _seed(db)
+    e = cal.add(db, "Стоматолог", "2026-07-15T05:00:00+00:00")
+    db.commit()
+    pid = plans.add(db, "Собраться", prep_for_event=e["id"],
+                     prep_when="departure")
+    db.commit()
+    p = plans.get(db, pid)
+    assert f"prep:{e['id']}/departure" in cli._fmt_plan(p)
+
+
+def test_fmt_plan_no_prep_marker_for_plain_plan(db):
+    from fam import cli
+    _seed(db)
+    pid = plans.add(db, "Купить корм коту")
+    db.commit()
+    p = plans.get(db, pid)
+    assert "prep:" not in cli._fmt_plan(p)
