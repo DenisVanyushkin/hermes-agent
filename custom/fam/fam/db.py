@@ -261,10 +261,20 @@ def init_db(conn):
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_series_start "
         "ON events(series_id, start_utc) WHERE series_id IS NOT NULL")
+    # -- v8 (phase 7: prep & social graph) --
+    _ensure_column(conn, "plans", "prep_for_event_id",
+                   "prep_for_event_id INTEGER REFERENCES events(id)")
+    _ensure_column(conn, "plans", "prep_when", "prep_when TEXT")
+    _ensure_column(conn, "events", "prep_min", "prep_min INTEGER")
+    _ensure_column(conn, "events", "prep_asked",
+                   "prep_asked INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "event_series", "prep_min", "prep_min INTEGER")
+    _ensure_column(conn, "people", "home_place_id",
+                   "home_place_id INTEGER REFERENCES places(id)")
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','7')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','8')")
     conn.execute(
-        "UPDATE meta SET value='7' WHERE key='schema_version'")
+        "UPDATE meta SET value='8' WHERE key='schema_version'")
     conn.commit()
 
 
