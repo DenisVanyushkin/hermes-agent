@@ -79,3 +79,105 @@ def test_series_copies_prep_min(db):
         fires = db.execute(
             "SELECT rule_id FROM reminders WHERE event_id=?", (row["id"],)).fetchall()
         assert fires and all(r["rule_id"] is None for r in fires)
+
+
+def test_series_add_participant_future_only(db):
+    from fam import rem
+    people.add(db, "Тая", slug="taya")
+    rem.seed_default_rules(db)
+    db.commit()
+    s = series.add(db, "Тренировка", "mon", "10:00")
+    db.commit()
+    created = series.generate(db, now_utc="2026-07-06T00:00:00+00:00")
+    db.commit()
+    assert created >= 2
+    occ = db.execute(
+        "SELECT id, start_utc FROM events WHERE series_id=? ORDER BY start_utc",
+        (s["id"],)).fetchall()
+    past_id = occ[0]["id"]  # 2026-07-06
+    future_id = occ[2]["id"]  # 2026-07-20
+
+    result = series.update_participants(
+        db, s["id"], add=["Тая"], now_utc="2026-07-15T00:00:00+00:00")
+    db.commit()
+
+    assert result["series_id"] == s["id"]
+    assert future_id in result["updated_events"]
+    assert past_id not in result["updated_events"]
+
+    past_people = {r["person_id"] for r in db.execute(
+        "SELECT person_id FROM event_participants WHERE event_id=?", (past_id,))}
+    future_people_names = [p["name"] for p in cal.get(db, future_id)["participants"]]
+    assert past_people == set()
+    assert future_people_names == ["Тая"]
+
+    labels = {r["label"] for r in db.execute(
+        "SELECT label FROM reminders WHERE event_id=? AND status='pending'",
+        (future_id,))}
+    assert "пора собираться" in labels  # slug:taya lead-60 stage
+
+    s2 = series.get(db, s["id"])
+    assert s2["participants"] == [
+        db.execute("SELECT id FROM people WHERE slug='taya'").fetchone()["id"]]
+
+
+def test_series_remove_participant(db):
+    people.add(db, "Тая", slug="taya")
+    db.commit()
+    s = series.add(db, "Тренировка", "mon", "10:00", participants=["Тая"])
+    db.commit()
+    series.generate(db, now_utc="2026-07-06T00:00:00+00:00")
+    db.commit()
+    occ = db.execute(
+        "SELECT id FROM events WHERE series_id=? ORDER BY start_utc",
+        (s["id"],)).fetchall()
+    future_id = occ[2]["id"]
+
+    result = series.update_participants(
+        db, s["id"], remove=["Тая"], now_utc="2026-07-15T00:00:00+00:00")
+    db.commit()
+
+    assert future_id in result["updated_events"]
+    future_people = [p["name"] for p in cal.get(db, future_id)["participants"]]
+    assert future_people == []
+    s2 = series.get(db, s["id"])
+    assert s2["participants"] == []
+
+
+def test_series_update_skips_rescheduled(db):
+    people.add(db, "Тая", slug="taya")
+    db.commit()
+    s = series.add(db, "Тренировка", "mon", "10:00")
+    db.commit()
+    series.generate(db, now_utc="2026-07-06T00:00:00+00:00")
+    db.commit()
+    occ = db.execute(
+        "SELECT id, start_utc FROM events WHERE series_id=? ORDER BY start_utc",
+        (s["id"],)).fetchall()
+    future_id = occ[2]["id"]  # 2026-07-20 10:00 local
+
+    # Reschedule this occurrence to 11:00 local (still future, but no longer
+    # matching the series' grid slot).
+    cal.update(db, future_id, start_utc="2026-07-20T06:00:00+00:00")
+    db.commit()
+
+    result = series.update_participants(
+        db, s["id"], add=["Тая"], now_utc="2026-07-15T00:00:00+00:00")
+    db.commit()
+
+    assert future_id not in result["updated_events"]
+    future_people = [p["name"] for p in cal.get(db, future_id)["participants"]]
+    assert future_people == []
+
+
+def test_series_update_unknown_person_raises(db):
+    s = series.add(db, "Тренировка", "mon", "10:00")
+    db.commit()
+    with pytest.raises(cal.UnknownRefError):
+        series.update_participants(db, s["id"], add=["НетТакого"])
+
+
+def test_series_update_unknown_series_raises(db):
+    with pytest.raises(ValueError):
+        series.update_participants(db, 999, add=[])
+
