@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import html
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -59,7 +59,7 @@ from job_intel.vacancy_understanding.model import (
     Requirements,
 )
 
-EXTRACTOR_VERSION = "0.1.0"
+EXTRACTOR_VERSION = "0.1.1"
 
 _SRC_TEXT = "src_vacancy_text"
 _SRC_STRUCT = "src_structured_fields"
@@ -228,8 +228,14 @@ def _country_from_location(location: str) -> Optional[str]:
 
 # --- main entry ------------------------------------------------------------
 
-def extract(raw: RawVacancy, *, created_at: Optional[datetime] = None) -> VacancyUnderstanding:
-    """Pure deterministic extraction. Same input → same output."""
+def extract(raw: RawVacancy, *, created_at: datetime) -> VacancyUnderstanding:
+    """Pure deterministic extraction. Same input → same output.
+
+    ``created_at`` is REQUIRED and must come from the caller (e.g. the source
+    row's observation timestamp): the extractor contains no wall-clock reads,
+    so identical input — including created_at — always yields an identical
+    canonical record (replay/cache-key guarantee).
+    """
     text = _clean(raw.description or "")
     location = raw.location or ""
     loc_ev = _ev(_SRC_STRUCT, location, "location", EvidenceSourceType.structured_source_field)
@@ -321,14 +327,6 @@ def extract(raw: RawVacancy, *, created_at: Optional[datetime] = None) -> Vacanc
                     method=ExtractionMethod.explicit_statement,
                     evidence=[_ev(_SRC_TEXT, _window(text, m), "description")],
                 )
-        m = _RELOC.search(text) or _RELOC.search(raw.title)
-        if m:
-            src = text if m.re is _RELOC and m.string == text else raw.title
-            feas.relocation_support = Fact[RelocationSupport](
-                value=RelocationSupport.explicit, confidence=Confidence.high,
-                method=ExtractionMethod.explicit_statement,
-                evidence=[_ev(_SRC_TEXT, _window(src, m) if src == text else raw.title, "description")],
-            )
         m = _ALREADY_AUTH.search(text)
         if m:
             feas.must_be_already_authorized = BoolFact(
@@ -350,6 +348,24 @@ def extract(raw: RawVacancy, *, created_at: Optional[datetime] = None) -> Vacanc
                         evidence=[_ev(_SRC_TEXT, _window(text, m), "description")],
                     )
                 )
+
+    # relocation — checked in description AND title (title works even for
+    # title-only snapshots); provenance names the real origin field.
+    reloc_ev: Optional[Evidence] = None
+    m = _RELOC.search(text) if text else None
+    if m:
+        reloc_ev = _ev(_SRC_TEXT, _window(text, m), "description")
+    else:
+        mt = _RELOC.search(raw.title)
+        if mt:
+            reloc_ev = _ev(_SRC_STRUCT, raw.title, "title",
+                           EvidenceSourceType.structured_source_field)
+    if reloc_ev:
+        feas.relocation_support = Fact[RelocationSupport](
+            value=RelocationSupport.explicit, confidence=Confidence.high,
+            method=ExtractionMethod.explicit_statement,
+            evidence=[reloc_ev],
+        )
 
     # KZ local indicator — a factual combination; sponsorship may stay
     # unknown, that is valid (no visa needed to work locally).
@@ -422,7 +438,7 @@ def extract(raw: RawVacancy, *, created_at: Optional[datetime] = None) -> Vacanc
         metadata=Metadata(
             schema_version=SCHEMA_VERSION,
             extractor_version=EXTRACTOR_VERSION,
-            created_at=created_at or datetime.now(timezone.utc),
+            created_at=created_at,
             vacancy_key=raw.vacancy_key,
             source_system=raw.source_system,
             source_record_id=raw.source_record_id,

@@ -231,3 +231,56 @@ def test_extractor_is_deterministic_replayable():
     a = extract(raw, created_at=CREATED).model_dump_json()
     b = extract(raw, created_at=CREATED).model_dump_json()
     assert a == b
+
+
+def test_extractor_has_no_wall_clock():
+    """created_at is required — the extractor never reads the current time,
+    so identical input always yields an identical canonical record."""
+    with pytest.raises(TypeError):
+        extract(_raw())  # noqa: missing created_at must fail loudly
+    import inspect
+    src = inspect.getsource(
+        __import__("job_intel.vacancy_understanding.extractor",
+                   fromlist=["extract"]))
+    assert "datetime.now" not in src and "utcnow" not in src
+
+
+def test_relocation_from_title_has_structured_provenance():
+    raw = _raw(
+        title="Head of Product (Relocate to Singapore)",
+        location="UK - London",
+        description="",
+    )
+    u = extract(raw, created_at=CREATED)
+    fact = u.feasibility_facts.relocation_support
+    assert fact.value.value == "explicit"
+    ev = fact.evidence[0]
+    assert ev.source_type.value == "structured_source_field"
+    assert ev.location == "title"
+    assert "Relocate to Singapore" in ev.excerpt
+    # and from description text the provenance stays textual
+    raw2 = _raw(description="We can help you relocate to the UK. " * 6)
+    ev2 = extract(raw2, created_at=CREATED).feasibility_facts.relocation_support.evidence[0]
+    assert ev2.source_type.value == "vacancy_text"
+    assert ev2.location == "description"
+
+
+def test_africa_region_is_exhaustive():
+    for country in [
+        "Democratic Republic of the Congo", "Republic of the Congo", "Mali",
+        "Niger", "Chad", "Somalia", "Madagascar", "Malawi", "Liberia",
+        "Sierra Leone", "Gabon", "Benin", "Togo", "Burkina Faso", "Eritrea",
+        "Lesotho", "Djibouti", "Burundi", "Comoros", "Mauritania",
+    ]:
+        assert resolve_country_group(country).group == CountryGroup.africa, country
+
+
+def test_country_group_precedence_documented_and_enforced():
+    from job_intel.vacancy_understanding.country_groups import PRECEDENCE
+    assert PRECEDENCE.index("sanctioned") < PRECEDENCE.index("unstable") < \
+        PRECEDENCE.index("africa") < PRECEDENCE.index("other")
+    # Sudan/South Sudan are African AND unstable-listed → unstable wins.
+    assert resolve_country_group("Sudan").group == CountryGroup.unstable
+    assert resolve_country_group("South Sudan").group == CountryGroup.unstable
+    # Libya is African and not on the policy snapshots → africa.
+    assert resolve_country_group("Libya").group == CountryGroup.africa
