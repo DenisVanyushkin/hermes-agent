@@ -446,7 +446,6 @@ def make_snapshot(rows_by_sheet):
     }
 
 
-\
 # ---------------------------------------------------------------------------
 # Task 4: diff engine
 # ---------------------------------------------------------------------------
@@ -665,8 +664,6 @@ def _person_referenced_outside_file(conn, person_id):
                         ("group_members", "person_id")):
         if conn.execute(f"SELECT 1 FROM {table} WHERE {col}=? LIMIT 1", (person_id,)).fetchone():
             return True
-    if conn.execute("SELECT 1 FROM people WHERE home_place_id=? LIMIT 1", (person_id,)).fetchone():
-        return True
     return False
 
 
