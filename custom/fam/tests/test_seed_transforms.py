@@ -21,6 +21,15 @@ def test_labels_bidirectional():
         seed.canon("transport", "такси")
 
 
+def test_canon_enabled_with_bad_value():
+    """Bad «включено» value should raise descriptive ValueError, not bare KeyError."""
+    assert seed.canon("enabled", "Да") == 1
+    assert seed.canon("enabled", "да") == 1
+    assert seed.canon("enabled", "нет") == 0
+    with pytest.raises(ValueError, match="enabled: неизвестное значение .*, ожидалось одно из"):
+        seed.canon("enabled", "maybe")
+
+
 def test_sheets_declared():
     assert set(seed.SHEETS) == {"Люди", "Места", "События", "Серии", "Планы", "Лекарства", "Покупки"}
     for spec in seed.SHEETS.values():
