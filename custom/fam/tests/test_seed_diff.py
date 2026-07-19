@@ -277,6 +277,51 @@ def test_gis_url_resolution_failure_is_conflict(db, monkeypatch):
     assert "не удалось развернуть 2ГИС-ссылку" in reasons and "broken" in reasons
 
 
+def test_legacy_unchanged_row_place_without_transport_is_noop(db):
+    """Bug repro: a series row that predates the transport guardrail (place
+    set, transport='unknown') must NOT trip the "место задано, но не задан
+    транспорт" conflict when the file row is byte-for-byte the same as the
+    current DB state (round-tripped export, untouched by a human). A no-op
+    row must be skipped before any conflict checks run.
+    """
+    from fam import series
+
+    _seed_db(db)
+    series.add(db, "Старая серия", "tue", "09:00", place="Invictus")  # transport default "unknown"
+    db.commit()
+
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}   # untouched round-trip
+
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts, f"Unexpected conflicts: {d.conflicts}"
+    assert d.empty
+
+
+def test_legacy_row_place_without_transport_edited_is_still_conflict(db):
+    """Same legacy row (place set, transport unknown), but this time the
+    file actually changes a field on it (title) -- the transport conflict
+    must still fire, since this is a genuine update, not a no-op.
+    """
+    from fam import series
+
+    _seed_db(db)
+    series.add(db, "Старая серия", "tue", "09:00", place="Invictus")  # transport default "unknown"
+    db.commit()
+
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Серии"]) if r["title"] == "Старая серия")
+    f["Серии"][idx]["title"] = "Старая серия (изменено)"
+
+    d = seed.diff(db, f, snap)
+    assert d.has_conflicts
+    reasons = " ".join(c["reason"] for c in d.conflicts["Серии"])
+    assert "место задано, но не задан транспорт" in reasons
+
+
 def test_gis_url_resolved_once_per_unique_url(db, monkeypatch):
     _seed_db(db)
     calls = []
