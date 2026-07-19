@@ -71,13 +71,21 @@ def run_synthetic_controls(contract=None, provider=None) -> dict:
         for kind in ("positive", "negative", "ambiguous", "unknown", "conflicting"):
             control = getattr(fact.controls, kind)
             phrases = _quoted(control)
-            if not phrases or (kind == "conflicting" and len(phrases) < 2):
+            if kind == "unknown" and not phrases:
+                # "no mention -> unknown" IS executable: neutral text, no signals
+                phrases = ["The team collaborates on various initiatives."]
+                title = "Synthetic Control Role"
+                text = phrases[0]
+            elif not phrases or (kind == "conflicting" and len(phrases) < 2):
                 results.append({"fact": fact.id, "kind": kind,
                                 "status": "exempt_no_phrase",
-                                "note": "control not mechanically constructible"})
+                                "note": "control describes paired observations / free-form "
+                                        "scenario the single-text runner cannot express; "
+                                        "covered by a named specialized test"})
                 continue
-            title = phrases[0] if "title" in control.lower() else "Synthetic Control Role"
-            text = " … ".join(phrases)
+            else:
+                title = phrases[0] if "title" in control.lower() else "Synthetic Control Role"
+                text = " … ".join(phrases)
             vu = _base_vu(f"control:{fact.id}:{kind}", title, text)
             out = extract_semantic(vu, title=title, text=text, provider=provider,
                                    contract=contract)
@@ -180,6 +188,61 @@ def run_calibration(fixture_dir: Path, out_path: Path | None = None,
     if out_path:
         out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
     return report
+
+
+SPECIALIZED_COVERAGE = {
+    # (fact_id, kind) -> "test_path::test_name" providing equivalent coverage
+    **{(f, "conflicting"): "tests/job_intel/test_semantic_control_coverage.py::test_conflicting_pair_controls"
+       for f in ("mandate.growth_mandate", "mandate.expansion_mandate",
+                 "mandate.monetization_core", "mandate.pricing_core",
+                 "mandate.acquiring_core", "mandate.platform_engineering",
+                 "company.platform_ecosystem")},
+    **{("risks.title_scope_mismatch", k):
+       "tests/job_intel/test_semantic_control_coverage.py::test_title_scope_mismatch_controls"
+       for k in ("positive", "negative", "ambiguous", "unknown", "conflicting")},
+    **{("mandate.mandate_summary", k):
+       "tests/job_intel/test_semantic_control_coverage.py::test_mandate_summary_invariants"
+       for k in ("positive", "negative", "ambiguous", "unknown", "conflicting")},
+}
+
+
+def build_control_coverage(contract=None, provider=None) -> dict:
+    """Machine-readable audit of every contract control (closure Part 1)."""
+    contract = contract or load_semantic_contract()
+    runner = run_synthetic_controls(contract, provider)
+    by_key = {(r["fact"], r["kind"]): r for r in runner["results"]}
+    records, uncovered = [], []
+    for fact in contract.facts:
+        if fact.extraction_class.value not in ("semantic_only", "hybrid"):
+            continue
+        for kind in ("positive", "negative", "ambiguous", "unknown", "conflicting"):
+            row = by_key.get((fact.id, kind))
+            spec = SPECIALIZED_COVERAGE.get((fact.id, kind))
+            if row and row["status"] == "pass":
+                status, evidence, reason = "generic_pass", \
+                    "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass", None
+            elif spec:
+                status, evidence = "equivalently_covered", spec
+                reason = (row or {}).get("note",
+                          "fact-level exemption: scenario needs paired/structured input")
+            else:
+                status, evidence, reason = "uncovered", None, (row or {}).get("note", "no coverage")
+                uncovered.append({"fact": fact.id, "kind": kind})
+            records.append({
+                "fact": fact.id, "kind": kind, "status": status,
+                "runner_status": (row or {}).get("status", "fact_exempt"),
+                "reason_not_generic": reason,
+                "requires": ("paired_observations" if kind == "conflicting" and spec
+                             else "summary_generation" if fact.id == "mandate.mandate_summary"
+                             else "title_body_pair" if fact.id == "risks.title_scope_mismatch"
+                             else None),
+                "coverage_evidence": evidence,
+            })
+    return {"total_controls": len(records),
+            "generic_pass": sum(1 for r in records if r["status"] == "generic_pass"),
+            "equivalently_covered": sum(1 for r in records if r["status"] == "equivalently_covered"),
+            "uncovered": len(uncovered), "uncovered_list": uncovered,
+            "records": records}
 
 
 if __name__ == "__main__":

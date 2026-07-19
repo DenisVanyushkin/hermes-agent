@@ -1,0 +1,1584 @@
+{
+ "total_controls": 175,
+ "generic_pass": 158,
+ "equivalently_covered": 17,
+ "uncovered": 0,
+ "uncovered_list": [],
+ "records": [
+  {
+   "fact": "mandate.scope_breadth",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.scope_breadth",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.scope_breadth",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.scope_breadth",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.scope_breadth",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.revenue_proximity",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.revenue_proximity",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.revenue_proximity",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.revenue_proximity",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.revenue_proximity",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.growth_mandate",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.growth_mandate",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.growth_mandate",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.growth_mandate",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.growth_mandate",
+   "kind": "conflicting",
+   "status": "equivalently_covered",
+   "runner_status": "exempt_no_phrase",
+   "reason_not_generic": "control describes paired observations / free-form scenario the single-text runner cannot express; covered by a named specialized test",
+   "requires": "paired_observations",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_conflicting_pair_controls"
+  },
+  {
+   "fact": "mandate.expansion_mandate",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.expansion_mandate",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.expansion_mandate",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.expansion_mandate",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.expansion_mandate",
+   "kind": "conflicting",
+   "status": "equivalently_covered",
+   "runner_status": "exempt_no_phrase",
+   "reason_not_generic": "control describes paired observations / free-form scenario the single-text runner cannot express; covered by a named specialized test",
+   "requires": "paired_observations",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_conflicting_pair_controls"
+  },
+  {
+   "fact": "mandate.monetization_core",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.monetization_core",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.monetization_core",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.monetization_core",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.monetization_core",
+   "kind": "conflicting",
+   "status": "equivalently_covered",
+   "runner_status": "exempt_no_phrase",
+   "reason_not_generic": "control describes paired observations / free-form scenario the single-text runner cannot express; covered by a named specialized test",
+   "requires": "paired_observations",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_conflicting_pair_controls"
+  },
+  {
+   "fact": "mandate.pricing_core",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.pricing_core",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.pricing_core",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.pricing_core",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.pricing_core",
+   "kind": "conflicting",
+   "status": "equivalently_covered",
+   "runner_status": "exempt_no_phrase",
+   "reason_not_generic": "control describes paired observations / free-form scenario the single-text runner cannot express; covered by a named specialized test",
+   "requires": "paired_observations",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_conflicting_pair_controls"
+  },
+  {
+   "fact": "mandate.acquiring_core",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.acquiring_core",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.acquiring_core",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.acquiring_core",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.acquiring_core",
+   "kind": "conflicting",
+   "status": "equivalently_covered",
+   "runner_status": "exempt_no_phrase",
+   "reason_not_generic": "control describes paired observations / free-form scenario the single-text runner cannot express; covered by a named specialized test",
+   "requires": "paired_observations",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_conflicting_pair_controls"
+  },
+  {
+   "fact": "mandate.pnl_ownership",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.pnl_ownership",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.pnl_ownership",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.pnl_ownership",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.pnl_ownership",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.strategy_ownership",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.strategy_ownership",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.strategy_ownership",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.strategy_ownership",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.strategy_ownership",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.org_design_mandate",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.org_design_mandate",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.org_design_mandate",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.org_design_mandate",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.org_design_mandate",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.team_build_mandate",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.team_build_mandate",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.team_build_mandate",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.team_build_mandate",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.team_build_mandate",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.executive_exposure",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.executive_exposure",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.executive_exposure",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.executive_exposure",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.executive_exposure",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.board_exposure",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.board_exposure",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.board_exposure",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.board_exposure",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.board_exposure",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.market_entry_ownership",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.market_entry_ownership",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.market_entry_ownership",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.market_entry_ownership",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.market_entry_ownership",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.turnaround_mandate",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.turnaround_mandate",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.turnaround_mandate",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.turnaround_mandate",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.turnaround_mandate",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.zero_to_one_mandate",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.zero_to_one_mandate",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.zero_to_one_mandate",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.zero_to_one_mandate",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.zero_to_one_mandate",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.maintenance_only",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.maintenance_only",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.maintenance_only",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.maintenance_only",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.maintenance_only",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.feature_delivery_only",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.feature_delivery_only",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.feature_delivery_only",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.feature_delivery_only",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.feature_delivery_only",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.digital_business_ownership",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.digital_business_ownership",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.digital_business_ownership",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.digital_business_ownership",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.digital_business_ownership",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.transformation_phase",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.transformation_phase",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.transformation_phase",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.transformation_phase",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.transformation_phase",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.mandate_summary",
+   "kind": "positive",
+   "status": "equivalently_covered",
+   "runner_status": "fact_exempt",
+   "reason_not_generic": "fact-level exemption: scenario needs paired/structured input",
+   "requires": "summary_generation",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_mandate_summary_invariants"
+  },
+  {
+   "fact": "mandate.mandate_summary",
+   "kind": "negative",
+   "status": "equivalently_covered",
+   "runner_status": "fact_exempt",
+   "reason_not_generic": "fact-level exemption: scenario needs paired/structured input",
+   "requires": "summary_generation",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_mandate_summary_invariants"
+  },
+  {
+   "fact": "mandate.mandate_summary",
+   "kind": "ambiguous",
+   "status": "equivalently_covered",
+   "runner_status": "fact_exempt",
+   "reason_not_generic": "fact-level exemption: scenario needs paired/structured input",
+   "requires": "summary_generation",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_mandate_summary_invariants"
+  },
+  {
+   "fact": "mandate.mandate_summary",
+   "kind": "unknown",
+   "status": "equivalently_covered",
+   "runner_status": "fact_exempt",
+   "reason_not_generic": "fact-level exemption: scenario needs paired/structured input",
+   "requires": "summary_generation",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_mandate_summary_invariants"
+  },
+  {
+   "fact": "mandate.mandate_summary",
+   "kind": "conflicting",
+   "status": "equivalently_covered",
+   "runner_status": "fact_exempt",
+   "reason_not_generic": "fact-level exemption: scenario needs paired/structured input",
+   "requires": "paired_observations",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_mandate_summary_invariants"
+  },
+  {
+   "fact": "mandate.platform_as_business",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.platform_as_business",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.platform_as_business",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.platform_as_business",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.platform_as_business",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.platform_engineering",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.platform_engineering",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.platform_engineering",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.platform_engineering",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.platform_engineering",
+   "kind": "conflicting",
+   "status": "equivalently_covered",
+   "runner_status": "exempt_no_phrase",
+   "reason_not_generic": "control describes paired observations / free-form scenario the single-text runner cannot express; covered by a named specialized test",
+   "requires": "paired_observations",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_conflicting_pair_controls"
+  },
+  {
+   "fact": "mandate.internal_tools_backoffice",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.internal_tools_backoffice",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.internal_tools_backoffice",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.internal_tools_backoffice",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.internal_tools_backoffice",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.risk_compliance_heavy",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.risk_compliance_heavy",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.risk_compliance_heavy",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.risk_compliance_heavy",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "mandate.risk_compliance_heavy",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "organization.cross_functional_leadership",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "organization.cross_functional_leadership",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "organization.cross_functional_leadership",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "organization.cross_functional_leadership",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "organization.cross_functional_leadership",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "organization.budget_ownership",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "organization.budget_ownership",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "organization.budget_ownership",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "organization.budget_ownership",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "organization.budget_ownership",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.scale",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.scale",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.scale",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.scale",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.scale",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.stage",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.stage",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.stage",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.stage",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.stage",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.customer_model",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.customer_model",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.customer_model",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.customer_model",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.customer_model",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.product_culture_signal",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.product_culture_signal",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.product_culture_signal",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.product_culture_signal",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.product_culture_signal",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.platform_ecosystem",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.platform_ecosystem",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.platform_ecosystem",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.platform_ecosystem",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.platform_ecosystem",
+   "kind": "conflicting",
+   "status": "equivalently_covered",
+   "runner_status": "exempt_no_phrase",
+   "reason_not_generic": "control describes paired observations / free-form scenario the single-text runner cannot express; covered by a named specialized test",
+   "requires": "paired_observations",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_conflicting_pair_controls"
+  },
+  {
+   "fact": "company.is_crypto_exchange",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.is_crypto_exchange",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.is_crypto_exchange",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.is_crypto_exchange",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "company.is_crypto_exchange",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "requirements.overall_transferability",
+   "kind": "positive",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "requirements.overall_transferability",
+   "kind": "negative",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "requirements.overall_transferability",
+   "kind": "ambiguous",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "requirements.overall_transferability",
+   "kind": "unknown",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "requirements.overall_transferability",
+   "kind": "conflicting",
+   "status": "generic_pass",
+   "runner_status": "pass",
+   "reason_not_generic": null,
+   "requires": null,
+   "coverage_evidence": "tests/job_intel/test_semantic_runtime.py::test_all_synthetic_controls_pass"
+  },
+  {
+   "fact": "risks.title_scope_mismatch",
+   "kind": "positive",
+   "status": "equivalently_covered",
+   "runner_status": "fact_exempt",
+   "reason_not_generic": "fact-level exemption: scenario needs paired/structured input",
+   "requires": "title_body_pair",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_title_scope_mismatch_controls"
+  },
+  {
+   "fact": "risks.title_scope_mismatch",
+   "kind": "negative",
+   "status": "equivalently_covered",
+   "runner_status": "fact_exempt",
+   "reason_not_generic": "fact-level exemption: scenario needs paired/structured input",
+   "requires": "title_body_pair",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_title_scope_mismatch_controls"
+  },
+  {
+   "fact": "risks.title_scope_mismatch",
+   "kind": "ambiguous",
+   "status": "equivalently_covered",
+   "runner_status": "fact_exempt",
+   "reason_not_generic": "fact-level exemption: scenario needs paired/structured input",
+   "requires": "title_body_pair",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_title_scope_mismatch_controls"
+  },
+  {
+   "fact": "risks.title_scope_mismatch",
+   "kind": "unknown",
+   "status": "equivalently_covered",
+   "runner_status": "fact_exempt",
+   "reason_not_generic": "fact-level exemption: scenario needs paired/structured input",
+   "requires": "title_body_pair",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_title_scope_mismatch_controls"
+  },
+  {
+   "fact": "risks.title_scope_mismatch",
+   "kind": "conflicting",
+   "status": "equivalently_covered",
+   "runner_status": "fact_exempt",
+   "reason_not_generic": "fact-level exemption: scenario needs paired/structured input",
+   "requires": "paired_observations",
+   "coverage_evidence": "tests/job_intel/test_semantic_control_coverage.py::test_title_scope_mismatch_controls"
+  }
+ ]
+}
