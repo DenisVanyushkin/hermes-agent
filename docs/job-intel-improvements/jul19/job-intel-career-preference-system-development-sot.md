@@ -535,7 +535,8 @@ Existing Decision Engine (shadow evaluator, без изменений)
 
 Provider допускается к Shadow (Phase III) только если выполнены **все** условия:
 
-1. **contract compliant** — выход валидируется Semantic Contract без исключений;
+1. **contract compliant** — выход валидируется Semantic Contract без исключений и
+   соответствует Provider Contract (`semantic-provider-contract.md`, Step 5A.0);
 2. **replay reproducible** — replay воспроизводим (детерминированные артефакты,
    semantic_hash-стабильность);
 3. **calibration complete** — калибровка пройдена по существующему framework;
