@@ -805,6 +805,26 @@ def diff(conn, file_rows_by_sheet, snap):
                 continue
 
             rid = canon_row.get("id")
+
+            # Short-circuit: if this row (by id) is byte-for-byte identical
+            # to the current live DB state, it's a no-op -- nothing will be
+            # written for it, so none of the conflict/validation checks
+            # below (transport guardrail, ref resolution, time parsing,
+            # gis_url expansion, ...) should run against it. This matters
+            # for legacy rows that predate a guardrail added later (e.g.
+            # place set + transport='unknown'): round-tripping an untouched
+            # export must yield an empty diff, never a spurious conflict.
+            # Duplicate-id / dedup bookkeeping still applies to no-op rows
+            # so a file that lists the same id twice is still caught.
+            if rid is not None and rid not in file_ids_seen and _id_exists(conn, sheet, rid):
+                cur_noop = live_sheet.get(str(rid))
+                if cur_noop is not None:
+                    unchanged = all(cur_noop.get(k) == v for k, v in canon_row.items()
+                                     if k != "id")
+                    if unchanged:
+                        file_ids_seen.add(rid)
+                        continue
+
             issues = []
 
             if sheet == "Места":
