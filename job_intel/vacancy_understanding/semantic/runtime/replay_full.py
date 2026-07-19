@@ -80,8 +80,9 @@ def classify_corpus(db_path: str = DB_PATH):
     return classified, eligible
 
 
-def run_full_replay(out_dir: Path = Path("artifacts/shadow-evaluator/semantic-full-replay")):
-    provider = DeterministicPhraseProvider()
+def run_full_replay(out_dir: Path = Path("artifacts/shadow-evaluator/semantic-full-replay"),
+                    provider=None):
+    provider = provider or DeterministicPhraseProvider()
     policy = load_policy()
     classified, eligible = classify_corpus()
     out_dir.mkdir(parents=True, exist_ok=True)
