@@ -1,5 +1,5 @@
 fixture_id: coinbase_core_infrastructure
-dataset_version: 1.0.0
+dataset_version: 1.0.1
 is_synthetic: false
 annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
   candidate-independent
@@ -41,7 +41,7 @@ ambiguities: []
 vacancy_understanding:
   metadata:
     schema_version: 1.0.0
-    extractor_version: 0.1.0
+    extractor_version: 0.1.1
     created_at: '2026-07-19T00:00:00Z'
     vacancy_key: e3cd957b1ba282937c764b6c8df43b9a3dd60c8015114e92854b435afd02b3f5
     source_system: greenhouse
@@ -366,7 +366,7 @@ vacancy_understanding:
         excerpt: Remote - USA
         location: location
         rationale: null
-    country_group_resolver_version: 2026.07.19
+    country_group_resolver_version: 2026.07.19.1
     work_format:
       value: remote
       confidence: high

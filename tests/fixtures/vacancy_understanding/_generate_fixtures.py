@@ -28,7 +28,7 @@ import yaml
 
 from job_intel.vacancy_understanding.model import VacancyUnderstanding
 
-DATASET_VERSION = "1.0.0"
+DATASET_VERSION = "1.0.1"
 OUT_DIR = Path(__file__).parent
 GOLD_DATE = "2026-07-19T00:00:00Z"
 
@@ -95,6 +95,30 @@ def clean(text: str) -> str:
 # det = deterministic replay expectations (dot-path -> value).
 # ---------------------------------------------------------------------------
 
+WISE_COMPANY = lambda: {
+    "scale": fact("global", "high", rationale="Wise operates globally (public company)"),
+    "brand_recognition": fact("tier1_scaleup", "high", rationale="research L4: career-convertible tier-1 scale-up brand"),
+    "is_crypto_exchange": fact("false", "high", rationale="cross-border payments company"),
+}
+AIRWALLEX_COMPANY = lambda: {
+    "scale": fact("global", "high", excerpt="26 offices around the globe"),
+    "brand_recognition": fact("tier1_scaleup", "high", rationale="research L4: $8B global scale-up"),
+    "is_crypto_exchange": fact("false", "high", rationale="B2B payments platform"),
+}
+MONZO_COMPANY = lambda: {
+    "scale": fact("multi_region", "high", rationale="UK core + EU expansion"),
+    "brand_recognition": fact("tier1_scaleup", "high", rationale="research L4"),
+}
+BREX_COMPANY = lambda: {
+    "scale": fact("multi_region", "medium", rationale="US + Canada + Brazil offices"),
+    "brand_recognition": fact("tier1_scaleup", "medium", rationale="research L4"),
+}
+AFFIRM_COMPANY = lambda: {
+    "scale": fact("regional", "medium", rationale="US-centric BNPL"),
+    "brand_recognition": fact("known", "medium", rationale="known US fintech, not confirmed tier-1 for career conversion"),
+}
+
+
 def spec_list(rows):
     def r(db_id):
         return rows[db_id]
@@ -115,8 +139,7 @@ def spec_list(rows):
             "mandate_summary": fact("Regional growth and market-expansion ownership across APAC.",
                                     "medium", rationale="synthesized from title; description snapshot incomplete"),
         },
-        gold_company={"scale": fact("global", "high", rationale="Wise operates globally (public company)"),
-                      "is_crypto_exchange": fact("false", "high", rationale="Wise is a cross-border payments company")},
+        gold_company=WISE_COMPANY(),
         det={
             "feasibility_facts.country.value": "Singapore",
             "feasibility_facts.country_group.value": "other",
@@ -137,7 +160,8 @@ def spec_list(rows):
                 f"{which}_core": title_fact("true", "high", T(db)),
                 "growth_mandate": fact("unknown", "unknown", rationale="no evidence in snapshot"),
             },
-            det={"feasibility_facts.country.value": "London" if False else None},
+            gold_company=WISE_COMPANY(),
+            det={},
             critical=[f"scope_breadth == domain", "monetization_core == true",
                       "narrow scope but commercially central"],
             ambiguities=["title-only snapshot"],
@@ -152,6 +176,7 @@ def spec_list(rows):
             "growth_mandate": fact("unknown", "unknown", rationale="no evidence; must not be inferred from company"),
             "monetization_core": fact("false", "medium", rationale="financial-crime compliance domain, not monetization"),
         },
+        gold_company=WISE_COMPANY(),
         det={},
         critical=["scope_breadth == domain (never region/business_line)",
                   "no broad-mandate inference from the Wise brand"],
@@ -166,6 +191,7 @@ def spec_list(rows):
             "feature_delivery_only": fact("unknown", "unknown", rationale="title-only snapshot"),
             "growth_mandate": fact("unknown", "unknown", rationale="no evidence"),
         },
+        gold_company=WISE_COMPANY(),
         det={},
         critical=["scope_breadth == feature (narrow onboarding experience)"],
         ambiguities=["feature vs narrow domain — annotated feature per research contrast"],
@@ -191,9 +217,9 @@ def spec_list(rows):
             "mandate_summary": fact("Ownership of the global payments-network platform that constitutes the company's core money-movement business.",
                                     "high", rationale="synthesis of posting"),
         },
-        gold_company={"scale": fact("global", "high", excerpt="26 offices around the globe"),
-                      "platform_ecosystem": fact("true", "high", rationale="platform is the product"),
-                      "is_crypto_exchange": fact("false", "high", rationale="B2B payments platform")},
+        gold_company={**AIRWALLEX_COMPANY(),
+                      "platform_ecosystem": fact("true", "high", rationale="platform is the product")},
+        gold_feasibility={"work_format": fact("onsite", "high", rationale="SG office role (no remote language in posting)")},
         det={"feasibility_facts.country.value": "Singapore",
              "feasibility_facts.country_group.value": "other"},
         critical=["platform_as_business == true", "platform_engineering == false",
@@ -213,6 +239,7 @@ def spec_list(rows):
                                          rationale="company platform shape must not transfer to a narrow fraud role by association"),
             "growth_mandate": fact("false", "medium", rationale="no growth/expansion language"),
         },
+        gold_company=AIRWALLEX_COMPANY(),
         det={"feasibility_facts.country.value": "Singapore"},
         critical=["scope_breadth == domain", "risk_compliance_heavy == true",
                   "platform_as_business NOT inherited from company (unknown)"],
@@ -230,7 +257,10 @@ def spec_list(rows):
             "revenue_proximity": fact("direct_revenue", "medium",
                                       rationale="business line with its own P&L-like revenue accountability"),
         },
-        gold_company={"customer_model": fact("smb_mass", "medium", rationale="mass SMB banking line of a B2C bank")},
+        gold_company={**MONZO_COMPANY(),
+                      "customer_model": fact("smb_mass", "medium", rationale="mass SMB banking line of a B2C bank")},
+        gold_feasibility={"country": fact("United Kingdom", "high", rationale="London office role"),
+                          "country_group": fact("other", "high", rationale="UK -> other (resolver group)")},
         det={"feasibility_facts.sponsorship_stated.value": "yes",
              "feasibility_facts.relocation_support.value": "explicit",
              "feasibility_facts.work_format.value": "hybrid"},
@@ -246,6 +276,7 @@ def spec_list(rows):
             "scope_breadth": fact("domain", "high", excerpt="Product Director, Flex (Borrowing)",
                                   rationale="one lending product, narrower than a business line"),
         },
+        gold_company=MONZO_COMPANY(),
         det={"feasibility_facts.sponsorship_stated.value": "yes"},
         critical=["scope_breadth == domain (narrower than business_banking fixture)"],
         ambiguities=[],
@@ -261,6 +292,7 @@ def spec_list(rows):
                                   rationale="growth funnel (acquisition+onboarding) — broad domain, below a business line"),
             "growth_mandate": title_fact("true", "high", T(7064)),
         },
+        gold_company=BREX_COMPANY(),
         det={"feasibility_facts.country.value": "Canada",
              "feasibility_facts.country_group.value": "other",
              "feasibility_facts.work_format.value": "hybrid"},
@@ -277,6 +309,7 @@ def spec_list(rows):
                                   excerpt="Senior Director, Product Management",
                                   rationale="broad senior product-management remit"),
         },
+        gold_company=AFFIRM_COMPANY(),
         det={"feasibility_facts.work_format.value": "remote",
              "feasibility_facts.country_group.value": "usa",
              "feasibility_facts.sponsorship_stated.value": "unknown"},
@@ -381,7 +414,11 @@ def spec_list(rows):
     S.append(dict(
         fid="affirm_remote_us_timezone_gap", db=7740, synthetic=False,
         pats=[r"sponsorship is not available", r"remote-first", r"#LI-Remote"],
-        gold_mandate={},
+        gold_mandate={
+            "scope_breadth": title_fact("domain", "medium", T(7740)),
+            "risk_compliance_heavy": title_fact("true", "high", T(7740)),
+        },
+        gold_company=AFFIRM_COMPANY(),
         det={"feasibility_facts.work_format.value": "remote",
              "feasibility_facts.country_group.value": "usa",
              "feasibility_facts.sponsorship_stated.value": "no"},
@@ -407,7 +444,9 @@ def spec_list(rows):
     S.append(dict(
         fid="brex_growth_ai_sf_no_sponsorship", db=7063, synthetic=False,
         pats=[r"office at least \d+ days", r"San Francisco"],
-        gold_mandate={"growth_mandate": title_fact("true", "high", T(7063))},
+        gold_mandate={"growth_mandate": title_fact("true", "high", T(7063)),
+                      "scope_breadth": fact("domain", "medium", rationale="growth funnel domain (mirrors Vancouver fixture)")},
+        gold_company=BREX_COMPANY(),
         det={"feasibility_facts.country.value": "United States",
              "feasibility_facts.country_group.value": "usa",
              "feasibility_facts.work_format.value": "hybrid",
@@ -470,7 +509,7 @@ def build_gold_doc(spec, raw, det_doc: dict) -> dict:
     doc["metadata"]["is_synthetic_fixture"] = bool(spec["synthetic"])
     for section_key, gold_key in (
         ("mandate", "gold_mandate"), ("company", "gold_company"),
-        ("requirements", "gold_requirements"),
+        ("requirements", "gold_requirements"), ("feasibility_facts", "gold_feasibility"),
     ):
         for field, value in (spec.get(gold_key) or {}).items():
             doc[section_key][field] = value

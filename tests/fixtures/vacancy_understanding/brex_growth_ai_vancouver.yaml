@@ -1,5 +1,5 @@
 fixture_id: brex_growth_ai_vancouver
-dataset_version: 1.0.0
+dataset_version: 1.0.1
 is_synthetic: false
 annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
   candidate-independent
@@ -44,7 +44,7 @@ ambiguities:
 vacancy_understanding:
   metadata:
     schema_version: 1.0.0
-    extractor_version: 0.1.0
+    extractor_version: 0.1.1
     created_at: '2026-07-19T00:00:00Z'
     vacancy_key: c8346b2b3cba5eb7cbb9f8690b254518618c468645bf94f3045fbf4ea359a254
     source_system: greenhouse
@@ -272,10 +272,13 @@ vacancy_understanding:
   company:
     name: brex
     scale:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: multi_region
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: US + Canada + Brazil offices
     stage:
       value: unknown
       confidence: unknown
@@ -327,10 +330,13 @@ vacancy_understanding:
       method: none
       evidence: []
     brand_recognition:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: tier1_scaleup
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: research L4
     bureaucracy_signal:
       value: unknown
       confidence: unknown
@@ -372,7 +378,7 @@ vacancy_understanding:
         excerpt: Vancouver, British Columbia, Canada
         location: location
         rationale: null
-    country_group_resolver_version: 2026.07.19
+    country_group_resolver_version: 2026.07.19.1
     work_format:
       value: hybrid
       confidence: high

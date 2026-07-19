@@ -154,27 +154,32 @@ def test_explanation_and_clarification_contracts(contract):
 
 
 def test_no_production_imports():
+    """Implementation phase: shadow evaluator consumes ONLY the canonical
+    Step 1/2 SoT packages; production modules must not import it, and it must
+    not import production delivery/scoring/write modules."""
     pkg = REPO_ROOT / "job_intel"
+    forbidden_for_shadow = re.compile(
+        r"^\s*(from|import)\s+job_intel\.(cli|digest|store|feedback_service|"
+        r"evaluator|calibration|crm_|observability|sources|ats_sources|"
+        r"browser_|reaction_triggers|company_intel|universe)", re.M)
     offenders = []
     for py in pkg.rglob("*.py"):
         text = py.read_text(encoding="utf-8", errors="ignore")
         if "shadow_evaluator" in py.parts:
-            # contract package must not import the other SoTs at runtime
-            if re.search(r"^\s*(from|import)\s+job_intel\.(preference_model|vacancy_understanding)",
-                         text, re.M):
-                offenders.append(f"{py} imports another SoT package")
+            if forbidden_for_shadow.search(text):
+                offenders.append(f"{py} imports a production module")
+            continue
+        if "preference_model" in py.parts or "vacancy_understanding" in py.parts:
             continue
         if re.search(r"^\s*(from|import)\s+job_intel\.shadow_evaluator", text, re.M):
             offenders.append(str(py))
     assert not offenders, offenders
 
 
-def test_no_runtime_evaluator_implemented():
+def test_contract_module_stays_policy_only():
+    """The contract module remains structural policy validation — evaluation
+    lives in engine.py (Step 3) and the contract must not grow verdict code."""
     pkg = REPO_ROOT / "job_intel" / "shadow_evaluator"
-    files = sorted(p.name for p in pkg.glob("*.py"))
-    assert files == ["__init__.py", "contract.py"], (
-        "Step 3A must not contain evaluator implementation modules"
-    )
     src = (pkg / "contract.py").read_text(encoding="utf-8")
     assert "def evaluate" not in src
 

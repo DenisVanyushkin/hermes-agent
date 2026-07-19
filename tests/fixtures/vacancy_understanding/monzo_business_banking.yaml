@@ -1,5 +1,5 @@
 fixture_id: monzo_business_banking
-dataset_version: 1.0.0
+dataset_version: 1.0.1
 is_synthetic: false
 annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
   candidate-independent
@@ -45,7 +45,7 @@ ambiguities: []
 vacancy_understanding:
   metadata:
     schema_version: 1.0.0
-    extractor_version: 0.1.0
+    extractor_version: 0.1.1
     created_at: '2026-07-19T00:00:00Z'
     vacancy_key: a28ec6bb184ea17a10bf5eee41ec866fce947bd880737765fd29db394d266db4
     source_system: greenhouse
@@ -269,10 +269,13 @@ vacancy_understanding:
   company:
     name: monzo
     scale:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: multi_region
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: UK core + EU expansion
     stage:
       value: unknown
       confidence: unknown
@@ -327,10 +330,13 @@ vacancy_understanding:
       method: none
       evidence: []
     brand_recognition:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: tier1_scaleup
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: research L4
     bureaucracy_signal:
       value: unknown
       confidence: unknown
@@ -343,10 +349,13 @@ vacancy_understanding:
       evidence: []
   feasibility_facts:
     country:
-      value: null
-      confidence: unknown
-      method: none
-      evidence: []
+      value: United Kingdom
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: London office role
     city:
       value: London
       confidence: medium
@@ -358,11 +367,14 @@ vacancy_understanding:
         location: location
         rationale: null
     country_group:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
-    country_group_resolver_version: 2026.07.19
+      value: other
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: UK -> other (resolver group)
+    country_group_resolver_version: 2026.07.19.1
     work_format:
       value: hybrid
       confidence: high

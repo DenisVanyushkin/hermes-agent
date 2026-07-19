@@ -127,7 +127,8 @@ def test_no_production_import():
             if re.search(r"^\s*(from|import)\s+job_intel\.preference_model", text, re.M):
                 offenders.append(f"{py} imports preference_model")
             continue
-        if "preference_model" in py.parts:
+        if "preference_model" in py.parts or "shadow_evaluator" in py.parts:
+            # shadow_evaluator is the sanctioned Step 3 consumer of this SoT
             continue
         if re.search(r"^\s*(from|import)\s+job_intel\.vacancy_understanding", text, re.M):
             offenders.append(str(py))
