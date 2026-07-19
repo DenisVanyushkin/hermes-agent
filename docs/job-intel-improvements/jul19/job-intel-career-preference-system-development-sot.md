@@ -85,9 +85,17 @@ company_fit:
   reasons: []
 
 overall:
-  recommendation: apply | investigate | save | exploration | reject
+  recommendation: exceptional | strong | promising | unclear | not_recommended
+  action: apply | investigate | save | reject   # operational action vocabulary
   confidence: high | medium | low
 ```
+
+> **Поправка 2026-07-19 (owner decision O1, Step 3A):** словарь разделён на
+> два уровня. `recommendation` описывает качество возможности;
+> `action` — операционный вывод (прежние значения apply/investigate/save/
+> reject — это action outcomes, не recommendation). Mapping утверждён в
+> shadow-evaluator-decision-sot.md §1; `exploration` — отдельный маркер,
+> не label.
 
 Единый непрозрачный score не может быть единственным выходом системы.
 

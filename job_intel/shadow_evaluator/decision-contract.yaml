@@ -5,12 +5,23 @@
 
 shadow_evaluator_decision_contract:
   metadata:
-    contract_version: "1.0.0"
-    status: "decision_sot_not_implemented"
+    contract_version: "1.1.0"
+    status: "approved_with_owner_decisions"
     owner: "Denis Vanyushkin"
     production_integration: false
     no_silent_learning: true
     human_sot: "docs/job-intel-improvements/jul19/shadow-evaluator-decision-sot.md"
+
+  action_vocabulary:
+    # O1 (approved): recommendation = quality of the opportunity;
+    # action = what to do next. exploration stays a marker, not a label.
+    mapping:
+      - {recommendation: exceptional, action: apply}
+      - {recommendation: strong, action: apply}
+      - {recommendation: promising, action: investigate, low_confidence_or_uncertain_action: save}
+      - {recommendation: unclear, action: investigate, requires_clarification: true}
+      - {recommendation: not_recommended, action: reject}
+    process_sot_amendment: "process SoT §4 legacy values are action outcomes, not recommendation vocabulary"
 
   supported_input_versions:
     preference_model: "1.x"
@@ -75,25 +86,25 @@ shadow_evaluator_decision_contract:
 
   result_types:
     - {kind: blocker, suppressible: true, overridable: true, aggregation: "one blocker suffices; suppression only via explicit interaction rule; override only when override.allowed with conditions"}
-    - {kind: concern, suppressible: true, overridable: false, aggregation: ">=3 unsuppressed concerns in a section lower the band by one step, once; concerns never create mismatch alone"}
+    - {kind: concern, suppressible: true, overridable: false, aggregation: "no counting arithmetic (O6 rejected the generic threshold): material concerns are reflected qualitatively in band criteria; confirmed combinations only via named evidence-backed compound interaction rules added with owner approval; concerns never create mismatch alone"}
     - {kind: support, suppressible: false, overridable: false, aggregation: "qualitative per band criteria; may be excluded via exclude_from; no numeric accumulation"}
     - {kind: unknown, suppressible: false, overridable: false, aggregation: "see unknown_policy"}
     - {kind: interaction, suppressible: false, overridable: false, aggregation: "trace entries; visible always"}
 
   mandate_fit_bands:
     - {band: exceptional, criteria: "scope_breadth >= business_line at high confidence AND >=2 strong preferences matched at high confidence AND no unsuppressed strong anti-preference AND full critical-fact coverage", exemplars: ["Airwallex GPNI", "Wise APAC (full text)"]}
-    - {band: strong, criteria: "scope >= business_line OR (domain + monetization exception) with >=1 strong support; no mismatch; <3 concerns", exemplars: ["Monzo Business Banking", "Wise Pricing (full text)"]}
-    - {band: moderate, criteria: "meaningful alignment but narrower scope, weaker evidence or notable concerns", exemplars: ["Affirm Senior Director PM"]}
+    - {band: strong, criteria: "scope >= business_line OR (domain + monetization exception) with >=1 strong support; no mismatch; no unsuppressed material concerns", exemplars: ["Monzo Business Banking", "Wise Pricing (full text)"]}
+    - {band: moderate, criteria: "meaningful alignment but narrower scope or weaker evidence, or one or more material concerns without a critical conflict", exemplars: ["Affirm Senior Director PM"]}
     - {band: weak, criteria: "transferable relevance that does not solve the core career objective: narrow domain without exceptions, risk-heavy, pure infrastructure", exemplars: ["Airwallex Payment Fraud", "Coinbase Core Infra"]}
     - {band: mismatch, criteria: "conflict with critical desired semantics: internal tools, unsuppressed strong role anti-preference, sub-executive scope", exemplars: ["OKX Internal HR & Finance"]}
     - {band: unknown, criteria: "scope AND revenue proximity unknown — honest non-classification", exemplars: []}
 
   company_fit_bands:
     - {band: exceptional, criteria: "global + tier1 brand + growth phase + product culture, all >= medium confidence, no company anti-preference", exemplars: []}
-    - {band: strong, criteria: "global/multi-region + known brand, no strong company anti", exemplars: ["Wise", "Airwallex", "Monzo"]}
-    - {band: moderate, criteria: "partial signals, partial unknowns, or soft company concerns", exemplars: []}
+    - {band: strong, criteria: "global/multi-region + known brand, no strong company anti, no unsuppressed material concerns", exemplars: ["Wise", "Airwallex", "Monzo"]}
+    - {band: moderate, criteria: "partial signals, partial unknowns, or material company concerns without a critical conflict", exemplars: []}
     - {band: weak, criteria: "signals against the objective (scale/locality) or softened strong anti (crypto exchange capped here by interaction rule)", exemplars: ["OKX", "Coinbase"]}
-    - {band: mismatch, criteria: "outsourcing/agency; small local company in core lane; direct conflict with the career objective", exemplars: []}
+    - {band: mismatch, criteria: "RESERVED for genuinely strong conflicts only (O2): outsourcing/agency; small local company in core lane; direct conflict with the career objective — soft doubts stay weak/moderate, mismatch must not become a hidden veto", exemplars: []}
     - {band: unknown, criteria: "company facts absent", exemplars: []}
 
   recommendation_matrix:
@@ -145,7 +156,7 @@ shadow_evaluator_decision_contract:
   caps:
     - {id: cap_uncertain, condition: "feasibility == uncertain", ceiling: promising, rationale: "unresolved feasibility cannot support a strong call; save_for_later behavioral analogue"}
     - {id: cap_incomplete_text, condition: "risk source_text_incomplete present", ceiling: promising, rationale: "semantic facts are unknown; honesty over brand intuition"}
-    - {id: cap_crypto_employer, condition: "crypto-exchange company concern active (limit_to_company_fit)", ceiling: promising, rationale: "19/19 historical declines at company level; exploration-eligible, never exceptional/strong"}
+    - {id: cap_crypto_employer, condition: "crypto-exchange company concern active (limit_to_company_fit)", ceiling: promising, rationale: "19/19 historical declines at company level; exploration-eligible, never exceptional/strong", status: provisional_shadow_policy, review_after: "sufficient exploration feedback; production rollout requires separate evidence review (historical declines mixed company/role/geo/barrier causes)"}
     - {id: cap_low_confidence, condition: "overall confidence == low", ceiling: strong, rationale: "exceptional requires high-confidence coverage"}
 
   interaction_effects:
@@ -194,6 +205,7 @@ shadow_evaluator_decision_contract:
   exploration_policy:
     eligible_axes: [exp_industry, exp_industry_return_telecom, exp_company_type, exp_role_family, exp_work_format]
     ineligible_axes: [big_tech_attitude, early_startup_attitude]
+    ineligible_axes_policy: "neutral (O5): not eligible for exploration, not an anti-preference, no positive support, no cap — until the owner answers the two direct preference questions after Step 3"
     one_axis_at_a_time: true
     hard_gates_always_apply: true
     max_rate: "1-2 cards/week"
@@ -229,7 +241,7 @@ shadow_evaluator_decision_contract:
       - critical_false_positive_list
     feedback_is_ground_truth: false
     prerequisites:
-      - "re-fetch full texts for title-only core cases (Wise) before judging flagship acceptance criteria"
+      - "re-fetch full texts for title-only core cases (Wise): REQUIRED before replay acceptance and final Step 3 calibration; does not block evaluator implementation; contract-level flagship validation uses gd_wise_apac_fulltext"
 
   change_policy:
     versioning: "semver; MAJOR = vocabulary/matrix/terminal semantics; MINOR = new caps/clarifications/band refinements; PATCH = wording"

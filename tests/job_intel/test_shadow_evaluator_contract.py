@@ -43,9 +43,36 @@ def golden() -> dict:
 # ---------------------------------------------------------------------------
 
 def test_contract_validates(contract):
-    assert contract.metadata.contract_version == "1.0.0"
+    assert contract.metadata.contract_version == "1.1.0"
     assert contract.metadata.production_integration is False
     assert contract.metadata.no_silent_learning is True
+
+
+def test_o1_action_vocabulary_two_level(contract):
+    mapping = {m.recommendation.value: m.action for m in contract.action_vocabulary.mapping}
+    assert mapping == {
+        "exceptional": "apply", "strong": "apply", "promising": "investigate",
+        "unclear": "investigate", "not_recommended": "reject",
+    }
+    promising = next(m for m in contract.action_vocabulary.mapping
+                     if m.recommendation.value == "promising")
+    assert promising.low_confidence_or_uncertain_action == "save"
+    unclear = next(m for m in contract.action_vocabulary.mapping
+                   if m.recommendation.value == "unclear")
+    assert unclear.requires_clarification is True
+
+
+def test_o6_no_concern_counting(contract):
+    concern = next(rt for rt in contract.result_types if rt.kind.value == "concern")
+    assert not re.search(r">=?\s*\d|\d\s*concerns", concern.aggregation)
+    for band_def in contract.mandate_fit_bands + contract.company_fit_bands:
+        assert "<3" not in band_def.criteria and ">=3" not in band_def.criteria
+
+
+def test_o4_crypto_cap_is_provisional(contract):
+    crypto = next(c for c in contract.caps if c.id == "cap_crypto_employer")
+    assert crypto.status == "provisional_shadow_policy"
+    assert crypto.review_after
 
 
 def test_schema_artifact_in_sync():
