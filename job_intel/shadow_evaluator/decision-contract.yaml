@@ -1,0 +1,237 @@
+# Shadow Evaluator Decision Contract (machine-readable policy, NOT code).
+# Human SoT: docs/job-intel-improvements/jul19/shadow-evaluator-decision-sot.md
+# Validated by job_intel/shadow_evaluator/contract.py (structure only —
+# no runtime evaluation exists). Changes require owner approval.
+
+shadow_evaluator_decision_contract:
+  metadata:
+    contract_version: "1.0.0"
+    status: "decision_sot_not_implemented"
+    owner: "Denis Vanyushkin"
+    production_integration: false
+    no_silent_learning: true
+    human_sot: "docs/job-intel-improvements/jul19/shadow-evaluator-decision-sot.md"
+
+  supported_input_versions:
+    preference_model: "1.x"
+    vacancy_understanding: "1.x"
+    on_unsupported_major: "error record, no verdict emitted"
+
+  evaluation_order:
+    - {id: n01_validate, title: "Validate inputs and schema majors", terminal: true, on_failure: "error record, no verdict"}
+    - {id: n02_lane, title: "Lane routing (kazakhstan+local -> fallback_local)", terminal: false, on_failure: "unknown country_group -> lane core + clarification"}
+    - {id: n03_feasibility_match, title: "Match feasibility constraints", terminal: false, on_failure: "rule without fact does not match (unknown != false)"}
+    - {id: n04_feasibility_interactions, title: "Feasibility interactions + verdict merge", terminal: false, on_failure: "conflict -> earlier priority wins, skipped_conflict traced"}
+    - {id: n05_terminal_infeasible, title: "Terminal: infeasible -> not_recommended", terminal: true, on_failure: "n/a"}
+    - {id: n06_mandate, title: "Mandate preferences + role anti-preferences", terminal: false, on_failure: "no facts -> band unknown"}
+    - {id: n07_mandate_interactions, title: "Mandate interaction rules", terminal: false, on_failure: "see n04"}
+    - {id: n08_company, title: "Company preferences + company anti-preferences", terminal: false, on_failure: "no facts -> band unknown"}
+    - {id: n09_company_interactions, title: "Company interaction rules", terminal: false, on_failure: "see n04"}
+    - {id: n10_confidence, title: "Section confidence + unknown ledger", terminal: false, on_failure: "n/a"}
+    - {id: n11_matrix, title: "Recommendation matrix + caps", terminal: true, on_failure: "matrix is complete by schema; no uncovered combination"}
+    - {id: n12_explanation, title: "Explanation + clarifications", terminal: true, on_failure: "item without evidence dropped with warning"}
+
+  precedence:
+    verdict_merge: [infeasible, uncertain, feasible]
+    lane_independent_of_verdict: true
+    rule_order:
+      - "graph stage order (feasibility -> mandate -> company)"
+      - "within stage: interaction rules by ascending priority integer (lower = earlier), applied once"
+      - "category strength: feasibility constraint > interaction rule > strong anti-preference > soft anti-preference > preference support > exploration marker"
+      - "YAML list position carries no semantics"
+    interaction_ordering: "ascending priority; conflict on same target -> earlier wins, later traced as skipped_conflict"
+    later_rules_may_reverse: false
+    evidence_hierarchy:
+      - explicit_statement
+      - structured_source_field
+      - deterministic_derivation
+      - semantic_inference
+      - title_only_inference
+    evidence_conflict_same_level: "value -> unknown + internal_contradiction risk + clarification"
+    manual_gold_is_runtime_evidence: false
+
+  unknown_policy:
+    - {id: u_work_format_non_kz, field: feasibility_facts.work_format, condition: "country_group != kazakhstan-local", verdict_effect: "uncertain-grade unknown (feasibility -> uncertain)", confidence_effect: "feasibility <= medium", clarification_priority: blocking, cap: promising}
+    - {id: u_work_format_kz, field: feasibility_facts.work_format, condition: "kz local lane", verdict_effect: none, confidence_effect: none, clarification_priority: optional, cap: none}
+    - {id: u_sponsorship_us_onsite, field: feasibility_facts.sponsorship_stated, condition: "usa onsite/hybrid", verdict_effect: "already infeasible by rule", confidence_effect: none, clarification_priority: recommendation_changing, cap: terminal}
+    - {id: u_sponsorship_nonus_onsite, field: feasibility_facts.sponsorship_stated, condition: "non-US onsite/hybrid", verdict_effect: "uncertain (fc_onsite_sponsorship_unknown)", confidence_effect: none, clarification_priority: recommendation_changing, cap: promising}
+    - {id: u_sponsorship_remote_or_kz, field: feasibility_facts.sponsorship_stated, condition: "remote or kz local", verdict_effect: none, confidence_effect: none, clarification_priority: optional, cap: none}
+    - {id: u_country, field: feasibility_facts.country_group, condition: null, verdict_effect: "uncertain-grade unknown", confidence_effect: "feasibility low", clarification_priority: blocking, cap: promising}
+    - {id: u_relocation_support, field: feasibility_facts.relocation_support, condition: null, verdict_effect: none, confidence_effect: none, clarification_priority: confidence_improving, cap: none}
+    - {id: u_right_to_work, field: feasibility_facts.must_be_already_authorized, condition: null, verdict_effect: none, confidence_effect: "feasibility <= medium", clarification_priority: confidence_improving, cap: none}
+    - {id: u_timezone, field: feasibility_facts.timezone_expectations, condition: null, verdict_effect: "never a gate", confidence_effect: none, clarification_priority: optional, cap: none}
+    - {id: u_language_unclear, field: feasibility_facts.language_requirements, condition: "role otherwise strong+", verdict_effect: none, confidence_effect: "requirements <= medium", clarification_priority: recommendation_changing, cap: none}
+    - {id: u_scope_breadth, field: mandate.scope_breadth, condition: null, verdict_effect: "mandate band unknown if revenue_proximity also unknown", confidence_effect: "mandate low", clarification_priority: blocking, cap: no_strong_or_exceptional}
+    - {id: u_revenue_proximity, field: mandate.revenue_proximity, condition: null, verdict_effect: none, confidence_effect: "mandate <= medium", clarification_priority: recommendation_changing, cap: no_exceptional}
+    - {id: u_pnl, field: mandate.pnl_ownership, condition: "band candidate strong+", verdict_effect: none, confidence_effect: "mandate <= medium", clarification_priority: recommendation_changing, cap: no_exceptional}
+    - {id: u_digital_ownership_nonproduct, field: mandate.digital_business_ownership, condition: "non_product_function present", verdict_effect: "uncertain-grade unknown", confidence_effect: "mandate low", clarification_priority: blocking, cap: promising}
+    - {id: u_org_scope, field: organization, condition: null, verdict_effect: none, confidence_effect: "mandate <= medium", clarification_priority: confidence_improving, cap: none}
+    - {id: u_platform_shape, field: mandate.platform_as_business, condition: "title mentions platform/infrastructure", verdict_effect: none, confidence_effect: none, clarification_priority: recommendation_changing, cap: no_exceptional}
+    - {id: u_company_scale, field: company.scale, condition: null, verdict_effect: none, confidence_effect: "company <= medium", clarification_priority: confidence_improving, cap: none}
+    - {id: u_brand, field: company.brand_recognition, condition: null, verdict_effect: none, confidence_effect: "company <= medium", clarification_priority: confidence_improving, cap: no_exceptional}
+    - {id: u_crypto_outsourcing, field: company.is_crypto_exchange, condition: null, verdict_effect: "unknown is neither true nor false", confidence_effect: "company <= medium", clarification_priority: confidence_improving, cap: none}
+    - {id: u_company_all, field: company, condition: "nearly all facts unknown", verdict_effect: "company band unknown", confidence_effect: "company unknown", clarification_priority: recommendation_changing, cap: promising}
+    - {id: u_incomplete_text, field: risks.source_text_incomplete, condition: null, verdict_effect: "semantic facts stay unknown", confidence_effect: "all sections <= medium", clarification_priority: blocking, cap: promising}
+
+  result_types:
+    - {kind: blocker, suppressible: true, overridable: true, aggregation: "one blocker suffices; suppression only via explicit interaction rule; override only when override.allowed with conditions"}
+    - {kind: concern, suppressible: true, overridable: false, aggregation: ">=3 unsuppressed concerns in a section lower the band by one step, once; concerns never create mismatch alone"}
+    - {kind: support, suppressible: false, overridable: false, aggregation: "qualitative per band criteria; may be excluded via exclude_from; no numeric accumulation"}
+    - {kind: unknown, suppressible: false, overridable: false, aggregation: "see unknown_policy"}
+    - {kind: interaction, suppressible: false, overridable: false, aggregation: "trace entries; visible always"}
+
+  mandate_fit_bands:
+    - {band: exceptional, criteria: "scope_breadth >= business_line at high confidence AND >=2 strong preferences matched at high confidence AND no unsuppressed strong anti-preference AND full critical-fact coverage", exemplars: ["Airwallex GPNI", "Wise APAC (full text)"]}
+    - {band: strong, criteria: "scope >= business_line OR (domain + monetization exception) with >=1 strong support; no mismatch; <3 concerns", exemplars: ["Monzo Business Banking", "Wise Pricing (full text)"]}
+    - {band: moderate, criteria: "meaningful alignment but narrower scope, weaker evidence or notable concerns", exemplars: ["Affirm Senior Director PM"]}
+    - {band: weak, criteria: "transferable relevance that does not solve the core career objective: narrow domain without exceptions, risk-heavy, pure infrastructure", exemplars: ["Airwallex Payment Fraud", "Coinbase Core Infra"]}
+    - {band: mismatch, criteria: "conflict with critical desired semantics: internal tools, unsuppressed strong role anti-preference, sub-executive scope", exemplars: ["OKX Internal HR & Finance"]}
+    - {band: unknown, criteria: "scope AND revenue proximity unknown — honest non-classification", exemplars: []}
+
+  company_fit_bands:
+    - {band: exceptional, criteria: "global + tier1 brand + growth phase + product culture, all >= medium confidence, no company anti-preference", exemplars: []}
+    - {band: strong, criteria: "global/multi-region + known brand, no strong company anti", exemplars: ["Wise", "Airwallex", "Monzo"]}
+    - {band: moderate, criteria: "partial signals, partial unknowns, or soft company concerns", exemplars: []}
+    - {band: weak, criteria: "signals against the objective (scale/locality) or softened strong anti (crypto exchange capped here by interaction rule)", exemplars: ["OKX", "Coinbase"]}
+    - {band: mismatch, criteria: "outsourcing/agency; small local company in core lane; direct conflict with the career objective", exemplars: []}
+    - {band: unknown, criteria: "company facts absent", exemplars: []}
+
+  recommendation_matrix:
+    terminal_rules:
+      - "infeasible -> not_recommended (always, regardless of fits)"
+      - "mandate mismatch -> not_recommended (company cannot rescue)"
+      - "mandate weak -> not_recommended (exploration marker is the only nuance, never a bypass)"
+      - "mandate unknown -> unclear (except company mismatch -> not_recommended)"
+    feasible_matrix:
+      - {mandate: exceptional, company: exceptional, recommendation: exceptional}
+      - {mandate: exceptional, company: strong, recommendation: exceptional}
+      - {mandate: exceptional, company: moderate, recommendation: strong}
+      - {mandate: exceptional, company: weak, recommendation: promising}
+      - {mandate: exceptional, company: mismatch, recommendation: not_recommended}
+      - {mandate: exceptional, company: unknown, recommendation: promising}
+      - {mandate: strong, company: exceptional, recommendation: strong}
+      - {mandate: strong, company: strong, recommendation: strong}
+      - {mandate: strong, company: moderate, recommendation: strong}
+      - {mandate: strong, company: weak, recommendation: promising}
+      - {mandate: strong, company: mismatch, recommendation: not_recommended}
+      - {mandate: strong, company: unknown, recommendation: promising}
+      - {mandate: moderate, company: exceptional, recommendation: promising}
+      - {mandate: moderate, company: strong, recommendation: promising}
+      - {mandate: moderate, company: moderate, recommendation: promising}
+      - {mandate: moderate, company: weak, recommendation: unclear}
+      - {mandate: moderate, company: mismatch, recommendation: not_recommended}
+      - {mandate: moderate, company: unknown, recommendation: unclear}
+      - {mandate: weak, company: exceptional, recommendation: not_recommended}
+      - {mandate: weak, company: strong, recommendation: not_recommended}
+      - {mandate: weak, company: moderate, recommendation: not_recommended}
+      - {mandate: weak, company: weak, recommendation: not_recommended}
+      - {mandate: weak, company: mismatch, recommendation: not_recommended}
+      - {mandate: weak, company: unknown, recommendation: not_recommended}
+      - {mandate: mismatch, company: exceptional, recommendation: not_recommended}
+      - {mandate: mismatch, company: strong, recommendation: not_recommended}
+      - {mandate: mismatch, company: moderate, recommendation: not_recommended}
+      - {mandate: mismatch, company: weak, recommendation: not_recommended}
+      - {mandate: mismatch, company: mismatch, recommendation: not_recommended}
+      - {mandate: mismatch, company: unknown, recommendation: not_recommended}
+      - {mandate: unknown, company: exceptional, recommendation: unclear}
+      - {mandate: unknown, company: strong, recommendation: unclear}
+      - {mandate: unknown, company: moderate, recommendation: unclear}
+      - {mandate: unknown, company: weak, recommendation: unclear}
+      - {mandate: unknown, company: mismatch, recommendation: not_recommended}
+      - {mandate: unknown, company: unknown, recommendation: unclear}
+    uncertain_transform: "apply feasible matrix, then cap result at promising; weak/mismatch stay not_recommended; unknown stays unclear; uncertain never yields strong"
+    fallback_lane_uses_same_matrix: true
+
+  caps:
+    - {id: cap_uncertain, condition: "feasibility == uncertain", ceiling: promising, rationale: "unresolved feasibility cannot support a strong call; save_for_later behavioral analogue"}
+    - {id: cap_incomplete_text, condition: "risk source_text_incomplete present", ceiling: promising, rationale: "semantic facts are unknown; honesty over brand intuition"}
+    - {id: cap_crypto_employer, condition: "crypto-exchange company concern active (limit_to_company_fit)", ceiling: promising, rationale: "19/19 historical declines at company level; exploration-eligible, never exceptional/strong"}
+    - {id: cap_low_confidence, condition: "overall confidence == low", ceiling: strong, rationale: "exceptional requires high-confidence coverage"}
+
+  interaction_effects:
+    - {effect: suppress, semantics: "matched concern/anti removed from active section results; full item kept in trace with suppressed_by and its evidence; does not change confidence", trace_visibility: "always, with suppressed_by", idempotent: true}
+    - {effect: limit_to_company_fit, semantics: "target result excluded from mandate section and counted only in company section; transformation traced as moved_to: company_fit", trace_visibility: "always", idempotent: true}
+    - {effect: gate, semantics: "documenting no-op: confirms target constraint applies only within its structural when-conditions; blocks nothing else", trace_visibility: "always", idempotent: true}
+    - {effect: route_to_fallback, semantics: "sets lane=fallback_local; evaluation continues fully; enables fallback suppression of small_local_company", trace_visibility: "always", idempotent: true}
+    - {effect: exclude_from, semantics: "named fact cannot contribute support to the named preference; fact stays visible and may feed other results", trace_visibility: "always", idempotent: true}
+    - {effect: allow, semantics: "prevents the target blocker rule from MATCHING (rule counted as not triggered), traced as prevented: rule_id; distinct from suppress", trace_visibility: "always", idempotent: true}
+
+  confidence_policy:
+    section_rule: "section confidence = confidence of the least-confident CRITICAL fact of that section; non-critical facts never cap a section"
+    critical_facts:
+      feasibility: [work_format, country_group, sponsorship_when_relevant]
+      mandate: [scope_breadth, revenue_proximity]
+      company: [scale, brand_recognition]
+    title_only_cap: medium
+    conflict_result: low
+    exceptional_coverage: "all critical facts known at >= medium AND >=1 strong support at high"
+    overall_rule: "min of section confidences; exception: terminal infeasible takes the blocker's confidence"
+    confidence_is_not_a_score: true
+
+  clarification_policy:
+    required_fields: [question, reason, affected_section, affected_recommendation, required_fact, priority]
+    priorities: [blocking, recommendation_changing, confidence_improving, optional]
+    fact_seeking_only: true
+    dedup_key: required_fact
+
+  explanation_contract:
+    item_fields: [section, kind, preference_rule_id, vacancy_fact_path, statement, evidence_refs, confidence, impact]
+    top_level_fields: [verdict_summary, why_attractive, why_may_not_work, unknowns, interactions_applied, lane]
+    numeric_scores_forbidden: true
+    evidence_required: true
+
+  fallback_policy:
+    lane: fallback_local
+    same_vocabulary_with_marker: true
+    rationale: "comparable band semantics without maintaining a second vocabulary; isolation via marker and separate metrics"
+    activation: manual_by_user
+    current_state: standby
+    excluded_from_core_metrics: true
+    sponsorship_unknown_is_not_uncertain: true
+    feedback_never_recalibrates_core: true
+    production_delivery: disabled
+
+  exploration_policy:
+    eligible_axes: [exp_industry, exp_industry_return_telecom, exp_company_type, exp_role_family, exp_work_format]
+    ineligible_axes: [big_tech_attitude, early_startup_attitude]
+    one_axis_at_a_time: true
+    hard_gates_always_apply: true
+    max_rate: "1-2 cards/week"
+    min_mandate_band: moderate
+    marker_field: exploration_axis
+    excluded_from_precision_metrics: true
+
+  replay_protocol:
+    cohort_exclusions: [test_users, resend_duplicates, data_quality_code_7]
+    per_case_outputs: [legacy_result, shadow_result, user_feedback, difference_classification, evidence_completeness]
+    disagreement_taxonomy:
+      - expected_architecture_change
+      - legacy_false_positive
+      - legacy_false_negative
+      - shadow_possible_false_positive
+      - shadow_possible_false_negative
+      - insufficient_vacancy_evidence
+      - preference_model_gap
+      - vacancy_understanding_gap
+      - decision_contract_gap
+      - feedback_ambiguity
+    metrics:
+      - positive_precision_by_band
+      - recall_applied_exceptional_interesting
+      - negative_precision
+      - unknown_unclear_rate
+      - infeasible_precision
+      - lane_specific_performance
+      - source_specific_performance
+      - explanation_coverage
+      - top_disagreement_causes
+      - critical_false_negative_list
+      - critical_false_positive_list
+    feedback_is_ground_truth: false
+    prerequisites:
+      - "re-fetch full texts for title-only core cases (Wise) before judging flagship acceptance criteria"
+
+  change_policy:
+    versioning: "semver; MAJOR = vocabulary/matrix/terminal semantics; MINOR = new caps/clarifications/band refinements; PATCH = wording"
+    approval: "owner approval with reason/evidence/impact per process SoT §8"
+    no_silent_learning: true

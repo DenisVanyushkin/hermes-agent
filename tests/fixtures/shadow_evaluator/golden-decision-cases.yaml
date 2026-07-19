@@ -1,0 +1,416 @@
+# Golden DECISION cases (Step 3A) — reviewable expected outcomes, not tests
+# of an implementation (no evaluator exists). Validated structurally by
+# tests/job_intel/test_shadow_evaluator_contract.py against the decision
+# contract vocabularies and the recommendation matrix.
+# fixture_ref points to tests/fixtures/vacancy_understanding/ where a real
+# Step 2 fixture backs the case; policy_only cases have no fixture yet.
+
+golden_decision_cases:
+  dataset_version: "1.0.0"
+  cases:
+
+    # ---------- expected high positive ----------
+    - id: gd_wise_apac_titleonly
+      fixture_ref: wise_apac_growth_expansion
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: exceptional
+      expected_company_fit: strong
+      expected_recommendation: promising     # capped by cap_incomplete_text
+      expected_confidence: low
+      required_supports: [scope_breadth, growth_mandate, expansion_mandate]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: [work_format, sponsorship_stated, source_text]
+      expected_interactions: []
+      expected_caps: [cap_incomplete_text]
+      rationale: "Flagship case honestly capped while the snapshot is title-only; blocking clarification demands the full text."
+    - id: gd_wise_apac_fulltext
+      fixture_ref: null   # policy-only: expected outcome after text re-fetch
+      policy_only: true
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: exceptional
+      expected_company_fit: strong
+      expected_recommendation: exceptional
+      expected_confidence: high
+      required_supports: [scope_breadth, growth_mandate, expansion_mandate, revenue_proximity]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Process-SoT acceptance criterion: Wise APAC stably in the top band once evidence is complete."
+    - id: gd_airwallex_gpni
+      fixture_ref: airwallex_gpni
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: exceptional
+      expected_company_fit: strong
+      expected_recommendation: exceptional
+      expected_confidence: high
+      required_supports: [platform_as_the_business, scope_breadth, zero_to_one_mandate]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Platform-as-business + business-line scope + global brand; full text."
+    - id: gd_monzo_business_banking
+      fixture_ref: monzo_business_banking
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: strong
+      expected_company_fit: strong
+      expected_recommendation: strong
+      expected_confidence: high
+      required_supports: [scope_breadth, visa_support_stated]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Business line + explicit sponsorship/relocation."
+    - id: gd_brex_growth_vancouver
+      fixture_ref: brex_growth_ai_vancouver
+      expected_lane: core
+      expected_feasibility: uncertain
+      expected_mandate_fit: strong
+      expected_company_fit: strong
+      expected_recommendation: promising    # cap_uncertain
+      expected_confidence: medium
+      required_supports: [growth_mandate]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: [sponsorship_stated]
+      expected_interactions: []
+      expected_caps: [cap_uncertain]
+      rationale: "Hybrid non-US office with unknown sponsorship -> uncertain; historical save-then-apply pattern."
+    - id: gd_affirm_remote_us_leadership
+      fixture_ref: affirm_senior_director_pm_remote_us
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: moderate
+      expected_company_fit: moderate
+      expected_recommendation: promising
+      expected_confidence: medium
+      required_supports: [scope_breadth]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: [sponsorship_stated]
+      expected_interactions: [ir_remote_suppresses_onsite_country_penalty]
+      expected_caps: []
+      rationale: "Remote US is feasible; broad senior remit with limited mandate evidence."
+
+    # ---------- valuable narrower exceptions ----------
+    - id: gd_wise_pricing
+      fixture_ref: wise_pricing
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: strong
+      expected_company_fit: strong
+      expected_recommendation: promising    # cap_incomplete_text (title-only)
+      expected_confidence: low
+      required_supports: [monetization_core, pricing_core]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: [source_text]
+      expected_interactions: [ir_narrow_scope_monetization_exception]
+      expected_caps: [cap_incomplete_text]
+      rationale: "Narrow scope suppressed by monetization identity exception; with full text -> strong."
+    - id: gd_wise_acquiring
+      fixture_ref: wise_acquiring
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: strong
+      expected_company_fit: strong
+      expected_recommendation: promising
+      expected_confidence: low
+      required_supports: [monetization_core, acquiring_core]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: [source_text]
+      expected_interactions: [ir_narrow_scope_monetization_exception]
+      expected_caps: [cap_incomplete_text]
+      rationale: "Same exception as pricing."
+
+    # ---------- negative / weak mandate contrasts ----------
+    - id: gd_wise_financial_crime
+      fixture_ref: wise_financial_crime
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: weak
+      expected_company_fit: strong
+      expected_recommendation: not_recommended
+      expected_confidence: medium
+      required_supports: []
+      required_concerns: [fraud_risk_compliance_heavy, narrow_feature_scope]
+      required_blockers: []
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Strong company must not rescue a weak risk-domain mandate."
+    - id: gd_wise_onboarding
+      fixture_ref: wise_onboarding_experience
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: weak
+      expected_company_fit: strong
+      expected_recommendation: not_recommended
+      expected_confidence: medium
+      required_supports: []
+      required_concerns: [narrow_feature_scope]
+      required_blockers: []
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Feature scope at a famous brand stays weak."
+    - id: gd_airwallex_payment_fraud
+      fixture_ref: airwallex_payment_fraud
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: weak
+      expected_company_fit: strong
+      expected_recommendation: not_recommended
+      expected_confidence: high
+      required_supports: []
+      required_concerns: [fraud_risk_compliance_heavy, narrow_feature_scope]
+      required_blockers: []
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Same company as GPNI — the pair proves mandate primacy."
+    - id: gd_coinbase_core_infra
+      fixture_ref: coinbase_core_infrastructure
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: weak
+      expected_company_fit: weak
+      expected_recommendation: not_recommended
+      expected_confidence: high
+      required_supports: []
+      required_concerns: [pure_infrastructure_devex, crypto_exchange_employer]
+      required_blockers: []
+      required_unknowns: []
+      expected_interactions: [ir_platform_engineering_not_platform_business, ir_crypto_employer_not_role_veto]
+      expected_caps: []
+      rationale: "Platform engineering never inherits platform-as-business; crypto stays a company concern."
+    - id: gd_okx_internal_tools
+      fixture_ref: okx_internal_hr_finance
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: mismatch
+      expected_company_fit: weak
+      expected_recommendation: not_recommended
+      expected_confidence: high
+      required_supports: []
+      required_concerns: [crypto_exchange_employer]
+      required_blockers: [internal_tools_backoffice]
+      required_unknowns: []
+      expected_interactions: [ir_crypto_employer_not_role_veto]
+      expected_caps: []
+      rationale: "Internal tools is an unsuppressed strong role anti-preference -> mandate mismatch."
+    - id: gd_block_sales_only
+      fixture_ref: block_strategic_product_sales
+      expected_lane: core
+      expected_feasibility: infeasible
+      expected_mandate_fit: mismatch
+      expected_company_fit: strong
+      expected_recommendation: not_recommended
+      expected_confidence: high
+      required_supports: []
+      required_concerns: []
+      required_blockers: [fc_function_digital_business_ownership]
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Sales quota function without digital business ownership."
+    - id: gd_canva_fpna
+      fixture_ref: canva_fpna
+      expected_lane: core
+      expected_feasibility: infeasible
+      expected_mandate_fit: mismatch
+      expected_company_fit: strong
+      expected_recommendation: not_recommended
+      expected_confidence: high
+      required_supports: []
+      required_concerns: []
+      required_blockers: [fc_function_digital_business_ownership]
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Finance support function."
+
+    # ---------- feasibility contrasts ----------
+    - id: gd_us_onsite_no_sponsorship
+      fixture_ref: brex_growth_ai_sf_no_sponsorship
+      expected_lane: core
+      expected_feasibility: infeasible
+      expected_mandate_fit: strong
+      expected_company_fit: strong
+      expected_recommendation: not_recommended
+      expected_confidence: high
+      required_supports: [growth_mandate]
+      required_concerns: []
+      required_blockers: [fc_usa_onsite_requires_explicit_sponsorship]
+      required_unknowns: [sponsorship_stated]
+      expected_interactions: [ir_usa_relocation_requires_sponsorship]
+      expected_caps: []
+      rationale: "Even a strong mandate cannot survive infeasible geography."
+    - id: gd_us_onsite_with_sponsorship
+      fixture_ref: synthetic_us_onsite_with_sponsorship
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: moderate
+      expected_company_fit: unknown
+      expected_recommendation: unclear
+      expected_confidence: medium
+      required_supports: [visa_support_stated]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: [company_facts]
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Explicit sponsorship unlocks general-terms evaluation; synthetic policy control (company facts unknown -> unclear per matrix moderate x unknown)."
+    - id: gd_affirm_remote_tz_gap
+      fixture_ref: affirm_remote_us_timezone_gap
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: weak
+      expected_company_fit: moderate
+      expected_recommendation: not_recommended
+      expected_confidence: high
+      required_supports: []
+      required_concerns: [fraud_risk_compliance_heavy, timezone_burden]
+      required_blockers: []
+      required_unknowns: [timezone_expectations]
+      expected_interactions: [ir_remote_suppresses_onsite_country_penalty]
+      expected_caps: []
+      rationale: "Timezone is only a factual concern; the rejection comes from the weak risk-strategy mandate, and explicit 'no sponsorship' is irrelevant for remote."
+    - id: gd_payoneer_israel_unknown_sponsorship
+      fixture_ref: payoneer_core_ai_platform_israel
+      expected_lane: core
+      expected_feasibility: uncertain
+      expected_mandate_fit: moderate
+      expected_company_fit: unknown
+      expected_recommendation: unclear
+      expected_confidence: low
+      required_supports: []
+      required_concerns: [ai_as_subject]
+      required_blockers: []
+      required_unknowns: [sponsorship_stated, company_facts]
+      expected_interactions: []
+      expected_caps: [cap_uncertain]
+      rationale: "Non-US onsite with unknown sponsorship -> uncertain; moderate x unknown -> unclear."
+    - id: gd_kz_local_fallback
+      fixture_ref: kz_local_zeekr_almaty
+      expected_lane: fallback_local
+      expected_feasibility: feasible
+      expected_mandate_fit: unknown
+      expected_company_fit: unknown
+      expected_recommendation: unclear
+      expected_confidence: low
+      required_supports: []
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: [scope_breadth, revenue_proximity, source_text]
+      expected_interactions: [ir_kz_fallback_lane]
+      expected_caps: [cap_incomplete_text]
+      rationale: "KZ local + unknown sponsorship stays feasible in the fallback lane (standby, delivery disabled); title-only snapshot leaves mandate unknown."
+    - id: gd_sanctioned_location
+      fixture_ref: null
+      policy_only: true
+      expected_lane: core
+      expected_feasibility: infeasible
+      expected_mandate_fit: unknown
+      expected_company_fit: unknown
+      expected_recommendation: not_recommended
+      expected_confidence: high
+      required_supports: []
+      required_concerns: []
+      required_blockers: [fc_sanctioned_geo]
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Sanctioned geography is terminal regardless of role quality."
+    - id: gd_africa_location
+      fixture_ref: null
+      policy_only: true
+      expected_lane: core
+      expected_feasibility: infeasible
+      expected_mandate_fit: unknown
+      expected_company_fit: unknown
+      expected_recommendation: not_recommended
+      expected_confidence: high
+      required_supports: []
+      required_concerns: []
+      required_blockers: [fc_africa_current_stage]
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Africa excluded at the current stage (owner-overridable rule)."
+    - id: gd_language_domain_barrier
+      fixture_ref: okx_kyb_onboarding_mandarin_barrier
+      expected_lane: core
+      expected_feasibility: infeasible
+      expected_mandate_fit: weak
+      expected_company_fit: weak
+      expected_recommendation: not_recommended
+      expected_confidence: high
+      required_supports: []
+      required_concerns: [crypto_exchange_employer]
+      required_blockers: [fc_domain_entry_barrier]
+      required_unknowns: []
+      expected_interactions: [ir_crypto_employer_not_role_veto]
+      expected_caps: []
+      rationale: "The blocker is the mandatory Mandarin barrier, not the crypto context."
+
+    # ---------- company-fit contrasts ----------
+    - id: gd_crypto_broad_mandate
+      fixture_ref: null
+      policy_only: true
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: strong
+      expected_company_fit: weak
+      expected_recommendation: promising
+      expected_confidence: medium
+      required_supports: [scope_breadth, growth_mandate]
+      required_concerns: [crypto_exchange_employer]
+      required_blockers: []
+      required_unknowns: []
+      expected_interactions: [ir_crypto_employer_not_role_veto]
+      expected_caps: [cap_crypto_employer]
+      rationale: "Broad transferable mandate at a crypto exchange: company concern + exploration candidate, never strong/exceptional."
+    - id: gd_strong_role_small_local_company
+      fixture_ref: null
+      policy_only: true
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: strong
+      expected_company_fit: mismatch
+      expected_recommendation: not_recommended
+      expected_confidence: medium
+      required_supports: [scope_breadth]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: []
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Small local company in the CORE lane is a company mismatch (brand-legitimization motivation); the KZ fallback lane is the only sanctioned path."
+    - id: gd_strong_role_company_unknown
+      fixture_ref: null
+      policy_only: true
+      expected_lane: core
+      expected_feasibility: feasible
+      expected_mandate_fit: strong
+      expected_company_fit: unknown
+      expected_recommendation: promising
+      expected_confidence: medium
+      required_supports: [scope_breadth]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: [company_facts]
+      expected_interactions: []
+      expected_caps: []
+      rationale: "Strong mandate with unknown company facts: promising + recommendation_changing clarification, not strong."

@@ -1,0 +1,876 @@
+{
+  "$defs": {
+    "Cap": {
+      "additionalProperties": false,
+      "properties": {
+        "ceiling": {
+          "$ref": "#/$defs/Recommendation"
+        },
+        "condition": {
+          "title": "Condition",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "rationale": {
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "condition",
+        "ceiling",
+        "rationale"
+      ],
+      "title": "Cap",
+      "type": "object"
+    },
+    "ChangePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "approval": {
+          "title": "Approval",
+          "type": "string"
+        },
+        "no_silent_learning": {
+          "title": "No Silent Learning",
+          "type": "boolean"
+        },
+        "versioning": {
+          "title": "Versioning",
+          "type": "string"
+        }
+      },
+      "required": [
+        "versioning",
+        "approval",
+        "no_silent_learning"
+      ],
+      "title": "ChangePolicy",
+      "type": "object"
+    },
+    "ClarificationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "dedup_key": {
+          "title": "Dedup Key",
+          "type": "string"
+        },
+        "fact_seeking_only": {
+          "title": "Fact Seeking Only",
+          "type": "boolean"
+        },
+        "priorities": {
+          "items": {
+            "$ref": "#/$defs/ClarificationPriority"
+          },
+          "title": "Priorities",
+          "type": "array"
+        },
+        "required_fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "required_fields",
+        "priorities",
+        "fact_seeking_only",
+        "dedup_key"
+      ],
+      "title": "ClarificationPolicy",
+      "type": "object"
+    },
+    "ClarificationPriority": {
+      "enum": [
+        "blocking",
+        "recommendation_changing",
+        "confidence_improving",
+        "optional"
+      ],
+      "title": "ClarificationPriority",
+      "type": "string"
+    },
+    "Confidence": {
+      "enum": [
+        "high",
+        "medium",
+        "low",
+        "unknown"
+      ],
+      "title": "Confidence",
+      "type": "string"
+    },
+    "ConfidencePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence_is_not_a_score": {
+          "title": "Confidence Is Not A Score",
+          "type": "boolean"
+        },
+        "conflict_result": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "critical_facts": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Critical Facts",
+          "type": "object"
+        },
+        "exceptional_coverage": {
+          "title": "Exceptional Coverage",
+          "type": "string"
+        },
+        "overall_rule": {
+          "title": "Overall Rule",
+          "type": "string"
+        },
+        "section_rule": {
+          "title": "Section Rule",
+          "type": "string"
+        },
+        "title_only_cap": {
+          "$ref": "#/$defs/Confidence"
+        }
+      },
+      "required": [
+        "section_rule",
+        "critical_facts",
+        "title_only_cap",
+        "conflict_result",
+        "exceptional_coverage",
+        "overall_rule",
+        "confidence_is_not_a_score"
+      ],
+      "title": "ConfidencePolicy",
+      "type": "object"
+    },
+    "EvaluationNode": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "on_failure": {
+          "title": "On Failure",
+          "type": "string"
+        },
+        "terminal": {
+          "title": "Terminal",
+          "type": "boolean"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "terminal",
+        "on_failure"
+      ],
+      "title": "EvaluationNode",
+      "type": "object"
+    },
+    "ExplanationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_required": {
+          "title": "Evidence Required",
+          "type": "boolean"
+        },
+        "item_fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Item Fields",
+          "type": "array"
+        },
+        "numeric_scores_forbidden": {
+          "title": "Numeric Scores Forbidden",
+          "type": "boolean"
+        },
+        "top_level_fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Top Level Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "item_fields",
+        "top_level_fields",
+        "numeric_scores_forbidden",
+        "evidence_required"
+      ],
+      "title": "ExplanationPolicy",
+      "type": "object"
+    },
+    "ExplorationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "eligible_axes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Eligible Axes",
+          "type": "array"
+        },
+        "excluded_from_precision_metrics": {
+          "title": "Excluded From Precision Metrics",
+          "type": "boolean"
+        },
+        "hard_gates_always_apply": {
+          "title": "Hard Gates Always Apply",
+          "type": "boolean"
+        },
+        "ineligible_axes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ineligible Axes",
+          "type": "array"
+        },
+        "marker_field": {
+          "title": "Marker Field",
+          "type": "string"
+        },
+        "max_rate": {
+          "title": "Max Rate",
+          "type": "string"
+        },
+        "min_mandate_band": {
+          "$ref": "#/$defs/FitBand"
+        },
+        "one_axis_at_a_time": {
+          "title": "One Axis At A Time",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "eligible_axes",
+        "ineligible_axes",
+        "one_axis_at_a_time",
+        "hard_gates_always_apply",
+        "max_rate",
+        "min_mandate_band",
+        "marker_field",
+        "excluded_from_precision_metrics"
+      ],
+      "title": "ExplorationPolicy",
+      "type": "object"
+    },
+    "FallbackPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "activation": {
+          "title": "Activation",
+          "type": "string"
+        },
+        "current_state": {
+          "title": "Current State",
+          "type": "string"
+        },
+        "excluded_from_core_metrics": {
+          "title": "Excluded From Core Metrics",
+          "type": "boolean"
+        },
+        "feedback_never_recalibrates_core": {
+          "title": "Feedback Never Recalibrates Core",
+          "type": "boolean"
+        },
+        "lane": {
+          "$ref": "#/$defs/Lane"
+        },
+        "production_delivery": {
+          "title": "Production Delivery",
+          "type": "string"
+        },
+        "rationale": {
+          "title": "Rationale",
+          "type": "string"
+        },
+        "same_vocabulary_with_marker": {
+          "title": "Same Vocabulary With Marker",
+          "type": "boolean"
+        },
+        "sponsorship_unknown_is_not_uncertain": {
+          "title": "Sponsorship Unknown Is Not Uncertain",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "lane",
+        "same_vocabulary_with_marker",
+        "rationale",
+        "activation",
+        "current_state",
+        "excluded_from_core_metrics",
+        "sponsorship_unknown_is_not_uncertain",
+        "feedback_never_recalibrates_core",
+        "production_delivery"
+      ],
+      "title": "FallbackPolicy",
+      "type": "object"
+    },
+    "FeasibilityVerdict": {
+      "enum": [
+        "feasible",
+        "uncertain",
+        "infeasible"
+      ],
+      "title": "FeasibilityVerdict",
+      "type": "string"
+    },
+    "FitBand": {
+      "enum": [
+        "exceptional",
+        "strong",
+        "moderate",
+        "weak",
+        "mismatch",
+        "unknown"
+      ],
+      "title": "FitBand",
+      "type": "string"
+    },
+    "FitBandDef": {
+      "additionalProperties": false,
+      "properties": {
+        "band": {
+          "$ref": "#/$defs/FitBand"
+        },
+        "criteria": {
+          "title": "Criteria",
+          "type": "string"
+        },
+        "exemplars": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exemplars",
+          "type": "array"
+        }
+      },
+      "required": [
+        "band",
+        "criteria"
+      ],
+      "title": "FitBandDef",
+      "type": "object"
+    },
+    "InteractionEffect": {
+      "enum": [
+        "suppress",
+        "limit_to_company_fit",
+        "gate",
+        "route_to_fallback",
+        "exclude_from",
+        "allow"
+      ],
+      "title": "InteractionEffect",
+      "type": "string"
+    },
+    "InteractionSemantics": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "$ref": "#/$defs/InteractionEffect"
+        },
+        "idempotent": {
+          "title": "Idempotent",
+          "type": "boolean"
+        },
+        "semantics": {
+          "title": "Semantics",
+          "type": "string"
+        },
+        "trace_visibility": {
+          "title": "Trace Visibility",
+          "type": "string"
+        }
+      },
+      "required": [
+        "effect",
+        "semantics",
+        "trace_visibility",
+        "idempotent"
+      ],
+      "title": "InteractionSemantics",
+      "type": "object"
+    },
+    "Lane": {
+      "enum": [
+        "core",
+        "fallback_local"
+      ],
+      "title": "Lane",
+      "type": "string"
+    },
+    "MatrixCell": {
+      "additionalProperties": false,
+      "properties": {
+        "company": {
+          "$ref": "#/$defs/FitBand"
+        },
+        "mandate": {
+          "$ref": "#/$defs/FitBand"
+        },
+        "recommendation": {
+          "$ref": "#/$defs/Recommendation"
+        }
+      },
+      "required": [
+        "mandate",
+        "company",
+        "recommendation"
+      ],
+      "title": "MatrixCell",
+      "type": "object"
+    },
+    "Metadata": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "human_sot": {
+          "title": "Human Sot",
+          "type": "string"
+        },
+        "no_silent_learning": {
+          "title": "No Silent Learning",
+          "type": "boolean"
+        },
+        "owner": {
+          "title": "Owner",
+          "type": "string"
+        },
+        "production_integration": {
+          "title": "Production Integration",
+          "type": "boolean"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract_version",
+        "status",
+        "owner",
+        "production_integration",
+        "no_silent_learning",
+        "human_sot"
+      ],
+      "title": "Metadata",
+      "type": "object"
+    },
+    "Precedence": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_conflict_same_level": {
+          "title": "Evidence Conflict Same Level",
+          "type": "string"
+        },
+        "evidence_hierarchy": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Hierarchy",
+          "type": "array"
+        },
+        "interaction_ordering": {
+          "title": "Interaction Ordering",
+          "type": "string"
+        },
+        "lane_independent_of_verdict": {
+          "title": "Lane Independent Of Verdict",
+          "type": "boolean"
+        },
+        "later_rules_may_reverse": {
+          "title": "Later Rules May Reverse",
+          "type": "boolean"
+        },
+        "manual_gold_is_runtime_evidence": {
+          "title": "Manual Gold Is Runtime Evidence",
+          "type": "boolean"
+        },
+        "rule_order": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rule Order",
+          "type": "array"
+        },
+        "verdict_merge": {
+          "items": {
+            "$ref": "#/$defs/FeasibilityVerdict"
+          },
+          "title": "Verdict Merge",
+          "type": "array"
+        }
+      },
+      "required": [
+        "verdict_merge",
+        "lane_independent_of_verdict",
+        "rule_order",
+        "interaction_ordering",
+        "later_rules_may_reverse",
+        "evidence_hierarchy",
+        "evidence_conflict_same_level",
+        "manual_gold_is_runtime_evidence"
+      ],
+      "title": "Precedence",
+      "type": "object"
+    },
+    "Recommendation": {
+      "enum": [
+        "exceptional",
+        "strong",
+        "promising",
+        "unclear",
+        "not_recommended"
+      ],
+      "title": "Recommendation",
+      "type": "string"
+    },
+    "RecommendationMatrix": {
+      "additionalProperties": false,
+      "properties": {
+        "fallback_lane_uses_same_matrix": {
+          "title": "Fallback Lane Uses Same Matrix",
+          "type": "boolean"
+        },
+        "feasible_matrix": {
+          "items": {
+            "$ref": "#/$defs/MatrixCell"
+          },
+          "title": "Feasible Matrix",
+          "type": "array"
+        },
+        "terminal_rules": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Terminal Rules",
+          "type": "array"
+        },
+        "uncertain_transform": {
+          "title": "Uncertain Transform",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminal_rules",
+        "feasible_matrix",
+        "uncertain_transform",
+        "fallback_lane_uses_same_matrix"
+      ],
+      "title": "RecommendationMatrix",
+      "type": "object"
+    },
+    "ReplayProtocol": {
+      "additionalProperties": false,
+      "properties": {
+        "cohort_exclusions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cohort Exclusions",
+          "type": "array"
+        },
+        "disagreement_taxonomy": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Disagreement Taxonomy",
+          "type": "array"
+        },
+        "feedback_is_ground_truth": {
+          "title": "Feedback Is Ground Truth",
+          "type": "boolean"
+        },
+        "metrics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Metrics",
+          "type": "array"
+        },
+        "per_case_outputs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Per Case Outputs",
+          "type": "array"
+        },
+        "prerequisites": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Prerequisites",
+          "type": "array"
+        }
+      },
+      "required": [
+        "cohort_exclusions",
+        "per_case_outputs",
+        "disagreement_taxonomy",
+        "metrics",
+        "feedback_is_ground_truth",
+        "prerequisites"
+      ],
+      "title": "ReplayProtocol",
+      "type": "object"
+    },
+    "ResultKind": {
+      "enum": [
+        "support",
+        "concern",
+        "blocker",
+        "unknown",
+        "interaction"
+      ],
+      "title": "ResultKind",
+      "type": "string"
+    },
+    "ResultTypeDef": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregation": {
+          "title": "Aggregation",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ResultKind"
+        },
+        "overridable": {
+          "title": "Overridable",
+          "type": "boolean"
+        },
+        "suppressible": {
+          "title": "Suppressible",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "suppressible",
+        "overridable",
+        "aggregation"
+      ],
+      "title": "ResultTypeDef",
+      "type": "object"
+    },
+    "SupportedInputs": {
+      "additionalProperties": false,
+      "properties": {
+        "on_unsupported_major": {
+          "title": "On Unsupported Major",
+          "type": "string"
+        },
+        "preference_model": {
+          "pattern": "^\\d+\\.x$",
+          "title": "Preference Model",
+          "type": "string"
+        },
+        "vacancy_understanding": {
+          "pattern": "^\\d+\\.x$",
+          "title": "Vacancy Understanding",
+          "type": "string"
+        }
+      },
+      "required": [
+        "preference_model",
+        "vacancy_understanding",
+        "on_unsupported_major"
+      ],
+      "title": "SupportedInputs",
+      "type": "object"
+    },
+    "UnknownCap": {
+      "enum": [
+        "none",
+        "no_exceptional",
+        "no_strong_or_exceptional",
+        "promising",
+        "terminal"
+      ],
+      "title": "UnknownCap",
+      "type": "string"
+    },
+    "UnknownPolicyEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "cap": {
+          "$ref": "#/$defs/UnknownCap"
+        },
+        "clarification_priority": {
+          "$ref": "#/$defs/ClarificationPriority"
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Condition"
+        },
+        "confidence_effect": {
+          "title": "Confidence Effect",
+          "type": "string"
+        },
+        "field": {
+          "title": "Field",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "verdict_effect": {
+          "title": "Verdict Effect",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "field",
+        "verdict_effect",
+        "confidence_effect",
+        "clarification_priority",
+        "cap"
+      ],
+      "title": "UnknownPolicyEntry",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "caps": {
+      "items": {
+        "$ref": "#/$defs/Cap"
+      },
+      "title": "Caps",
+      "type": "array"
+    },
+    "change_policy": {
+      "$ref": "#/$defs/ChangePolicy"
+    },
+    "clarification_policy": {
+      "$ref": "#/$defs/ClarificationPolicy"
+    },
+    "company_fit_bands": {
+      "items": {
+        "$ref": "#/$defs/FitBandDef"
+      },
+      "title": "Company Fit Bands",
+      "type": "array"
+    },
+    "confidence_policy": {
+      "$ref": "#/$defs/ConfidencePolicy"
+    },
+    "evaluation_order": {
+      "items": {
+        "$ref": "#/$defs/EvaluationNode"
+      },
+      "title": "Evaluation Order",
+      "type": "array"
+    },
+    "explanation_contract": {
+      "$ref": "#/$defs/ExplanationPolicy"
+    },
+    "exploration_policy": {
+      "$ref": "#/$defs/ExplorationPolicy"
+    },
+    "fallback_policy": {
+      "$ref": "#/$defs/FallbackPolicy"
+    },
+    "interaction_effects": {
+      "items": {
+        "$ref": "#/$defs/InteractionSemantics"
+      },
+      "title": "Interaction Effects",
+      "type": "array"
+    },
+    "mandate_fit_bands": {
+      "items": {
+        "$ref": "#/$defs/FitBandDef"
+      },
+      "title": "Mandate Fit Bands",
+      "type": "array"
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "precedence": {
+      "$ref": "#/$defs/Precedence"
+    },
+    "recommendation_matrix": {
+      "$ref": "#/$defs/RecommendationMatrix"
+    },
+    "replay_protocol": {
+      "$ref": "#/$defs/ReplayProtocol"
+    },
+    "result_types": {
+      "items": {
+        "$ref": "#/$defs/ResultTypeDef"
+      },
+      "title": "Result Types",
+      "type": "array"
+    },
+    "supported_input_versions": {
+      "$ref": "#/$defs/SupportedInputs"
+    },
+    "unknown_policy": {
+      "items": {
+        "$ref": "#/$defs/UnknownPolicyEntry"
+      },
+      "title": "Unknown Policy",
+      "type": "array"
+    }
+  },
+  "required": [
+    "metadata",
+    "supported_input_versions",
+    "evaluation_order",
+    "precedence",
+    "unknown_policy",
+    "result_types",
+    "mandate_fit_bands",
+    "company_fit_bands",
+    "recommendation_matrix",
+    "caps",
+    "interaction_effects",
+    "confidence_policy",
+    "clarification_policy",
+    "explanation_contract",
+    "fallback_policy",
+    "exploration_policy",
+    "replay_protocol",
+    "change_policy"
+  ],
+  "title": "shadow_evaluator_decision_contract",
+  "type": "object"
+}
