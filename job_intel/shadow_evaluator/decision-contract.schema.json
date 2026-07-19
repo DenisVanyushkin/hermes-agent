@@ -1,5 +1,69 @@
 {
   "$defs": {
+    "ActionMappingEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "low_confidence_or_uncertain_action": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Low Confidence Or Uncertain Action"
+        },
+        "recommendation": {
+          "$ref": "#/$defs/Recommendation"
+        },
+        "requires_clarification": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requires Clarification"
+        }
+      },
+      "required": [
+        "recommendation",
+        "action"
+      ],
+      "title": "ActionMappingEntry",
+      "type": "object"
+    },
+    "ActionVocabulary": {
+      "additionalProperties": false,
+      "properties": {
+        "mapping": {
+          "items": {
+            "$ref": "#/$defs/ActionMappingEntry"
+          },
+          "title": "Mapping",
+          "type": "array"
+        },
+        "process_sot_amendment": {
+          "title": "Process Sot Amendment",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mapping",
+        "process_sot_amendment"
+      ],
+      "title": "ActionVocabulary",
+      "type": "object"
+    },
     "Cap": {
       "additionalProperties": false,
       "properties": {
@@ -17,6 +81,30 @@
         "rationale": {
           "title": "Rationale",
           "type": "string"
+        },
+        "review_after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review After"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
         }
       },
       "required": [
@@ -243,6 +331,18 @@
           },
           "title": "Ineligible Axes",
           "type": "array"
+        },
+        "ineligible_axes_policy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ineligible Axes Policy"
         },
         "marker_field": {
           "title": "Marker Field",
@@ -768,6 +868,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "action_vocabulary": {
+      "$ref": "#/$defs/ActionVocabulary"
+    },
     "caps": {
       "items": {
         "$ref": "#/$defs/Cap"
@@ -853,6 +956,7 @@
   },
   "required": [
     "metadata",
+    "action_vocabulary",
     "supported_input_versions",
     "evaluation_order",
     "precedence",

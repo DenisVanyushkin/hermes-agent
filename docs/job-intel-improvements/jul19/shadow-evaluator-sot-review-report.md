@@ -84,3 +84,19 @@ fallback/exploration, replay-протокол, 24 golden decision cases,
 3. Пропуск approve O1 создаст третий словарь в Slack/CRM-интеграциях позже.
 4. Соблазн «дочислить» confidence/concerns в коде — запрещено: любые новые
    пороги должны сначала появиться здесь.
+
+---
+
+## 10. Owner decisions — RESOLVED (2026-07-19, review round 1)
+
+| # | Решение | Итог в контракте v1.1.0 |
+|---|---|---|
+| O1 | approved | двухуровневый словарь: recommendation (качество) + action vocabulary apply/investigate/save/reject; mapping в SoT §1 и `action_vocabulary` YAML; поправка process SoT §4 — старые значения суть action outcomes |
+| O2 | approved_with_O6_change | матрица и caps утверждены; company mismatch зарезервирован за сильными конфликтами (outsourcing, small-local-core, прямое противоречие цели) — мягкие сомнения остаются weak/moderate |
+| O3 | approved | re-fetch полных текстов Wise обязателен ДО replay acceptance и финальной калибровки; написание evaluator не блокирует |
+| O4 | provisionally_approved_for_shadow | cap_crypto_employer=promising со status=provisional_shadow_policy; production rollout — только после отдельного разбора исторических отклонений |
+| O5 | defer | big-tech/early-startup нейтральны: not exploration-eligible, не anti, не support, без cap; два прямых preference-вопроса — после Step 3 |
+| O6 | rejected | generic «≥3 concerns → −1 band» удалён из human и machine контрактов; заменён качественными критериями band'ов (material concerns) и именованными compound interaction rules (только с replay evidence + owner approval); валидатор схемы теперь ЗАПРЕЩАЕТ счётную агрегацию concerns |
+
+**Implementation readiness (обновлено):** препятствий нет — Step 3 evaluator
+можно реализовывать как прямую трансляцию контракта v1.1.0.

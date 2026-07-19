@@ -107,6 +107,18 @@ class Metadata(_Strict):
     human_sot: str
 
 
+class ActionMappingEntry(_Strict):
+    recommendation: Recommendation
+    action: str  # apply | investigate | save | reject
+    low_confidence_or_uncertain_action: Optional[str] = None
+    requires_clarification: Optional[bool] = None
+
+
+class ActionVocabulary(_Strict):
+    mapping: list[ActionMappingEntry]
+    process_sot_amendment: str
+
+
 class SupportedInputs(_Strict):
     preference_model: str = Field(pattern=MAJOR_RANGE_PATTERN)
     vacancy_understanding: str = Field(pattern=MAJOR_RANGE_PATTERN)
@@ -172,6 +184,8 @@ class Cap(_Strict):
     condition: str
     ceiling: Recommendation
     rationale: str
+    status: Optional[str] = None        # e.g. provisional_shadow_policy (O4)
+    review_after: Optional[str] = None
 
 
 class InteractionSemantics(_Strict):
@@ -220,6 +234,7 @@ class FallbackPolicy(_Strict):
 class ExplorationPolicy(_Strict):
     eligible_axes: list[str]
     ineligible_axes: list[str]
+    ineligible_axes_policy: Optional[str] = None  # O5: neutral, no anti/support/cap
     one_axis_at_a_time: bool
     hard_gates_always_apply: bool
     max_rate: str
@@ -245,6 +260,7 @@ class ChangePolicy(_Strict):
 
 class DecisionContract(_Strict):
     metadata: Metadata
+    action_vocabulary: ActionVocabulary
     supported_input_versions: SupportedInputs
     evaluation_order: list[EvaluationNode]
     precedence: Precedence
@@ -327,6 +343,21 @@ class DecisionContract(_Strict):
             raise ValueError("explanations must forbid numeric scores")
         if self.replay_protocol.feedback_is_ground_truth:
             raise ValueError("feedback is evidence, not ground truth")
+
+        # O1: every recommendation label maps to exactly one action entry
+        mapped = [m.recommendation for m in self.action_vocabulary.mapping]
+        if sorted(m.value for m in mapped) != sorted(r.value for r in Recommendation):
+            raise ValueError("action_vocabulary must map every recommendation exactly once")
+        for m in self.action_vocabulary.mapping:
+            if m.action not in {"apply", "investigate", "save", "reject"}:
+                raise ValueError(f"unknown action {m.action!r}")
+
+        # O6: no counting arithmetic in concern aggregation
+        for rt in self.result_types:
+            if rt.kind == ResultKind.concern:
+                import re as _re
+                if _re.search(r">=?\s*\d|\d\s*concerns", rt.aggregation):
+                    raise ValueError("concern aggregation must not count concerns (O6)")
         return self
 
 

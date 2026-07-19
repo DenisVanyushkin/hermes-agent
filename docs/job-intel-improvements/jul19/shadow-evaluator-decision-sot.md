@@ -1,4 +1,12 @@
-# Shadow Evaluator — Decision Source of Truth (v1.0.0)
+# Shadow Evaluator — Decision Source of Truth (v1.1.0)
+
+> v1.1.0 (2026-07-19): owner decisions O1–O6 recorded. Two-level vocabulary
+> approved (O1); matrix+caps approved (O2, с оговоркой про company mismatch);
+> Wise re-fetch обязателен до replay acceptance (O3); crypto cap —
+> provisional shadow policy (O4); big-tech/early-startup нейтральны и
+> exploration-ineligible (O5); generic «≥3 concerns → −1 band» УДАЛЁН (O6) —
+> заменён качественными band-критериями и именованными compound interaction
+> rules (только после replay evidence + owner approval).
 
 **Статус:** канонический decision-контракт Step 3. Runtime evaluator НЕ
 реализован; этот документ + `job_intel/shadow_evaluator/decision-contract.yaml`
@@ -21,11 +29,14 @@ overall:          {recommendation: exceptional|strong|promising|unclear|not_reco
 Блоки раздельны на всём пути; overall выводится ТОЛЬКО из них через матрицу
 §7 + caps §8 — никогда независимо. Feasibility — не скор и не предпочтение.
 
-**Mapping к словарю process SoT §4** (для будущей поправки; см. review
-report, owner decision O1): exceptional→apply, strong→apply,
-promising→investigate/save (по confidence: medium+→investigate, low→save),
-unclear→investigate(clarify), not_recommended→reject; exploration —
-отдельный маркер, не label.
+**Двухуровневый словарь (O1, approved).** Recommendation описывает
+КАЧЕСТВО возможности (словарь выше); операционный **action vocabulary**
+описывает, что делать: `apply | investigate | save | reject`. Mapping:
+exceptional→apply; strong→apply; promising→investigate (при low confidence
+или feasibility uncertainty → save); unclear→investigate с обязательным
+clarification; not_recommended→reject. `exploration` — отдельный маркер, не
+label. Process SoT §4 подлежит поправке: старые значения — action outcomes,
+не recommendation vocabulary.
 
 ## 2. Decision graph
 
@@ -103,13 +114,17 @@ semantic_inference > title-only inference`. `company_enrichment` ранжиру�
 | Тип | Определение | Suppressible | Overridable | Влияние на confidence | Агрегация |
 |---|---|---|---|---|---|
 | blocker | matched feasibility constraint (verdict≠feasible) или strong role anti-pref, дающий mismatch | только явным interaction rule | только `override.allowed` + conditions | нет (blocker — про verdict) | один blocker достаточен |
-| concern | негатив, не терминальный сам по себе (soft anti-prefs; crypto employer после `limit_to_company_fit`; risks Step 2) | да (interaction) | — | может понижать секционный confidence, если основан на low-confidence факте | ≥3 несуппрессированных concerns в секции → band −1 ступень (однократно; НЕ создают mismatch) |
+| concern | негатив, не терминальный сам по себе (soft anti-prefs; crypto employer после `limit_to_company_fit`; risks Step 2) | да (interaction) | — | может понижать секционный confidence, если основан на low-confidence факте | БЕЗ счётной арифметики (O6): material concerns учитываются качественно в критериях band'ов §6; подтверждённые комбинации — только именованными compound interaction rules (после replay evidence + owner approval); concerns никогда не создают mismatch |
 | support | совпадение с preference | нет (может быть excluded: `exclude_from`) | — | наследует confidence факта | качественно, по правилам band'ов §6 |
 
 Support не «выкупает» concerns арифметически; компенсация существует только
-как именованные interaction rules Step 1. Никакой скрытой числовой
-аккумуляции; единственная счётная конструкция — порог «≥3 concerns», и он
-объявлен здесь явно.
+как именованные interaction rules Step 1. Никакой числовой аккумуляции —
+в том числе счёта concerns (порог «≥3» отклонён владельцем, O6): смысловая
+тяжесть concern'а важнее их количества, а счёт сделал бы результат зависимым
+от гранулярности feature dictionary. Compound-эффекты выражаются ТОЛЬКО
+именованными правилами вида «narrow scope + optimize-only + no revenue
+ownership → mandate weak», добавляемыми после replay evidence с owner
+approval.
 
 ## 5. Unknown truth table
 
@@ -157,10 +172,11 @@ unknown-при-non-product-function. Это дополнение к Step 1, не
   pnl) с high conf И ни одного несуппрессированного strong anti И evidence
   coverage §9.4 полная. Эталон: Airwallex GPNI; Wise APAC (при полном тексте).
 - **strong** — scope ≥ business_line ИЛИ (домен + monetization exception) с
-  ≥1 strong support; нет mismatch; concerns управляемы (<3). Эталон: Monzo BB;
-  Wise Pricing при полном тексте.
-- **moderate** — осмысленное совпадение, но уже скоуп/слабее evidence/заметные
-  concerns. Эталон: широкая senior-PM роль без явного мандата (Affirm 9581).
+  ≥1 strong support; нет mismatch; НЕТ несуппрессированных material
+  concerns. Эталон: Monzo BB; Wise Pricing при полном тексте.
+- **moderate** — осмысленное совпадение, но уже скоуп/слабее evidence, ЛИБО
+  один и более material concerns без критического конфликта. Эталон: широкая
+  senior-PM роль без явного мандата (Affirm 9581).
 - **weak** — переносимая релевантность без решения карьерной задачи: узкий
   домен без исключений, risk-heavy, чистая инфраструктура. Эталон: Airwallex
   Fraud, Coinbase Core Infra, Wise FinCrime/Onboarding.
@@ -173,14 +189,17 @@ unknown-при-non-product-function. Это дополнение к Step 1, не
 
 - **exceptional** — global + tier1_scaleup brand + growth phase +
   product-culture сигнал, всё ≥medium conf, без company anti.
-- **strong** — global/multi_region + известный бренд, без strong anti.
-- **moderate** — часть сигналов есть, часть unknown; или soft company
-  concerns.
+- **strong** — global/multi_region + известный бренд, без strong anti и без
+  несуппрессированных material concerns.
+- **moderate** — часть сигналов есть, часть unknown; либо есть material
+  company concerns без критического конфликта.
 - **weak** — сигналы против цели (локальность/масштаб) или несуппрессированный
   strong company anti с разрешённой «мягкой» трактовкой (crypto exchange по
   ir_crypto_employer_not_role_veto капится именно сюда, не в mismatch).
-- **mismatch** — outsourcing/agency; small local company в core lane;
-  прямое противоречие карьерной цели.
+- **mismatch** — ЗАРЕЗЕРВИРОВАН за действительно сильными конфликтами (O2):
+  outsourcing/agency; small local company в core lane; прямое противоречие
+  карьерной цели. Мягкие сомнения остаются weak/moderate — mismatch не
+  должен превращаться в скрытое veto.
 - **unknown** — company facts отсутствуют.
 
 Company fit никогда не перезаписывает mandate fit (архитектурный принцип
@@ -223,7 +242,7 @@ Fallback lane: та же матрица и словарь + обязательн
 | cap_uncertain | feasibility=uncertain | promising |
 | cap_incomplete_text | risk source_text_incomplete | promising |
 | cap_critical_unknowns | любой cap-помеченный unknown §5 | как в §5 (обычно promising; часть запрещает только exceptional) |
-| cap_crypto_employer | company concern crypto (limit_to_company_fit) | promising |
+| cap_crypto_employer | company concern crypto (limit_to_company_fit) | promising — **provisional_shadow_policy** (O4): действует только в shadow-фазе, review после накопления exploration-feedback; в production не переходит без отдельного разбора исторических отклонений (company/role/geo/barrier были смешаны) |
 | cap_low_confidence | overall confidence = low | strong (exceptional запрещён) |
 
 Caps только понижают. Каждый применённый cap попадает в `applied_caps` и в
@@ -269,8 +288,11 @@ Caps только понижают. Каждый применённый cap по
 
 - Eligible оси: только active exploration axes Step 1 (industry,
   industry_return, company_type, role_family, work_format). big_tech /
-  early_startup — НЕ eligible (это `direct_questions_not_exploration`), пока
-  владелец не ответил (owner decision O5).
+  early_startup — **нейтральны** (O5, defer): not eligible for exploration,
+  НЕ anti-preference, no positive support, no cap — до прямых ответов
+  владельца на два preference-вопроса (интерес к Big Tech при сильном
+  мандате но узкой зоне; интерес к early-stage при широком P&L но слабом
+  бренде), задаваемых после Step 3.
 - Инварианты: одна ось за карточку; ВСЕ hard feasibility gates соблюдены
   (exploration не обходит блокеры); rate ≤ 1–2/нед.; KZ fallback ≠
   exploration.
@@ -352,8 +374,12 @@ infeasible precision; lane- и source-specific; explanation coverage; топ
 причин расхождений; списки критических FN и FP (каждый FN разбирается
 вручную — DoD Step 3).
 
-**Prerequisite:** re-fetch полных текстов для title-only кейсов ядра
-(Wise) — иначе флагманы честно упрутся в cap_incomplete_text (см. R1).
+**Prerequisite (O3, approved):** re-fetch полных текстов title-only ядра
+(Wise) ОБЯЗАТЕЛЕН до replay acceptance и финальной калибровки Step 3 —
+иначе флагманы честно упрутся в cap_incomplete_text. Написание evaluator-кода
+это не блокирует; блокируется только вынесение replay-вердикта о качестве.
+Contract-валидация флагмана до re-fetch — через policy-кейс
+gd_wise_apac_fulltext.
 
 ## 16. Legacy boundaries
 
