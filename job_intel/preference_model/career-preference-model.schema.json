@@ -1,0 +1,1105 @@
+{
+  "$defs": {
+    "AntiPreference": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "level": {
+          "$ref": "#/$defs/AntiPreferenceLevel"
+        },
+        "override": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Override"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RuleStatus"
+        },
+        "strength": {
+          "$ref": "#/$defs/Strength"
+        },
+        "tier": {
+          "$ref": "#/$defs/AntiPreferenceTier"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScenarioCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "statement",
+        "strength",
+        "confidence",
+        "status",
+        "provenance",
+        "level",
+        "tier"
+      ],
+      "title": "AntiPreference",
+      "type": "object"
+    },
+    "AntiPreferenceLevel": {
+      "enum": [
+        "company",
+        "role"
+      ],
+      "title": "AntiPreferenceLevel",
+      "type": "string"
+    },
+    "AntiPreferenceTier": {
+      "enum": [
+        "strong",
+        "soft"
+      ],
+      "title": "AntiPreferenceTier",
+      "type": "string"
+    },
+    "ChangePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "approval": {
+          "title": "Approval",
+          "type": "string"
+        },
+        "compatibility": {
+          "title": "Compatibility",
+          "type": "string"
+        },
+        "no_silent_learning": {
+          "title": "No Silent Learning",
+          "type": "boolean"
+        },
+        "versioning": {
+          "title": "Versioning",
+          "type": "string"
+        }
+      },
+      "required": [
+        "versioning",
+        "compatibility",
+        "approval",
+        "no_silent_learning"
+      ],
+      "title": "ChangePolicy",
+      "type": "object"
+    },
+    "CompensationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "gating_effect": {
+          "title": "Gating Effect",
+          "type": "boolean"
+        },
+        "missing_salary_is_negative": {
+          "title": "Missing Salary Is Negative",
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "ranking_effect": {
+          "title": "Ranking Effect",
+          "type": "boolean"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RuleStatus"
+        }
+      },
+      "required": [
+        "status",
+        "gating_effect",
+        "ranking_effect",
+        "missing_salary_is_negative",
+        "statement",
+        "provenance"
+      ],
+      "title": "CompensationPolicy",
+      "type": "object"
+    },
+    "Confidence": {
+      "enum": [
+        "high",
+        "medium",
+        "low",
+        "unknown"
+      ],
+      "title": "Confidence",
+      "type": "string"
+    },
+    "CountryGroup": {
+      "enum": [
+        "usa",
+        "kazakhstan",
+        "sanctioned",
+        "unstable",
+        "africa",
+        "other"
+      ],
+      "title": "CountryGroup",
+      "type": "string"
+    },
+    "Effect": {
+      "additionalProperties": false,
+      "properties": {
+        "result": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result"
+        },
+        "target_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Ids",
+          "type": "array"
+        },
+        "type": {
+          "$ref": "#/$defs/EffectType"
+        }
+      },
+      "required": [
+        "type",
+        "target_ids"
+      ],
+      "title": "Effect",
+      "type": "object"
+    },
+    "EffectType": {
+      "enum": [
+        "suppress",
+        "limit_to_company_fit",
+        "gate",
+        "route_to_fallback",
+        "exclude_from",
+        "allow"
+      ],
+      "title": "EffectType",
+      "type": "string"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "registry_id": {
+          "title": "Registry Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "registry_id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "EvidenceRegistryEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "source",
+        "kind"
+      ],
+      "title": "EvidenceRegistryEntry",
+      "type": "object"
+    },
+    "ExplorationAxis": {
+      "additionalProperties": false,
+      "properties": {
+        "axis": {
+          "title": "Axis",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "requirement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requirement"
+        },
+        "status": {
+          "$ref": "#/$defs/RuleStatus",
+          "default": "exploration"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "axis",
+        "values"
+      ],
+      "title": "ExplorationAxis",
+      "type": "object"
+    },
+    "ExplorationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "axes": {
+          "items": {
+            "$ref": "#/$defs/ExplorationAxis"
+          },
+          "title": "Axes",
+          "type": "array"
+        },
+        "direct_questions_not_exploration": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Direct Questions Not Exploration",
+          "type": "array"
+        },
+        "rate": {
+          "title": "Rate",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rate",
+        "rules",
+        "axes"
+      ],
+      "title": "ExplorationPolicy",
+      "type": "object"
+    },
+    "FeasibilityConstraint": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "lane": {
+          "$ref": "#/$defs/Lane",
+          "default": "core"
+        },
+        "override": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Override"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RuleStatus"
+        },
+        "strength": {
+          "$ref": "#/$defs/Strength"
+        },
+        "verdict": {
+          "$ref": "#/$defs/FeasibilityVerdict"
+        },
+        "when": {
+          "$ref": "#/$defs/ScenarioCondition"
+        }
+      },
+      "required": [
+        "id",
+        "statement",
+        "strength",
+        "confidence",
+        "status",
+        "provenance",
+        "when",
+        "verdict"
+      ],
+      "title": "FeasibilityConstraint",
+      "type": "object"
+    },
+    "FeasibilitySection": {
+      "additionalProperties": false,
+      "properties": {
+        "compensation_policy": {
+          "$ref": "#/$defs/CompensationPolicy"
+        },
+        "constraints": {
+          "items": {
+            "$ref": "#/$defs/FeasibilityConstraint"
+          },
+          "title": "Constraints",
+          "type": "array"
+        },
+        "timezone_policy": {
+          "$ref": "#/$defs/TimezonePolicy"
+        }
+      },
+      "required": [
+        "constraints",
+        "timezone_policy",
+        "compensation_policy"
+      ],
+      "title": "FeasibilitySection",
+      "type": "object"
+    },
+    "FeasibilityVerdict": {
+      "enum": [
+        "feasible",
+        "uncertain",
+        "infeasible"
+      ],
+      "title": "FeasibilityVerdict",
+      "type": "string"
+    },
+    "InteractionRule": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "priority": {
+          "title": "Priority",
+          "type": "integer"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RuleStatus"
+        },
+        "when": {
+          "$ref": "#/$defs/ScenarioCondition"
+        }
+      },
+      "required": [
+        "id",
+        "statement",
+        "priority",
+        "when",
+        "effect",
+        "status",
+        "provenance"
+      ],
+      "title": "InteractionRule",
+      "type": "object"
+    },
+    "Lane": {
+      "enum": [
+        "core",
+        "fallback_local"
+      ],
+      "title": "Lane",
+      "type": "string"
+    },
+    "LocalMarketFallbackPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "activation": {
+          "title": "Activation",
+          "type": "string"
+        },
+        "current_state": {
+          "title": "Current State",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "separation": {
+          "title": "Separation",
+          "type": "string"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RuleStatus"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "activation",
+        "current_state",
+        "statement",
+        "separation",
+        "provenance"
+      ],
+      "title": "LocalMarketFallbackPolicy",
+      "type": "object"
+    },
+    "Metadata": {
+      "additionalProperties": false,
+      "properties": {
+        "data_basis": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data Basis"
+        },
+        "derived_from": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Derived From",
+          "type": "array"
+        },
+        "generated_at": {
+          "format": "date",
+          "title": "Generated At",
+          "type": "string"
+        },
+        "model_version": {
+          "title": "Model Version",
+          "type": "string"
+        },
+        "production_integration": {
+          "title": "Production Integration",
+          "type": "boolean"
+        },
+        "reference_ideal_vacancy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference Ideal Vacancy"
+        },
+        "schema_version": {
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "model_version",
+        "subject",
+        "generated_at",
+        "status",
+        "production_integration",
+        "derived_from"
+      ],
+      "title": "Metadata",
+      "type": "object"
+    },
+    "Motivation": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RuleStatus"
+        }
+      },
+      "required": [
+        "id",
+        "statement",
+        "confidence",
+        "status",
+        "provenance"
+      ],
+      "title": "Motivation",
+      "type": "object"
+    },
+    "Override": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "title": "Allowed",
+          "type": "boolean"
+        },
+        "conditions": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conditions"
+        }
+      },
+      "required": [
+        "allowed"
+      ],
+      "title": "Override",
+      "type": "object"
+    },
+    "Polarity": {
+      "enum": [
+        "positive",
+        "negative"
+      ],
+      "title": "Polarity",
+      "type": "string"
+    },
+    "Preference": {
+      "additionalProperties": false,
+      "properties": {
+        "anti_values": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anti Values"
+        },
+        "applies_to": {
+          "default": "role",
+          "title": "Applies To",
+          "type": "string"
+        },
+        "axis": {
+          "title": "Axis",
+          "type": "string"
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "override": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Override"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "polarity": {
+          "$ref": "#/$defs/Polarity",
+          "default": "positive"
+        },
+        "preferred_min": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preferred Min"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RuleStatus"
+        },
+        "strength": {
+          "$ref": "#/$defs/Strength"
+        },
+        "values": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Values"
+        },
+        "values_order": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Values Order"
+        }
+      },
+      "required": [
+        "id",
+        "statement",
+        "strength",
+        "confidence",
+        "status",
+        "provenance",
+        "axis"
+      ],
+      "title": "Preference",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "evidence_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Count"
+        },
+        "last_validated": {
+          "format": "date",
+          "title": "Last Validated",
+          "type": "string"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        },
+        "source_type": {
+          "$ref": "#/$defs/SourceType"
+        }
+      },
+      "required": [
+        "source_type",
+        "last_validated"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "RuleStatus": {
+      "enum": [
+        "active",
+        "hypothesis",
+        "exploration",
+        "inactive"
+      ],
+      "title": "RuleStatus",
+      "type": "string"
+    },
+    "ScenarioCondition": {
+      "additionalProperties": false,
+      "description": "All non-null fields must match for the condition to apply.",
+      "properties": {
+        "country_group": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/CountryGroup"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Country Group"
+        },
+        "flags_all": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Flags All"
+        },
+        "flags_none": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Flags None"
+        },
+        "local_market": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Market"
+        },
+        "sponsorship_stated": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/SponsorshipStated"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sponsorship Stated"
+        },
+        "work_format": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/WorkFormat"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Work Format"
+        }
+      },
+      "title": "ScenarioCondition",
+      "type": "object"
+    },
+    "SourceType": {
+      "enum": [
+        "behavioral",
+        "explicit",
+        "inferred"
+      ],
+      "title": "SourceType",
+      "type": "string"
+    },
+    "SponsorshipStated": {
+      "enum": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "title": "SponsorshipStated",
+      "type": "string"
+    },
+    "Strength": {
+      "enum": [
+        "critical",
+        "strong",
+        "medium",
+        "weak"
+      ],
+      "title": "Strength",
+      "type": "string"
+    },
+    "TimezonePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "hard_gate": {
+          "title": "Hard Gate",
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "treatment": {
+          "title": "Treatment",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hard_gate",
+        "treatment",
+        "statement",
+        "provenance"
+      ],
+      "title": "TimezonePolicy",
+      "type": "object"
+    },
+    "WorkFormat": {
+      "enum": [
+        "remote",
+        "hybrid",
+        "onsite"
+      ],
+      "title": "WorkFormat",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "anti_preferences": {
+      "items": {
+        "$ref": "#/$defs/AntiPreference"
+      },
+      "title": "Anti Preferences",
+      "type": "array"
+    },
+    "change_policy": {
+      "$ref": "#/$defs/ChangePolicy"
+    },
+    "company_preferences": {
+      "items": {
+        "$ref": "#/$defs/Preference"
+      },
+      "title": "Company Preferences",
+      "type": "array"
+    },
+    "evidence_registry": {
+      "items": {
+        "$ref": "#/$defs/EvidenceRegistryEntry"
+      },
+      "title": "Evidence Registry",
+      "type": "array"
+    },
+    "exploration_policy": {
+      "$ref": "#/$defs/ExplorationPolicy"
+    },
+    "feasibility_constraints": {
+      "$ref": "#/$defs/FeasibilitySection"
+    },
+    "interaction_rules": {
+      "items": {
+        "$ref": "#/$defs/InteractionRule"
+      },
+      "title": "Interaction Rules",
+      "type": "array"
+    },
+    "local_market_fallback_policy": {
+      "$ref": "#/$defs/LocalMarketFallbackPolicy"
+    },
+    "mandate_preferences": {
+      "items": {
+        "$ref": "#/$defs/Preference"
+      },
+      "title": "Mandate Preferences",
+      "type": "array"
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "motivations": {
+      "items": {
+        "$ref": "#/$defs/Motivation"
+      },
+      "title": "Motivations",
+      "type": "array"
+    }
+  },
+  "required": [
+    "metadata",
+    "motivations",
+    "feasibility_constraints",
+    "mandate_preferences",
+    "company_preferences",
+    "anti_preferences",
+    "interaction_rules",
+    "exploration_policy",
+    "local_market_fallback_policy",
+    "evidence_registry",
+    "change_policy"
+  ],
+  "title": "career_preference_model",
+  "type": "object"
+}
