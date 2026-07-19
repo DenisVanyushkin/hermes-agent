@@ -49,6 +49,10 @@
 
 Благодаря provider abstraction смена транспорта = только `build_live_llm_provider()` в `llm_provider.py` (1 функция, 1 файл) + spend-gate документы. Provider Contract, Runtime, replay, benchmark-методика, Step 5A tests — без изменений (transport инжектится). То есть решение обратимо и НЕ является архитектурным lock-in: если позже появится прямой OpenAI-ключ, миграция — один слайс.
 
+## Эмпирическое подтверждение (live probe 2026-07-19)
+
+Codex-строки матрицы проверены живыми вызовами (см. openai-transport-analysis.md §5): json_schema strict молча игнорируется (проза вместо JSON), temperature=0 молча отбрасывается, `response.model` — эхо запроса, а `gpt-5-mini` отвергается бэкендом («not supported when using Codex with a ChatGPT account»). OpenRouter-строки подтверждены ранее smoke-прогоном 15/15.
+
 ## Recommendation
 
 **`KEEP_OPENROUTER_AS_CANONICAL`** для Step 5B. Codex-транспорт дисквалифицирован по четырём жёстким осям (identity, structured output, determinism, cost accounting) плюс риск production-квоты; прямой OpenAI API не даёт преимуществ и требует нового биллинга. Follow-up implementation plan не требуется.
