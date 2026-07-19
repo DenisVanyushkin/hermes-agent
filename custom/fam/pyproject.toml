@@ -1,0 +1,4 @@
+[project.optional-dependencies]
+# xlsx round-trip data-seeding layer (custom/fam/fam/seed_xlsx.py). venv-only
+# — must NOT be added to ~/.hermes/sandbox-image/Dockerfile.
+seed = ["openpyxl>=3.1"]
