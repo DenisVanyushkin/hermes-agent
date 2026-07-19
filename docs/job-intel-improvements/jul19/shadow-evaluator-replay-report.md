@@ -1,4 +1,7 @@
-# Shadow Evaluator — Historical Replay Report (run `replay-20260719-step3`)
+# Shadow Evaluator — Historical Replay Report
+
+**Runs:** `replay-20260719-step3` (до correction) и **`replay-20260719-step3-fix2`**
+(после uncertain-grade fix — актуальный). Метрики ниже дополнены дельтой fix2.
 
 **Дата:** 2026-07-19. Read-only; артефакты:
 `artifacts/shadow-evaluator/replay/replay-20260719-step3/` (run-metadata,
@@ -64,6 +67,18 @@ offline-артефакты (в git не коммитятся — copyright/reten
 зафиксированы sha16. Ни в одном тексте нет relocation/visa-формулировок —
 подтверждает honest-uncertain для SG-вариантов. Re-annotation фикстур по
 полным текстам — вход следующего слайса перед calibration.
+
+## 4a. Re-replay после uncertain-grade fix (`replay-20260719-step3-fix2`)
+
+Как и ожидалось ревью: recommendation distribution БЕЗ изменений (unclear 59 /
+not_recommended 4), disagreement taxonomy без изменений (62 insufficient / 1
+legacy FP), но **feasibility distribution изменился существенно и честно**:
+uncertain 48 / feasible 11 / infeasible 4 (было feasible 59). Triggered caps
+теперь видимы: `cap_uncertain` ×48, `cap_incomplete_text` ×18 — объяснение
+потолка стало правильным («feasibility uncertain because work format is
+unknown»), а не «feasible + incomplete evidence». Action distribution не
+сместился к save, потому что доминирующий label — unclear (investigate), а
+не promising; save-переход проявится после semantic extraction.
 
 ## 5. Replay-acceptance статус
 
