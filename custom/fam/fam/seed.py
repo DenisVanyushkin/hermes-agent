@@ -30,7 +30,7 @@ LABELS = {
     "weekday": {"mon": "пн", "tue": "вт", "wed": "ср", "thu": "чт", "fri": "пт", "sat": "сб", "sun": "вс"},
     "enabled": {1: "да", 0: "нет"},
 }
-_CANON = {d: {str(v).casefold(): k for k, v in m.items()} for d, m in LABELS.items()}
+_CANON = {d: {str(v).casefold(): k for k, v in m.items() if str(v).strip()} for d, m in LABELS.items()}
 _ALLOW_EMPTY = {"transport": (None,), "category": (None,)}
 
 
@@ -153,7 +153,7 @@ SHEETS = {
    Col("порог", "threshold", "При остатке ≤ порога лекарство автоматически попадает в «Покупки» "
        "и в дайджест. 0 = выключено."),
    Col("включено", "enabled", "«да|нет». «нет» — напоминания не создаются, определение хранится.",
-       lambda v: label("enabled", v), lambda v: {"да": 1, "нет": 0}[str(v).strip().casefold()]))),
+       lambda v: label("enabled", v), lambda v: canon("enabled", v)))),
  "Покупки": SheetSpec("Покупки", (_ID,
    Col("название", "name", "Что купить. Гермес подскажет «по пути», когда маршрут пройдёт мимо "
        "продуктового/аптеки (по категории места)."),
