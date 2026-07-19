@@ -1,5 +1,5 @@
 fixture_id: wise_financial_crime
-dataset_version: 1.0.0
+dataset_version: 1.0.1
 is_synthetic: false
 annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
   candidate-independent
@@ -30,7 +30,7 @@ ambiguities:
 vacancy_understanding:
   metadata:
     schema_version: 1.0.0
-    extractor_version: 0.1.0
+    extractor_version: 0.1.1
     created_at: '2026-07-19T00:00:00Z'
     vacancy_key: 23e61e3e5eea90f2ffd08d898fec94ac7a1b8e51cc794fe34e2c258e8b03d666
     source_system: smartrecruiters
@@ -263,10 +263,13 @@ vacancy_understanding:
   company:
     name: wise
     scale:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: global
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: Wise operates globally (public company)
     stage:
       value: unknown
       confidence: unknown
@@ -293,10 +296,13 @@ vacancy_understanding:
       method: none
       evidence: []
     is_crypto_exchange:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: 'false'
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: cross-border payments company
     is_outsourcing:
       value: unknown
       confidence: unknown
@@ -318,10 +324,13 @@ vacancy_understanding:
       method: none
       evidence: []
     brand_recognition:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: tier1_scaleup
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: 'research L4: career-convertible tier-1 scale-up brand'
     bureaucracy_signal:
       value: unknown
       confidence: unknown
@@ -353,7 +362,7 @@ vacancy_understanding:
       confidence: unknown
       method: none
       evidence: []
-    country_group_resolver_version: 2026.07.19
+    country_group_resolver_version: 2026.07.19.1
     work_format:
       value: unknown
       confidence: unknown

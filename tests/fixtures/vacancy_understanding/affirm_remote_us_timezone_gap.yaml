@@ -1,5 +1,5 @@
 fixture_id: affirm_remote_us_timezone_gap
-dataset_version: 1.0.0
+dataset_version: 1.0.1
 is_synthetic: false
 annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
   candidate-independent
@@ -42,7 +42,7 @@ ambiguities:
 vacancy_understanding:
   metadata:
     schema_version: 1.0.0
-    extractor_version: 0.1.0
+    extractor_version: 0.1.1
     created_at: '2026-07-19T00:00:00Z'
     vacancy_key: 77378ea48becc79350b6e141037dc8a554fd129aee4d8656902d64b01bbd30c4
     source_system: greenhouse
@@ -75,10 +75,15 @@ vacancy_understanding:
         rationale: null
   mandate:
     scope_breadth:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: domain
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        excerpt: Senior Director, Enterprise Risk Strategy
+        location: title
+        rationale: title is evidence, not final scope truth
     revenue_proximity:
       value: unknown
       confidence: unknown
@@ -185,10 +190,15 @@ vacancy_understanding:
       method: none
       evidence: []
     risk_compliance_heavy:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: 'true'
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        excerpt: Senior Director, Enterprise Risk Strategy
+        location: title
+        rationale: title is evidence, not final scope truth
     transformation_phase:
       value:
       - unknown
@@ -259,10 +269,13 @@ vacancy_understanding:
   company:
     name: affirm
     scale:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: regional
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: US-centric BNPL
     stage:
       value: unknown
       confidence: unknown
@@ -314,10 +327,13 @@ vacancy_understanding:
       method: none
       evidence: []
     brand_recognition:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: known
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: known US fintech, not confirmed tier-1 for career conversion
     bureaucracy_signal:
       value: unknown
       confidence: unknown
@@ -354,7 +370,7 @@ vacancy_understanding:
         excerpt: Remote US
         location: location
         rationale: null
-    country_group_resolver_version: 2026.07.19
+    country_group_resolver_version: 2026.07.19.1
     work_format:
       value: remote
       confidence: high

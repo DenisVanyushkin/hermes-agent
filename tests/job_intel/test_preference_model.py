@@ -129,7 +129,8 @@ def test_no_production_integration():
     pkg_dir = REPO_ROOT / "job_intel"
     offenders = []
     for py in pkg_dir.rglob("*.py"):
-        if "preference_model" in py.parts or py.name.startswith("test_"):
+        # shadow_evaluator is the sanctioned Step 3 consumer of this SoT
+        if "preference_model" in py.parts or "shadow_evaluator" in py.parts                 or py.name.startswith("test_"):
             continue
         if re.search(r"^\s*(from|import)\s+job_intel\.preference_model",
                      py.read_text(encoding="utf-8", errors="ignore"), re.M):

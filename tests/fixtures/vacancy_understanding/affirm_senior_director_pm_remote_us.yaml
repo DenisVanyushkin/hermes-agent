@@ -1,5 +1,5 @@
 fixture_id: affirm_senior_director_pm_remote_us
-dataset_version: 1.0.0
+dataset_version: 1.0.1
 is_synthetic: false
 annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
   candidate-independent
@@ -41,7 +41,7 @@ ambiguities: []
 vacancy_understanding:
   metadata:
     schema_version: 1.0.0
-    extractor_version: 0.1.0
+    extractor_version: 0.1.1
     created_at: '2026-07-19T00:00:00Z'
     vacancy_key: 558fd4288fb8dfa62bc1a5633cf73ede2fb1b7d9787567d71a5e543f227ee760
     source_system: greenhouse
@@ -262,10 +262,13 @@ vacancy_understanding:
   company:
     name: affirm
     scale:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: regional
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: US-centric BNPL
     stage:
       value: unknown
       confidence: unknown
@@ -317,10 +320,13 @@ vacancy_understanding:
       method: none
       evidence: []
     brand_recognition:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: known
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: known US fintech, not confirmed tier-1 for career conversion
     bureaucracy_signal:
       value: unknown
       confidence: unknown
@@ -357,7 +363,7 @@ vacancy_understanding:
         excerpt: Remote US
         location: location
         rationale: null
-    country_group_resolver_version: 2026.07.19
+    country_group_resolver_version: 2026.07.19.1
     work_format:
       value: remote
       confidence: high

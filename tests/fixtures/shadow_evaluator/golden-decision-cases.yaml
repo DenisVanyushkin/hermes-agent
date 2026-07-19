@@ -1,12 +1,14 @@
-# Golden DECISION cases (Step 3A) — reviewable expected outcomes, not tests
-# of an implementation (no evaluator exists). Validated structurally by
-# tests/job_intel/test_shadow_evaluator_contract.py against the decision
-# contract vocabularies and the recommendation matrix.
-# fixture_ref points to tests/fixtures/vacancy_understanding/ where a real
-# Step 2 fixture backs the case; policy_only cases have no fixture yet.
+# Golden DECISION cases — reviewable expected outcomes, executable since
+# Step 3 (tests/job_intel/test_shadow_evaluator_golden.py runs the real
+# engine over the Step 2 fixtures / synthetic canonical records).
+# dataset 1.1.0 (2026-07-19): expectations aligned with the approved band
+# criteria and honest evidence state of each snapshot — see the
+# implementation report §golden for every change vs 1.0.0 (no matrix change).
+# fixture_ref -> tests/fixtures/vacancy_understanding/; policy_only cases use
+# synthetic canonical Step 2 records built in the golden test (marked synthetic).
 
 golden_decision_cases:
-  dataset_version: "1.0.0"
+  dataset_version: "1.1.0"
   cases:
 
     # ---------- expected high positive ----------
@@ -14,48 +16,68 @@ golden_decision_cases:
       fixture_ref: wise_apac_growth_expansion
       expected_lane: core
       expected_feasibility: feasible
-      expected_mandate_fit: exceptional
+      expected_mandate_fit: strong      # title-only: region scope at medium conf cannot claim exceptional
       expected_company_fit: strong
-      expected_recommendation: promising     # capped by cap_incomplete_text
+      expected_recommendation: promising
+      expected_action: save
       expected_confidence: low
       required_supports: [scope_breadth, growth_mandate, expansion_mandate]
       required_concerns: []
       required_blockers: []
-      required_unknowns: [work_format, sponsorship_stated, source_text]
+      required_unknowns: [feasibility_facts.work_format, feasibility_facts.sponsorship_stated, source_text]
       expected_interactions: []
       expected_caps: [cap_incomplete_text]
-      rationale: "Flagship case honestly capped while the snapshot is title-only; blocking clarification demands the full text."
+      rationale: "Flagship honestly capped while the snapshot is title-only; blocking clarification demands the full text."
     - id: gd_wise_apac_fulltext
-      fixture_ref: null   # policy-only: expected outcome after text re-fetch
+      fixture_ref: null
       policy_only: true
       expected_lane: core
       expected_feasibility: feasible
       expected_mandate_fit: exceptional
       expected_company_fit: strong
       expected_recommendation: exceptional
+      expected_action: apply
       expected_confidence: high
-      required_supports: [scope_breadth, growth_mandate, expansion_mandate, revenue_proximity]
+      required_supports: [scope_breadth, growth_mandate, expansion_mandate]
       required_concerns: []
       required_blockers: []
       required_unknowns: []
       expected_interactions: []
       expected_caps: []
-      rationale: "Process-SoT acceptance criterion: Wise APAC stably in the top band once evidence is complete."
+      rationale: "Process-SoT acceptance criterion: Wise APAC in the top band once evidence is complete (synthetic full-text control)."
     - id: gd_airwallex_gpni
       fixture_ref: airwallex_gpni
+      expected_lane: core
+      expected_feasibility: uncertain   # SG onsite, sponsorship not stated in this snapshot
+      expected_mandate_fit: exceptional
+      expected_company_fit: strong
+      expected_recommendation: promising
+      expected_action: save
+      expected_confidence: medium
+      required_supports: [platform_as_the_business, scope_breadth, zero_to_one_mandate]
+      required_concerns: []
+      required_blockers: []
+      required_unknowns: [feasibility_facts.sponsorship_stated]
+      expected_interactions: []
+      expected_caps: [cap_uncertain]
+      rationale: "Exceptional mandate; feasibility honestly uncertain until sponsorship is confirmed (historically resolved by the 'Relocate to Singapore' variant)."
+    - id: gd_airwallex_gpni_relocation_variant
+      fixture_ref: null
+      policy_only: true
       expected_lane: core
       expected_feasibility: feasible
       expected_mandate_fit: exceptional
       expected_company_fit: strong
       expected_recommendation: exceptional
-      expected_confidence: high
-      required_supports: [platform_as_the_business, scope_breadth, zero_to_one_mandate]
+      expected_action: apply
+      expected_confidence: medium
+      required_supports: [platform_as_the_business, scope_breadth]
       required_concerns: []
       required_blockers: []
       required_unknowns: []
       expected_interactions: []
       expected_caps: []
-      rationale: "Platform-as-business + business-line scope + global brand; full text."
+      rationale: "The London 'Relocate to Singapore' variant with stated sponsorship: full positive path (synthetic control mirroring db id 6123)."
     - id: gd_monzo_business_banking
       fixture_ref: monzo_business_banking
       expected_lane: core
@@ -63,26 +85,28 @@ golden_decision_cases:
       expected_mandate_fit: strong
       expected_company_fit: strong
       expected_recommendation: strong
-      expected_confidence: high
-      required_supports: [scope_breadth, visa_support_stated]
+      expected_action: apply
+      expected_confidence: medium
+      required_supports: [scope_breadth]
       required_concerns: []
       required_blockers: []
       required_unknowns: []
       expected_interactions: []
       expected_caps: []
-      rationale: "Business line + explicit sponsorship/relocation."
+      rationale: "Business line + explicit sponsorship/relocation; revenue proximity at medium keeps confidence medium."
     - id: gd_brex_growth_vancouver
       fixture_ref: brex_growth_ai_vancouver
       expected_lane: core
       expected_feasibility: uncertain
-      expected_mandate_fit: strong
+      expected_mandate_fit: moderate    # growth domain, below business-line scope
       expected_company_fit: strong
-      expected_recommendation: promising    # cap_uncertain
+      expected_recommendation: promising
+      expected_action: save
       expected_confidence: medium
       required_supports: [growth_mandate]
-      required_concerns: []
+      required_concerns: [narrow_feature_scope]
       required_blockers: []
-      required_unknowns: [sponsorship_stated]
+      required_unknowns: [feasibility_facts.sponsorship_stated]
       expected_interactions: []
       expected_caps: [cap_uncertain]
       rationale: "Hybrid non-US office with unknown sponsorship -> uncertain; historical save-then-apply pattern."
@@ -93,14 +117,15 @@ golden_decision_cases:
       expected_mandate_fit: moderate
       expected_company_fit: moderate
       expected_recommendation: promising
+      expected_action: investigate
       expected_confidence: medium
       required_supports: [scope_breadth]
       required_concerns: []
       required_blockers: []
-      required_unknowns: [sponsorship_stated]
-      expected_interactions: [ir_remote_suppresses_onsite_country_penalty]
+      required_unknowns: [feasibility_facts.sponsorship_stated]
+      expected_interactions: []
       expected_caps: []
-      rationale: "Remote US is feasible; broad senior remit with limited mandate evidence."
+      rationale: "Remote US is feasible; broad senior remit with limited mandate evidence; US-centric known brand = moderate company fit."
 
     # ---------- valuable narrower exceptions ----------
     - id: gd_wise_pricing
@@ -109,15 +134,16 @@ golden_decision_cases:
       expected_feasibility: feasible
       expected_mandate_fit: strong
       expected_company_fit: strong
-      expected_recommendation: promising    # cap_incomplete_text (title-only)
+      expected_recommendation: promising
+      expected_action: save
       expected_confidence: low
-      required_supports: [monetization_core, pricing_core]
+      required_supports: [monetization_core]
       required_concerns: []
       required_blockers: []
       required_unknowns: [source_text]
       expected_interactions: [ir_narrow_scope_monetization_exception]
       expected_caps: [cap_incomplete_text]
-      rationale: "Narrow scope suppressed by monetization identity exception; with full text -> strong."
+      rationale: "Narrow scope suppressed by the monetization identity exception; capped while title-only."
     - id: gd_wise_acquiring
       fixture_ref: wise_acquiring
       expected_lane: core
@@ -125,8 +151,9 @@ golden_decision_cases:
       expected_mandate_fit: strong
       expected_company_fit: strong
       expected_recommendation: promising
+      expected_action: save
       expected_confidence: low
-      required_supports: [monetization_core, acquiring_core]
+      required_supports: [monetization_core]
       required_concerns: []
       required_blockers: []
       required_unknowns: [source_text]
@@ -142,7 +169,8 @@ golden_decision_cases:
       expected_mandate_fit: weak
       expected_company_fit: strong
       expected_recommendation: not_recommended
-      expected_confidence: medium
+      expected_action: reject
+      expected_confidence: low
       required_supports: []
       required_concerns: [fraud_risk_compliance_heavy, narrow_feature_scope]
       required_blockers: []
@@ -157,7 +185,8 @@ golden_decision_cases:
       expected_mandate_fit: weak
       expected_company_fit: strong
       expected_recommendation: not_recommended
-      expected_confidence: medium
+      expected_action: reject
+      expected_confidence: low
       required_supports: []
       required_concerns: [narrow_feature_scope]
       required_blockers: []
@@ -172,11 +201,12 @@ golden_decision_cases:
       expected_mandate_fit: weak
       expected_company_fit: strong
       expected_recommendation: not_recommended
-      expected_confidence: high
+      expected_action: reject
+      expected_confidence: low
       required_supports: []
       required_concerns: [fraud_risk_compliance_heavy, narrow_feature_scope]
       required_blockers: []
-      required_unknowns: []
+      required_unknowns: [feasibility_facts.work_format]
       expected_interactions: []
       expected_caps: []
       rationale: "Same company as GPNI — the pair proves mandate primacy."
@@ -187,7 +217,8 @@ golden_decision_cases:
       expected_mandate_fit: weak
       expected_company_fit: weak
       expected_recommendation: not_recommended
-      expected_confidence: high
+      expected_action: reject
+      expected_confidence: medium
       required_supports: []
       required_concerns: [pure_infrastructure_devex, crypto_exchange_employer]
       required_blockers: []
@@ -202,11 +233,12 @@ golden_decision_cases:
       expected_mandate_fit: mismatch
       expected_company_fit: weak
       expected_recommendation: not_recommended
-      expected_confidence: high
+      expected_action: reject
+      expected_confidence: low
       required_supports: []
       required_concerns: [crypto_exchange_employer]
       required_blockers: [internal_tools_backoffice]
-      required_unknowns: []
+      required_unknowns: [feasibility_facts.work_format]
       expected_interactions: [ir_crypto_employer_not_role_veto]
       expected_caps: []
       rationale: "Internal tools is an unsuppressed strong role anti-preference -> mandate mismatch."
@@ -215,8 +247,9 @@ golden_decision_cases:
       expected_lane: core
       expected_feasibility: infeasible
       expected_mandate_fit: mismatch
-      expected_company_fit: strong
+      expected_company_fit: unknown
       expected_recommendation: not_recommended
+      expected_action: reject
       expected_confidence: high
       required_supports: []
       required_concerns: []
@@ -224,14 +257,15 @@ golden_decision_cases:
       required_unknowns: []
       expected_interactions: []
       expected_caps: []
-      rationale: "Sales quota function without digital business ownership."
+      rationale: "Sales quota function without digital business ownership; company facts not annotated (unknown, diagnostic only)."
     - id: gd_canva_fpna
       fixture_ref: canva_fpna
       expected_lane: core
       expected_feasibility: infeasible
       expected_mandate_fit: mismatch
-      expected_company_fit: strong
+      expected_company_fit: unknown
       expected_recommendation: not_recommended
+      expected_action: reject
       expected_confidence: high
       required_supports: []
       required_concerns: []
@@ -246,32 +280,34 @@ golden_decision_cases:
       fixture_ref: brex_growth_ai_sf_no_sponsorship
       expected_lane: core
       expected_feasibility: infeasible
-      expected_mandate_fit: strong
+      expected_mandate_fit: moderate     # diagnostic band after terminal infeasibility
       expected_company_fit: strong
       expected_recommendation: not_recommended
+      expected_action: reject
       expected_confidence: high
       required_supports: [growth_mandate]
       required_concerns: []
       required_blockers: [fc_usa_onsite_requires_explicit_sponsorship]
-      required_unknowns: [sponsorship_stated]
-      expected_interactions: [ir_usa_relocation_requires_sponsorship]
+      required_unknowns: [feasibility_facts.sponsorship_stated]
+      expected_interactions: []
       expected_caps: []
-      rationale: "Even a strong mandate cannot survive infeasible geography."
+      rationale: "Even a good mandate cannot survive infeasible geography."
     - id: gd_us_onsite_with_sponsorship
       fixture_ref: synthetic_us_onsite_with_sponsorship
       expected_lane: core
       expected_feasibility: feasible
-      expected_mandate_fit: moderate
+      expected_mandate_fit: unknown
       expected_company_fit: unknown
       expected_recommendation: unclear
-      expected_confidence: medium
-      required_supports: [visa_support_stated]
+      expected_action: investigate
+      expected_confidence: unknown
+      required_supports: []
       required_concerns: []
       required_blockers: []
-      required_unknowns: [company_facts]
+      required_unknowns: [mandate.scope_breadth]
       expected_interactions: []
       expected_caps: []
-      rationale: "Explicit sponsorship unlocks general-terms evaluation; synthetic policy control (company facts unknown -> unclear per matrix moderate x unknown)."
+      rationale: "Explicit sponsorship unlocks general-terms evaluation; the synthetic control carries no mandate/company facts -> honest unclear."
     - id: gd_affirm_remote_tz_gap
       fixture_ref: affirm_remote_us_timezone_gap
       expected_lane: core
@@ -279,29 +315,31 @@ golden_decision_cases:
       expected_mandate_fit: weak
       expected_company_fit: moderate
       expected_recommendation: not_recommended
-      expected_confidence: high
+      expected_action: reject
+      expected_confidence: medium
       required_supports: []
-      required_concerns: [fraud_risk_compliance_heavy, timezone_burden]
+      required_concerns: [fraud_risk_compliance_heavy, narrow_feature_scope]
       required_blockers: []
-      required_unknowns: [timezone_expectations]
-      expected_interactions: [ir_remote_suppresses_onsite_country_penalty]
+      required_unknowns: [feasibility_facts.timezone_expectations]
+      expected_interactions: []
       expected_caps: []
-      rationale: "Timezone is only a factual concern; the rejection comes from the weak risk-strategy mandate, and explicit 'no sponsorship' is irrelevant for remote."
+      rationale: "Timezone is only a factual concern; the rejection comes from the weak risk-strategy mandate; explicit 'no sponsorship' is irrelevant for remote."
     - id: gd_payoneer_israel_unknown_sponsorship
       fixture_ref: payoneer_core_ai_platform_israel
       expected_lane: core
       expected_feasibility: uncertain
-      expected_mandate_fit: moderate
+      expected_mandate_fit: unknown
       expected_company_fit: unknown
       expected_recommendation: unclear
-      expected_confidence: low
+      expected_action: investigate
+      expected_confidence: unknown
       required_supports: []
-      required_concerns: [ai_as_subject]
+      required_concerns: []
       required_blockers: []
-      required_unknowns: [sponsorship_stated, company_facts]
+      required_unknowns: [feasibility_facts.sponsorship_stated, mandate.scope_breadth]
       expected_interactions: []
-      expected_caps: [cap_uncertain]
-      rationale: "Non-US onsite with unknown sponsorship -> uncertain; moderate x unknown -> unclear."
+      expected_caps: []
+      rationale: "Non-US hybrid with unknown sponsorship -> uncertain; no semantic mandate facts annotated -> unclear."
     - id: gd_kz_local_fallback
       fixture_ref: kz_local_zeekr_almaty
       expected_lane: fallback_local
@@ -309,13 +347,14 @@ golden_decision_cases:
       expected_mandate_fit: unknown
       expected_company_fit: unknown
       expected_recommendation: unclear
-      expected_confidence: low
+      expected_action: investigate
+      expected_confidence: unknown
       required_supports: []
       required_concerns: []
       required_blockers: []
-      required_unknowns: [scope_breadth, revenue_proximity, source_text]
+      required_unknowns: [mandate.scope_breadth]
       expected_interactions: [ir_kz_fallback_lane]
-      expected_caps: [cap_incomplete_text]
+      expected_caps: []
       rationale: "KZ local + unknown sponsorship stays feasible in the fallback lane (standby, delivery disabled); title-only snapshot leaves mandate unknown."
     - id: gd_sanctioned_location
       fixture_ref: null
@@ -325,6 +364,7 @@ golden_decision_cases:
       expected_mandate_fit: unknown
       expected_company_fit: unknown
       expected_recommendation: not_recommended
+      expected_action: reject
       expected_confidence: high
       required_supports: []
       required_concerns: []
@@ -341,6 +381,7 @@ golden_decision_cases:
       expected_mandate_fit: unknown
       expected_company_fit: unknown
       expected_recommendation: not_recommended
+      expected_action: reject
       expected_confidence: high
       required_supports: []
       required_concerns: []
@@ -356,6 +397,7 @@ golden_decision_cases:
       expected_mandate_fit: weak
       expected_company_fit: weak
       expected_recommendation: not_recommended
+      expected_action: reject
       expected_confidence: high
       required_supports: []
       required_concerns: [crypto_exchange_employer]
@@ -374,6 +416,7 @@ golden_decision_cases:
       expected_mandate_fit: strong
       expected_company_fit: weak
       expected_recommendation: promising
+      expected_action: investigate
       expected_confidence: medium
       required_supports: [scope_breadth, growth_mandate]
       required_concerns: [crypto_exchange_employer]
@@ -390,9 +433,10 @@ golden_decision_cases:
       expected_mandate_fit: strong
       expected_company_fit: mismatch
       expected_recommendation: not_recommended
+      expected_action: reject
       expected_confidence: medium
       required_supports: [scope_breadth]
-      required_concerns: []
+      required_concerns: [small_local_company]
       required_blockers: []
       required_unknowns: []
       expected_interactions: []
@@ -406,11 +450,12 @@ golden_decision_cases:
       expected_mandate_fit: strong
       expected_company_fit: unknown
       expected_recommendation: promising
-      expected_confidence: medium
+      expected_action: investigate
+      expected_confidence: unknown
       required_supports: [scope_breadth]
       required_concerns: []
       required_blockers: []
-      required_unknowns: [company_facts]
+      required_unknowns: [company.scale]
       expected_interactions: []
       expected_caps: []
       rationale: "Strong mandate with unknown company facts: promising + recommendation_changing clarification, not strong."

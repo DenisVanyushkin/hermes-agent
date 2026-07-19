@@ -1,5 +1,5 @@
 fixture_id: airwallex_gpni
-dataset_version: 1.0.0
+dataset_version: 1.0.1
 is_synthetic: false
 annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
   candidate-independent
@@ -46,7 +46,7 @@ ambiguities: []
 vacancy_understanding:
   metadata:
     schema_version: 1.0.0
-    extractor_version: 0.1.0
+    extractor_version: 0.1.1
     created_at: '2026-07-19T00:00:00Z'
     vacancy_key: 19624fa3e727f2342f24e1c9cb68417c58f02d955de35bfecf46800ff30ba035
     source_system: ashby
@@ -352,10 +352,13 @@ vacancy_understanding:
       method: none
       evidence: []
     brand_recognition:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: tier1_scaleup
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: 'research L4: $8B global scale-up'
     bureaucracy_signal:
       value: unknown
       confidence: unknown
@@ -392,12 +395,15 @@ vacancy_understanding:
         excerpt: SG - Singapore
         location: location
         rationale: null
-    country_group_resolver_version: 2026.07.19
+    country_group_resolver_version: 2026.07.19.1
     work_format:
-      value: unknown
-      confidence: unknown
-      method: none
-      evidence: []
+      value: onsite
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: SG office role (no remote language in posting)
     remote_geo_restrictions:
       value: null
       confidence: unknown
