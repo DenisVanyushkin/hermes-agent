@@ -118,3 +118,51 @@ def test_delete_of_referenced_place_is_conflict(db):
     d = seed.diff(db, f, snap)
     assert d.has_conflicts
     assert d.conflicts["Места"]
+
+
+def test_person_with_id_equal_to_place_id_can_be_deleted(db):
+    """Regression: _person_referenced_outside_file had a bogus check
+    SELECT 1 FROM people WHERE home_place_id=? that could false-positive
+    if person_id happened to equal some place_id. The check was removed
+    entirely (home_place_id is a foreign key to places, not people).
+    Verify that a person with no external references can be deleted cleanly,
+    even if their id numerically equals some place_id in the database.
+    """
+    from fam import people, places
+
+    _seed_db(db)
+
+    # Create a place with a known id
+    place_dict = places.add(db, "Новое место", address="Тестовое место")
+    place_id = place_dict["id"]
+
+    # Create a person with the same id as the place (by direct insert)
+    from datetime import datetime, timezone
+    person_id = place_id
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        "INSERT INTO people (id, name, kind, created_at) VALUES (?, 'Петя', 'person', ?)",
+        (person_id, now)
+    )
+
+    # Set the place as someone else's home (so place is referenced)
+    person_dict_1 = people.add(db, "Вася", kind="person")
+    people.set_home(db, person_dict_1["id"], place_id)
+    db.commit()
+
+    # Export and take snapshot
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+
+    # File form: delete Петя (person with id=place_id), no other changes
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Люди"] = [r for r in f["Люди"] if r.get("name") != "Петя"]
+
+    d = seed.diff(db, f, snap)
+
+    # Should be a clean delete, not a conflict
+    # (The bug would have incorrectly marked it as conflict because
+    # the bogus check would find the home_place_id reference)
+    assert not d.has_conflicts, f"Unexpected conflicts: {d.conflicts}"
+    assert any(r.get("name") == "Петя" for r in d.deletes.get("Люди", []))
+    assert not any(r.get("name") == "Петя" for r in d.conflicts.get("Люди", []))
