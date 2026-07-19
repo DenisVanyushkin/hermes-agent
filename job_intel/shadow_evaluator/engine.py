@@ -130,12 +130,14 @@ def evaluate(
         items.append(item)
         return item
 
+    UNCERTAIN_GRADE = {"u_work_format_non_kz", "u_country", "u_digital_ownership_nonproduct"}
+
     def add_unknown(policy_id: str, field: str, section: Section) -> None:
         entry = policy.unknown_policy[policy_id]
         ledger.append(UnknownLedgerEntry(
             policy_id=policy_id, field=field, section=section,
             cap=entry.cap.value, clarification_priority=entry.clarification_priority.value))
-        if entry.cap.value == "promising":
+        if entry.cap.value == "promising" and policy_id not in UNCERTAIN_GRADE:
             cap_ids.append("cap_critical_unknowns")
         if entry.clarification_priority.value in ("blocking", "recommendation_changing"):
             clarifications.append(Clarification(
@@ -154,8 +156,7 @@ def evaluate(
             rule_id="ir_kz_fallback_lane", effect="route_to_fallback",
             target_ids=["local_market_fallback", "small_local_company"], produced="lane=fallback_local"))
     kz_local_lane = lane == Lane.fallback_local
-    if sig.country_group is None:
-        add_unknown("u_country", "feasibility_facts.country_group", Section.feasibility)
+    country_unknown = sig.country_group is None
 
     # ---- Stage 3-4: feasibility matching + interactions + merge -----------
     verdict = FeasibilityVerdict.feasible
@@ -175,10 +176,18 @@ def evaluate(
                 rule_id=rule.id, effect="allow", target_ids=rule.effect.target_ids,
                 produced="prevented"))
 
+    digital_unknown_nonproduct = (
+        sig.flag("non_product_function")
+        and "mandate.digital_business_ownership" in sig.unknown_fields)
+
     for c in pref.feasibility_constraints.constraints:
         if c.status != RuleStatus.active:
             continue
         if c.id in prevented:
+            continue
+        if c.id == "fc_function_digital_business_ownership" and digital_unknown_nonproduct:
+            # unknown != false: an unknown digital-business-ownership fact must
+            # not satisfy the flags_none condition — routed to uncertain-grade
             continue
         if condition_matches(c.when, scenario):
             matched_constraints.append(c.id)
@@ -197,9 +206,28 @@ def evaluate(
                 else:
                     feas_unknown_ids.append(item.id)
 
-    # feasibility unknown policy (uncertain-grade unknowns cap, verdict unchanged)
+    # uncertain-grade unknowns (SoT §5): verdict -> uncertain, explanation
+    # item with impact=feasibility_uncertain, blocking clarification.
+    def add_uncertain_grade(policy_id: str, field: str, statement: str) -> None:
+        nonlocal verdict
+        if _order(FeasibilityVerdict.uncertain) > _order(verdict):
+            verdict = FeasibilityVerdict.uncertain
+        item = add_item(
+            id=f"unk_{policy_id}", section=Section.feasibility, kind=ItemKind.unknown,
+            preference_rule_id=policy_id, vacancy_fact_path=field,
+            statement=statement, evidence_refs=["src_structured_fields"],
+            confidence=Confidence.unknown, impact="feasibility_uncertain")
+        feas_unknown_ids.append(item.id)
+        add_unknown(policy_id, field, Section.feasibility)
+
     if sig.work_format is None and not kz_local_lane:
-        add_unknown("u_work_format_non_kz", "feasibility_facts.work_format", Section.feasibility)
+        add_uncertain_grade(
+            "u_work_format_non_kz", "feasibility_facts.work_format",
+            "work format is unknown outside the KZ fallback lane -> feasibility uncertain")
+    if digital_unknown_nonproduct:
+        add_uncertain_grade(
+            "u_digital_ownership_nonproduct", "mandate.digital_business_ownership",
+            "non-product function with unknown digital business ownership -> feasibility uncertain")
     if "feasibility_facts.sponsorship_stated" in sig.unknown_fields:
         if sig.work_format is not None and sig.work_format.value in ("onsite", "hybrid") \
                 and sig.country_group is not None and sig.country_group.value not in ("usa", "kazakhstan"):
@@ -207,6 +235,10 @@ def evaluate(
         elif not kz_local_lane and (sig.work_format is None or sig.work_format.value == "remote"):
             # optional-grade: no cap, no clarification pressure
             pass
+    if country_unknown:
+        add_uncertain_grade(
+            "u_country", "feasibility_facts.country_group",
+            "country is unknown -> feasibility uncertain")
     if sig.source_text_incomplete:
         add_unknown("u_incomplete_text", "source_text", Section.feasibility)
         cap_ids.append("cap_incomplete_text")

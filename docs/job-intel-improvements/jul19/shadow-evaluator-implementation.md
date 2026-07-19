@@ -34,7 +34,12 @@ cli/digest/store/feedback/evaluator/crm/slack (guard-тесты в обе сто
   strong-оси → weak; счёта concerns нет (O6).
 - **Unknown policy**: полевые записи contract → ledger + clarifications;
   «uncertain-grade» unknown (work_format вне KZ, country, digital-ownership
-  при non-product) капит на promising, verdict не меняет.
+  при non-product) буквально переводит `feasibility.verdict` в **uncertain**
+  (review fix 2026-07-19) с explanation-item `impact=feasibility_uncertain`
+  и blocking clarification; сопутствующий дефект закрыт: fc_function больше
+  не матчится на UNKNOWN digital ownership (unknown ≠ false) — такой случай
+  идёт в uncertain-grade. Triggered caps всегда фиксируются в applied_caps,
+  даже если результат уже на/ниже потолка.
 - **Confidence**: min по критическим фактам секции (scope/revenue; work
   format/country/sponsorship-when-relevant; scale/brand); revenue-конфиденс
   наследуется от факта; overall = min секций; terminal infeasible → high.

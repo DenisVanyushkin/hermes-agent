@@ -70,16 +70,16 @@ class RuntimePolicy:
 
     def apply_caps(self, recommendation: Recommendation,
                    cap_ids: list[str]) -> tuple[Recommendation, list[str]]:
+        """Monotonic: caps may only lower. Every TRIGGERED cap is recorded in
+        applied_caps (a ceiling in force stays visible in the trace and
+        explanations even when the result already sits at or below it)."""
         result = recommendation.value
         applied: list[str] = []
         for cap_id in cap_ids:
             ceiling = self.caps[cap_id].ceiling.value
             if _REC_ORDER.index(result) > _REC_ORDER.index(ceiling):
                 result = ceiling
-                applied.append(cap_id)
-            elif _REC_ORDER.index(result) == _REC_ORDER.index(ceiling) and cap_id not in applied:
-                # cap was binding at the same level: record it as applied for
-                # explanation coverage, without double punishment
+            if cap_id not in applied:
                 applied.append(cap_id)
         return Recommendation(result), applied
 
