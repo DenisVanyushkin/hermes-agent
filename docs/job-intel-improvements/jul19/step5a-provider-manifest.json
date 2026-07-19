@@ -10,6 +10,8 @@
   "provider_contract_version": "1.0.0",
   "implementation_commit": "this commit (self-hash unknowable at commit time; authoritative value = git log --oneline -1 -- job_intel/vacancy_understanding/semantic/runtime/llm_provider.py)",
   "recording_format_version": "1.0",
-  "live_calls_approved": false,
-  "approved_cost_cap": null
+  "live_calls_approved": true,
+  "approved_cost_cap": "USD 1.00 (smoke only, APPROVE_STEP5A_SMOKE_WITH_CAP_$1, 2026-07-19)",
+  "smoke_actual_cost_usd": 0.0911,
+  "smoke_verdict": "STEP_5A_SMOKE_COMPLETE"
 }

@@ -357,6 +357,30 @@ def test_response_schema_derived_from_observation_model():
     assert item.get("additionalProperties") is False
 
 
+def test_response_schema_has_no_dangling_refs():
+    # every $ref of the form #/$defs/X must resolve from the DOCUMENT root
+    # (nested $defs caused a live 400 invalid_json_schema on 2026-07-19)
+    schema = response_schema()
+    refs = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "$ref" in node:
+                refs.append(node["$ref"])
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(schema)
+    root_defs = schema.get("$defs", {})
+    for ref in refs:
+        assert ref.startswith("#/$defs/"), ref
+        assert ref.split("/")[-1] in root_defs, f"dangling {ref}"
+    assert "$defs" not in schema["properties"]["observations"]["items"]
+
+
 # ----------------------------------------------- 5A-4a: transport integrity --
 
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (

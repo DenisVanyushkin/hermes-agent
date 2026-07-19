@@ -153,14 +153,24 @@ Hard rules:
 
 
 def response_schema() -> dict[str, Any]:
-    """Structured-output schema derived from the existing Observation model."""
+    """Structured-output schema derived from the existing Observation model.
+
+    ``$defs`` are hoisted to the document root: ``$ref: #/$defs/...`` inside
+    the nested item schema resolves from the root, so leaving them under
+    ``items`` produces a dangling reference the API rejects (400
+    invalid_json_schema — hit on the first smoke attempt, 2026-07-19).
+    """
     obs_schema = Observation.model_json_schema()
-    return {
+    defs = obs_schema.pop("$defs", None)
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {"observations": {"type": "array", "items": obs_schema}},
         "required": ["observations"],
         "additionalProperties": False,
     }
+    if defs:
+        schema["$defs"] = defs
+    return schema
 
 
 # ---------------------------------------------------------------------------
