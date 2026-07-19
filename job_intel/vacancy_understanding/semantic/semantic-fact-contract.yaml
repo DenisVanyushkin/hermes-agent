@@ -1,0 +1,746 @@
+# Semantic Vacancy Understanding — machine-readable SoT (Step 4A).
+# Human SoT: docs/job-intel-improvements/jul19/semantic-vacancy-understanding-sot.md
+# Validated by job_intel/vacancy_understanding/semantic/contract.py.
+# NO runtime extraction exists; providers/prompts are implementation details.
+# Fact ids are canonical Step 2 field paths — no second vocabulary.
+
+semantic_fact_contract:
+  metadata:
+    contract_version: "1.0.0"
+    status: "semantic_sot_not_implemented"
+    owner: "Denis Vanyushkin"
+    production_integration: false
+    no_silent_learning: true
+    human_sot: "docs/job-intel-improvements/jul19/semantic-vacancy-understanding-sot.md"
+    step2_schema_compat: "1.x"
+    decision_contract_compat: "1.x"
+
+  evidence_hierarchy:
+    levels: [explicit_text, structured_source_field, deterministic_derivation, semantic_inference, human_gold]
+    level_definitions:
+      explicit_text: "a verbatim statement in the vacancy body that asserts the fact directly (near-paraphrase)"
+      structured_source_field: "an ATS-structured field (title, location, employment type) carrying the fact"
+      deterministic_derivation: "a pure rule over explicit text/structured fields (Step 2 extractor v0.1.x class)"
+      semantic_inference: "an interpretation of vacancy language via the observation model — the subject of this SoT"
+      human_gold: "manual gold annotation; test/calibration truth, NEVER a runtime source"
+    prohibited_sources:
+      - "company reputation or brand familiarity (e.g. 'Wise is big therefore scale=global')"
+      - "recruiter intuition or operator memory"
+      - "historical assumptions from previous vacancies of the same company"
+      - "previous evaluations, legacy scores or feedback history"
+      - "provider world knowledge not grounded in the vacancy text"
+    only_vacancy_evidence_produces_vacancy_facts: true
+
+  observation_model:
+    definition: >
+      A semantic observation is an intermediate, evidence-carrying record:
+      {observation_id, verbatim excerpt, location, signal_type,
+      interpretation, maps_to: [fact ids]}. Extractors emit observations from
+      text, then a mapping stage derives canonical facts from observations.
+      A canonical fact may never be written directly from raw text.
+    required_fields: [observation_id, excerpt, location, signal_type, interpretation, maps_to]
+    facts_never_written_directly_from_text: true
+    min_observations_per_semantic_fact: 1
+    excerpt_must_be_verbatim: true
+    max_excerpt_len: 400
+
+  provenance_model:
+    required_fields: [origin, provider, prompt_version, evidence_refs, reasoning_summary, confidence]
+    reasoning_summary_style: >
+      one to two sentences, strictly evidence-based ("posting states X and Y,
+      therefore fact=V"), citing observation ids; no speculation
+    chain_of_thought_forbidden: true
+
+  confidence_policy:
+    provider_confidence_is_not_a_source: true
+    rules:
+      - {level: high, allowed_when: "an explicit_text observation directly asserts the fact (near-paraphrase); no contradicting observation"}
+      - {level: medium, allowed_when: "semantic inference supported by direct responsibility/mandate language in the body; no contradiction"}
+      - {level: low, allowed_when: "title-only or boilerplate-adjacent signals; single weak observation"}
+      - {level: unknown, allowed_when: "no qualifying observation exists — the fact value must then be unknown, never guessed"}
+
+  conflict_policy:
+    - id: cf_contradictory_observations
+      situation: "two observations support incompatible values of one fact at the same evidence level"
+      resolution: "fact -> unknown; risk internal_contradiction with both observations attached; clarification emitted"
+    - id: cf_evidence_level_conflict
+      situation: "observations at different evidence levels disagree"
+      resolution: "higher level wins (hierarchy order); losing observation retained in provenance as overridden"
+    - id: cf_deterministic_vs_semantic
+      situation: "semantic inference disagrees with a Step 2 deterministic fact"
+      resolution: "deterministic wins; semantic observation recorded as internal_contradiction risk; NEVER overwrite"
+    - id: cf_impossible_combination
+      situation: "facts violate a Step 2 model invariant (e.g. platform_as_business AND platform_engineering true)"
+      resolution: "keep the value backed by the higher evidence level; the other -> unknown; if equal levels -> both unknown + internal_contradiction risk (mirrors Step 2 validator)"
+    - id: cf_insufficient_evidence
+      situation: "observations exist but none meets the fact's evidence_required bar"
+      resolution: "fact -> unknown with confidence unknown; observations retained; clarification per unknown policy"
+    - id: cf_duplicate_observations
+      situation: "multiple observations map to the same fact with the same value"
+      resolution: "fact emitted once; all observations listed in evidence_refs; confidence from the strongest"
+
+  # -------------------------------------------------------------------------
+  # Fact inventory. id = canonical Step 2 field path (single definition each).
+  # values reference Step 2 enums; tri = true|false|unknown.
+  # -------------------------------------------------------------------------
+  facts:
+    # ---------------- mandate ----------------
+    - id: mandate.scope_breadth
+      group: mandate
+      meaning: "real breadth of ownership judged from responsibilities, not the title"
+      values: "ScopeBreadth: feature|domain|business_line|region|portfolio|enterprise|unknown"
+      extraction_class: semantic_only
+      evidence_required: "responsibility language naming the owned unit (product area, business line, market, portfolio); title alone caps confidence at low"
+      prohibited_evidence: ["title seniority tokens as scope proof", "company size as scope proxy"]
+      deterministic_relation: "no deterministic source; Step 2 leaves unknown"
+      evaluator_relation: "primary mandate discriminator (scope_breadth / narrow_feature_scope signals)"
+      unknown: {unknown_required_when: "no responsibility language describes the owned unit", inference_forbidden_when: "only the title or company brand suggests breadth", clarification_priority: blocking}
+      controls:
+        positive: "'Own APAC growth and expansion across all markets' -> region"
+        negative: "'Improve the onboarding flow conversion' -> feature"
+        ambiguous: "'Drive growth across acquisition and onboarding' -> domain, ambiguity noted"
+        unknown: "title-only posting -> unknown (title evidence may set low-confidence value only when explicit, e.g. 'APAC' in title)"
+        conflicting: "'own the business line' + 'report into the feature team' -> unknown + internal_contradiction"
+    - id: mandate.revenue_proximity
+      group: mandate
+      meaning: "closeness of the role to revenue/P&L"
+      values: "RevenueProximity: support|enabling|indirect|direct_revenue|direct_pnl|unknown"
+      extraction_class: hybrid
+      evidence_required: "explicit P&L wording (deterministic) or revenue-accountability language (semantic)"
+      prohibited_evidence: ["'commercial impact' boilerplate as direct_revenue"]
+      deterministic_relation: "explicit 'own the P&L' handled deterministically (Step 2); semantic covers de-facto accountability"
+      evaluator_relation: "critical confidence fact; exceptional band requires known revenue"
+      unknown: {unknown_required_when: "no revenue/P&L language", inference_forbidden_when: "inferring from seniority or company model", clarification_priority: recommendation_changing}
+      controls:
+        positive: "'You will own revenue targets for the SMB line' -> direct_revenue"
+        negative: "'Support the finance team with reporting' -> support"
+        ambiguous: "'Drive commercial outcomes' -> unknown or indirect at low confidence, ambiguity noted"
+        unknown: "no revenue language -> unknown"
+        conflicting: "'own P&L' + 'no budget responsibility' -> unknown + contradiction risk"
+    - id: mandate.growth_mandate
+      group: mandate
+      meaning: "growth (acquisition/expansion funnels) is core to the mandate"
+      values: "tri"
+      extraction_class: hybrid
+      evidence_required: "growth token in title (deterministic evidence, low-medium) or growth responsibilities in body (semantic, medium-high)"
+      prohibited_evidence: ["company-wide growth marketing talk without role responsibility"]
+      deterministic_relation: "title token = deterministic evidence input, not the fact itself"
+      evaluator_relation: "strong preference support growth_mandate"
+      unknown: {unknown_required_when: "no growth language tied to the role", inference_forbidden_when: "company is 'high growth' but the role is not", clarification_priority: confidence_improving}
+      controls:
+        positive: "'Own user acquisition and activation' -> true"
+        negative: "'Maintain the existing reporting stack' -> false"
+        ambiguous: "'Contribute to growth initiatives' -> unknown, ambiguity noted"
+        unknown: "no growth mention -> unknown"
+        conflicting: "'Growth' title + purely compliance duties -> unknown + title_scope_mismatch risk"
+    - id: mandate.expansion_mandate
+      group: mandate
+      meaning: "market/geographic expansion is part of the mandate"
+      values: "tri"
+      extraction_class: hybrid
+      evidence_required: "expansion/market-entry responsibilities; title token as weak evidence"
+      prohibited_evidence: ["company expansion news"]
+      deterministic_relation: "title token as evidence input"
+      evaluator_relation: "feeds growth_mandate strong support family"
+      unknown: {unknown_required_when: "no expansion language", inference_forbidden_when: "region named without expansion duty", clarification_priority: confidence_improving}
+      controls:
+        positive: "'Launch and scale new markets in APAC' -> true"
+        negative: "'Operate the established UK business' -> false"
+        ambiguous: "'Work with international teams' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'expansion' title + maintenance duties -> unknown + mismatch risk"
+    - id: mandate.monetization_core
+      group: mandate
+      meaning: "pricing/monetization/acquiring is the core domain of the role"
+      values: "tri"
+      extraction_class: hybrid
+      evidence_required: "monetization domain named as the role's core (title or body)"
+      prohibited_evidence: ["mentioning revenue in passing"]
+      deterministic_relation: "pricing/acquiring title tokens are deterministic evidence"
+      evaluator_relation: "narrow-scope monetization exception key (ir_narrow_scope_monetization_exception)"
+      unknown: {unknown_required_when: "domain not identifiable", inference_forbidden_when: "role merely influences revenue", clarification_priority: recommendation_changing}
+      controls:
+        positive: "'Product Lead - Pricing: own our pricing engine' -> true"
+        negative: "'Own the compliance product' -> false"
+        ambiguous: "'Improve unit economics' -> unknown"
+        unknown: "no monetization language -> unknown"
+        conflicting: "pricing title + 'no pricing authority' -> unknown + contradiction"
+    - id: mandate.pricing_core
+      group: mandate
+      meaning: "pricing specifically is the core domain"
+      values: "tri"
+      extraction_class: hybrid
+      evidence_required: "as monetization_core, pricing-specific"
+      prohibited_evidence: ["generic monetization talk"]
+      deterministic_relation: "title token evidence"
+      evaluator_relation: "companion of monetization_core"
+      unknown: {unknown_required_when: "not pricing-specific", inference_forbidden_when: "always when only revenue is mentioned", clarification_priority: optional}
+      controls:
+        positive: "'own pricing strategy and experimentation' -> true"
+        negative: "'own the fraud product' -> false"
+        ambiguous: "'commercial levers' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "pricing title + no pricing duties -> unknown"
+    - id: mandate.acquiring_core
+      group: mandate
+      meaning: "acquiring specifically is the core domain"
+      values: "tri"
+      extraction_class: hybrid
+      evidence_required: "as pricing_core, acquiring-specific"
+      prohibited_evidence: ["payments mentions in passing"]
+      deterministic_relation: "title token evidence"
+      evaluator_relation: "companion of monetization_core"
+      unknown: {unknown_required_when: "not acquiring-specific", inference_forbidden_when: "generic payments context", clarification_priority: optional}
+      controls:
+        positive: "'own our card acquiring product' -> true"
+        negative: "'own onboarding' -> false"
+        ambiguous: "'payments platform work' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "acquiring title + devex duties -> unknown"
+    - id: mandate.pnl_ownership
+      group: mandate
+      meaning: "explicit or de-facto P&L ownership"
+      values: "tri"
+      extraction_class: hybrid
+      evidence_required: "explicit P&L wording (deterministic, high) or budget+revenue accountability combo (semantic, medium)"
+      prohibited_evidence: ["seniority as P&L proxy"]
+      deterministic_relation: "explicit wording extracted deterministically in Step 2; semantic only adds de-facto cases"
+      evaluator_relation: "strong support pnl_ownership; u_pnl unknown cap no_exceptional"
+      unknown: {unknown_required_when: "no P&L/budget-revenue language", inference_forbidden_when: "GM/Director title alone", clarification_priority: recommendation_changing}
+      controls:
+        positive: "'full P&L ownership of the business line' -> true"
+        negative: "'influence roadmap, finance owns the budget' -> false"
+        ambiguous: "'accountable for business results' -> unknown or low"
+        unknown: "no mention -> unknown"
+        conflicting: "'own P&L' + 'report into product org without budget' -> unknown + contradiction"
+    - id: mandate.strategy_ownership
+      group: mandate
+      meaning: "owns strategy rather than executing someone else's"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "'define/set/own the strategy' language for the owned unit"
+      prohibited_evidence: ["the word 'strategic' as an adjective"]
+      deterministic_relation: "none"
+      evaluator_relation: "medium mandate support"
+      unknown: {unknown_required_when: "no strategy-ownership language", inference_forbidden_when: "'strategic role' boilerplate", clarification_priority: confidence_improving}
+      controls:
+        positive: "'You define the product strategy for business banking' -> true"
+        negative: "'Execute the roadmap defined by the CPO' -> false"
+        ambiguous: "'strategic thinker wanted' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'own strategy' + 'execute the group plan' -> unknown"
+    - id: mandate.org_design_mandate
+      group: mandate
+      meaning: "mandate to (re)design the organization/operating model"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "explicit org design/operating-model responsibilities"
+      prohibited_evidence: ["people management alone"]
+      deterministic_relation: "none"
+      evaluator_relation: "medium support org_mandate"
+      unknown: {unknown_required_when: "no org-design language", inference_forbidden_when: "team size mentioned without design mandate", clarification_priority: optional}
+      controls:
+        positive: "'redesign the product operating model across tribes' -> true"
+        negative: "'join an established team structure' -> false"
+        ambiguous: "'shape how we work' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'build the org' + 'headcount frozen, structure fixed' -> unknown"
+    - id: mandate.team_build_mandate
+      group: mandate
+      meaning: "build/rebuild the team"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "hiring/building-the-team responsibilities"
+      prohibited_evidence: ["'work with a great team'"]
+      deterministic_relation: "explicit 'team of N' size handled deterministically; the MANDATE is semantic"
+      evaluator_relation: "medium support family"
+      unknown: {unknown_required_when: "no team-building language", inference_forbidden_when: "manager title alone", clarification_priority: optional}
+      controls:
+        positive: "'hire and grow a team of PMs from scratch' -> true"
+        negative: "'lead an existing team of 8' -> false"
+        ambiguous: "'grow the function' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'build the team' + 'no hiring this year' -> unknown"
+    - id: mandate.executive_exposure
+      group: mandate
+      meaning: "regular executive/C-suite visibility"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "explicit exposure/reporting language ('present to the exec team')"
+      prohibited_evidence: ["seniority title alone"]
+      deterministic_relation: "reports-to phrases deterministic; exposure is semantic"
+      evaluator_relation: "medium support executive_exposure"
+      unknown: {unknown_required_when: "no exposure language", inference_forbidden_when: "director+ title alone", clarification_priority: optional}
+      controls:
+        positive: "'present quarterly to the executive committee' -> true"
+        negative: "'work within the delivery squad' -> false"
+        ambiguous: "'high visibility role' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'exec exposure' + 'reports to a team lead' -> unknown"
+    - id: mandate.board_exposure
+      group: mandate
+      meaning: "board-level visibility"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "explicit board interaction language"
+      prohibited_evidence: ["'executive' wording as board proxy"]
+      deterministic_relation: "none"
+      evaluator_relation: "medium support family"
+      unknown: {unknown_required_when: "no board language", inference_forbidden_when: "always without explicit mention", clarification_priority: optional}
+      controls:
+        positive: "'prepare and present board updates' -> true"
+        negative: "'no external reporting' -> false"
+        ambiguous: "'senior stakeholders' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'board exposure' + 'IC role' -> unknown + mismatch risk"
+    - id: mandate.market_entry_ownership
+      group: mandate
+      meaning: "owns entry into new markets"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "market-entry/launch responsibilities"
+      prohibited_evidence: ["company plans without role duty"]
+      deterministic_relation: "none"
+      evaluator_relation: "expansion family support"
+      unknown: {unknown_required_when: "no entry language", inference_forbidden_when: "regional title alone", clarification_priority: optional}
+      controls:
+        positive: "'lead our entry into LATAM' -> true"
+        negative: "'optimize existing markets' -> false"
+        ambiguous: "'international scope' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'new markets' + 'no launches planned' -> unknown"
+    - id: mandate.turnaround_mandate
+      group: mandate
+      meaning: "turn around a declining/broken area"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "turnaround/recovery language"
+      prohibited_evidence: ["'challenging environment' boilerplate"]
+      deterministic_relation: "none"
+      evaluator_relation: "transformation family"
+      unknown: {unknown_required_when: "no turnaround language", inference_forbidden_when: "always without explicit signals", clarification_priority: optional}
+      controls:
+        positive: "'reverse the decline of the subscriber base' -> true"
+        negative: "'scale a fast-growing product' -> false"
+        ambiguous: "'transform the business' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'turnaround' + 'steady-state operation' -> unknown"
+    - id: mandate.zero_to_one_mandate
+      group: mandate
+      meaning: "build something new from scratch"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "zero-to-one/greenfield language"
+      prohibited_evidence: ["startup self-description of the company"]
+      deterministic_relation: "none"
+      evaluator_relation: "medium support zero_to_one_mandate"
+      unknown: {unknown_required_when: "no greenfield language", inference_forbidden_when: "company stage as proxy", clarification_priority: optional}
+      controls:
+        positive: "'take the payout product from zero to one' -> true"
+        negative: "'iterate on our mature core product' -> false"
+        ambiguous: "'entrepreneurial mindset' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'zero-to-one' + 'maintain the legacy stack' -> unknown"
+    - id: mandate.maintenance_only
+      group: mandate
+      meaning: "the role is steady-state maintenance/optimize-only"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "maintenance/optimize-only framing of ALL core duties"
+      prohibited_evidence: ["a single optimization duty among broader ones"]
+      deterministic_relation: "none"
+      evaluator_relation: "anti-signal (transformation anti_values)"
+      unknown: {unknown_required_when: "duties mixed or unclear", inference_forbidden_when: "one maintenance bullet exists", clarification_priority: optional}
+      controls:
+        positive: "'keep the existing platform stable; no new scope planned' -> true"
+        negative: "'launch the new business line' -> false"
+        ambiguous: "'optimize and grow' -> unknown"
+        unknown: "no phase language -> unknown"
+        conflicting: "'maintenance role' + 'build new products' -> unknown"
+    - id: mandate.feature_delivery_only
+      group: mandate
+      meaning: "pure feature-delivery execution without ownership"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "delivery-only framing (ship features defined elsewhere)"
+      prohibited_evidence: ["agile vocabulary alone"]
+      deterministic_relation: "none"
+      evaluator_relation: "weak-band signal"
+      unknown: {unknown_required_when: "ownership unclear", inference_forbidden_when: "delivery mentioned among ownership duties", clarification_priority: optional}
+      controls:
+        positive: "'deliver features from the central roadmap' -> true"
+        negative: "'define what we build and why' -> false"
+        ambiguous: "'ship fast' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'delivery role' + 'own strategy' -> unknown + contradiction"
+    - id: mandate.digital_business_ownership
+      group: mandate
+      meaning: "role owns a digital business (product + commercial outcomes), independent of title family"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "combined product + commercial accountability language"
+      prohibited_evidence: ["GM/commercial title alone", "sales quota as ownership"]
+      deterministic_relation: "none; feeds the fc_function uncertain-grade path when unknown with non-product function"
+      evaluator_relation: "hybrid-GM policy key (ir_hybrid_gm_roles_allowed / fc_function)"
+      unknown: {unknown_required_when: "commercial-product combination not evidenced", inference_forbidden_when: "title family alone", clarification_priority: blocking}
+      controls:
+        positive: "'GM Digital: own product, growth and the P&L of the online business' -> true"
+        negative: "'carry the enterprise sales quota' -> false"
+        ambiguous: "'commercial product leader' -> unknown"
+        unknown: "no combined language -> unknown"
+        conflicting: "'own the digital business' + 'no product authority' -> unknown + contradiction"
+    - id: mandate.transformation_phase
+      group: mandate
+      meaning: "phase(s) of the work: build/scale/turnaround/expand/optimize/maintain"
+      values: "list[TransformationPhase]"
+      extraction_class: semantic_only
+      evidence_required: "phase language per included value; multiple values allowed when each is evidenced"
+      prohibited_evidence: ["'fast-paced environment' boilerplate"]
+      deterministic_relation: "none"
+      evaluator_relation: "transformation preference"
+      unknown: {unknown_required_when: "no phase language", inference_forbidden_when: "company stage as proxy", clarification_priority: optional}
+      controls:
+        positive: "'launch new markets while scaling the core' -> [expand, scale]"
+        negative: "'keep the lights on' -> [maintain]"
+        ambiguous: "'dynamic environment' -> [unknown]"
+        unknown: "no phase language -> [unknown]"
+        conflicting: "'greenfield' + 'no new development' -> [unknown] + contradiction"
+    - id: mandate.mandate_summary
+      group: mandate
+      meaning: "concise candidate-independent synthesis of the mandate"
+      values: "free text (bounded), evidence-backed, no recommendation language"
+      extraction_class: semantic_only
+      evidence_required: "must be derivable from cited observations only"
+      prohibited_evidence: ["desirability wording", "candidate references"]
+      deterministic_relation: "none"
+      evaluator_relation: "explanation layer input only — never a decision input"
+      unknown: {unknown_required_when: "fewer than two known mandate facts", inference_forbidden_when: "would require guessing scope", clarification_priority: optional}
+      controls:
+        positive: "'Regional growth and market-expansion ownership with direct revenue accountability.'"
+        negative: "'Great role for an ambitious leader' (forbidden desirability wording)"
+        ambiguous: "text supports only a partial summary -> summarize only the evidenced part"
+        unknown: "insufficient facts -> null"
+        conflicting: "conflicting scope observations -> no summary, contradiction risk"
+
+    # ---------------- product shape ----------------
+    - id: mandate.platform_as_business
+      group: product_shape
+      meaning: "the platform IS the monetized product (value flows through it)"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "language showing external customers/money move through the platform (rails, marketplace core, network sold as product)"
+      prohibited_evidence: ["the word 'platform' alone", "company association (other roles at the same company)"]
+      deterministic_relation: "none; mutually exclusive with platform_engineering=true (Step 2 invariant)"
+      evaluator_relation: "strong support platform_as_the_business; contrast pair with platform_engineering"
+      unknown: {unknown_required_when: "platform words without business-shape evidence", inference_forbidden_when: "'infrastructure' in title with commercial ownership unproven either way", clarification_priority: recommendation_changing}
+      controls:
+        positive: "'own the payment rails our customers move money through' -> true"
+        negative: "'internal developer platform' -> false"
+        ambiguous: "'platform product manager' -> unknown"
+        unknown: "no platform-shape language -> unknown"
+        conflicting: "'customer-facing rails' + 'serving internal teams only' -> both platform facts unknown + contradiction"
+    - id: mandate.platform_engineering
+      group: product_shape
+      meaning: "internal platform / DevEx / reliability engineering focus"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "internal-delivery language (developer productivity, reliability, internal platform users)"
+      prohibited_evidence: ["'infrastructure' word alone when commercial platform ownership is explicit"]
+      deterministic_relation: "mutual exclusion invariant with platform_as_business"
+      evaluator_relation: "weak-band signal pure_infrastructure_devex; exclude_from platform_as_the_business"
+      unknown: {unknown_required_when: "internal-vs-external audience not evidenced", inference_forbidden_when: "title contains 'infrastructure' but body shows commercial platform", clarification_priority: recommendation_changing}
+      controls:
+        positive: "'build the internal compute platform for our engineers' -> true"
+        negative: "'own the acquiring product for merchants' -> false"
+        ambiguous: "'infrastructure PM' -> unknown"
+        unknown: "no audience evidence -> unknown"
+        conflicting: "internal + external audience claims -> both unknown + contradiction"
+    - id: mandate.internal_tools_backoffice
+      group: product_shape
+      meaning: "the product serves internal employees / back-office"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "internal-user language (employees, HR/finance operations as users)"
+      prohibited_evidence: ["'operations' word alone"]
+      deterministic_relation: "none"
+      evaluator_relation: "mismatch-grade role anti internal_tools_backoffice"
+      unknown: {unknown_required_when: "user audience not evidenced", inference_forbidden_when: "back-office domain named without user audience", clarification_priority: recommendation_changing}
+      controls:
+        positive: "'internal HR and finance systems used by our people team' -> true"
+        negative: "'customer-facing compliance product' -> false"
+        ambiguous: "'operations tooling' -> unknown"
+        unknown: "no audience evidence -> unknown"
+        conflicting: "'internal tools' + 'external customers' -> unknown + contradiction"
+    - id: mandate.risk_compliance_heavy
+      group: product_shape
+      meaning: "fraud/risk/compliance is the dominant subject"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "dominance of risk/compliance duties in the core responsibilities"
+      prohibited_evidence: ["a single compliance bullet in a broad role"]
+      deterministic_relation: "none"
+      evaluator_relation: "weak-band signal fraud_risk_compliance_heavy"
+      unknown: {unknown_required_when: "risk share of duties unclear", inference_forbidden_when: "regulated industry alone", clarification_priority: optional}
+      controls:
+        positive: "'own fraud prevention end to end' -> true"
+        negative: "'growth role; comply with policies' -> false"
+        ambiguous: "'risk-aware product leader' -> unknown"
+        unknown: "no risk language -> unknown"
+        conflicting: "'fraud role' + 'primarily growth duties' -> unknown + title_scope_mismatch"
+
+    # ---------------- organization ----------------
+    - id: organization.cross_functional_leadership
+      group: organization
+      meaning: "leads across functions (not only own team)"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "explicit cross-functional leadership duties"
+      prohibited_evidence: ["'collaborate with' boilerplate"]
+      deterministic_relation: "reports-to/team-size phrases are deterministic; leadership shape is semantic"
+      evaluator_relation: "org-authority context (confidence only)"
+      unknown: {unknown_required_when: "no leadership-shape language", inference_forbidden_when: "collaboration wording alone", clarification_priority: optional}
+      controls:
+        positive: "'lead engineering, design and ops leaders toward the line goals' -> true"
+        negative: "'manage your PM team' -> false"
+        ambiguous: "'work cross-functionally' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'lead the org' + 'IC position' -> unknown + mismatch risk"
+    - id: organization.budget_ownership
+      group: organization
+      meaning: "owns a budget"
+      values: "tri"
+      extraction_class: hybrid
+      evidence_required: "explicit budget wording (deterministic-adjacent) or clear accountability language"
+      prohibited_evidence: ["seniority as proxy"]
+      deterministic_relation: "explicit phrases could be deterministic later; currently semantic"
+      evaluator_relation: "supports de-facto P&L reasoning (confidence only)"
+      unknown: {unknown_required_when: "no budget language", inference_forbidden_when: "title alone", clarification_priority: optional}
+      controls:
+        positive: "'own the marketing budget for the line' -> true"
+        negative: "'budget managed centrally' -> false"
+        ambiguous: "'resource planning' -> unknown"
+        unknown: "no mention -> unknown"
+        conflicting: "'own budget' + 'finance approves all spend' -> unknown"
+
+    # ---------------- company (vacancy-text-evidenced only) ----------------
+    - id: company.scale
+      group: company
+      meaning: "operating scale of the company AS STATED IN THE VACANCY"
+      values: "CompanyScale: local|regional|multi_region|global|unknown"
+      extraction_class: hybrid
+      evidence_required: "explicit statements ('26 offices around the globe', 'serving 40 markets')"
+      prohibited_evidence: ["brand familiarity", "provider world knowledge"]
+      deterministic_relation: "none today; explicit numeric patterns may become deterministic"
+      evaluator_relation: "company band critical fact"
+      unknown: {unknown_required_when: "no scale statements in text", inference_forbidden_when: "the company is famous", clarification_priority: confidence_improving}
+      controls:
+        positive: "'we operate in 26 offices around the globe' -> global"
+        negative: "'we serve customers across Kazakhstan' -> local"
+        ambiguous: "'international company' -> unknown or multi_region at low"
+        unknown: "no statements -> unknown (enrichment may fill later, separately sourced)"
+        conflicting: "'global' + 'single-market focus' -> unknown + contradiction"
+    - id: company.stage
+      group: company
+      meaning: "company stage as stated (funding/growth phase)"
+      values: "CompanyStage: seed|growth|scaleup|public|mature|unknown"
+      extraction_class: hybrid
+      evidence_required: "explicit stage statements ('Series C', 'публичная компания')"
+      prohibited_evidence: ["brand familiarity", "provider world knowledge"]
+      deterministic_relation: "none"
+      evaluator_relation: "company band context"
+      unknown: {unknown_required_when: "no stage statements", inference_forbidden_when: "always without text evidence", clarification_priority: confidence_improving}
+      controls:
+        positive: "'after our Series D we are scaling globally' -> scaleup"
+        negative: "'a family business established 1950' -> mature"
+        ambiguous: "'fast-growing' -> unknown or growth at low"
+        unknown: "no statements -> unknown"
+        conflicting: "'startup' + 'publicly listed' -> unknown + contradiction"
+    - id: company.customer_model
+      group: company
+      meaning: "customer model evidenced by the vacancy"
+      values: "CustomerModel: b2c|smb_mass|b2b_enterprise|mixed|unknown"
+      extraction_class: semantic_only
+      evidence_required: "customer descriptions in the text"
+      prohibited_evidence: ["industry stereotypes"]
+      deterministic_relation: "none"
+      evaluator_relation: "b2b_enterprise_context signal (soft anti with platform exception)"
+      unknown: {unknown_required_when: "customers not described", inference_forbidden_when: "industry alone", clarification_priority: optional}
+      controls:
+        positive: "'800k business customers on our SMB banking' -> smb_mass"
+        negative: "'enterprise sales cycles with Fortune 500' -> b2b_enterprise"
+        ambiguous: "'our customers' unspecified -> unknown"
+        unknown: "no description -> unknown"
+        conflicting: "'consumer app' + 'enterprise contracts only' -> mixed or unknown + note"
+    - id: company.product_culture_signal
+      group: company
+      meaning: "product-driven culture signals in the posting"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "ownership/product-culture language ('true ownership', 'founder energy')"
+      prohibited_evidence: ["perks lists", "brand reputation"]
+      deterministic_relation: "none"
+      evaluator_relation: "company band exceptional criterion"
+      unknown: {unknown_required_when: "no culture language", inference_forbidden_when: "always without text evidence", clarification_priority: optional}
+      controls:
+        positive: "'you get true ownership, zero-to-one energy' -> true"
+        negative: "'follow established processes strictly' -> false"
+        ambiguous: "'great culture' -> unknown"
+        unknown: "no signals -> unknown"
+        conflicting: "'ownership' + 'all decisions centralized' -> unknown"
+    - id: company.platform_ecosystem
+      group: company
+      meaning: "platform/ecosystem is the company's core (as stated)"
+      values: "tri"
+      extraction_class: semantic_only
+      evidence_required: "text describing the platform/ecosystem as the company's product"
+      prohibited_evidence: ["brand knowledge"]
+      deterministic_relation: "none"
+      evaluator_relation: "company preference context"
+      unknown: {unknown_required_when: "not described", inference_forbidden_when: "industry alone", clarification_priority: optional}
+      controls:
+        positive: "'our network moves money for businesses worldwide' -> true"
+        negative: "'we sell a single desktop application' -> false"
+        ambiguous: "'ecosystem of products' -> unknown"
+        unknown: "no description -> unknown"
+        conflicting: "platform claims + single-feature reality -> unknown"
+    - id: company.is_crypto_exchange
+      group: company
+      meaning: "the employer operates a crypto exchange"
+      values: "tri"
+      extraction_class: hybrid
+      evidence_required: "explicit self-description in the vacancy ('leading crypto exchange')"
+      prohibited_evidence: ["brand familiarity (extractor must not 'know' OKX)"]
+      deterministic_relation: "none; enrichment may supply it later from a separately-sourced company record"
+      evaluator_relation: "company concern crypto_exchange_employer (limit_to_company_fit)"
+      unknown: {unknown_required_when: "no self-description", inference_forbidden_when: "company name recognition", clarification_priority: confidence_improving}
+      controls:
+        positive: "'OKX is a leading crypto exchange' (text states it) -> true"
+        negative: "'we are a cross-border payments company' -> false"
+        ambiguous: "'digital assets exposure' -> unknown"
+        unknown: "no self-description -> unknown"
+        conflicting: "'exchange' + 'we are a bank' -> unknown + contradiction"
+    - id: company.brand_recognition
+      group: company
+      meaning: "career-convertible brand tier"
+      values: "BrandRecognition: unknown|niche|known|tier1_scaleup|big_tech"
+      extraction_class: enrichment_only
+      evidence_required: "external enrichment with its own separately-identified source; NEVER inferable from vacancy text"
+      prohibited_evidence: ["vacancy_text", "semantic_inference", "provider brand familiarity"]
+      deterministic_relation: "none"
+      evaluator_relation: "company band critical fact"
+      unknown: {unknown_required_when: "no enrichment record", inference_forbidden_when: "ALWAYS for semantic extraction — reputation is a prohibited source", clarification_priority: confidence_improving}
+      notes: "direct consequence of the prohibited-sources rule: brand tier is reputation by definition"
+
+    # ---------------- requirements ----------------
+    - id: requirements.overall_transferability
+      group: requirements
+      meaning: "transferability of mandatory requirements"
+      values: "Transferability: transferable|adjacent|specialized_but_learnable|non_transferable_barrier|unknown"
+      extraction_class: hybrid
+      evidence_required: "mandatory requirement statements; language requirements deterministic, domain-depth semantic"
+      prohibited_evidence: ["industry context as barrier (crypto context alone is never a barrier)"]
+      deterministic_relation: "explicit language requirements deterministic (Step 2); depth judgments semantic"
+      evaluator_relation: "fc_domain_entry_barrier blocker"
+      unknown: {unknown_required_when: "requirements absent or non-mandatory", inference_forbidden_when: "industry stereotype", clarification_priority: recommendation_changing}
+      controls:
+        positive: "'must have 5+ years deep derivatives-trading expertise and fluent Mandarin' -> non_transferable_barrier"
+        negative: "'payments experience a plus' -> transferable"
+        ambiguous: "'crypto experience preferred' -> adjacent or unknown"
+        unknown: "no mandatory requirements -> unknown"
+        conflicting: "'required' and 'nice to have' for the same skill -> unknown + note"
+
+    # ---------------- risk ----------------
+    - id: risks.title_scope_mismatch
+      group: risk
+      meaning: "title promises a different scope than the body describes"
+      values: "risk entry (RiskKind.title_scope_mismatch)"
+      extraction_class: semantic_only
+      evidence_required: "both the title signal and the contradicting body observation"
+      prohibited_evidence: ["title alone"]
+      deterministic_relation: "none"
+      evaluator_relation: "confidence reduction + clarification; never a rejection"
+      unknown: {unknown_required_when: "body too thin to compare", inference_forbidden_when: "no explicit contradiction", clarification_priority: confidence_improving}
+      controls:
+        positive: "'Director' title + purely IC execution duties -> risk emitted"
+        negative: "title and body agree -> no risk"
+        ambiguous: "body vague -> no risk, low evidence note"
+        unknown: "title-only snapshot -> no risk (source_text_incomplete already covers it)"
+        conflicting: "n/a — the risk IS the conflict record"
+    - id: risks.internal_contradiction
+      group: risk
+      meaning: "contradictory statements inside the vacancy"
+      values: "risk entry (RiskKind.internal_contradiction)"
+      extraction_class: rule_produced
+      evidence_required: "produced ONLY by conflict_policy rules with both observations attached"
+      prohibited_evidence: ["free-form extractor judgement"]
+      deterministic_relation: "conflict rules cf_*"
+      evaluator_relation: "confidence low + clarification"
+      unknown: {unknown_required_when: "n/a", inference_forbidden_when: "outside conflict rules", clarification_priority: confidence_improving}
+    - id: risks.ambiguity
+      group: risk
+      meaning: "material ambiguity that blocked a fact (recorded as RiskKind.other with note)"
+      values: "risk entry"
+      extraction_class: rule_produced
+      evidence_required: "the ambiguous observation(s) attached"
+      prohibited_evidence: ["generic hedging"]
+      deterministic_relation: "cf_insufficient_evidence companion"
+      evaluator_relation: "clarification generation"
+      unknown: {unknown_required_when: "n/a", inference_forbidden_when: "outside unknown policy", clarification_priority: optional}
+
+  provider_contract:
+    provider_independent: true
+    canonical_output: >
+      a partial Step 2 VacancyUnderstanding record (semantic fields only) +
+      the observation list; validated by the Step 2 schema; method =
+      semantic_inference; every fact cites observation-backed evidence
+    identical_output_requirement: >
+      any conformant implementation (LLM, deterministic rules, hybrid, future
+      models) given the same vacancy content and contract version must emit a
+      canonical object with the same schema, same unknown semantics and the
+      same evidence obligations; VALUE agreement across providers is measured
+      by calibration, not assumed
+    prompt_is_implementation_detail: true
+    extractor_version_composition: [semantic_contract_version, provider_id, prompt_version]
+
+  calibration_contract:
+    golden_source: >
+      Step 2 golden fixtures (dataset 1.0.x) + re-annotated Wise flagship
+      cases from recovered full texts + synthetic controls from this contract
+    metrics:
+      - per_fact_precision_vs_gold
+      - per_fact_recall_vs_gold
+      - evidence_coverage (share of emitted facts whose excerpts are verbatim-present in the text)
+      - unknown_rate_per_fact
+      - clarification_rate
+      - cross_provider_agreement_per_fact
+      - confidence_calibration (share of high-confidence facts confirmed by gold)
+    disagreement_classes:
+      - extraction_false_positive
+      - extraction_false_negative
+      - evidence_not_verbatim
+      - gold_ambiguous
+      - provider_divergence
+      - contract_gap
+    no_aggregate_score: true
+
+  human_review:
+    gold_annotation: "manual gold per Step 2 fixture rules; candidate-independent; evidence-cited"
+    review_workflow: "sampled review of extracted facts vs text; every high-confidence miss escalated"
+    correction_policy: "corrections update GOLD data only; extractor behaviour changes require prompt/impl change + extractor_version bump"
+    disagreement_resolution: "owner decides; recorded in the review report"
+    policy_changes_only_via_sot_amendment: true
+
+  replay_integration:
+    fact_origin_classes: [deterministic, semantic, missing]
+    missing_semantic_evidence_class: insufficient_vacancy_evidence
+    statement: >
+      Replay records per-fact origin; disagreements caused by missing
+      semantic evidence remain classified insufficient_vacancy_evidence and
+      are never mixed with decision-policy disagreements. Semantic-fact
+      quality issues use the calibration disagreement classes, not the
+      decision taxonomy.
+
+  change_policy:
+    versioning: "semver; MAJOR = fact removal/semantics change; MINOR = new facts/controls; PATCH = wording"
+    approval: "owner approval per process SoT §8"
+    no_silent_learning: "true — calibration and review may only PROPOSE amendments"

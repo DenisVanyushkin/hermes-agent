@@ -1,0 +1,618 @@
+{
+  "$defs": {
+    "CalibrationContract": {
+      "additionalProperties": false,
+      "properties": {
+        "disagreement_classes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Disagreement Classes",
+          "type": "array"
+        },
+        "golden_source": {
+          "title": "Golden Source",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Metrics",
+          "type": "array"
+        },
+        "no_aggregate_score": {
+          "title": "No Aggregate Score",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "golden_source",
+        "metrics",
+        "disagreement_classes",
+        "no_aggregate_score"
+      ],
+      "title": "CalibrationContract",
+      "type": "object"
+    },
+    "ClarificationPriority": {
+      "enum": [
+        "blocking",
+        "recommendation_changing",
+        "confidence_improving",
+        "optional"
+      ],
+      "title": "ClarificationPriority",
+      "type": "string"
+    },
+    "Confidence": {
+      "enum": [
+        "high",
+        "medium",
+        "low",
+        "unknown"
+      ],
+      "title": "Confidence",
+      "type": "string"
+    },
+    "ConfidencePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "provider_confidence_is_not_a_source": {
+          "title": "Provider Confidence Is Not A Source",
+          "type": "boolean"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/ConfidenceRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rules",
+        "provider_confidence_is_not_a_source"
+      ],
+      "title": "ConfidencePolicy",
+      "type": "object"
+    },
+    "ConfidenceRule": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_when": {
+          "title": "Allowed When",
+          "type": "string"
+        },
+        "level": {
+          "$ref": "#/$defs/Confidence"
+        }
+      },
+      "required": [
+        "level",
+        "allowed_when"
+      ],
+      "title": "ConfidenceRule",
+      "type": "object"
+    },
+    "ConflictRule": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "resolution": {
+          "title": "Resolution",
+          "type": "string"
+        },
+        "situation": {
+          "title": "Situation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "situation",
+        "resolution"
+      ],
+      "title": "ConflictRule",
+      "type": "object"
+    },
+    "EvidenceHierarchy": {
+      "additionalProperties": false,
+      "properties": {
+        "level_definitions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Level Definitions",
+          "type": "object"
+        },
+        "levels": {
+          "items": {
+            "$ref": "#/$defs/EvidenceLevel"
+          },
+          "title": "Levels",
+          "type": "array"
+        },
+        "only_vacancy_evidence_produces_vacancy_facts": {
+          "title": "Only Vacancy Evidence Produces Vacancy Facts",
+          "type": "boolean"
+        },
+        "prohibited_sources": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Prohibited Sources",
+          "type": "array"
+        }
+      },
+      "required": [
+        "levels",
+        "level_definitions",
+        "prohibited_sources",
+        "only_vacancy_evidence_produces_vacancy_facts"
+      ],
+      "title": "EvidenceHierarchy",
+      "type": "object"
+    },
+    "EvidenceLevel": {
+      "enum": [
+        "explicit_text",
+        "structured_source_field",
+        "deterministic_derivation",
+        "semantic_inference",
+        "human_gold"
+      ],
+      "title": "EvidenceLevel",
+      "type": "string"
+    },
+    "ExtractionClass": {
+      "enum": [
+        "deterministic_only",
+        "semantic_only",
+        "hybrid",
+        "enrichment_only",
+        "rule_produced"
+      ],
+      "title": "ExtractionClass",
+      "type": "string"
+    },
+    "FactGroup": {
+      "enum": [
+        "mandate",
+        "product_shape",
+        "organization",
+        "company",
+        "requirements",
+        "risk"
+      ],
+      "title": "FactGroup",
+      "type": "string"
+    },
+    "HumanReviewContract": {
+      "additionalProperties": false,
+      "properties": {
+        "correction_policy": {
+          "title": "Correction Policy",
+          "type": "string"
+        },
+        "disagreement_resolution": {
+          "title": "Disagreement Resolution",
+          "type": "string"
+        },
+        "gold_annotation": {
+          "title": "Gold Annotation",
+          "type": "string"
+        },
+        "policy_changes_only_via_sot_amendment": {
+          "title": "Policy Changes Only Via Sot Amendment",
+          "type": "boolean"
+        },
+        "review_workflow": {
+          "title": "Review Workflow",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gold_annotation",
+        "review_workflow",
+        "correction_policy",
+        "disagreement_resolution",
+        "policy_changes_only_via_sot_amendment"
+      ],
+      "title": "HumanReviewContract",
+      "type": "object"
+    },
+    "Metadata": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "decision_contract_compat": {
+          "title": "Decision Contract Compat",
+          "type": "string"
+        },
+        "human_sot": {
+          "title": "Human Sot",
+          "type": "string"
+        },
+        "no_silent_learning": {
+          "title": "No Silent Learning",
+          "type": "boolean"
+        },
+        "owner": {
+          "title": "Owner",
+          "type": "string"
+        },
+        "production_integration": {
+          "title": "Production Integration",
+          "type": "boolean"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "step2_schema_compat": {
+          "title": "Step2 Schema Compat",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract_version",
+        "status",
+        "owner",
+        "production_integration",
+        "no_silent_learning",
+        "human_sot",
+        "step2_schema_compat",
+        "decision_contract_compat"
+      ],
+      "title": "Metadata",
+      "type": "object"
+    },
+    "ObservationModel": {
+      "additionalProperties": false,
+      "properties": {
+        "definition": {
+          "title": "Definition",
+          "type": "string"
+        },
+        "excerpt_must_be_verbatim": {
+          "title": "Excerpt Must Be Verbatim",
+          "type": "boolean"
+        },
+        "facts_never_written_directly_from_text": {
+          "title": "Facts Never Written Directly From Text",
+          "type": "boolean"
+        },
+        "max_excerpt_len": {
+          "title": "Max Excerpt Len",
+          "type": "integer"
+        },
+        "min_observations_per_semantic_fact": {
+          "title": "Min Observations Per Semantic Fact",
+          "type": "integer"
+        },
+        "required_fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "definition",
+        "required_fields",
+        "facts_never_written_directly_from_text",
+        "min_observations_per_semantic_fact",
+        "excerpt_must_be_verbatim",
+        "max_excerpt_len"
+      ],
+      "title": "ObservationModel",
+      "type": "object"
+    },
+    "ProvenanceModel": {
+      "additionalProperties": false,
+      "properties": {
+        "chain_of_thought_forbidden": {
+          "title": "Chain Of Thought Forbidden",
+          "type": "boolean"
+        },
+        "reasoning_summary_style": {
+          "title": "Reasoning Summary Style",
+          "type": "string"
+        },
+        "required_fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "required_fields",
+        "reasoning_summary_style",
+        "chain_of_thought_forbidden"
+      ],
+      "title": "ProvenanceModel",
+      "type": "object"
+    },
+    "ProviderContract": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_output": {
+          "title": "Canonical Output",
+          "type": "string"
+        },
+        "extractor_version_composition": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Extractor Version Composition",
+          "type": "array"
+        },
+        "identical_output_requirement": {
+          "title": "Identical Output Requirement",
+          "type": "string"
+        },
+        "prompt_is_implementation_detail": {
+          "title": "Prompt Is Implementation Detail",
+          "type": "boolean"
+        },
+        "provider_independent": {
+          "title": "Provider Independent",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider_independent",
+        "canonical_output",
+        "identical_output_requirement",
+        "prompt_is_implementation_detail",
+        "extractor_version_composition"
+      ],
+      "title": "ProviderContract",
+      "type": "object"
+    },
+    "ReplayIntegration": {
+      "additionalProperties": false,
+      "properties": {
+        "fact_origin_classes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Fact Origin Classes",
+          "type": "array"
+        },
+        "missing_semantic_evidence_class": {
+          "title": "Missing Semantic Evidence Class",
+          "type": "string"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fact_origin_classes",
+        "missing_semantic_evidence_class",
+        "statement"
+      ],
+      "title": "ReplayIntegration",
+      "type": "object"
+    },
+    "SemanticFact": {
+      "additionalProperties": false,
+      "properties": {
+        "controls": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SyntheticControls"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "deterministic_relation": {
+          "title": "Deterministic Relation",
+          "type": "string"
+        },
+        "evaluator_relation": {
+          "title": "Evaluator Relation",
+          "type": "string"
+        },
+        "evidence_required": {
+          "title": "Evidence Required",
+          "type": "string"
+        },
+        "extraction_class": {
+          "$ref": "#/$defs/ExtractionClass"
+        },
+        "group": {
+          "$ref": "#/$defs/FactGroup"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "meaning": {
+          "title": "Meaning",
+          "type": "string"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        },
+        "prohibited_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Prohibited Evidence",
+          "type": "array"
+        },
+        "unknown": {
+          "$ref": "#/$defs/UnknownPolicy"
+        },
+        "values": {
+          "title": "Values",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "group",
+        "meaning",
+        "values",
+        "extraction_class",
+        "evidence_required",
+        "deterministic_relation",
+        "evaluator_relation",
+        "unknown"
+      ],
+      "title": "SemanticFact",
+      "type": "object"
+    },
+    "SyntheticControls": {
+      "additionalProperties": false,
+      "properties": {
+        "ambiguous": {
+          "title": "Ambiguous",
+          "type": "string"
+        },
+        "conflicting": {
+          "title": "Conflicting",
+          "type": "string"
+        },
+        "negative": {
+          "title": "Negative",
+          "type": "string"
+        },
+        "positive": {
+          "title": "Positive",
+          "type": "string"
+        },
+        "unknown": {
+          "title": "Unknown",
+          "type": "string"
+        }
+      },
+      "required": [
+        "positive",
+        "negative",
+        "ambiguous",
+        "unknown",
+        "conflicting"
+      ],
+      "title": "SyntheticControls",
+      "type": "object"
+    },
+    "UnknownPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "clarification_priority": {
+          "$ref": "#/$defs/ClarificationPriority"
+        },
+        "inference_forbidden_when": {
+          "title": "Inference Forbidden When",
+          "type": "string"
+        },
+        "unknown_required_when": {
+          "title": "Unknown Required When",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unknown_required_when",
+        "inference_forbidden_when",
+        "clarification_priority"
+      ],
+      "title": "UnknownPolicy",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "calibration_contract": {
+      "$ref": "#/$defs/CalibrationContract"
+    },
+    "change_policy": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Change Policy",
+      "type": "object"
+    },
+    "confidence_policy": {
+      "$ref": "#/$defs/ConfidencePolicy"
+    },
+    "conflict_policy": {
+      "items": {
+        "$ref": "#/$defs/ConflictRule"
+      },
+      "title": "Conflict Policy",
+      "type": "array"
+    },
+    "evidence_hierarchy": {
+      "$ref": "#/$defs/EvidenceHierarchy"
+    },
+    "facts": {
+      "items": {
+        "$ref": "#/$defs/SemanticFact"
+      },
+      "title": "Facts",
+      "type": "array"
+    },
+    "human_review": {
+      "$ref": "#/$defs/HumanReviewContract"
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "observation_model": {
+      "$ref": "#/$defs/ObservationModel"
+    },
+    "provenance_model": {
+      "$ref": "#/$defs/ProvenanceModel"
+    },
+    "provider_contract": {
+      "$ref": "#/$defs/ProviderContract"
+    },
+    "replay_integration": {
+      "$ref": "#/$defs/ReplayIntegration"
+    }
+  },
+  "required": [
+    "metadata",
+    "evidence_hierarchy",
+    "observation_model",
+    "provenance_model",
+    "confidence_policy",
+    "conflict_policy",
+    "facts",
+    "provider_contract",
+    "calibration_contract",
+    "human_review",
+    "replay_integration",
+    "change_policy"
+  ],
+  "title": "semantic_fact_contract",
+  "type": "object"
+}
