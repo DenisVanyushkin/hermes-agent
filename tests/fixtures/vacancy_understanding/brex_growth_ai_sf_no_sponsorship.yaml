@@ -1,0 +1,473 @@
+fixture_id: brex_growth_ai_sf_no_sponsorship
+dataset_version: 1.0.0
+is_synthetic: false
+annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
+  candidate-independent
+vacancy_identity:
+  db_id: 7063
+  vacancy_key: 192422c711afe013d15c27c8c8be1540086dc9b69b21880f2fb1927e18ad9c55
+  company: brex
+  title: Director of Product, Growth/AI
+  location: San Francisco, California, United States
+  source_system: greenhouse
+  source_content_sha16: 1b6af2b225906fbc
+  source_text_full_length: 5824
+replay_input:
+  vacancy_key: 192422c711afe013d15c27c8c8be1540086dc9b69b21880f2fb1927e18ad9c55
+  source_system: greenhouse
+  source_record_id: 508048441fba7e34
+  company: brex
+  title: Director of Product, Growth/AI
+  location: San Francisco, California, United States
+  description: Why join us Brex is the intelligent finance platform that enables companies to spend smarter
+    and move faster in more than 200 markets. By combining global corporate cards and banking with intuitive
+    spend management, bill pay, and travel software, Brex enables founders and finance teams to accelerate
+    … is role will be based in either our San Francisco, Seattle, or New York City office. You must be
+    willing to work in the office at least 3 days per week on Monday, Wednesday and Thursday. Employees
+    will be able to work remotely for up to 4 weeks per year, for a m … imal leverage out of their efforts.
+    You will work closely with cross-functional teams across the organization, based in San Francisco,
+    New York, Seattle, Vancouver, Brazil, and remote locations. Past examples of work in this domain include
+    AI agents for
+deterministic_expected:
+  feasibility_facts.country.value: United States
+  feasibility_facts.country_group.value: usa
+  feasibility_facts.work_format.value: hybrid
+  feasibility_facts.sponsorship_stated.value: unknown
+critical_assertions:
+- 'US office role without sponsorship statement: factual extraction only, no rejection verdict'
+ambiguities: []
+vacancy_understanding:
+  metadata:
+    schema_version: 1.0.0
+    extractor_version: 0.1.0
+    created_at: '2026-07-19T00:00:00Z'
+    vacancy_key: 192422c711afe013d15c27c8c8be1540086dc9b69b21880f2fb1927e18ad9c55
+    source_system: greenhouse
+    source_record_id: 508048441fba7e34
+    source_content_hash: 10519df5fbdca56a
+    language: null
+    is_synthetic_fixture: false
+    production_integration: false
+  role_identity:
+    raw_title: Director of Product, Growth/AI
+    normalized_title: Director of Product, Growth/AI
+    title_families:
+    - growth
+    - product
+    function_families:
+    - growth
+    - product
+    employment_type:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    management_level_observed:
+      value: director
+      confidence: medium
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: Director of Product, Growth/AI
+        location: title
+        rationale: null
+  mandate:
+    scope_breadth:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    revenue_proximity:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    growth_mandate:
+      value: 'true'
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        excerpt: Director of Product, Growth/AI
+        location: title
+        rationale: title is evidence, not final scope truth
+    expansion_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    monetization_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    pricing_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    acquiring_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    pnl_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    strategy_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    org_design_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    team_build_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    executive_exposure:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    board_exposure:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    market_entry_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    turnaround_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    zero_to_one_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    digital_business_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    platform_as_business:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    platform_engineering:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    internal_tools_backoffice:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    feature_delivery_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    maintenance_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    risk_compliance_heavy:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    transformation_phase:
+      value:
+      - unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    mandate_summary:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+  organization:
+    reports_to_level:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    reports_to_title:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    direct_reports_estimate:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    total_org_scope_estimate:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    cross_functional_leadership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    hiring_authority:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    budget_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    org_design_authority:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    decision_authority:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    geographic_responsibility:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    portfolio_responsibility:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+  company:
+    name: brex
+    scale:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    stage:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    geographic_footprint:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    business_model:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    customer_model:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    platform_ecosystem:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    is_crypto_exchange:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    is_outsourcing:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    local_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    product_culture_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    emerging_markets_footprint:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    brand_recognition:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    bureaucracy_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    regulatory_risk_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  feasibility_facts:
+    country:
+      value: United States
+      confidence: high
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: San Francisco, California, United States
+        location: location
+        rationale: null
+    city:
+      value: San Francisco
+      confidence: medium
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: San Francisco, California, United States
+        location: location
+        rationale: null
+    country_group:
+      value: usa
+      confidence: high
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: San Francisco, California, United States
+        location: location
+        rationale: null
+    country_group_resolver_version: 2026.07.19
+    work_format:
+      value: hybrid
+      confidence: high
+      method: explicit_statement
+      evidence:
+      - source_id: src_vacancy_text
+        source_type: vacancy_text
+        excerpt: ur San Francisco, Seattle, or New York City office. You must be willing to work in the
+          office at least 3 days per week on Monday, Wednesday and Thursday. Employees will be able to
+          work remo
+        location: description
+        rationale: null
+    remote_geo_restrictions:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    relocation_support:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    sponsorship_stated:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    work_authorization_required:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    must_be_already_authorized:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    timezone_expectations:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    required_working_hours:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    travel_requirement:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    language_requirements: []
+    local_market_indicator:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  requirements:
+    years_experience_min:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    mandatory_industry_experience: []
+    mandatory_domain_expertise: []
+    regulatory_expertise:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    technical_expertise: []
+    education:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    certifications: []
+    entry_barriers: []
+    overall_transferability:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  risks:
+  - kind: relocation_unclear
+    note: USA location without any sponsorship statement (factual note only)
+    evidence: []
+  evidence_registry:
+  - id: src_vacancy_text
+    source_type: vacancy_text
+    description: normalized vacancy description text
+    content_hash: 10519df5fbdca56a
+  - id: src_structured_fields
+    source_type: structured_source_field
+    description: structured source row fields (title/location/company)
+    content_hash: null
+  - id: src_gold_annotation
+    source_type: manual_gold_annotation
+    description: manual gold annotation 2026-07-19 grounded in the research corpus
+  extraction_diagnostics:
+    warnings: []
+    source_text_length: 821
+    source_text_truncated: null
+    deterministic_fact_count: null
+    semantic_fact_count: null
+    unknown_field_count: null
