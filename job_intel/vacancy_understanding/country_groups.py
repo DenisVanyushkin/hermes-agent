@@ -8,6 +8,11 @@ Contract (Step 2):
 - ``sanctioned`` / ``unstable`` are NEVER inferred from free-text intuition —
   only from the curated snapshot below. An unlisted country resolves to
   ``other`` (or ``unknown`` when no country is given at all).
+- Classification precedence for overlapping memberships (e.g. Sudan is both
+  unstable-listed and African): sanctioned > unstable > africa > other. The
+  ``africa`` mapping is geographically EXHAUSTIVE (whole continent, ISO 3166 +
+  aliases) because downstream policy treats Africa as a regional criterion;
+  the sanctioned/unstable snapshots remain deliberately minimal curated lists.
 - The snapshot is manually curated and reviewed; authoritative future sources
   (to be wired in a later, separately approved slice): consolidated sanctions
   lists (OFAC/EU/UN) for ``sanctioned``; a human-reviewed operator list for
@@ -22,20 +27,37 @@ from pydantic import BaseModel, ConfigDict
 
 from job_intel.vacancy_understanding.model import CountryGroup
 
-RESOLVER_VERSION = "2026.07.19"
+RESOLVER_VERSION = "2026.07.19.1"
 SNAPSHOT_SOURCE = "curated_snapshot"
 
-# Manually curated snapshot (lowercase keys). Not exhaustive by design —
-# unlisted countries are "other", never guessed into sanctioned/unstable.
+# Precedence when a country belongs to several classifications (documented
+# and test-enforced): usa/kazakhstan (special policy groups, disjoint from
+# the rest) > sanctioned > unstable > africa > other.
+PRECEDENCE = ("usa", "kazakhstan", "sanctioned", "unstable", "africa", "other")
+
 _USA = {"united states", "united states of america", "usa", "us"}
 _KZ = {"kazakhstan"}
+# Policy-status snapshots: manually curated, deliberately NOT exhaustive —
+# unlisted countries are "other", never guessed into sanctioned/unstable.
 _SANCTIONED = {"russia", "russian federation", "belarus", "iran", "north korea", "syria", "cuba"}
 _UNSTABLE = {"afghanistan", "myanmar", "yemen", "sudan", "south sudan", "haiti", "venezuela"}
+# Geographic region: EXHAUSTIVE ISO 3166 country→Africa mapping (incl. common
+# aliases). Africa is a regional feasibility criterion in downstream policy,
+# so this list must cover the whole continent — unlike the policy snapshots.
 _AFRICA = {
-    "nigeria", "egypt", "south africa", "kenya", "ghana", "morocco", "ethiopia",
-    "tanzania", "uganda", "algeria", "tunisia", "senegal", "ivory coast",
-    "cote d'ivoire", "rwanda", "cameroon", "zambia", "zimbabwe", "botswana",
-    "namibia", "mozambique", "angola", "libya", "mauritius", "seychelles",
+    "algeria", "angola", "benin", "botswana", "burkina faso", "burundi",
+    "cabo verde", "cape verde", "cameroon", "central african republic",
+    "chad", "comoros", "congo", "republic of the congo",
+    "democratic republic of the congo", "dr congo", "drc", "djibouti",
+    "egypt", "equatorial guinea", "eritrea", "eswatini", "swaziland",
+    "ethiopia", "gabon", "gambia", "the gambia", "ghana", "guinea",
+    "guinea-bissau", "ivory coast", "cote d'ivoire", "côte d'ivoire",
+    "kenya", "lesotho", "liberia", "libya", "madagascar", "malawi", "mali",
+    "mauritania", "mauritius", "morocco", "mozambique", "namibia", "niger",
+    "nigeria", "rwanda", "sao tome and principe", "são tomé and príncipe",
+    "senegal", "seychelles", "sierra leone", "somalia", "south africa",
+    "south sudan", "sudan", "tanzania", "togo", "tunisia", "uganda",
+    "zambia", "zimbabwe",
 }
 
 

@@ -4,7 +4,7 @@
 **Машинные артефакты:** `job_intel/vacancy_understanding/model.py` (Pydantic-контракт),
 `vacancy-understanding.schema.json` (генерируется, sync-тест),
 `feature-definitions.yaml` (семантический словарь), `country_groups.py`
-(версионируемый резолвер), `extractor.py` (детерминированный baseline v0.1.0).
+(версионируемый резолвер), `extractor.py` (детерминированный baseline v0.1.1).
 **Golden dataset:** `tests/fixtures/vacancy_understanding/` (21 кейс, dataset 1.0.0).
 **Тесты:** `tests/job_intel/test_vacancy_understanding_{model,golden}.py`.
 
@@ -66,7 +66,7 @@ apply/reject, весов предпочтений, `is_good_for_*`. Тест `te
 
 ## 5. Deterministic vs semantic vs enrichment
 
-- **Deterministic (реализовано, extractor v0.1.0):** title-нормализация и
+- **Deterministic (реализовано, extractor v0.1.1):** title-нормализация и
   families, management level (capped), location→city/country→country_group
   (через резолвер), work format (location + явные фразы), sponsorship/
   relocation/authorization фразы, языки, годы опыта, явный P&L, team size,
@@ -84,8 +84,13 @@ apply/reject, весов предпочтений, `is_good_for_*`. Тест `te
 ## 6. Country-group resolver
 
 Отдельный версионируемый контракт (`country_groups.py`, snapshot
-`2026.07.19`): curated-списки usa/kazakhstan/sanctioned/unstable/africa;
-не входящие в списки страны → `other`; пустой вход → `unknown`.
+`2026.07.19.1`). Три разных типа классификации: special policy groups
+(usa/kazakhstan), policy-статусы (sanctioned/unstable — **curated-минимум**,
+намеренно неисчерпывающий) и географический регион (africa — **исчерпывающее**
+ISO 3166-покрытие континента с алиасами, т.к. Africa — региональный
+feasibility-критерий). Пересечения разрешаются документированным precedence:
+`sanctioned > unstable > africa > other` (тест-enforced; пример: Судан →
+unstable). Не входящие в списки страны → `other`; пустой вход → `unknown`.
 `sanctioned`/`unstable` **никогда** не выводятся из free-text интуиции.
 Будущие авторитетные источники: консолидированные санкционные списки
 (OFAC/EU/UN) и operator-reviewed список нестабильности. Результат

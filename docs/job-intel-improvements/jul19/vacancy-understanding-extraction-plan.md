@@ -5,7 +5,7 @@
 
 ## 1. Граница извлечения
 
-### 1.1 Deterministic — реализовано (extractor v0.1.0, pure/replayable)
+### 1.1 Deterministic — реализовано (extractor v0.1.1, pure/replayable)
 
 raw/normalized title; title families; management level (title-capped ≤medium);
 location → city/country → country_group (versioned resolver); work format
