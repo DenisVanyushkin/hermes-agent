@@ -315,6 +315,28 @@ class LLMObservationProvider:
                 "model_id": record.get("model_id"), "retry_count": record.get("retry_count", 0),
             }
             return observations
+        # Record mode is idempotent per input (Slice 5B-4 finding): datasets
+        # legitimately contain distinct cases with identical (title, text) —
+        # re-calling live would both pay twice for the same input and
+        # OVERWRITE the recording with a non-byte-identical response
+        # (temperature=0 does not guarantee live-repeat equality), orphaning
+        # every earlier case derived from the first response. A successful
+        # recording for this exact input/model/prompt is therefore reused;
+        # only failed recordings are retried live.
+        existing_path = self.store.path_for(ih)
+        if existing_path.exists():
+            record = self.store.load(ih)
+            if (not record.get("error")
+                    and record.get("model_id") == self.model_id
+                    and record.get("prompt_version") == self.prompt_version):
+                observations = parse_llm_response(record["raw_response_text"])
+                self.last_call_metadata = {
+                    "mode": "record_cached", "input_hash": ih,
+                    "usage": record.get("usage"), "latency_ms": record.get("latency_ms"),
+                    "model_id": record.get("model_id"),
+                    "retry_count": record.get("retry_count", 0),
+                }
+                return observations
         return self._record_call(ih, title=title, text=text, structured=structured)
 
     # -- live call (record mode only) -----------------------------------------
