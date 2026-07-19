@@ -19,6 +19,7 @@ from job_intel.vacancy_understanding.semantic.contract import (
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
     LLMObservationProvider,
     RecordingStore,
+    build_live_llm_provider,
     build_prompt,
 )
 from job_intel.vacancy_understanding.semantic.runtime.provider import (
@@ -39,10 +40,10 @@ def build_benchmark_provider(
 ) -> tuple[Any, dict[str, Any]]:
     """spec -> (provider instance, identity metadata for the manifest).
 
-    spec["type"] in {"deterministic", "llm_replay"}. "llm_replay" is the
-    ONLY LLM mode this registry constructs — a live/record mode requires
-    the separately spend-gated build_live_llm_provider() and is never
-    reached through this boundary (Slice 5B-1 is offline-only per task).
+    spec["type"] in {"deterministic", "llm_replay", "llm_live"}. "llm_live"
+    (Slice 5B-4) goes through the spend-gated build_live_llm_provider() and
+    refuses to construct without the owner-approval env flag; the offline
+    modes never touch that gate.
     """
     contract = contract or load_semantic_contract()
     kind = spec.get("type")
@@ -67,6 +68,7 @@ def build_benchmark_provider(
             "reports_usage_metadata": False,
             "cost_known_zero": True,
             "pricing": None,
+            "latency_mode": "deterministic",
         }
         return provider, identity
 
@@ -109,6 +111,46 @@ def build_benchmark_provider(
             "reports_usage_metadata": True,
             "cost_known_zero": False,
             "pricing": pricing,
+            "latency_mode": "replay",
+        }
+        return provider, identity
+
+    if kind == "llm_live":
+        # Spend-gated (Slice 5B-4): construction refuses without the owner
+        # approval flag — build_live_llm_provider() enforces
+        # JOB_INTEL_LLM_LIVE_APPROVED and the no-silent-retry transport rules.
+        store_dir = spec.get("store_dir")
+        model_id = spec.get("model_id")
+        pricing = spec.get("pricing")
+        if not store_dir or not model_id:
+            raise ProviderRegistryError(
+                "llm_live spec requires 'store_dir' and 'model_id'")
+        if not pricing or ({"input_usd_per_mtok", "output_usd_per_mtok"}
+                           - set(pricing)):
+            raise ProviderRegistryError(
+                "llm_live spec requires 'pricing' with input/output_usd_per_mtok "
+                "— a live benchmark run may never produce unknown costs by design")
+        provider = build_live_llm_provider(store_dir=store_dir, model_id=model_id)
+        identity = {
+            "provider_id": provider.provider_id,
+            "prompt_version": provider.prompt_version,
+            "provider_version": sha256_text(build_prompt(contract))[:16],
+            "provider_config_hash": sha256_json({
+                "model_id": model_id,
+                "pricing": {k: pricing[k] for k in
+                            ("input_usd_per_mtok", "output_usd_per_mtok")},
+            }),
+            "model_requested": model_id,
+            "model_actual": None,
+            "transport": "openrouter",
+            "temperature": 0.0,
+            "retry_policy": "max_retries=0",
+            "fallback_policy": "allow_fallbacks=false",
+            "recording_format_version": "1.0",
+            "reports_usage_metadata": True,
+            "cost_known_zero": False,
+            "pricing": pricing,
+            "latency_mode": "live",
         }
         return provider, identity
 

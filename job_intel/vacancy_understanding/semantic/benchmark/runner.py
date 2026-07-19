@@ -205,13 +205,17 @@ def run_benchmark(
     *, benchmark_id: str, run_id: str, provider_spec: dict[str, Any],
     dataset_id: str, cases: list[dict[str, Any]], out_dir: Path,
     evaluate_downstream_decision: bool = True, force: bool = False,
+    max_new_cases: Optional[int] = None,
 ) -> tuple[BenchmarkManifest, list[BenchmarkCaseResult]]:
+    """max_new_cases caps how many NOT-yet-persisted cases this call may
+    execute (cached rows don't count) — the budget hook for paid runs:
+    callers execute in bounded chunks and check spend between calls, while
+    manifest identity stays pinned to the FULL dataset."""
     repo_root = Path(__file__).resolve().parents[4]
     contract = load_semantic_contract()
     provider, identity = build_benchmark_provider(provider_spec, contract=contract)
     policy = load_policy() if evaluate_downstream_decision else None
-    latency_mode = (LatencyMode.deterministic if not identity["reports_usage_metadata"]
-                    else LatencyMode.replay)
+    latency_mode = LatencyMode(identity["latency_mode"])
 
     manifest_path = out_dir / "manifest.json"
     fresh_manifest = _build_manifest(
@@ -230,6 +234,7 @@ def run_benchmark(
     dumps_dir = out_dir / "semantic_dumps"
     decisions_dir = out_dir / "decisions"
     results: list[BenchmarkCaseResult] = []
+    new_executed = 0
 
     for case in cases:
         case_id = case["case_id"]
@@ -239,6 +244,9 @@ def run_benchmark(
             if cached is not None:
                 results.append(cached)
                 continue
+        if max_new_cases is not None and new_executed >= max_new_cases:
+            break
+        new_executed += 1
 
         started_at = _now_iso()
         sem, decision, latency_ms, error = run_benchmark_case(
