@@ -139,3 +139,53 @@ def test_verify_roundtrip(db):
     seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
     assert seed.verify_roundtrip(db, f)                           # повторный экспорт == файл
     assert seed.diff(db, f, seed.make_snapshot(seed.export_rows(db))).empty
+
+
+# -- Final-review findings ---------------------------------------------------
+
+def test_apply_place_rename(db):
+    """FINDING 1: переименование места должно доходить до БД и проходить
+    verify_roundtrip (раньше молча отбрасывалось _UPDATE_FIELDS)."""
+    _seed_db(db)
+    places.add(db, "Старый зал"); db.commit()      # никем не referenced
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Старый зал")
+    rid = f["Места"][idx]["id"]
+    f["Места"][idx]["name"] = "Новый зал"
+    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+    assert places.get(db, rid)["name"] == "Новый зал"
+    assert seed.verify_roundtrip(db, f)
+
+
+def test_apply_gis_url_on_existing_place_updates_coords(db, monkeypatch):
+    """FINDING 1: 2ГИС-ссылка на СУЩЕСТВУЮЩЕЙ строке места (lat/lon пустые)
+    должна подтянуть координаты (раньше молча отбрасывалась)."""
+    _seed_db(db)
+    monkeypatch.setattr(seed.geo2gis, "resolve_place_coords", lambda url: (43.25, 76.95))
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Казакова")
+    assert f["Места"][idx]["lat"] is None                      # прекондиция
+    f["Места"][idx]["gis_url"] = "https://go.2gis.com/xyz"
+    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+    got = places.get(db, "Казакова")
+    assert got["lat"] == 43.25
+    assert got["lon"] == 76.95
+
+
+def test_apply_gis_url_does_not_override_filled_coords(db, monkeypatch):
+    """lat/lon в файле в приоритете над gis_url (контракт Col.comment)."""
+    _seed_db(db)
+    monkeypatch.setattr(seed.geo2gis, "resolve_place_coords",
+                        lambda url: (0.0, 0.0))
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Казакова")
+    f["Места"][idx]["lat"] = 43.1
+    f["Места"][idx]["lon"] = 76.8
+    f["Места"][idx]["gis_url"] = "https://go.2gis.com/xyz"
+    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+    got = places.get(db, "Казакова")
+    assert got["lat"] == 43.1
+    assert got["lon"] == 76.8

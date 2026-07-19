@@ -125,7 +125,18 @@ def cmd_apply(args):
         conn.execute("COMMIT")
 
         print(report)
-        ok = seed.verify_roundtrip(conn, file_rows)
+        # После COMMIT данные уже в БД: любая неожиданная ошибка самой
+        # проверки -- это предупреждение и exit 3 (как несовпавший verify),
+        # а не exit 2, чтобы оператор не принял применённый apply за
+        # неприменённый.
+        try:
+            ok = seed.verify_roundtrip(conn, file_rows)
+        except Exception as e:
+            print("ПРЕДУПРЕЖДЕНИЕ: verify_roundtrip после apply упал с ошибкой "
+                  f"({e}) -- изменения УЖЕ применены к БД, расхождение нужно "
+                  "разобрать вручную (см. custom/fam/docs/seeding.md).",
+                  file=sys.stderr)
+            return 3
         if not ok:
             print("ПРЕДУПРЕЖДЕНИЕ: verify_roundtrip после apply не совпал -- "
                   "изменения УЖЕ применены к БД, расхождение нужно разобрать вручную "
@@ -191,6 +202,12 @@ def main(argv=None):
         return 2
     except sqlite3.Error as e:
         print(f"db error: {e}", file=sys.stderr)
+        return 2
+    except Exception as e:
+        # Любая другая неожиданная ошибка ДО коммита: cmd_apply уже сделал
+        # ROLLBACK и перебросил её сюда -- ничего не записано, exit 2.
+        # (Ошибки ПОСЛЕ коммита cmd_apply ловит сам и возвращает 3.)
+        print(f"unexpected error: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
 
 
