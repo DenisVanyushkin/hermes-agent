@@ -1,0 +1,91 @@
+{
+  "run": "semantic-full-historical-replay",
+  "provider": "deterministic-phrase",
+  "prompt_version": "rules-1.0.0",
+  "runtime_version": "0.1.0",
+  "total_historical_records": 10013,
+  "corpus_classification": {
+    "title_only_source_incomplete": 2404,
+    "full_text_usable": 3624,
+    "partial_text_usable": 2,
+    "duplicate_vacancy": 3983
+  },
+  "eligible_records": 3626,
+  "extraction_success": 3626,
+  "extraction_failures": 0,
+  "evidence_coverage_distribution": {
+    "none": 2632,
+    "low": 874,
+    "medium": 120
+  },
+  "per_fact_emission": {
+    "company.product_culture_signal": 495,
+    "company.scale": 493,
+    "company.is_crypto_exchange": 161,
+    "mandate.growth_mandate": 126,
+    "mandate.internal_tools_backoffice": 107,
+    "mandate.scope_breadth": 98,
+    "mandate.transformation_phase": 47,
+    "mandate.feature_delivery_only": 29,
+    "mandate.maintenance_only": 25,
+    "mandate.zero_to_one_mandate": 20,
+    "company.stage": 19,
+    "company.customer_model": 18,
+    "mandate.pricing_core": 14,
+    "mandate.risk_compliance_heavy": 13,
+    "organization.cross_functional_leadership": 8,
+    "mandate.expansion_mandate": 7,
+    "mandate.platform_engineering": 6,
+    "requirements.overall_transferability": 5,
+    "mandate.team_build_mandate": 3,
+    "mandate.acquiring_core": 2,
+    "mandate.market_entry_ownership": 1,
+    "organization.budget_ownership": 1,
+    "mandate.monetization_core": 1
+  },
+  "recommendation_before": {
+    "unclear": 2929,
+    "not_recommended": 697
+  },
+  "recommendation_after": {
+    "unclear": 2795,
+    "not_recommended": 774,
+    "promising": 57
+  },
+  "transitions": {
+    "unclear->unclear": 2795,
+    "not_recommended->not_recommended": 697,
+    "unclear->not_recommended": 77,
+    "unclear->promising": 57
+  },
+  "changed_cases": 134,
+  "critical_false_negative_candidates": 0,
+  "critical_false_positive_candidates": 0,
+  "contract_gaps": [],
+  "reannotation_candidates": [
+    {
+      "vacancy_key": "16797b62df8bb89c74ee14099d30a8924ee5365fddb138274ed02eac26866940",
+      "company": "airwallex",
+      "title": "Director, Product Strategy",
+      "facts": [
+        "company.product_culture_signal",
+        "company.scale",
+        "mandate.transformation_phase",
+        "mandate.zero_to_one_mandate"
+      ],
+      "feedback": "not_interesting"
+    },
+    {
+      "vacancy_key": "2433c978595914b6b2172a02e407883683f1bf812668c7a996360a77cd42374c",
+      "company": "okx",
+      "title": "Product Manager / Director, Institutional Product",
+      "facts": [
+        "company.is_crypto_exchange",
+        "mandate.transformation_phase",
+        "mandate.zero_to_one_mandate"
+      ],
+      "feedback": "not_interesting"
+    }
+  ],
+  "run_timestamp": "2026-07-19T14:52:49.590302+00:00"
+}
