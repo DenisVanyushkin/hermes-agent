@@ -6,6 +6,13 @@
 **Назначение:** единый план доработки Hermes Job Intel от текущего статического скоринга к объяснимой системе рекомендаций, основанной на карьерных предпочтениях пользователя.  
 **Режим:** работа по последовательным слайсам; каждый следующий шаг начинается только после выполнения DoD предыдущего.
 
+> **Roadmap v2 (2026-07-19).** После завершения Step 4B roadmap обновлён: Phase I
+> (архитектура semantic-извлечения, Steps 1–4B) объявлена архитектурно завершённой,
+> дальнейшая работа переопределена как **Phase II — Semantic Provider Benchmark**
+> (см. §9). Разделы §5 «Step 5» и §6 сохранены как исторический контекст; в части
+> порядка дальнейших шагов приоритет имеет §9. Архитектурные SoT (Decision SoT,
+> Semantic SoT) настоящим обновлением не изменяются.
+
 ## 1. Основание и ключевой вывод
 
 Проведены два исследования:
@@ -325,6 +332,13 @@ Negative/contrast:
 
 ## Step 5 — Controlled Rollout & Feedback Closure
 
+> **Поправка 2026-07-19 (Roadmap v2):** этот раздел описывает production-rollout
+> в терминах первоначального пятишагового плана. Порядок дальнейших шагов
+> заменён Phase II/III в §9: controlled rollout наступает только после
+> Provider Selection Review (Step 5C) и Shadow Deployment (Phase III).
+> Содержательные требования раздела (feedback semantics, exploration,
+> rollback) остаются в силе для Phase III / Production Rollout.
+
 ### Цель
 
 Поэтапно включить preference model в production и замкнуть feedback loop без неконтролируемого самообучения.
@@ -393,6 +407,12 @@ Step 1 ──► Step 2 ──► Step 3 ──► Step 5
 - Step 5 не начинается без shadow evidence Step 3.
 - Step 4 не должен внедрять shortcuts, которые противоречат будущему SoT.
 
+> **Поправка 2026-07-19 (Roadmap v2):** фактическая траектория выполнения:
+> Step 1 → Step 2 → Step 3A (Decision SoT) → Step 3 (Shadow Evaluator runtime)
+> → Step 4A (Semantic SoT) → Step 4B (Semantic runtime). Все шаги Phase I
+> завершены. Дальнейший порядок определяется §9 (Phase II → Phase III →
+> Production Rollout), а не диаграммой выше.
+
 # 7. Глобальные acceptance criteria процесса
 
 Процесс считается успешным, когда:
@@ -420,3 +440,137 @@ Step 1 ──► Step 2 ──► Step 3 ──► Step 5
 - решение владельца.
 
 До завершения Step 5 этот документ является процессным SoT и имеет приоритет над отдельными implementation plans, если они ему противоречат.
+
+---
+
+# 9. Roadmap v2 — Project Maturity и Phase II (2026-07-19)
+
+## 9.1 Project maturity
+
+**Phase I (Steps 1 → 4B) завершила архитектуру.**
+
+По итогам Step 4B зафиксировано:
+
+- Semantic Runtime завершён (10-стадийный конвейер, контракт 36 фактов);
+- Decision SoT не изменился;
+- Semantic SoT не изменился;
+- historical replay выполнен успешно (10 013 записей, 0 failures, 0 contract gaps, 0 critical FN/FP);
+- calibration framework существует;
+- provider abstraction существует;
+- deterministic baseline существует (DeterministicPhraseProvider).
+
+Следствие — **смена стадии зрелости проекта**:
+
+- Оставшаяся работа больше **не проектирует** semantic extraction.
+- Оставшаяся работа **оценивает взаимозаменяемые provider-реализации** уже
+  существующего Semantic Contract.
+
+Раньше вопрос стоял как «как построить Semantic Extraction?». Теперь вопрос:
+«какой provider лучше реализует существующий Semantic Contract?». LLM — не
+архитектурный компонент, а одна из реализаций интерфейса.
+
+## 9.2 Roadmap
+
+Прежний post-Step-4 план
+
+```text
+Step 5 (LLM Provider) ──► Replay ──► Calibration ──► Production
+```
+
+**заменён** на:
+
+```text
+Phase II — Semantic Provider Benchmark
+    Step 5A — LLM Observation Provider
+        ↓
+    Step 5B — Cross-provider Benchmark
+        ↓
+    Step 5C — Provider Selection Review
+        ↓
+Phase III — Shadow Deployment
+        ↓
+Production Rollout
+```
+
+Shadow Deployment теперь **условен**: он наступает только после утверждённого
+Provider Selection Review (Step 5C).
+
+## 9.3 Provider architecture principle
+
+```text
+Semantic Provider
+    ↓ Observation[]
+Existing Runtime (semantic pipeline, без изменений)
+    ↓
+Existing Decision Engine (shadow evaluator, без изменений)
+```
+
+- Все providers реализуют **один и тот же протокол** (provider abstraction
+  Step 4B, выход = Observation[], валидируемый Semantic Contract).
+- Provider **не имеет права требовать модификаций runtime**: провайдер,
+  которому нужны изменения конвейера, контракта или decision engine, не
+  соответствует архитектуре и не допускается к benchmark.
+
+## 9.4 Benchmark philosophy
+
+**Providers compete. Architecture does not.**
+
+Оценка providers ведётся по независимым осям, без агрегатного скора:
+
+- replay (полный historical replay на общем корпусе);
+- calibration (существующий calibration framework);
+- evidence coverage;
+- precision;
+- recall;
+- cost;
+- latency;
+- reproducibility.
+
+**No aggregate score.** Единый композитный рейтинг providers запрещён — по той
+же причине, по которой запрещён единый opaque score вакансии (§4, O6):
+взвешивание осей — владельческое решение на Provider Selection Review, а не
+свойство метрики.
+
+## 9.5 Provider acceptance gate
+
+Provider допускается к Shadow (Phase III) только если выполнены **все** условия:
+
+1. **contract compliant** — выход валидируется Semantic Contract без исключений;
+2. **replay reproducible** — replay воспроизводим (детерминированные артефакты,
+   semantic_hash-стабильность);
+3. **calibration complete** — калибровка пройдена по существующему framework;
+4. **benchmark completed** — все оси §9.4 измерены и опубликованы;
+5. **recommendation approved** — рекомендация выбора провайдера утверждена
+   владельцем (Step 5C).
+
+## 9.6 Non-goals Phase II
+
+Phase II **не может**:
+
+- изменять Decision SoT;
+- изменять Semantic SoT;
+- изменять evaluator;
+- изменять runtime pipeline;
+- тюнить recommendation thresholds;
+- вводить provider-специфичную policy (любое правило вида «если provider X,
+  то…» запрещено).
+
+Обнаруженная в ходе benchmark потребность в любом из перечисленного — повод
+для отдельного SoT-изменения по процедуре §8, а не для правки внутри Phase II.
+
+## 9.7 Change record (§8 compliance)
+
+- **Причина:** Step 4B перевёл проект из стадии построения архитектуры в
+  стадию оценки providers; roadmap обязан отражать стадию зрелости.
+- **Evidence:** closure-вердикт Step 4B
+  (`semantic-step4b-closure-report.md`): controls 175/uncovered 0; full replay
+  10 013 / 3 626 eligible / 0 failures; потолок recall phrase-провайдера 72.6%
+  eligible без semantic-фактов.
+- **Затронутый шаг:** пост-Step-4 план (прежний «Step 5»); Steps 1–4B и
+  архитектурные SoT не затронуты.
+- **Изменение acceptance criteria:** добавлен provider acceptance gate (§9.5);
+  критерии §7 не изменены.
+- **Backward compatibility impact:** нулевой для runtime — задача
+  documentation-only, поведение системы не меняется.
+- **Решение владельца:** утверждено заданием владельца от 2026-07-19
+  («Task — Update Roadmap SoT for Phase II»).
