@@ -818,7 +818,7 @@ def _insert_place(conn, row):
     if gis_url and (lat is None or lon is None):
         resolved = geo2gis.resolve_place_coords(gis_url)
         if resolved is not None:
-            lon, lat = resolved  # 2ГИС отдаёт LON,LAT — известная ловушка
+            lat, lon = resolved  # geo2gis.resolve_place_coords contract: (lat, lon)
 
     p = places.add(conn, row["name"], address=row.get("address") or "",
                     lat=lat, lon=lon, aliases=row.get("aliases") or ())
@@ -948,18 +948,25 @@ _SERIES_SCHEDULE_FIELDS = {"weekdays", "start_time", "end_time", "place", "trans
                            "prep_min", "until_local"}
 
 
-def _cancel_future_series_occurrences(conn, sid, now_iso):
-    """Remove future active occurrences of series `sid` (mirrors
-    series.cancel's occurrence-removal, without flipping the series'
-    status), so the trailing series.generate() rebuilds them per the
-    just-updated schedule.
+def _cancel_future_series_occurrences(conn, sid, now_iso, old_start_time):
+    """Remove future active occurrences of series `sid` that are still ON
+    the series grid (local HH:MM equals the series' OLD start_time, i.e.
+    the value BEFORE this update was applied -- callers must capture it
+    first), mirroring series.update_participants's "future untouched"
+    filter. An occurrence individually rescheduled off-grid (cal.update
+    leaves it with a different local start time) keeps its series_id and
+    is left untouched here; series.generate() then only fills in the
+    (series_id, new-grid-slot) pairs that are still empty.
     """
     from fam import cal
 
     rows = conn.execute(
-        "SELECT id FROM events WHERE series_id=? AND status='active' AND start_utc > ?",
-        (sid, now_iso)).fetchall()
+        "SELECT id, start_utc FROM events WHERE series_id=? AND status='active' AND "
+        "start_utc > ?", (sid, now_iso)).fetchall()
     for r in rows:
+        local_hm = cal._to_local_iso(r["start_utc"])[11:16]
+        if local_hm != old_start_time:
+            continue  # rescheduled off the series grid -- leave alone
         event_id = r["id"]
         cal._prep_cascade_cancel(conn, event_id)
         conn.execute("UPDATE plans SET prep_for_event_id=NULL WHERE prep_for_event_id=?",
@@ -973,6 +980,12 @@ def _apply_series_update(conn, item, now_iso):
     from fam import places, series
 
     rid, changes = item["id"], item["changes"]
+    # Capture the OLD start_time (the grid this series' occurrences were
+    # generated on) before any mutation below -- _cancel_future_series_
+    # occurrences must filter against it, not the just-applied new value.
+    old_start_time = conn.execute(
+        "SELECT start_time FROM event_series WHERE id=?", (rid,)).fetchone()["start_time"]
+
     set_clauses, params = [], []
     simple_map = {"title": "title", "weekdays": "weekdays", "start_time": "start_time",
                   "end_time": "end_time", "transport": "transport", "notes": "notes",
@@ -999,7 +1012,7 @@ def _apply_series_update(conn, item, now_iso):
                                     now_utc=now_iso)
 
     if _SERIES_SCHEDULE_FIELDS & set(changes):
-        _cancel_future_series_occurrences(conn, rid, now_iso)
+        _cancel_future_series_occurrences(conn, rid, now_iso, old_start_time)
 
     audit.log(conn, "seed.Серии.update", {"id": rid, "changes": changes}, actor="admin")
 

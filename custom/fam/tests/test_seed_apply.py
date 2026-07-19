@@ -43,14 +43,16 @@ def test_apply_new_event_gets_reminders(db):
 def test_apply_place_gis_url_resolves(db, monkeypatch):
     _seed_db(db)
     rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
-    monkeypatch.setattr(seed.geo2gis, "resolve_place_coords", lambda url: (76.9, 43.2))
+    monkeypatch.setattr(seed.geo2gis, "resolve_place_coords", lambda url: (43.2, 76.9))
     f = {**rows, "Места": rows["Места"] + [{"id": None, "name": "Аптека 36.6",
          "gis_url": "https://go.2gis.com/abc", "category": "pharmacy",
          "address": None, "lat": None, "lon": None, "travel_min": None,
          "aliases": [], "notes": None}]}
     seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
     got = places.get(db, "Аптека 36.6")
-    assert (got["lon"], got["lat"]) == (76.9, 43.2)               # 2ГИС отдаёт LON,LAT!
+    # resolve_place_coords contract is (lat, lon) -- see geo2gis.py.
+    assert got["lat"] == 43.2
+    assert got["lon"] == 76.9
 
 
 def test_apply_series_update_regenerates(db):
@@ -63,6 +65,70 @@ def test_apply_series_update_regenerates(db):
         "SELECT strftime('%w', start_utc, '+5 hours') FROM events "
         "WHERE series_id=1 AND status='active' AND start_utc > datetime('now')")}
     assert wd == {"2"}                                            # только вторники
+
+
+def test_apply_series_update_preserves_off_grid_occurrence(db):
+    """A series schedule update must only cancel FUTURE occurrences still on
+    the series grid (local HH:MM == the series' OLD start_time). An
+    occurrence individually moved off-grid via cal.update keeps its
+    series_id and survives untouched; other future on-grid occurrences are
+    regenerated on the new weekdays. Also confirms generate()'s existing
+    tombstone-skip behavior: the cancelled tombstone cal.update leaves at
+    the occurrence's original slot still blocks regeneration there.
+    """
+    _seed_db(db)
+
+    row = db.execute(
+        "SELECT id, start_utc FROM events WHERE series_id=1 AND status='active' "
+        "ORDER BY start_utc LIMIT 1").fetchone()
+    event_id, old_start_utc = row["id"], row["start_utc"]
+    dow_map = {"0": "sun", "1": "mon", "2": "tue", "3": "wed", "4": "thu", "5": "fri", "6": "sat"}
+    orig_day = dow_map[db.execute(
+        "SELECT strftime('%w', ?, '+5 hours')", (old_start_utc,)).fetchone()[0]]
+
+    # Reschedule this one occurrence off the 10:00 grid (same day, +1h local).
+    from datetime import datetime, timedelta
+
+    new_start = (datetime.fromisoformat(old_start_utc) + timedelta(hours=1)).isoformat(
+        timespec="seconds")
+    moved = cal.update(db, event_id, start_utc=new_start)
+    moved_start_utc = moved["start_utc"]
+    db.commit()
+
+    # Original slot is now a cancelled tombstone (cal.update's own behavior).
+    tomb = db.execute("SELECT status FROM events WHERE series_id=1 AND start_utc=?",
+                       (old_start_utc,)).fetchone()
+    assert tomb["status"] == "cancelled"
+
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Серии"]) if r["title"] == "Тренировка")
+    f["Серии"][idx]["weekdays"] = f"{orig_day},sun"  # schedule change; keeps orig_day on the grid
+    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+
+    # The manually-moved occurrence survives, untouched, at its custom time.
+    still = cal.get(db, event_id)
+    assert still["status"] == "active"
+    assert still["start_utc"] == moved_start_utc
+
+    # The original (now-tombstoned) slot is still not regenerated -- generate()
+    # keeps skipping an occupied (series_id, start_utc) slot even though
+    # orig_day is still on the new grid.
+    tomb2 = db.execute("SELECT status FROM events WHERE series_id=1 AND start_utc=?",
+                        (old_start_utc,)).fetchone()
+    assert tomb2["status"] == "cancelled"
+
+    # Every OTHER future active occurrence of the series sits on the new
+    # grid: orig_day or sun, at the series' unchanged 10:00 start_time.
+    others = db.execute(
+        "SELECT strftime('%w', start_utc, '+5 hours') AS dow, "
+        "strftime('%H:%M', start_utc, '+5 hours') AS hm FROM events "
+        "WHERE series_id=1 AND status='active' AND start_utc > datetime('now') "
+        "AND id != ?", (event_id,)).fetchall()
+    assert others, "expected regenerated occurrences on the new grid"
+    allowed_dow = {k for k, v in dow_map.items() if v in (orig_day, "sun")}
+    assert all(r["dow"] in allowed_dow for r in others)
+    assert all(r["hm"] == "10:00" for r in others)
 
 
 def test_verify_roundtrip(db):
