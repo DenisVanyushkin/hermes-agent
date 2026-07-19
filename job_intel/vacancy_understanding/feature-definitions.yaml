@@ -1,0 +1,290 @@
+# Vacancy Understanding — canonical feature dictionary (semantic definitions,
+# NOT a scoring config). Every feature is candidate-independent.
+# Schema: job_intel/vacancy_understanding/model.py (v1.0.0).
+# Fields: id, description, type, allowed_values, unknown_allowed,
+#         source_priority, positive_examples, negative_examples,
+#         ambiguity_notes, consumer_notes.
+
+feature_dictionary:
+  version: "1.0.0"
+  features:
+
+    - id: mandate.scope_breadth
+      description: >
+        Real breadth of ownership, judged from responsibilities, not from the
+        title. Ordinal: feature < domain < business_line < region < portfolio
+        < enterprise.
+      type: ordinal
+      allowed_values: [feature, domain, business_line, region, portfolio, enterprise, unknown]
+      unknown_allowed: true
+      source_priority: [semantic_inference, manual_gold_annotation]
+      positive_examples:
+        - "APAC Growth & Expansion → region (owns a whole market)"
+        - "Business Banking → business_line (a customer business with its own economics)"
+        - "company-wide CPO / GM Digital → enterprise"
+      negative_examples:
+        - "Onboarding Experience → feature, even at a famous company"
+        - "Payment Fraud → domain, not business_line"
+      ambiguity_notes: >
+        Growth funnels (acquisition+onboarding) sit between domain and
+        business_line — annotate the narrower value and record the ambiguity.
+      consumer_notes: "Core discriminator for the Step 3 mandate_fit verdict."
+
+    - id: mandate.revenue_proximity
+      description: "How close the role is to revenue/P&L (ordinal)."
+      type: ordinal
+      allowed_values: [support, enabling, indirect, direct_revenue, direct_pnl, unknown]
+      unknown_allowed: true
+      source_priority: [explicit_statement, semantic_inference]
+      positive_examples:
+        - "'own the P&L of the business line' → direct_pnl"
+        - "pricing/monetization ownership → direct_revenue"
+      negative_examples:
+        - "internal tooling → support"
+        - "developer productivity platform → enabling"
+      ambiguity_notes: "'Commercial impact' marketing language alone is not direct_revenue."
+      consumer_notes: "Do not conflate with desirability; support roles are facts, not verdicts."
+
+    - id: mandate.platform_as_business
+      description: >
+        True when the platform IS the monetized product: money/value flows
+        through it (payment rails, marketplace core, network infrastructure
+        sold as the product).
+      type: tri_state
+      allowed_values: ["true", "false", unknown]
+      unknown_allowed: true
+      source_priority: [semantic_inference, manual_gold_annotation]
+      positive_examples:
+        - "Airwallex Global Payments Network Infrastructure (collect/treasury/payouts/FX rails)"
+      negative_examples:
+        - "Coinbase Core Infrastructure & Reliability (serves internal delivery)"
+        - "the word 'platform' anywhere in the text"
+      ambiguity_notes: >
+        'Infrastructure' in a title does NOT imply platform engineering when
+        the text shows commercial platform ownership. Mutually exclusive with
+        platform_engineering=true (model-enforced).
+      consumer_notes: "Key contrast pair with mandate.platform_engineering."
+
+    - id: mandate.platform_engineering
+      description: "Internal platform / DevEx / reliability engineering focus."
+      type: tri_state
+      allowed_values: ["true", "false", unknown]
+      unknown_allowed: true
+      source_priority: [semantic_inference, manual_gold_annotation]
+      positive_examples: ["Core Infrastructure & Reliability", "Developer Infrastructure"]
+      negative_examples: ["payments network as the product"]
+      ambiguity_notes: "Never inferred from 'infrastructure' alone; needs internal-delivery language."
+      consumer_notes: "Must never inherit platform_as_business positives downstream."
+
+    - id: mandate.growth_mandate
+      description: "Growth (acquisition/expansion/monetized funnels) is core to the mandate."
+      type: tri_state
+      allowed_values: ["true", "false", unknown]
+      unknown_allowed: true
+      source_priority: [explicit_statement, deterministic_derivation, semantic_inference]
+      positive_examples: ["'Growth' in title with growth responsibilities in text"]
+      negative_examples: ["company-wide growth talk without role responsibility"]
+      ambiguity_notes: "Title token is evidence; confirm with responsibilities when text exists."
+      consumer_notes: ""
+
+    - id: mandate.monetization_core
+      description: "Pricing/monetization/acquiring is the core domain of the role."
+      type: tri_state
+      allowed_values: ["true", "false", unknown]
+      unknown_allowed: true
+      source_priority: [explicit_statement, semantic_inference]
+      positive_examples: ["Product Lead - Pricing", "Product Lead - Acquiring"]
+      negative_examples: ["mentions revenue impact in passing"]
+      ambiguity_notes: ""
+      consumer_notes: "Companion booleans pricing_core / acquiring_core narrow the domain."
+
+    - id: mandate.digital_business_ownership
+      description: >
+        The role owns a digital business (product+commercial outcomes),
+        regardless of whether the title is product, GM, commercial or COO-ish.
+      type: tri_state
+      allowed_values: ["true", "false", unknown]
+      unknown_allowed: true
+      source_priority: [semantic_inference, manual_gold_annotation]
+      positive_examples: ["GM Digital owning product, growth and P&L"]
+      negative_examples: ["sales quota role", "FP&A support"]
+      ambiguity_notes: "Hybrid titles must not be collapsed into 'non-product support'."
+      consumer_notes: "Feeds the hybrid-GM policy contrast downstream."
+
+    - id: mandate.internal_tools_backoffice
+      description: "The product serves internal employees / back-office operations."
+      type: tri_state
+      allowed_values: ["true", "false", unknown]
+      unknown_allowed: true
+      source_priority: [semantic_inference, manual_gold_annotation]
+      positive_examples: ["Internal HR & Finance Systems"]
+      negative_examples: ["customer-facing compliance product"]
+      ambiguity_notes: ""
+      consumer_notes: ""
+
+    - id: mandate.risk_compliance_heavy
+      description: "Fraud/risk/compliance is the dominant subject of the role."
+      type: tri_state
+      allowed_values: ["true", "false", unknown]
+      unknown_allowed: true
+      source_priority: [semantic_inference]
+      positive_examples: ["Payment Fraud", "Financial Crime compliance"]
+      negative_examples: ["a platform role that merely mentions compliance"]
+      ambiguity_notes: ""
+      consumer_notes: "Fact, not penalty."
+
+    - id: mandate.transformation_phase
+      description: "Phase(s) of the work: build/scale/turnaround/expand/optimize/maintain."
+      type: multi_categorical
+      allowed_values: [build, scale, turnaround, expand, optimize, maintain, unknown]
+      unknown_allowed: true
+      source_priority: [semantic_inference]
+      positive_examples: ["zero-to-one language → build", "market entry → expand"]
+      negative_examples: ["'fast-paced environment' boilerplate"]
+      ambiguity_notes: "Multiple phases allowed when justified."
+      consumer_notes: ""
+
+    - id: role_identity.title_families
+      description: "All families evidenced by the title; hybrids keep every family."
+      type: multi_categorical
+      allowed_values: [product, growth, general_management, commercial, strategy,
+                       operations, engineering, sales, finance, project_delivery, other, unknown]
+      unknown_allowed: true
+      source_priority: [deterministic_derivation]
+      positive_examples: ["'Head of Strategic Product Sales' → [sales, product]"]
+      negative_examples: ["forcing that title to a single 'sales' label"]
+      ambiguity_notes: "function_families may differ from title_families after semantic review."
+      consumer_notes: "Title is evidence; scope truth lives in mandate.*"
+
+    - id: role_identity.management_level_observed
+      description: "Seniority as OBSERVED in title/text; never high-confidence from title alone."
+      type: ordinal
+      allowed_values: [ic, manager, senior_manager, director, head_vp, c_level, unknown]
+      unknown_allowed: true
+      source_priority: [deterministic_derivation, semantic_inference]
+      positive_examples: ["'reports to the CEO, owns 4 domains' can upgrade confidence"]
+      negative_examples: ["'Director' title → high-confidence executive scope (forbidden)"]
+      ambiguity_notes: "Confidence from title-only derivation is capped at medium."
+      consumer_notes: ""
+
+    - id: company.is_crypto_exchange
+      description: "The employer operates a crypto exchange (observable company fact)."
+      type: tri_state
+      allowed_values: ["true", "false", unknown]
+      unknown_allowed: true
+      source_priority: [company_enrichment, manual_gold_annotation]
+      positive_examples: ["OKX", "Coinbase"]
+      negative_examples: ["a payments company that supports stablecoin payouts"]
+      ambiguity_notes: "Separate fact from any expertise barrier in requirements."
+      consumer_notes: "Never a verdict; company-fit policy lives downstream."
+
+    - id: company.scale
+      description: "Operating scale of the company."
+      type: ordinal
+      allowed_values: [local, regional, multi_region, global, unknown]
+      unknown_allowed: true
+      source_priority: [company_enrichment, vacancy_text]
+      positive_examples: ["'26 offices around the globe' → global"]
+      negative_examples: ["assuming global from brand familiarity without evidence"]
+      ambiguity_notes: ""
+      consumer_notes: ""
+
+    - id: company.brand_recognition
+      description: "Brand recognition tier (enrichment fact, not desirability)."
+      type: ordinal
+      allowed_values: [unknown, niche, known, tier1_scaleup, big_tech]
+      unknown_allowed: true
+      source_priority: [company_enrichment, manual_gold_annotation]
+      positive_examples: []
+      negative_examples: []
+      ambiguity_notes: "Requires external evidence; vacancy text alone rarely suffices."
+      consumer_notes: ""
+
+    - id: feasibility_facts.work_format
+      description: "Work format as stated (onsite/hybrid/remote)."
+      type: categorical
+      allowed_values: [onsite, hybrid, remote, unknown]
+      unknown_allowed: true
+      source_priority: [structured_source_field, explicit_statement]
+      positive_examples: ["location 'Remote US' → remote", "'office at least 3 days' → hybrid"]
+      negative_examples: ["guessing onsite because a city is named"]
+      ambiguity_notes: "In-text hybrid statements override a bare city location."
+      consumer_notes: "Remote and onsite facts must stay separate for downstream policy."
+
+    - id: feasibility_facts.sponsorship_stated
+      description: "What the posting says about visa sponsorship. Absence of a statement is unknown, never no."
+      type: categorical
+      allowed_values: ["yes", "no", unknown]
+      unknown_allowed: true
+      source_priority: [explicit_statement]
+      positive_examples:
+        - "'We can sponsor visas' → yes"
+        - "'visa sponsorship is not available' → no"
+        - "'candidates who … do not require sponsorship of a visa' → no"
+      negative_examples: ["treating silence as 'no'"]
+      ambiguity_notes: ""
+      consumer_notes: "KZ local + sponsorship unknown is a valid factual combination."
+
+    - id: feasibility_facts.relocation_support
+      description: "Stated relocation support."
+      type: categorical
+      allowed_values: [explicit, implied, absent, unknown]
+      unknown_allowed: true
+      source_priority: [explicit_statement]
+      positive_examples: ["'We can help you relocate to the UK' → explicit"]
+      negative_examples: []
+      ambiguity_notes: "'absent' asserts a full text was read without any mention — use sparingly."
+      consumer_notes: ""
+
+    - id: feasibility_facts.country_group
+      description: >
+        Policy grouping of the country, resolved ONLY by the versioned
+        curated resolver (country_groups.py). Never inferred from free text.
+      type: categorical
+      allowed_values: [usa, kazakhstan, sanctioned, unstable, africa, other, unknown]
+      unknown_allowed: true
+      source_priority: [deterministic_derivation]
+      positive_examples: ["'United States' → usa (resolver 2026.07.19)"]
+      negative_examples: ["marking a country sanctioned because the text sounds risky"]
+      ambiguity_notes: "Unlisted countries are 'other'; record resolver_version."
+      consumer_notes: "kazakhstan is a lane-routing group, not a desirability signal."
+
+    - id: feasibility_facts.local_market_indicator
+      description: "The ROLE serves a local market (e.g. a KZ-market role of any company)."
+      type: tri_state
+      allowed_values: ["true", "false", unknown]
+      unknown_allowed: true
+      source_priority: [deterministic_derivation, semantic_inference]
+      positive_examples: ["brand manager for the Kazakhstan market, Almaty onsite"]
+      negative_examples: ["a global role that happens to allow KZ remote"]
+      ambiguity_notes: "Refers to the role's market, not the company's HQ."
+      consumer_notes: ""
+
+    - id: requirements.entry_barriers
+      description: >
+        Mandatory requirements classified by transferability. A barrier
+        exists only when a requirement is genuinely non-acquirable (e.g.
+        mandatory Mandarin, deep prior domain expertise as a hard filter).
+      type: list
+      allowed_values: [transferable, adjacent, specialized_but_learnable,
+                       non_transferable_barrier, unknown]
+      unknown_allowed: true
+      source_priority: [explicit_statement, semantic_inference]
+      positive_examples: ["'Fluent in English and Mandarin' → non_transferable_barrier"]
+      negative_examples: ["crypto industry context alone → barrier (forbidden)"]
+      ambiguity_notes: "Each barrier requires the explicit requirement, why, evidence, confidence."
+      consumer_notes: "Crypto employer fact and expertise barrier are independent."
+
+    - id: risks
+      description: "Factual warnings (data gaps, contradictions, burdens). Never penalties."
+      type: list
+      allowed_values: [relocation_unclear, sponsorship_absent, timezone_burden,
+                       title_scope_mismatch, ambiguous_pnl, company_facts_missing,
+                       possible_repost, source_text_incomplete, internal_contradiction,
+                       low_extraction_confidence, other]
+      unknown_allowed: false
+      source_priority: [deterministic_derivation, semantic_inference]
+      positive_examples: ["title says Director, text describes an IC → title_scope_mismatch"]
+      negative_examples: ["risk used as a rejection verdict (forbidden)"]
+      ambiguity_notes: ""
+      consumer_notes: "Risks may only ever become clarifications downstream."
