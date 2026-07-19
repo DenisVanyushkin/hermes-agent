@@ -261,3 +261,32 @@ def test_unparseable_lat_is_conflict_not_traceback(db):
     f["Места"][idx]["lat"] = "сорок три"
     d = seed.diff(db, f, snap)
     assert d.conflicts["Места"]
+
+
+def test_gis_url_resolution_failure_is_conflict(db, monkeypatch):
+    _seed_db(db)
+    monkeypatch.setattr(seed.geo2gis, "resolve_place_coords", lambda url: None)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Казакова")
+    f["Места"][idx]["gis_url"] = "https://go.2gis.com/broken"
+    d = seed.diff(db, f, snap)
+    assert d.has_conflicts
+    reasons = " ".join(c["reason"] for c in d.conflicts["Места"])
+    assert "не удалось развернуть 2ГИС-ссылку" in reasons and "broken" in reasons
+
+
+def test_gis_url_resolved_once_per_unique_url(db, monkeypatch):
+    _seed_db(db)
+    calls = []
+    monkeypatch.setattr(seed.geo2gis, "resolve_place_coords",
+                        lambda url: calls.append(url) or (43.2, 76.9))
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Места"].append({"id": None, "name": "Точка А", "gis_url": "https://go.2gis.com/one"})
+    f["Места"].append({"id": None, "name": "Точка Б", "gis_url": "https://go.2gis.com/one"})
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts
+    assert calls == ["https://go.2gis.com/one"]           # кэш: один вызов на url
