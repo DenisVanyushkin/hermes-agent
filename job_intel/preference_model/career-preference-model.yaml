@@ -106,10 +106,12 @@ career_preference_model:
         statement: >
           Onsite/hybrid outside USA with unknown sponsorship is uncertain, not
           rejected: user is open to relocation to almost any country, so the
-          missing fact is a clarification, not a veto.
+          missing fact is a clarification, not a veto. Kazakhstan is explicitly
+          NOT covered: no visa/relocation path is needed to work in KZ, so KZ
+          feasibility never depends on sponsorship (see fc_kz_local_lane).
         when:
           work_format: [onsite, hybrid]
-          country_group: [other, kazakhstan]
+          country_group: [other]
           sponsorship_stated: ["unknown"]
         verdict: uncertain
         strength: strong

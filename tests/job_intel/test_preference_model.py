@@ -199,15 +199,43 @@ def test_5_africa_relocation_currently_excluded(model):
 
 
 def test_6_kz_local_strong_role_goes_to_fallback_lane_only(model):
+    # Realistic case: a local KZ vacancy naturally states no sponsorship.
     s = Scenario(
         work_format=WorkFormat.onsite,
         country_group=CountryGroup.kazakhstan,
         local_market=True,
-        sponsorship_stated=SponsorshipStated.yes,
+        sponsorship_stated=SponsorshipStated.unknown,
     )
     res = evaluate_feasibility(model, s)
     assert res.verdict == FeasibilityVerdict.feasible
     assert res.lane == Lane.fallback_local  # never the global core lane
+
+
+def test_6b_kz_feasibility_independent_of_sponsorship(model):
+    """Regression: KZ local roles never become uncertain/infeasible solely
+    because sponsorship is unknown or absent — no visa path is needed to
+    work in Kazakhstan."""
+    for sponsorship in SponsorshipStated:
+        for fmt in (WorkFormat.onsite, WorkFormat.hybrid, WorkFormat.remote):
+            s = Scenario(
+                work_format=fmt,
+                country_group=CountryGroup.kazakhstan,
+                local_market=True,
+                sponsorship_stated=sponsorship,
+            )
+            res = evaluate_feasibility(model, s)
+            assert res.verdict == FeasibilityVerdict.feasible, (fmt, sponsorship)
+            assert res.lane == Lane.fallback_local
+    # Schema-level guard: no non-feasible constraint may combine KZ with a
+    # sponsorship condition.
+    for c in model.feasibility_constraints.constraints:
+        if (
+            c.status == RuleStatus.active
+            and c.verdict != FeasibilityVerdict.feasible
+            and c.when.country_group is not None
+            and CountryGroup.kazakhstan in c.when.country_group
+        ):
+            assert c.when.sponsorship_stated is None, c.id
 
 
 def test_7_narrow_pricing_role_monetization_override(model):
