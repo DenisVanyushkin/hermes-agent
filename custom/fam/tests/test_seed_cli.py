@@ -84,3 +84,43 @@ def test_diff_on_corrupted_transport_reports_conflict(seeded_db, tmp_path, monke
 
     assert rc == 2
     assert "⚠" in captured.out
+
+
+# -- FINDING 4: broad exception guard around apply ---------------------------
+
+def _exported(tmp_path, monkeypatch):
+    monkeypatch.setattr(data_roundtrip, "DEFAULT_SNAPSHOT_DIR", tmp_path / "seeding")
+    out = tmp_path / "data.xlsx"
+    assert data_roundtrip.main(["export", "--out", str(out)]) == 0
+    snap_path = next((tmp_path / "seeding").glob("export-*.json"))
+    return out, snap_path
+
+
+def test_unexpected_exception_before_commit_exits_2(seeded_db, tmp_path, monkeypatch, capsys):
+    out, snap_path = _exported(tmp_path, monkeypatch)
+    monkeypatch.setattr(data_roundtrip, "_backup_both", lambda *a, **kw: None)
+
+    def boom(*a, **kw):
+        raise RuntimeError("boom before commit")
+
+    monkeypatch.setattr(data_roundtrip.seed, "apply_diff", boom)
+    capsys.readouterr()
+    rc = data_roundtrip.main(["apply", "--file", str(out), "--snapshot", str(snap_path), "--yes"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "boom before commit" in captured.err
+
+
+def test_unexpected_exception_during_verify_exits_3(seeded_db, tmp_path, monkeypatch, capsys):
+    out, snap_path = _exported(tmp_path, monkeypatch)
+    monkeypatch.setattr(data_roundtrip, "_backup_both", lambda *a, **kw: None)
+
+    def boom(*a, **kw):
+        raise RuntimeError("boom during verify")
+
+    monkeypatch.setattr(data_roundtrip.seed, "verify_roundtrip", boom)
+    capsys.readouterr()
+    rc = data_roundtrip.main(["apply", "--file", str(out), "--snapshot", str(snap_path), "--yes"])
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert "boom during verify" in captured.err

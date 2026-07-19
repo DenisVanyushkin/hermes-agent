@@ -166,3 +166,98 @@ def test_person_with_id_equal_to_place_id_can_be_deleted(db):
     assert not d.has_conflicts, f"Unexpected conflicts: {d.conflicts}"
     assert any(r.get("name") == "Петя" for r in d.deletes.get("Люди", []))
     assert not any(r.get("name") == "Петя" for r in d.conflicts.get("Люди", []))
+
+
+# -- Final-review findings ---------------------------------------------------
+
+def test_group_name_in_event_participants_is_conflict(db):
+    """FINDING 2: группа в «участники» события -- конфликт на этапе diff."""
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["События"].append({"id": None, "title": "Чай", "start": "2026-08-02 10:00",
+                         "participants": ["татешки"]})
+    d = seed.diff(db, f, snap)
+    assert d.has_conflicts
+    reasons = " ".join(c["reason"] for c in d.conflicts["События"])
+    assert "татешки" in reasons and "не группу" in reasons
+
+
+def test_in_file_inserted_group_in_participants_is_conflict(db):
+    """FINDING 2: группа, вставляемая этим же файлом, тоже конфликт."""
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Люди"].append({"id": None, "name": "подруги", "kind": "group"})
+    f["Серии"].append({"id": None, "title": "Посиделки", "weekdays": "mon",
+                       "start_time": "18:00", "participants": ["подруги"]})
+    d = seed.diff(db, f, snap)
+    assert d.has_conflicts
+    reasons = " ".join(c["reason"] for c in d.conflicts["Серии"])
+    assert "подруги" in reasons and "не группу" in reasons
+
+
+def test_time_cell_coerced_by_excel_is_accepted(db):
+    """FINDING 3: Excel отдаёт datetime.time вместо строки -- это валидно."""
+    import datetime as dt
+
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Серии"][0]["start_time"] = dt.time(9, 30)
+    d = seed.diff(db, f, snap)                     # не должно бросить TypeError
+    assert not d.has_conflicts
+    assert d.updates["Серии"][0]["changes"]["start_time"][1] == "09:30"
+
+
+def test_datetime_cell_in_event_start_is_accepted(db):
+    """FINDING 3: datetime в «начало» события -- принимается как строка."""
+    import datetime as dt
+
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["События"][0]["start"] = dt.datetime(2026, 8, 2, 10, 0)
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts
+    assert d.updates["События"][0]["changes"]["start"][1] == "2026-08-02 10:00"
+
+
+def test_garbage_time_string_is_conflict_not_traceback(db):
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Серии"][0]["start_time"] = "около девяти"
+    d = seed.diff(db, f, snap)                     # никаких исключений
+    assert d.conflicts["Серии"]
+
+
+def test_lat_with_russian_decimal_comma_is_parsed(db):
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Казакова")
+    f["Места"][idx]["lat"] = "43,5"
+    f["Места"][idx]["lon"] = "76,9"
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts
+    changes = d.updates["Места"][0]["changes"]
+    assert changes["lat"][1] == 43.5
+    assert changes["lon"][1] == 76.9
+
+
+def test_unparseable_lat_is_conflict_not_traceback(db):
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Казакова")
+    f["Места"][idx]["lat"] = "сорок три"
+    d = seed.diff(db, f, snap)
+    assert d.conflicts["Места"]

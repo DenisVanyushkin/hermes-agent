@@ -4,7 +4,7 @@
 какое поведение Гермеса влияют; seed_xlsx вешает их на заголовки.
 """
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 
 from .cal import ALMATY
 from . import audit, geo2gis
@@ -165,6 +165,42 @@ SHEETS = {
 }
 
 
+# Excel (openpyxl, data_only=True) may hand back datetime/date/time objects
+# for cells it auto-coerced, and lat/lon may arrive as strings (possibly with
+# a Russian decimal comma). Coerce those into the canonical string/float form
+# BEFORE any regex/float parsing, so a coerced-but-valid cell is accepted and
+# a truly malformed one becomes a normal conflict, never an uncaught
+# TypeError escaping diff().
+_DATETIME_KEYS = {"start", "end"}
+_DATE_KEYS = {"deadline", "until_local"}
+_TIME_KEYS = {"start_time", "end_time", "times"}
+_FLOAT_KEYS = {"lat", "lon"}
+
+
+def _coerce_cell(key, v):
+    if isinstance(v, datetime):
+        if key in _DATETIME_KEYS:
+            return v.strftime("%Y-%m-%d %H:%M")
+        if key in _DATE_KEYS:
+            return v.strftime("%Y-%m-%d")
+        if key in _TIME_KEYS:
+            return v.strftime("%H:%M")
+        return str(v)
+    if isinstance(v, time):
+        return v.strftime("%H:%M") if key in _TIME_KEYS else str(v)
+    if isinstance(v, date):
+        return v.strftime("%Y-%m-%d") if key in _DATE_KEYS else str(v)
+    if key in _FLOAT_KEYS and isinstance(v, str):
+        s = v.strip().replace(",", ".")  # русская десятичная запятая
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            raise ValueError(f"{key}: не число: {v!r}")
+    return v
+
+
 def normalize_row(sheet, row):
     """Канонический dict для diff-сравнений: строки strip, пустое → None.
 
@@ -182,6 +218,7 @@ def normalize_row(sheet, row):
             v = row[col.header]
         else:
             v = row.get(col.key)
+        v = _coerce_cell(col.key, v)
         if isinstance(v, str):
             v = v.strip() or None
         if col.key == "id":
@@ -532,29 +569,35 @@ def _check_time_date(sheet, row):
     no Col transform (start/end/deadline/until_local/start_time/end_time/
     meds times), reusing the exact 'YYYY-MM-DD HH:MM' parser cal/seed use.
     """
+    def _s(v):
+        # normalize_row's _coerce_cell already stringifies Excel-coerced
+        # datetime/date/time cells; this is a last-resort belt so a regex
+        # .match below can never raise TypeError on a non-str value.
+        return v if isinstance(v, str) else str(v)
+
     if sheet == "События":
         for key in ("start", "end"):
             v = row.get(key)
             if v:
                 try:
-                    local_to_utc_iso(v)
+                    local_to_utc_iso(_s(v))
                 except ValueError as exc:
                     return str(exc)
     elif sheet == "Серии":
         for key in ("start_time", "end_time"):
             v = row.get(key)
-            if v and not _HHMM_RE.match(v):
+            if v and not _HHMM_RE.match(_s(v)):
                 return f"{key}: время не в формате ЧЧ:ММ: {v!r}"
         v = row.get("until_local")
-        if v and not _YMD_RE.match(v):
+        if v and not _YMD_RE.match(_s(v)):
             return f"до (дата): не в формате ГГГГ-ММ-ДД: {v!r}"
     elif sheet == "Планы":
         v = row.get("deadline")
-        if v and not _YMD_RE.match(v):
+        if v and not _YMD_RE.match(_s(v)):
             return f"срок: не в формате ГГГГ-ММ-ДД: {v!r}"
     elif sheet == "Лекарства":
         for t in row.get("times") or []:
-            if not _HHMM_RE.match(t):
+            if not _HHMM_RE.match(_s(t)):
                 return f"времена: не в формате ЧЧ:ММ: {t!r}"
     return None
 
@@ -600,7 +643,29 @@ def _in_file_person_names(file_rows_by_sheet):
     return names
 
 
-def _check_refs(conn, sheet, row, in_file_places=(), in_file_people=()):
+def _in_file_group_names(file_rows_by_sheet):
+    """Casefolded names+aliases of GROUP rows in this file (тип «группа»),
+    id or no id -- so a group name written into участники is caught even
+    when the group itself is being inserted by this very file.
+    """
+    names = set()
+    for row in file_rows_by_sheet.get("Люди", []):
+        try:
+            canon_row = _to_canonical("Люди", row)
+        except ValueError:
+            continue
+        if canon_row.get("kind") != "group":
+            continue
+        name = canon_row.get("name")
+        if name:
+            names.add(str(name).casefold())
+        for alias in canon_row.get("aliases") or []:
+            names.add(str(alias).casefold())
+    return names
+
+
+def _check_refs(conn, sheet, row, in_file_places=(), in_file_people=(),
+                in_file_groups=()):
     """Returns a combined reason string (place/person unresolvable, or a
     place with no transport -- mirrors cli._check_trip_has_transport) or
     None. Issues are joined so a row with multiple problems reports all
@@ -631,6 +696,13 @@ def _check_refs(conn, sheet, row, in_file_places=(), in_file_people=()):
         for pname in row.get("participants") or []:
             if not person_ok(pname):
                 issues.append(f"участник не найден: {pname!r}")
+                continue
+            # Экспорт разворачивает группы в имена людей; группа, вписанная
+            # в участники руками, применилась бы криво (молчаливое удаление
+            # участников) и никогда не проходит verify -- конфликт сразу.
+            pe = people.resolve(conn, pname)
+            if (pe and pe.get("kind") == "group") or pname.casefold() in in_file_groups:
+                issues.append(f"участники: укажи имена людей, не группу {pname!r}")
     elif sheet == "Планы":
         place_name = row.get("place")
         if place_name and not place_ok(place_name):
@@ -682,6 +754,7 @@ def diff(conn, file_rows_by_sheet, snap):
     live_snap = make_snapshot(export_rows(conn))
     in_file_places = _in_file_place_names(file_rows_by_sheet)
     in_file_people = _in_file_person_names(file_rows_by_sheet)
+    in_file_groups = _in_file_group_names(file_rows_by_sheet)
 
     inserts, updates, deletes, conflicts = {}, {}, {}, {}
 
@@ -717,7 +790,8 @@ def diff(conn, file_rows_by_sheet, snap):
                 issues.append(time_issue)
             ref_issue = _check_refs(conn, sheet, canon_row,
                                      in_file_places=in_file_places,
-                                     in_file_people=in_file_people)
+                                     in_file_people=in_file_people,
+                                     in_file_groups=in_file_groups)
             if ref_issue:
                 issues.append(ref_issue)
 
@@ -840,6 +914,26 @@ def _update_place(conn, item):
 
     rid, changes = item["id"], item["changes"]
     fields = {k: v[1] for k, v in changes.items() if k in places._UPDATE_FIELDS}
+
+    # 2ГИС-ссылка на существующей строке: если итоговые lat/lon пусты,
+    # подтянуть координаты из ссылки (зеркалит _insert_place; заполненные
+    # в файле lat/lon в приоритете -- контракт Col.comment).
+    gis_url = changes.get("gis_url", (None, None))[1]
+    if gis_url:
+        cur = places.get(conn, rid) or {}
+        eff_lat = fields["lat"] if "lat" in fields else cur.get("lat")
+        eff_lon = fields["lon"] if "lon" in fields else cur.get("lon")
+        if eff_lat is None or eff_lon is None:
+            resolved = geo2gis.resolve_place_coords(gis_url)
+            if resolved is not None:
+                fields["lat"], fields["lon"] = resolved  # contract: (lat, lon)
+
+    # name не входит в places._UPDATE_FIELDS -- переименование прямым
+    # UPDATE, как _apply_people_update; audit-пейлоад ниже несёт changes
+    # как есть, включая name.
+    if "name" in changes:
+        conn.execute("UPDATE places SET name=? WHERE id=?", (changes["name"][1], rid))
+
     if fields:
         places.update(conn, rid, **fields)
 

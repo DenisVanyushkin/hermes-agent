@@ -22,7 +22,8 @@ digest, meds-gen, maintenance all touch the same DB):
 
     ../../venv/bin/python scripts/data_roundtrip.py export --out /tmp/amina-data.xlsx
 
-Prints the snapshot name, e.g. `snapshot: export-20260719-1530.json`
+Prints the snapshot name, e.g. `snapshot: export-20260719-1530.json` —
+the timestamp in the filename is **UTC**, not Almaty time
 (written under `~/.hermes/private/amina/seeding/` by default; pass
 `--snapshot-dir DIR` to override). Open the xlsx, edit rows (see the
 README sheet inside the workbook for the id/new-row/delete conventions),
@@ -54,9 +55,12 @@ then re-exports and checks the result matches the file
 (`verify_roundtrip`).
 
 - Exit 0: applied and verified clean.
-- Exit 2: conflicts, nothing applied (safe to fix and retry).
+- Exit 2: conflicts or ANY error before commit — bad input, a
+  `ValueError`/db error, or an unexpected exception during apply (the
+  transaction is rolled back). Nothing applied (safe to fix and retry).
 - Exit 3: **applied and committed, but the post-apply verify didn't
-  match.** The data IS already in the DB — do not re-run apply blindly.
+  match — or the verify step itself crashed** (a warning is printed
+  either way). The data IS already in the DB — do not re-run apply blindly.
   Investigate the mismatch (likely a concurrent write, or a domain-layer
   quirk in how a field round-trips) before deciding whether to restore
   from the backup just taken (see step 6) or fix forward.
