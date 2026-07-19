@@ -58,10 +58,15 @@ def _base_vu(key: str, title: str, text: str) -> VacancyUnderstanding:
         title=title, location="Remote", description=text), created_at=FIXED_TS)
 
 
-def run_synthetic_controls(contract=None, provider=None) -> dict:
+def iter_control_cases(contract=None):
+    """Enumerate synthetic-control cases WITHOUT running them.
+
+    Single source of truth for control-case construction: both the
+    calibration runner below and the Step 5B benchmark dataset builder
+    consume this, so the two can never drift apart. Pure enumeration — no
+    extraction, no judging, no behaviour change (extracted verbatim from
+    run_synthetic_controls in Slice 5B-3)."""
     contract = contract or load_semantic_contract()
-    provider = provider or DeterministicPhraseProvider()
-    results, failures = [], []
     for fact in contract.facts:
         if fact.extraction_class not in (ExtractionClass.semantic_only, ExtractionClass.hybrid):
             continue
@@ -77,26 +82,42 @@ def run_synthetic_controls(contract=None, provider=None) -> dict:
                 title = "Synthetic Control Role"
                 text = phrases[0]
             elif not phrases or (kind == "conflicting" and len(phrases) < 2):
-                results.append({"fact": fact.id, "kind": kind,
-                                "status": "exempt_no_phrase",
-                                "note": "control describes paired observations / free-form "
-                                        "scenario the single-text runner cannot express; "
-                                        "covered by a named specialized test"})
+                yield {"fact": fact.id, "kind": kind, "runnable": False,
+                       "control": control, "pos_value": pos_value}
                 continue
             else:
                 title = phrases[0] if "title" in control.lower() else "Synthetic Control Role"
                 text = " … ".join(phrases)
-            vu = _base_vu(f"control:{fact.id}:{kind}", title, text)
-            out = extract_semantic(vu, title=title, text=text, provider=provider,
-                                   contract=contract)
-            value, conf = _fact_value(out.fragment, fact.id)
-            raw = value if not isinstance(value, list) else "|".join(sorted(value))
-            ok, note = _judge(kind, raw, conf, pos_value, control, out)
-            row = {"fact": fact.id, "kind": kind, "status": "pass" if ok else "fail",
-                   "value": raw, "confidence": conf, "note": note}
-            results.append(row)
-            if not ok:
-                failures.append(row)
+            yield {"fact": fact.id, "kind": kind, "runnable": True,
+                   "key": f"control:{fact.id}:{kind}", "title": title, "text": text,
+                   "control": control, "pos_value": pos_value}
+
+
+def run_synthetic_controls(contract=None, provider=None) -> dict:
+    contract = contract or load_semantic_contract()
+    provider = provider or DeterministicPhraseProvider()
+    results, failures = [], []
+    for case in iter_control_cases(contract):
+        if not case["runnable"]:
+            results.append({"fact": case["fact"], "kind": case["kind"],
+                            "status": "exempt_no_phrase",
+                            "note": "control describes paired observations / free-form "
+                                    "scenario the single-text runner cannot express; "
+                                    "covered by a named specialized test"})
+            continue
+        title, text = case["title"], case["text"]
+        vu = _base_vu(case["key"], title, text)
+        out = extract_semantic(vu, title=title, text=text, provider=provider,
+                               contract=contract)
+        value, conf = _fact_value(out.fragment, case["fact"])
+        raw = value if not isinstance(value, list) else "|".join(sorted(value))
+        ok, note = _judge(case["kind"], raw, conf, case["pos_value"], case["control"], out)
+        row = {"fact": case["fact"], "kind": case["kind"],
+               "status": "pass" if ok else "fail",
+               "value": raw, "confidence": conf, "note": note}
+        results.append(row)
+        if not ok:
+            failures.append(row)
     return {"results": results, "failures": failures,
             "exemptions": CONTROL_EXEMPTIONS,
             "pass": sum(1 for r in results if r["status"] == "pass"),
