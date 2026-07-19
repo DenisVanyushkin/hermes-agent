@@ -1,0 +1,1483 @@
+{
+  "$defs": {
+    "BrandRecognition": {
+      "enum": [
+        "unknown",
+        "niche",
+        "known",
+        "tier1_scaleup",
+        "big_tech"
+      ],
+      "title": "BrandRecognition",
+      "type": "string"
+    },
+    "CompanyFacts": {
+      "additionalProperties": false,
+      "description": "Observable or enriched company FACTS — never company-fit verdicts.",
+      "properties": {
+        "brand_recognition": {
+          "$ref": "#/$defs/Fact_BrandRecognition_"
+        },
+        "bureaucracy_signal": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "business_model": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "customer_model": {
+          "$ref": "#/$defs/Fact_CustomerModel_"
+        },
+        "emerging_markets_footprint": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "geographic_footprint": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "is_crypto_exchange": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "is_outsourcing": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "local_only": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "platform_ecosystem": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "product_culture_signal": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "regulatory_risk_signal": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "scale": {
+          "$ref": "#/$defs/Fact_CompanyScale_"
+        },
+        "stage": {
+          "$ref": "#/$defs/Fact_CompanyStage_"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "CompanyFacts",
+      "type": "object"
+    },
+    "CompanyScale": {
+      "enum": [
+        "local",
+        "regional",
+        "multi_region",
+        "global",
+        "unknown"
+      ],
+      "title": "CompanyScale",
+      "type": "string"
+    },
+    "CompanyStage": {
+      "enum": [
+        "seed",
+        "growth",
+        "scaleup",
+        "public",
+        "mature",
+        "unknown"
+      ],
+      "title": "CompanyStage",
+      "type": "string"
+    },
+    "Confidence": {
+      "enum": [
+        "high",
+        "medium",
+        "low",
+        "unknown"
+      ],
+      "title": "Confidence",
+      "type": "string"
+    },
+    "CountryGroup": {
+      "enum": [
+        "usa",
+        "kazakhstan",
+        "sanctioned",
+        "unstable",
+        "africa",
+        "other",
+        "unknown"
+      ],
+      "title": "CountryGroup",
+      "type": "string"
+    },
+    "CustomerModel": {
+      "enum": [
+        "b2c",
+        "smb_mass",
+        "b2b_enterprise",
+        "mixed",
+        "unknown"
+      ],
+      "title": "CustomerModel",
+      "type": "string"
+    },
+    "EmploymentType": {
+      "enum": [
+        "full_time",
+        "part_time",
+        "contract",
+        "unknown"
+      ],
+      "title": "EmploymentType",
+      "type": "string"
+    },
+    "EntryBarrier": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "requirement": {
+          "title": "Requirement",
+          "type": "string"
+        },
+        "transferability": {
+          "$ref": "#/$defs/Transferability"
+        },
+        "why": {
+          "title": "Why",
+          "type": "string"
+        }
+      },
+      "required": [
+        "requirement",
+        "transferability",
+        "why",
+        "confidence"
+      ],
+      "title": "EntryBarrier",
+      "type": "object"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "properties": {
+        "excerpt": {
+          "anyOf": [
+            {
+              "maxLength": 400,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Excerpt"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Location"
+        },
+        "rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rationale"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_type": {
+          "$ref": "#/$defs/EvidenceSourceType"
+        }
+      },
+      "required": [
+        "source_id",
+        "source_type"
+      ],
+      "title": "Evidence",
+      "type": "object"
+    },
+    "EvidenceSourceType": {
+      "enum": [
+        "vacancy_text",
+        "structured_source_field",
+        "company_enrichment",
+        "deterministic_derivation",
+        "semantic_inference",
+        "manual_gold_annotation"
+      ],
+      "title": "EvidenceSourceType",
+      "type": "string"
+    },
+    "ExtractionDiagnostics": {
+      "additionalProperties": false,
+      "properties": {
+        "deterministic_fact_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Deterministic Fact Count"
+        },
+        "semantic_fact_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Fact Count"
+        },
+        "source_text_length": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Text Length"
+        },
+        "source_text_truncated": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Text Truncated"
+        },
+        "unknown_field_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unknown Field Count"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "title": "ExtractionDiagnostics",
+      "type": "object"
+    },
+    "ExtractionMethod": {
+      "enum": [
+        "explicit_statement",
+        "deterministic_derivation",
+        "semantic_inference",
+        "company_enrichment",
+        "manual_gold_annotation",
+        "none"
+      ],
+      "title": "ExtractionMethod",
+      "type": "string"
+    },
+    "Fact_BrandRecognition_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/BrandRecognition"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[BrandRecognition]",
+      "type": "object"
+    },
+    "Fact_CompanyScale_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/CompanyScale"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[CompanyScale]",
+      "type": "object"
+    },
+    "Fact_CompanyStage_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/CompanyStage"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[CompanyStage]",
+      "type": "object"
+    },
+    "Fact_CountryGroup_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/CountryGroup"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[CountryGroup]",
+      "type": "object"
+    },
+    "Fact_CustomerModel_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/CustomerModel"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[CustomerModel]",
+      "type": "object"
+    },
+    "Fact_EmploymentType_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/EmploymentType"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[EmploymentType]",
+      "type": "object"
+    },
+    "Fact_ManagementLevel_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/ManagementLevel"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[ManagementLevel]",
+      "type": "object"
+    },
+    "Fact_RelocationSupport_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/RelocationSupport"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[RelocationSupport]",
+      "type": "object"
+    },
+    "Fact_RevenueProximity_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/RevenueProximity"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[RevenueProximity]",
+      "type": "object"
+    },
+    "Fact_ScopeBreadth_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/ScopeBreadth"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[ScopeBreadth]",
+      "type": "object"
+    },
+    "Fact_SponsorshipStated_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/SponsorshipStated"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[SponsorshipStated]",
+      "type": "object"
+    },
+    "Fact_Transferability_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/Transferability"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[Transferability]",
+      "type": "object"
+    },
+    "Fact_TriState_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/TriState"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[TriState]",
+      "type": "object"
+    },
+    "Fact_Union_int__NoneType__": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[Union[int, NoneType]]",
+      "type": "object"
+    },
+    "Fact_Union_str__NoneType__": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[Union[str, NoneType]]",
+      "type": "object"
+    },
+    "Fact_WorkFormat_": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "$ref": "#/$defs/WorkFormat"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[WorkFormat]",
+      "type": "object"
+    },
+    "Fact_list_TransformationPhase__": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "default": "unknown"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/ExtractionMethod",
+          "default": "none"
+        },
+        "value": {
+          "items": {
+            "$ref": "#/$defs/TransformationPhase"
+          },
+          "title": "Value",
+          "type": "array"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "Fact[list[TransformationPhase]]",
+      "type": "object"
+    },
+    "FeasibilityFacts": {
+      "additionalProperties": false,
+      "description": "Facts a feasibility policy will need — the policy itself lives\nelsewhere. KZ local + sponsorship unknown is a VALID factual combination.",
+      "properties": {
+        "city": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "country": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "country_group": {
+          "$ref": "#/$defs/Fact_CountryGroup_"
+        },
+        "country_group_resolver_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Country Group Resolver Version"
+        },
+        "language_requirements": {
+          "items": {
+            "$ref": "#/$defs/LanguageRequirement"
+          },
+          "title": "Language Requirements",
+          "type": "array"
+        },
+        "local_market_indicator": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "must_be_already_authorized": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "relocation_support": {
+          "$ref": "#/$defs/Fact_RelocationSupport_"
+        },
+        "remote_geo_restrictions": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "required_working_hours": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "sponsorship_stated": {
+          "$ref": "#/$defs/Fact_SponsorshipStated_"
+        },
+        "timezone_expectations": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "travel_requirement": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "work_authorization_required": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "work_format": {
+          "$ref": "#/$defs/Fact_WorkFormat_"
+        }
+      },
+      "title": "FeasibilityFacts",
+      "type": "object"
+    },
+    "LanguageRequirement": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "language": {
+          "title": "Language",
+          "type": "string"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Level"
+        },
+        "mandatory": {
+          "$ref": "#/$defs/TriState",
+          "default": "unknown"
+        }
+      },
+      "required": [
+        "language"
+      ],
+      "title": "LanguageRequirement",
+      "type": "object"
+    },
+    "ManagementLevel": {
+      "enum": [
+        "ic",
+        "manager",
+        "senior_manager",
+        "director",
+        "head_vp",
+        "c_level",
+        "unknown"
+      ],
+      "title": "ManagementLevel",
+      "type": "string"
+    },
+    "Mandate": {
+      "additionalProperties": false,
+      "properties": {
+        "acquiring_core": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "board_exposure": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "digital_business_ownership": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "executive_exposure": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "expansion_mandate": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "feature_delivery_only": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "growth_mandate": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "internal_tools_backoffice": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "maintenance_only": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "mandate_summary": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "market_entry_ownership": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "monetization_core": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "org_design_mandate": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "platform_as_business": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "platform_engineering": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "pnl_ownership": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "pricing_core": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "revenue_proximity": {
+          "$ref": "#/$defs/Fact_RevenueProximity_"
+        },
+        "risk_compliance_heavy": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "scope_breadth": {
+          "$ref": "#/$defs/Fact_ScopeBreadth_"
+        },
+        "strategy_ownership": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "team_build_mandate": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "transformation_phase": {
+          "$ref": "#/$defs/Fact_list_TransformationPhase__"
+        },
+        "turnaround_mandate": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "zero_to_one_mandate": {
+          "$ref": "#/$defs/Fact_TriState_"
+        }
+      },
+      "title": "Mandate",
+      "type": "object"
+    },
+    "Metadata": {
+      "additionalProperties": false,
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "extractor_version": {
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "title": "Extractor Version",
+          "type": "string"
+        },
+        "is_synthetic_fixture": {
+          "default": false,
+          "title": "Is Synthetic Fixture",
+          "type": "boolean"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language"
+        },
+        "production_integration": {
+          "default": false,
+          "title": "Production Integration",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_content_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Content Hash"
+        },
+        "source_record_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Record Id"
+        },
+        "source_system": {
+          "title": "Source System",
+          "type": "string"
+        },
+        "vacancy_key": {
+          "title": "Vacancy Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "extractor_version",
+        "created_at",
+        "vacancy_key",
+        "source_system"
+      ],
+      "title": "Metadata",
+      "type": "object"
+    },
+    "Organization": {
+      "additionalProperties": false,
+      "properties": {
+        "budget_ownership": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "cross_functional_leadership": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "decision_authority": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "direct_reports_estimate": {
+          "$ref": "#/$defs/Fact_Union_int__NoneType__"
+        },
+        "geographic_responsibility": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "hiring_authority": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "org_design_authority": {
+          "$ref": "#/$defs/Fact_TriState_"
+        },
+        "portfolio_responsibility": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "reports_to_level": {
+          "$ref": "#/$defs/Fact_ManagementLevel_"
+        },
+        "reports_to_title": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "total_org_scope_estimate": {
+          "$ref": "#/$defs/Fact_Union_int__NoneType__"
+        }
+      },
+      "title": "Organization",
+      "type": "object"
+    },
+    "RelocationSupport": {
+      "enum": [
+        "explicit",
+        "implied",
+        "absent",
+        "unknown"
+      ],
+      "title": "RelocationSupport",
+      "type": "string"
+    },
+    "Requirements": {
+      "additionalProperties": false,
+      "properties": {
+        "certifications": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Certifications",
+          "type": "array"
+        },
+        "education": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "entry_barriers": {
+          "items": {
+            "$ref": "#/$defs/EntryBarrier"
+          },
+          "title": "Entry Barriers",
+          "type": "array"
+        },
+        "mandatory_domain_expertise": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mandatory Domain Expertise",
+          "type": "array"
+        },
+        "mandatory_industry_experience": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mandatory Industry Experience",
+          "type": "array"
+        },
+        "overall_transferability": {
+          "$ref": "#/$defs/Fact_Transferability_"
+        },
+        "regulatory_expertise": {
+          "$ref": "#/$defs/Fact_Union_str__NoneType__"
+        },
+        "technical_expertise": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Technical Expertise",
+          "type": "array"
+        },
+        "years_experience_min": {
+          "$ref": "#/$defs/Fact_Union_int__NoneType__"
+        }
+      },
+      "title": "Requirements",
+      "type": "object"
+    },
+    "RevenueProximity": {
+      "enum": [
+        "support",
+        "enabling",
+        "indirect",
+        "direct_revenue",
+        "direct_pnl",
+        "unknown"
+      ],
+      "title": "RevenueProximity",
+      "type": "string"
+    },
+    "Risk": {
+      "additionalProperties": false,
+      "description": "Factual warning — never a preference penalty, never a rejection.",
+      "properties": {
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/RiskKind"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "Risk",
+      "type": "object"
+    },
+    "RiskKind": {
+      "enum": [
+        "relocation_unclear",
+        "sponsorship_absent",
+        "timezone_burden",
+        "title_scope_mismatch",
+        "ambiguous_pnl",
+        "company_facts_missing",
+        "possible_repost",
+        "source_text_incomplete",
+        "internal_contradiction",
+        "low_extraction_confidence",
+        "other"
+      ],
+      "title": "RiskKind",
+      "type": "string"
+    },
+    "RoleIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "employment_type": {
+          "$ref": "#/$defs/Fact_EmploymentType_"
+        },
+        "function_families": {
+          "items": {
+            "$ref": "#/$defs/TitleFamily"
+          },
+          "title": "Function Families",
+          "type": "array"
+        },
+        "management_level_observed": {
+          "$ref": "#/$defs/Fact_ManagementLevel_"
+        },
+        "normalized_title": {
+          "title": "Normalized Title",
+          "type": "string"
+        },
+        "raw_title": {
+          "title": "Raw Title",
+          "type": "string"
+        },
+        "title_families": {
+          "items": {
+            "$ref": "#/$defs/TitleFamily"
+          },
+          "title": "Title Families",
+          "type": "array"
+        }
+      },
+      "required": [
+        "raw_title",
+        "normalized_title"
+      ],
+      "title": "RoleIdentity",
+      "type": "object"
+    },
+    "ScopeBreadth": {
+      "enum": [
+        "feature",
+        "domain",
+        "business_line",
+        "region",
+        "portfolio",
+        "enterprise",
+        "unknown"
+      ],
+      "title": "ScopeBreadth",
+      "type": "string"
+    },
+    "SourceDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "content_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Hash"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "source_type": {
+          "$ref": "#/$defs/EvidenceSourceType"
+        }
+      },
+      "required": [
+        "id",
+        "source_type"
+      ],
+      "title": "SourceDocument",
+      "type": "object"
+    },
+    "SponsorshipStated": {
+      "enum": [
+        "yes",
+        "no",
+        "unknown"
+      ],
+      "title": "SponsorshipStated",
+      "type": "string"
+    },
+    "TitleFamily": {
+      "enum": [
+        "product",
+        "growth",
+        "general_management",
+        "commercial",
+        "strategy",
+        "operations",
+        "engineering",
+        "sales",
+        "finance",
+        "project_delivery",
+        "other",
+        "unknown"
+      ],
+      "title": "TitleFamily",
+      "type": "string"
+    },
+    "Transferability": {
+      "enum": [
+        "transferable",
+        "adjacent",
+        "specialized_but_learnable",
+        "non_transferable_barrier",
+        "unknown"
+      ],
+      "title": "Transferability",
+      "type": "string"
+    },
+    "TransformationPhase": {
+      "enum": [
+        "build",
+        "scale",
+        "turnaround",
+        "expand",
+        "optimize",
+        "maintain",
+        "unknown"
+      ],
+      "title": "TransformationPhase",
+      "type": "string"
+    },
+    "TriState": {
+      "enum": [
+        "true",
+        "false",
+        "unknown"
+      ],
+      "title": "TriState",
+      "type": "string"
+    },
+    "WorkFormat": {
+      "enum": [
+        "onsite",
+        "hybrid",
+        "remote",
+        "unknown"
+      ],
+      "title": "WorkFormat",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "company": {
+      "$ref": "#/$defs/CompanyFacts"
+    },
+    "evidence_registry": {
+      "items": {
+        "$ref": "#/$defs/SourceDocument"
+      },
+      "title": "Evidence Registry",
+      "type": "array"
+    },
+    "extraction_diagnostics": {
+      "$ref": "#/$defs/ExtractionDiagnostics"
+    },
+    "feasibility_facts": {
+      "$ref": "#/$defs/FeasibilityFacts"
+    },
+    "mandate": {
+      "$ref": "#/$defs/Mandate"
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "organization": {
+      "$ref": "#/$defs/Organization"
+    },
+    "requirements": {
+      "$ref": "#/$defs/Requirements"
+    },
+    "risks": {
+      "items": {
+        "$ref": "#/$defs/Risk"
+      },
+      "title": "Risks",
+      "type": "array"
+    },
+    "role_identity": {
+      "$ref": "#/$defs/RoleIdentity"
+    }
+  },
+  "required": [
+    "metadata",
+    "role_identity",
+    "mandate",
+    "company"
+  ],
+  "title": "vacancy_understanding",
+  "type": "object"
+}
