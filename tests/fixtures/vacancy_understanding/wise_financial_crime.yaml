@@ -1,0 +1,457 @@
+fixture_id: wise_financial_crime
+dataset_version: 1.0.0
+is_synthetic: false
+annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
+  candidate-independent
+vacancy_identity:
+  db_id: 1813
+  vacancy_key: 23e61e3e5eea90f2ffd08d898fec94ac7a1b8e51cc794fe34e2c258e8b03d666
+  company: wise
+  title: Financial Crime Product Compliance & Risk Senior Manager
+  location: Sydney
+  source_system: smartrecruiters
+  source_content_sha16: ebdc8781285c3af2
+  source_text_full_length: 56
+replay_input:
+  vacancy_key: 23e61e3e5eea90f2ffd08d898fec94ac7a1b8e51cc794fe34e2c258e8b03d666
+  source_system: smartrecruiters
+  source_record_id: 2a061fdfdc4884c7
+  company: wise
+  title: Financial Crime Product Compliance & Risk Senior Manager
+  location: Sydney
+  description: Financial Crime Product Compliance & Risk Senior Manager
+deterministic_expected: {}
+critical_assertions:
+- scope_breadth == domain (never region/business_line)
+- no broad-mandate inference from the Wise brand
+ambiguities:
+- senior-manager compliance role used as the Financial Crime contrast (no product-director FinCrime posting
+  in DB)
+vacancy_understanding:
+  metadata:
+    schema_version: 1.0.0
+    extractor_version: 0.1.0
+    created_at: '2026-07-19T00:00:00Z'
+    vacancy_key: 23e61e3e5eea90f2ffd08d898fec94ac7a1b8e51cc794fe34e2c258e8b03d666
+    source_system: smartrecruiters
+    source_record_id: 2a061fdfdc4884c7
+    source_content_hash: ebdc8781285c3af2
+    language: null
+    is_synthetic_fixture: false
+    production_integration: false
+  role_identity:
+    raw_title: Financial Crime Product Compliance & Risk Senior Manager
+    normalized_title: Financial Crime Product Compliance & Risk Senior Manager
+    title_families:
+    - product
+    function_families:
+    - product
+    employment_type:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    management_level_observed:
+      value: senior_manager
+      confidence: medium
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: Financial Crime Product Compliance & Risk Senior Manager
+        location: title
+        rationale: null
+  mandate:
+    scope_breadth:
+      value: domain
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        excerpt: Financial Crime Product Compliance & Risk Senior Manager
+        location: title
+        rationale: title is evidence, not final scope truth
+    revenue_proximity:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    growth_mandate:
+      value: unknown
+      confidence: unknown
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: no evidence; must not be inferred from company
+    expansion_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    monetization_core:
+      value: 'false'
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: financial-crime compliance domain, not monetization
+    pricing_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    acquiring_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    pnl_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    strategy_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    org_design_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    team_build_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    executive_exposure:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    board_exposure:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    market_entry_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    turnaround_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    zero_to_one_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    digital_business_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    platform_as_business:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    platform_engineering:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    internal_tools_backoffice:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    feature_delivery_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    maintenance_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    risk_compliance_heavy:
+      value: 'true'
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        excerpt: Financial Crime Product Compliance & Risk Senior Manager
+        location: title
+        rationale: title is evidence, not final scope truth
+    transformation_phase:
+      value:
+      - unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    mandate_summary:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+  organization:
+    reports_to_level:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    reports_to_title:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    direct_reports_estimate:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    total_org_scope_estimate:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    cross_functional_leadership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    hiring_authority:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    budget_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    org_design_authority:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    decision_authority:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    geographic_responsibility:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    portfolio_responsibility:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+  company:
+    name: wise
+    scale:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    stage:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    geographic_footprint:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    business_model:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    customer_model:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    platform_ecosystem:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    is_crypto_exchange:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    is_outsourcing:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    local_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    product_culture_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    emerging_markets_footprint:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    brand_recognition:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    bureaucracy_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    regulatory_risk_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  feasibility_facts:
+    country:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    city:
+      value: Sydney
+      confidence: medium
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: Sydney
+        location: location
+        rationale: null
+    country_group:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    country_group_resolver_version: 2026.07.19
+    work_format:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    remote_geo_restrictions:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    relocation_support:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    sponsorship_stated:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    work_authorization_required:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    must_be_already_authorized:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    timezone_expectations:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    required_working_hours:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    travel_requirement:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    language_requirements: []
+    local_market_indicator:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  requirements:
+    years_experience_min:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    mandatory_industry_experience: []
+    mandatory_domain_expertise: []
+    regulatory_expertise:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    technical_expertise: []
+    education:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    certifications: []
+    entry_barriers: []
+    overall_transferability:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  risks:
+  - kind: source_text_incomplete
+    note: description length 56 < 200; semantic facts cannot be extracted from this snapshot
+    evidence: []
+  evidence_registry:
+  - id: src_vacancy_text
+    source_type: vacancy_text
+    description: normalized vacancy description text
+    content_hash: ebdc8781285c3af2
+  - id: src_structured_fields
+    source_type: structured_source_field
+    description: structured source row fields (title/location/company)
+    content_hash: null
+  - id: src_gold_annotation
+    source_type: manual_gold_annotation
+    description: manual gold annotation 2026-07-19 grounded in the research corpus
+  extraction_diagnostics:
+    warnings:
+    - source_text_incomplete
+    source_text_length: 56
+    source_text_truncated: null
+    deterministic_fact_count: null
+    semantic_fact_count: null
+    unknown_field_count: null

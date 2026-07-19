@@ -1,0 +1,465 @@
+fixture_id: airwallex_payment_fraud
+dataset_version: 1.0.0
+is_synthetic: false
+annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
+  candidate-independent
+vacancy_identity:
+  db_id: 1287
+  vacancy_key: e45157155d58274960a31f69e32414e88fc6fa76e31dfff12f8b7cd9931308eb
+  company: airwallex
+  title: Product Director, Payment Fraud
+  location: SG - Singapore
+  source_system: ashby
+  source_content_sha16: 026e07f4eb3af625
+  source_text_full_length: 5622
+replay_input:
+  vacancy_key: e45157155d58274960a31f69e32414e88fc6fa76e31dfff12f8b7cd9931308eb
+  source_system: ashby
+  source_record_id: bbbd6a057da95d81
+  company: airwallex
+  title: Product Director, Payment Fraud
+  location: SG - Singapore
+  description: ABOUT AIRWALLEX Airwallex is the only unified payments and financial platform for global
+    businesses. Powered by our unique combination of proprietary infrastructure and software, we empower
+    over 200,000 businesses worldwide – including Brex, Rippling, Navan, Qantas, SHEIN and many more –
+    with fully  … eliver exceptional product experiences. This role will be part of Airwallex’s Risk Platform
+    team, building out our Anti-Fraud capabilities to protect our customers from Payment fraud. You will
+    be responsible for developing and implementing strat … ntly iterating and pushing boundaries to deliver
+    exceptional product experiences. This role will be part of Airwallex’s Risk Platform team, building
+    out our Anti-Fraud capabilities to protect our customers from Payment fraud. You will be respon …
+    . Proudly founded in Melbourne, we have a team of over 2,200 of the brightest and most innovative
+    people in tech across 26 offices around the globe. Valued at US$8 billion and backed by world-leading
+    investors including T. Rowe Price, Visa, Mastercar
+deterministic_expected:
+  feasibility_facts.country.value: Singapore
+critical_assertions:
+- scope_breadth == domain
+- risk_compliance_heavy == true
+- platform_as_business NOT inherited from company (unknown)
+ambiguities: []
+vacancy_understanding:
+  metadata:
+    schema_version: 1.0.0
+    extractor_version: 0.1.0
+    created_at: '2026-07-19T00:00:00Z'
+    vacancy_key: e45157155d58274960a31f69e32414e88fc6fa76e31dfff12f8b7cd9931308eb
+    source_system: ashby
+    source_record_id: bbbd6a057da95d81
+    source_content_hash: 401b7571de1bb3fc
+    language: null
+    is_synthetic_fixture: false
+    production_integration: false
+  role_identity:
+    raw_title: Product Director, Payment Fraud
+    normalized_title: Product Director, Payment Fraud
+    title_families:
+    - product
+    function_families:
+    - product
+    employment_type:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    management_level_observed:
+      value: director
+      confidence: medium
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: Product Director, Payment Fraud
+        location: title
+        rationale: null
+  mandate:
+    scope_breadth:
+      value: domain
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        excerpt: Product Director, Payment Fraud
+        rationale: single risk domain inside the platform
+    revenue_proximity:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    growth_mandate:
+      value: 'false'
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: no growth/expansion language
+    expansion_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    monetization_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    pricing_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    acquiring_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    pnl_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    strategy_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    org_design_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    team_build_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    executive_exposure:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    board_exposure:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    market_entry_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    turnaround_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    zero_to_one_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    digital_business_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    platform_as_business:
+      value: unknown
+      confidence: unknown
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: company platform shape must not transfer to a narrow fraud role by association
+    platform_engineering:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    internal_tools_backoffice:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    feature_delivery_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    maintenance_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    risk_compliance_heavy:
+      value: 'true'
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: payment-fraud prevention domain
+    transformation_phase:
+      value:
+      - unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    mandate_summary:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+  organization:
+    reports_to_level:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    reports_to_title:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    direct_reports_estimate:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    total_org_scope_estimate:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    cross_functional_leadership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    hiring_authority:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    budget_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    org_design_authority:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    decision_authority:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    geographic_responsibility:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    portfolio_responsibility:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+  company:
+    name: airwallex
+    scale:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    stage:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    geographic_footprint:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    business_model:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    customer_model:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    platform_ecosystem:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    is_crypto_exchange:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    is_outsourcing:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    local_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    product_culture_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    emerging_markets_footprint:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    brand_recognition:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    bureaucracy_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    regulatory_risk_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  feasibility_facts:
+    country:
+      value: Singapore
+      confidence: high
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: SG - Singapore
+        location: location
+        rationale: null
+    city:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    country_group:
+      value: other
+      confidence: high
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: SG - Singapore
+        location: location
+        rationale: null
+    country_group_resolver_version: 2026.07.19
+    work_format:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    remote_geo_restrictions:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    relocation_support:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    sponsorship_stated:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    work_authorization_required:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    must_be_already_authorized:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    timezone_expectations:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    required_working_hours:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    travel_requirement:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    language_requirements: []
+    local_market_indicator:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  requirements:
+    years_experience_min:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    mandatory_industry_experience: []
+    mandatory_domain_expertise: []
+    regulatory_expertise:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    technical_expertise: []
+    education:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    certifications: []
+    entry_barriers: []
+    overall_transferability:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  risks: []
+  evidence_registry:
+  - id: src_vacancy_text
+    source_type: vacancy_text
+    description: normalized vacancy description text
+    content_hash: 665b91dbf698f747
+  - id: src_structured_fields
+    source_type: structured_source_field
+    description: structured source row fields (title/location/company)
+    content_hash: null
+  - id: src_gold_annotation
+    source_type: manual_gold_annotation
+    description: manual gold annotation 2026-07-19 grounded in the research corpus
+  extraction_diagnostics:
+    warnings: []
+    source_text_length: 1047
+    source_text_truncated: null
+    deterministic_fact_count: null
+    semantic_fact_count: null
+    unknown_field_count: null

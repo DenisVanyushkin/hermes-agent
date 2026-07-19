@@ -1,0 +1,492 @@
+fixture_id: airwallex_gpni
+dataset_version: 1.0.0
+is_synthetic: false
+annotation_source: manual gold annotation 2026-07-19; grounded in docs/audit/2026-07-19-career-preference-model.md;
+  candidate-independent
+vacancy_identity:
+  db_id: 1262
+  vacancy_key: 19624fa3e727f2342f24e1c9cb68417c58f02d955de35bfecf46800ff30ba035
+  company: airwallex
+  title: Head of Product, Global Payments Network Infrastructure
+  location: SG - Singapore
+  source_system: ashby
+  source_content_sha16: aaa91d825bef7ff1
+  source_text_full_length: 7763
+replay_input:
+  vacancy_key: 19624fa3e727f2342f24e1c9cb68417c58f02d955de35bfecf46800ff30ba035
+  source_system: ashby
+  source_record_id: 1a81b8859e1887db
+  company: airwallex
+  title: Head of Product, Global Payments Network Infrastructure
+  location: SG - Singapore
+  description: ABOUT AIRWALLEX Airwallex is the only unified payments and financial platform for global
+    businesses. Powered by our unique combination of proprietary infrastructure and software, we empower
+    over 200,000 businesses worldwide – including Brex, Rippling, Navan, Qantas, SHEIN and many more –
+    with fully  … TTRIBUTES WE VALUE We hire successful builders with founder-like energy who want real
+    impact, accelerated learning, and true ownership. You bring strong role-related expertise and sharp
+    thinking, and you’re motivated by our mission and operating principl … ou’re ready to do the most
+    ambitious work of your career, join us. ATTRIBUTES WE VALUE We hire successful builders with founder-like
+    energy who want real impact, accelerated learning, and true ownership. You bring strong role-related
+    expertise and … . Proudly founded in Melbourne, we have a team of over 2,200 of the brightest and
+    most innovative people in tech across 26 offices around the globe. Valued at US$8 billion and backed
+    by world-leading investors including T. Rowe Price, Visa, Mastercar … s next. This role can be based
+    in Singapore, London, or San Francisco. About the team You will join the Global Treasury Payment Network
+    (GTPN) product team. GTPN is Airwallex’s core money-movement platform – it powers how customers collect
+    money, manage t … many more – with fully integrated solutions to manage everything from business accounts,
+    payments, spend management and treasury, to embedded finance at a global scale. Proudly founded in
+    Melbourne, we have a team of over 2,200 of the brightest and
+deterministic_expected:
+  feasibility_facts.country.value: Singapore
+  feasibility_facts.country_group.value: other
+critical_assertions:
+- platform_as_business == true
+- platform_engineering == false
+- '''infrastructure'' word alone does not flip to platform_engineering'
+ambiguities: []
+vacancy_understanding:
+  metadata:
+    schema_version: 1.0.0
+    extractor_version: 0.1.0
+    created_at: '2026-07-19T00:00:00Z'
+    vacancy_key: 19624fa3e727f2342f24e1c9cb68417c58f02d955de35bfecf46800ff30ba035
+    source_system: ashby
+    source_record_id: 1a81b8859e1887db
+    source_content_hash: 8083b414291435e2
+    language: null
+    is_synthetic_fixture: false
+    production_integration: false
+  role_identity:
+    raw_title: Head of Product, Global Payments Network Infrastructure
+    normalized_title: Head of Product, Global Payments Network Infrastructure
+    title_families:
+    - product
+    function_families:
+    - product
+    employment_type:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    management_level_observed:
+      value: head_vp
+      confidence: medium
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: Head of Product, Global Payments Network Infrastructure
+        location: title
+        rationale: null
+  mandate:
+    scope_breadth:
+      value: business_line
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        excerpt: Head of Product, Global Payments Network Infrastructure
+        rationale: owns the money-movement platform core — a business line, not a feature
+    revenue_proximity:
+      value: direct_revenue
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: platform rails monetized directly
+    growth_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    expansion_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    monetization_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    pricing_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    acquiring_core:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    pnl_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    strategy_ownership:
+      value: 'true'
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: head-of-product ownership language
+    org_design_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    team_build_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    executive_exposure:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    board_exposure:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    market_entry_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    turnaround_mandate:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    zero_to_one_mandate:
+      value: 'true'
+      confidence: medium
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: 'posting language: zero-to-one, true ownership'
+    digital_business_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    platform_as_business:
+      value: 'true'
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: 'the payments network IS the business: money moves through it (collect/treasury/payouts/FX
+          rails)'
+    platform_engineering:
+      value: 'false'
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: '''Infrastructure'' in the title denotes the commercial platform product, not DevEx/internal
+          platform engineering'
+    internal_tools_backoffice:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    feature_delivery_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    maintenance_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    risk_compliance_heavy:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    transformation_phase:
+      value:
+      - unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    mandate_summary:
+      value: Ownership of the global payments-network platform that constitutes the company's core money-movement
+        business.
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: synthesis of posting
+  organization:
+    reports_to_level:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    reports_to_title:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    direct_reports_estimate:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    total_org_scope_estimate:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    cross_functional_leadership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    hiring_authority:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    budget_ownership:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    org_design_authority:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    decision_authority:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    geographic_responsibility:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    portfolio_responsibility:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+  company:
+    name: airwallex
+    scale:
+      value: global
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        excerpt: 26 offices around the globe
+    stage:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    geographic_footprint:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    business_model:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    customer_model:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    platform_ecosystem:
+      value: 'true'
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: platform is the product
+    is_crypto_exchange:
+      value: 'false'
+      confidence: high
+      method: manual_gold_annotation
+      evidence:
+      - source_id: src_gold_annotation
+        source_type: manual_gold_annotation
+        rationale: B2B payments platform
+    is_outsourcing:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    local_only:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    product_culture_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    emerging_markets_footprint:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    brand_recognition:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    bureaucracy_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    regulatory_risk_signal:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  feasibility_facts:
+    country:
+      value: Singapore
+      confidence: high
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: SG - Singapore
+        location: location
+        rationale: null
+    city:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    country_group:
+      value: other
+      confidence: high
+      method: deterministic_derivation
+      evidence:
+      - source_id: src_structured_fields
+        source_type: structured_source_field
+        excerpt: SG - Singapore
+        location: location
+        rationale: null
+    country_group_resolver_version: 2026.07.19
+    work_format:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    remote_geo_restrictions:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    relocation_support:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    sponsorship_stated:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    work_authorization_required:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    must_be_already_authorized:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+    timezone_expectations:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    required_working_hours:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    travel_requirement:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    language_requirements: []
+    local_market_indicator:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  requirements:
+    years_experience_min:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    mandatory_industry_experience: []
+    mandatory_domain_expertise: []
+    regulatory_expertise:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    technical_expertise: []
+    education:
+      value: null
+      confidence: unknown
+      method: none
+      evidence: []
+    certifications: []
+    entry_barriers: []
+    overall_transferability:
+      value: unknown
+      confidence: unknown
+      method: none
+      evidence: []
+  risks: []
+  evidence_registry:
+  - id: src_vacancy_text
+    source_type: vacancy_text
+    description: normalized vacancy description text
+    content_hash: 79bcc181001cefc5
+  - id: src_structured_fields
+    source_type: structured_source_field
+    description: structured source row fields (title/location/company)
+    content_hash: null
+  - id: src_gold_annotation
+    source_type: manual_gold_annotation
+    description: manual gold annotation 2026-07-19 grounded in the research corpus
+  extraction_diagnostics:
+    warnings: []
+    source_text_length: 1568
+    source_text_truncated: null
+    deterministic_fact_count: null
+    semantic_fact_count: null
+    unknown_field_count: null
