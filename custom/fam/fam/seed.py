@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .cal import ALMATY
+from . import audit, geo2gis
 
 _LOCAL_FMT = "%Y-%m-%d %H:%M"
 
@@ -794,3 +795,524 @@ def format_report(d):
     if not lines:
         return "Изменений нет."
     return "\n".join(lines).rstrip()
+
+
+# ---------------------------------------------------------------------------
+# Task 5: applier + post-apply round-trip verify
+# ---------------------------------------------------------------------------
+
+_APPLY_ORDER = ["Места", "Люди", "Серии", "События", "Планы", "Лекарства", "Покупки"]
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# -- Места --------------------------------------------------------------
+
+def _insert_place(conn, row):
+    from fam import places
+
+    lat, lon = row.get("lat"), row.get("lon")
+    gis_url = row.get("gis_url")
+    if gis_url and (lat is None or lon is None):
+        resolved = geo2gis.resolve_place_coords(gis_url)
+        if resolved is not None:
+            lon, lat = resolved  # 2ГИС отдаёт LON,LAT — известная ловушка
+
+    p = places.add(conn, row["name"], address=row.get("address") or "",
+                    lat=lat, lon=lon, aliases=row.get("aliases") or ())
+
+    extra = {}
+    if row.get("category") is not None:
+        extra["category"] = row["category"]
+    if row.get("travel_min") is not None:
+        extra["travel_min"] = row["travel_min"]
+    if extra:
+        places.update(conn, p["id"], **extra)
+
+    audit.log(conn, "seed.Места.insert", {"id": p["id"], "name": row["name"]}, actor="admin")
+    return p["id"]
+
+
+def _update_place(conn, item):
+    from fam import places
+
+    rid, changes = item["id"], item["changes"]
+    fields = {k: v[1] for k, v in changes.items() if k in places._UPDATE_FIELDS}
+    if fields:
+        places.update(conn, rid, **fields)
+
+    if "aliases" in changes:
+        was, now = changes["aliases"]
+        was, now = set(was or []), set(now or [])
+        for a in now - was:
+            places.alias(conn, rid, a)
+        for a in was - now:
+            conn.execute("DELETE FROM place_aliases WHERE place_id=? AND alias=?", (rid, a))
+
+    audit.log(conn, "seed.Места.update", {"id": rid, "changes": changes}, actor="admin")
+
+
+def _delete_place(conn, row):
+    rid = row["id"]
+    conn.execute("DELETE FROM place_aliases WHERE place_id=?", (rid,))
+    conn.execute("DELETE FROM places WHERE id=?", (rid,))
+    audit.log(conn, "seed.Места.delete", {"id": rid, "name": row.get("name")}, actor="admin")
+
+
+# -- Люди -----------------------------------------------------------------
+
+def _apply_people_inserts(conn, rows):
+    from fam import people
+
+    inserted = []
+    for row in rows:
+        p = people.add(conn, row["name"], kind=row.get("kind") or "person",
+                        slug=row.get("slug"), aliases=row.get("aliases") or ())
+        audit.log(conn, "seed.Люди.insert", {"id": p["id"], "name": row["name"]}, actor="admin")
+        inserted.append((p["id"], row))
+
+    # Second pass: home/members may reference entities inserted earlier in
+    # this same file (places always precede people; a group's members may
+    # be people inserted just above it in this pass).
+    for pid, row in inserted:
+        if row.get("home"):
+            people.set_home(conn, pid, row["home"])
+        for m in row.get("members") or []:
+            people.add_member(conn, pid, m)
+
+
+def _apply_people_update(conn, item):
+    from fam import people
+
+    rid, changes = item["id"], item["changes"]
+    set_clauses, params = [], []
+    for key in ("name", "slug", "notes"):
+        if key in changes:
+            set_clauses.append(f"{key}=?")
+            params.append(changes[key][1])
+    if set_clauses:
+        params.append(rid)
+        conn.execute(f"UPDATE people SET {', '.join(set_clauses)} WHERE id=?", params)
+
+    if "home" in changes:
+        people.set_home(conn, rid, changes["home"][1])
+
+    if "aliases" in changes:
+        was, now = changes["aliases"]
+        was, now = set(was or []), set(now or [])
+        for a in now - was:
+            people.alias(conn, rid, a)
+        for a in was - now:
+            conn.execute("DELETE FROM people_aliases WHERE person_id=? AND alias=?", (rid, a))
+
+    if "members" in changes:
+        was, now = changes["members"]
+        was, now = set(was or []), set(now or [])
+        for m in now - was:
+            people.add_member(conn, rid, m)
+        for m in was - now:
+            mp = people.get(conn, m)
+            if mp:
+                conn.execute("DELETE FROM group_members WHERE group_id=? AND person_id=?",
+                             (rid, mp["id"]))
+
+    audit.log(conn, "seed.Люди.update", {"id": rid, "changes": changes}, actor="admin")
+
+
+def _delete_person(conn, row):
+    rid = row["id"]
+    conn.execute("DELETE FROM people_aliases WHERE person_id=?", (rid,))
+    conn.execute("DELETE FROM group_members WHERE group_id=? OR person_id=?", (rid, rid))
+    conn.execute("DELETE FROM people WHERE id=?", (rid,))
+    audit.log(conn, "seed.Люди.delete", {"id": rid, "name": row.get("name")}, actor="admin")
+
+
+# -- Серии ------------------------------------------------------------------
+
+def _apply_series_insert(conn, row):
+    from fam import series
+
+    s = series.add(conn, row["title"], row["weekdays"], row["start_time"],
+                    end_time=row.get("end_time"), place=row.get("place"),
+                    participants=row.get("participants") or (),
+                    transport=row.get("transport") or "unknown",
+                    notes=row.get("notes") or "", until_local=row.get("until_local"),
+                    prep_min=row.get("prep_min"))
+    audit.log(conn, "seed.Серии.insert", {"id": s["id"], "title": row["title"]}, actor="admin")
+    return s["id"]
+
+
+_SERIES_SCHEDULE_FIELDS = {"weekdays", "start_time", "end_time", "place", "transport",
+                           "prep_min", "until_local"}
+
+
+def _cancel_future_series_occurrences(conn, sid, now_iso):
+    """Remove future active occurrences of series `sid` (mirrors
+    series.cancel's occurrence-removal, without flipping the series'
+    status), so the trailing series.generate() rebuilds them per the
+    just-updated schedule.
+    """
+    from fam import cal
+
+    rows = conn.execute(
+        "SELECT id FROM events WHERE series_id=? AND status='active' AND start_utc > ?",
+        (sid, now_iso)).fetchall()
+    for r in rows:
+        event_id = r["id"]
+        cal._prep_cascade_cancel(conn, event_id)
+        conn.execute("UPDATE plans SET prep_for_event_id=NULL WHERE prep_for_event_id=?",
+                     (event_id,))
+        conn.execute("UPDATE plans SET attached_event_id=NULL WHERE attached_event_id=?",
+                     (event_id,))
+        conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+
+
+def _apply_series_update(conn, item, now_iso):
+    from fam import places, series
+
+    rid, changes = item["id"], item["changes"]
+    set_clauses, params = [], []
+    simple_map = {"title": "title", "weekdays": "weekdays", "start_time": "start_time",
+                  "end_time": "end_time", "transport": "transport", "notes": "notes",
+                  "until_local": "until_local", "prep_min": "prep_min"}
+    for key, col in simple_map.items():
+        if key in changes:
+            set_clauses.append(f"{col}=?")
+            params.append(changes[key][1])
+    if "place" in changes:
+        new_place_name = changes["place"][1]
+        pl = places.resolve(conn, new_place_name) if new_place_name else None
+        set_clauses.append("place_id=?")
+        params.append(pl["id"] if pl else None)
+    if set_clauses:
+        set_clauses.append("updated_at=?")
+        params.append(now_iso)
+        params.append(rid)
+        conn.execute(f"UPDATE event_series SET {', '.join(set_clauses)} WHERE id=?", params)
+
+    if "participants" in changes:
+        was, now = changes["participants"]
+        was, now = set(was or []), set(now or [])
+        series.update_participants(conn, rid, add=list(now - was), remove=list(was - now),
+                                    now_utc=now_iso)
+
+    if _SERIES_SCHEDULE_FIELDS & set(changes):
+        _cancel_future_series_occurrences(conn, rid, now_iso)
+
+    audit.log(conn, "seed.Серии.update", {"id": rid, "changes": changes}, actor="admin")
+
+
+def _delete_series(conn, row):
+    from fam import series
+
+    series.cancel(conn, row["id"])
+    audit.log(conn, "seed.Серии.delete", {"id": row["id"], "title": row.get("title")},
+              actor="admin")
+
+
+# -- События ------------------------------------------------------------------
+
+def _apply_event_insert(conn, row):
+    from fam import cal
+
+    start_utc = local_to_utc_iso(row["start"])
+    end_utc = local_to_utc_iso(row["end"]) if row.get("end") else None
+    ev = cal.add(conn, row["title"], start_utc, end_utc=end_utc, place=row.get("place"),
+                 participants=row.get("participants") or (),
+                 transport=row.get("transport") or "unknown",
+                 notes=row.get("notes") or "", prep_min=row.get("prep_min"))
+    audit.log(conn, "seed.События.insert", {"id": ev["id"], "title": row["title"]}, actor="admin")
+    return ev["id"]
+
+
+def _apply_event_update(conn, item):
+    from fam import cal
+
+    rid, changes = item["id"], item["changes"]
+    fields = {}
+    if "title" in changes:
+        fields["title"] = changes["title"][1]
+    if "start" in changes:
+        fields["start_utc"] = local_to_utc_iso(changes["start"][1])
+    if "end" in changes:
+        v = changes["end"][1]
+        fields["end_utc"] = local_to_utc_iso(v) if v else None
+    if "place" in changes:
+        fields["place"] = changes["place"][1]
+    if "transport" in changes:
+        fields["transport"] = changes["transport"][1]
+    if "notes" in changes:
+        fields["notes"] = changes["notes"][1]
+    if "prep_min" in changes:
+        fields["prep_min"] = changes["prep_min"][1]
+    if "participants" in changes:
+        was, now = changes["participants"]
+        was, now = set(was or []), set(now or [])
+        add_p, rm_p = list(now - was), list(was - now)
+        if add_p:
+            fields["add_person"] = add_p
+        if rm_p:
+            fields["rm_person"] = rm_p
+
+    if fields:
+        cal.update(conn, rid, **fields)
+
+    audit.log(conn, "seed.События.update", {"id": rid, "changes": changes}, actor="admin")
+
+
+def _delete_event(conn, row):
+    from fam import cal
+
+    cal.cancel(conn, row["id"])
+    audit.log(conn, "seed.События.delete", {"id": row["id"], "title": row.get("title")},
+              actor="admin")
+
+
+# -- Планы ------------------------------------------------------------------
+
+def _apply_plan_insert(conn, row):
+    from fam import plans
+
+    pid = plans.add(conn, row["title"], place=row.get("place"), person=row.get("person"),
+                     deadline=row.get("deadline"), notes=row.get("notes") or "")
+    audit.log(conn, "seed.Планы.insert", {"id": pid, "title": row["title"]}, actor="admin")
+    return pid
+
+
+def _apply_plan_update(conn, item):
+    from fam import people, places
+
+    rid, changes = item["id"], item["changes"]
+    set_clauses, params = [], []
+    if "title" in changes:
+        set_clauses.append("title=?")
+        params.append(changes["title"][1])
+    if "deadline" in changes:
+        set_clauses.append("deadline=?")
+        params.append(changes["deadline"][1])
+    if "notes" in changes:
+        set_clauses.append("notes=?")
+        params.append(changes["notes"][1])
+    if "place" in changes:
+        v = changes["place"][1]
+        pl = places.resolve(conn, v) if v else None
+        set_clauses.append("place_id=?")
+        params.append(pl["id"] if pl else None)
+    if "person" in changes:
+        v = changes["person"][1]
+        pe = people.resolve(conn, v) if v else None
+        set_clauses.append("person_id=?")
+        params.append(pe["id"] if pe else None)
+    if set_clauses:
+        params.append(rid)
+        conn.execute(f"UPDATE plans SET {', '.join(set_clauses)} WHERE id=?", params)
+
+    audit.log(conn, "seed.Планы.update", {"id": rid, "changes": changes}, actor="admin")
+
+
+def _delete_plan(conn, row):
+    from fam import plans
+
+    plans.mark(conn, row["id"], "dropped")
+    audit.log(conn, "seed.Планы.delete", {"id": row["id"], "title": row.get("title")},
+              actor="admin")
+
+
+# -- Лекарства ------------------------------------------------------------
+
+def _apply_med_insert(conn, row):
+    from fam import meds
+
+    mid = meds.add(conn, row["name"], row.get("times") or [], dose=row.get("dose") or "",
+                    remaining=row.get("remaining"), threshold=row.get("threshold") or 0)
+    if row.get("enabled") == 0:
+        meds.edit(conn, mid, enabled=0)
+    audit.log(conn, "seed.Лекарства.insert", {"id": mid, "name": row["name"]}, actor="admin")
+    return mid
+
+
+def _apply_med_update(conn, item):
+    from fam import meds
+
+    rid, changes = item["id"], item["changes"]
+    fields = {k: v[1] for k, v in changes.items() if k in meds._EDIT_FIELDS}
+    if fields:
+        meds.edit(conn, rid, **fields)
+
+    audit.log(conn, "seed.Лекарства.update", {"id": rid, "changes": changes}, actor="admin")
+
+
+def _delete_med(conn, row):
+    from fam import meds
+
+    meds.remove(conn, row["id"])
+    audit.log(conn, "seed.Лекарства.delete", {"id": row["id"], "name": row.get("name")},
+              actor="admin")
+
+
+# -- Покупки ------------------------------------------------------------------
+
+def _apply_shopping_insert(conn, row):
+    from fam import shopping
+
+    sid = shopping.add(conn, row["name"], qty=row.get("qty") or "",
+                        added_by=row.get("added_by") or "")
+    audit.log(conn, "seed.Покупки.insert", {"id": sid, "name": row["name"]}, actor="admin")
+    return sid
+
+
+def _apply_shopping_update(conn, item):
+    rid, changes = item["id"], item["changes"]
+    set_clauses, params = [], []
+    for key in ("name", "qty", "added_by"):
+        if key in changes:
+            set_clauses.append(f"{key}=?")
+            params.append(changes[key][1])
+    if set_clauses:
+        params.append(rid)
+        conn.execute(f"UPDATE shopping SET {', '.join(set_clauses)} WHERE id=?", params)
+
+    audit.log(conn, "seed.Покупки.update", {"id": rid, "changes": changes}, actor="admin")
+
+
+def _delete_shopping(conn, row):
+    conn.execute("DELETE FROM shopping WHERE id=?", (row["id"],))
+    audit.log(conn, "seed.Покупки.delete", {"id": row["id"], "name": row.get("name")},
+              actor="admin")
+
+
+_ROW_INSERT_FN = {
+    "Места": _insert_place,
+    "Серии": _apply_series_insert,
+    "События": _apply_event_insert,
+    "Планы": _apply_plan_insert,
+    "Лекарства": _apply_med_insert,
+    "Покупки": _apply_shopping_insert,
+}
+
+_UPDATE_FN = {
+    "Места": _update_place,
+    "Люди": _apply_people_update,
+    "Серии": None,                     # needs now_iso, handled specially
+    "События": _apply_event_update,
+    "Планы": _apply_plan_update,
+    "Лекарства": _apply_med_update,
+    "Покупки": _apply_shopping_update,
+}
+
+_DELETE_FN = {
+    "Места": _delete_place,
+    "Люди": _delete_person,
+    "Серии": _delete_series,
+    "События": _delete_event,
+    "Планы": _delete_plan,
+    "Лекарства": _delete_med,
+    "Покупки": _delete_shopping,
+}
+
+
+def apply_diff(conn, d, now_utc=None):
+    """Apply an approved Diff to the DB through the fam domain modules.
+    Never commits (the caller's transaction, mirroring every fam module).
+    Raises ValueError if d.has_conflicts -- an approval gate must never
+    apply a diff with unresolved conflicts.
+
+    Order: Места -> Люди -> Серии -> События -> Планы -> Лекарства ->
+    Покупки for inserts/updates (so a row referencing an entity inserted
+    earlier in this same file resolves); deletes run afterwards, in the
+    reverse sheet order (so a delete never trips over a live reference
+    from a sheet processed earlier in this same apply). One
+    series.generate() runs at the very end, after every series/event
+    mutation has landed, so newly-updated schedules materialize their
+    future occurrences in a single pass.
+
+    Returns a dict of per-sheet {"inserts": n, "updates": n, "deletes": n}
+    counts of what was applied.
+    """
+    if d.has_conflicts:
+        raise ValueError("diff has conflicts, cannot apply")
+
+    now_iso = now_utc.isoformat(timespec="seconds") if now_utc else _now_iso()
+
+    counts = {"inserts": {}, "updates": {}, "deletes": {}}
+
+    for sheet in _APPLY_ORDER:
+        ins_rows = d.inserts.get(sheet, [])
+        upd_items = d.updates.get(sheet, [])
+
+        if sheet == "Люди":
+            _apply_people_inserts(conn, ins_rows)
+        else:
+            for row in ins_rows:
+                _ROW_INSERT_FN[sheet](conn, row)
+
+        if sheet == "Серии":
+            for item in upd_items:
+                _apply_series_update(conn, item, now_iso)
+        else:
+            for item in upd_items:
+                _UPDATE_FN[sheet](conn, item)
+
+        counts["inserts"][sheet] = len(ins_rows)
+        counts["updates"][sheet] = len(upd_items)
+
+    for sheet in reversed(_APPLY_ORDER):
+        del_rows = d.deletes.get(sheet, [])
+        for row in del_rows:
+            _DELETE_FN[sheet](conn, row)
+        counts["deletes"][sheet] = len(del_rows)
+
+    from fam import series as series_mod
+
+    series_mod.generate(conn, now_utc=now_iso)
+
+    return counts
+
+
+def verify_roundtrip(conn, file_rows_by_sheet):
+    """True iff a fresh export_rows(conn) matches file_rows_by_sheet,
+    sheet by sheet: rows carrying an id must match the fresh export's row
+    at that id exactly (normalized); rows with no id (freshly-inserted,
+    the file never learns the id apply_diff assigned) are matched by
+    content alone, ignoring id, against whatever fresh rows are left
+    after every id-carrying row has claimed its match. Every fresh row
+    must be claimed by exactly one file row, in both directions -- an
+    unmatched leftover on either side means the DB and the file have
+    diverged, so this returns False.
+    """
+    fresh = export_rows(conn)
+
+    for sheet in SHEETS:
+        file_list = [_to_canonical(sheet, r) for r in file_rows_by_sheet.get(sheet, [])]
+        fresh_list = [_to_canonical(sheet, r) for r in fresh.get(sheet, [])]
+
+        with_id = [r for r in file_list if r.get("id") is not None]
+        without_id = [r for r in file_list if r.get("id") is None]
+
+        fresh_by_id = {r["id"]: r for r in fresh_list}
+        used_ids = set()
+        for r in with_id:
+            fr = fresh_by_id.get(r["id"])
+            if fr is None or fr != r:
+                return False
+            used_ids.add(r["id"])
+
+        remaining = [r for r in fresh_list if r["id"] not in used_ids]
+        for r in without_id:
+            r_no_id = {k: v for k, v in r.items() if k != "id"}
+            match_idx = None
+            for i, cand in enumerate(remaining):
+                cand_no_id = {k: v for k, v in cand.items() if k != "id"}
+                if cand_no_id == r_no_id:
+                    match_idx = i
+                    break
+            if match_idx is None:
+                return False
+            remaining.pop(match_idx)
+
+        if remaining:
+            return False
+
+    return True
