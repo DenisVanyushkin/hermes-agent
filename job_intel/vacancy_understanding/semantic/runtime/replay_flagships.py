@@ -55,8 +55,9 @@ def _full_text_for(fixture: dict) -> str | None:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def run(out_path: Path = Path("artifacts/shadow-evaluator/semantic-flagship-replay.json")) -> dict:
-    provider = DeterministicPhraseProvider()
+def run(out_path: Path = Path("artifacts/shadow-evaluator/semantic-flagship-replay.json"),
+        provider=None) -> dict:
+    provider = provider or DeterministicPhraseProvider()
     step3_golden = {
         c["id"]: c for c in yaml.safe_load(
             Path("tests/fixtures/shadow_evaluator/golden-decision-cases.yaml")
