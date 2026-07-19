@@ -37,6 +37,7 @@ from job_intel.vacancy_understanding.semantic.runtime.llm_provider import LLMPro
 from job_intel.vacancy_understanding.semantic.runtime.models import RUNTIME_VERSION
 from job_intel.vacancy_understanding.semantic.runtime.pipeline import extract_semantic
 
+from .aggregate import aggregate_run
 from .hashing import sha256_file, sha256_json
 from .models import (
     RUNNER_VERSION,
@@ -134,6 +135,11 @@ def _build_manifest(
         metric_contract_hash=sha256_file(METRIC_CONTRACT_PATH),
         decision_matrix_path=_relpath(DECISION_CONTRACT_PATH, repo_root),
         decision_matrix_hash=sha256_file(DECISION_CONTRACT_PATH),
+        price_input_usd_per_mtok=(provider_identity.get("pricing") or {}).get(
+            "input_usd_per_mtok"),
+        price_output_usd_per_mtok=(provider_identity.get("pricing") or {}).get(
+            "output_usd_per_mtok"),
+        pricing_source=(provider_identity.get("pricing") or {}).get("source"),
     )
 
 
@@ -178,14 +184,21 @@ def run_benchmark_case(
     return sem, decision, (time.monotonic() - started) * 1000, None
 
 
-def _case_cost(provider_identity: dict[str, Any]) -> tuple[Optional[float], NumericState]:
+def _case_cost(
+    provider_identity: dict[str, Any],
+    input_tokens: Optional[int], output_tokens: Optional[int],
+) -> tuple[Optional[float], NumericState]:
     if provider_identity["cost_known_zero"]:
         return 0.0, NumericState.known_zero
-    # Providers with real per-token cost: tokens are recorded facts (carried
-    # separately below); the cost-per-token formula is explicitly Slice
-    # 5B-2 scope (step5b-benchmark-contract.md §6) — deliberately not
-    # computed here.
-    return None, NumericState.not_applicable
+    pricing = provider_identity.get("pricing")
+    if pricing and input_tokens is not None and output_tokens is not None:
+        cost = (input_tokens * pricing["input_usd_per_mtok"]
+                + output_tokens * pricing["output_usd_per_mtok"]) / 1_000_000
+        return cost, NumericState.known_value
+    # Cost SHOULD be measurable for this provider but either the recorded
+    # usage or the run's pricing is missing — that is `unknown`, never a
+    # silent zero (contract §6).
+    return None, NumericState.unknown
 
 
 def run_benchmark(
@@ -240,7 +253,13 @@ def run_benchmark(
                 status=CaseStatus.failed,
                 observations_emitted=0, observations_accepted=0, observations_rejected=0,
                 latency_ms=latency_ms, latency_mode=latency_mode,
-                cost_state=NumericState.unknown, error_code=error.reason,
+                live_latency_state=(NumericState.unknown
+                                    if identity["reports_usage_metadata"]
+                                    else NumericState.not_applicable),
+                cost_state=(NumericState.known_zero if identity["cost_known_zero"]
+                            else NumericState.unknown),
+                cost_usd=0.0 if identity["cost_known_zero"] else None,
+                error_code=error.reason,
                 started_at=started_at, completed_at=completed_at,
             )
         else:
@@ -250,19 +269,27 @@ def run_benchmark(
             if decision is not None:
                 decision_path = decisions_dir / f"{case_id}.decision.json"
                 _atomic_write_json(decision_path, decision.semantic_dump())
-            cost_usd, cost_state = _case_cost(identity)
             recording_path = None
+            live_latency_ms: Optional[float] = None
+            live_latency_state = NumericState.not_applicable
             if identity["reports_usage_metadata"]:
                 meta = getattr(provider, "last_call_metadata", {}) or {}
                 usage = meta.get("usage") or {}
                 input_tokens = usage.get("prompt_tokens")
                 output_tokens = usage.get("completion_tokens")
+                rec_latency = meta.get("latency_ms")
+                if rec_latency is not None:
+                    live_latency_ms = float(rec_latency)
+                    live_latency_state = NumericState.known_value
+                else:
+                    live_latency_state = NumericState.unknown
                 input_hash = meta.get("input_hash")
                 if input_hash is not None:
                     rp = provider.store.path_for(input_hash)
                     recording_path = _relpath(rp, repo_root)
             else:
                 input_tokens = output_tokens = 0
+            cost_usd, cost_state = _case_cost(identity, input_tokens, output_tokens)
 
             result = BenchmarkCaseResult(
                 benchmark_id=benchmark_id, run_id=run_id, case_id=case_id,
@@ -279,6 +306,7 @@ def run_benchmark(
                 decision_output_path=(_relpath(decision_path, repo_root)
                                       if decision_path else None),
                 latency_ms=latency_ms, latency_mode=latency_mode,
+                live_latency_ms=live_latency_ms, live_latency_state=live_latency_state,
                 input_tokens=input_tokens, output_tokens=output_tokens,
                 cost_usd=cost_usd, cost_state=cost_state,
                 recording_path=recording_path,
@@ -287,4 +315,7 @@ def run_benchmark(
         _atomic_write_json(result_path, result.model_dump(mode="json"))
         results.append(result)
 
+    # Aggregate strictly from the persisted rows just written/skipped —
+    # NEVER from the in-memory `results` list (resume must not double-count).
+    aggregate_run(out_dir)
     return manifest, results

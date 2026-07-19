@@ -66,6 +66,7 @@ def build_benchmark_provider(
             "recording_format_version": None,
             "reports_usage_metadata": False,
             "cost_known_zero": True,
+            "pricing": None,
         }
         return provider, identity
 
@@ -75,10 +76,24 @@ def build_benchmark_provider(
         if not store_dir or not model_id:
             raise ProviderRegistryError(
                 "llm_replay spec requires 'store_dir' and 'model_id'")
+        pricing = spec.get("pricing")
+        if pricing is not None:
+            missing = {"input_usd_per_mtok", "output_usd_per_mtok"} - set(pricing)
+            if missing:
+                raise ProviderRegistryError(
+                    f"llm_replay pricing missing required keys: {sorted(missing)}")
         provider = LLMObservationProvider(
             store=RecordingStore(store_dir), mode="replay",
             model_id=model_id, contract=contract)
-        config_for_hash = {"model_id": model_id}  # store_dir is a path, not identity
+        # store_dir is a path, not identity. Pricing IS identity: rows costed
+        # under different prices are not comparable, so a resume under a
+        # changed price must be blocked via provider_config_hash.
+        config_for_hash = {
+            "model_id": model_id,
+            "pricing": ({k: pricing[k] for k in
+                         ("input_usd_per_mtok", "output_usd_per_mtok")}
+                        if pricing else None),
+        }
         identity = {
             "provider_id": provider.provider_id,
             "prompt_version": provider.prompt_version,
@@ -93,6 +108,7 @@ def build_benchmark_provider(
             "recording_format_version": "1.0",
             "reports_usage_metadata": True,
             "cost_known_zero": False,
+            "pricing": pricing,
         }
         return provider, identity
 
