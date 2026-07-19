@@ -1,27 +1,6 @@
-from datetime import datetime, timedelta, timezone
+from fam import people, plans, seed
 
-from fam import people, places, cal, series, plans, meds, shopping, seed
-
-
-def _seed_db(conn):
-    p_home = places.add(conn, "Казакова", address="ул. Казакова 12")
-    inv = places.add(conn, "Invictus", lat=43.205156, lon=76.899298)
-    aisha = people.add(conn, "Аишка", aliases=("Аиша",))
-    people.set_home(conn, "Аишка", "Казакова")
-    grp = people.add(conn, "татешки", kind="group")
-    people.add_member(conn, "татешки", "Аишка")
-    future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-    past = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    ev = cal.add(conn, "ДР", future, place="Invictus", transport="car", participants=("татешки",))
-    cal.add(conn, "Прошлое", past)                          # прошедшее — НЕ экспортируется
-    sid = series.add(conn, "Тренировка", "mon,wed,fri", "10:00", end_time="12:00",
-                     place="Invictus", transport="car")
-    series.generate(conn)                                    # вхождения — НЕ экспортируются
-    plans.add(conn, "Пироги", deadline=None)
-    meds.add(conn, "Витамин D", ["08:00"], remaining=30, threshold=5)
-    shopping.add(conn, "Молоко", qty="1 л")
-    conn.commit()
-    return ev
+from seed_helpers import seed_db as _seed_db
 
 
 def test_export_slice(db):

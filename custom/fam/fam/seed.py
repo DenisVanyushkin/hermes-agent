@@ -444,3 +444,300 @@ def make_snapshot(rows_by_sheet):
         "exported_at_utc": datetime.now(timezone.utc).isoformat(),
         "sheets": sheets,
     }
+
+
+\
+# ---------------------------------------------------------------------------
+# Task 4: diff engine
+# ---------------------------------------------------------------------------
+import re
+from dataclasses import dataclass, field
+
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_YMD_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+_SHEET_TABLE = {
+    "Люди": "people",
+    "Места": "places",
+    "События": "events",
+    "Серии": "event_series",
+    "Планы": "plans",
+    "Лекарства": "meds",
+    "Покупки": "shopping",
+}
+
+
+@dataclass
+class Diff:
+    """Result of diff(): per-sheet classification of file rows vs live DB.
+
+    inserts[sheet]: list of canonical row dicts (id is None) to create.
+    updates[sheet]: list of {"id", "changes": {key: (was, now)}}.
+    deletes[sheet]: list of canonical snapshot row dicts (carry "id") whose
+      id was present at export time but is missing from the file.
+    conflicts[sheet]: list of {"sheet", "row_ref", "reason"} -- rows that
+      cannot be applied; diff() never raises for bad input data, it reports
+      conflicts instead (approval gate blocks on has_conflicts).
+    """
+
+    inserts: dict = field(default_factory=dict)
+    updates: dict = field(default_factory=dict)
+    deletes: dict = field(default_factory=dict)
+    conflicts: dict = field(default_factory=dict)
+
+    @property
+    def empty(self):
+        return not (any(self.inserts.values()) or any(self.updates.values())
+                    or any(self.deletes.values()))
+
+    @property
+    def has_conflicts(self):
+        return any(self.conflicts.values())
+
+
+def _to_canonical(sheet, row):
+    """Bridge Task 1's normalize_row (built for xlsx header/label input)
+    so it also accepts canonical-key rows (export_rows/snapshot shape),
+    per the Task 4 brief's input contract. A row is treated as header-form
+    if it carries any of the sheet's Russian column headers; otherwise
+    it's assumed canonical and round-tripped through
+    _canon_row_to_header_form (canon -> label) first, exactly like
+    make_snapshot does for export_rows output.
+    """
+    spec = SHEETS[sheet]
+    # Columns where header and key differ are the only reliable signal:
+    # some columns (slug, id, lat, lon...) happen to share header==key, so
+    # their presence says nothing about which form the row is in. If any
+    # differing column's raw canonical key is present, this is a
+    # canonical-key row (export_rows/snapshot shape) and needs bridging
+    # through _canon_row_to_header_form before normalize_row's from_xlsx
+    # pass (which expects header-form label values).
+    distinguishing = [col for col in spec.columns if col.key != "id" and col.header != col.key]
+    is_canon_form = any(col.key in row for col in distinguishing)
+    if is_canon_form:
+        row = _canon_row_to_header_form(sheet, row)
+    return normalize_row(sheet, row)
+
+
+def _id_exists(conn, sheet, rid):
+    table = _SHEET_TABLE[sheet]
+    return conn.execute(f"SELECT 1 FROM {table} WHERE id=?", (rid,)).fetchone() is not None
+
+
+def _check_time_date(sheet, row):
+    """Returns a human reason string if a date/time/weekday field is
+    malformed, else None. Col.from_xlsx already validates weekday/kind/
+    transport/category/enabled labels (raised as ValueError earlier, in
+    _to_canonical); this covers the free-text date/time fields that have
+    no Col transform (start/end/deadline/until_local/start_time/end_time/
+    meds times), reusing the exact 'YYYY-MM-DD HH:MM' parser cal/seed use.
+    """
+    if sheet == "События":
+        for key in ("start", "end"):
+            v = row.get(key)
+            if v:
+                try:
+                    local_to_utc_iso(v)
+                except ValueError as exc:
+                    return str(exc)
+    elif sheet == "Серии":
+        for key in ("start_time", "end_time"):
+            v = row.get(key)
+            if v and not _HHMM_RE.match(v):
+                return f"{key}: время не в формате ЧЧ:ММ: {v!r}"
+        v = row.get("until_local")
+        if v and not _YMD_RE.match(v):
+            return f"до (дата): не в формате ГГГГ-ММ-ДД: {v!r}"
+    elif sheet == "Планы":
+        v = row.get("deadline")
+        if v and not _YMD_RE.match(v):
+            return f"срок: не в формате ГГГГ-ММ-ДД: {v!r}"
+    elif sheet == "Лекарства":
+        for t in row.get("times") or []:
+            if not _HHMM_RE.match(t):
+                return f"времена: не в формате ЧЧ:ММ: {t!r}"
+    return None
+
+
+def _check_refs(conn, sheet, row):
+    """Returns a combined reason string (place/person unresolvable, or a
+    place with no transport -- mirrors cli._check_trip_has_transport) or
+    None. Issues are joined so a row with multiple problems reports all
+    of them in one conflict entry.
+    """
+    from fam import people, places
+
+    issues = []
+    if sheet in ("События", "Серии"):
+        place_name = row.get("place")
+        transport = row.get("transport")
+        if place_name:
+            if places.resolve(conn, place_name) is None:
+                issues.append(f"место не найдено: {place_name!r}")
+            if transport is None or transport == "unknown":
+                issues.append("место задано, но не задан транспорт")
+        for pname in row.get("participants") or []:
+            if people.resolve(conn, pname) is None:
+                issues.append(f"участник не найден: {pname!r}")
+    elif sheet == "Планы":
+        place_name = row.get("place")
+        if place_name and places.resolve(conn, place_name) is None:
+            issues.append(f"место не найдено: {place_name!r}")
+        person_name = row.get("person")
+        if person_name and people.resolve(conn, person_name) is None:
+            issues.append(f"человек не найден: {person_name!r}")
+    elif sheet == "Люди":
+        home = row.get("home")
+        if home and places.resolve(conn, home) is None:
+            issues.append(f"место не найдено: {home!r}")
+        if row.get("kind") == "group":
+            for m in row.get("members") or []:
+                if people.resolve(conn, m) is None:
+                    issues.append(f"участник группы не найден: {m!r}")
+    return "; ".join(issues) if issues else None
+
+
+def _place_referenced_outside_file(conn, place_id):
+    for table, col in (("plans", "place_id"), ("events", "place_id"),
+                        ("event_series", "place_id")):
+        if conn.execute(f"SELECT 1 FROM {table} WHERE {col}=? LIMIT 1", (place_id,)).fetchone():
+            return True
+    if conn.execute("SELECT 1 FROM people WHERE home_place_id=? LIMIT 1", (place_id,)).fetchone():
+        return True
+    return False
+
+
+def _person_referenced_outside_file(conn, person_id):
+    for table, col in (("plans", "person_id"), ("event_participants", "person_id"),
+                        ("event_series_participants", "person_id"),
+                        ("group_members", "person_id")):
+        if conn.execute(f"SELECT 1 FROM {table} WHERE {col}=? LIMIT 1", (person_id,)).fetchone():
+            return True
+    if conn.execute("SELECT 1 FROM people WHERE home_place_id=? LIMIT 1", (person_id,)).fetchone():
+        return True
+    return False
+
+
+def diff(conn, file_rows_by_sheet, snap):
+    """Compare file_rows_by_sheet (header/label form from seed_xlsx, or
+    canonical-key form as produced by export_rows) against the live DB and
+    the export snapshot `snap`. Read-only: never writes to conn.
+
+    inserts/updates classification is against the CURRENT live DB state
+    (a fresh export_rows/make_snapshot taken here); deletes are bounded by
+    `snap` (ids present when the file was exported) so rows created in the
+    DB after the export are never proposed for deletion, even if the file
+    doesn't mention them.
+    """
+    live_snap = make_snapshot(export_rows(conn))
+
+    inserts, updates, deletes, conflicts = {}, {}, {}, {}
+
+    for sheet in SHEETS:
+        file_rows = file_rows_by_sheet.get(sheet, [])
+        snap_sheet = snap.get("sheets", {}).get(sheet, {})
+        live_sheet = live_snap["sheets"].get(sheet, {})
+
+        ins, upd, conf = [], [], []
+        file_ids_seen = set()
+
+        for idx, row in enumerate(file_rows):
+            row_ref = f"{sheet}#{idx + 1}"
+            try:
+                canon_row = _to_canonical(sheet, row)
+            except ValueError as exc:
+                conf.append({"sheet": sheet, "row_ref": row_ref, "reason": str(exc)})
+                continue
+
+            rid = canon_row.get("id")
+            issues = []
+
+            if rid is not None:
+                if rid in file_ids_seen:
+                    issues.append(f"дублирующийся id {rid} в файле")
+                else:
+                    file_ids_seen.add(rid)
+                if not _id_exists(conn, sheet, rid):
+                    issues.append(f"id {rid} не найден в БД")
+
+            time_issue = _check_time_date(sheet, canon_row)
+            if time_issue:
+                issues.append(time_issue)
+            ref_issue = _check_refs(conn, sheet, canon_row)
+            if ref_issue:
+                issues.append(ref_issue)
+
+            if issues:
+                conf.append({"sheet": sheet, "row_ref": row_ref, "reason": "; ".join(issues)})
+                continue
+
+            if rid is None:
+                ins.append(canon_row)
+            else:
+                cur = live_sheet.get(str(rid))
+                if cur is None:
+                    # id exists in the DB (checked above) but outside the
+                    # exported live slice (e.g. a done plan) -- nothing to
+                    # diff against, leave untouched.
+                    continue
+                changes = {k: (cur.get(k), v) for k, v in canon_row.items()
+                           if k != "id" and cur.get(k) != v}
+                if changes:
+                    upd.append({"id": rid, "changes": changes})
+
+        dele = []
+        for str_id, snap_row in snap_sheet.items():
+            rid = int(str_id)
+            if rid in file_ids_seen:
+                continue
+            if sheet == "Места" and _place_referenced_outside_file(conn, rid):
+                conf.append({"sheet": sheet, "row_ref": f"{sheet}#id{rid}",
+                             "reason": f"место #{rid} ({snap_row.get('name')}) удалить нельзя: "
+                                       "на него ещё ссылаются планы/события/серии/дом человека"})
+                continue
+            if sheet == "Люди" and _person_referenced_outside_file(conn, rid):
+                conf.append({"sheet": sheet, "row_ref": f"{sheet}#id{rid}",
+                             "reason": f"человек #{rid} ({snap_row.get('name')}) удалить нельзя: "
+                                       "на него ещё ссылаются планы/события/серии/группы"})
+                continue
+            dele.append(snap_row)
+
+        inserts[sheet] = ins
+        updates[sheet] = upd
+        deletes[sheet] = dele
+        conflicts[sheet] = conf
+
+    return Diff(inserts=inserts, updates=updates, deletes=deletes, conflicts=conflicts)
+
+
+def format_report(d):
+    """Russian-language summary for Denis's approval gate: per sheet,
+    ➕ inserts / ✏️ updates (field: was -> now) / 🗑 deletes, followed by a
+    ⚠️ conflicts section (if any) listing sheet/row/reason. Sheets with no
+    activity at all are omitted.
+    """
+    lines = []
+    for sheet in SHEETS:
+        ins = d.inserts.get(sheet, [])
+        upd = d.updates.get(sheet, [])
+        dele = d.deletes.get(sheet, [])
+        conf = d.conflicts.get(sheet, [])
+        if not (ins or upd or dele or conf):
+            continue
+        lines.append(f"## {sheet}")
+        if ins:
+            lines.append(f"➕ {len(ins)}")
+        for u in upd:
+            changes = ", ".join(f"{k}: {was!r} → {now!r}" for k, (was, now) in u["changes"].items())
+            lines.append(f"✏️ #{u['id']} ({changes})")
+        if dele:
+            lines.append(f"🗑 {len(dele)}")
+        if conf:
+            lines.append("⚠️ конфликты:")
+            for c in conf:
+                lines.append(f"  - {c['row_ref']}: {c['reason']}")
+        lines.append("")
+
+    if not lines:
+        return "Изменений нет."
+    return "\n".join(lines).rstrip()
