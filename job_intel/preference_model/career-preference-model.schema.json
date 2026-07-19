@@ -214,6 +214,16 @@
       "title": "EffectType",
       "type": "string"
     },
+    "EvidenceKind": {
+      "enum": [
+        "document",
+        "data",
+        "verbatim",
+        "user_decision"
+      ],
+      "title": "EvidenceKind",
+      "type": "string"
+    },
     "EvidenceRef": {
       "additionalProperties": false,
       "properties": {
@@ -260,8 +270,7 @@
           "type": "string"
         },
         "kind": {
-          "title": "Kind",
-          "type": "string"
+          "$ref": "#/$defs/EvidenceKind"
         },
         "source": {
           "title": "Source",
@@ -367,6 +376,22 @@
       ],
       "title": "ExplorationPolicy",
       "type": "object"
+    },
+    "FallbackActivation": {
+      "enum": [
+        "manual_by_user"
+      ],
+      "title": "FallbackActivation",
+      "type": "string"
+    },
+    "FallbackState": {
+      "enum": [
+        "standby",
+        "armed",
+        "active"
+      ],
+      "title": "FallbackState",
+      "type": "string"
     },
     "FeasibilityConstraint": {
       "additionalProperties": false,
@@ -512,12 +537,10 @@
       "additionalProperties": false,
       "properties": {
         "activation": {
-          "title": "Activation",
-          "type": "string"
+          "$ref": "#/$defs/FallbackActivation"
         },
         "current_state": {
-          "title": "Current State",
-          "type": "string"
+          "$ref": "#/$defs/FallbackState"
         },
         "id": {
           "title": "Id",
@@ -579,6 +602,7 @@
           "type": "string"
         },
         "model_version": {
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
           "title": "Model Version",
           "type": "string"
         },
@@ -599,12 +623,12 @@
           "title": "Reference Ideal Vacancy"
         },
         "schema_version": {
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
           "title": "Schema Version",
           "type": "string"
         },
         "status": {
-          "title": "Status",
-          "type": "string"
+          "$ref": "#/$defs/ModelStatus"
         },
         "subject": {
           "title": "Subject",
@@ -622,6 +646,15 @@
       ],
       "title": "Metadata",
       "type": "object"
+    },
+    "ModelStatus": {
+      "enum": [
+        "normalized_not_integrated",
+        "shadow",
+        "production"
+      ],
+      "title": "ModelStatus",
+      "type": "string"
     },
     "Motivation": {
       "additionalProperties": false,
@@ -707,13 +740,11 @@
           "title": "Anti Values"
         },
         "applies_to": {
-          "default": "role",
-          "title": "Applies To",
-          "type": "string"
+          "$ref": "#/$defs/PreferenceTarget",
+          "default": "role"
         },
         "axis": {
-          "title": "Axis",
-          "type": "string"
+          "$ref": "#/$defs/PreferenceAxis"
         },
         "confidence": {
           "$ref": "#/$defs/Confidence"
@@ -804,6 +835,34 @@
       ],
       "title": "Preference",
       "type": "object"
+    },
+    "PreferenceAxis": {
+      "enum": [
+        "mandate_scope",
+        "revenue_proximity",
+        "org_authority",
+        "transformation_phase",
+        "feasibility_signal",
+        "company_scale",
+        "company_brand",
+        "company_stage",
+        "business_model",
+        "company_culture",
+        "company_footprint",
+        "industry",
+        "country",
+        "title"
+      ],
+      "title": "PreferenceAxis",
+      "type": "string"
+    },
+    "PreferenceTarget": {
+      "enum": [
+        "role",
+        "company"
+      ],
+      "title": "PreferenceTarget",
+      "type": "string"
     },
     "Provenance": {
       "additionalProperties": false,
@@ -1003,8 +1062,7 @@
           "type": "string"
         },
         "treatment": {
-          "title": "Treatment",
-          "type": "string"
+          "$ref": "#/$defs/TimezoneTreatment"
         }
       },
       "required": [
@@ -1015,6 +1073,13 @@
       ],
       "title": "TimezonePolicy",
       "type": "object"
+    },
+    "TimezoneTreatment": {
+      "enum": [
+        "risk_or_clarification"
+      ],
+      "title": "TimezoneTreatment",
+      "type": "string"
     },
     "WorkFormat": {
       "enum": [

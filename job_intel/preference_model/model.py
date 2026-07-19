@@ -119,8 +119,63 @@ class EffectType(str, Enum):
     allow = "allow"                              # explicitly permits despite target
 
 
+class PreferenceTarget(str, Enum):
+    role = "role"
+    company = "company"
+
+
+class PreferenceAxis(str, Enum):
+    mandate_scope = "mandate_scope"
+    revenue_proximity = "revenue_proximity"
+    org_authority = "org_authority"
+    transformation_phase = "transformation_phase"
+    feasibility_signal = "feasibility_signal"
+    company_scale = "company_scale"
+    company_brand = "company_brand"
+    company_stage = "company_stage"
+    business_model = "business_model"
+    company_culture = "company_culture"
+    company_footprint = "company_footprint"
+    # Forbidden as standalone active preferences (validator-enforced), listed
+    # so the enum can express them for inactive/historical entries if needed.
+    industry = "industry"
+    country = "country"
+    title = "title"
+
+
+class EvidenceKind(str, Enum):
+    document = "document"
+    data = "data"
+    verbatim = "verbatim"
+    user_decision = "user_decision"
+
+
+class ModelStatus(str, Enum):
+    normalized_not_integrated = "normalized_not_integrated"
+    shadow = "shadow"
+    production = "production"
+
+
+class TimezoneTreatment(str, Enum):
+    risk_or_clarification = "risk_or_clarification"
+
+
+class FallbackActivation(str, Enum):
+    manual_by_user = "manual_by_user"
+
+
+class FallbackState(str, Enum):
+    standby = "standby"
+    armed = "armed"
+    active = "active"
+
+
+SEMVER_PATTERN = r"^\d+\.\d+\.\d+$"
+
 # Preference axes that must never carry standalone active preference weight.
-FORBIDDEN_STANDALONE_AXES = frozenset({"industry", "country", "title"})
+FORBIDDEN_STANDALONE_AXES = frozenset(
+    {PreferenceAxis.industry, PreferenceAxis.country, PreferenceAxis.title}
+)
 
 
 class _StrictModel(BaseModel):
@@ -152,7 +207,7 @@ class Override(_StrictModel):
 class EvidenceRegistryEntry(_StrictModel):
     id: str
     source: str
-    kind: str  # document | data | verbatim | user_decision
+    kind: EvidenceKind
     description: Optional[str] = None
 
 
@@ -231,7 +286,7 @@ class FeasibilityConstraint(_RuleBase):
 
 class TimezonePolicy(_StrictModel):
     hard_gate: bool
-    treatment: str  # e.g. "risk_or_clarification"
+    treatment: TimezoneTreatment
     statement: str
     provenance: Provenance
 
@@ -252,9 +307,9 @@ class FeasibilitySection(_StrictModel):
 
 
 class Preference(_RuleBase):
-    axis: str
+    axis: PreferenceAxis
     polarity: Polarity = Polarity.positive
-    applies_to: str = "role"  # role | company
+    applies_to: PreferenceTarget = PreferenceTarget.role
     values_order: Optional[list[str]] = None
     preferred_min: Optional[str] = None
     values: Optional[list[str]] = None
@@ -302,8 +357,8 @@ class ExplorationPolicy(_StrictModel):
 class LocalMarketFallbackPolicy(_StrictModel):
     id: str
     status: RuleStatus
-    activation: str          # manual_by_user — never automatic
-    current_state: str       # standby | armed | active
+    activation: FallbackActivation   # never automatic
+    current_state: FallbackState
     statement: str
     separation: str          # how the lane is kept apart from core
     provenance: Provenance
@@ -317,11 +372,11 @@ class ChangePolicy(_StrictModel):
 
 
 class Metadata(_StrictModel):
-    schema_version: str
-    model_version: str
+    schema_version: str = Field(pattern=SEMVER_PATTERN)
+    model_version: str = Field(pattern=SEMVER_PATTERN)
     subject: str
     generated_at: date
-    status: str
+    status: ModelStatus
     production_integration: bool
     derived_from: list[str]
     data_basis: Optional[dict] = None
@@ -398,6 +453,16 @@ class CareerPreferenceModel(_StrictModel):
             self.local_market_fallback_policy.provenance,
             self.local_market_fallback_policy.status,
         )
+        check_provenance(
+            "timezone_policy",
+            self.feasibility_constraints.timezone_policy.provenance,
+            RuleStatus.active,
+        )
+        check_provenance(
+            "compensation_policy",
+            self.feasibility_constraints.compensation_policy.provenance,
+            RuleStatus.active,
+        )
 
         # Forbidden standalone label axes.
         for p in self.mandate_preferences + self.company_preferences:
@@ -437,6 +502,22 @@ class CareerPreferenceModel(_StrictModel):
                 and not c.when.flags_all
             ):
                 raise ValueError(f"constraint {c.id} makes remote USA infeasible")
+
+        # KZ feasibility must never depend on sponsorship: working in KZ needs
+        # no visa/relocation path, so no non-feasible constraint may combine
+        # kazakhstan with a sponsorship condition.
+        for c in self.feasibility_constraints.constraints:
+            if (
+                c.status == RuleStatus.active
+                and c.verdict != FeasibilityVerdict.feasible
+                and c.when.country_group is not None
+                and CountryGroup.kazakhstan in c.when.country_group
+                and c.when.sponsorship_stated is not None
+            ):
+                raise ValueError(
+                    f"constraint {c.id} makes Kazakhstan feasibility depend "
+                    "on sponsorship"
+                )
 
         if self.metadata.production_integration:
             raise ValueError("production_integration must be false in Step 1")

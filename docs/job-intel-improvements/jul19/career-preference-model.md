@@ -63,7 +63,7 @@ discovery, CV-tailoring, recruiter messaging. Ни один production-комп�
 | Африка сейчас не рассматривается | `fc_africa_current_stage` → infeasible, override allowed по явному решению владельца |
 | USA onsite/hybrid только с явным sponsorship | `fc_usa_onsite_requires_explicit_sponsorship` (no/unknown → infeasible; yes → общие основания) |
 | Remote US не blocker | конструкции onsite-scoped; guard-валидатор «remote USA не может быть infeasible» + `ir_remote_suppresses_onsite_country_penalty` |
-| KZ — fallback lane, не veto | `fc_kz_local_lane` (lane=fallback_local) + `local_market_fallback_policy` (manual_by_user, standby) + `ir_kz_fallback_lane` |
+| KZ — fallback lane, не veto | `fc_kz_local_lane` (lane=fallback_local) + `local_market_fallback_policy` (manual_by_user, standby) + `ir_kz_fallback_lane`. Feasibility KZ **никогда не зависит от sponsorship** (для работы в KZ виза не нужна) — enforced валидатором схемы и regression-тестом |
 | Timezone — не gate | `timezone_policy.hard_gate=false`, treatment=risk_or_clarification; валидатор запрещает timezone-условия в constraints |
 | Compensation неактивна | `compensation_policy`: status=inactive, gating/ranking=false, missing salary не негатив; валидатор запрещает comp-условия |
 
@@ -98,3 +98,22 @@ discovery, CV-tailoring, recruiter messaging. Ни один production-комп�
 исходная формулировка сохранена комментарием в YAML и в diff-отчёте. Rationale:
 шестиуровневая шкала не даёт downstream-потребителям действий, отличных от
 пятиуровневой, а несогласованные значения были главным источником drift'а.
+
+## 8. Явные семантические оговорки (для Step 2/3)
+
+1. **Exploration axes не имеют provenance — намеренно.** Это не rules, а
+   исследовательские зонды для сбора evidence; provenance появляется у
+   правила, которое родится из результатов exploration.
+2. **`strength` у feasibility constraints — только описательная важность
+   правила** (для человека и приоритизации ревью). Она НЕ участвует и не
+   должна участвовать ни в каком вычислении; будущий evaluator обязан
+   использовать только `verdict`/`lane`. Превращение feasibility strength в
+   числовой вес — architecture drift и запрещено.
+3. **Effect-типы `gate`, `allow`, `route_to_fallback` декларативны в Step 1:**
+   фактическое поведение реализовано условиями самих constraints, а
+   interaction rule документирует и охраняет инвариант. Runtime-семантика
+   порядка применения эффектов должна быть специфицирована отдельно до
+   Step 3 (shadow evaluator); минимальный matcher в `model.py` — контрактный
+   инструмент тестов, не общая runtime-семантика.
+4. **Типизация:** axis/applies_to/kind/status/activation/state/treatment —
+   строгие enum'ы; версии валидируются по semver-паттерну.
