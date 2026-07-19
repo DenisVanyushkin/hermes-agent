@@ -556,6 +556,35 @@ def _to_canonical(sheet, row):
     return normalize_row(sheet, row)
 
 
+def _expand_gis_url(canon_row, cache):
+    """File-side pre-pass for «Места» rows (used by diff() AND
+    verify_roundtrip()): the 2ГИС-ссылка is sugar for lat/lon, expanded at
+    parse time. If gis_url is set and the effective lat/lon are not both
+    filled, resolve the url (once per unique url per run, via `cache`) and
+    substitute the (lat, lon) into the row; gis_url itself is dropped from
+    the comparison entirely (set to None -- exports always carry None
+    there). Filled lat/lon in the file win and the link is ignored.
+    Returns a conflict reason string on resolution failure, else None.
+    Mutates canon_row in place.
+    """
+    url = canon_row.get("gis_url")
+    canon_row["gis_url"] = None
+    if not url:
+        return None
+    if canon_row.get("lat") is not None and canon_row.get("lon") is not None:
+        return None  # lat/lon в файле в приоритете (контракт Col.comment)
+    if url not in cache:
+        try:
+            cache[url] = geo2gis.resolve_place_coords(url)
+        except Exception:
+            cache[url] = None
+    resolved = cache[url]
+    if resolved is None:
+        return f"не удалось развернуть 2ГИС-ссылку: {url}"
+    canon_row["lat"], canon_row["lon"] = resolved  # contract: (lat, lon)
+    return None
+
+
 def _id_exists(conn, sheet, rid):
     table = _SHEET_TABLE[sheet]
     return conn.execute(f"SELECT 1 FROM {table} WHERE id=?", (rid,)).fetchone() is not None
@@ -757,6 +786,7 @@ def diff(conn, file_rows_by_sheet, snap):
     in_file_groups = _in_file_group_names(file_rows_by_sheet)
 
     inserts, updates, deletes, conflicts = {}, {}, {}, {}
+    gis_cache = {}
 
     for sheet in SHEETS:
         file_rows = file_rows_by_sheet.get(sheet, [])
@@ -776,6 +806,11 @@ def diff(conn, file_rows_by_sheet, snap):
 
             rid = canon_row.get("id")
             issues = []
+
+            if sheet == "Места":
+                gis_issue = _expand_gis_url(canon_row, gis_cache)
+                if gis_issue:
+                    issues.append(gis_issue)
 
             if rid is not None:
                 if rid in file_ids_seen:
@@ -887,12 +922,9 @@ def _now_iso():
 def _insert_place(conn, row):
     from fam import places
 
+    # gis_url is already expanded into lat/lon at parse time (see
+    # _expand_gis_url in diff()/verify_roundtrip) -- no special-casing here.
     lat, lon = row.get("lat"), row.get("lon")
-    gis_url = row.get("gis_url")
-    if gis_url and (lat is None or lon is None):
-        resolved = geo2gis.resolve_place_coords(gis_url)
-        if resolved is not None:
-            lat, lon = resolved  # geo2gis.resolve_place_coords contract: (lat, lon)
 
     p = places.add(conn, row["name"], address=row.get("address") or "",
                     lat=lat, lon=lon, aliases=row.get("aliases") or ())
@@ -913,20 +945,9 @@ def _update_place(conn, item):
     from fam import places
 
     rid, changes = item["id"], item["changes"]
+    # gis_url is already expanded into lat/lon at parse time (see
+    # _expand_gis_url in diff()) -- changes carry real coordinate diffs.
     fields = {k: v[1] for k, v in changes.items() if k in places._UPDATE_FIELDS}
-
-    # 2ГИС-ссылка на существующей строке: если итоговые lat/lon пусты,
-    # подтянуть координаты из ссылки (зеркалит _insert_place; заполненные
-    # в файле lat/lon в приоритете -- контракт Col.comment).
-    gis_url = changes.get("gis_url", (None, None))[1]
-    if gis_url:
-        cur = places.get(conn, rid) or {}
-        eff_lat = fields["lat"] if "lat" in fields else cur.get("lat")
-        eff_lon = fields["lon"] if "lon" in fields else cur.get("lon")
-        if eff_lat is None or eff_lon is None:
-            resolved = geo2gis.resolve_place_coords(gis_url)
-            if resolved is not None:
-                fields["lat"], fields["lon"] = resolved  # contract: (lat, lon)
 
     # name не входит в places._UPDATE_FIELDS -- переименование прямым
     # UPDATE, как _apply_people_update; audit-пейлоад ниже несёт changes
@@ -1390,9 +1411,14 @@ def verify_roundtrip(conn, file_rows_by_sheet):
     diverged, so this returns False.
     """
     fresh = export_rows(conn)
+    gis_cache = {}
 
     for sheet in SHEETS:
         file_list = [_to_canonical(sheet, r) for r in file_rows_by_sheet.get(sheet, [])]
+        if sheet == "Места":
+            for r in file_list:
+                if _expand_gis_url(r, gis_cache) is not None:
+                    return False  # ссылка не развернулась -- сверить нельзя
         fresh_list = [_to_canonical(sheet, r) for r in fresh.get(sheet, [])]
 
         with_id = [r for r in file_list if r.get("id") is not None]

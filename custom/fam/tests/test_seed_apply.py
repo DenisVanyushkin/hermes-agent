@@ -46,13 +46,22 @@ def test_apply_place_gis_url_resolves(db, monkeypatch):
     monkeypatch.setattr(seed.geo2gis, "resolve_place_coords", lambda url: (43.2, 76.9))
     f = {**rows, "Места": rows["Места"] + [{"id": None, "name": "Аптека 36.6",
          "gis_url": "https://go.2gis.com/abc", "category": "pharmacy",
-         "address": None, "lat": None, "lon": None, "travel_min": None,
+         "address": None, "lat": None, "lon": None, "travel_min": 0,
          "aliases": [], "notes": None}]}
-    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+    # travel_min=0 (не None): в БД дефолт 0, экспорт вернёт 0 -- иначе
+    # verify честно поймает расхождение (не связано с gis_url).
+    d = seed.diff(db, f, snap)
+    # Parse-level contract: the link is expanded into lat/lon already in the
+    # diff (resolve_place_coords contract is (lat, lon) -- see geo2gis.py),
+    # and gis_url is dropped from the comparison.
+    ins = next(r for r in d.inserts["Места"] if r["name"] == "Аптека 36.6")
+    assert ins["lat"] == 43.2 and ins["lon"] == 76.9
+    assert ins["gis_url"] is None
+    seed.apply_diff(db, d); db.commit()
     got = places.get(db, "Аптека 36.6")
-    # resolve_place_coords contract is (lat, lon) -- see geo2gis.py.
     assert got["lat"] == 43.2
     assert got["lon"] == 76.9
+    assert seed.verify_roundtrip(db, f)
 
 
 def test_apply_series_update_regenerates(db):
@@ -168,10 +177,15 @@ def test_apply_gis_url_on_existing_place_updates_coords(db, monkeypatch):
     idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Казакова")
     assert f["Места"][idx]["lat"] is None                      # прекондиция
     f["Места"][idx]["gis_url"] = "https://go.2gis.com/xyz"
-    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+    d = seed.diff(db, f, snap)
+    upd = next(u for u in d.updates["Места"] if u["id"] == f["Места"][idx]["id"])
+    assert upd["changes"]["lat"][1] == 43.25              # реальный coord-diff
+    assert "gis_url" not in upd["changes"]                # ссылка -- сахар
+    seed.apply_diff(db, d); db.commit()
     got = places.get(db, "Казакова")
     assert got["lat"] == 43.25
     assert got["lon"] == 76.95
+    assert seed.verify_roundtrip(db, f)                   # exit-3-ловушка закрыта
 
 
 def test_apply_gis_url_does_not_override_filled_coords(db, monkeypatch):

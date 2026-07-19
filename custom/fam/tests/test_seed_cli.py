@@ -86,41 +86,71 @@ def test_diff_on_corrupted_transport_reports_conflict(seeded_db, tmp_path, monke
     assert "⚠" in captured.out
 
 
-# -- FINDING 4: broad exception guard around apply ---------------------------
-
-def _exported(tmp_path, monkeypatch):
+def test_apply_unexpected_exception_before_commit_rolls_back_and_exits_2(
+        seeded_db, tmp_path, monkeypatch, capsys):
+    """Finding 4: an unexpected exception type (not ValueError/sqlite3.Error)
+    raised during apply_diff -- BEFORE commit -- must be rolled back and
+    reported as exit 2, not escape with an undocumented default exit code."""
     monkeypatch.setattr(data_roundtrip, "DEFAULT_SNAPSHOT_DIR", tmp_path / "seeding")
     out = tmp_path / "data.xlsx"
     assert data_roundtrip.main(["export", "--out", str(out)]) == 0
     snap_path = next((tmp_path / "seeding").glob("export-*.json"))
-    return out, snap_path
 
+    wb = load_workbook(out)
+    ws = wb["События"]
+    headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    col = headers.index("название") + 1
+    ws.cell(row=2, column=col, value="Переименовано")
+    wb.save(out)
 
-def test_unexpected_exception_before_commit_exits_2(seeded_db, tmp_path, monkeypatch, capsys):
-    out, snap_path = _exported(tmp_path, monkeypatch)
-    monkeypatch.setattr(data_roundtrip, "_backup_both", lambda *a, **kw: None)
-
-    def boom(*a, **kw):
-        raise RuntimeError("boom before commit")
+    def boom(*a, **k):
+        raise RuntimeError("apply boom")
 
     monkeypatch.setattr(data_roundtrip.seed, "apply_diff", boom)
+
     capsys.readouterr()
-    rc = data_roundtrip.main(["apply", "--file", str(out), "--snapshot", str(snap_path), "--yes"])
+    rc = data_roundtrip.main(
+        ["apply", "--file", str(out), "--snapshot", str(snap_path), "--yes"])
     captured = capsys.readouterr()
+
     assert rc == 2
-    assert "boom before commit" in captured.err
+
+    from fam import cal
+    titles = [e["title"] for e in cal.list_range(seeded_db, "2000-01-01", "9999-01-01")]
+    assert "Переименовано" not in titles
+    assert "Плановое событие" in titles
 
 
-def test_unexpected_exception_during_verify_exits_3(seeded_db, tmp_path, monkeypatch, capsys):
-    out, snap_path = _exported(tmp_path, monkeypatch)
-    monkeypatch.setattr(data_roundtrip, "_backup_both", lambda *a, **kw: None)
+def test_apply_unexpected_exception_during_verify_after_commit_exits_3(
+        seeded_db, tmp_path, monkeypatch, capsys):
+    """Finding 4: an unexpected exception raised by verify_roundtrip --
+    AFTER commit -- must be reported as exit 3 with a clear warning (data
+    is already committed), not escape with an undocumented exit code."""
+    monkeypatch.setattr(data_roundtrip, "DEFAULT_SNAPSHOT_DIR", tmp_path / "seeding")
+    out = tmp_path / "data.xlsx"
+    assert data_roundtrip.main(["export", "--out", str(out)]) == 0
+    snap_path = next((tmp_path / "seeding").glob("export-*.json"))
 
-    def boom(*a, **kw):
-        raise RuntimeError("boom during verify")
+    wb = load_workbook(out)
+    ws = wb["События"]
+    headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    col = headers.index("название") + 1
+    ws.cell(row=2, column=col, value="Переименовано")
+    wb.save(out)
+
+    def boom(*a, **k):
+        raise RuntimeError("verify boom")
 
     monkeypatch.setattr(data_roundtrip.seed, "verify_roundtrip", boom)
+
     capsys.readouterr()
-    rc = data_roundtrip.main(["apply", "--file", str(out), "--snapshot", str(snap_path), "--yes"])
+    rc = data_roundtrip.main(
+        ["apply", "--file", str(out), "--snapshot", str(snap_path), "--yes"])
     captured = capsys.readouterr()
+
     assert rc == 3
-    assert "boom during verify" in captured.err
+    assert "verify" in captured.err.lower() or "ПРЕДУПРЕЖДЕНИЕ" in captured.err
+
+    from fam import cal
+    titles = [e["title"] for e in cal.list_range(seeded_db, "2000-01-01", "9999-01-01")]
+    assert "Переименовано" in titles
