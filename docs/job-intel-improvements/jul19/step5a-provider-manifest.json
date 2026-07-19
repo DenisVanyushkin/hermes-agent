@@ -1,0 +1,15 @@
+{
+  "provider_id": "llm-observation",
+  "prompt_version": "llm-obs-1.0.0",
+  "model_id": "openai/gpt-5-mini",
+  "transport": "openrouter via agent.auxiliary_client.resolve_provider_client",
+  "decoding_parameters": {
+    "temperature": 0
+  },
+  "semantic_contract_version": "1.0.0",
+  "provider_contract_version": "1.0.0",
+  "implementation_commit": "this commit (self-hash unknowable at commit time; authoritative value = git log --oneline -1 -- job_intel/vacancy_understanding/semantic/runtime/llm_provider.py)",
+  "recording_format_version": "1.0",
+  "live_calls_approved": false,
+  "approved_cost_cap": null
+}
