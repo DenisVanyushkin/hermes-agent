@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -39,6 +40,30 @@ DEFAULT_TRANSPORT_PROVIDER = "openrouter"
 DECODING_PARAMETERS: dict[str, Any] = {"temperature": 0}
 RECORDING_FORMAT_VERSION = "1.0"
 LIVE_APPROVAL_ENV = "JOB_INTEL_LLM_LIVE_APPROVED"
+# OpenRouter must serve the pinned model itself — no upstream fallback routing.
+NO_FALLBACK_EXTRA_BODY = {"provider": {"allow_fallbacks": False}}
+
+
+def allowed_response_model(requested: str, actual: str) -> bool:
+    """Model identity policy (Step 5A-4a).
+
+    Accepts ONLY:
+    - the exact requested slug (with or without the vendor prefix); or
+    - a dated canonical snapshot of the SAME deployment:
+      ``<slug>-YYYY-MM-DD`` (this is how OpenAI-family endpoints report the
+      resolved snapshot of a stable alias).
+    Anything else — другая модель, вариант семейства (gpt-5-nano,
+    gpt-5-mini-high), другой vendor — отклоняется. Никаких startswith по
+    семейству.
+    """
+    if not actual:
+        return False
+    base = requested.split("/", 1)[-1]
+    if actual in (requested, base):
+        return True
+    return re.fullmatch(
+        rf"(?:{re.escape(requested)}|{re.escape(base)})-\d{{4}}-\d{{2}}-\d{{2}}",
+        actual) is not None
 
 _BASIS_DEFINITIONS = {
     # Aligned 1:1 with the Semantic Contract confidence policy; basis is the
@@ -302,6 +327,7 @@ class LLMObservationProvider:
                     "json_schema": {"name": "semantic_observations",
                                     "schema": response_schema(), "strict": True},
                 },
+                extra_body=NO_FALLBACK_EXTRA_BODY,
                 **DECODING_PARAMETERS,
             )
             choice = response.choices[0]
@@ -316,12 +342,20 @@ class LLMObservationProvider:
                     "total_tokens": getattr(u, "total_tokens", None),
                 }
             response_model = getattr(response, "model", None)
+            # Model identity verification BEFORE anything reaches the parser.
+            if error is None:
+                if not response_model:
+                    error = "model_identity_unverifiable: response.model missing"
+                elif not allowed_response_model(self.model_id, response_model):
+                    error = (f"model_version_mismatch: requested {self.model_id}, "
+                             f"response served by {response_model}")
         except Exception as exc:  # transport failure: record + surface, no retry here
             error = f"transport_error: {exc}"
         latency_ms = int((time.monotonic() - started) * 1000)
         record = {
             "recording_format_version": RECORDING_FORMAT_VERSION,
             "input_hash": ih,
+            "requested_model": self.model_id,
             "input": {"title": title, "text": text, "structured": structured},
             "provider_id": self.provider_id,
             "prompt_version": self.prompt_version,
@@ -343,8 +377,8 @@ class LLMObservationProvider:
             "error": error,
         }
         if error:
-            raise LLMProviderError("transport_error" if error.startswith("transport_error")
-                                   else "empty_response", error)
+            reason = error.split(":", 1)[0]
+            raise LLMProviderError(reason, error)
         return parse_llm_response(raw_text)
 
 
@@ -365,10 +399,15 @@ def build_live_llm_provider(
     if resolved_model and resolved_model != model_id:
         raise LLMProviderError("model_version_mismatch",
                                f"requested {model_id}, transport resolved {resolved_model}")
-    # SDK default is 2 silent retries; cap to the single technical retry the
-    # Step 5A policy allows for transient transport failures.
-    if hasattr(client, "with_options"):
-        client = client.with_options(max_retries=1)
+    # SDK default is 2 SILENT retries; until attempt accounting exists,
+    # invisible retries are forbidden — recordings must honestly say
+    # retry_count=0 (Step 5A-4a).
+    if not hasattr(client, "with_options"):
+        raise LLMProviderError(
+            "transport_unsupported",
+            "client cannot disable SDK retries (with_options missing); "
+            "STEP_5A_PROVIDER_TRANSPORT_BLOCKED")
+    client = client.with_options(max_retries=0)
     return LLMObservationProvider(
         store=RecordingStore(store_dir), mode="record",
         model_id=model_id, transport=client)

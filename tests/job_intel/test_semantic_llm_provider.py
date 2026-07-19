@@ -82,16 +82,16 @@ class FakeUsage:
 
 
 class FakeResponse:
-    def __init__(self, content):
+    def __init__(self, content, model="openai/gpt-5-mini"):
         self.choices = [FakeChoice(content)]
         self.usage = FakeUsage()
-        self.model = "openai/gpt-5-mini"
+        self.model = model
 
 
 class FakeTransport:
     """OpenAI-compatible fake. Counts calls; can raise."""
 
-    def __init__(self, content=None, exc=None):
+    def __init__(self, content=None, exc=None, response_model="openai/gpt-5-mini"):
         self.calls = 0
         outer = self
 
@@ -101,7 +101,7 @@ class FakeTransport:
                 outer.last_kwargs = kwargs
                 if exc:
                     raise exc
-                return FakeResponse(content)
+                return FakeResponse(content, model=response_model)
 
         class _Chat:
             completions = _Completions()
@@ -355,6 +355,101 @@ def test_response_schema_derived_from_observation_model():
     assert set(item["required"]) == {"observation_id", "excerpt", "location",
                                      "signal_type", "interpretation", "maps_to", "basis"}
     assert item.get("additionalProperties") is False
+
+
+# ----------------------------------------------- 5A-4a: transport integrity --
+
+from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+    NO_FALLBACK_EXTRA_BODY,
+    allowed_response_model,
+)
+
+REQ = "openai/gpt-5-mini"
+
+
+@pytest.mark.parametrize("actual,ok", [
+    (REQ, True),                          # exact requested slug
+    ("gpt-5-mini", True),                 # same slug, vendor prefix stripped
+    ("gpt-5-mini-2026-03-14", True),      # dated canonical snapshot, same deployment
+    ("openai/gpt-5-mini-2026-03-14", True),
+    ("openai/gpt-5-nano", False),         # unrelated model
+    ("anthropic/claude-haiku-4-5", False),
+    ("gpt-5-mini-high", False),           # nearby family variant
+    ("gpt-5-mini-2", False),
+    ("openai/gpt-5", False),              # family prefix is NOT enough
+    ("", False),
+    (None, False),
+])
+def test_model_identity_policy(actual, ok):
+    assert allowed_response_model(REQ, actual) is ok
+
+
+def test_mismatched_model_recorded_but_never_parsed(tmp_path):
+    t = FakeTransport(_raw(_obs(1)), response_model="openai/gpt-5-nano")
+    p = LLMObservationProvider(store=RecordingStore(tmp_path), mode="record",
+                               transport=t, contract=CONTRACT)
+    with pytest.raises(LLMProviderError) as e:
+        p.extract_semantic_observations(title=TITLE, text=TEXT, structured={})
+    assert e.value.reason == "model_version_mismatch"
+    record = json.loads(next(Path(tmp_path).glob("*.json")).read_text())
+    assert record["requested_model"] == REQ
+    assert record["response_model"] == "openai/gpt-5-nano"
+    assert record["error"].startswith("model_version_mismatch")
+    # and the poisoned recording replays as failure, not as observations
+    replay = LLMObservationProvider(store=RecordingStore(tmp_path), contract=CONTRACT)
+    with pytest.raises(LLMProviderError) as e2:
+        replay.extract_semantic_observations(title=TITLE, text=TEXT, structured={})
+    assert e2.value.reason == "recorded_call_failed"
+
+
+def test_missing_response_model_fails_explicitly(tmp_path):
+    t = FakeTransport(_raw(_obs(1)), response_model=None)
+    p = LLMObservationProvider(store=RecordingStore(tmp_path), mode="record",
+                               transport=t, contract=CONTRACT)
+    with pytest.raises(LLMProviderError) as e:
+        p.extract_semantic_observations(title=TITLE, text=TEXT, structured={})
+    assert e.value.reason == "model_identity_unverifiable"
+
+
+def test_snapshot_model_accepted_end_to_end(tmp_path):
+    t = FakeTransport(_raw(_obs(1)), response_model="gpt-5-mini-2026-03-14")
+    p = LLMObservationProvider(store=RecordingStore(tmp_path), mode="record",
+                               transport=t, contract=CONTRACT)
+    out = p.extract_semantic_observations(title=TITLE, text=TEXT, structured={})
+    assert len(out) == 1
+
+
+def test_request_disables_openrouter_fallbacks(tmp_path):
+    t = FakeTransport(_raw())
+    p = LLMObservationProvider(store=RecordingStore(tmp_path), mode="record",
+                               transport=t, contract=CONTRACT)
+    p.extract_semantic_observations(title=TITLE, text=TEXT, structured={})
+    assert t.last_kwargs["extra_body"] == NO_FALLBACK_EXTRA_BODY
+    assert t.last_kwargs["extra_body"]["provider"]["allow_fallbacks"] is False
+
+
+def test_live_client_gets_zero_sdk_retries(monkeypatch, tmp_path):
+    monkeypatch.setenv("JOB_INTEL_LLM_LIVE_APPROVED", "1")
+    captured = {}
+
+    class FakeClient:
+        chat = None
+
+        def with_options(self, **kw):
+            captured.update(kw)
+            return self
+
+    monkeypatch.setattr(
+        "agent.auxiliary_client.resolve_provider_client",
+        lambda provider, model=None, **kw: (FakeClient(), model))
+    build_live_llm_provider(store_dir=tmp_path)
+    assert captured == {"max_retries": 0}
+
+
+def test_recordings_report_zero_retries(tmp_path):
+    make_recorded(tmp_path, _raw(_obs(1)))
+    record = json.loads(next(Path(tmp_path).glob("*.json")).read_text())
+    assert record["retry_count"] == 0
 
 
 # --------------------------------------------------------------- spend gate --
