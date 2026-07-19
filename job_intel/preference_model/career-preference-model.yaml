@@ -1,0 +1,798 @@
+# Career Preference Model — normalized Source of Truth (Step 1).
+# NOT integrated into any production evaluator. Contract: model.py /
+# career-preference-model.schema.json. Human contract:
+# docs/job-intel-improvements/jul19/career-preference-model.md
+# Changes require owner approval (see change_policy). No silent learning.
+
+career_preference_model:
+  metadata:
+    schema_version: "1.0.0"
+    model_version: "1.0.0"
+    subject: "Denis Vanyushkin"
+    generated_at: 2026-07-19
+    status: "normalized_not_integrated"
+    production_integration: false
+    derived_from:
+      - "docs/audit/career-preference-model.draft.yaml"
+      - "docs/audit/2026-07-19-career-preference-model.md"
+      - "docs/audit/2026-07-19-recommendation-system-audit.md"
+      - "docs/job-intel-improvements/jul19/job-intel-career-preference-system-development-sot.md"
+    data_basis:
+      positive_cases: {applied: 5, exceptional: 1, interesting: 4, save_for_later: 13}
+      negative_cases: {not_interesting: 87, declined_with_reasons: 37}
+      excluded_noise:
+        test_users: [U_TEST, U_AUDIT, U_SMOKE_REPLAY, U_VALIDATION]
+        resend_duplicates: true
+        data_quality_code_7: true
+    reference_ideal_vacancy: "Wise — Product Director, APAC Growth & Expansion (the only star)"
+
+  motivations:
+    - id: escape_local_market_ceiling
+      statement: "Move from KZ-local market to global-level product leadership"
+      confidence: high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§2.2 — all applies global, zero KZ positives"}]
+        last_validated: 2026-07-19
+    - id: brand_legitimization
+      statement: "Acquire a tier-1 scale-up brand; own materials name 'no Western scale-up brand' as the main risk"
+      confidence: high
+      status: active
+      provenance:
+        source_type: explicit
+        evidence: [{registry_id: ev_materials_sot, detail: "§10.1, §4.4"}]
+        last_validated: 2026-07-19
+    - id: restore_executive_scope
+      statement: "Return to Director+/P&L breadth after narrowing to Tribe Lead (2025)"
+      confidence: medium  # draft: medium_high, rounded down per enum normalization
+      status: active
+      provenance:
+        source_type: inferred
+        evidence: [{registry_id: ev_research_report, detail: "§2.2 — career move 2025 + target roles"}]
+        last_validated: 2026-07-19
+    - id: builder_identity
+      statement: "Prefers build/scale/turnaround phases over steady-state operation"
+      confidence: medium
+      status: active
+      provenance:
+        source_type: inferred
+        evidence: [{registry_id: ev_career_facts, detail: "achievement categories: transformation/turnaround/launch/pivot/org design"}]
+        last_validated: 2026-07-19
+
+  feasibility_constraints:
+    constraints:
+      # --- geography / work format ---
+      - id: fc_usa_onsite_requires_explicit_sponsorship
+        statement: >
+          USA onsite/hybrid role WITHOUT explicitly stated employer visa +
+          relocation sponsorship is infeasible. With explicit sponsorship the
+          role is eligible for downstream evaluation on general terms.
+          Remote US roles are NOT covered by this constraint.
+        when:
+          work_format: [onsite, hybrid]
+          country_group: [usa]
+          sponsorship_stated: ["no", "unknown"]
+        verdict: infeasible
+        strength: critical
+        confidence: high
+        status: active
+        provenance:
+          source_type: explicit
+          evidence:
+            - {registry_id: ev_user_decision_20260719, detail: "SoT §2.1 — USA relocation practically hard; explicit sponsorship required"}
+            - {registry_id: ev_reco_audit, detail: "§5.1 — USA 20x negative, 0 positive"}
+          last_validated: 2026-07-19
+        override: {allowed: false}
+      - id: fc_onsite_declared_no_visa_path
+        statement: >
+          Onsite/hybrid role that explicitly offers no visa/relocation path is
+          infeasible: no work authorization outside KZ.
+        when:
+          work_format: [onsite, hybrid]
+          country_group: [other]
+          sponsorship_stated: ["no"]
+        verdict: infeasible
+        strength: critical
+        confidence: high
+        status: active
+        provenance:
+          source_type: behavioral
+          evidence: [{registry_id: ev_crm_declines, detail: "12 declines code=3 location"}]
+          evidence_count: 12
+          last_validated: 2026-07-19
+        override: {allowed: false}
+      - id: fc_onsite_sponsorship_unknown
+        statement: >
+          Onsite/hybrid outside USA with unknown sponsorship is uncertain, not
+          rejected: user is open to relocation to almost any country, so the
+          missing fact is a clarification, not a veto.
+        when:
+          work_format: [onsite, hybrid]
+          country_group: [other, kazakhstan]
+          sponsorship_stated: ["unknown"]
+        verdict: uncertain
+        strength: strong
+        confidence: high
+        status: active
+        provenance:
+          source_type: explicit
+          evidence: [{registry_id: ev_user_decision_20260719, detail: "SoT §2.1 — ready to relocate to almost any country"}]
+          last_validated: 2026-07-19
+      - id: fc_sanctioned_geo
+        statement: "Sanctioned countries/regions (incl. RU/BY) are excluded for any work format."
+        when:
+          country_group: [sanctioned]
+        verdict: infeasible
+        strength: critical
+        confidence: high
+        status: active
+        provenance:
+          source_type: explicit
+          evidence:
+            - {registry_id: ev_preferences_yaml, detail: "explicit geo exclusions"}
+            - {registry_id: ev_user_decision_20260719, detail: "SoT §2.1 — sanctioned countries excluded"}
+          notes: >
+            Encoded as a criterion, not a maintained country list: the model
+            does not claim to be a current sanctions registry. Resolution of a
+            concrete country to this group is a downstream extraction concern.
+          last_validated: 2026-07-19
+        override: {allowed: false}
+      - id: fc_unstable_geo
+        statement: "Politically or socially unstable countries are excluded (criterion, not a maintained list)."
+        when:
+          country_group: [unstable]
+        verdict: infeasible
+        strength: critical
+        confidence: high
+        status: active
+        provenance:
+          source_type: explicit
+          evidence: [{registry_id: ev_user_decision_20260719, detail: "SoT §2.1"}]
+          last_validated: 2026-07-19
+        override: {allowed: false}
+      - id: fc_africa_current_stage
+        statement: "Africa as a region is not considered at the current stage (revisit on explicit SoT change)."
+        when:
+          country_group: [africa]
+        verdict: infeasible
+        strength: critical
+        confidence: high
+        status: active
+        provenance:
+          source_type: explicit
+          evidence: [{registry_id: ev_user_decision_20260719, detail: "SoT §2.1"}]
+          last_validated: 2026-07-19
+        override: {allowed: true, conditions: "explicit owner decision recorded in SoT"}
+      # --- function / scope / domain ---
+      - id: fc_function_digital_business_ownership
+        statement: >
+          A role without digital business ownership in a non-product function
+          (pure sales, FP&A, delivery/project management, pure ops) is
+          infeasible. Hybrid product/commercial/GM/COO-adjacent roles WITH
+          digital business ownership are explicitly allowed (replaces draft
+          rule product_function_only).
+        when:
+          flags_all: [non_product_function]
+          flags_none: [digital_business_ownership]
+        verdict: infeasible
+        strength: critical
+        confidence: high
+        status: active
+        provenance:
+          source_type: behavioral
+          evidence:
+            - {registry_id: ev_crm_declines, detail: "Block sales, Canva FP&A"}
+            - {registry_id: ev_research_report, detail: "§5 L8 hybrid identity product x commercial x strategy"}
+          last_validated: 2026-07-19
+      - id: fc_scope_below_executive
+        statement: >
+          Scope/mandate below Director-equivalent (IC or low-manager: no
+          strategy ownership, no meaningful org or portfolio scope) is
+          infeasible. Criterion is SCOPE-based; the title is evidence only,
+          never hard truth (replaces draft title-based seniority_floor).
+        when:
+          flags_all: [below_executive_scope]
+        verdict: infeasible
+        strength: critical
+        confidence: high
+        status: active
+        provenance:
+          source_type: behavioral
+          evidence:
+            - {registry_id: ev_crm_declines, detail: "Ticketon code=2; taxonomy ic_or_low_manager_role"}
+            - {registry_id: ev_research_report, detail: "§13 — Director-title lift is an artifact; mandate is the real feature"}
+          last_validated: 2026-07-19
+      - id: fc_domain_entry_barrier
+        statement: >
+          Roles requiring non-transferable domain expertise or an unavailable
+          language (e.g. deep crypto expertise + Chinese) are infeasible.
+        when:
+          flags_all: [non_transferable_domain_barrier]
+        verdict: infeasible
+        strength: critical
+        confidence: high
+        status: active
+        provenance:
+          source_type: behavioral
+          evidence: [{registry_id: ev_verbatim_okx, detail: "verbatim: crypto depth + Chinese required"}]
+          last_validated: 2026-07-19
+      # --- KZ local fallback lane ---
+      - id: fc_kz_local_lane
+        statement: >
+          KZ local-market roles are NOT a hard veto: they are routed to the
+          local_market_fallback_policy lane with its own thresholds, and are
+          never mixed into the global core preference ranking.
+        when:
+          country_group: [kazakhstan]
+          local_market: true
+        verdict: feasible
+        lane: fallback_local
+        strength: strong
+        confidence: high
+        status: active
+        provenance:
+          source_type: explicit
+          evidence: [{registry_id: ev_user_decision_20260719, detail: "SoT §2.1 — KZ is a fallback lane, not a veto"}]
+          last_validated: 2026-07-19
+    timezone_policy:
+      hard_gate: false
+      treatment: "risk_or_clarification"
+      statement: >
+        No hard timezone restrictions at the current stage: any timezone
+        difference is acceptable; relocation to a friendlier timezone is an
+        option for a high-quality role. Timezone may be recorded as a
+        risk/clarification but never as an automatic rejection reason, until a
+        real negative experience or an explicit user constraint appears.
+      provenance:
+        source_type: explicit
+        evidence: [{registry_id: ev_user_decision_20260719, detail: "SoT §2.2"}]
+        last_validated: 2026-07-19
+    compensation_policy:
+      status: inactive
+      gating_effect: false
+      ranking_effect: false
+      missing_salary_is_negative: false
+      statement: >
+        Compensation is not a selection criterion yet: ranges are rarely
+        published and the current goal is quality/volume of relevant
+        opportunities. A missing salary range is not a deficiency. Low or
+        unknown compensation must not influence gating or ranking until an
+        explicit SoT change introduces a compensation floor.
+      provenance:
+        source_type: explicit
+        evidence: [{registry_id: ev_user_decision_20260719, detail: "SoT §2.3"}]
+        last_validated: 2026-07-19
+
+  mandate_preferences:
+    - id: scope_breadth
+      axis: mandate_scope
+      statement: "Breadth of ownership; preferred minimum: business line (ordinal: feature < domain < business_line < region < portfolio)"
+      values_order: [feature, domain, business_line, region, portfolio]
+      preferred_min: business_line
+      polarity: positive
+      strength: strong
+      confidence: high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§3-4 within-company contrasts Wise/Airwallex/Monzo"}]
+        last_validated: 2026-07-19
+    - id: growth_mandate
+      axis: revenue_proximity
+      statement: "Growth/expansion in the mandate"
+      polarity: positive
+      strength: strong
+      confidence: high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_reco_audit, detail: "§5.1 growth title lift 2.55; star Wise APAC; applied Brex Growth/AI"}]
+        last_validated: 2026-07-19
+    - id: monetization_core
+      axis: revenue_proximity
+      statement: "Monetization/pricing/acquiring at the core of the role (identity L2); also the exception key for narrow scope"
+      polarity: positive
+      strength: medium
+      confidence: medium  # draft: medium_high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§3 saves on Wise Pricing/Acquiring; resume headline"}]
+        last_validated: 2026-07-19
+    - id: pnl_ownership
+      axis: revenue_proximity
+      statement: "Explicit or de-facto P&L ownership"
+      polarity: positive
+      strength: strong
+      confidence: high
+      status: active
+      provenance:
+        source_type: explicit
+        evidence: [{registry_id: ev_research_report, detail: "§2 resume identity; no_pnl_ownership self-declared blocker"}]
+        last_validated: 2026-07-19
+    - id: org_mandate
+      axis: org_authority
+      statement: "Mandate to build/rebuild the organization"
+      polarity: positive
+      strength: medium
+      confidence: medium
+      status: active
+      provenance:
+        source_type: inferred
+        evidence: [{registry_id: ev_career_facts, detail: "org design/transformation at every employer"}]
+        last_validated: 2026-07-19
+    - id: executive_exposure
+      axis: org_authority
+      statement: "Board-level / C-suite visibility"
+      polarity: positive
+      strength: medium
+      confidence: medium
+      status: active
+      provenance:
+        source_type: inferred
+        evidence: [{registry_id: ev_career_facts, detail: "board-level/funding-round achievements"}]
+        last_validated: 2026-07-19
+    - id: transformation_phase
+      axis: transformation_phase
+      statement: "Build/scale/turnaround phases preferred; maintain/optimize-only disfavored"
+      values: [build, scale, turnaround]
+      anti_values: [maintain, optimize_only]
+      polarity: positive
+      strength: medium
+      confidence: medium
+      status: active
+      provenance:
+        source_type: inferred
+        evidence: [{registry_id: ev_research_report, detail: "§5 L3"}]
+        last_validated: 2026-07-19
+    - id: visa_support_stated
+      axis: feasibility_signal
+      statement: "Explicit visa/relocation support in the posting (converts save_for_later into applied)"
+      polarity: positive
+      strength: medium
+      confidence: high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_reco_audit, detail: "§5.1 relocation lift 2.68"}]
+        last_validated: 2026-07-19
+    - id: remote_friendly
+      axis: feasibility_signal
+      statement: "Remote-friendly work format"
+      polarity: positive
+      strength: medium
+      confidence: medium
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§6 feasibility branch"}]
+        last_validated: 2026-07-19
+
+  company_preferences:
+    - id: global_scale
+      axis: company_scale
+      statement: "Company operating scale; preferred minimum multi-region (ordinal: local < regional < multi_region < global)"
+      values_order: [local, regional, multi_region, global]
+      preferred_min: multi_region
+      applies_to: company
+      polarity: positive
+      strength: strong
+      confidence: high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§8 — 5/5 applied are global"}]
+        evidence_count: 5
+        last_validated: 2026-07-19
+    - id: brand_tier
+      axis: company_brand
+      statement: "Career-convertible brand; preferred minimum tier-1 scale-up (big_tech untested)"
+      values_order: [unknown, niche, known, tier1_scaleup, big_tech]
+      preferred_min: tier1_scaleup
+      applies_to: company
+      polarity: positive
+      strength: strong
+      confidence: medium  # draft: medium_high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§8 Wise/Airwallex/Monzo/Brex vs local declines"}]
+        last_validated: 2026-07-19
+    - id: growth_stage
+      axis: company_stage
+      statement: "Active growth/scale-up phase preferred"
+      values: [growth, scaleup]
+      applies_to: company
+      polarity: positive
+      strength: medium
+      confidence: medium
+      status: active
+      provenance:
+        source_type: inferred
+        evidence: [{registry_id: ev_research_report, detail: "§8"}]
+        last_validated: 2026-07-19
+    - id: business_model_shape
+      axis: business_model
+      statement: "B2C / mass-SMB / platform / ecosystem / subscriptions / mobile-first shapes preferred"
+      values: [b2c, smb_mass, platform, ecosystem, subscriptions, mobile_first]
+      applies_to: company
+      polarity: positive
+      strength: medium
+      confidence: medium
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§8 Monzo/Wise/Affirm"}]
+        last_validated: 2026-07-19
+    - id: product_culture
+      axis: company_culture
+      statement: "Product-driven culture (ownership language; 'founder energy')"
+      applies_to: company
+      polarity: positive
+      strength: medium
+      confidence: medium
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§8 Airwallex text; weak_product_culture self-declared negative"}]
+        last_validated: 2026-07-19
+    - id: emerging_markets_footprint
+      axis: company_footprint
+      statement: "Emerging-markets footprint as a differentiator match"
+      applies_to: company
+      polarity: positive
+      strength: weak
+      confidence: medium
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§5 L6 — APAC star; KZ+Cambodia career"}]
+        last_validated: 2026-07-19
+    - id: platform_as_the_business
+      axis: business_model
+      statement: >
+        Platform-as-the-business (money/value flows THROUGH the platform, e.g.
+        Airwallex GPNI). Strictly distinct from platform ENGINEERING
+        (infra/DevEx), which must not inherit this positive.
+      applies_to: company
+      polarity: positive
+      strength: strong
+      confidence: high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§9 — GPNI applied vs Coinbase Core Infra declined"}]
+        last_validated: 2026-07-19
+
+  anti_preferences:
+    # --- company-level ---
+    - id: crypto_exchange_employer
+      level: company
+      tier: strong
+      statement: >
+        Crypto exchange as employer is a company-level negative (career/
+        reputational risk), NOT an automatic role veto: role shape may still
+        attract (Coinbase platform roles were saved first).
+      when: {flags_all: [crypto_exchange_employer]}
+      strength: strong
+      confidence: high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_crm_declines, detail: "OKX 13/13, Coinbase 6 declined, code=4 company_quality"}]
+        evidence_count: 19
+        last_validated: 2026-07-19
+      override: {allowed: true, conditions: "broad transferable mandate; treated as company concern / exploration, never role veto"}
+    - id: small_local_company
+      level: company
+      tier: strong
+      statement: "Small local-market company without brand does not solve the motivational task (KZ roles go to the fallback lane instead)"
+      when: {flags_all: [small_local_company]}
+      strength: strong
+      confidence: high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_crm_declines, detail: "Ticketon, Aitigenio, MAREE"}]
+        last_validated: 2026-07-19
+    - id: outsourcing_company
+      level: company
+      tier: strong
+      statement: "Outsourcing/agency employer"
+      when: {flags_all: [outsourcing_company]}
+      strength: strong
+      confidence: high
+      status: active
+      provenance:
+        source_type: explicit
+        evidence: [{registry_id: ev_preferences_yaml, detail: "outsourcing_company -40 self-declared"}]
+        last_validated: 2026-07-19
+    - id: mature_bureaucratic_org
+      level: company
+      tier: soft
+      statement: "Mature bureaucratic structure (little behavioral data; self-declared)"
+      when: {flags_all: [mature_bureaucratic_org]}
+      strength: weak
+      confidence: low
+      status: hypothesis
+      provenance:
+        source_type: explicit
+        evidence: [{registry_id: ev_preferences_yaml, detail: "enterprise_bureaucracy -15"}]
+        last_validated: 2026-07-19
+    # --- role-level ---
+    - id: narrow_feature_scope
+      level: role
+      tier: strong
+      statement: "Narrow feature/domain scope in a large company (onboarding/fraud/data-product/devex) — step down from portfolio ownership; EXCEPTION: monetization core (see interaction rule)"
+      when: {flags_all: [narrow_feature_scope]}
+      strength: strong
+      confidence: high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_crm_declines, detail: "12x role_mismatch"}]
+        evidence_count: 12
+        last_validated: 2026-07-19
+      override: {allowed: true, conditions: "monetization_core domain (ir_narrow_scope_monetization_exception)"}
+    - id: internal_tools_backoffice
+      level: role
+      tier: strong
+      statement: "Internal tools / back-office roles (zero positives ever)"
+      when: {flags_all: [internal_tools_backoffice]}
+      strength: strong
+      confidence: high
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_crm_declines, detail: "OKX Internal HR&Finance"}]
+        last_validated: 2026-07-19
+    - id: b2b_enterprise_context
+      level: role
+      tier: soft
+      statement: "Enterprise-sales context is the negative, NOT B2B per se (Airwallex/Brex are B2B platforms and were applied)"
+      when: {flags_all: [b2b_enterprise_context]}
+      strength: weak
+      confidence: medium
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_reco_audit, detail: "§5.1 b2b lift 0.53 + applied B2B counterexamples"}]
+        last_validated: 2026-07-19
+    - id: fraud_risk_compliance_heavy
+      level: role
+      tier: soft
+      statement: "Fraud/risk/compliance-heavy roles"
+      when: {flags_all: [fraud_risk_compliance_heavy]}
+      strength: weak
+      confidence: medium
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_reco_audit, detail: "§5.1 lift 0.71"}]
+        last_validated: 2026-07-19
+    - id: pure_infrastructure_devex
+      level: role
+      tier: soft
+      statement: "Pure infrastructure / developer-experience roles (platform ENGINEERING, not platform-as-business)"
+      when: {flags_all: [platform_engineering]}
+      strength: weak
+      confidence: medium
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_crm_declines, detail: "Coinbase Core/Developer Infra declines"}]
+        last_validated: 2026-07-19
+    - id: ai_as_subject
+      level: role
+      tier: soft
+      statement: "AI as the subject (AI infrastructure) is weaker than AI as a tool (Brex Growth/AI applied)"
+      when: {flags_all: [ai_as_subject]}
+      strength: weak
+      confidence: low
+      status: hypothesis
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§5 L7"}]
+        last_validated: 2026-07-19
+
+  interaction_rules:
+    - id: ir_narrow_scope_monetization_exception
+      statement: "Narrow scope penalty is suppressed when the domain is monetization/pricing/acquiring (identity exception)"
+      priority: 10
+      when: {flags_all: [narrow_feature_scope, monetization_core]}
+      effect: {type: suppress, target_ids: [narrow_feature_scope], result: "narrow scope acceptable in monetization domains"}
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§13 — Wise Pricing/Acquiring saves"}]
+        last_validated: 2026-07-19
+    - id: ir_b2b_platform_business_exception
+      statement: "B2B context penalty is suppressed for platform-as-business companies (no generic B2B rejection)"
+      priority: 20
+      when: {flags_all: [b2b_enterprise_context, platform_as_the_business]}
+      effect: {type: suppress, target_ids: [b2b_enterprise_context], result: "B2B platform-as-business acceptable"}
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§13 — Airwallex/Brex applied"}]
+        last_validated: 2026-07-19
+    - id: ir_remote_suppresses_onsite_country_penalty
+      statement: >
+        A remote role never inherits a country's onsite feasibility penalty:
+        onsite constraints are scoped to onsite/hybrid via their conditions,
+        and this rule documents + guards that invariant (Remote US stays
+        eligible).
+      priority: 30
+      when: {work_format: [remote]}
+      effect:
+        type: gate
+        target_ids: [fc_usa_onsite_requires_explicit_sponsorship, fc_onsite_declared_no_visa_path, fc_onsite_sponsorship_unknown]
+        result: "onsite-scoped constraints do not apply to remote roles"
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§13 — Affirm Remote US interesting; USA dislike refuted"}]
+        last_validated: 2026-07-19
+    - id: ir_crypto_employer_not_role_veto
+      statement: "Crypto employer with a broad transferable mandate is a company concern / exploration candidate, never an automatic role veto"
+      priority: 40
+      when: {flags_all: [crypto_exchange_employer]}
+      effect: {type: limit_to_company_fit, target_ids: [crypto_exchange_employer], result: "company_fit concern only"}
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§13 — Coinbase platform roles saved first"}]
+        last_validated: 2026-07-19
+    - id: ir_usa_relocation_requires_sponsorship
+      statement: "USA relocation is viable ONLY with explicit employer sponsorship (documents fc_usa_onsite_requires_explicit_sponsorship)"
+      priority: 50
+      when: {work_format: [onsite, hybrid], country_group: [usa]}
+      effect: {type: gate, target_ids: [fc_usa_onsite_requires_explicit_sponsorship], result: "explicit sponsorship required"}
+      status: active
+      provenance:
+        source_type: explicit
+        evidence: [{registry_id: ev_user_decision_20260719, detail: "SoT §2.1"}]
+        last_validated: 2026-07-19
+    - id: ir_kz_fallback_lane
+      statement: "KZ local roles bypass the small_local_company veto by routing into the fallback lane with its own thresholds"
+      priority: 60
+      when: {country_group: [kazakhstan], local_market: true}
+      effect: {type: route_to_fallback, target_ids: [local_market_fallback, small_local_company], result: "evaluate in fallback lane only"}
+      status: active
+      provenance:
+        source_type: explicit
+        evidence: [{registry_id: ev_user_decision_20260719, detail: "SoT §2.1 — KZ not a hard veto"}]
+        last_validated: 2026-07-19
+    - id: ir_platform_engineering_not_platform_business
+      statement: "A platform-engineering role must NOT inherit the platform-as-the-business positive"
+      priority: 70
+      when: {flags_all: [platform_engineering]}
+      effect: {type: exclude_from, target_ids: [platform_as_the_business], result: "no positive inheritance"}
+      status: active
+      provenance:
+        source_type: behavioral
+        evidence: [{registry_id: ev_research_report, detail: "§9 — GPNI vs Core Infrastructure distinction"}]
+        last_validated: 2026-07-19
+    - id: ir_hybrid_gm_roles_allowed
+      statement: "GM Digital / GM Market / commercial-hybrid roles with product/P&L digital business ownership pass the function constraint (not rejected as non-product titles)"
+      priority: 80
+      when: {flags_all: [non_product_function, digital_business_ownership]}
+      effect: {type: allow, target_ids: [fc_function_digital_business_ownership], result: "hybrid roles with digital business ownership are eligible"}
+      status: active
+      provenance:
+        source_type: inferred
+        evidence: [{registry_id: ev_research_report, detail: "§5 L8; §12 GM/COO trajectory exploration"}]
+        last_validated: 2026-07-19
+
+  exploration_policy:
+    rate: "1-2 cards/week"
+    rules:
+      - "vary exactly ONE axis per exploration card"
+      - "all hard feasibility gates must be satisfied"
+      - "exploration cards are labeled separately; their reactions carry higher information value"
+      - "KZ local fallback lane is never mixed with global-track exploration"
+    axes:
+      - id: exp_industry
+        axis: industry
+        values: [healthtech, gaming, devtools, climatetech, mobility, travel, global_edtech]
+        requirement: "mandate >= business_line, global scaleup, feasible geo"
+      - id: exp_industry_return_telecom
+        axis: industry
+        values: [telecom_digital_arms]
+        note: "core resume expertise, never shown"
+      - id: exp_company_type
+        axis: company_type
+        values: [big_tech_director_roles, series_a_b_head_of_product]
+      - id: exp_role_family
+        axis: role_family
+        values: [gm_digital, gm_market, coo_adjacent]
+        note: "hybrid identity L8 allows"
+      - id: exp_work_format
+        axis: work_format
+        values: [full_async_us_remote]
+        note: "large-timezone async feasibility unknown; risk-flag only, never a gate"
+    direct_questions_not_exploration:
+      - big_tech_attitude
+      - early_startup_attitude
+      # resolved 2026-07-19 and removed from open questions:
+      #   allowed_relocation_cities -> almost any country (SoT §2.1)
+      #   remote_timezone_limits    -> no hard limits (SoT §2.2)
+      #   compensation_floor        -> deferred, inactive (SoT §2.3)
+
+  local_market_fallback_policy:
+    id: local_market_fallback
+    status: active
+    activation: manual_by_user
+    current_state: standby
+    statement: >
+      KZ local market is not the preferred long-term direction, but if the
+      current work situation deteriorates the user is ready to consider local
+      companies and temporarily lower the bar. KZ roles are therefore
+      evaluated in a separate fallback lane with its own (lower) quality and
+      priority thresholds.
+    separation: >
+      The lane is physically separate from global core preference ranking:
+      fallback verdicts never mix into core metrics, exploration, or learning;
+      observability reports core and fallback lanes separately.
+    provenance:
+      source_type: explicit
+      evidence: [{registry_id: ev_user_decision_20260719, detail: "SoT §2.1 — Kazakhstan"}]
+      last_validated: 2026-07-19
+
+  evidence_registry:
+    - id: ev_research_report
+      source: "docs/audit/2026-07-19-career-preference-model.md"
+      kind: document
+      description: "User Career Preference Model research report"
+    - id: ev_reco_audit
+      source: "docs/audit/2026-07-19-recommendation-system-audit.md"
+      kind: document
+      description: "Recommendation system audit (lifts, precision, RCA)"
+    - id: ev_draft
+      source: "docs/audit/career-preference-model.draft.yaml"
+      kind: document
+      description: "Research draft this model normalizes"
+    - id: ev_user_decision_20260719
+      source: "docs/job-intel-improvements/jul19/job-intel-career-preference-system-development-sot.md"
+      kind: user_decision
+      description: "Owner decisions on relocation, timezone, compensation, KZ fallback (§2)"
+    - id: ev_crm_declines
+      source: "live DB /var/lib/job-intel/state/job_intel.sqlite3 (vacancy_feedback, feedback_events, CRM)"
+      kind: data
+      description: "Cleaned reaction history and 37 declined-with-reason cases"
+    - id: ev_verbatim_okx
+      source: "feedback thread verbatim (OKX)"
+      kind: verbatim
+      description: "'need crypto depth and Chinese' — domain barrier"
+    - id: ev_preferences_yaml
+      source: "~/.hermes/job_intel/career_facts/preferences.yaml"
+      kind: document
+      description: "Explicit self-declared preferences"
+    - id: ev_career_facts
+      source: "~/.hermes/job_intel/career_facts/career_facts.json"
+      kind: document
+      description: "Structured resume v1.1"
+    - id: ev_materials_sot
+      source: "docs/hermes_vacancy_materials_sot.md"
+      kind: document
+      description: "Application materials positioning SoT"
+
+  change_policy:
+    versioning: >
+      Semantic versioning of model_version. MAJOR: removed/renamed fields,
+      enum value removal, semantics changes of existing rules. MINOR: new
+      rules, new enum values, new optional fields. PATCH: evidence updates,
+      status transitions, wording. schema_version tracks the Pydantic contract
+      in job_intel/preference_model/model.py and follows the same rules.
+    compatibility: >
+      Consumers must pin the MAJOR schema_version and must reject a model
+      whose MAJOR they do not support. Unknown fields are always a validation
+      error (extra=forbid) — additions require a version bump, never silent
+      passthrough.
+    approval: >
+      Any change to this file requires explicit owner (Denis Vanyushkin)
+      approval with reason, evidence, affected step, acceptance-criteria
+      impact and backward-compatibility note, per process SoT §8. Feedback
+      loops may PROPOSE changes; nothing is auto-applied.
+    no_silent_learning: true

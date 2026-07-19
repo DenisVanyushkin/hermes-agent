@@ -1,0 +1,125 @@
+# career_preference_model — DRAFT (not deployed)
+# Source of Truth candidate for ALL career-platform components:
+# recommendation engine, CV tailoring, company discovery, recruiter messaging.
+# Derived 2026-07-19 from behavioral data (cleaned reactions, CRM declines,
+# verbatim thread replies), structured resume (career_facts.json v1.1),
+# explicit preferences (preferences.yaml) and application-materials SoT.
+# Research report: docs/audit/2026-07-19-career-preference-model.md
+#
+# Conventions:
+#   strength: critical | strong | medium | weak
+#   confidence: high | medium | low | unknown
+#   polarity: positive | negative
+#   evidence: short pointer to the report section / data fact
+
+career_preference_model:
+  schema_version: "0.1.0-draft"
+  subject: Denis Vanyushkin
+  generated_at: "2026-07-19"
+  data_basis:
+    positive_cases: {applied: 5, exceptional: 1, interesting: 4, save_for_later: 13}
+    negative_cases: {not_interesting: 87, declined_with_reasons: 37}
+    excluded_noise: [test_users: [U_TEST, U_AUDIT, U_SMOKE_REPLAY, U_VALIDATION], resend_duplicates: true, data_quality_code_7: true]
+    reference_ideal_vacancy: "Wise — Product Director, APAC Growth & Expansion (the only ⭐)"
+
+  motivations:
+    - id: escape_local_market_ceiling
+      statement: "Move from KZ-local market to global-level product leadership"
+      confidence: high
+    - id: brand_legitimization
+      statement: "Acquire a tier-1 scale-up brand on the CV; own materials name 'no Western scale-up brand' as the main risk"
+      confidence: high
+    - id: restore_executive_scope
+      statement: "Return to Director+/P&L breadth after narrowing to Tribe Lead (2025)"
+      confidence: medium_high
+    - id: builder_identity
+      statement: "Prefers build/scale/turnaround phases over steady-state operation"
+      confidence: medium
+
+  hard_constraints:   # violation ≈ guaranteed rejection; apply BEFORE any scoring
+    - id: location_feasibility
+      rule: "onsite role without visa/relocation path is infeasible (no work authorization outside KZ)"
+      allowed: [remote, relocation_with_visa_support]
+      behaviorally_confirmed_relocation: [Singapore, London]
+      unconfirmed_relocation: [Dubai, Amsterdam, Berlin, other]   # ask user, do not assume
+      evidence: "12 declines code=3; applied only where relocation supported"
+      confidence: high
+    - id: product_function_only
+      rule: "non-product functions are vetoed (sales, FP&A, delivery/project management, pure ops)"
+      evidence: "Block sales, Canva FP&A declines; own preferences: pure_project_management -30"
+      confidence: high
+    - id: seniority_floor
+      rule: "below Director-equivalent scope = rejection (IC / low-manager)"
+      evidence: "Ticketon code=2; taxonomy ic_or_low_manager_role"
+      confidence: high
+    - id: domain_entry_barrier
+      rule: "roles requiring non-transferable expertise or unavailable language (e.g. crypto depth + Chinese) are infeasible"
+      evidence: "verbatim OKX: 'нужна крипта и китайский'"
+      confidence: high
+    - id: sanctioned_or_reputational_geo
+      rule: "RU/BY/sanctioned regions excluded"
+      source: explicit_preferences
+      confidence: high
+
+  preferences:        # scored after hard constraints pass
+    mandate:
+      - {id: scope_breadth, values_order: [feature, domain, business_line, region, portfolio], preferred_min: business_line, strength: strong, confidence: high, evidence: "within-company contrasts Wise/Airwallex/Monzo"}
+      - {id: growth_mandate, type: boolean, strength: strong, confidence: high, evidence: "title lift 2.55; ⭐ Wise APAC; applied Brex Growth/AI"}
+      - {id: monetization_core, type: boolean, strength: medium, confidence: medium_high, evidence: "saves on Wise Pricing/Acquiring; resume headline; exception to narrow-scope rule"}
+      - {id: pnl_ownership, type: boolean, strength: strong, confidence: high, evidence: "resume identity; no_pnl_ownership is a self-declared hard blocker"}
+      - {id: org_mandate, type: boolean, strength: medium, confidence: medium, evidence: "resume pattern: org design/transformation at every employer"}
+      - {id: executive_exposure, type: boolean, strength: medium, confidence: medium, evidence: "board-level/funding-round achievements"}
+      - {id: transformation_phase, values: [build, scale, turnaround], anti_values: [maintain, optimize_only], strength: medium, confidence: medium}
+    company:
+      - {id: global_scale, values_order: [local, regional, multi_region, global], preferred_min: multi_region, strength: strong, confidence: high, evidence: "5/5 applied are global"}
+      - {id: brand_tier, values_order: [unknown, niche, known, tier1_scaleup, big_tech], preferred_min: tier1_scaleup, strength: strong, confidence: medium_high, evidence: "Wise/Airwallex/Monzo/Brex; big_tech untested"}
+      - {id: growth_stage, values: [growth, scaleup], strength: medium, confidence: medium}
+      - {id: business_model, positive: [b2c, smb_mass, platform, ecosystem, subscriptions, mobile_first], strength: medium, confidence: medium}
+      - {id: product_culture, type: boolean, strength: medium, confidence: medium, evidence: "ownership-language in liked postings; weak_product_culture -20 self-declared"}
+      - {id: emerging_markets_footprint, type: boolean, strength: weak, confidence: medium, evidence: "APAC ⭐; KZ+Cambodia career"}
+      - {id: platform_as_the_business, type: boolean, strength: strong, confidence: high, evidence: "Airwallex GPNI applied; distinct from platform ENGINEERING (negative)"}
+    feasibility_bonuses:
+      - {id: visa_support_stated, type: boolean, strength: medium, confidence: high, evidence: "relocation-lift 2.68; converts save_for_later into applied"}
+      - {id: remote_friendly, type: boolean, strength: medium, confidence: medium}
+
+  anti_preferences:
+    strong:            # overcome only by exceptional mandate
+      - {id: crypto_exchange_employer, evidence: "OKX 13/13, Coinbase 6 declined, all code=4 company_quality; note: Coinbase platform roles were saved first — company-level negative, not role-shape", confidence: high}
+      - {id: narrow_feature_scope, evidence: "12x role_mismatch (onboarding/fraud/data-product/devex)", exception: monetization_core, confidence: high}
+      - {id: internal_tools_backoffice, evidence: "OKX Internal HR&Finance; 0 positives ever", confidence: high}
+      - {id: small_local_company, evidence: "Ticketon, Aitigenio, MAREE declines", confidence: high}
+    soft:              # undesirable but acceptable
+      - {id: b2b_enterprise_context, evidence: "lift 0.53; BUT Airwallex/Brex (B2B platforms) applied — penalize enterprise-sales context, not B2B per se", confidence: medium}
+      - {id: fraud_risk_compliance_heavy, evidence: "lift 0.71", confidence: medium}
+      - {id: pure_infrastructure_devex, evidence: "Coinbase Core/Developer Infra declines", confidence: medium}
+      - {id: ai_as_subject, evidence: "AI-infra roles saved not applied; AI-as-tool is positive (Brex Growth/AI applied)", confidence: low}
+      - {id: mature_bureaucratic_org, evidence: "self-declared enterprise_bureaucracy -15; little behavioral data", confidence: low}
+
+  feature_weights:    # deliberately qualitative in draft; numeric calibration is an engine concern
+    note: >
+      Order of application: hard_constraints (gate) -> strong preferences ->
+      medium -> weak. Categorical labels (industry, country, title) must NOT
+      carry standalone weights — they are raw material for computing the
+      property-level features above. Industry is confirmed NEUTRAL
+      (payments 41% pos = 41% neg; 30+ fintech declines).
+
+  confidence:
+    validated_by_counterexample_search: true
+    revised_during_validation:
+      - "USA dislike -> onsite-infeasibility (Remote US = interesting/saved; Brex Vancouver applied)"
+      - "crypto dislike -> crypto-EMPLOYER negative, role shape can attract (Coinbase saves)"
+      - "narrow scope dislike -> exception for monetization/pricing domains"
+      - "B2B dislike -> softened (Airwallex/Brex applied)"
+      - "Director-title negative lift = artifact of narrow-Director mass; mandate is the real feature"
+    known_data_gaps: [compensation_threshold, allowed_relocation_cities, remote_timezone_limits, big_tech_attitude, early_startup_attitude]
+
+  exploration_candidates:   # controlled exploration: vary ONE axis, keep hard constraints satisfied
+    - {axis: industry, values: [healthtech, gaming, devtools, climatetech, mobility, travel, global_edtech], rate: "1-2 cards/week", requirement: "mandate>=business_line, global scaleup, feasible geo"}
+    - {axis: industry_return, values: [telecom_digital_arms], note: "core resume expertise, never shown"}
+    - {axis: company_type, values: [big_tech_director_roles, series_a_b_head_of_product]}
+    - {axis: role_family, values: [gm_digital, gm_market, coo_adjacent], note: "hybrid identity L8 allows"}
+    - {axis: work_format, values: [full_async_us_remote], note: "+11h timezone feasibility unknown"}
+    direct_questions_not_exploration:   # constraints to ask the user once, not A/B
+      - allowed_relocation_cities
+      - compensation_floor
+      - remote_timezone_limits
