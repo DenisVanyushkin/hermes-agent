@@ -559,40 +559,92 @@ def _check_time_date(sheet, row):
     return None
 
 
-def _check_refs(conn, sheet, row):
+def _in_file_place_names(file_rows_by_sheet):
+    """Casefolded names of places inserted (no id) in this same file, so a
+    place/event referencing a brand-new place from the same seed file
+    resolves without needing that place to already exist in the DB.
+    """
+    names = set()
+    for row in file_rows_by_sheet.get("Места", []):
+        try:
+            canon_row = _to_canonical("Места", row)
+        except ValueError:
+            continue
+        if canon_row.get("id") is not None:
+            continue
+        name = canon_row.get("name")
+        if name:
+            names.add(str(name).casefold())
+    return names
+
+
+def _in_file_person_names(file_rows_by_sheet):
+    """Casefolded names+aliases of people inserted (no id) in this same
+    file -- same rationale as _in_file_place_names. Group expansion is not
+    needed here: a referenced in-file group name counts as resolvable on
+    its own.
+    """
+    names = set()
+    for row in file_rows_by_sheet.get("Люди", []):
+        try:
+            canon_row = _to_canonical("Люди", row)
+        except ValueError:
+            continue
+        if canon_row.get("id") is not None:
+            continue
+        name = canon_row.get("name")
+        if name:
+            names.add(str(name).casefold())
+        for alias in canon_row.get("aliases") or []:
+            names.add(str(alias).casefold())
+    return names
+
+
+def _check_refs(conn, sheet, row, in_file_places=(), in_file_people=()):
     """Returns a combined reason string (place/person unresolvable, or a
     place with no transport -- mirrors cli._check_trip_has_transport) or
     None. Issues are joined so a row with multiple problems reports all
     of them in one conflict entry.
+
+    A place/person ref resolves against (live DB) union (in_file_places /
+    in_file_people -- casefolded names of insert rows elsewhere in the same
+    file), so a file that both inserts a new place/person and references it
+    from another row isn't wrongly flagged as a conflict.
     """
     from fam import people, places
+
+    def place_ok(name):
+        return places.resolve(conn, name) is not None or name.casefold() in in_file_places
+
+    def person_ok(name):
+        return people.resolve(conn, name) is not None or name.casefold() in in_file_people
 
     issues = []
     if sheet in ("События", "Серии"):
         place_name = row.get("place")
         transport = row.get("transport")
         if place_name:
-            if places.resolve(conn, place_name) is None:
+            if not place_ok(place_name):
                 issues.append(f"место не найдено: {place_name!r}")
             if transport is None or transport == "unknown":
                 issues.append("место задано, но не задан транспорт")
         for pname in row.get("participants") or []:
-            if people.resolve(conn, pname) is None:
+            if not person_ok(pname):
                 issues.append(f"участник не найден: {pname!r}")
     elif sheet == "Планы":
         place_name = row.get("place")
-        if place_name and places.resolve(conn, place_name) is None:
+        if place_name and not place_ok(place_name):
             issues.append(f"место не найдено: {place_name!r}")
         person_name = row.get("person")
-        if person_name and people.resolve(conn, person_name) is None:
+        if person_name and not person_ok(person_name):
             issues.append(f"человек не найден: {person_name!r}")
     elif sheet == "Люди":
         home = row.get("home")
-        if home and places.resolve(conn, home) is None:
+        if home and not place_ok(home):
             issues.append(f"место не найдено: {home!r}")
         if row.get("kind") == "group":
             for m in row.get("members") or []:
-                if people.resolve(conn, m) is None:
+                if not person_ok(m):
                     issues.append(f"участник группы не найден: {m!r}")
     return "; ".join(issues) if issues else None
 
@@ -630,6 +682,8 @@ def diff(conn, file_rows_by_sheet, snap):
     doesn't mention them.
     """
     live_snap = make_snapshot(export_rows(conn))
+    in_file_places = _in_file_place_names(file_rows_by_sheet)
+    in_file_people = _in_file_person_names(file_rows_by_sheet)
 
     inserts, updates, deletes, conflicts = {}, {}, {}, {}
 
@@ -663,7 +717,9 @@ def diff(conn, file_rows_by_sheet, snap):
             time_issue = _check_time_date(sheet, canon_row)
             if time_issue:
                 issues.append(time_issue)
-            ref_issue = _check_refs(conn, sheet, canon_row)
+            ref_issue = _check_refs(conn, sheet, canon_row,
+                                     in_file_places=in_file_places,
+                                     in_file_people=in_file_people)
             if ref_issue:
                 issues.append(ref_issue)
 

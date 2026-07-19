@@ -69,6 +69,46 @@ def test_format_report_mentions_counts(db):
     assert "➕" in report
 
 
+def test_ref_to_in_file_inserted_place_is_not_conflict(db):
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Места"] = f["Места"] + [{"id": None, "name": "Аптека 36.6"}]
+    f["События"] = f["События"] + [{"id": None, "title": "Поездка в аптеку",
+                                      "start": "2026-08-02 10:00",
+                                      "place": "Аптека 36.6", "transport": "car"}]
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts
+    assert any(r["name"] == "Аптека 36.6" for r in d.inserts["Места"])
+    assert any(r["place"] == "Аптека 36.6" for r in d.inserts["События"])
+
+
+def test_ref_to_in_file_inserted_person_is_not_conflict(db):
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Люди"] = f["Люди"] + [{"id": None, "name": "Мадина", "kind": "person"}]
+    f["Планы"] = f["Планы"] + [{"id": None, "title": "Позвонить", "person": "Мадина"}]
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts
+    assert any(r["name"] == "Мадина" for r in d.inserts["Люди"])
+    assert any(r["person"] == "Мадина" for r in d.inserts["Планы"])
+
+
+def test_ref_to_unknown_name_still_conflict(db):
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Планы"] = f["Планы"] + [{"id": None, "title": "Позвонить", "person": "Никто Такой"}]
+    d = seed.diff(db, f, snap)
+    assert d.has_conflicts
+    reasons = " ".join(c["reason"] for c in d.conflicts["Планы"])
+    assert "Никто Такой" in reasons
+
+
 def test_delete_of_referenced_place_is_conflict(db):
     _seed_db(db)
     rows = seed.export_rows(db)
