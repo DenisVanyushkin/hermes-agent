@@ -359,3 +359,66 @@ def plan_info(conn, today, window_days):
         "tails_open": tails_open,
         "tails_declined": tails_declined,
     }
+
+
+def has_any_plan_state(conn):
+    """True once at least one goal_plan_state:<YYYY-MM> meta key has ever
+    been written (offered/done/declined, any month) -- the "history"
+    signal Task 6's catch-up branch uses to tell a genuinely missed
+    ritual window (offer now) apart from a brand-new install that simply
+    hasn't reached its first window yet (stay silent, spec §4.3).
+    """
+    row = conn.execute(
+        "SELECT 1 FROM meta WHERE key LIKE 'goal_plan_state:%' LIMIT 1"
+    ).fetchone()
+    return row is not None
+
+
+# --- ritual question text (spec §4.3) -----------------------------------
+#
+# Russian month names are masculine inanimate nouns, so the accusative
+# form ("на август") is identical to the nominative -- no separate
+# declension table needed, just the plain names.
+
+_MONTH_NAMES_RU = {
+    1: "январь", 2: "февраль", 3: "март", 4: "апрель",
+    5: "май", 6: "июнь", 7: "июль", 8: "август",
+    9: "сентябрь", 10: "октябрь", 11: "ноябрь", 12: "декабрь",
+}
+
+_QUARTER_ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV"}
+
+
+def month_name_ru(month_str):
+    """'YYYY-MM' -> Russian month name, accusative (== nominative for
+    these masculine inanimate nouns)."""
+    if validate_period(month_str) != "month":
+        raise ValueError(f"not a month period: {month_str}")
+    return _MONTH_NAMES_RU[int(month_str[5:7])]
+
+
+def quarter_label_ru(quarter_str):
+    """'YYYY-Qn' -> 'II квартала' style genitive label for the ritual
+    question's optional quarter clause."""
+    if validate_period(quarter_str) != "quarter":
+        raise ValueError(f"not a quarter period: {quarter_str}")
+    n = int(quarter_str[-1])
+    return f"{_QUARTER_ROMAN[n]} квартала"
+
+
+def ritual_question_text(target_month):
+    """The planning-ritual question text for target month `target_month`
+    (spec §4.3): «Готова сейчас запланировать цели на <месяц>{, включая
+    цели <квартал>,} — или напомнить завтра?». The quarter clause is
+    included only when target_month is the first month of its quarter
+    (is_first_month_of_quarter) -- e.g. December's target text mentions
+    "I квартала" of the FOLLOWING year (quarter_of/next_month already
+    handle the year rollover; this function just formats what they
+    compute).
+    """
+    name = month_name_ru(target_month)
+    text = f"Готова сейчас запланировать цели на {name}"
+    if is_first_month_of_quarter(target_month):
+        text += f", включая цели {quarter_label_ru(quarter_of(target_month))}"
+    text += " — или напомнить завтра?"
+    return text
