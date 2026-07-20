@@ -897,8 +897,8 @@ def test_digest_raw_shape_with_weather_and_event(db, fake_deliver):
         "events": [{"event_id": e["id"], "title": "Встреча",
                      "start_local": e["start_local"]}],
         "burning_plans": [],
-        "busy_two_days": [{"start_local": e["start_local"],
-                            "title": "Встреча"}],
+        # busy_two_days omitted: no burning plans -> no slot to propose
+        # (live bug 2026-07-20, see test_digest_plans.py).
         "question": tick.DIGEST_QUESTION,
     }
 

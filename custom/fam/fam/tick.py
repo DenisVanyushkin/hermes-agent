@@ -1532,14 +1532,21 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
     # weather: omitted when unavailable. meds: omitted unless there is an
     # exception to report (missed dose / low stock). events/burning_plans
     # stay always-present, so "Событий нет." is still stated by design.
+    # busy_two_days: only alongside a burning plan -- it exists purely as
+    # slot-proposal material, and without a plan to place it is just a
+    # duplicate of events for the rewrite to misnarrate (live 2026-07-20:
+    # "на ближайшие 2 дня этот слот уже занят"). When a plan exists the
+    # key stays even if empty: "everything is free" is itself the fact
+    # the slot proposal reasons over.
     raw = {
         "kind": "digest",
         "date_local": date_local,
         "events": event_list,
         "burning_plans": burning_plans,
-        "busy_two_days": busy_two_days,
         "question": DIGEST_QUESTION,
     }
+    if burning_plans:
+        raw["busy_two_days"] = busy_two_days
     if wx is not None:
         raw["weather"] = wx
     if meds_digest["missed_yesterday"] or meds_digest["low_stock"]:
