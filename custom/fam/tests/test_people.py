@@ -144,3 +144,70 @@ def test_get_person_without_home_has_none(db):
     people.add(db, "Салтанат"); db.commit()
     p = people.get(db, "Салтанат")
     assert p["home_place"] is None
+
+
+# --- Separator-insensitive name/alias matching ---
+# "-", "_" and runs of whitespace are equivalent to a plain space when
+# looking up a name or alias (fam.textnorm.fold). Storage is unchanged --
+# only the comparison is normalized.
+
+def test_resolve_name_separator_variants(db):
+    people.add(db, "Гуля Тате"); db.commit()
+    for ref in ("гуля-тате", "Гуля_Тате", "гуля   тате", "ГУЛЯ-ТАТЕ"):
+        p = people.resolve(db, ref)
+        assert p and p["name"] == "Гуля Тате"
+
+
+def test_resolve_alias_separator_variants(db):
+    people.add(db, "Тая", aliases=["Мама Тая"]); db.commit()
+    for ref in ("мама-тая", "мама_тая", "мама   тая"):
+        p = people.resolve(db, ref)
+        assert p and p["name"] == "Тая"
+
+
+def test_add_duplicate_name_separator_variant_rejected(db):
+    people.add(db, "Гуля Тате"); db.commit()
+    with pytest.raises(ValueError):
+        people.add(db, "Гуля-Тате")
+
+
+def test_add_duplicate_alias_separator_variant_rejected(db):
+    people.add(db, "ПерсонаА", aliases=["Мама Тая"])
+    people.add(db, "ПерсонаБ")
+    db.commit()
+    with pytest.raises(ValueError):
+        people.alias(db, "ПерсонаБ", "мама_тая")
+
+
+def test_ambiguous_fold_match_prefers_exact_casefold(db):
+    # Two different rows fold to the same key; the ref that matches one of
+    # them EXACTLY (mod case) must resolve to that one, not bail out as
+    # ambiguous.
+    people.add(db, "Анна-Мария")
+    people.add(db, "Анна Мария Вторая")
+    db.commit()
+    p = people.resolve(db, "анна-мария")
+    assert p and p["name"] == "Анна-Мария"
+
+
+def test_ambiguous_fold_match_returns_none_when_not_unique(db):
+    # add()'s own duplicate-fold guard prevents creating this state through
+    # the API -- simulate a legacy DB (rows inserted before this fold logic
+    # existed) with a direct insert, bypassing add().
+    db.execute(
+        "INSERT INTO people(name, kind, created_at) VALUES (?,?,datetime('now'))",
+        ("Анна-Мария", "person"),
+    )
+    db.execute(
+        "INSERT INTO people(name, kind, created_at) VALUES (?,?,datetime('now'))",
+        ("Анна_Мария", "person"),
+    )
+    db.commit()
+    # Neither stored name is an exact casefold match for this ref, and the
+    # fold key is shared by two different people -- ambiguous, so None.
+    assert people.resolve(db, "анна   мария") is None
+
+
+def test_slug_lookup_unaffected_by_fold(db):
+    people.add(db, "Тая", slug="taya"); db.commit()
+    assert people.resolve(db, "taya")["name"] == "Тая"

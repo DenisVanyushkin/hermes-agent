@@ -6,6 +6,7 @@ mirroring people.py's pattern.
 from datetime import datetime, timezone
 
 from fam import audit
+from fam.textnorm import fold
 
 
 def _now():
@@ -16,10 +17,16 @@ def get(conn, ref):
     """Resolve ref (id|name|alias) to a place dict, or None.
 
     Lookup order for string refs: exact name (case-insensitive), then
-    alias (case-insensitive). SQLite's built-in NOCASE collation only
-    folds ASCII (it leaves Cyrillic case untouched), so case-insensitive
-    comparisons are done here with Python's str.casefold() instead of
-    relying on SQL COLLATE NOCASE.
+    alias (case-insensitive), then separator-insensitive name/alias
+    ("гуля-тате" == "гуля тате" == "гуля_тате", see fam.textnorm.fold) --
+    but only when the fold match is unique. If the DB already contains two
+    different places whose names/aliases fold to the same key, an exact
+    casefold match always wins first; a ref that only matches at the fold
+    level and is ambiguous between places resolves to None rather than
+    guessing. SQLite's built-in NOCASE collation only folds ASCII (it
+    leaves Cyrillic case untouched), so case-insensitive comparisons are
+    done here with Python's str.casefold() instead of relying on SQL
+    COLLATE NOCASE.
     """
     if ref is None:
         return None
@@ -43,6 +50,34 @@ def get(conn, ref):
             d.pop("_alias", None)
             return d
 
+    return _fold_match(conn, ref)
+
+
+def _fold_match(conn, ref):
+    """Separator/case-insensitive fallback lookup (fam.textnorm.fold) across
+    place names and aliases. Returns the matching place dict only if
+    exactly one distinct place folds to ref's key; None if no match or if
+    the match is ambiguous across more than one place.
+    """
+    ref_fold = fold(ref)
+    if not ref_fold:
+        return None
+
+    matches = {}  # place_id -> row (dict, alias key stripped)
+    for row in conn.execute("SELECT * FROM places").fetchall():
+        if fold(row["name"]) == ref_fold:
+            matches[row["id"]] = dict(row)
+    for row in conn.execute(
+        "SELECT a.alias AS _alias, p.* FROM place_aliases a "
+        "JOIN places p ON p.id = a.place_id"
+    ).fetchall():
+        if fold(row["_alias"]) == ref_fold:
+            d = dict(row)
+            d.pop("_alias", None)
+            matches.setdefault(d["id"], d)
+
+    if len(matches) == 1:
+        return next(iter(matches.values()))
     return None
 
 
@@ -53,23 +88,24 @@ def resolve(conn, text):
 
 def _alias_conflict_owner(conn, alias_fold):
     """Return the name of the place that already owns alias_fold (a
-    casefolded string), checking both place names and existing aliases.
+    fam.textnorm.fold key), checking both place names and existing aliases.
     None if alias_fold is free.
 
     SQLite's built-in NOCASE collation (used by the place_aliases PK) only
     folds ASCII, so it will happily let "Мега" and "мега" coexist as two
     distinct rows pointing at two different places, silently misrouting
-    lookups. This does the uniqueness check in Python with str.casefold()
-    instead, which is correct for any Unicode script.
+    lookups. This does the uniqueness check in Python with fam.textnorm.fold
+    instead, which is correct for any Unicode script and treats -/_/multi-
+    space as equivalent to a plain space.
     """
     for row in conn.execute("SELECT name FROM places").fetchall():
-        if row["name"].casefold() == alias_fold:
+        if fold(row["name"]) == alias_fold:
             return row["name"]
     for row in conn.execute(
         "SELECT a.alias AS _alias, p.name AS _name FROM place_aliases a "
         "JOIN places p ON p.id = a.place_id"
     ).fetchall():
-        if row["_alias"].casefold() == alias_fold:
+        if fold(row["_alias"]) == alias_fold:
             return row["_name"]
     return None
 
@@ -79,9 +115,9 @@ def add(conn, name, address="", lat=None, lon=None, aliases=(), source="manual")
     any alias collides (casefolded) with an existing place name or alias,
     or with another alias in this same call.
     """
-    name_fold = name.casefold()
+    name_fold = fold(name)
     for row in conn.execute("SELECT name FROM places").fetchall():
-        if row["name"].casefold() == name_fold:
+        if fold(row["name"]) == name_fold:
             raise ValueError(f"place already exists: {name}")
 
     # Validate every alias up front, before inserting anything, so a
@@ -89,7 +125,7 @@ def add(conn, name, address="", lat=None, lon=None, aliases=(), source="manual")
     # partial aliases attached).
     seen_folds = {}
     for a in aliases:
-        a_fold = a.casefold()
+        a_fold = fold(a)
         owner = _alias_conflict_owner(conn, a_fold)
         if owner is not None:
             raise ValueError(f"alias already in use by {owner}: {a}")
@@ -130,7 +166,7 @@ def alias(conn, place_ref, alias):
     if p is None:
         raise ValueError(f"unknown place: {place_ref}")
 
-    owner = _alias_conflict_owner(conn, alias.casefold())
+    owner = _alias_conflict_owner(conn, fold(alias))
     if owner is not None:
         raise ValueError(f"alias already in use by {owner}: {alias}")
 

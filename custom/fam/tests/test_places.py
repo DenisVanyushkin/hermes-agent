@@ -160,3 +160,62 @@ def test_update_travel_min_shifts_future_leave_at_chain(db):
 
     after = db.execute(q, (e["id"],)).fetchone()
     assert after["fire_at_utc"] == "2099-01-02T05:20:00+00:00"
+
+
+# --- Separator-insensitive name/alias matching ---
+# "-", "_" and runs of whitespace are equivalent to a plain space when
+# looking up a name or alias (fam.textnorm.fold). Storage is unchanged --
+# only the comparison is normalized.
+
+def test_resolve_name_separator_variants(db):
+    places.add(db, "Гуля Тате"); db.commit()
+    for ref in ("гуля-тате", "Гуля_Тате", "гуля   тате", "ГУЛЯ-ТАТЕ"):
+        p = places.resolve(db, ref)
+        assert p and p["name"] == "Гуля Тате"
+
+
+def test_resolve_alias_separator_variants(db):
+    places.add(db, "Клиника Дента", aliases=["Зубной Врач"]); db.commit()
+    for ref in ("зубной-врач", "зубной_врач", "зубной   врач"):
+        p = places.resolve(db, ref)
+        assert p and p["name"] == "Клиника Дента"
+
+
+def test_add_duplicate_name_separator_variant_rejected(db):
+    places.add(db, "Гуля Тате"); db.commit()
+    with pytest.raises(ValueError):
+        places.add(db, "Гуля-Тате")
+
+
+def test_add_duplicate_alias_separator_variant_rejected(db):
+    places.add(db, "МестоА", aliases=["Зубной Врач"])
+    places.add(db, "МестоБ")
+    db.commit()
+    with pytest.raises(ValueError):
+        places.alias(db, "МестоБ", "зубной_врач")
+
+
+def test_ambiguous_fold_match_prefers_exact_casefold(db):
+    places.add(db, "Анна-Мария")
+    places.add(db, "Анна Мария Вторая")
+    db.commit()
+    p = places.resolve(db, "анна-мария")
+    assert p and p["name"] == "Анна-Мария"
+
+
+def test_ambiguous_fold_match_returns_none_when_not_unique(db):
+    # add()'s own duplicate-fold guard prevents creating this state through
+    # the API -- simulate a legacy DB (rows inserted before this fold logic
+    # existed) with a direct insert, bypassing add().
+    db.execute(
+        "INSERT INTO places(name, address, source, created_at) "
+        "VALUES (?,?,?,datetime('now'))",
+        ("Анна-Мария", "", "manual"),
+    )
+    db.execute(
+        "INSERT INTO places(name, address, source, created_at) "
+        "VALUES (?,?,?,datetime('now'))",
+        ("Анна_Мария", "", "manual"),
+    )
+    db.commit()
+    assert places.resolve(db, "анна   мария") is None

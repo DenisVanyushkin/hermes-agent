@@ -445,3 +445,21 @@ def test_gis_url_resolved_once_per_unique_url(db, monkeypatch):
     d = seed.diff(db, f, snap)
     assert not d.has_conflicts
     assert calls == ["https://go.2gis.com/one"]           # кэш: один вызов на url
+
+
+def test_ref_written_with_hyphen_matches_in_file_place_written_with_space(db):
+    # A reference cell ("Гуля-Тате") must match an in-file inserted place
+    # ("Гуля Тате") that differs only by separator/case (fam.textnorm.fold),
+    # not just an exact string match.
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Места"] = f["Места"] + [{"id": None, "name": "Гуля Тате"}]
+    f["События"] = f["События"] + [{"id": None, "title": "К Гуле",
+                                      "start": "2026-08-02 10:00",
+                                      "place": "Гуля-Тате", "transport": "car"}]
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts
+    assert any(r["name"] == "Гуля Тате" for r in d.inserts["Места"])
+    assert any(r["place"] == "Гуля-Тате" for r in d.inserts["События"])

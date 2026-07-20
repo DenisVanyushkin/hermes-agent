@@ -8,6 +8,7 @@ from datetime import date, datetime, time, timezone
 
 from .cal import ALMATY
 from . import audit, geo2gis
+from .textnorm import fold
 
 _LOCAL_FMT = "%Y-%m-%d %H:%M"
 
@@ -649,7 +650,7 @@ def _check_time_date(sheet, row):
 
 
 def _in_file_place_names(file_rows_by_sheet):
-    """Casefolded names of places inserted (no id) in this same file, so a
+    """fam.textnorm.fold keys of places inserted (no id) in this same file, so a
     place/event referencing a brand-new place from the same seed file
     resolves without needing that place to already exist in the DB.
     """
@@ -663,12 +664,12 @@ def _in_file_place_names(file_rows_by_sheet):
             continue
         name = canon_row.get("name")
         if name:
-            names.add(str(name).casefold())
+            names.add(fold(str(name)))
     return names
 
 
 def _in_file_person_names(file_rows_by_sheet):
-    """Casefolded names+aliases of people inserted (no id) in this same
+    """fam.textnorm.fold keys (names+aliases) of people inserted (no id) in this same
     file -- same rationale as _in_file_place_names. Group expansion is not
     needed here: a referenced in-file group name counts as resolvable on
     its own.
@@ -683,14 +684,14 @@ def _in_file_person_names(file_rows_by_sheet):
             continue
         name = canon_row.get("name")
         if name:
-            names.add(str(name).casefold())
+            names.add(fold(str(name)))
         for alias in canon_row.get("aliases") or []:
-            names.add(str(alias).casefold())
+            names.add(fold(str(alias)))
     return names
 
 
 def _in_file_group_names(file_rows_by_sheet):
-    """Casefolded names+aliases of GROUP rows in this file (тип «группа»),
+    """fam.textnorm.fold keys (names+aliases) of GROUP rows in this file (тип «группа»),
     id or no id -- so a group name written into участники is caught even
     when the group itself is being inserted by this very file.
     """
@@ -704,9 +705,9 @@ def _in_file_group_names(file_rows_by_sheet):
             continue
         name = canon_row.get("name")
         if name:
-            names.add(str(name).casefold())
+            names.add(fold(str(name)))
         for alias in canon_row.get("aliases") or []:
-            names.add(str(alias).casefold())
+            names.add(fold(str(alias)))
     return names
 
 
@@ -718,17 +719,17 @@ def _check_refs(conn, sheet, row, in_file_places=(), in_file_people=(),
     of them in one conflict entry.
 
     A place/person ref resolves against (live DB) union (in_file_places /
-    in_file_people -- casefolded names of insert rows elsewhere in the same
+    in_file_people -- fam.textnorm.fold keys of insert rows elsewhere in the same
     file), so a file that both inserts a new place/person and references it
     from another row isn't wrongly flagged as a conflict.
     """
     from fam import people, places
 
     def place_ok(name):
-        return places.resolve(conn, name) is not None or name.casefold() in in_file_places
+        return places.resolve(conn, name) is not None or fold(name) in in_file_places
 
     def person_ok(name):
-        return people.resolve(conn, name) is not None or name.casefold() in in_file_people
+        return people.resolve(conn, name) is not None or fold(name) in in_file_people
 
     issues = []
     if sheet in ("События", "Серии"):
@@ -747,7 +748,7 @@ def _check_refs(conn, sheet, row, in_file_places=(), in_file_people=(),
             # в участники руками, применилась бы криво (молчаливое удаление
             # участников) и никогда не проходит verify -- конфликт сразу.
             pe = people.resolve(conn, pname)
-            if (pe and pe.get("kind") == "group") or pname.casefold() in in_file_groups:
+            if (pe and pe.get("kind") == "group") or fold(pname) in in_file_groups:
                 issues.append(f"участники: укажи имена людей, не группу {pname!r}")
     elif sheet == "Планы":
         place_name = row.get("place")
