@@ -1,7 +1,7 @@
 ---
 name: upstream-sync
 description: Safely update local/customizations from upstream NousResearch/hermes-agent - triage the preflight report, auto-rebase clean updates, or negotiate per-feature conflict resolution with the operator over Slack.
-version: 0.3.1
+version: 0.3.2
 metadata:
   hermes:
     tags: [devops, git, maintenance]
@@ -66,8 +66,20 @@ appears within 10 minutes, report that the finalizer did not respond and stop.
    Mention the backup ref in every report.
 2. If `pending_decision_present` is true in the preflight JSON and you were
    started by cron: do not begin a new sync. If `pending.json` is younger than
-   7 days, post a short reminder that a decision is still awaited; if older,
-   post the conflict report again.
+   7 days, post a reminder that a decision is still awaited; if older, post the
+   conflict report again. The reminder MUST be self-contained — the operator
+   should never have to dig up the original report to decide. Read
+   `pending.json` and include, per awaiting feature: its id, `files`, the
+   `operator_prompt` (or a one-line summary of `local_subjects` if absent), and
+   the exact reply format, e.g.:
+
+   | # | Files | Local vs upstream |
+   |---|-------|-------------------|
+   | F1 | agent/conversation_loop.py | approval preflight vs api_content sidecar |
+
+   Reply per feature in this thread: `F1: merge-both` / `keep-local` /
+   `take-upstream`. Features already decided from memory are listed separately
+   as auto-applied, not asked about.
 3. If `worktree_dirty` lists files that are not routine runtime artifacts,
    note them in the report; the host rebase script auto-stashes, so this is
    informational, not blocking.
