@@ -288,3 +288,123 @@ def test_review_remarks_surface_in_text(monkeypatch, tmp_path) -> None:
     # remarks are surfaced, not hidden
     assert "CHANGES_REQUESTED" in result["text"] or "замечан" in result["text"].lower()
     assert result["report"]["safety"]["draft_only"] is True
+
+
+# --- context builder that records the vacancy_url it was asked to resolve ---
+class _RecordingContextBuilder:
+    def __init__(self) -> None:
+        self.seen_vacancy_url: str | None = None
+        self.called = False
+
+    def __call__(self, request: Any) -> RecruiterContextPacket:
+        self.called = True
+        self.seen_vacancy_url = getattr(request, "vacancy_url", None)
+        return _context_packet()
+
+
+def _recording_factory(recorder: _RecordingContextBuilder, *, reviewer_verdict: str = "APPROVE"):
+    def factory() -> RecruiterApplicationExecutors:
+        return RecruiterApplicationExecutors(
+            skill_executor=_FakeSkillExecutor(),
+            document_executor=_FakeDocumentExecutor(reviewer_verdict=reviewer_verdict),
+            context_builder=recorder,
+        )
+
+    return factory
+
+
+_PROVIDER_CONFIG = {"pipelines": {"execution": {"allow_real_provider_execution": True}}}
+
+
+def test_a_vacancy_url_from_message_reaches_positioning_request(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_sot(tmp_path)
+    recorder = _RecordingContextBuilder()
+    result = execute_recruiter_application_package_helper(
+        user_message="подготовь пакет документов для https://jobs.example.com/vacancy/42.",
+        executor_factory=_recording_factory(recorder),
+        config=_PROVIDER_CONFIG,
+    )
+    assert recorder.called is True
+    assert recorder.seen_vacancy_url == "https://jobs.example.com/vacancy/42"
+    assert result["report"]["safety"]["draft_only"] is True
+
+
+def test_b_vacancy_url_falls_back_to_conversation_context(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_sot(tmp_path)
+    recorder = _RecordingContextBuilder()
+    result = execute_recruiter_application_package_helper(
+        user_message="подготовь резюме и сопроводительное письмо",  # no URL here
+        conversation_context="ранее в треде: https://hh.ru/vacancy/777 обсуждали",
+        executor_factory=_recording_factory(recorder),
+        config=_PROVIDER_CONFIG,
+    )
+    assert recorder.seen_vacancy_url == "https://hh.ru/vacancy/777"
+    assert result["report"]["safety"]["draft_only"] is True
+
+
+def test_c_no_vacancy_url_anywhere_is_graceful_block(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_sot(tmp_path)
+
+    # Real context builder path (context_builder=None) with no URL: build_recruiter_context
+    # raises ValueError, which run_recruiter_skill_execution turns into a graceful
+    # INVALID_REQUEST -> BLOCKED_POSITIONING_UNAVAILABLE. No crash, no network.
+    def factory() -> RecruiterApplicationExecutors:
+        return RecruiterApplicationExecutors(
+            skill_executor=_FakeSkillExecutor(),
+            document_executor=_FakeDocumentExecutor(),
+            context_builder=None,
+        )
+
+    result = execute_recruiter_application_package_helper(
+        user_message="подготовь резюме, сопроводительное письмо и сообщение рекрутеру",
+        executor_factory=factory,
+        config=_PROVIDER_CONFIG,
+    )
+    assert result["status"] == "BLOCKED_POSITIONING_UNAVAILABLE"
+    assert result["report"]["safety"]["draft_only"] is True
+
+
+def test_d_fuse_open_builder_exception_degrades_to_draft_only_block(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_sot(tmp_path)
+
+    import hermes_cli.recruiter_skill_provider_executor as skill_mod
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("positioning_provider_client_unavailable")
+
+    monkeypatch.setattr(skill_mod, "build_recruiter_positioning_skill_executor", _boom)
+
+    result = execute_recruiter_application_package_helper(
+        user_message="подготовь пакет документов для https://jobs.example.com/vacancy/42",
+        config=_PROVIDER_CONFIG,  # fuse open, no executor_factory -> real builders attempted
+    )
+    assert result["status"] == "BLOCKED_EXECUTOR_UNAVAILABLE"
+    assert result["report"]["safety"]["draft_only"] is True
+    # the underlying builder error is disclosed, not swallowed
+    assert "positioning_provider_client_unavailable" in result["text"]
+    assert any("positioning_provider_client_unavailable" in w for w in result["report"]["warnings"])
+
+
+def test_e_fuse_closed_never_builds_provider_executors(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_sot(tmp_path)
+
+    import hermes_cli.recruiter_document_provider_executor as doc_mod
+    import hermes_cli.recruiter_skill_provider_executor as skill_mod
+
+    def _boom(*_a, **_k):  # pragma: no cover - must never run when fuse is closed
+        raise AssertionError("provider builder called while fuse closed")
+
+    monkeypatch.setattr(skill_mod, "build_recruiter_positioning_skill_executor", _boom)
+    monkeypatch.setattr(doc_mod, "build_recruiter_document_provider_executor", _boom)
+
+    result = execute_recruiter_application_package_helper(
+        user_message="подготовь пакет документов для https://jobs.example.com/vacancy/42",
+        # no config -> fuse closed, no executor_factory
+    )
+    assert result["status"] == "BLOCKED_EXECUTION_DISABLED"
+    assert result["report"]["safety"]["draft_only"] is True

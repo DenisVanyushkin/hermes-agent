@@ -18,7 +18,10 @@ from hermes_cli.recruiter_career_facts import (
     load_career_facts,
 )
 from hermes_cli.recruiter_context import build_recruiter_context
-from hermes_cli.recruiter_decision_execution import _real_provider_execution_allowed
+from hermes_cli.recruiter_decision_execution import (
+    _real_provider_execution_allowed,
+    extract_vacancy_url,
+)
 from hermes_cli.recruiter_document_execution import (
     RecruiterDocumentExecutionStatus,
     run_recruiter_document_execution,
@@ -74,7 +77,7 @@ def execute_recruiter_application_package_helper(
     config: Mapping[str, Any] | None = None,
     user_message: str = "",
     executor_factory: Any = None,
-    conversation_context: str | None = None,  # reserved for future context wiring
+    conversation_context: str | None = None,
     hermes_home: Path | str | None = None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
@@ -98,14 +101,26 @@ def execute_recruiter_application_package_helper(
 
     provider_allowed = _real_provider_execution_allowed(config)
 
+    # Vacancy context: the URL the package is being built for. Pure string work,
+    # safe even when the provider fuse is closed. Falls back to the most recent
+    # URL in the surrounding thread context (shared with decision-support).
+    vacancy_url = extract_vacancy_url(user_message, conversation_context)
+
     executors = _resolve_executors(executor_factory, provider_allowed)
     executor_error: str | None = executors[1]
     executor_bundle: RecruiterApplicationExecutors | None = executors[0]
+
+    # When the fuse is open and we had to build the real executors ourselves, a
+    # builder failure degrades to a draft-only block with the error disclosed —
+    # never a crash, never a silent success.
+    if provider_allowed and executor_factory is None and executor_bundle is None and executor_error:
+        return _blocked_executor_unavailable_result(routing, facts_bundle, executor_error)
 
     # --- Gate 3: positioning (existing machinery) ---
     positioning_report = _run_positioning(
         executor_bundle,
         provider_allowed=provider_allowed,
+        vacancy_url=vacancy_url,
     )
 
     # --- Gate 4: documents (POSITIONING_REQUIRED gate lives inside the builder) ---
@@ -163,19 +178,32 @@ def _resolve_executors(
     """Return (executors, error). Only builds provider executors when the fuse is open."""
     if executor_factory is None:
         if not provider_allowed:
+            # Fuse closed: no provider machinery imported, no network.
             return None, None
         try:
-            from hermes_cli.recruiter_positioning_provider_executor import (  # noqa: F401
-                build_recruiter_positioning_provider_executor,
+            # Imported lazily so the closed-fuse path above never pulls in
+            # provider machinery. Both builders construct their provider client
+            # eagerly, so a client-unavailable failure surfaces here and is
+            # captured (degraded draft-only block) rather than crashing mid-flow.
+            from hermes_cli.recruiter_document_provider_executor import (
+                build_recruiter_document_provider_executor,
+            )
+            from hermes_cli.recruiter_skill_provider_executor import (
+                build_recruiter_positioning_skill_executor,
             )
 
-            # The real provider-backed positioning executor exists but is not
-            # yet wired into this helper's default path; the hook stays inert
-            # and callers get a draft-only report plus this diagnostic so the
-            # degraded state is observable rather than silent.
-            return None, "real provider executor not wired"
-        except Exception as exc:  # pragma: no cover - defensive
+            skill_executor = build_recruiter_positioning_skill_executor()
+            document_executor = build_recruiter_document_provider_executor()
+        except Exception as exc:
             return None, f"{type(exc).__name__}: {exc}"
+        return (
+            RecruiterApplicationExecutors(
+                skill_executor=skill_executor,
+                document_executor=document_executor,
+                context_builder=None,  # real build_recruiter_context via _run_positioning
+            ),
+            None,
+        )
 
     try:
         bundle = executor_factory()
@@ -199,13 +227,19 @@ def _run_positioning(
     executors: RecruiterApplicationExecutors | None,
     *,
     provider_allowed: bool,
+    vacancy_url: str | None = None,
 ):
     context_builder = None
     skill_executor = None
     if executors is not None:
         context_builder = executors.context_builder
         skill_executor = executors.skill_executor
+    # With the fuse closed the flow is blocked before any provider call, and the
+    # real context builder would otherwise resolve job-intel context (DB work)
+    # only to be discarded. Withholding the URL keeps the closed-fuse path free
+    # of DB/network side effects (byte-equivalent to the pre-wiring behavior).
     request = RecruiterSkillExecutionRequest(
+        vacancy_url=vacancy_url if provider_allowed else None,
         flow=FLOW_EVALUATE_AND_POSITION,
         allow_provider_execution=provider_allowed,
     )
@@ -239,7 +273,8 @@ def _collect_warnings(routing, facts_bundle, positioning_report, executor_error)
     warnings: list[str] = []
     warnings.extend(routing.warnings)
     warnings.extend(facts_bundle.warnings)
-    warnings.extend(positioning_report.warnings)
+    if positioning_report is not None:
+        warnings.extend(positioning_report.warnings)
     if executor_error:
         warnings.append(f"executor unavailable: {executor_error}")
     # de-dupe preserving order
@@ -306,6 +341,39 @@ def _blocked_not_application_result(routing) -> dict[str, Any]:
         "safety": {"draft_only": True, "no_outbound": True, "no_job_intel_db_write": True},
     }
     return {"status": "BLOCKED_NOT_APPLICATION_REQUEST", "text": text, "report": report}
+
+
+def _blocked_executor_unavailable_result(routing, facts_bundle, executor_error: str) -> dict[str, Any]:
+    """Provider fuse open but the real executors could not be built — degrade, disclose."""
+    text = "\n".join(
+        [
+            _DRAFT_ONLY_HEADER,
+            "",
+            "Провайдерное исполнение включено, но исполнителя не удалось инициализировать — "
+            "черновики не генерировались.",
+            f"Причина: {executor_error}",
+        ]
+    )
+    warnings = _collect_warnings(routing, facts_bundle, None, executor_error)
+    report = {
+        "helper_id": RECRUITER_APPLICATION_HELPER,
+        "status": "BLOCKED_EXECUTOR_UNAVAILABLE",
+        "routing": {
+            "selected_pipeline_id": RECRUITER_APPLICATION_PIPELINE_ID,
+            "selected_role_id": routing.selected_role_id,
+            "selected_bundle": routing.selected_bundle,
+            "reasoning_summary": routing.reasoning_summary,
+        },
+        "documents": {},
+        "warnings": warnings,
+        "safety": {
+            "draft_only": True,
+            "no_outbound": True,
+            "no_job_intel_db_write": True,
+            "provider_execution_allowed": True,
+        },
+    }
+    return {"status": "BLOCKED_EXECUTOR_UNAVAILABLE", "text": text, "report": report}
 
 
 def _format_text(

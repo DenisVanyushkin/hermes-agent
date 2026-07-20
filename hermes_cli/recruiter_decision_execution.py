@@ -26,6 +26,28 @@ RECRUITER_PRIMARY_SUBAGENT_ID = "general_operator"
 
 _URL_PATTERN = re.compile(r"https?://[^\s<>()\"']+")
 
+
+def extract_vacancy_url(
+    user_message: str,
+    conversation_context: str | None = None,
+) -> str | None:
+    """Return the vacancy URL implied by a chat message, or ``None``.
+
+    A bare follow-up ("оцени вакансию" replying under a job alert) carries no
+    URL itself, so the link falls back to the most recent URL in the thread
+    context. Shared by the decision-support and application-package flows so the
+    extraction rules stay identical.
+    """
+    text = str(user_message or "").strip()
+    context = str(conversation_context or "").strip()
+    urls = _URL_PATTERN.findall(text)
+    if not urls and context:
+        # Most recent thread URL first.
+        urls = list(reversed(_URL_PATTERN.findall(context)))
+    if not urls:
+        return None
+    return urls[0].rstrip(".,;)")
+
 _MODULE_TITLES = {
     "vacancy_assessment": "Vacancy assessment",
     "company_assessment": "Company assessment",
@@ -53,15 +75,12 @@ def build_decision_request_from_message(
     """
     text = str(user_message or "").strip()
     context = str(conversation_context or "").strip()
-    urls = _URL_PATTERN.findall(text)
-    if not urls and context:
-        # Most recent thread URL first.
-        urls = list(reversed(_URL_PATTERN.findall(context)))
+    vacancy_url = extract_vacancy_url(user_message, conversation_context)
     vacancy_source = None
-    if urls:
+    if vacancy_url:
         vacancy_source = {
             "source_type": "vacancy_url",
-            "source_id": urls[0].rstrip(".,;)"),
+            "source_id": vacancy_url,
             "approved": True,
         }
     bundle = career_facts if career_facts is not None else CareerFactsBundle()
