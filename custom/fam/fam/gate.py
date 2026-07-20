@@ -127,6 +127,11 @@ CONFIG_DEFAULTS = {
     # for. Above the max: too far off-route to call it "on the way".
     "detour_offer_min_min": 2,
     "detour_max_min": 30,
+    # Phase 8b (goals): planning-ritual window -- compute_target_month
+    # treats the last N days of a month as "already about next month"
+    # (goals.py's compute_target_month, `goal plan-info`/`plan-mark`
+    # default target, and the digest ritual question in tick.py).
+    "goal_ritual_window_days": 3,
 }
 
 GATE_STYLE_INSTRUCTION = (

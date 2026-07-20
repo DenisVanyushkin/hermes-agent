@@ -1173,6 +1173,61 @@ def cmd_goal_take(args):
     return 0
 
 
+def _fmt_plan_info(info):
+    lines = [f"target: {info['target_month']} (state: {info['state'] or '—'})"]
+    if info["quarter"]:
+        lines.append(f"quarter: {info['quarter']} "
+                      f"({len(info['quarter_goals_open'])} open)")
+    lines.append(f"tails open: {len(info['tails_open'])}, "
+                 f"declined: {len(info['tails_declined'])}")
+    for g in info["quarter_goals_open"]:
+        lines.append(f"  Q  #{g['id']} {g['title']}")
+    for g in info["tails_open"]:
+        lines.append(f"  open      #{g['id']} {g['title']}")
+    for g in info["tails_declined"]:
+        lines.append(f"  declined  #{g['id']} {g['title']}")
+    return "\n".join(lines)
+
+
+def cmd_goal_plan_info(args):
+    conn = famdb.connect()
+    cfg = gate.load_config()
+    today = goals.today_almaty()
+    info = goals.plan_info(conn, today, cfg["goal_ritual_window_days"])
+    if args.json:
+        print(json.dumps(info, ensure_ascii=False))
+    else:
+        print(_fmt_plan_info(info))
+    return 0
+
+
+def cmd_goal_plan_mark(args):
+    conn = famdb.connect()
+    cfg = gate.load_config()
+    today = goals.today_almaty()
+    month = args.month
+    if month is None:
+        month = goals.compute_target_month(conn, today, cfg["goal_ritual_window_days"])
+    goals.plan_state_set(conn, month, args.status, today)
+    conn.commit()
+    state = goals.plan_state_get(conn, month)
+    if args.json:
+        print(json.dumps({"month": month, "status": state[0], "date": state[1]},
+                          ensure_ascii=False))
+    else:
+        print(f"plan-mark: {month} -> {args.status}")
+    return 0
+
+
+def cmd_goal_plan_status(args):
+    conn = famdb.connect()
+    cfg = gate.load_config()
+    today = goals.today_almaty()
+    info = goals.plan_info(conn, today, cfg["goal_ritual_window_days"])
+    print(_fmt_plan_info(info))
+    return 0
+
+
 def _fmt_med(m):
     times_str = ",".join(m["times"])
     line = f"{m['id']}\t{m['name']}\t{times_str}"
@@ -1801,6 +1856,18 @@ def build_parser():
     spgt.add_argument("--period", required=True, help="target month YYYY-MM")
     spgt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
+
+    spgpi = goal_sub.add_parser("plan-info"); spgpi.set_defaults(func=cmd_goal_plan_info)
+    spgpi.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable output")
+
+    spgpm = goal_sub.add_parser("plan-mark"); spgpm.set_defaults(func=cmd_goal_plan_mark)
+    spgpm.add_argument("status", choices=["done", "declined"])
+    spgpm.add_argument("--month", help="target month YYYY-MM; default: computed target")
+    spgpm.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable output")
+
+    spgps = goal_sub.add_parser("plan-status"); spgps.set_defaults(func=cmd_goal_plan_status)
 
     sp = sub.add_parser("road"); sp.set_defaults(func=cmd_road)
     sp.add_argument("event_id", type=int)
