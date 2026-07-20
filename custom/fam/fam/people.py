@@ -6,6 +6,7 @@ mirroring audit.py's pattern.
 from datetime import datetime, timezone
 
 from fam import audit
+from fam.textnorm import fold
 
 
 def _now():
@@ -28,10 +29,17 @@ def get(conn, ref):
     The dict always carries a 'home_place' key (joined place dict, or None).
 
     Lookup order for string refs: exact name (case-insensitive), then
-    alias (case-insensitive), then slug (exact). SQLite's built-in NOCASE
-    collation only folds ASCII (it leaves Cyrillic case untouched), so
-    case-insensitive comparisons are done here with Python's str.casefold()
-    instead of relying on SQL COLLATE NOCASE.
+    alias (case-insensitive), then slug (exact), then separator-insensitive
+    name/alias ("гуля-тате" == "гуля тате" == "гуля_тате", see
+    fam.textnorm.fold) -- but only when the fold match is unique. If the DB
+    already contains two different rows whose names/aliases fold to the
+    same key (e.g. both "Анна-Мария" and "Анна Мария" exist), an exact
+    casefold match always wins first; a ref that only matches at the fold
+    level and is ambiguous between rows resolves to None rather than
+    guessing. SQLite's built-in NOCASE collation only folds ASCII (it
+    leaves Cyrillic case untouched), so case-insensitive comparisons are
+    done here with Python's str.casefold() instead of relying on SQL
+    COLLATE NOCASE.
     """
     if ref is None:
         return None
@@ -60,12 +68,41 @@ def get(conn, ref):
         if row is None:
             row = conn.execute("SELECT * FROM people WHERE slug = ?", (ref,)).fetchone()
 
+        if row is None:
+            row = _fold_match(conn, ref)
+
     if row is None:
         return None
 
     d = dict(row)
     d.pop("_alias", None)
     return _attach_home(conn, d)
+
+
+def _fold_match(conn, ref):
+    """Separator/case-insensitive fallback lookup (fam.textnorm.fold) across
+    person/group names and aliases. Returns the matching row only if exactly
+    one distinct person/group folds to ref's key; None if no match or if
+    the match is ambiguous across more than one person/group.
+    """
+    ref_fold = fold(ref)
+    if not ref_fold:
+        return None
+
+    matches = {}  # person_id -> row
+    for r in conn.execute("SELECT * FROM people").fetchall():
+        if fold(r["name"]) == ref_fold:
+            matches[r["id"]] = r
+    for r in conn.execute(
+        "SELECT a.alias AS _alias, p.* FROM people_aliases a "
+        "JOIN people p ON p.id = a.person_id"
+    ).fetchall():
+        if fold(r["_alias"]) == ref_fold:
+            matches.setdefault(r["id"], r)
+
+    if len(matches) == 1:
+        return next(iter(matches.values()))
+    return None
 
 
 def resolve(conn, text):
@@ -87,23 +124,25 @@ def resolve(conn, text):
 
 def _alias_conflict_owner(conn, alias_fold):
     """Return the name of the person/group that already owns alias_fold (a
-    casefolded string), checking both person/group names and existing
+    fam.textnorm.fold key), checking both person/group names and existing
     aliases. None if alias_fold is free.
 
     SQLite's built-in NOCASE collation (used by the people_aliases PK) only
     folds ASCII, so it will happily let "Таюша" and "таюша" coexist as two
     distinct rows pointing at two different people, silently misrouting
-    lookups. This does the uniqueness check in Python with str.casefold()
-    instead, which is correct for any Unicode script.
+    lookups. This does the uniqueness check in Python with fam.textnorm.fold
+    instead, which is correct for any Unicode script and treats -/_/multi-
+    space as equivalent to a plain space (so "Гуля-Тате" is recognized as a
+    duplicate of an existing "гуля тате").
     """
     for row in conn.execute("SELECT name FROM people").fetchall():
-        if row["name"].casefold() == alias_fold:
+        if fold(row["name"]) == alias_fold:
             return row["name"]
     for row in conn.execute(
         "SELECT a.alias AS _alias, p.name AS _name FROM people_aliases a "
         "JOIN people p ON p.id = a.person_id"
     ).fetchall():
-        if row["_alias"].casefold() == alias_fold:
+        if fold(row["_alias"]) == alias_fold:
             return row["_name"]
     return None
 
@@ -113,9 +152,9 @@ def add(conn, name, kind="person", slug=None, aliases=()):
     exists, or if any alias collides (casefolded) with an existing
     person/group name or alias, or with another alias in this same call.
     """
-    name_fold = name.casefold()
+    name_fold = fold(name)
     for row in conn.execute("SELECT name FROM people").fetchall():
-        if row["name"].casefold() == name_fold:
+        if fold(row["name"]) == name_fold:
             raise ValueError(f"person already exists: {name}")
 
     # Validate every alias up front, before inserting anything, so a
@@ -123,7 +162,7 @@ def add(conn, name, kind="person", slug=None, aliases=()):
     # partial aliases attached).
     seen_folds = {}
     for a in aliases:
-        a_fold = a.casefold()
+        a_fold = fold(a)
         owner = _alias_conflict_owner(conn, a_fold)
         if owner is not None:
             raise ValueError(f"alias already in use by {owner}: {a}")
@@ -163,7 +202,7 @@ def alias(conn, person_ref, alias):
     if p is None:
         raise ValueError(f"unknown person: {person_ref}")
 
-    owner = _alias_conflict_owner(conn, alias.casefold())
+    owner = _alias_conflict_owner(conn, fold(alias))
     if owner is not None:
         raise ValueError(f"alias already in use by {owner}: {alias}")
 
