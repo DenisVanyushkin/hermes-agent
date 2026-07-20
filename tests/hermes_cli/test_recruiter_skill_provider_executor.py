@@ -174,3 +174,198 @@ def test_real_builder_defers_provider_imports_until_called(monkeypatch) -> None:
     monkeypatch.setattr(mod, "build_recruiter_positioning_provider_executor", _boom)
     adapter, _, _ = _adapter(evaluation_payload={"vacancy_evaluation_summary": "x"})
     assert isinstance(adapter, RecruiterProviderSkillExecutor)
+
+
+# --- schema-alias reconciliation (native packet -> runner REQUIRED_POSITIONING_FIELDS) ---
+from hermes_cli.recruiter_skill_execution import (  # noqa: E402
+    FLOW_EVALUATE_AND_POSITION,
+    REQUIRED_POSITIONING_FIELDS,
+    RecruiterSkillExecutionRequest,
+    RecruiterSkillExecutionStatus,
+    run_recruiter_skill_execution,
+)
+
+
+from hermes_cli.recruiter_context import (  # noqa: E402
+    RecruiterContextPacket,
+    RecruiterContextStatus,
+)
+
+
+def _runner_context_builder(_request: Any) -> RecruiterContextPacket:
+    """Known-good READY context packet that drives the runner to EXECUTION_READY."""
+    return RecruiterContextPacket(
+        status=RecruiterContextStatus.READY,
+        request={"vacancy_id": 101},
+        vacancy={
+            "vacancy_id": 101,
+            "vacancy_key": "vac-101",
+            "source_url": "https://example.com/jobs/101",
+            "title": "Head of Product",
+            "company": "Acme",
+            "location": "Remote",
+            "source_kind": "linkedin",
+            "evaluation": {"score": 92, "tier": "strong_fit", "recommendation": "apply"},
+            "provenance": {"source_table": "vacancies", "source_url": "https://example.com/jobs/101"},
+        },
+        opportunity={"id": 501, "vacancy_id": 101, "stage": "new"},
+        company_context=[
+            {"company": "Acme", "summary": "Category leader", "provenance": {"source_table": "company_intelligence"}}
+        ],
+        application_history={"status": "found", "history": [], "artifacts": [], "feedback": []},
+        machine_score={
+            "status": "available",
+            "score": 92,
+            "tier": "strong_fit",
+            "recommendation": "apply",
+            "matched_signals": ["b2b_saas", "leadership"],
+            "concerns": [],
+            "reasons": ["strong product leadership match"],
+        },
+        role_package_context={
+            "package_id": "hermes-recruiter",
+            "package_path": "role-packages/recruiter",
+            "role_id": "hermes_recruiter",
+            "skills_by_id": {
+                "vacancy-evaluation": {
+                    "id": "vacancy-evaluation",
+                    "path": "role-packages/recruiter/skills/vacancy-evaluation/SKILL.md",
+                },
+                "positioning-and-evidence": {
+                    "id": "positioning-and-evidence",
+                    "path": "role-packages/recruiter/skills/positioning-and-evidence/SKILL.md",
+                },
+                "document-writer": {
+                    "id": "document-writer",
+                    "path": "role-packages/recruiter/skills/document-writer/SKILL.md",
+                },
+            },
+            "bundles_by_id": {
+                "evaluate-vacancy": {"id": "evaluate-vacancy", "skills": ["vacancy-evaluation", "positioning-and-evidence"]}
+            },
+        },
+        private_context={
+            "status": "PRIVATE_CONTEXT_AVAILABLE",
+            "dir": "/home/hermes/.hermes/private/career",
+            "files": {
+                "denis_vanyushkin_structured_resume_v1_1.json": {"present": True},
+                "opportunity-thesis.md": {"present": True},
+                "company_intelligence_architecture.md": {"present": True},
+                "scoring_v3.md": {"present": True},
+            },
+        },
+        warnings=[],
+        errors=[],
+        provenance={"writes_performed": False, "private_dir_checked": "/home/hermes/.hermes/private/career"},
+    )
+
+
+def _native_positioning_packet() -> dict[str, Any]:
+    return {
+        "schema_version": "recruiter_positioning_packet_v1",
+        "skill_id": "positioning-and-evidence",
+        "status": "POSITIONING_READY",
+        "positioning_summary": "Lead with executive B2B product leadership.",
+        "target_narrative": "Operator-executive for complex platform businesses.",
+        "recommended_angle": "Scale-stage operator.",
+        "evidence": ["Scaled multi-team product orgs."],
+        "gaps": ["domain depth"],
+        "risks_and_mitigations": ["avoid overstating prior stage similarity"],
+        "claims_to_use": ["Led product organizations."],
+        "claims_to_avoid": [],
+        "evidence_items": [{"claim_text": "Led product organizations.", "source_ref_ids": ["src-1"]}],
+        "allowed_claims": [{"claim_id": "claim-1", "claim_text": "Led product organizations."}],
+        "source_references": [{"source_ref_id": "src-1"}],
+        "provenance": {"provider": "openai-codex"},
+    }
+
+
+def test_positioning_aliases_satisfy_runner_required_fields() -> None:
+    adapter, _, _ = _adapter(positioning_payload=_native_positioning_packet())
+    result = adapter.execute(
+        skill_id=POSITIONING_EVIDENCE_SKILL_ID,
+        skill_input={},
+        skill_markdown_path="p",
+        expected_schema=list(REQUIRED_POSITIONING_FIELDS),
+    )
+    for field in REQUIRED_POSITIONING_FIELDS:
+        assert field in result.output, f"missing required alias: {field}"
+    # deterministic derivation
+    assert result.output["evidence_map"] == ["Scaled multi-team product orgs."]
+    assert result.output["proven_facts"] == ["Led product organizations."]
+    assert result.output["derived_positioning"] == {
+        "target_narrative": "Operator-executive for complex platform businesses.",
+        "recommended_angle": "Scale-stage operator.",
+    }
+
+
+def test_native_positioning_fields_survive_untouched() -> None:
+    adapter, _, _ = _adapter(positioning_payload=_native_positioning_packet())
+    result = adapter.execute(
+        skill_id=POSITIONING_EVIDENCE_SKILL_ID,
+        skill_input={},
+        skill_markdown_path="p",
+        expected_schema=list(REQUIRED_POSITIONING_FIELDS),
+    )
+    out = result.output
+    assert out["evidence"] == ["Scaled multi-team product orgs."]
+    assert out["claims_to_use"] == ["Led product organizations."]
+    assert out["evidence_items"] == [{"claim_text": "Led product organizations.", "source_ref_ids": ["src-1"]}]
+    assert out["allowed_claims"] == [{"claim_id": "claim-1", "claim_text": "Led product organizations."}]
+    assert out["source_references"] == [{"source_ref_id": "src-1"}]
+    assert out["schema_version"] == "recruiter_positioning_packet_v1"
+
+
+def test_absent_optional_source_fields_yield_safe_empty_aliases() -> None:
+    # Native-required fields present, but the alias SOURCE fields are absent.
+    minimal = {
+        "schema_version": "recruiter_positioning_packet_v1",
+        "skill_id": "positioning-and-evidence",
+        "status": "POSITIONING_READY",
+        "positioning_summary": "Summary.",
+        "gaps": [],
+        "risks_and_mitigations": [],
+    }
+    adapter, _, _ = _adapter(positioning_payload=minimal)
+    result = adapter.execute(
+        skill_id=POSITIONING_EVIDENCE_SKILL_ID,
+        skill_input={},
+        skill_markdown_path="p",
+        expected_schema=list(REQUIRED_POSITIONING_FIELDS),
+    )
+    assert result.output["evidence_map"] == []
+    assert result.output["proven_facts"] == []
+    assert result.output["derived_positioning"] == {}
+    for field in REQUIRED_POSITIONING_FIELDS:
+        assert field in result.output
+
+
+def test_native_packet_passes_runner_required_fields_end_to_end() -> None:
+    # Full runner path: vacancy-evaluation then positioning, both via the adapter.
+    eval_payload = {
+        "vacancy_evaluation_summary": "Strong fit.",
+        "fit_interpretation": "High-confidence match.",
+        "evidence_gaps": [],
+        "recommendation_for_next_step": "Proceed to positioning.",
+    }
+    evaluation = _FakeProviderExecutor(eval_payload)
+    positioning = _FakeProviderExecutor(_native_positioning_packet())
+    adapter = build_recruiter_positioning_skill_executor(
+        evaluation_executor=evaluation,
+        positioning_executor=positioning,
+    )
+
+    report = run_recruiter_skill_execution(
+        RecruiterSkillExecutionRequest(
+            vacancy_id=101,
+            flow=FLOW_EVALUATE_AND_POSITION,
+            allow_provider_execution=True,
+        ),
+        context_builder=_runner_context_builder,
+        executor=adapter,
+    )
+    assert report.status is RecruiterSkillExecutionStatus.EXECUTION_READY
+    assert report.positioning_evidence_result is not None
+    # native fields preserved through the runner's normalization
+    assert "evidence_items" in report.positioning_evidence_result
+    assert "evidence_map" in report.positioning_evidence_result

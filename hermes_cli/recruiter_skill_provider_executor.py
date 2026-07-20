@@ -137,6 +137,9 @@ def _payload_to_result(
         "skill_markdown_path": skill_markdown_path,
         "expected_schema": requested_fields,
     }
+    if skill_id == POSITIONING_EVIDENCE_SKILL_ID:
+        _augment_positioning_output(output)
+
     status = output.get("status")
     if not isinstance(status, str) or not status:
         status = "SUCCESS"
@@ -150,6 +153,34 @@ def _payload_to_result(
         provenance=provenance,
         provider_called=provider_called,
     )
+
+
+def _augment_positioning_output(output: dict[str, Any]) -> None:
+    """Add runner-required aliases as a superset over the native positioning packet.
+
+    ``run_recruiter_skill_execution`` validates ``REQUIRED_POSITIONING_FIELDS``
+    (``positioning_summary``/``gaps``/``risks_and_mitigations`` already match the
+    native packet by name), while the native fields (``evidence``/``claims_to_use``/
+    ``evidence_items``/``allowed_claims``/…) are consumed downstream by
+    ``recruiter_document_inputs``. Both must survive, so the aliases are added
+    deterministically from packet content without overwriting anything the packet
+    already provides, and never synthesizing facts. ``_missing_fields`` checks
+    presence, so an empty alias satisfies the required-field gate.
+    """
+    if "evidence_map" not in output:
+        # Native packet carries positioning evidence under ``evidence``.
+        output["evidence_map"] = output.get("evidence", [])
+    if "proven_facts" not in output:
+        # Evidence-backed claims to use; empty list when absent.
+        claims = output.get("claims_to_use")
+        output["proven_facts"] = list(claims) if isinstance(claims, list) else []
+    if "derived_positioning" not in output:
+        derived: dict[str, Any] = {}
+        if "target_narrative" in output:
+            derived["target_narrative"] = output["target_narrative"]
+        if "recommended_angle" in output:
+            derived["recommended_angle"] = output["recommended_angle"]
+        output["derived_positioning"] = derived
 
 
 def _as_str_list(value: Any) -> list[str]:
