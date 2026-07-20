@@ -322,6 +322,116 @@ def test_legacy_row_place_without_transport_edited_is_still_conflict(db):
     assert "место задано, но не задан транспорт" in reasons
 
 
+def test_empty_travel_min_cell_against_zero_is_noop(db):
+    """places.travel_min is NOT NULL DEFAULT 0. A cleared/blank cell must
+    normalize to 0, not None, so a file where the operator emptied the
+    column round-trips against a DB value of 0 with no proposed change."""
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Казакова")
+    assert rows["Места"][idx]["travel_min"] == 0        # baseline: unset in DB
+    f["Места"][idx]["travel_min"] = None                # operator cleared the cell
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts
+    assert d.empty
+    assert d.updates["Места"] == []
+
+
+def test_travel_min_cell_zero_to_value_is_update(db):
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Казакова")
+    f["Места"][idx]["travel_min"] = 15
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts
+    assert d.updates["Места"][0]["changes"]["travel_min"] == (0, 15)
+
+
+def test_garbage_travel_min_is_conflict_not_crash(db):
+    _seed_db(db)
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Казакова")
+    f["Места"][idx]["travel_min"] = "минут пятнадцать"
+    d = seed.diff(db, f, snap)                          # никаких исключений
+    assert d.conflicts["Места"]
+
+
+def test_delete_place_referenced_only_by_cancelled_event_is_allowed(db):
+    """Live case: a place referenced only by cancelled events (pilot junk)
+    must be deletable -- only LIVE (active) references block a delete."""
+    from datetime import datetime, timedelta, timezone
+
+    from fam import cal, places
+
+    _seed_db(db)
+    places.add(db, "Студия танцев", address="ул. Тестовая 1")
+    future = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    ev = cal.add(db, "Отменённая тренировка", future, place="Студия танцев", transport="car")
+    cal.cancel(db, ev["id"])
+    db.commit()
+
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Места"] = [r for r in f["Места"] if r["name"] != "Студия танцев"]
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts, f"Unexpected conflicts: {d.conflicts}"
+    assert any(r["name"] == "Студия танцев" for r in d.deletes["Места"])
+
+
+def test_delete_place_referenced_by_active_event_still_conflicts(db):
+    _seed_db(db)  # baseline "ДР" event already references "Invictus", active
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Места"] = [r for r in f["Места"] if r["name"] != "Invictus"]
+    d = seed.diff(db, f, snap)
+    assert d.has_conflicts
+    assert d.conflicts["Места"]
+
+
+def test_delete_person_referenced_only_by_dropped_plan_is_allowed(db):
+    from fam import people
+
+    _seed_db(db)
+    p = people.add(db, "Дропнутый", kind="person")
+    db.execute("INSERT INTO plans (title, person_id, status, created_at) "
+               "VALUES ('Старый план', ?, 'dropped', datetime('now'))", (p["id"],))
+    db.commit()
+
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Люди"] = [r for r in f["Люди"] if r["name"] != "Дропнутый"]
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts, f"Unexpected conflicts: {d.conflicts}"
+    assert any(r["name"] == "Дропнутый" for r in d.deletes["Люди"])
+
+
+def test_delete_person_referenced_by_open_plan_still_conflicts(db):
+    from fam import people
+
+    _seed_db(db)
+    p = people.add(db, "Активный", kind="person")
+    db.execute("INSERT INTO plans (title, person_id, status, created_at) "
+               "VALUES ('Живой план', ?, 'open', datetime('now'))", (p["id"],))
+    db.commit()
+
+    rows = seed.export_rows(db)
+    snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Люди"] = [r for r in f["Люди"] if r["name"] != "Активный"]
+    d = seed.diff(db, f, snap)
+    assert d.has_conflicts
+    assert d.conflicts["Люди"]
+
+
 def test_gis_url_resolved_once_per_unique_url(db, monkeypatch):
     _seed_db(db)
     calls = []
