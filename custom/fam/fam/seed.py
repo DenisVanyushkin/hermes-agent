@@ -78,6 +78,18 @@ def _uncsv(s):
     return [p.strip() for p in str(s or "").split(",") if p.strip()]
 
 
+def _travel_min_from_xlsx(v):
+    """Cell -> int minutes. Only called on non-empty cells (normalize_row
+    treats an empty/blank cell as 0 before reaching from_xlsx, since the
+    column is NOT NULL DEFAULT 0 -- 'не задано' means 0, not unset). A
+    non-numeric value here becomes a normal ValueError conflict, never an
+    uncaught crash."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        raise ValueError(f"время в пути (мин): не число: {v!r}")
+
+
 SHEETS = {
  "Люди": SheetSpec("Люди", (_ID,
    Col("имя", "name", "Имя, по которому Гермес узнаёт человека в разговоре. Уникально."),
@@ -104,7 +116,7 @@ SHEETS = {
    Col("2ГИС-ссылка", "gis_url", "ТОЛЬКО ДЛЯ ИМПОРТА: вставь ссылку 2ГИС (можно короткую "
        "go.2gis.com/…) — координаты подтянутся сами. Если lat/lon заполнены, они в приоритете."),
    Col("время в пути (мин)", "travel_min", "Ручная оценка времени в пути, минут. Используется для "
-       "«пора выходить», пока нет координат/дороги. 0 = не задано."),
+       "«пора выходить», пока нет координат/дороги. 0 = не задано.", None, _travel_min_from_xlsx),
    Col("алиасы", "aliases", "Другие названия через запятую («зал, Инвиктус»).", _csv, _uncsv),
    Col("заметки", "notes", "Свободный текст-контекст про место."))),
  "События": SheetSpec("События", (_ID,
@@ -223,6 +235,11 @@ def normalize_row(sheet, row):
             v = v.strip() or None
         if col.key == "id":
             v = int(v) if v not in (None, "") else None
+        elif col.key == "travel_min":
+            # places.travel_min is NOT NULL DEFAULT 0 -- an empty/blank cell
+            # means "не задано", i.e. 0, never None (else apply() would hit
+            # a NOT NULL IntegrityError and roll back).
+            v = col.from_xlsx(v) if v is not None else 0
         elif v is not None and col.from_xlsx:
             v = col.from_xlsx(v)
         out[col.key] = v
@@ -751,21 +768,44 @@ def _check_refs(conn, sheet, row, in_file_places=(), in_file_people=(),
 
 
 def _place_referenced_outside_file(conn, place_id):
-    for table, col in (("plans", "place_id"), ("events", "place_id"),
-                        ("event_series", "place_id")):
-        if conn.execute(f"SELECT 1 FROM {table} WHERE {col}=? LIMIT 1", (place_id,)).fetchone():
-            return True
+    """Only LIVE references block a delete: cancelled events, cancelled
+    series and dropped/done plans are dead rows and must not pin a place
+    in place forever. people.home_place_id always counts (no status)."""
+    if conn.execute("SELECT 1 FROM plans WHERE place_id=? AND status='open' LIMIT 1",
+                     (place_id,)).fetchone():
+        return True
+    if conn.execute("SELECT 1 FROM events WHERE place_id=? AND status='active' LIMIT 1",
+                     (place_id,)).fetchone():
+        return True
+    if conn.execute("SELECT 1 FROM event_series WHERE place_id=? AND status='active' LIMIT 1",
+                     (place_id,)).fetchone():
+        return True
     if conn.execute("SELECT 1 FROM people WHERE home_place_id=? LIMIT 1", (place_id,)).fetchone():
         return True
     return False
 
 
 def _person_referenced_outside_file(conn, person_id):
-    for table, col in (("plans", "person_id"), ("event_participants", "person_id"),
-                        ("event_series_participants", "person_id"),
-                        ("group_members", "person_id")):
-        if conn.execute(f"SELECT 1 FROM {table} WHERE {col}=? LIMIT 1", (person_id,)).fetchone():
-            return True
+    """Same live-only rule as _place_referenced_outside_file: participants
+    of a cancelled event/series don't block a delete, since the event/series
+    itself is dead. group_members has no status of its own -- membership
+    always counts."""
+    if conn.execute("SELECT 1 FROM plans WHERE person_id=? AND status='open' LIMIT 1",
+                     (person_id,)).fetchone():
+        return True
+    if conn.execute(
+        "SELECT 1 FROM event_participants ep JOIN events e ON e.id = ep.event_id "
+        "WHERE ep.person_id=? AND e.status='active' LIMIT 1", (person_id,)
+    ).fetchone():
+        return True
+    if conn.execute(
+        "SELECT 1 FROM event_series_participants sp JOIN event_series es ON es.id = sp.series_id "
+        "WHERE sp.person_id=? AND es.status='active' LIMIT 1", (person_id,)
+    ).fetchone():
+        return True
+    if conn.execute("SELECT 1 FROM group_members WHERE person_id=? LIMIT 1",
+                     (person_id,)).fetchone():
+        return True
     return False
 
 
