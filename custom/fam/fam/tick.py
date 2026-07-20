@@ -37,7 +37,7 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import audit, cal, gate, meds, plans, rem, road, shopping, weather
+from fam import audit, cal, db, gate, goals, meds, plans, rem, road, shopping, weather
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -1320,6 +1320,72 @@ def _busy_two_days(conn, date_local):
     return busy
 
 
+def _month_goals_digest(conn, cfg, date_local):
+    """Open month-period goals of date_local's Asia/Almaty calendar month,
+    for the digest's soft "month_goals" nudge -- Phase 8b Task 5. Quarter
+    goals never appear here (goals.list_goals(period=<month>) already
+    filters to period_type='month' when given an explicit month period).
+
+    Cadence, not "always show": a fresh block would turn into daily nag
+    noise, so it only reappears once goal_digest_intervals[tercile] days
+    have passed since it was last shown, per meta key "goals_block_last"
+    (the date_local it was last included, written by digest() itself,
+    ONLY when that day's send actually succeeded -- see digest()'s own
+    docstring). Tercile = which third of the calendar month date_local's
+    day falls in: 1-10 -> intervals[0], 11-20 -> intervals[1], 21+ ->
+    intervals[2] (denser early in the month, sparser by month's end;
+    boundaries themselves are not config, only the three interval values
+    are -- gate.CONFIG_DEFAULTS["goal_digest_intervals"]).
+
+    "Due" (block eligible to show) when goals_block_last is empty (never
+    shown), OR its month differs from date_local's month (a new month
+    always gets a fresh show, mirrors goals.plan_state's per-month
+    keying), OR at least `interval` days have elapsed since it.
+
+    Returns [] whenever the block is not due -- indistinguishable from
+    "due but no open month goals" on purpose: either way digest() must
+    omit raw["month_goals"] entirely (reflect-every-present-field
+    pattern), and the caller has no need to tell the two apart.
+    """
+    day = date.fromisoformat(date_local).day
+    intervals = cfg.get("goal_digest_intervals",
+                         gate.CONFIG_DEFAULTS["goal_digest_intervals"])
+    if day <= 10:
+        interval = intervals[0]
+    elif day <= 20:
+        interval = intervals[1]
+    else:
+        interval = intervals[2]
+
+    last = db.meta_get(conn, "goals_block_last")
+    if not last:
+        due = True
+    elif last[:7] != date_local[:7]:
+        due = True
+    else:
+        elapsed = (date.fromisoformat(date_local)
+                   - date.fromisoformat(last)).days
+        due = elapsed >= interval
+
+    if not due:
+        return []
+
+    month = date_local[:7]
+    return [{"goal_id": g["id"], "title": g["title"]}
+            for g in goals.list_goals(conn, period=month)]
+
+
+def _fallback_month_goals_lines(month_goals):
+    """Deterministic "Цели месяца:" section lines for the digest fallback
+    -- omitted entirely (returns []) when month_goals is empty (not due,
+    or due with no open month goals -- see _month_goals_digest)."""
+    if not month_goals:
+        return []
+    lines = ["Цели месяца:"]
+    lines.extend(g["title"] for g in month_goals)
+    return lines
+
+
 def _fallback_plan_line(plan):
     line = f"{plan['title']} — до {plan['deadline']}"
     if plan["overdue"]:
@@ -1410,7 +1476,7 @@ def _fallback_meds_lines(meds_digest):
 
 
 def _build_digest_fallback(date_local, wx, events, burning_plans=None,
-                            meds=None):
+                            meds=None, month_goals=None):
     """Deterministic fallback text (no LLM involved) -- used verbatim
     when gate.deliver's rewrite fails, and as the source raw material the
     rewrite is asked to restyle otherwise. Sections: date header, weather
@@ -1418,16 +1484,19 @@ def _build_digest_fallback(date_local, wx, events, burning_plans=None,
     burning-plans list (omitted entirely when empty -- 3b Task 5),
     medication list (omitted entirely when today/missed_yesterday/
     low_stock are all empty -- Phase 5 Task 7, see _fallback_meds_lines),
-    and the fixed closing question. Deliberately does NOT include a busy-
-    today/tomorrow section or propose any slot: slot suggestion is the
-    LLM rewrite's job (raw["busy_two_days"] feeds it), this fallback only
-    ever states plain facts. Comfortably under the 900-char digest
-    ceiling for a normal day's event/plan/meds count; gate.deliver's own
-    length ceiling (shorten-retry, then send-as-is with long=True) is the
-    backstop for the pathological case, not this function.
+    month-goals list (omitted entirely when not due or empty -- Phase 8b
+    Task 5, see _fallback_month_goals_lines), and the fixed closing
+    question. Deliberately does NOT include a busy-today/tomorrow section
+    or propose any slot: slot suggestion is the LLM rewrite's job
+    (raw["busy_two_days"] feeds it), this fallback only ever states plain
+    facts. Comfortably under the 900-char digest ceiling for a normal
+    day's event/plan/meds count; gate.deliver's own length ceiling
+    (shorten-retry, then send-as-is with long=True) is the backstop for
+    the pathological case, not this function.
     """
     burning_plans = burning_plans or []
     meds = meds or {}
+    month_goals = month_goals or []
     lines = [f"Доброе утро! Сегодня {date_local}."]
     weather_line = _fallback_weather_line(wx)
     if weather_line:
@@ -1441,6 +1510,7 @@ def _build_digest_fallback(date_local, wx, events, burning_plans=None,
         lines.append("Горящие планы:")
         lines.extend(_fallback_plan_line(p) for p in burning_plans)
     lines.extend(_fallback_meds_lines(meds))
+    lines.extend(_fallback_month_goals_lines(month_goals))
     lines.append(DIGEST_QUESTION)
     return "\n".join(lines)
 
@@ -1524,6 +1594,7 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
     burning_plans = _burning_plans(conn, cfg, date_local)
     busy_two_days = _busy_two_days(conn, date_local)
     meds_digest = _meds_digest(conn, date_local)
+    month_goals = _month_goals_digest(conn, cfg, date_local)
 
     # Empty/unavailable sections are dropped from raw entirely rather
     # than sent as null/[] -- the rewrite prompt tells the LLM to reflect
@@ -1551,11 +1622,22 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
         raw["weather"] = wx
     if meds_digest["missed_yesterday"] or meds_digest["low_stock"]:
         raw["meds"] = meds_digest
+    if month_goals:
+        raw["month_goals"] = month_goals
     human_fallback = _build_digest_fallback(date_local, wx, event_list,
-                                             burning_plans, meds_digest)
+                                             burning_plans, meds_digest,
+                                             month_goals)
 
     status = gate.deliver(conn, "digest", raw, human_fallback, cfg,
                            force=True, now_utc=now)
+
+    if month_goals and status == "sent":
+        # goals_block_last tracks the last date_local the month-goals
+        # block was actually shown -- gated on "sent" (not skip/error)
+        # so a failed/suppressed send doesn't silently reset the
+        # cadence clock (mirrors reminders()' status=="sent" gate on its
+        # own state writes, see reminders() above).
+        db.meta_set(conn, "goals_block_last", date_local)
 
     if status == "error":
         # A failed morning digest was previously invisible: "error" is a
