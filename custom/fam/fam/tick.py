@@ -32,6 +32,7 @@ regenerates it from scratch because generation is idempotent on
 (med_id, plan_ts_utc). It owns one commit at the very end, same as
 digest.
 """
+import calendar
 import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
@@ -1386,6 +1387,76 @@ def _fallback_month_goals_lines(month_goals):
     return lines
 
 
+def _goal_ritual(conn, cfg, date_local):
+    """The planning-ritual question for date_local's Asia/Almaty calendar
+    day, or None -- Phase 8b Task 6 (spec §4.3). Pure read: never mutates
+    plan_state itself (digest() does that, only on an actual "sent",
+    same transaction as tick.digest's audit row -- see digest()).
+
+    target = goals.compute_target_month(window=cfg["goal_ritual_window_days"]):
+    the next month while today sits in the last `window` days of its own
+    month, otherwise the current month -- this is what makes an
+    offered-but-unanswered cycle keep resolving to the same target after
+    it rolls past the 1st (goals.compute_target_month's own docstring).
+
+    state branches, keyed on goals.plan_state_get(target):
+      - done/declined -> None, permanently silent for this target.
+      - offered -> the question, every day (repeat-until-answered; the
+        digest's own once-a-day dedup, not this function, is what stops
+        it from going out twice on the same day).
+      - no state recorded yet:
+          * today INSIDE the window -> "quiet day" pick: of the
+            remaining window days [max(today, window_start)..last_day],
+            the one with the fewest active events (cal.day), ties broken
+            towards the EARLIER day. The question fires only when today
+            IS that quiet day -- so across the whole window there is
+            exactly one candidate day, picked in advance as each day's
+            remaining-days set shrinks, converging on the same day
+            (earliest-argmin is stable as the window narrows).
+          * today OUTSIDE the window, i.e. target == today's own current
+            month (an entire window came and went with no cycle ever
+            started) -- catch-up, but ONLY when history exists
+            (goals.has_any_plan_state): some goal_plan_state:* key has
+            been written before, for ANY month. Without that history
+            this is a brand-new install that simply hasn't reached its
+            first window yet, and MUST stay silent (spec §4.3
+            "первый запуск молчит до окна") -- otherwise every fresh
+            install would immediately nag about the current month on
+            day one.
+    """
+    window_days = cfg.get("goal_ritual_window_days",
+                           gate.CONFIG_DEFAULTS["goal_ritual_window_days"])
+    today = date.fromisoformat(date_local)
+    target = goals.compute_target_month(conn, date_local, window_days)
+    state_row = goals.plan_state_get(conn, target)
+    state = state_row[0] if state_row else None
+
+    if state in ("done", "declined"):
+        return None
+    if state == "offered":
+        return goals.ritual_question_text(target)
+
+    last_day = calendar.monthrange(today.year, today.month)[1]
+    window_start_day = last_day - window_days + 1
+
+    if today.day < window_start_day:
+        if not goals.has_any_plan_state(conn):
+            return None
+        return goals.ritual_question_text(target)
+
+    best_day, best_count = None, None
+    for d in range(max(today.day, window_start_day), last_day + 1):
+        day_str = f"{today.year:04d}-{today.month:02d}-{d:02d}"
+        count = len(cal.day(conn, day_str))
+        if best_count is None or count < best_count:
+            best_count = count
+            best_day = d
+
+    if best_day == today.day:
+        return goals.ritual_question_text(target)
+    return None
+
+
 def _fallback_plan_line(plan):
     line = f"{plan['title']} — до {plan['deadline']}"
     if plan["overdue"]:
@@ -1476,7 +1547,7 @@ def _fallback_meds_lines(meds_digest):
 
 
 def _build_digest_fallback(date_local, wx, events, burning_plans=None,
-                            meds=None, month_goals=None):
+                            meds=None, month_goals=None, question=None):
     """Deterministic fallback text (no LLM involved) -- used verbatim
     when gate.deliver's rewrite fails, and as the source raw material the
     rewrite is asked to restyle otherwise. Sections: date header, weather
@@ -1485,18 +1556,24 @@ def _build_digest_fallback(date_local, wx, events, burning_plans=None,
     medication list (omitted entirely when today/missed_yesterday/
     low_stock are all empty -- Phase 5 Task 7, see _fallback_meds_lines),
     month-goals list (omitted entirely when not due or empty -- Phase 8b
-    Task 5, see _fallback_month_goals_lines), and the fixed closing
-    question. Deliberately does NOT include a busy-today/tomorrow section
-    or propose any slot: slot suggestion is the LLM rewrite's job
+    Task 5, see _fallback_month_goals_lines), and the closing question.
+    Deliberately does NOT include a busy-today/tomorrow section or
+    propose any slot: slot suggestion is the LLM rewrite's job
     (raw["busy_two_days"] feeds it), this fallback only ever states plain
     facts. Comfortably under the 900-char digest ceiling for a normal
     day's event/plan/meds count; gate.deliver's own length ceiling
     (shorten-retry, then send-as-is with long=True) is the backstop for
     the pathological case, not this function.
+
+    question: the closing line -- defaults to DIGEST_QUESTION, but
+    Phase 8b Task 6's planning-ritual question (_goal_ritual) REPLACES it
+    on a ritual day; the caller (digest()) is the one deciding which text
+    applies, this function just prints whatever it's handed.
     """
     burning_plans = burning_plans or []
     meds = meds or {}
     month_goals = month_goals or []
+    question = question if question is not None else DIGEST_QUESTION
     lines = [f"Доброе утро! Сегодня {date_local}."]
     weather_line = _fallback_weather_line(wx)
     if weather_line:
@@ -1511,7 +1588,7 @@ def _build_digest_fallback(date_local, wx, events, burning_plans=None,
         lines.extend(_fallback_plan_line(p) for p in burning_plans)
     lines.extend(_fallback_meds_lines(meds))
     lines.extend(_fallback_month_goals_lines(month_goals))
-    lines.append(DIGEST_QUESTION)
+    lines.append(question)
     return "\n".join(lines)
 
 
@@ -1560,7 +1637,9 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
     deterministic human_fallback, so the two can never phrase the ask
     differently. This also doubles as the day's planning intake per the
     digest-doubles-as-intake spec amendment: replying in chat with
-    today's plans is the expected next turn.
+    today's plans is the expected next turn. On a ritual day (Phase 8b
+    Task 6, _goal_ritual) the planning-ritual question REPLACES
+    DIGEST_QUESTION here instead -- see the ritual_question block below.
 
     Always audits tick.digest -- both the dup-guard skip and the normal
     path -- with {status, date_local, weather_present, n_events} (or
@@ -1596,6 +1675,22 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
     meds_digest = _meds_digest(conn, date_local)
     month_goals = _month_goals_digest(conn, cfg, date_local)
 
+    # Planning-ritual question (Phase 8b Task 6, spec §4.3): when due, it
+    # REPLACES the fixed DIGEST_QUESTION as raw["question"] -- gate.deliver
+    # appends whatever raw["question"] is verbatim (kind in
+    # ("digest","followup") path, see gate.deliver's docstring), it never
+    # inspects the text, so swapping the value here is enough; the
+    # rewrite prompt itself never sees "question" as a separate concept
+    # to rephrase. ritual_window/state looked up again below (rather than
+    # threaded out of _goal_ritual, which per spec only returns text-or-
+    # None) purely to decide whether to stamp plan_state after send.
+    ritual_window_days = cfg.get(
+        "goal_ritual_window_days", gate.CONFIG_DEFAULTS["goal_ritual_window_days"])
+    ritual_target = goals.compute_target_month(conn, date_local, ritual_window_days)
+    ritual_state_before = goals.plan_state_get(conn, ritual_target)
+    ritual_question = _goal_ritual(conn, cfg, date_local)
+    question_text = ritual_question if ritual_question else DIGEST_QUESTION
+
     # Empty/unavailable sections are dropped from raw entirely rather
     # than sent as null/[] -- the rewrite prompt tells the LLM to reflect
     # every field it IS given, so a present-but-empty field would make it
@@ -1614,7 +1709,7 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
         "date_local": date_local,
         "events": event_list,
         "burning_plans": burning_plans,
-        "question": DIGEST_QUESTION,
+        "question": question_text,
     }
     if burning_plans:
         raw["busy_two_days"] = busy_two_days
@@ -1626,7 +1721,7 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
         raw["month_goals"] = month_goals
     human_fallback = _build_digest_fallback(date_local, wx, event_list,
                                              burning_plans, meds_digest,
-                                             month_goals)
+                                             month_goals, question=question_text)
 
     status = gate.deliver(conn, "digest", raw, human_fallback, cfg,
                            force=True, now_utc=now)
@@ -1638,6 +1733,16 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
         # cadence clock (mirrors reminders()' status=="sent" gate on its
         # own state writes, see reminders() above).
         db.meta_set(conn, "goals_block_last", date_local)
+
+    if ritual_question and status == "sent" and ritual_state_before is None:
+        # Only stamp "offered" the FIRST time a cycle is asked (state was
+        # empty before this send) -- spec §4.3: "offered:<date_local>
+        # ставится при sent в той же транзакции [как audit tick.digest]".
+        # An already-"offered" cycle repeats the question daily (see
+        # _goal_ritual) without re-stamping, so its original offered date
+        # is preserved rather than sliding forward every day it's asked
+        # again.
+        goals.plan_state_set(conn, ritual_target, "offered", date_local)
 
     if status == "error":
         # A failed morning digest was previously invisible: "error" is a
