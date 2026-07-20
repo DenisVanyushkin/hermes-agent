@@ -838,7 +838,12 @@ def test_deliver_digest_prompt_includes_informativeness_instruction(db, fake_run
 
     rewrite_args, _ = fake_run.calls[0]
     prompt = rewrite_args[rewrite_args.index("-z") + 1]
-    assert "Лаконичность не должна терять факты: каждое поле сводки должно быть отражено в тексте" in prompt
+    assert ("Лаконичность не должна терять факты: каждое поле сводки, "
+            "кроме busy_two_days, должно быть отражено в тексте") in prompt
+    # busy_two_days is reasoning-only slot material (live bug 2026-07-20:
+    # the rewrite narrated the field as "слот занят") -- the instruction
+    # must forbid narrating it.
+    assert "busy_two_days" in prompt
 
 
 def test_deliver_reminder_prompt_has_no_digest_question_instruction(db, fake_run):

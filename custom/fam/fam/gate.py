@@ -151,10 +151,23 @@ GATE_STYLE_INSTRUCTION = (
 # This instruction tells the rewrite not to write one of its own, and
 # deliver() appends the real question (raw["question"]) itself,
 # deterministically, after the rewrite -- see _ensure_trailing_question.
+#
+# Live-found bug (2026-07-20): busy_two_days had no stated semantics, so
+# "каждое поле ... отражено" made the rewrite narrate the field name
+# itself -- a lone training at 10:00 became "на ближайшие 2 дня этот
+# слот уже занят". busy_two_days is reasoning-only material for placing
+# a burning plan; the instruction now says so and exempts it from the
+# reflect-every-field rule (tick.digest additionally omits the key when
+# there are no burning plans at all).
 GATE_DIGEST_NO_QUESTION_INSTRUCTION = (
     "Не задавай вопросов и не добавляй призывов — только сводка. "
     "Если в сводке есть погода — обязательно укажи диапазон температур (минимум…максимум). "
-    "Лаконичность не должна терять факты: каждое поле сводки должно быть отражено в тексте."
+    "Поле busy_two_days — служебное: это занятые интервалы сегодня и завтра, "
+    "оно нужно только чтобы при желании предложить свободное время для дела из "
+    "burning_plans. Само по себе его НЕ пересказывай, про «слоты» и занятость "
+    "не пиши и ничего из него не выводи сверх данных. "
+    "Лаконичность не должна терять факты: каждое поле сводки, кроме busy_two_days, "
+    "должно быть отражено в тексте."
 )
 
 # Live-found bug: a real reminder went out as "В 13:00 Тае пора

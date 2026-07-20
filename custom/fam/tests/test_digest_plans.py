@@ -209,8 +209,21 @@ def test_fallback_never_mentions_slots_for_burning_plans(db, fake_deliver):
 
 
 # ---- busy facts (today + tomorrow): raw only ----
+#
+# busy_two_days exists solely as reasoning material for the rewrite to
+# propose a free slot for a burning plan (live-found bug 2026-07-20: with
+# no semantics attached, the rewrite narrated the field itself as "на
+# ближайшие 2 дня этот слот уже занят"). With no burning plans there is
+# no slot to propose, so the key is omitted from raw entirely -- same
+# treatment as weather/meds.
+
+def _burning_plan(db):
+    plans.add(db, "Горящий план", deadline="2026-07-21")
+    db.commit()
+
 
 def test_busy_includes_todays_and_tomorrows_events_in_raw(db, fake_deliver):
+    _burning_plan(db)
     _event(db, title="Встреча", start="2026-07-20T10:00:00+00:00")
     _event(db, title="Завтрашнее", start="2026-07-21T06:00:00+00:00")
     db.commit()
@@ -225,6 +238,7 @@ def test_busy_includes_todays_and_tomorrows_events_in_raw(db, fake_deliver):
 
 
 def test_busy_excludes_events_beyond_tomorrow(db, fake_deliver):
+    _burning_plan(db)
     _event(db, title="Послезавтра", start="2026-07-22T06:00:00+00:00")
     db.commit()
     fake_deliver.responses = ["sent"]
@@ -237,6 +251,7 @@ def test_busy_excludes_events_beyond_tomorrow(db, fake_deliver):
 
 
 def test_busy_excludes_cancelled_events(db, fake_deliver):
+    _burning_plan(db)
     e = _event(db, title="Отменено", start="2026-07-20T10:00:00+00:00")
     cal.cancel(db, e["id"])
     db.commit()
@@ -260,6 +275,44 @@ def test_busy_not_mentioned_in_fallback(db, fake_deliver):
 
     fallback = fake_deliver.calls[0]["human_fallback"]
     assert "Занято" not in fallback
+
+
+def test_busy_omitted_from_raw_when_no_burning_plans(db, fake_deliver):
+    # No burning plan -> no slot to propose -> the key must be absent
+    # (not present-but-empty and not a duplicate of events for the
+    # rewrite to narrate).
+    _event(db, title="Встреча", start="2026-07-20T10:00:00+00:00")
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert "busy_two_days" not in fake_deliver.calls[0]["raw"]
+
+
+def test_busy_present_even_if_empty_when_burning_plan_exists(db, fake_deliver):
+    # A burning plan with a completely free two days: the rewrite should
+    # still see busy_two_days (empty = "everything is free") so it can
+    # propose a slot confidently.
+    _burning_plan(db)
+    fake_deliver.responses = ["sent"]
+
+    tick.digest(db, now_utc=NOW, cfg=CFG, _fetch_weather=_fetch_wx())
+
+    assert fake_deliver.calls[0]["raw"]["busy_two_days"] == []
+
+
+# ---- rewrite instruction: busy_two_days semantics ----
+
+def test_digest_instruction_explains_busy_two_days():
+    # Live-found bug 2026-07-20: the instruction demanded "каждое поле
+    # ... отражено" with no semantics for busy_two_days, so the rewrite
+    # narrated the field name as "на ближайшие 2 дня этот слот уже
+    # занят". The instruction must name the field, frame it as
+    # reasoning-only material and exempt it from the reflect-every-field
+    # rule.
+    instr = gate.GATE_DIGEST_NO_QUESTION_INSTRUCTION
+    assert "busy_two_days" in instr
 
 
 # ---- weather:null minor: fallback never says "погода" ----
