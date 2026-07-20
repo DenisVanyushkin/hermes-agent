@@ -373,3 +373,72 @@ def test_apply_place_delete_still_blocked_by_active_event(db):
     assert d.has_conflicts
     assert d.conflicts["Места"]
     assert places.get(db, "Invictus") is not None
+
+
+# -- Task 6 diagnosability: order-insensitive lists + ref-name canonicalization
+
+def test_diff_pure_alias_reorder_is_noop(db):
+    """FINDING (live import): the operator retypes 'алиасы'/'состав группы'/
+    'участники'/'времена' in whatever order comes to mind; export always
+    writes back the DB's own ORDER BY order. A pure reordering of one of
+    these list-valued cells must diff/verify as a no-op, not a spurious
+    update -- see normalize_row's _ORDER_INSENSITIVE_KEYS."""
+    _seed_db(db)
+    people.alias(db, "Аишка", "Зайка"); db.commit()
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Люди"]) if r["name"] == "Аишка")
+    assert set(f["Люди"][idx]["aliases"]) == {"Аиша", "Зайка"}       # precondition
+    f["Люди"][idx]["aliases"] = list(reversed(f["Люди"][idx]["aliases"]))
+    d = seed.diff(db, f, snap)
+    assert d.empty, f"pure reorder produced an update: {d.updates}"
+    assert seed.verify_roundtrip(db, f)
+
+
+def test_diff_real_alias_change_still_detected(db):
+    """The order-insensitivity fix must not swallow an actual content
+    change (add/remove an alias)."""
+    _seed_db(db)
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Люди"]) if r["name"] == "Аишка")
+    f["Люди"][idx]["aliases"] = ["Совсем другое"]
+    d = seed.diff(db, f, snap)
+    upd = next(u for u in d.updates["Люди"] if u["id"] == f["Люди"][idx]["id"])
+    assert upd["changes"]["aliases"] == (["Аиша"], ["Совсем другое"])
+
+
+def test_verify_roundtrip_ignores_reference_name_case(db):
+    """FINDING (live import): a place/person reference cell (e.g. 'место')
+    typed in a different case/alias than the entity's canonical DB name
+    must not read as a perpetual divergence -- verify_roundtrip resolves
+    reference fields to their canonical name for comparison (mirrors
+    gis_url's resolve-at-comparison-time treatment)."""
+    _seed_db(db)
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {**rows, "Планы": rows["Планы"] + [{"id": None, "title": "Что-то",
+         "deadline": None, "place": "invictus", "person": None, "notes": None}]}
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts
+    seed.apply_diff(db, d); db.commit()
+    assert seed.verify_roundtrip(db, f)
+
+
+def test_roundtrip_mismatches_reports_real_divergence(db):
+    """roundtrip_mismatches() must still catch a genuine post-apply
+    divergence (verify_roundtrip's bool contract is unaffected)."""
+    _seed_db(db)
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Планы"]) if r["title"] == "Пироги")
+    plan_id = f["Планы"][idx]["id"]
+    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+
+    f["Планы"][idx]["title"] = "Другое название"  # file now claims a value the DB never got
+    mismatches = seed.roundtrip_mismatches(db, f)
+    assert not seed.verify_roundtrip(db, f)
+    assert mismatches
+    m = next(m for m in mismatches if m["sheet"] == "Планы" and m["id"] == plan_id)
+    assert m["fields"]["title"] == {"file": "Другое название", "db": "Пироги"}
+    report = seed.format_mismatches(mismatches)
+    assert "Планы#" in report and "Другое название" in report

@@ -214,6 +214,22 @@ def _coerce_cell(key, v):
     return v
 
 
+# List-valued columns where the operator's typed order and the DB's
+# export order (whatever ORDER BY the domain module happens to use) are
+# not meaningfully different data -- a pure reordering must diff/verify as
+# a no-op. Sorted canonically (casefold) right here so every caller of
+# normalize_row (file-side AND DB/export-side, via make_snapshot and
+# _to_canonical) agrees on one order, instead of trying to keep diff()'s
+# comparison and verify_roundtrip's comparison in sync separately.
+_ORDER_INSENSITIVE_KEYS = {"aliases", "members", "participants", "times"}
+
+
+def _canon_list_order(v):
+    if not isinstance(v, list):
+        return v
+    return sorted(v, key=lambda x: str(x).casefold())
+
+
 def normalize_row(sheet, row):
     """Канонический dict для diff-сравнений: строки strip, пустое → None.
 
@@ -243,6 +259,8 @@ def normalize_row(sheet, row):
             v = col.from_xlsx(v) if v is not None else 0
         elif v is not None and col.from_xlsx:
             v = col.from_xlsx(v)
+        if col.key in _ORDER_INSENSITIVE_KEYS:
+            v = _canon_list_order(v)
         out[col.key] = v
     return out
 
@@ -550,7 +568,57 @@ class Diff:
         return any(self.conflicts.values())
 
 
-def _to_canonical(sheet, row):
+# Reference-name fields: the operator types a place/person by id, name, OR
+# alias (places.resolve/people.resolve accept all three); the DB only ever
+# stores an id, and export always writes back the entity's canonical
+# `name`. Comparing the file's raw typed text against that canonical name
+# byte-for-byte means ANY case/alias variance the operator used (a normal,
+# expected way to fill this cell -- see the Col.comment on "участники" etc.)
+# reads as a perpetual, spurious divergence, exactly like an un-expanded
+# gis_url would. So when a conn is available, resolve these fields to their
+# canonical DB name for comparison purposes -- mirroring _expand_gis_url's
+# resolve-at-comparison-time treatment of "2ГИС-ссылка". An unresolvable
+# ref is left as-is: diff()'s _check_refs (or verify's plain mismatch)
+# reports that, this is not the place to hide a real unknown reference.
+_REF_SINGLE_FIELDS = {
+    "Люди": ("home",),
+    "События": ("place",),
+    "Серии": ("place",),
+    "Планы": ("place", "person"),
+}
+_REF_LIST_FIELDS = {
+    "Люди": ("members",),
+    "События": ("participants",),
+    "Серии": ("participants",),
+}
+_PERSON_FIELDS = {"person", "members", "participants"}
+
+
+def _canonicalize_refs(conn, sheet, canon_row):
+    if conn is None:
+        return canon_row
+    from fam import people, places
+
+    def resolve_one(key, name):
+        if not name:
+            return name
+        if key in _PERSON_FIELDS:
+            ent = people.resolve(conn, name)
+        else:
+            ent = places.resolve(conn, name)
+        return ent["name"] if ent else name
+
+    for key in _REF_SINGLE_FIELDS.get(sheet, ()):
+        if canon_row.get(key):
+            canon_row[key] = resolve_one(key, canon_row[key])
+    for key in _REF_LIST_FIELDS.get(sheet, ()):
+        if canon_row.get(key):
+            canon_row[key] = _canon_list_order(
+                [resolve_one(key, v) for v in canon_row[key]])
+    return canon_row
+
+
+def _to_canonical(sheet, row, conn=None):
     """Bridge Task 1's normalize_row (built for xlsx header/label input)
     so it also accepts canonical-key rows (export_rows/snapshot shape),
     per the Task 4 brief's input contract. A row is treated as header-form
@@ -558,6 +626,13 @@ def _to_canonical(sheet, row):
     it's assumed canonical and round-tripped through
     _canon_row_to_header_form (canon -> label) first, exactly like
     make_snapshot does for export_rows output.
+
+    conn: when given, reference-name fields (place/person/home/members/
+    participants) are resolved to their canonical DB name -- see
+    _canonicalize_refs. Callers comparing against a live DB (diff(),
+    verify_roundtrip()/roundtrip_mismatches()) should pass conn on the
+    file-side rows; callers that only need existence/membership sets
+    (_in_file_*_names) leave it None, matching prior behaviour.
     """
     spec = SHEETS[sheet]
     # Columns where header and key differ are the only reliable signal:
@@ -571,7 +646,8 @@ def _to_canonical(sheet, row):
     is_canon_form = any(col.key in row for col in distinguishing)
     if is_canon_form:
         row = _canon_row_to_header_form(sheet, row)
-    return normalize_row(sheet, row)
+    canon_row = normalize_row(sheet, row)
+    return _canonicalize_refs(conn, sheet, canon_row)
 
 
 def _expand_gis_url(canon_row, cache):
@@ -840,7 +916,7 @@ def diff(conn, file_rows_by_sheet, snap):
         for idx, row in enumerate(file_rows):
             row_ref = f"{sheet}#{idx + 1}"
             try:
-                canon_row = _to_canonical(sheet, row)
+                canon_row = _to_canonical(sheet, row, conn=conn)
             except ValueError as exc:
                 conf.append({"sheet": sheet, "row_ref": row_ref, "reason": str(exc)})
                 continue
@@ -1573,26 +1649,40 @@ def apply_diff(conn, d, now_utc=None):
     return counts
 
 
-def verify_roundtrip(conn, file_rows_by_sheet):
-    """True iff a fresh export_rows(conn) matches file_rows_by_sheet,
-    sheet by sheet: rows carrying an id must match the fresh export's row
-    at that id exactly (normalized); rows with no id (freshly-inserted,
-    the file never learns the id apply_diff assigned) are matched by
-    content alone, ignoring id, against whatever fresh rows are left
-    after every id-carrying row has claimed its match. Every fresh row
-    must be claimed by exactly one file row, in both directions -- an
-    unmatched leftover on either side means the DB and the file have
-    diverged, so this returns False.
+def roundtrip_mismatches(conn, file_rows_by_sheet):
+    """[] iff a fresh export_rows(conn) matches file_rows_by_sheet, sheet by
+    sheet: rows carrying an id must match the fresh export's row at that id
+    exactly (normalized, and reference-name fields resolved to their
+    canonical form -- see _canonicalize_refs); rows with no id
+    (freshly-inserted, the file never learns the id apply_diff assigned)
+    are matched by content alone, ignoring id, against whatever fresh rows
+    are left after every id-carrying row has claimed its match. Every
+    fresh row must be claimed by exactly one file row, in both directions
+    -- an unmatched leftover on either side means the DB and the file have
+    diverged.
+
+    Returns a list of mismatch dicts (empty when clean), each one of:
+      {"sheet", "id", "reason"}                         -- id/url issues
+      {"sheet", "id", "reason", "fields", "file", "db"}  -- field diffs
+      {"sheet", "id": None, "reason", "file", "db": None} -- unmatched file row
+      {"sheet", "id", "reason", "file": None, "db"}       -- unmatched DB row
+
+    verify_roundtrip() is a thin bool wrapper around this; this is the
+    version scripts/data_roundtrip.py's exit-3 path uses to tell the
+    operator WHAT diverged, not just that it did.
     """
+    mismatches = []
     fresh = export_rows(conn)
     gis_cache = {}
 
     for sheet in SHEETS:
-        file_list = [_to_canonical(sheet, r) for r in file_rows_by_sheet.get(sheet, [])]
+        file_list = [_to_canonical(sheet, r, conn=conn) for r in file_rows_by_sheet.get(sheet, [])]
         if sheet == "Места":
             for r in file_list:
-                if _expand_gis_url(r, gis_cache) is not None:
-                    return False  # ссылка не развернулась -- сверить нельзя
+                issue = _expand_gis_url(r, gis_cache)
+                if issue:
+                    mismatches.append({"sheet": sheet, "id": r.get("id"),
+                                        "reason": issue, "file": r, "db": None})
         fresh_list = [_to_canonical(sheet, r) for r in fresh.get(sheet, [])]
 
         with_id = [r for r in file_list if r.get("id") is not None]
@@ -1602,8 +1692,16 @@ def verify_roundtrip(conn, file_rows_by_sheet):
         used_ids = set()
         for r in with_id:
             fr = fresh_by_id.get(r["id"])
-            if fr is None or fr != r:
-                return False
+            if fr is None:
+                mismatches.append({"sheet": sheet, "id": r["id"],
+                                    "reason": "id отсутствует в свежем экспорте",
+                                    "file": r, "db": None})
+                continue
+            if fr != r:
+                fields = {k: {"file": r.get(k), "db": fr.get(k)}
+                          for k in sorted(set(r) | set(fr)) if r.get(k) != fr.get(k)}
+                mismatches.append({"sheet": sheet, "id": r["id"], "reason": "поля не совпадают",
+                                    "fields": fields, "file": r, "db": fr})
             used_ids.add(r["id"])
 
         remaining = [r for r in fresh_list if r["id"] not in used_ids]
@@ -1616,10 +1714,39 @@ def verify_roundtrip(conn, file_rows_by_sheet):
                     match_idx = i
                     break
             if match_idx is None:
-                return False
-            remaining.pop(match_idx)
+                mismatches.append({"sheet": sheet, "id": None,
+                                    "reason": "новая строка файла не найдена в свежем экспорте",
+                                    "file": r, "db": None})
+            else:
+                remaining.pop(match_idx)
 
-        if remaining:
-            return False
+        for r in remaining:
+            mismatches.append({"sheet": sheet, "id": r.get("id"),
+                                "reason": "запись есть в свежем экспорте, но не найдена в файле",
+                                "file": None, "db": r})
 
-    return True
+    return mismatches
+
+
+def format_mismatches(mismatches):
+    """Human-readable, Russian-language rendering of roundtrip_mismatches()
+    for the exit-3 operator path (scripts/data_roundtrip.py): sheet + row
+    identity + differing fields, so an operator sees the cause instead of
+    a bare warning."""
+    if not mismatches:
+        return "Расхождений нет."
+    lines = []
+    for m in mismatches:
+        loc = f"{m['sheet']}#{m['id']}" if m.get("id") is not None else f"{m['sheet']} (новая строка)"
+        lines.append(f"- {loc}: {m['reason']}")
+        for key, fv in (m.get("fields") or {}).items():
+            lines.append(f"    {key}: файл={fv['file']!r}  БД={fv['db']!r}")
+    return "\n".join(lines)
+
+
+def verify_roundtrip(conn, file_rows_by_sheet):
+    """True iff a fresh export_rows(conn) matches file_rows_by_sheet.
+    Thin bool wrapper around roundtrip_mismatches() -- see there for the
+    matching contract; existing callers only need the bool, so this keeps
+    working unchanged."""
+    return not roundtrip_mismatches(conn, file_rows_by_sheet)

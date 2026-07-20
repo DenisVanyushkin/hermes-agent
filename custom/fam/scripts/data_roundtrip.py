@@ -130,17 +130,18 @@ def cmd_apply(args):
         # а не exit 2, чтобы оператор не принял применённый apply за
         # неприменённый.
         try:
-            ok = seed.verify_roundtrip(conn, file_rows)
+            mismatches = seed.roundtrip_mismatches(conn, file_rows)
         except Exception as e:
             print("ПРЕДУПРЕЖДЕНИЕ: verify_roundtrip после apply упал с ошибкой "
                   f"({e}) -- изменения УЖЕ применены к БД, расхождение нужно "
                   "разобрать вручную (см. custom/fam/docs/seeding.md).",
                   file=sys.stderr)
             return 3
-        if not ok:
+        if mismatches:
             print("ПРЕДУПРЕЖДЕНИЕ: verify_roundtrip после apply не совпал -- "
                   "изменения УЖЕ применены к БД, расхождение нужно разобрать вручную "
                   "(см. custom/fam/docs/seeding.md).", file=sys.stderr)
+            print(seed.format_mismatches(mismatches), file=sys.stderr)
             return 3
 
         print("applied ok")
@@ -154,12 +155,16 @@ def cmd_verify(args):
     conn = famdb.connect(db_path)
     try:
         file_rows = seed_xlsx.read_workbook(args.file)
-        ok = seed.verify_roundtrip(conn, file_rows)
+        mismatches = seed.roundtrip_mismatches(conn, file_rows)
     finally:
         conn.close()
 
-    print("ok" if ok else "MISMATCH")
-    return 0 if ok else 3
+    if mismatches:
+        print("MISMATCH")
+        print(seed.format_mismatches(mismatches))
+        return 3
+    print("ok")
+    return 0
 
 
 def build_parser():

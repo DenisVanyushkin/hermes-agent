@@ -123,7 +123,7 @@ def test_apply_unexpected_exception_before_commit_rolls_back_and_exits_2(
 
 def test_apply_unexpected_exception_during_verify_after_commit_exits_3(
         seeded_db, tmp_path, monkeypatch, capsys):
-    """Finding 4: an unexpected exception raised by verify_roundtrip --
+    """Finding 4: an unexpected exception raised by roundtrip_mismatches --
     AFTER commit -- must be reported as exit 3 with a clear warning (data
     is already committed), not escape with an undocumented exit code."""
     monkeypatch.setattr(data_roundtrip, "DEFAULT_SNAPSHOT_DIR", tmp_path / "seeding")
@@ -141,7 +141,7 @@ def test_apply_unexpected_exception_during_verify_after_commit_exits_3(
     def boom(*a, **k):
         raise RuntimeError("verify boom")
 
-    monkeypatch.setattr(data_roundtrip.seed, "verify_roundtrip", boom)
+    monkeypatch.setattr(data_roundtrip.seed, "roundtrip_mismatches", boom)
 
     capsys.readouterr()
     rc = data_roundtrip.main(
