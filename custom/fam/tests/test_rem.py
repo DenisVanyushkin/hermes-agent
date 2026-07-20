@@ -22,7 +22,7 @@ def conn_with_taya_event(db):
     _seed_people(db)
     rem.seed_default_rules(db)
     db.commit()
-    e = cal.add(db, "С Таей", "2026-07-20T05:00:00+00:00",
+    e = cal.add(db, "С Таей", "2037-07-20T05:00:00+00:00",
                 participants=["Тая"])
     db.commit()
     return db, e
@@ -46,7 +46,7 @@ def conn_with_future_default_event(db):
     ])
     rem._seed_rule(db, "slug:amina", [])
     db.commit()
-    e = cal.add(db, "Без Таи", "2026-07-20T05:00:00+00:00",
+    e = cal.add(db, "Без Таи", "2037-07-20T05:00:00+00:00",
                 participants=["Денис"])
     db.commit()
     return db, e
@@ -755,7 +755,7 @@ def test_prep_min_overrides_default(db):
     _seed_people(db)
     rem.seed_default_rules(db)
     db.commit()
-    e = cal.add(db, "Стрижка", "2026-07-20T05:00:00+00:00",
+    e = cal.add(db, "Стрижка", "2037-07-20T05:00:00+00:00",
                 participants=["Денис"], prep_min=120)
     db.commit()
 
@@ -778,7 +778,7 @@ def test_prep_min_overrides_taya(db):
     _seed_people(db)
     rem.seed_default_rules(db)
     db.commit()
-    e = cal.add(db, "С Таей", "2026-07-20T05:00:00+00:00",
+    e = cal.add(db, "С Таей", "2037-07-20T05:00:00+00:00",
                 participants=["Тая"], prep_min=90)
     db.commit()
 
@@ -796,7 +796,7 @@ def test_no_prep_min_taya_unchanged(db):
     _seed_people(db)
     rem.seed_default_rules(db)
     db.commit()
-    e = cal.add(db, "С Таей", "2026-07-20T05:00:00+00:00",
+    e = cal.add(db, "С Таей", "2037-07-20T05:00:00+00:00",
                 participants=["Тая"])
     db.commit()
 
@@ -815,7 +815,7 @@ def test_update_prep_min_regenerates(db):
     _seed_people(db)
     rem.seed_default_rules(db)
     db.commit()
-    e = cal.add(db, "Стрижка", "2026-07-20T05:00:00+00:00",
+    e = cal.add(db, "Стрижка", "2037-07-20T05:00:00+00:00",
                 participants=["Денис"])
     db.commit()
     before = db.execute(

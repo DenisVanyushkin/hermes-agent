@@ -68,7 +68,7 @@ def test_series_copies_prep_min(db):
                    participants=["Денис"], prep_min=20)
     db.commit()
     assert s["prep_min"] == 20
-    created = series.generate(db, now_utc="2026-07-19T00:00:00+00:00")
+    created = series.generate(db, now_utc="2037-07-19T00:00:00+00:00")
     db.commit()
     assert created >= 1
     occ = db.execute(
@@ -88,17 +88,17 @@ def test_series_add_participant_future_only(db):
     db.commit()
     s = series.add(db, "Тренировка", "mon", "10:00")
     db.commit()
-    created = series.generate(db, now_utc="2026-07-06T00:00:00+00:00")
+    created = series.generate(db, now_utc="2037-07-06T00:00:00+00:00")
     db.commit()
     assert created >= 2
     occ = db.execute(
         "SELECT id, start_utc FROM events WHERE series_id=? ORDER BY start_utc",
         (s["id"],)).fetchall()
-    past_id = occ[0]["id"]  # 2026-07-06
-    future_id = occ[2]["id"]  # 2026-07-20
+    past_id = occ[0]["id"]  # 2037-07-06
+    future_id = occ[2]["id"]  # 2037-07-20
 
     result = series.update_participants(
-        db, s["id"], add=["Тая"], now_utc="2026-07-15T00:00:00+00:00")
+        db, s["id"], add=["Тая"], now_utc="2037-07-15T00:00:00+00:00")
     db.commit()
 
     assert result["series_id"] == s["id"]
@@ -126,7 +126,7 @@ def test_series_remove_participant(db):
     db.commit()
     s = series.add(db, "Тренировка", "mon", "10:00", participants=["Тая"])
     db.commit()
-    series.generate(db, now_utc="2026-07-06T00:00:00+00:00")
+    series.generate(db, now_utc="2037-07-06T00:00:00+00:00")
     db.commit()
     occ = db.execute(
         "SELECT id FROM events WHERE series_id=? ORDER BY start_utc",
@@ -134,7 +134,7 @@ def test_series_remove_participant(db):
     future_id = occ[2]["id"]
 
     result = series.update_participants(
-        db, s["id"], remove=["Тая"], now_utc="2026-07-15T00:00:00+00:00")
+        db, s["id"], remove=["Тая"], now_utc="2037-07-15T00:00:00+00:00")
     db.commit()
 
     assert future_id in result["updated_events"]
@@ -149,20 +149,20 @@ def test_series_update_skips_rescheduled(db):
     db.commit()
     s = series.add(db, "Тренировка", "mon", "10:00")
     db.commit()
-    series.generate(db, now_utc="2026-07-06T00:00:00+00:00")
+    series.generate(db, now_utc="2037-07-06T00:00:00+00:00")
     db.commit()
     occ = db.execute(
         "SELECT id, start_utc FROM events WHERE series_id=? ORDER BY start_utc",
         (s["id"],)).fetchall()
-    future_id = occ[2]["id"]  # 2026-07-20 10:00 local
+    future_id = occ[2]["id"]  # 2037-07-20 10:00 local
 
     # Reschedule this occurrence to 11:00 local (still future, but no longer
     # matching the series' grid slot).
-    cal.update(db, future_id, start_utc="2026-07-20T06:00:00+00:00")
+    cal.update(db, future_id, start_utc="2037-07-20T06:00:00+00:00")
     db.commit()
 
     result = series.update_participants(
-        db, s["id"], add=["Тая"], now_utc="2026-07-15T00:00:00+00:00")
+        db, s["id"], add=["Тая"], now_utc="2037-07-15T00:00:00+00:00")
     db.commit()
 
     assert future_id not in result["updated_events"]
@@ -193,7 +193,7 @@ def test_series_update_unknown_series_raises(db):
 # (drops OPEN prep-plans) and null out any surviving plan's dangling
 # event reference first.
 
-def _series_with_future_occurrence(db, now_utc="2026-07-15T00:00:00+00:00"):
+def _series_with_future_occurrence(db, now_utc="2037-07-15T00:00:00+00:00"):
     """A weekly Monday series with exactly one future occurrence, plus the
     series row and that occurrence's id."""
     s = series.add(db, "Тренировка", "mon", "10:00")
@@ -214,7 +214,7 @@ def test_cancel_series_with_open_prep_plan_on_future_occurrence(db):
                      prep_when="departure")
     db.commit()
 
-    series.cancel(db, s["id"], now_utc="2026-07-15T00:00:00+00:00")
+    series.cancel(db, s["id"], now_utc="2037-07-15T00:00:00+00:00")
     db.commit()
 
     assert series.get(db, s["id"])["status"] == "cancelled"
@@ -233,7 +233,7 @@ def test_cancel_series_with_done_prep_plan_on_future_occurrence(db):
     plans.mark(db, pid, "done")
     db.commit()
 
-    series.cancel(db, s["id"], now_utc="2026-07-15T00:00:00+00:00")
+    series.cancel(db, s["id"], now_utc="2037-07-15T00:00:00+00:00")
     db.commit()
 
     assert series.get(db, s["id"])["status"] == "cancelled"
@@ -252,7 +252,7 @@ def test_cancel_series_with_attached_plan_on_future_occurrence(db):
     plans.attach(db, pid, event_id)
     db.commit()
 
-    series.cancel(db, s["id"], now_utc="2026-07-15T00:00:00+00:00")
+    series.cancel(db, s["id"], now_utc="2037-07-15T00:00:00+00:00")
     db.commit()
 
     assert series.get(db, s["id"])["status"] == "cancelled"
