@@ -815,6 +815,27 @@ def test_deliver_digest_rewrite_prompt_forbids_own_question(db, fake_run):
     assert "Не задавай вопросов" in prompt
 
 
+def test_deliver_digest_prompt_omits_question_from_data(db, fake_run):
+    # Live bug 2026-07-20 (round 2): raw["question"] reached the LLM,
+    # which paraphrased it mid-text ("есть заметка: ... их нужно
+    # записать") while deliver appended the canonical question after --
+    # a duplicate _strip_trailing_question cannot catch (it only strips
+    # a verbatim trailing copy). The question is deliver's job alone
+    # (_ensure_trailing_question), so the rewrite must never see it:
+    # _build_prompt drops the key from the digest <data> payload.
+    raw = {"kind": "digest", "events": [], "question": tick.DIGEST_QUESTION}
+    fake_run.rewrite_responses = [_completed(0, "Сводка.")]
+    fake_run.send_response = _completed(0, "")
+
+    gate.deliver(db, "digest", raw, "fallback\n\n" + tick.DIGEST_QUESTION, CFG,
+                  now_utc="2026-07-11T12:00:00+05:00", force=True)
+
+    rewrite_args, _ = fake_run.calls[0]
+    prompt = rewrite_args[rewrite_args.index("-z") + 1]
+    assert tick.DIGEST_QUESTION not in prompt
+    assert '"question"' not in prompt
+
+
 def test_deliver_digest_prompt_includes_temperature_range_instruction(db, fake_run):
     raw = {"kind": "digest", "question": tick.DIGEST_QUESTION}
     fake_run.rewrite_responses = [_completed(0, "Сводка.")]

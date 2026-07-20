@@ -405,6 +405,14 @@ def _build_prompt(raw, kind=None):
     instruction = GATE_STYLE_INSTRUCTION
     if kind == "digest":
         instruction = f"{instruction} {GATE_DIGEST_NO_QUESTION_INSTRUCTION}"
+        # Live bug 2026-07-20 (round 2): raw["question"] in <data> got
+        # paraphrased mid-text by the rewrite while deliver() appended
+        # the canonical question too -- a duplicate the verbatim-only
+        # _strip_trailing_question can't catch. The closing question is
+        # deliver()'s job alone (_ensure_trailing_question), so the
+        # rewrite never sees it.
+        if "question" in raw:
+            raw = {k: v for k, v in raw.items() if k != "question"}
     elif kind == "reminder":
         instruction = f"{instruction} {GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION}"
     return (
