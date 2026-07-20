@@ -132,6 +132,13 @@ CONFIG_DEFAULTS = {
     # (goals.py's compute_target_month, `goal plan-info`/`plan-mark`
     # default target, and the digest ritual question in tick.py).
     "goal_ritual_window_days": 3,
+    # Phase 8b (goals) Task 5: month-goals digest block cadence
+    # (tick.py's _month_goals_digest) -- days between re-shows of the
+    # open-month-goals block, indexed by which tercile of the calendar
+    # month `date_local`'s day falls in: [0]=days 1-10, [1]=11-20,
+    # [2]=21+. Denser early in the month (more runway to act), sparser
+    # by month's end. Tercile boundaries themselves are not config.
+    "goal_digest_intervals": [4, 2, 1],
 }
 
 GATE_STYLE_INSTRUCTION = (
@@ -172,7 +179,13 @@ GATE_DIGEST_NO_QUESTION_INSTRUCTION = (
     "burning_plans. Само по себе его НЕ пересказывай, про «слоты» и занятость "
     "не пиши и ничего из него не выводи сверх данных. "
     "Лаконичность не должна терять факты: каждое поле сводки, кроме busy_two_days, "
-    "должно быть отражено в тексте."
+    "должно быть отражено в тексте. "
+    # Phase 8b (goals) Task 5: month_goals is a soft nudge, not a task
+    # list to interrogate -- one gentle phrase, no pressure, no
+    # questions (mirrors busy_two_days's "reasoning material, don't
+    # narrate the field name" carve-out above).
+    "Поле month_goals — мягкое напоминание о целях месяца: упомяни его одной "
+    "короткой фразой, без давления и без вопросов."
 )
 
 # Live-found bug: a real reminder went out as "В 13:00 Тае пора

@@ -52,6 +52,7 @@ CFG = {
     "detour_offer_min_min": 2,
     "detour_max_min": 30,
     "goal_ritual_window_days": 3,
+    "goal_digest_intervals": [4, 2, 1],
 }
 
 
