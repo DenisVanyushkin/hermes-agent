@@ -204,6 +204,7 @@ def _invoke_resolved_helper(
         pipeline_id=pipeline_id,
         execution_helper=execution_helper,
         allow_registered_helper_selection=allow_registered_helper_selection,
+        user_message=str((helper_execution_context or {}).get("user_message") or ""),
     )
     if not helper_resolution.resolved:
         return replace(

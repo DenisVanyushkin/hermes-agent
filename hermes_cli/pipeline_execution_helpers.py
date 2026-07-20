@@ -13,6 +13,7 @@ ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
 BOUNDED_REWORK_LOOP_HELPER = "bounded_rework_loop"
 RECRUITER_PIPELINE_ID = "recruiter_decision_support_pipeline"
 RECRUITER_DECISION_HELPER = "recruiter_decision_support_flow"
+RECRUITER_APPLICATION_HELPER = "recruiter_application_package_flow"
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ def resolve_pipeline_execution_helper(
     pipeline_id: str | None,
     execution_helper: Callable[..., Any] | None = None,
     allow_registered_helper_selection: bool = False,
+    user_message: str = "",
 ) -> PipelineExecutionHelperResolution:
     if execution_helper is not None:
         return PipelineExecutionHelperResolution(
@@ -59,13 +61,12 @@ def resolve_pipeline_execution_helper(
         )
 
     if pipeline_id == RECRUITER_PIPELINE_ID:
-        from hermes_cli.recruiter_decision_execution import execute_recruiter_decision_support_helper
-
+        recruiter_helper_name, recruiter_helper = _resolve_recruiter_helper(user_message)
         return PipelineExecutionHelperResolution(
             status="resolved",
-            helper_name=RECRUITER_DECISION_HELPER,
+            helper_name=recruiter_helper_name,
             blocked_reason=None,
-            helper=execute_recruiter_decision_support_helper,
+            helper=recruiter_helper,
         )
 
     return PipelineExecutionHelperResolution(
@@ -74,6 +75,27 @@ def resolve_pipeline_execution_helper(
         blocked_reason="unsupported_pipeline_helper",
         helper=None,
     )
+
+
+def _resolve_recruiter_helper(user_message: str) -> tuple[str, Callable[..., Any]]:
+    """Pick the recruiter helper by routing bundle (Task 4: bundle-aware dispatch).
+
+    Application-materials prompts get the document-package flow; everything
+    else (including no/ambiguous message) keeps the existing decision-support
+    flow so recruiter pipeline evaluation prompts are unaffected.
+    """
+    from hermes_cli.recruiter_decision_execution import execute_recruiter_decision_support_helper
+    from hermes_cli.recruiter_routing import APPLICATION_MATERIALS_BUNDLE_ID, route_recruiter_prompt
+
+    decision = route_recruiter_prompt(user_message or "")
+    if decision.selected_bundle == APPLICATION_MATERIALS_BUNDLE_ID:
+        from hermes_cli.recruiter_application_package_execution import (
+            execute_recruiter_application_package_helper,
+        )
+
+        return RECRUITER_APPLICATION_HELPER, execute_recruiter_application_package_helper
+
+    return RECRUITER_DECISION_HELPER, execute_recruiter_decision_support_helper
 
 
 def execute_engineering_review_helper(

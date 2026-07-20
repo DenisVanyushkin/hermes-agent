@@ -8,7 +8,7 @@ report whose ``text`` header states that nothing was sent.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -74,7 +74,7 @@ def execute_recruiter_application_package_helper(
     config: Mapping[str, Any] | None = None,
     user_message: str = "",
     executor_factory: Any = None,
-    conversation_context: str | None = None,
+    conversation_context: str | None = None,  # reserved for future context wiring
     hermes_home: Path | str | None = None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
@@ -169,9 +169,11 @@ def _resolve_executors(
                 build_recruiter_positioning_provider_executor,
             )
 
-            # Real provider wiring is Task 4's responsibility; if the module or
-            # its builder is unavailable, fail soft into a draft-only report.
-            return None, None
+            # The real provider-backed positioning executor exists but is not
+            # yet wired into this helper's default path; the hook stays inert
+            # and callers get a draft-only report plus this diagnostic so the
+            # degraded state is observable rather than silent.
+            return None, "real provider executor not wired"
         except Exception as exc:  # pragma: no cover - defensive
             return None, f"{type(exc).__name__}: {exc}"
 
