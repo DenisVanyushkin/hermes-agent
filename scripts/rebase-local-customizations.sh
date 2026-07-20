@@ -373,6 +373,18 @@ EOF_FILES
 }
 # end-verify-helpers
 
+# Serialize all automated git writers on a repo-level lock: git's own
+# index.lock is fail-fast, so a concurrent commit (agent session, operator
+# shell) and this script kill each other mid-rebase (2026-07-20 incident).
+# Acquired here — after the sudo/su re-exec dance, which would not preserve
+# a flock fd across process replacement.
+REPO_LOCK_FILE="${HERMES_REPO_LOCK:-$REPO/.git/hermes-repo.lock}"
+exec 8>"$REPO_LOCK_FILE"
+if ! flock -w "${HERMES_REPO_LOCK_TIMEOUT:-600}" 8; then
+  echo "FAILED: could not acquire repo lock $REPO_LOCK_FILE within ${HERMES_REPO_LOCK_TIMEOUT:-600}s — another git writer is active." >&2
+  exit 1
+fi
+
 STATUS_BEFORE="$(git -C "$REPO" status --porcelain --untracked-files=all)"
 if [ -n "$STATUS_BEFORE" ]; then
   echo "Local changes detected — stashing before update..." >&2
