@@ -73,7 +73,7 @@ def test_verify_backup_passes_on_real_db(db, tmp_path):
     ok, detail = maint.verify_backup(src)
     assert ok is True
     assert detail["integrity"] == "ok"
-    assert detail["schema_version"] == "8"
+    assert detail["schema_version"] == "9"
 
 def test_verify_backup_fails_on_corrupt_file(tmp_path):
     bad = tmp_path / "corrupt.db"

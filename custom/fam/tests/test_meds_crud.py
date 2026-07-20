@@ -128,7 +128,7 @@ def test_remove_unknown_returns_false(db):
 def test_schema_version_is_7(db):
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "8"
+    ).fetchone()["value"] == "9"
 
 
 def test_shopping_table_exists(db):
