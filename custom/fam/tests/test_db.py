@@ -174,7 +174,7 @@ def test_harden_perms_missing_file_never_raises(tmp_path):
 def test_fresh_db_schema_version_current(db):
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "8"
+    ).fetchone()["value"] == "9"
 
 def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     from fam import db as famdb
@@ -191,7 +191,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "8"
+    ).fetchone()["value"] == "9"
 
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -212,7 +212,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "8"
+    ).fetchone()["value"] == "9"
     conn.close()
 
 def test_places_travel_min_default_zero(db):
@@ -304,7 +304,7 @@ def test_legacy_2b_db_gets_kind_column(legacy_2b_conn):
     assert "kind" in cols
     assert legacy_2b_conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "8"
+    ).fetchone()["value"] == "9"
 
 # ---- schema 3a migration: events.travel_min_road, events.road_checked_at ----
 
@@ -355,7 +355,7 @@ CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
     assert "road_checked_at" in cols
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "8"
+    ).fetchone()["value"] == "9"
     conn.close()
 
 def test_events_travel_min_road_nullable(db):
@@ -439,7 +439,7 @@ def test_schema_v8_columns(db):
     ver = db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(ver) == 8
+    assert int(ver) == 9
 
 def test_schema_v8_migrates_from_v7(tmp_path):
     from fam import db as famdb
@@ -534,7 +534,7 @@ CREATE TABLE plans (
     assert "home_place_id" in cols("people")
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "8"
+    ).fetchone()["value"] == "9"
 
     # pre-existing rows survived the ALTER TABLE ADD COLUMN migration
     ev = conn.execute("SELECT title FROM events WHERE id=1").fetchone()
@@ -546,5 +546,96 @@ CREATE TABLE plans (
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "8"
+    ).fetchone()["value"] == "9"
     conn.close()
+
+
+# ---- schema 9 migration: goals (quarter/month, no time/place lifecycle) ----
+
+def test_schema_v9_goals_table(db):
+    cols = {r["name"]: r for r in db.execute("PRAGMA table_info(goals)")}
+    assert {"id", "title", "period_type", "period", "status",
+            "parent_goal_id", "notes", "created_at",
+            "closed_at"} <= cols.keys()
+    assert cols["title"]["notnull"] == 1
+    assert cols["period_type"]["notnull"] == 1
+    assert cols["period"]["notnull"] == 1
+    assert cols["status"]["notnull"] == 1
+    assert cols["status"]["dflt_value"] == "'open'"
+    assert cols["created_at"]["notnull"] == 1
+    assert cols["closed_at"]["notnull"] == 0
+
+    idx = {r["name"] for r in db.execute("PRAGMA index_list(goals)")}
+    assert "idx_goals_period" in idx
+
+    # CHECK (period_type IN ('quarter','month'))
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO goals(title,period_type,period,created_at) "
+            "VALUES ('bad','year','2026',?)", ("2026-07-20T00:00:00Z",))
+    # CHECK (status IN ('open','done','declined'))
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO goals(title,period_type,period,status,created_at) "
+            "VALUES ('bad','month','2026-08','archived',?)",
+            ("2026-07-20T00:00:00Z",))
+
+    db.execute(
+        "INSERT INTO goals(title,period_type,period,created_at) "
+        "VALUES ('quarterly goal','quarter','2026-Q3',?)",
+        ("2026-07-20T00:00:00Z",))
+    db.commit()
+    row = db.execute("SELECT * FROM goals WHERE title='quarterly goal'").fetchone()
+    assert row["status"] == "open"
+    assert row["notes"] == ""
+    assert row["closed_at"] is None
+
+    ver = db.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()[0]
+    assert int(ver) == 9
+
+def test_schema_v9_migrates_from_v8(tmp_path):
+    from fam import db as famdb
+    conn = sqlite3.connect(str(tmp_path / "legacy_8.db"))
+    conn.row_factory = sqlite3.Row
+    # A v8-shaped db is the current SCHEMA (which already includes the
+    # goals table) minus that whole table -- goals is a brand new table
+    # in v9, same class of migration as `plans` in 3b / `meds` in 5.
+    conn.executescript(famdb.SCHEMA)
+    conn.execute("DROP TABLE goals")
+    conn.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','8')")
+    conn.execute("UPDATE meta SET value='8' WHERE key='schema_version'")
+    # existing data that must survive the migration untouched
+    conn.execute(
+        "INSERT INTO events(id,title,start_utc,created_at,updated_at) "
+        "VALUES (1,'старое событие','2026-07-01T00:00:00Z',"
+        "'2026-07-01T00:00:00Z','2026-07-01T00:00:00Z')")
+    conn.commit()
+
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "goals" not in tables
+
+    famdb.init_db(conn)  # migrate
+
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "goals" in tables
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}
+    assert {"period_type", "period", "status", "parent_goal_id",
+            "closed_at"} <= cols
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "9"
+
+    # pre-existing data survived untouched
+    ev = conn.execute("SELECT title FROM events WHERE id=1").fetchone()
+    assert ev["title"] == "старое событие"
+
+    # re-run is harmless (idempotent migration)
+    famdb.init_db(conn)
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "9"

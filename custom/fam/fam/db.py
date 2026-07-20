@@ -166,6 +166,17 @@ CREATE TABLE IF NOT EXISTS car_metrics (
   gps_lat REAL, gps_lon REAL,
   raw_json TEXT);
 CREATE INDEX IF NOT EXISTS idx_car_metrics_ts ON car_metrics(ts_utc);
+CREATE TABLE IF NOT EXISTS goals (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  period_type TEXT NOT NULL CHECK (period_type IN ('quarter','month')),
+  period TEXT NOT NULL,                -- '2026-Q3' | '2026-08'
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','declined')),
+  parent_goal_id INTEGER REFERENCES goals(id),
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  closed_at TEXT);                     -- UTC ISO; done И declined оба «закрывают»
+CREATE INDEX IF NOT EXISTS idx_goals_period ON goals(period_type, period, status);
 """
 
 def resolve_db_path():
@@ -271,10 +282,15 @@ def init_db(conn):
     _ensure_column(conn, "event_series", "prep_min", "prep_min INTEGER")
     _ensure_column(conn, "people", "home_place_id",
                    "home_place_id INTEGER REFERENCES places(id)")
+    # -- v9 (goals: quarter/month, no time/place lifecycle) --
+    # `goals` is a whole new table -- CREATE TABLE IF NOT EXISTS above
+    # covers fresh installs and pre-v9 databases alike, no _ensure_column
+    # migration needed (same pattern as `plans` in 3b, `meds`/`shopping`
+    # in 5).
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','8')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','9')")
     conn.execute(
-        "UPDATE meta SET value='8' WHERE key='schema_version'")
+        "UPDATE meta SET value='9' WHERE key='schema_version'")
     conn.commit()
 
 

@@ -6,7 +6,7 @@ from fam import series, cal, people, places
 
 def test_schema_v7(db):
     ver = db.execute("SELECT value FROM meta WHERE key=\x27schema_version\x27").fetchone()[0]
-    assert ver == "8"
+    assert ver == "9"
     tabs = {r["name"] for r in db.execute(
         "SELECT name FROM sqlite_master WHERE type=\x27table\x27")}
     assert {"event_series", "event_series_participants"} <= tabs
