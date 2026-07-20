@@ -333,6 +333,32 @@ class TestControllerRecruiterBundleDispatch:
         )
         assert result.resolved_helper_name == "recruiter_application_package_flow"
 
+    def test_recruiter_pipeline_dispatches_application_helper_for_canonical_package_prompt(self) -> None:
+        prompt = "подготовь мне пакет документов для вакансии"
+        session = SimpleNamespace(
+            pipeline_id=RECRUITER_PIPELINE_ID,
+            pipeline_session_id="ps-1",
+            router_status="selected",
+        )
+        state_snapshot = SimpleNamespace(
+            pipeline_id=RECRUITER_PIPELINE_ID,
+            pipeline_session_id="ps-1",
+            planned_steps=[],
+        )
+        result = evaluate_pipeline_execution_controller(
+            config=_autonomous_config(),
+            session=session,
+            state_snapshot=state_snapshot,
+            allow_test_execution=True,
+            allow_registered_helper_selection=True,
+            helper_execution_context={
+                "runtime_factory": object(),
+                "runner": object(),
+                "user_message": prompt,
+            },
+        )
+        assert result.resolved_helper_name == "recruiter_application_package_flow"
+
     def test_recruiter_pipeline_keeps_decision_helper_for_evaluation_prompt(self) -> None:
         prompt = "оцени вакансию https://hh.ru/vacancy/1"
         session = SimpleNamespace(

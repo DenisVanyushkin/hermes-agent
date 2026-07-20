@@ -69,6 +69,8 @@ _APPLICATION_PATTERNS = (
     r"напиши рекрутер",
     r"подготовь\s+cv",
     r"подготовь\s+материал",
+    r"пакет\s+документов",
+    r"application\s+package",
 )
 _EVALUATION_PATTERNS = (
     r"\bevaluate\b",
@@ -104,6 +106,8 @@ _RECRUITER_GENERAL_PATTERNS = (
     r"рекрутер",
     r"отклик",
     r"податься",
+    r"пакет\s+документов",
+    r"application\s+package",
 )
 _ENGINEERING_PATTERNS = (
     r"hermes_cli/",

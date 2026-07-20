@@ -181,3 +181,53 @@ def test_decision_support_bundle_contract_unchanged():
     decision = route_recruiter_prompt("оцени вакансию https://hh.ru/vacancy/1")
     assert decision.document_provider_execution_enabled is False
     assert "read_private_file_contents" in decision.forbidden_actions
+
+
+def test_canonical_ru_document_package_prompt_selects_application_bundle() -> None:
+    decision = route_recruiter_prompt(
+        "подготовь мне пакет документов для вакансии",
+        context={"repo_root": REPO_ROOT},
+    )
+
+    assert decision.status.value == "selected"
+    assert decision.selected_bundle == APPLICATION_MATERIALS_BUNDLE_ID
+
+
+def test_ru_gather_document_package_prompt_selects_application_bundle() -> None:
+    decision = route_recruiter_prompt(
+        "собери пакет документов",
+        context={"repo_root": REPO_ROOT},
+    )
+
+    assert decision.status.value == "selected"
+    assert decision.selected_bundle == APPLICATION_MATERIALS_BUNDLE_ID
+
+
+def test_en_application_package_prompt_selects_application_bundle() -> None:
+    decision = route_recruiter_prompt(
+        "prepare an application package for this role",
+        context={"repo_root": REPO_ROOT},
+    )
+
+    assert decision.status.value == "selected"
+    assert decision.selected_bundle == APPLICATION_MATERIALS_BUNDLE_ID
+
+
+def test_ru_evaluate_vacancy_url_prompt_stays_decision_support() -> None:
+    decision = route_recruiter_prompt(
+        "оцени вакансию https://example.com/jobs/123",
+        context={"repo_root": REPO_ROOT},
+    )
+
+    assert decision.status.value == "selected"
+    assert decision.selected_bundle == DECISION_SUPPORT_BUNDLE_ID
+
+
+def test_ru_should_i_apply_prompt_stays_decision_support() -> None:
+    decision = route_recruiter_prompt(
+        "стоит ли подаваться на вакансию",
+        context={"repo_root": REPO_ROOT},
+    )
+
+    assert decision.status.value == "selected"
+    assert decision.selected_bundle == DECISION_SUPPORT_BUNDLE_ID
