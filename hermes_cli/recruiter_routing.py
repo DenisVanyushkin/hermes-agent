@@ -45,6 +45,12 @@ _FORBIDDEN_ACTIONS = [
     "execute_recruiter_document_with_provider",
 ]
 
+_APPLICATION_MATERIALS_FORBIDDEN_ACTIONS = [
+    action
+    for action in _FORBIDDEN_ACTIONS
+    if action not in ("read_private_file_contents", "execute_recruiter_document_with_provider")
+]
+
 _APPLICATION_PATTERNS = (
     r"\bcv\b",
     r"\bresume\b",
@@ -202,6 +208,8 @@ def route_recruiter_prompt(prompt: str, *, context: dict[str, Any] | None = None
         reasoning = "Prompt asks for recruiter-facing application materials."
         warnings.append(_APPLICATION_MATERIALS_POSITIONING_WARNING)
         next_actions = list(_APPLICATION_MATERIALS_NEXT_ALLOWED_ACTIONS)
+        document_provider_execution_enabled = True
+        forbidden_actions = list(_APPLICATION_MATERIALS_FORBIDDEN_ACTIONS)
     else:
         bundle_id = DECISION_SUPPORT_BUNDLE_ID
         next_actions = list(_DEFAULT_NEXT_ALLOWED_ACTIONS)
@@ -209,6 +217,8 @@ def route_recruiter_prompt(prompt: str, *, context: dict[str, Any] | None = None
         requested_outputs = list(parsed.requested)
         requested_outputs_preset = parsed.preset_id
         warnings.extend(parsed.warnings)
+        document_provider_execution_enabled = False
+        forbidden_actions = list(_FORBIDDEN_ACTIONS)
         if evaluation_signals:
             reasoning = "Prompt asks for vacancy/company decision support."
         else:
@@ -233,6 +243,8 @@ def route_recruiter_prompt(prompt: str, *, context: dict[str, Any] | None = None
         role_package_context=role_package_context,
         requested_outputs=requested_outputs,
         requested_outputs_preset=requested_outputs_preset,
+        document_provider_execution_enabled=document_provider_execution_enabled,
+        forbidden_actions=forbidden_actions,
     )
 
 

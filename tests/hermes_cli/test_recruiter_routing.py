@@ -164,3 +164,20 @@ def test_routing_module_has_no_provider_or_db_imports() -> None:
     ]
     for marker in forbidden:
         assert marker not in source
+
+
+def test_application_bundle_enables_document_execution_contract():
+    decision = route_recruiter_prompt("подготовь резюме и сопроводительное письмо для вакансии")
+    assert decision.selected_bundle == APPLICATION_MATERIALS_BUNDLE_ID
+    assert decision.document_provider_execution_enabled is True
+    assert "read_private_file_contents" not in decision.forbidden_actions
+    assert "execute_recruiter_document_with_provider" not in decision.forbidden_actions
+    # Жёсткие запреты неизменны:
+    for action in ("send_outbound_message", "apply_to_job", "write_job_intel_db", "send_gmail"):
+        assert action in decision.forbidden_actions
+
+
+def test_decision_support_bundle_contract_unchanged():
+    decision = route_recruiter_prompt("оцени вакансию https://hh.ru/vacancy/1")
+    assert decision.document_provider_execution_enabled is False
+    assert "read_private_file_contents" in decision.forbidden_actions
