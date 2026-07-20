@@ -211,7 +211,7 @@ def test_no_key_skips_tomtom_silently(monkeypatch, db):
 # cal.add so its own add-time road hook -- which reads the REAL on-disk
 # config on this prod host -- doesn't fire for real.
 
-ROAD_RECOMPUTE_NOW = "2026-07-20T04:30:00+00:00"
+ROAD_RECOMPUTE_NOW = "2037-07-20T04:30:00+00:00"
 ROAD_RECOMPUTE_CFG = {
     "road_home_lat": 43.2220, "road_home_lon": 76.8512, "road_coef": 1.4,
     "road_speed_kmh": 30, "road_daily_cap": 100, "road_timeout_sec": 10,
@@ -241,7 +241,7 @@ def test_road_recompute_error_rolls_back_partial_state(db, monkeypatch):
     # test_tick.py's _add_event_neutral_road does.
     monkeypatch.setattr(tick.road, "compute_travel_min",
                          lambda conn, event, cfg, now_utc=None: (None, "none"))
-    event = cal.add(db, "Врач", "2026-07-20T06:29:00+00:00", place="Клиника")
+    event = cal.add(db, "Врач", "2037-07-20T06:29:00+00:00", place="Клиника")
     db.commit()
 
     before = db.execute(
