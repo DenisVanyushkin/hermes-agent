@@ -110,3 +110,19 @@ class TestRecruiterTimeoutFallback:
             pipeline_session_id="fallback-smoke-2",
         )
         assert decision.selected_pipeline_id != "recruiter_decision_support_pipeline"
+
+
+def _render_router_prompt_text() -> str:
+    from hermes_cli.pipeline_router import _build_router_messages
+
+    specs = load_pipeline_specs()
+    messages = _build_router_messages(specs, "подготовь мне пакет документов для вакансии")
+    return "\n".join(message["content"] for message in messages)
+
+
+def test_router_prompt_example_c_routes_application_materials_to_recruiter() -> None:
+    text = _render_router_prompt_text()
+    assert "Career writing is not an engineering code-change pipeline" not in text
+    assert "Example C" in text
+    assert f'"selected_pipeline_id": "{RECRUITER_PIPELINE_ID}"' in text
+    assert "application package" in text.lower() or "application materials" in text.lower()

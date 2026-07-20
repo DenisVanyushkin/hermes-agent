@@ -1465,7 +1465,7 @@ def test_router_prompt_explicitly_requires_status_contract_and_examples(tmp_path
     assert "Example B - engineering prompt" in combined
     assert '"selected_pipeline_id": "engineering_review_pipeline"' in combined
     assert '"fallback_safe": false' in combined
-    assert "Example C - recruiter or career writing prompt" in combined
+    assert "Example C - application package / recruiter materials prompt" in combined
 
 
 def test_summarize_confidence_value_redacts_strings() -> None:
