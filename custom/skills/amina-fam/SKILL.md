@@ -418,7 +418,7 @@ show after cancel), make a second, separate terminal call.
 | Decline a goal | `fam goal decline <id>` |
 | Reopen a goal | `fam goal reopen <id>` |
 | Move a goal to a different period | `fam goal take <id> --period P` |
-| Planning-ritual material (JSON) | `fam goal plan-info` |
+| Planning-ritual material (JSON) | `fam goal plan-info --json` |
 | Mark this ritual cycle done/declined | `fam goal plan-mark done\|declined [--month YYYY-MM]` |
 | Planning-ritual state, human-readable | `fam goal plan-status` |
 
@@ -593,7 +593,7 @@ plan, it never gets a place or a time, only a period. Goals ≠ plans: rule
 - **The planning-ritual dialog** — the digest may ask "Готова сейчас
   запланировать цели на <месяц>{, включая цели <квартал>,} — или
   напомнить завтра?"; rule 18 above routes the reply. On "сейчас":
-  1. `fam goal plan-info` — JSON: `target_month`, `state`, `quarter`
+  1. `fam goal plan-info --json` — JSON: `target_month`, `state`, `quarter`
      (only set if `target_month` is the first month of its quarter),
      `quarter_goals_open[]`, `tails_open[]`, `tails_declined[]`.
   2. If `quarter` is set (first month of the quarter): walk through
