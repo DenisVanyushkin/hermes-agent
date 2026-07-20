@@ -1093,11 +1093,41 @@ def _update_place(conn, item):
     audit.log(conn, "seed.Места.update", {"id": rid, "changes": changes}, actor="admin")
 
 
+def _detach_dead_place_refs(conn, place_id):
+    """Mirror _place_referenced_outside_file's dead-row exception at DB
+    level: cancelled/done events, cancelled series and dropped/done plans
+    are allowed to reference a place that's about to be hard-deleted, but
+    the plain (non-CASCADE) place_id FK still fires on DELETE unless those
+    references are detached first. Only dead rows are touched -- a live
+    reference is exactly what the diff guard is supposed to prevent from
+    ever reaching here, so if one somehow slips through it's left alone
+    and the subsequent DELETE fails loudly (FK violation) rather than
+    silently detaching a live row. Returns a dict of counts for the audit
+    log.
+    """
+    counts = {}
+    cur = conn.execute(
+        "UPDATE events SET place_id=NULL WHERE place_id=? AND status IN ('cancelled','done')",
+        (place_id,))
+    counts["events"] = cur.rowcount
+    cur = conn.execute(
+        "UPDATE event_series SET place_id=NULL WHERE place_id=? AND status='cancelled'",
+        (place_id,))
+    counts["event_series"] = cur.rowcount
+    cur = conn.execute(
+        "UPDATE plans SET place_id=NULL WHERE place_id=? AND status IN ('dropped','done')",
+        (place_id,))
+    counts["plans"] = cur.rowcount
+    return counts
+
+
 def _delete_place(conn, row):
     rid = row["id"]
+    detached = _detach_dead_place_refs(conn, rid)
     conn.execute("DELETE FROM place_aliases WHERE place_id=?", (rid,))
     conn.execute("DELETE FROM places WHERE id=?", (rid,))
-    audit.log(conn, "seed.Места.delete", {"id": rid, "name": row.get("name")}, actor="admin")
+    audit.log(conn, "seed.Места.delete",
+              {"id": rid, "name": row.get("name"), "detached": detached}, actor="admin")
 
 
 # -- Люди -----------------------------------------------------------------
@@ -1160,12 +1190,31 @@ def _apply_people_update(conn, item):
     audit.log(conn, "seed.Люди.update", {"id": rid, "changes": changes}, actor="admin")
 
 
+def _detach_dead_person_refs(conn, person_id):
+    """Mirror _person_referenced_outside_file's dead-row exception at DB
+    level. event_participants and event_series_participants carry
+    ON DELETE CASCADE (see fam/db.py init_db) so cancelled/done
+    events/series referencing this person are cleaned up automatically by
+    SQLite once `people` is deleted -- no manual handling needed there.
+    plans.person_id is a plain FK, so a dropped/done plan referencing this
+    person must be detached first or the hard delete below raises a FK
+    violation. Only dead rows are touched; a live plan is exactly what the
+    diff guard should have blocked, so leave it to fail loudly if present.
+    """
+    cur = conn.execute(
+        "UPDATE plans SET person_id=NULL WHERE person_id=? AND status IN ('dropped','done')",
+        (person_id,))
+    return {"plans": cur.rowcount}
+
+
 def _delete_person(conn, row):
     rid = row["id"]
+    detached = _detach_dead_person_refs(conn, rid)
     conn.execute("DELETE FROM people_aliases WHERE person_id=?", (rid,))
     conn.execute("DELETE FROM group_members WHERE group_id=? OR person_id=?", (rid, rid))
     conn.execute("DELETE FROM people WHERE id=?", (rid,))
-    audit.log(conn, "seed.Люди.delete", {"id": rid, "name": row.get("name")}, actor="admin")
+    audit.log(conn, "seed.Люди.delete",
+              {"id": rid, "name": row.get("name"), "detached": detached}, actor="admin")
 
 
 # -- Серии ------------------------------------------------------------------

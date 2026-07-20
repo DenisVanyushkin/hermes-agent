@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fam import cal, people, places, plans, rem, shopping, seed
 
 from seed_helpers import seed_db as _seed_db
@@ -273,3 +275,101 @@ def test_apply_gis_url_does_not_override_filled_coords(db, monkeypatch):
     got = places.get(db, "Казакова")
     assert got["lat"] == 43.1
     assert got["lon"] == 76.8
+
+
+# -- Hard-delete FK detach (dead-row references) ---------------------------
+# The diff guard (_place_referenced_outside_file / _person_referenced_
+# outside_file) allows deleting a place/person still referenced by DEAD
+# rows (cancelled events/series, dropped/done plans) -- those rows don't
+# pin the entity in place forever. But places.place_id / event_series.
+# place_id / plans.place_id / plans.person_id are plain (non-CASCADE) FKs
+# (see fam/db.py init_db), so the apply-level hard DELETE must detach
+# those dead references first or SQLite raises FOREIGN KEY constraint
+# failed even though the diff itself was clean. Live case: "Студия танцев"
+# (id 2), referenced only by two cancelled pilot events.
+
+
+def test_apply_place_delete_detaches_cancelled_event_reference(db):
+    """Mirrors the live incident: a place referenced ONLY by a cancelled
+    event must actually be deletable by apply_diff, and the cancelled
+    event must survive with place_id cleared to NULL."""
+    _seed_db(db)
+    places.add(db, "Студия танцев", address="ул. Тестовая 1")
+    ev = cal.add(db, "Отменённая тренировка", datetime.now(timezone.utc).isoformat(),
+                 place="Студия танцев", transport="car")
+    cal.cancel(db, ev["id"])
+    db.commit()
+
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Места"] = [r for r in f["Места"] if r["name"] != "Студия танцев"]
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts, f"Unexpected conflicts: {d.conflicts}"
+
+    seed.apply_diff(db, d); db.commit()                    # bug: raised IntegrityError
+
+    assert places.get(db, "Студия танцев") is None
+    row = db.execute("SELECT status, place_id FROM events WHERE id=?", (ev["id"],)).fetchone()
+    assert row["status"] == "cancelled"
+    assert row["place_id"] is None
+
+
+def test_apply_place_delete_detaches_dropped_plan_reference(db):
+    """Same failure mode via a dropped plan referencing the place."""
+    _seed_db(db)
+    pl = places.add(db, "Студия танцев", address="ул. Тестовая 1")
+    pid = db.execute(
+        "INSERT INTO plans (title, place_id, status, created_at) "
+        "VALUES ('Старый план', ?, 'dropped', datetime('now'))", (pl["id"],)
+    ).lastrowid
+    db.commit()
+
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Места"] = [r for r in f["Места"] if r["name"] != "Студия танцев"]
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts, f"Unexpected conflicts: {d.conflicts}"
+
+    seed.apply_diff(db, d); db.commit()
+
+    assert places.get(db, "Студия танцев") is None
+    row = db.execute("SELECT status, place_id FROM plans WHERE id=?", (pid,)).fetchone()
+    assert row["status"] == "dropped"
+    assert row["place_id"] is None
+
+
+def test_apply_person_delete_detaches_dropped_plan_reference(db):
+    """A person referenced ONLY by a dropped plan must be deletable by
+    apply_diff; the plan survives with person_id cleared to NULL."""
+    p = people.add(db, "Дропнутый", kind="person")
+    pid = db.execute(
+        "INSERT INTO plans (title, person_id, status, created_at) "
+        "VALUES ('Старый план', ?, 'dropped', datetime('now'))", (p["id"],)
+    ).lastrowid
+    db.commit()
+
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Люди"] = [r for r in f["Люди"] if r["name"] != "Дропнутый"]
+    d = seed.diff(db, f, snap)
+    assert not d.has_conflicts, f"Unexpected conflicts: {d.conflicts}"
+
+    seed.apply_diff(db, d); db.commit()
+
+    assert people.get(db, "Дропнутый") is None
+    row = db.execute("SELECT status, person_id FROM plans WHERE id=?", (pid,)).fetchone()
+    assert row["status"] == "dropped"
+    assert row["person_id"] is None
+
+
+def test_apply_place_delete_still_blocked_by_active_event(db):
+    """Guard regression check: a place referenced by an ACTIVE event must
+    still surface as a diff conflict, never reach the DELETE at all."""
+    _seed_db(db)  # baseline "ДР" event already references "Invictus", active
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    f["Места"] = [r for r in f["Места"] if r["name"] != "Invictus"]
+    d = seed.diff(db, f, snap)
+    assert d.has_conflicts
+    assert d.conflicts["Места"]
+    assert places.get(db, "Invictus") is not None
