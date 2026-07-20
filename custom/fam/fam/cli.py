@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, gate, geo2gis, grid, mail, maint, meds, people, places, plans, rem, series, shopping, tick
+from fam import audit, cal, db as famdb, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, rem, series, shopping, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -1052,6 +1052,127 @@ def cmd_plan_attach(args):
         print(f"attached plan {args.id} -> event {args.event}")
     return 0
 
+def _fmt_goal(g):
+    line = f"{g['id']}\t{g['title']}\t[{g['status']}]\t{g['period_type']}:{g['period']}"
+    if g.get("parent_goal_id"):
+        line += f"\tparent:{g['parent_goal_id']}"
+    if g.get("notes"):
+        line += f"\tnotes={g['notes']}"
+    return line
+
+
+def _parent_hint(conn, g):
+    """Task 3 spec: after `goal done`, if the goal has a parent AND the
+    parent is an open quarter goal, surface a hint line prompting the
+    caller (skill/human) to ask whether the quarter goal is fully done
+    too. Returns the hint text, or None when there's no parent or the
+    parent isn't an open quarter goal.
+    """
+    parent_id = g.get("parent_goal_id")
+    if not parent_id:
+        return None
+    parent = goals.get(conn, parent_id)
+    if parent is None:
+        return None
+    if parent["period_type"] != "quarter" or parent["status"] != "open":
+        return None
+    return (f"parent: #{parent['id']} «{parent['title']}» (quarter, open) "
+            f"— спроси, закрыта ли квартальная целиком.")
+
+
+def cmd_goal_add(args):
+    conn = famdb.connect()
+    goal_id = goals.add(conn, args.title, period=args.period,
+                         parent=args.parent, notes=args.notes)
+    conn.commit()
+    g = goals.get(conn, goal_id)
+    if args.json:
+        print(json.dumps(g, ensure_ascii=False))
+    else:
+        print(f"added goal: {g['title']} (id={g['id']})")
+    return 0
+
+
+def cmd_goal_list(args):
+    conn = famdb.connect()
+    rows = goals.list_goals(conn, period=args.period, include_closed=args.all)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for g in rows:
+            print(_fmt_goal(g))
+    return 0
+
+
+def cmd_goal_show(args):
+    conn = famdb.connect()
+    g = goals.get(conn, args.id)
+    if g is None:
+        raise ValueError(f"unknown goal: {args.id}")
+    if args.json:
+        print(json.dumps(g, ensure_ascii=False))
+    else:
+        print(_fmt_goal(g))
+    return 0
+
+
+def cmd_goal_done(args):
+    conn = famdb.connect()
+    if not goals.mark(conn, args.id, "done"):
+        raise ValueError(f"unknown goal: {args.id}")
+    conn.commit()
+    g = goals.get(conn, args.id)
+    hint = _parent_hint(conn, g)
+    if args.json:
+        out = dict(g)
+        out["parent_hint"] = hint
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        print(f"done goal: {g['title']} (id={g['id']})")
+        if hint:
+            print(hint)
+    return 0
+
+
+def cmd_goal_decline(args):
+    conn = famdb.connect()
+    if not goals.mark(conn, args.id, "declined"):
+        raise ValueError(f"unknown goal: {args.id}")
+    conn.commit()
+    g = goals.get(conn, args.id)
+    if args.json:
+        print(json.dumps(g, ensure_ascii=False))
+    else:
+        print(f"declined goal: {g['title']} (id={g['id']})")
+    return 0
+
+
+def cmd_goal_reopen(args):
+    conn = famdb.connect()
+    if not goals.mark(conn, args.id, "open"):
+        raise ValueError(f"unknown goal: {args.id}")
+    conn.commit()
+    g = goals.get(conn, args.id)
+    if args.json:
+        print(json.dumps(g, ensure_ascii=False))
+    else:
+        print(f"reopened goal: {g['title']} (id={g['id']})")
+    return 0
+
+
+def cmd_goal_take(args):
+    conn = famdb.connect()
+    if not goals.take(conn, args.id, args.period):
+        raise ValueError(f"unknown goal: {args.id}")
+    conn.commit()
+    g = goals.get(conn, args.id)
+    if args.json:
+        print(json.dumps(g, ensure_ascii=False))
+    else:
+        print(f"took goal: {g['title']} (id={g['id']}) -> {g['period']}")
+    return 0
+
+
 def _fmt_med(m):
     times_str = ",".join(m["times"])
     line = f"{m['id']}\t{m['name']}\t{times_str}"
@@ -1634,6 +1755,51 @@ def build_parser():
     spat.add_argument("id", type=int)
     spat.add_argument("--event", type=int, required=True)
     spat.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    sp = sub.add_parser("goal")
+    goal_sub = sp.add_subparsers(dest="goal_cmd", required=True)
+
+    spga = goal_sub.add_parser("add"); spga.set_defaults(func=cmd_goal_add)
+    spga.add_argument("title")
+    spga.add_argument("--period", help="YYYY-MM or YYYY-Qn; default: current month")
+    spga.add_argument("--parent", type=int, help="parent quarter goal id")
+    spga.add_argument("--notes", default="")
+    spga.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    spgl = goal_sub.add_parser("list"); spgl.set_defaults(func=cmd_goal_list)
+    spgl.add_argument("--period", help="YYYY-MM or YYYY-Qn; "
+                       "default: current month + current quarter")
+    spgl.add_argument("--all", action="store_true",
+                       help="include done/declined goals (default: open only)")
+    spgl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    spgs = goal_sub.add_parser("show"); spgs.set_defaults(func=cmd_goal_show)
+    spgs.add_argument("id", type=int)
+    spgs.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    spgd = goal_sub.add_parser("done"); spgd.set_defaults(func=cmd_goal_done)
+    spgd.add_argument("id", type=int)
+    spgd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    spgdc = goal_sub.add_parser("decline"); spgdc.set_defaults(func=cmd_goal_decline)
+    spgdc.add_argument("id", type=int)
+    spgdc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable output")
+
+    spgr = goal_sub.add_parser("reopen"); spgr.set_defaults(func=cmd_goal_reopen)
+    spgr.add_argument("id", type=int)
+    spgr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
+    spgt = goal_sub.add_parser("take"); spgt.set_defaults(func=cmd_goal_take)
+    spgt.add_argument("id", type=int)
+    spgt.add_argument("--period", required=True, help="target month YYYY-MM")
+    spgt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
 
     sp = sub.add_parser("road"); sp.set_defaults(func=cmd_road)
