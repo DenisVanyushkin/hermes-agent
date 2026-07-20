@@ -12,7 +12,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v14 (detour offers on place-bound trips)._
+_Body version: v15 (period goals)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -44,6 +44,11 @@ way to read or change family data.
   Shopping Verbs below.
 - Place category: "это аптека", "там продуктовый" — categorizing a place
   for the shopping "по пути" match. See Place Category below.
+- Goals: a target for the month or quarter with no place/time — "хочу
+  цель...", "запиши цель на квартал...", replies to the digest's month-
+  goals block ("сделано", "не буду"), or replying to the planning-ritual
+  question the digest may ask ("сейчас", "завтра", "не буду
+  планировать"). See Goal Verbs below.
 
 ## Tool
 
@@ -68,6 +73,7 @@ way to read or change family data.
   - `med list|taken|skip`
   - `shop add|list|done`
   - `road <event_id>`
+  - `goal add|list|show|done|decline|reopen|take|plan-info|plan-mark|plan-status`
 - Time: the household lives in Asia/Almaty (+05:00). "Now" comes from the
   timestamp prefix on the **latest** user message, `[Dow YYYY-MM-DD
   HH:MM:SS TZ]` (e.g. `[Tue 2026-04-28 13:40:53 CEST]`) — read it from
@@ -317,6 +323,41 @@ show after cancel), make a second, separate terminal call.
       записал"/"заезжаем" from the offer or the "да" alone, only after
       the `plan attach` call itself has actually succeeded.
 
+18. **A goal is a target for a period, not a plan — no place, no time, no
+    deadline.** "хочу цель X", "запиши цель на квартал..." → `fam goal
+    add "TITLE" [--period 2026-08|2026-Q3] [--notes N]` — never invent a
+    date or place for a goal; if the user gives one, that's a plan
+    (Plan Verbs above) or a calendar event, not a goal. Same
+    anti-confabulation (rule 12) and no-date-arithmetic (rule 1)
+    discipline applies: only confirm "записал цель" after `goal add`
+    exits 0, and resolve any period the user names ("на этот месяц",
+    "на квартал") from "now" the same way as rule 1/10 — never guess.
+    A bare "хочу цель X" with no explicit "на квартал" wording is a
+    **month** goal for the current month; only record a quarter goal
+    when the user explicitly says "на квартал"/"в этом квартале" (or
+    names the quarter, "Q3"). See Goal Verbs below for the full verb
+    set and the planning-ritual dialog.
+    - **Reacting to the digest's month-goals mention** ("сделано",
+      "не буду туда двигаться", "цель X не получится") — the goal_id is
+      NOT in your session context (same out-of-band caveat as Reminder
+      Reactions above), so always look it up first: `fam goal list
+      --json` (current period, open by default), match by title, then
+      `fam goal done <id>` or `fam goal decline <id>`. Never guess an
+      id. If `goal done` prints a parent hint (the goal's quarter parent
+      is still open), ask "квартальная цель тоже закрыта целиком?" —
+      only on an explicit yes, `fam goal done <parent_id>`; a "нет" or
+      no reply leaves the parent open, no further call.
+    - **Reacting to the digest's planning-ritual question**
+      ("Готова сейчас запланировать цели на <месяц>{, включая цели
+      <квартал>,} — или напомнить завтра?"):
+      - "сейчас"/"давай"/"поехали" → run the planning dialog under Goal
+        Verbs below.
+      - "завтра"/"не сейчас"/no reply → do nothing at all — no fam call.
+        The digest ritual re-offers the same question on a later day by
+        itself; don't call `plan-mark` for a deferral.
+      - "не буду планировать"/"не хочу" → `fam goal plan-mark declined`
+        (no dialog, no goal add calls).
+
 ## Quick Reference
 
 | Goal | Command |
@@ -370,6 +411,16 @@ show after cancel), make a second, separate terminal call.
 | Warm up the car (after explicit yes) | `fam car warmup --confirm [--requester WHO]` |
 | Stop the engine (after explicit yes) | `fam car stop --confirm [--requester WHO]` |
 | Set an event's transport | `fam car set-transport <event_id> car\|walk\|public` |
+| Record a goal | `fam goal add "TITLE" [--period 2026-08\|2026-Q3] [--parent ID] [--notes N]` |
+| See goals | `fam goal list [--period P] [--all] --json` |
+| One goal | `fam goal show <id>` |
+| Mark a goal done | `fam goal done <id>` (prints a parent hint if the quarter parent is still open) |
+| Decline a goal | `fam goal decline <id>` |
+| Reopen a goal | `fam goal reopen <id>` |
+| Move a goal to a different period | `fam goal take <id> --period P` |
+| Planning-ritual material (JSON) | `fam goal plan-info` |
+| Mark this ritual cycle done/declined | `fam goal plan-mark done\|declined [--month YYYY-MM]` |
+| Planning-ritual state, human-readable | `fam goal plan-status` |
 
 ## Calendar Grid
 
@@ -508,6 +559,61 @@ protocol as rule 3 applies if `--place` is given and doesn't resolve.
   reminder's `raw.event_id` → 42 →
   `fam plan attach 7 --event 42` → "Записал, куртку заедете забрать по
   пути к стоматологу."
+
+## Goal Verbs
+
+A goal is a target for the month or quarter — unlike a calendar event or a
+plan, it never gets a place or a time, only a period. Goals ≠ plans: rule
+18 above governs which is which.
+
+- **Recording a goal** — "хочу цель...", "запиши цель на квартал..." →
+  `fam goal add "TITLE" [--period 2026-08|2026-Q3] [--parent ID]
+  [--notes N]`. No explicit "на квартал" → month goal, current month
+  (omit `--period`, or pass the current `YYYY-MM`). Confirm in one line:
+  "Записал цель: пробежать 10к, на июль."
+- **Reacting to the digest's month-goals mention** ("сделано", "не
+  буду") → look it up first, then act, same match-then-act pattern as
+  Plan Verbs' "done" below:
+  1. `fam goal list --json` (open goals for the current period).
+  2. Exactly one goal plausibly matches → `fam goal done <id>` or `fam
+     goal decline <id>`, confirm briefly ("Отметил цель: пробежать 10к —
+     готово.").
+  3. Several plausible matches, or none → ask which goal they mean —
+     never guess an id.
+  - If `goal done` prints a parent hint (`parent: #<id> "<title>"
+    (quarter, open)`), ask "квартальная цель тоже закрыта целиком?" —
+    on an explicit yes, `fam goal done <parent_id>`; a "нет" or no reply
+    leaves the parent open, no further call.
+- **Declining/reopening a goal** ("эту цель не буду", "передумали, всё
+  же вернём цель") → `fam goal decline <id>` / `fam goal reopen <id>`,
+  found the same way as done above (`fam goal list --all` if it may
+  already be closed).
+- **Moving a goal to a different period** ("перенеси цель на август") →
+  `fam goal take <id> --period P`, id found the same way as done above.
+- **The planning-ritual dialog** — the digest may ask "Готова сейчас
+  запланировать цели на <месяц>{, включая цели <квартал>,} — или
+  напомнить завтра?"; rule 18 above routes the reply. On "сейчас":
+  1. `fam goal plan-info` — JSON: `target_month`, `state`, `quarter`
+     (only set if `target_month` is the first month of its quarter),
+     `quarter_goals_open[]`, `tails_open[]`, `tails_declined[]`.
+  2. If `quarter` is set (first month of the quarter): walk through
+     quarter goals FIRST — offer/record them with `fam goal add
+     "TITLE" --period <quarter>` — THEN month goals, each with
+     `--parent <quarter_goal_id>` when it belongs under one already
+     recorded.
+  3. If `quarter` is not set: just month goals for `target_month`, no
+     `--parent` needed unless the user explicitly ties one to an
+     existing quarter goal.
+  4. Offer any `tails_open`/`tails_declined` (goals from the month
+     before `target_month` still open or declined) one at a time:
+     "берём цель «X» дальше?" — "да" → `fam goal take <id> --period
+     <target_month>`; "нет" → `fam goal decline <id>` (only if not
+     already declined).
+  5. Finish the whole dialog with `fam goal plan-mark done` — this is
+     what closes the ritual for the cycle; don't skip it even if the
+     user added no new goals.
+  Anti-confabulation (rule 12) applies throughout: confirm each goal
+  only after its `goal add`/`take`/`decline` call exits 0.
 
 ## Medication Verbs
 
@@ -651,6 +757,16 @@ The morning digest always closes with the same question: "Если появят�
 - The digest itself may list plans with an approaching deadline
   alongside the day's events — reacting to those follows the same Plan
   Verbs rules as any other plan mention.
+- The digest may also mention open month goals in passing (a soft,
+  one-line reminder, no question attached) — "сделано"/"не буду" in
+  reply to that block follows Goal Verbs' "Reacting to the digest's
+  month-goals mention" above (look it up with `goal list` first, then
+  `done`/`decline`).
+- The digest may separately close with the planning-ritual question
+  instead of the usual closing line, on the days the ritual is due —
+  "Готова сейчас запланировать цели..." — replies to THAT question
+  follow rule 18's routing (сейчас/завтра/не буду планировать) and the
+  planning dialog under Goal Verbs above, not the ordinary intake rules.
 
 ## Reply Style
 
