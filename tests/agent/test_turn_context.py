@@ -491,3 +491,30 @@ def test_preflight_compression_rebases_current_turn_user_idx():
     assert ctx.current_turn_user_idx == 2
     assert ctx.messages[ctx.current_turn_user_idx]["content"] == "hello"
     assert agent._persist_user_message_idx == 2
+
+
+def test_turn_prologue_snapshots_the_dirty_worktree_baseline(monkeypatch):
+    """The review gate needs to know what was already dirty before the turn.
+
+    Regression guard for 2026-07-19: an unrelated uncommitted diff left in the
+    repo blocked the ``hermes-rebase-local-customizations`` cron.
+    """
+    monkeypatch.setattr(
+        "hermes_cli.review_gate.snapshot_material_dirty_paths",
+        lambda *a, **k: ["job_intel/calibration.py"],
+    )
+    agent = _FakeAgent()
+    _build(agent)
+    assert agent._turn_dirty_baseline == ["job_intel/calibration.py"]
+
+
+def test_turn_prologue_tolerates_a_failing_baseline_snapshot(monkeypatch):
+    """A broken git call must never take the turn down."""
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("git exploded")
+
+    monkeypatch.setattr("hermes_cli.review_gate.snapshot_material_dirty_paths", _boom)
+    agent = _FakeAgent()
+    _build(agent)
+    assert agent._turn_dirty_baseline == []

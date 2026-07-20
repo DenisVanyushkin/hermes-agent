@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
-from typing import Any
+from typing import Any, Iterable
 
 import yaml
 
@@ -210,15 +210,24 @@ def _is_material_repo_path(path: str) -> bool:
     return False
 
 
-def _material_repo_paths_from_git(repo_root: Path) -> list[str]:
+def _material_repo_paths_from_git(
+    repo_root: Path,
+    baseline_dirty_paths: Iterable[str] | None = None,
+) -> list[str]:
     raw = _run_git_diff(["git", "diff", "HEAD", "--name-only"], repo_root)
     if not raw:
         return []
+    # Paths already dirty when the turn began were not written by this session.
+    # Attributing them to the agent lets an unrelated work-in-progress diff
+    # block every git-touching cron run.
+    baseline = {str(path).strip() for path in (baseline_dirty_paths or []) if str(path).strip()}
     material: list[str] = []
     seen: set[str] = set()
     for line in raw.splitlines():
         candidate = line.strip()
         if not candidate or candidate in seen:
+            continue
+        if candidate in baseline:
             continue
         if not _is_material_repo_path(candidate):
             continue
@@ -227,11 +236,22 @@ def _material_repo_paths_from_git(repo_root: Path) -> list[str]:
     return material
 
 
+def snapshot_material_dirty_paths(repo_root: Path | None = None) -> list[str]:
+    """Material repo paths already dirty — call once at turn start.
+
+    The result is the session baseline handed back to
+    :func:`detect_material_engineering_change` so the review gate reviews only
+    what the agent itself changed.
+    """
+    return _material_repo_paths_from_git(repo_root or _repo_root())
+
+
 def detect_material_engineering_change(
     plan: RoleExecutionPlan,
     messages: list[dict[str, Any]],
     *,
     changed_paths: list[str] | None = None,
+    baseline_dirty_paths: Iterable[str] | None = None,
 ) -> tuple[bool, list[str]]:
     if not isinstance(plan, RoleExecutionPlan):
         return False, []
@@ -251,7 +271,7 @@ def detect_material_engineering_change(
     has_file_mutation_tool_call = bool(tool_names)
 
     if not material_paths and has_file_mutation_tool_call:
-        material_paths = _material_repo_paths_from_git(repo_root)
+        material_paths = _material_repo_paths_from_git(repo_root, baseline_dirty_paths)
 
     if plan.operation_category in material_categories:
         if material_paths:
@@ -290,7 +310,7 @@ def detect_material_engineering_change(
         if not saw_failed_or_unparsed_mutation:
             break
     if saw_failed_or_unparsed_mutation:
-        material_paths = _material_repo_paths_from_git(repo_root)
+        material_paths = _material_repo_paths_from_git(repo_root, baseline_dirty_paths)
     return bool(material_paths), material_paths
 
 
@@ -635,6 +655,7 @@ def evaluate_review_gate(
     verdict: str | None = None,
     policy_path: Path | str = DEFAULT_MODEL_POLICY_PATH,
     runtime_request: dict[str, Any] | None = None,
+    baseline_dirty_paths: Iterable[str] | None = None,
 ) -> ReviewGateDecision:
     gate_cfg = load_review_gate_config(config)
     mode = gate_cfg["mode"]
@@ -644,6 +665,7 @@ def evaluate_review_gate(
         plan,
         messages,
         changed_paths=changed_paths,
+        baseline_dirty_paths=baseline_dirty_paths,
     )
     mutation_sources = _collect_file_mutation_tool_names(messages)
     review_required = material_change_detected

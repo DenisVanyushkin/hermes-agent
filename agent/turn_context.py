@@ -881,6 +881,16 @@ def build_turn_context(
         if not isinstance(pending_cli_message, dict) or pending_cli_message.get("_db_persisted"):
             agent._pending_cli_user_message = None
 
+    # Snapshot what the worktree already had dirty BEFORE the agent runs. The
+    # review gate subtracts this so an unrelated work-in-progress diff left in
+    # the repo is not attributed to this session (2026-07-19 rebase-cron block).
+    try:
+        from hermes_cli.review_gate import snapshot_material_dirty_paths
+
+        agent._turn_dirty_baseline = snapshot_material_dirty_paths()
+    except Exception:
+        agent._turn_dirty_baseline = []
+
     return TurnContext(
         user_message=user_message,
         original_user_message=original_user_message,

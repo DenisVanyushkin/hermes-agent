@@ -309,6 +309,7 @@ def finalize_turn(
                     review_plan,
                     messages,
                     runtime_request=runtime_request if isinstance(runtime_request, dict) else None,
+                    baseline_dirty_paths=getattr(agent, "_turn_dirty_baseline", None),
                 )
                 review_gate_log = build_review_gate_evaluation_log_fields(review_gate)
                 logger.info(
