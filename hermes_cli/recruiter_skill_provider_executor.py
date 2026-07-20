@@ -137,7 +137,9 @@ def _payload_to_result(
         "skill_markdown_path": skill_markdown_path,
         "expected_schema": requested_fields,
     }
-    if skill_id == POSITIONING_EVIDENCE_SKILL_ID:
+    if skill_id == VACANCY_EVALUATION_SKILL_ID:
+        _augment_vacancy_evaluation_output(output)
+    elif skill_id == POSITIONING_EVIDENCE_SKILL_ID:
         _augment_positioning_output(output)
 
     status = output.get("status")
@@ -153,6 +155,40 @@ def _payload_to_result(
         provenance=provenance,
         provider_called=provider_called,
     )
+
+
+def _augment_vacancy_evaluation_output(output: dict[str, Any]) -> None:
+    """Add runner-required aliases as a superset over the native evaluation packet.
+
+    ``run_recruiter_skill_execution`` runs vacancy evaluation FIRST and validates
+    ``REQUIRED_VACANCY_EVALUATION_FIELDS`` (summary/interpretation/gaps/next-step),
+    while the real provider emits ``recruiter_vacancy_evaluation_packet_v1`` fields
+    (recommendation/fit_assessment/strengths/risks/evidence/missing_information/
+    next_step). The two share no names, so without these aliases a live run dies at
+    stage 1 with ``SKILL_OUTPUT_INVALID``. Aliases regroup native fields
+    deterministically (no invented content); native fields are preserved because the
+    whole packet is passed through to ``recruiter_document_inputs`` downstream.
+    ``_missing_fields`` checks presence, so empty fallbacks satisfy the gate.
+    """
+    if "vacancy_evaluation_summary" not in output:
+        fit_assessment = output.get("fit_assessment")
+        output["vacancy_evaluation_summary"] = fit_assessment if isinstance(fit_assessment, str) else ""
+    if "fit_interpretation" not in output:
+        interp: dict[str, Any] = {}
+        if "strengths" in output:
+            interp["strengths"] = output["strengths"]
+        if "risks" in output:
+            interp["risks"] = output["risks"]
+        output["fit_interpretation"] = interp
+    if "evidence_gaps" not in output:
+        missing = output.get("missing_information")
+        output["evidence_gaps"] = list(missing) if isinstance(missing, list) else []
+    if "recommendation_for_next_step" not in output:
+        recommendation = output.get("recommendation")
+        if not isinstance(recommendation, str) or not recommendation:
+            next_step = output.get("next_step")
+            recommendation = next_step if isinstance(next_step, str) else ""
+        output["recommendation_for_next_step"] = recommendation
 
 
 def _augment_positioning_output(output: dict[str, Any]) -> None:

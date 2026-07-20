@@ -260,6 +260,23 @@ def _runner_context_builder(_request: Any) -> RecruiterContextPacket:
     )
 
 
+def _native_vacancy_evaluation_packet() -> dict[str, Any]:
+    """Genuine ``recruiter_vacancy_evaluation_packet_v1`` shape (no runner field names)."""
+    return {
+        "schema_version": "recruiter_vacancy_evaluation_packet_v1",
+        "skill_id": "vacancy-evaluation",
+        "status": "VACANCY_EVALUATION_READY",
+        "recommendation": "apply",
+        "fit_assessment": "Strong fit for executive product leadership.",
+        "strengths": ["Scaled B2B product orgs.", "Marketplace depth."],
+        "risks": ["Company stage differs."],
+        "evidence": ["Led multi-team product org."],
+        "missing_information": ["Exact team size not confirmed."],
+        "next_step": "Proceed to positioning synthesis.",
+        "provenance": {"provider": "openai-codex"},
+    }
+
+
 def _native_positioning_packet() -> dict[str, Any]:
     return {
         "schema_version": "recruiter_positioning_packet_v1",
@@ -340,15 +357,65 @@ def test_absent_optional_source_fields_yield_safe_empty_aliases() -> None:
         assert field in result.output
 
 
-def test_native_packet_passes_runner_required_fields_end_to_end() -> None:
-    # Full runner path: vacancy-evaluation then positioning, both via the adapter.
-    eval_payload = {
-        "vacancy_evaluation_summary": "Strong fit.",
-        "fit_interpretation": "High-confidence match.",
-        "evidence_gaps": [],
-        "recommendation_for_next_step": "Proceed to positioning.",
+def test_vacancy_evaluation_aliases_satisfy_runner_required_fields() -> None:
+    adapter, _, _ = _adapter(evaluation_payload=_native_vacancy_evaluation_packet())
+    result = adapter.execute(
+        skill_id=VACANCY_EVALUATION_SKILL_ID,
+        skill_input={},
+        skill_markdown_path="p",
+        expected_schema=["vacancy_evaluation_summary"],
+    )
+    for field in ("vacancy_evaluation_summary", "fit_interpretation", "evidence_gaps", "recommendation_for_next_step"):
+        assert field in result.output
+    assert result.output["vacancy_evaluation_summary"] == "Strong fit for executive product leadership."
+    assert result.output["fit_interpretation"] == {
+        "strengths": ["Scaled B2B product orgs.", "Marketplace depth."],
+        "risks": ["Company stage differs."],
     }
-    evaluation = _FakeProviderExecutor(eval_payload)
+    assert result.output["evidence_gaps"] == ["Exact team size not confirmed."]
+    assert result.output["recommendation_for_next_step"] == "apply"
+    # native fields survive untouched
+    assert result.output["fit_assessment"] == "Strong fit for executive product leadership."
+    assert result.output["recommendation"] == "apply"
+    assert result.output["schema_version"] == "recruiter_vacancy_evaluation_packet_v1"
+
+
+def test_vacancy_evaluation_recommendation_falls_back_to_next_step() -> None:
+    packet = _native_vacancy_evaluation_packet()
+    del packet["recommendation"]
+    adapter, _, _ = _adapter(evaluation_payload=packet)
+    result = adapter.execute(
+        skill_id=VACANCY_EVALUATION_SKILL_ID,
+        skill_input={},
+        skill_markdown_path="p",
+        expected_schema=[],
+    )
+    assert result.output["recommendation_for_next_step"] == "Proceed to positioning synthesis."
+
+
+def test_vacancy_evaluation_absent_source_fields_yield_safe_empty_aliases() -> None:
+    minimal = {
+        "schema_version": "recruiter_vacancy_evaluation_packet_v1",
+        "skill_id": "vacancy-evaluation",
+        "status": "VACANCY_EVALUATION_READY",
+    }
+    adapter, _, _ = _adapter(evaluation_payload=minimal)
+    result = adapter.execute(
+        skill_id=VACANCY_EVALUATION_SKILL_ID,
+        skill_input={},
+        skill_markdown_path="p",
+        expected_schema=[],
+    )
+    assert result.output["vacancy_evaluation_summary"] == ""
+    assert result.output["fit_interpretation"] == {}
+    assert result.output["evidence_gaps"] == []
+    assert result.output["recommendation_for_next_step"] == ""
+
+
+def test_native_packets_pass_runner_required_fields_end_to_end() -> None:
+    # Full runner path: vacancy-evaluation THEN positioning, both GENUINE native packets
+    # driven through the adapter. Only the adapter's aliases make this reach READY.
+    evaluation = _FakeProviderExecutor(_native_vacancy_evaluation_packet())
     positioning = _FakeProviderExecutor(_native_positioning_packet())
     adapter = build_recruiter_positioning_skill_executor(
         evaluation_executor=evaluation,
@@ -365,7 +432,45 @@ def test_native_packet_passes_runner_required_fields_end_to_end() -> None:
         executor=adapter,
     )
     assert report.status is RecruiterSkillExecutionStatus.EXECUTION_READY
+    assert report.vacancy_evaluation_result is not None
     assert report.positioning_evidence_result is not None
     # native fields preserved through the runner's normalization
+    assert "fit_assessment" in report.vacancy_evaluation_result
     assert "evidence_items" in report.positioning_evidence_result
     assert "evidence_map" in report.positioning_evidence_result
+
+
+class _RawNativeExecutor:
+    """Bypasses the adapter's aliasing: returns the native packet as SkillExecutionResult verbatim."""
+
+    provider_backed = True
+
+    def __init__(self, eval_packet: dict[str, Any], pos_packet: dict[str, Any]) -> None:
+        self._by_skill = {
+            VACANCY_EVALUATION_SKILL_ID: eval_packet,
+            POSITIONING_EVIDENCE_SKILL_ID: pos_packet,
+        }
+
+    def execute(self, *, skill_id, skill_input, skill_markdown_path, expected_schema) -> SkillExecutionResult:
+        return SkillExecutionResult(
+            status="SUCCESS",
+            skill_id=skill_id,
+            output=dict(self._by_skill[skill_id]),
+            provider_called=True,
+        )
+
+
+def test_unaugmented_native_eval_fails_runner_gate_proving_aliases_are_load_bearing() -> None:
+    # Same native packets, but WITHOUT the adapter's aliases: the runner rejects the
+    # eval stage on missing required fields -> proves the aliases are what make it pass.
+    raw = _RawNativeExecutor(_native_vacancy_evaluation_packet(), _native_positioning_packet())
+    report = run_recruiter_skill_execution(
+        RecruiterSkillExecutionRequest(
+            vacancy_id=101,
+            flow=FLOW_EVALUATE_AND_POSITION,
+            allow_provider_execution=True,
+        ),
+        context_builder=_runner_context_builder,
+        executor=raw,
+    )
+    assert report.status is RecruiterSkillExecutionStatus.SKILL_OUTPUT_INVALID
