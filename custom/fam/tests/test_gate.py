@@ -51,6 +51,7 @@ CFG = {
     "prep_check_days": 5,
     "detour_offer_min_min": 2,
     "detour_max_min": 30,
+    "goal_ritual_window_days": 3,
 }
 
 
