@@ -978,6 +978,69 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# -- NOT NULL default coercion --------------------------------------------
+#
+# normalize_row (Task 1) maps every empty/blank cell to None -- that's the
+# right canonical shape for diff/verify_roundtrip comparisons (an exported
+# '' also normalizes to None on the DB side, see make_snapshot, so both
+# sides agree and a cleared cell that was already empty stays a no-op).
+# But a handful of columns are declared NOT NULL DEFAULT <x> in db.py's
+# SCHEMA (e.g. places.address, events.transport) -- passing that bare None
+# straight into an INSERT/UPDATE crashes with a NOT NULL IntegrityError and
+# rolls back the whole apply (hit live: an operator cleared "адрес" and the
+# import aborted). travel_min is the one exception -- normalize_row already
+# folds its empty cell to 0 at parse time (see _travel_min_from_xlsx's call
+# site above), so it never reaches here as None; it's still listed so a
+# future reader doesn't wonder why it's missing.
+#
+# This table is the single place that maps sheet + column key -> schema
+# default (kept in sync with db.py's init_db SCHEMA, the ground truth for
+# NOT NULL columns) -- adding a new NOT NULL DEFAULT column to any sheet is
+# a one-line addition here, applied uniformly to both insert rows and
+# update changes below.
+_NOT_NULL_DEFAULTS = {
+    "Места": {"address": "", "notes": "", "source": "manual", "travel_min": 0},
+    "Люди": {"notes": ""},
+    "События": {"notes": "", "transport": "unknown"},
+    "Серии": {"notes": "", "transport": "unknown"},
+    "Планы": {"notes": ""},
+    "Лекарства": {"dose": ""},
+    "Покупки": {"qty": "", "added_by": "", "source": "manual"},
+}
+
+
+def _with_defaults(sheet, row):
+    """Insert-row form: coerce any None value for a NOT NULL DEFAULT column
+    (per _NOT_NULL_DEFAULTS[sheet]) to its schema default. Returns a new
+    dict; row itself is not mutated. Columns absent from the row, or not
+    listed for this sheet, pass through untouched."""
+    defaults = _NOT_NULL_DEFAULTS.get(sheet)
+    if not defaults:
+        return row
+    out = dict(row)
+    for key, default in defaults.items():
+        if key in out and out[key] is None:
+            out[key] = default
+    return out
+
+
+def _with_defaults_in_changes(sheet, changes):
+    """Update-changes form: same coercion as _with_defaults, but applied to
+    the "now" side of a {key: (was, now)} changes dict (as produced by
+    diff()). The "was" side is left as-is -- it only feeds the audit log
+    and format_report, never a write."""
+    defaults = _NOT_NULL_DEFAULTS.get(sheet)
+    if not defaults:
+        return changes
+    out = dict(changes)
+    for key, default in defaults.items():
+        if key in out:
+            was, now = out[key]
+            if now is None:
+                out[key] = (was, default)
+    return out
+
+
 # -- Места --------------------------------------------------------------
 
 def _insert_place(conn, row):
@@ -1428,8 +1491,9 @@ def apply_diff(conn, d, now_utc=None):
     counts = {"inserts": {}, "updates": {}, "deletes": {}}
 
     for sheet in _APPLY_ORDER:
-        ins_rows = d.inserts.get(sheet, [])
-        upd_items = d.updates.get(sheet, [])
+        ins_rows = [_with_defaults(sheet, row) for row in d.inserts.get(sheet, [])]
+        upd_items = [{**item, "changes": _with_defaults_in_changes(sheet, item["changes"])}
+                     for item in d.updates.get(sheet, [])]
 
         if sheet == "Люди":
             _apply_people_inserts(conn, ins_rows)

@@ -188,6 +188,76 @@ def test_apply_gis_url_on_existing_place_updates_coords(db, monkeypatch):
     assert seed.verify_roundtrip(db, f)                   # exit-3-ловушка закрыта
 
 
+def test_apply_clears_address_to_schema_default_not_null(db):
+    """SYMPTOM (live import): operator clears the "адрес" cell on an
+    EXISTING place (moved the value into "2ГИС-ссылка" instead) --
+    normalize_row maps the blank cell to None, and places.address is
+    NOT NULL DEFAULT '' in db.py. apply_diff must coerce that None to ''
+    on the update path instead of crashing with a NOT NULL IntegrityError
+    (and rolling back the whole import, as it did live)."""
+    _seed_db(db)
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {s: [dict(r) for r in v] for s, v in rows.items()}
+    idx = next(i for i, r in enumerate(f["Места"]) if r["name"] == "Казакова")
+    assert f["Места"][idx]["address"]                          # precondition: was set
+    f["Места"][idx]["address"] = None                          # cleared cell
+    rid = f["Места"][idx]["id"]
+    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+    got = places.get(db, rid)
+    assert got["address"] == ""                                # schema default, never None
+    assert seed.verify_roundtrip(db, f)
+
+
+def test_apply_new_place_empty_address_notes(db):
+    """A brand-new place row with empty address/notes cells must insert
+    cleanly, landing on the schema defaults ('')."""
+    _seed_db(db)
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {**rows, "Места": rows["Места"] + [{"id": None, "name": "Новое место",
+         "address": None, "category": None, "lat": None, "lon": None,
+         "gis_url": None, "travel_min": 0, "aliases": [], "notes": None}]}
+    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+    got = places.get(db, "Новое место")
+    assert got["address"] == ""
+    assert got["notes"] == ""
+    assert seed.verify_roundtrip(db, f)
+
+
+def test_apply_new_event_no_place_empty_transport(db):
+    """A new event with no place has no reason to carry a transport value
+    -- an empty "транспорт" cell must land on the 'unknown' schema default,
+    not crash (events.transport is NOT NULL DEFAULT 'unknown')."""
+    _seed_db(db)
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {**rows, "События": rows["События"] + [{"id": None, "title": "Звонок",
+         "start": "2026-08-05 09:00", "end": None, "place": None, "transport": None,
+         "participants": [], "prep_min": None, "notes": None}]}
+    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+    row = db.execute("SELECT transport, notes FROM events WHERE title='Звонок'").fetchone()
+    assert row["transport"] == "unknown"
+    assert row["notes"] == ""
+    assert seed.verify_roundtrip(db, f)
+
+
+def test_apply_new_shopping_and_meds_empty_optional_text(db):
+    """New shopping/meds rows with empty optional text cells (qty, added_by,
+    dose) must insert cleanly onto their schema defaults ('')."""
+    _seed_db(db)
+    rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    f = {**rows,
+         "Покупки": rows["Покупки"] + [{"id": None, "name": "Хлеб", "qty": None,
+                                        "source": "manual", "added_by": None}],
+         "Лекарства": rows["Лекарства"] + [{"id": None, "name": "Аспирин", "dose": None,
+                                            "times": ["09:00"], "remaining": None,
+                                            "threshold": 0, "enabled": 1}]}
+    seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
+    srow = db.execute("SELECT qty, added_by FROM shopping WHERE name='Хлеб'").fetchone()
+    assert srow["qty"] == "" and srow["added_by"] == ""
+    mrow = db.execute("SELECT dose FROM meds WHERE name='Аспирин'").fetchone()
+    assert mrow["dose"] == ""
+    assert seed.verify_roundtrip(db, f)
+
+
 def test_apply_gis_url_does_not_override_filled_coords(db, monkeypatch):
     """lat/lon в файле в приоритете над gis_url (контракт Col.comment)."""
     _seed_db(db)
