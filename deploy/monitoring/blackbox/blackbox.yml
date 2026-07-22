@@ -39,7 +39,12 @@ modules:
     timeout: 15s
     http:
       valid_status_codes: [200]
-      follow_redirects: false
+      # Unlike every other module here, this one follows redirects. The
+      # root path 301s to a locale-prefixed path (e.g. /kaz/) as normal
+      # site behaviour, not a fault — the point of this probe is TLS-chain
+      # validation against our CA bundle, not root-path routing. Do not
+      # flip this back to false to 'match' the other modules.
+      follow_redirects: true
       preferred_ip_protocol: ip4
       ip_protocol_fallback: false
       tls_config:
