@@ -45,16 +45,17 @@
         labels: {module: tcp_tls, dependency: mail, tier: important, layer: dependency}
       - targets: ['smtp.gmail.com:587']
         labels: {module: tcp_connect, dependency: mail, tier: important, layer: dependency}
-      # KNOWN LIMITATION (2026-07-22): root 301-redirects to
-      # api-dashboard.search.brave.com/... (normal site routing). An
-      # unauthenticated request to a real search endpoint doesn't redirect
-      # but answers 422 (missing x-subscription-token header), which is
-      # outside http_auth_expected's [200,401,403]. Fixing this cleanly
-      # needs a blackbox.yml module change (out of this task's file scope)
-      # — left as probe_success=0 pending a coordinator decision; not a
-      # genuine brave outage (JSON error body confirms the API answered).
-      - targets: ['https://api.search.brave.com/']
-        labels: {module: http_auth_expected, dependency: brave, tier: important, layer: dependency}
+      # Root 301-redirects to api-dashboard.search.brave.com (normal site
+      # routing, avoided via follow_redirects: false). An unauthenticated
+      # request to a real search endpoint answers 422 (missing
+      # x-subscription-token header) without redirecting — "reached and
+      # validating input," the same class of signal as codex's 403. Per
+      # coordinator decision 2026-07-22, this gets its own module
+      # (http_brave_alive, blackbox.yml) rather than widening the shared
+      # http_auth_expected, which codex also uses and where a 422 would be
+      # a genuine anomaly.
+      - targets: ['https://api.search.brave.com/res/v1/web/search?q=test']
+        labels: {module: http_brave_alive, dependency: brave, tier: important, layer: dependency}
       # --- layer: channel ----------------------------------------------
       - targets: ['1.1.1.1', '8.8.8.8']
         labels: {module: icmp_v4, dependency: uplink, tier: baseline, layer: channel}
