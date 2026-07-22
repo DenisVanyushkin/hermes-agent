@@ -556,7 +556,7 @@ def test_completion_allowed_final_response_text_summarizes_commit_gate() -> None
     )
 
     assert "✅ ЗАДАЧА ВЫПОЛНЕНА" in text
-    assert "━━ Изменения ━━ (2 файлов)" in text
+    assert "━━ Изменения ━━ (2 файла)" in text
     assert "- hermes_cli/smoke_square.py" in text
     assert "- tests/test_smoke_square.py" in text
     assert "Тесты: ✅ passed" in text
@@ -4918,3 +4918,82 @@ def test_escalation_bounded_by_max_model_escalations_reviewer_blockers(tmp_path:
     assert captured_classes == [None] * (policy.max_review_iterations - 1) + ["senior_coding"]
     assert result.user_action_required is True
     assert result.blocked_reason is not None
+
+
+def test_commit_gate_renders_per_file_summaries_and_line_stats() -> None:
+    """The engineer already returns changes:[{path,summary}]; the commit gate must
+    show them next to deterministic git line counts, so prose and numbers can be
+    cross-checked against each other."""
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._completion_allowed_final_response_text(
+        git_gate={
+            "changed_files": ["scripts/news_collector.py", "scripts/news_context.py"],
+            "line_stats": {
+                "scripts/news_collector.py": {"added": 79, "removed": 8},
+                "scripts/news_context.py": {"added": 2, "removed": 2},
+            },
+        },
+        test_summary={"status": "passed", "command": "venv/bin/pytest -q", "summary": "5 passed"},
+        reviewer_packet={
+            "packet_status": "ready_for_review",
+            "safe_packet": {
+                "engineer_summary": "Починил дубли новостей.",
+                "engineer_sanitized_output": {
+                    "changes": [
+                        {"path": "scripts/news_collector.py",
+                         "summary": "Дедупликация по заголовку: таблица seen_titles."},
+                        {"path": "scripts/news_context.py",
+                         "summary": "Промпт запрещает пересказывать старые истории."},
+                    ]
+                },
+            },
+        },
+    )
+
+    assert "━━ Изменения ━━ (2 файла, +81/−10)" in text
+    assert "- scripts/news_collector.py (+79/−8)" in text
+    assert "  Дедупликация по заголовку: таблица seen_titles." in text
+    assert "- scripts/news_context.py (+2/−2)" in text
+    assert "  Промпт запрещает пересказывать старые истории." in text
+
+
+def test_commit_gate_marks_files_the_engineer_did_not_describe() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._completion_allowed_final_response_text(
+        git_gate={"changed_files": ["a.py", "b.py"]},
+        test_summary={"status": "passed", "command": "venv/bin/pytest -q"},
+        reviewer_packet={
+            "packet_status": "ready_for_review",
+            "safe_packet": {
+                "engineer_sanitized_output": {
+                    "changes": [{"path": "a.py", "summary": "Описал только этот файл."}]
+                },
+            },
+        },
+    )
+
+    assert "  Описал только этот файл." in text
+    assert "описание не предоставлено" in text
+
+
+def test_commit_gate_strips_leaked_role_banner_from_summary() -> None:
+    """Live 2026-07-22: the engineer returned its own system-prompt banner as the
+    change summary, so "Что сделано" read "Hermes role: engineer"."""
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._completion_allowed_final_response_text(
+        git_gate={"changed_files": ["a.py"]},
+        test_summary={"status": "passed", "command": "venv/bin/pytest -q"},
+        reviewer_packet={
+            "packet_status": "ready_for_review",
+            "safe_packet": {
+                "engineer_summary": "Hermes role: engineer\nOperation category: code_change\n",
+            },
+        },
+    )
+
+    assert "Hermes role:" not in text
+    assert "Operation category:" not in text
+    assert "инженер не предоставил описание изменений" in text

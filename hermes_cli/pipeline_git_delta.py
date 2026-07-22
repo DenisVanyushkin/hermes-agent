@@ -348,3 +348,45 @@ def _git_diff_changed_files(repo: Path, baseline_head: str, post_head: str) -> l
         if path:
             changed.add(path)
     return sorted(changed)
+
+
+def collect_line_stats(repo: Any, changed_files: Any) -> dict[str, dict[str, int]]:
+    """Per-file {"added": N, "removed": M} for the commit-gate message.
+
+    Deterministic counterweight to the engineer's prose: the model can
+    misdescribe a change, but it cannot alter these numbers. Untracked files are
+    counted via --no-index against /dev/null, since git diff ignores them.
+    Never raises -- a rendering path must not fail because git misbehaved.
+    """
+    from pathlib import Path as _Path
+
+    repo_path = _Path(str(repo))
+    stats: dict[str, dict[str, int]] = {}
+    for raw in list(changed_files or []):
+        rel = str(raw).strip()
+        if not rel:
+            continue
+        target = repo_path / rel
+        try:
+            if not target.exists():
+                continue
+            proc = subprocess.run(
+                ["git", "diff", "--numstat", "HEAD", "--", rel],
+                cwd=str(repo_path), capture_output=True, text=True, check=False,
+            )
+            line = (proc.stdout or "").strip().splitlines()
+            if not line:
+                proc = subprocess.run(
+                    ["git", "diff", "--numstat", "--no-index", "/dev/null", rel],
+                    cwd=str(repo_path), capture_output=True, text=True, check=False,
+                )
+                line = (proc.stdout or "").strip().splitlines()
+            if not line:
+                continue
+            added, removed, *_ = line[0].split("\t")
+            if added == "-" or removed == "-":  # binary file
+                continue
+            stats[rel] = {"added": int(added), "removed": int(removed)}
+        except Exception:
+            continue
+    return stats

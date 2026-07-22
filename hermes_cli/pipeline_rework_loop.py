@@ -2117,6 +2117,79 @@ def _blocked_final_response_text(
     return "\n".join(lines)
 
 
+# The banner may arrive multi-line or already flattened to a single line by the
+# packet sanitizer, so match through "Operation category: <value>" either way.
+_ROLE_BANNER_RE = re.compile(
+    r"^\s*Hermes role:\s*\S+(?:\s*Operation category:\s*\S+)?[ \t]*\n?",
+    re.I,
+)
+
+
+def _strip_role_banner(text: str | None) -> str:
+    """Drop a leaked subagent system-prompt banner from model-authored prose.
+
+    The engineer occasionally returns its own role preamble as the change
+    summary (live 2026-07-22), which rendered as "Hermes role: engineer" under
+    "Что сделано". Same leak already handled in scripts/idle_idea_context.py.
+    """
+    cleaned = _ROLE_BANNER_RE.sub("", str(text or ""))
+    cleaned = re.sub(r"^\s*Operation category:\s*\S+[ \t]*\n?", "", cleaned, flags=re.I | re.M)
+    return cleaned.strip()
+
+
+def _plural_files(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return "файл"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return "файла"
+    return "файлов"
+
+
+def _render_change_section(git_gate, safe_packet) -> list[str]:
+    """Per-file lines: engineer prose (what/why) + deterministic git line counts.
+
+    The two sources check each other -- the model can misdescribe a file, but it
+    cannot alter +N/-M, and a file the engineer never mentions is called out.
+    """
+    changed_files = [
+        str(item).strip()
+        for item in list((git_gate or {}).get("changed_files") or [])
+        if str(item).strip()
+    ]
+    line_stats = (git_gate or {}).get("line_stats")
+    line_stats = line_stats if isinstance(line_stats, dict) else {}
+
+    sanitized_output = (safe_packet or {}).get("engineer_sanitized_output")
+    descriptions: dict[str, str] = {}
+    if isinstance(sanitized_output, dict):
+        for item in sanitized_output.get("changes") or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip()
+            summary = _strip_role_banner(item.get("summary"))
+            if path and summary:
+                descriptions[path] = summary
+
+    total_added = sum(int((line_stats.get(p) or {}).get("added") or 0) for p in changed_files)
+    total_removed = sum(int((line_stats.get(p) or {}).get("removed") or 0) for p in changed_files)
+
+    header = f"━━ Изменения ━━ ({len(changed_files)} {_plural_files(len(changed_files))}"
+    if total_added or total_removed:
+        header += f", +{total_added}/−{total_removed}"
+    header += ")"
+
+    lines = ["", header]
+    for path in changed_files:
+        stats = line_stats.get(path) or {}
+        added, removed = stats.get("added"), stats.get("removed")
+        if added is not None or removed is not None:
+            lines.append(f"- {path} (+{int(added or 0)}/−{int(removed or 0)})")
+        else:
+            lines.append(f"- {path}")
+        lines.append(f"  {descriptions.get(path) or '⚠️ описание не предоставлено'}")
+    return lines
+
+
 def _completion_allowed_final_response_text(
     *,
     git_gate: dict[str, Any] | None,
@@ -2177,14 +2250,14 @@ def _completion_allowed_final_response_text(
         "",
         "━━ Что сделано ━━",
     ]
-    if engineer_summary:
-        lines.append(engineer_summary)
+    clean_summary = _strip_role_banner(engineer_summary)
+    if clean_summary:
+        lines.append(clean_summary)
+    elif not finding_lines:
+        lines.append("⚠️ инженер не предоставил описание изменений")
     lines.extend(finding_lines)
 
-    changed_files = [str(item).strip() for item in list((git_gate or {}).get("changed_files") or []) if str(item).strip()]
-    lines.extend(["", f"━━ Изменения ━━ ({len(changed_files)} файлов)"])
-    for path in changed_files:
-        lines.append(f"- {path}")
+    lines.extend(_render_change_section(git_gate, safe_packet))
 
     lines.extend(["", "━━ Проверка ━━"])
 
@@ -2255,6 +2328,18 @@ def _finalize_loop_result(
     repo_path: str | None = None,
 ) -> PipelineReworkLoopResult:
     gate_reached = completion_allowed and candidate_complete and blocked_reason is None
+    if gate_reached and repo_path:
+        # Computed at render time (same pattern as the dirty-baseline block
+        # message): the working tree still holds the un-committed deliverable.
+        try:
+            from hermes_cli.pipeline_git_delta import collect_line_stats
+
+            git_gate = dict(git_gate or {})
+            git_gate["line_stats"] = collect_line_stats(
+                repo_path, (git_gate or {}).get("changed_files") or []
+            )
+        except Exception:
+            git_gate = dict(git_gate or {})  # stats are optional; never block the gate
     final_response_text = (
         _completion_allowed_final_response_text(
             git_gate=git_gate,
