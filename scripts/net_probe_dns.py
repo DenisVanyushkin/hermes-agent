@@ -89,7 +89,9 @@ def compare_answers(system_ips: set[str], doh_ips: set[str]) -> bool:
     return not (system_ips & doh_ips)
 
 
-def render_metrics(results: list[ProbeResult]) -> str:
+def render_metrics(results: list[ProbeResult], now: float | None = None) -> str:
+    if now is None:
+        now = time.time()
     seconds_lines: list[str] = []
     success_lines: list[str] = []
     mismatch_lines: list[str] = []
@@ -119,6 +121,9 @@ def render_metrics(results: list[ProbeResult]) -> str:
         "# HELP hermes_dns_resolve_success 1 if the resolver answered, 0 otherwise.",
         "# TYPE hermes_dns_resolve_success gauge",
         *success_lines,
+        "# HELP hermes_dns_probe_timestamp_seconds Unix time this probe run wrote its metrics.",
+        "# TYPE hermes_dns_probe_timestamp_seconds gauge",
+        f"hermes_dns_probe_timestamp_seconds {now:.3f}",
     ]
     # Headers for hermes_dns_answer_mismatch are themselves omitted when no
     # result qualifies, so the metric name never appears at all in that case
@@ -158,7 +163,7 @@ def main() -> int:
                     doh_ok=doh_ok,
                 )
             )
-    write_atomically(TEXTFILE_PATH, render_metrics(results))
+    write_atomically(TEXTFILE_PATH, render_metrics(results, now=time.time()))
     return 0
 
 

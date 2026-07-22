@@ -1,0 +1,25 @@
+# Fragment appended to ~/.hermes/monitoring/alertmanager/alertmanager.yml
+# under the top-level `inhibit_rules:` key. Kept in git for review; the live
+# file is authoritative and is not a git repo.
+#
+# One incident, one Telegram message: if the uplink is down, eight
+# dependency alerts are the same event seen eight times.
+#
+# `equal: [host]` was dropped 2026-07-22 (whole-branch review Fix 5): no
+# alert in network_alerts.yml emits a `host` label, so this only ever
+# "worked" because Alertmanager treats a label missing on both sides as
+# equal. The moment any alert gains a `host` label, inhibition would
+# silently stop matching and dependency alerts would fire uninhibited during
+# a real outage — failing in the direction of an alert storm, the worst
+# direction for this rule to fail in. There being no shared label to key on
+# between a channel alert and a dependency alert, `equal` should be empty.
+
+inhibit_rules:
+  - source_matchers:
+      - severity = critical
+    target_matchers:
+      - severity = warning
+    equal: [alertname]
+  - source_matchers: [alertname="NetworkChannelDown"]
+    target_matchers: [layer="dependency"]
+    equal: []

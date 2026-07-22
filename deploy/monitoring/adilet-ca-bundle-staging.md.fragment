@@ -1,0 +1,25 @@
+# Deployment step, not a config file: how adilet_ca_bundle.pem gets into
+# ~/.hermes/monitoring/blackbox/, which docker-compose.yml.fragment mounts
+# read-only into the blackbox container at /etc/blackbox/adilet_ca_bundle.pem
+# (referenced by the http_2xx_adilet module's tls_config.ca_file in
+# deploy/monitoring/blackbox/blackbox.yml, which IS committed).
+
+The public certificate itself is already tracked in git at
+`tools/legal_research/adilet_ca_bundle.pem` (added there for the lawyer
+role's adilet.zan.kz TLS chain fix; `.pem` is gitignored in general but this
+file was force-added — see CLAUDE.md). What was never recorded anywhere is
+that the *same* file must be copied into the monitoring stack so blackbox_
+exporter's http_2xx_adilet probe can validate adilet's certificate chain too
+(same root cause: adilet's server sends an incomplete chain missing the
+GoGetSSL intermediate).
+
+Staging command run by hand on 2026-07-22 (idempotent, safe to re-run after
+any rebuild of the monitoring host):
+
+    sudo -u hermes cp \
+      /home/hermes/.hermes/hermes-agent/tools/legal_research/adilet_ca_bundle.pem \
+      /home/hermes/.hermes/monitoring/blackbox/adilet_ca_bundle.pem
+
+If this file is ever rotated (e.g. GoGetSSL reissues), update the source
+under tools/legal_research/ first, then re-run this copy — do not edit the
+staged copy directly, it will drift silently.

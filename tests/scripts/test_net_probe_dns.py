@@ -99,6 +99,35 @@ def test_render_metrics_includes_help_and_type_headers_once():
     assert out.count("# TYPE hermes_dns_answer_mismatch gauge") == 1
 
 
+def test_render_metrics_emits_probe_timestamp_using_provided_value():
+    """render_metrics must stay pure: the timestamp is a parameter, not
+    time.time() called internally, so output is deterministic under test."""
+    results = [
+        net_probe_dns.ProbeResult(
+            name="example.org",
+            system_ips={"1.2.3.4"}, system_seconds=0.01, system_ok=True,
+            doh_ips={"1.2.3.4"}, doh_seconds=0.02, doh_ok=True,
+        )
+    ]
+    out = net_probe_dns.render_metrics(results, now=1234567890.0)
+    assert "hermes_dns_probe_timestamp_seconds 1234567890" in out
+    assert out.count("# TYPE hermes_dns_probe_timestamp_seconds gauge") == 1
+
+
+def test_render_metrics_probe_timestamp_defaults_without_now_argument():
+    """Callers (and existing tests) that omit `now` still get a timestamp
+    metric emitted — just not one asserted on for an exact value."""
+    results = [
+        net_probe_dns.ProbeResult(
+            name="example.org",
+            system_ips={"1.2.3.4"}, system_seconds=0.01, system_ok=True,
+            doh_ips={"1.2.3.4"}, doh_seconds=0.02, doh_ok=True,
+        )
+    ]
+    out = net_probe_dns.render_metrics(results)
+    assert "hermes_dns_probe_timestamp_seconds" in out
+
+
 def test_resolve_system_returns_ips_and_marks_success(monkeypatch):
     def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
         return [(2, 1, 6, "", ("93.184.216.34", 0))]

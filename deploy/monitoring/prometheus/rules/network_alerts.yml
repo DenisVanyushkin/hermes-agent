@@ -6,7 +6,7 @@ groups:
       # 5s bursts and self-heal. An alert without `for` becomes spam, gets
       # muted, and a muted alert is worse than no alert.
       - alert: NetworkChannelDown
-        expr: min(probe_success{layer="channel", module="icmp_v4"}) == 0
+        expr: max(probe_success{layer="channel", module="icmp_v4"}) == 0
         for: 3m
         labels:
           severity: critical
@@ -70,11 +70,12 @@ groups:
 
       - alert: ProbeLatencyDegraded
         expr: >
-          probe_duration_seconds
-            > 3 * avg_over_time(probe_duration_seconds[24h])
+          probe_duration_seconds{layer="dependency"}
+            > 3 * avg_over_time(probe_duration_seconds{layer="dependency"}[24h])
         for: 15m
         labels:
           severity: warning
+          layer: dependency
         annotations:
           summary: "Probe latency for {{ $labels.dependency }} is 3x its 24h baseline"
           description: "{{ $labels.instance }} is responding far slower than normal. Check the latency phase breakdown to see whether it is resolve, connect, tls or processing."
@@ -84,9 +85,26 @@ groups:
         for: 1h
         labels:
           severity: warning
+          layer: dependency
         annotations:
           summary: "TLS certificate for {{ $labels.dependency }} expires soon"
           description: "Certificate at {{ $labels.instance }} expires in under 14 days."
+
+      # net_probe_dns.py's honesty about missing data (Task 3) only helps if
+      # the script itself is still running. If the cron entry, venv, or
+      # script breaks, the last .prom file stays on disk forever and
+      # DNSSlow/DNSResolverMismatch silently monitor a frozen snapshot —
+      # the same failure mode BlackboxExporterDown exists to prevent, here
+      # applied to the DNS channel instead of blackbox.
+      - alert: DNSProbeStale
+        expr: time() - hermes_dns_probe_timestamp_seconds > 600
+        for: 5m
+        labels:
+          severity: warning
+          layer: channel
+        annotations:
+          summary: "DNS probe metrics are stale"
+          description: "hermes_dns_probe_timestamp_seconds has not advanced in over 10m. DNSSlow and DNSResolverMismatch are reading a frozen snapshot and cannot be trusted until this clears."
 
       # Without this, the exporter dying looks like "all quiet, no alerts".
       - alert: BlackboxExporterDown

@@ -1,0 +1,11 @@
+# Line added to the `hermes` user's crontab (`crontab -l -u hermes` on the
+# VPS; `crontab -e` is the live source of truth, this repo cannot edit it).
+# Kept here so a rebuild can restore it instead of silently losing the DNS
+# channel probe (Task 3 / scripts/net_probe_dns.py).
+#
+# Runs every minute, writes the node_exporter textfile at
+# NET_PROBE_DNS_OUTPUT (default /var/lib/hermes-metrics/net_probe_dns.prom).
+# Uses the repo's own venv, not system python, because httpx is only
+# installed there.
+
+* * * * * /home/hermes/.hermes/hermes-agent/venv/bin/python /home/hermes/.hermes/scripts/net_probe_dns.py

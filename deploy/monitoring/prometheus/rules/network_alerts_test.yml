@@ -24,6 +24,21 @@ tests:
               summary: "Uplink unreachable: ICMP to all baseline targets failing"
               description: "No ICMP reply from any channel target for 3m. Dependency alerts are inhibited."
 
+  # Regression test for the min-vs-max bug: one channel target at 0 and the
+  # other at 1 must NOT fire NetworkChannelDown — only when ALL targets are
+  # down should this alert (and its inhibition of every dependency alert)
+  # trigger. The old `min(...)` expression fired here; `max(...)` must not.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox",layer="channel",module="icmp_v4",instance="1.1.1.1",dependency="uplink",tier="baseline"}'
+        values: '0+0x10'
+      - series: 'probe_success{job="blackbox",layer="channel",module="icmp_v4",instance="8.8.8.8",dependency="uplink",tier="baseline"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: NetworkChannelDown
+        exp_alerts: []
+
   # A critical dependency down for 5m fires at critical severity.
   - interval: 1m
     input_series:
@@ -95,6 +110,7 @@ tests:
           - exp_labels:
               alertname: TLSCertExpiringSoon
               severity: warning
+              layer: dependency
               dependency: adilet
               instance: "https://adilet.zan.kz/"
               job: blackbox
@@ -238,3 +254,26 @@ tests:
             exp_annotations:
               summary: "Probe latency for wise is 3x its 24h baseline"
               description: "https://wise.com/api/v1/ is responding far slower than normal. Check the latency phase breakdown to see whether it is resolve, connect, tls or processing."
+
+  # DNSProbeStale: the timestamp metric is frozen at promtool's synthetic
+  # epoch (0), so time() - timestamp grows every minute. It crosses the
+  # 600s threshold at t=10m; for:5m means it must not fire before t=15m
+  # and must fire once sustained past it.
+  - interval: 1m
+    input_series:
+      - series: 'hermes_dns_probe_timestamp_seconds'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: DNSProbeStale
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: DNSProbeStale
+        exp_alerts:
+          - exp_labels:
+              alertname: DNSProbeStale
+              severity: warning
+              layer: channel
+            exp_annotations:
+              summary: "DNS probe metrics are stale"
+              description: "hermes_dns_probe_timestamp_seconds has not advanced in over 10m. DNSSlow and DNSResolverMismatch are reading a frozen snapshot and cannot be trusted until this clears."

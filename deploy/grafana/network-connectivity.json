@@ -136,7 +136,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min(probe_success{layer=\"channel\", module=\"icmp_v4\"})",
+          "expr": "max(probe_success{layer=\"channel\", module=\"icmp_v4\"})",
           "legendFormat": "uplink (ICMP)",
           "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
         },

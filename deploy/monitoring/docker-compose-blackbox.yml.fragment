@@ -1,0 +1,28 @@
+# Fragment appended to ~/.hermes/monitoring/docker-compose.yml under
+# `services:`. Kept in git for review; the live file is authoritative and is
+# not a git repo, so this is the only reconstructible record of the block.
+#
+# NET_RAW is required for blackbox_exporter's icmp_v4 module — without it,
+# ICMP probes fail with "permission denied" and probe_success is silently 0
+# (a false "channel down", not a crash, so it is easy to miss).
+#
+# The ./blackbox:/etc/blackbox:ro mount carries both blackbox.yml (module
+# definitions) and adilet_ca_bundle.pem (see
+# adilet-ca-bundle-staging.md.fragment) — blackbox.yml's http_2xx_adilet
+# module references the bundle by that mounted path.
+#
+# Deliberately no `ports:` — blackbox is reachable only from other
+# containers on the `monitoring` network, never from the host or internet.
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: blackbox
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/blackbox/blackbox.yml
+    volumes:
+      - ./blackbox:/etc/blackbox:ro
+    cap_add:
+      - NET_RAW
+    networks:
+      - monitoring
