@@ -37,7 +37,11 @@
           "uid": "PBFA97CFB590B2093"
         },
         "query": "label_values(probe_success, tier)",
-        "refresh": 1
+        "refresh": 1,
+        "current": {
+          "text": "critical",
+          "value": "critical"
+        }
       }
     ]
   },
@@ -151,7 +155,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Critical Dependency Latency by Phase",
+      "title": "Dependency Latency by Phase ($tier tier)",
       "datasource": {
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
@@ -173,7 +177,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "probe_http_duration_seconds{tier=\"critical\", dependency=~\"$dependency\"}",
+          "expr": "probe_http_duration_seconds{tier=~\"$tier\", dependency=~\"$dependency\"}",
           "legendFormat": "{{dependency}} / {{phase}}",
           "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
         }
