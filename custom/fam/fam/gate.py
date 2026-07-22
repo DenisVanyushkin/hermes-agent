@@ -607,18 +607,42 @@ def _call_rewrite(prompt, cfg):
 
 
 def _call_send(text, cfg):
-    """Run `hermes send -t TARGET` with text on stdin. Returns True on a
-    zero exit code, False on ANY failure (timeout, process error,
-    non-zero exit).
+    """Run `hermes send -t TARGET --json` with text on stdin. Returns
+    (ok, message_id): ok is True on a zero exit code, False on ANY
+    failure (timeout, process error, non-zero exit); message_id is the
+    platform message id the send tool reports, or None.
+
+    --json makes send_cmd print send_message_tool's payload verbatim, and
+    the WhatsApp path fills message_id from the bridge's /send response
+    (plugins/platforms/whatsapp/adapter.py::_standalone_send). That id is
+    what a later emoji reaction is correlated against (fam/react.py); a
+    missing/unparseable id must never fail a send that actually went
+    through -- the message is delivered, only the reaction shortcut is
+    unavailable for it (deliver() audits gate.no_msgid).
     """
     try:
         result = subprocess.run(
-            HERMES + ["send", "-t", cfg["target"]],
+            HERMES + ["send", "-t", cfg["target"], "--json"],
             input=text, capture_output=True, text=True, timeout=60,
         )
     except (subprocess.TimeoutExpired, OSError):
-        return False
-    return result.returncode == 0
+        return False, None
+    if result.returncode != 0:
+        return False, None
+    return True, _parse_message_id(result.stdout)
+
+
+def _parse_message_id(stdout):
+    """Pull message_id out of `hermes send --json` stdout. Tolerant by
+    design: any shape surprise yields None rather than an exception."""
+    try:
+        payload = json.loads((stdout or "").strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    msg_id = payload.get("message_id")
+    return str(msg_id) if msg_id else None
 
 
 def notify_denis(text):
@@ -641,7 +665,8 @@ def notify_denis(text):
     return result.returncode == 0
 
 
-def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
+def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None,
+            sent_ref=None):
     """Rewrite raw into Hermes's voice and deliver it. Returns one of:
     "sent", "quiet", "budget", "error".
 
@@ -683,6 +708,12 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
       5. send via hermes send; failure -> audit gate.error, return
          "error". Success -> audit gate.sent{kind,raw,final,attempt[,long]},
          return "sent".
+
+    sent_ref (optional) = {"kind": "reminder"|"med", "ref_id": int,
+    "event_id": int|None}: on a successful send, records the platform
+    message id in `sent_messages` so an emoji reaction on that very
+    message can be resolved back to this reminder/intake (fam/react.py).
+    Writes into the caller's transaction like every other audit here.
     """
     now = now_utc or _now()
 
@@ -748,10 +779,29 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None):
     if kind == "reminder":
         final_text = _append_piggyback_if_missing(final_text, raw)
 
-    if not _call_send(final_text, cfg):
+    ok, message_id = _call_send(final_text, cfg)
+    if not ok:
         audit.log(conn, "gate.error",
                    {"kind": kind, "raw": raw, "final": final_text, "attempt": attempt})
         return "error"
+
+    # Reaction-ack correlation (spec: reaction-acks, 2026-07-22): record
+    # which reminder/med intake this outbound message belongs to, so an
+    # emoji reaction on it can be mapped back deterministically. Opt-in
+    # per call site via sent_ref -- kinds without an ack primitive
+    # (digest, followup) pass nothing and are unaffected.
+    if sent_ref:
+        from fam import react  # local import: react imports gate._now
+        if message_id:
+            react.record_sent(
+                conn, message_id, sent_ref["kind"], sent_ref["ref_id"],
+                event_id=sent_ref.get("event_id"),
+                chat_jid=cfg.get("target", ""), now_utc=now)
+        else:
+            # Delivered, but unreactable: worth seeing in the nightly
+            # problem summary's audit sweep if it ever becomes chronic.
+            audit.log(conn, "gate.no_msgid",
+                      {"kind": kind, "ref": sent_ref})
 
     payload = {"kind": kind, "raw": raw, "final": final_text, "attempt": attempt}
     if long_flag:

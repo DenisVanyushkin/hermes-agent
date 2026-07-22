@@ -295,6 +295,12 @@ const logger = pino({ level: 'warn' });
 const messageQueue = [];
 const MAX_QUEUE_SIZE = 100;
 
+// Emoji reactions on our own outbound messages, drained by GET
+// /reactions. Deliberately separate from messageQueue: reactions are
+// answered deterministically (fam react-hook) and must never reach the
+// agent loop as a turn.
+const reactionQueue = [];
+
 // Track recently sent message IDs.  Two purposes:
 //   1. Prevent echo-back loops with media in self-chat mode.
 //   2. (When WHATSAPP_FORWARD_OWNER_MESSAGES=true) distinguish our own
@@ -304,6 +310,10 @@ const MAX_QUEUE_SIZE = 100;
 // sustained sending.
 const recentlySentIds = createOutboundIdTracker(512);
 const recentlyProcessedPollUpdates = createOutboundIdTracker(512);
+// WhatsApp redelivers reaction events (app-state resync, reconnect), and
+// an ack must not be applied twice -- fam/react.py is idempotent, but
+// deduping here keeps the redelivered noise out of the queue entirely.
+const recentlyProcessedReactions = createOutboundIdTracker(512);
 const messageStore = createBoundedMessageStore(512);
 
 function normalizePollUpdateOptions(aggregation, pollUpdateMessage, meId) {
@@ -403,6 +413,29 @@ function enqueuePollUpdateEvent({ key, update, selectedOptions, aggregation }) {
   if (messageQueue.length > MAX_QUEUE_SIZE) {
     messageQueue.shift();
   }
+}
+
+// Reactions live in their own queue, drained by GET /reactions. Kept
+// apart from messageQueue on purpose: /messages feeds the agent loop,
+// and an emoji reaction must never spend a model turn (see the
+// reactionMessage branch in messages.upsert).
+function enqueueReactionEvent(event) {
+  const dedupeId = `react:${event.targetMessageId}:${event.senderId}:${event.emoji}`;
+  if (recentlyProcessedReactions.has(dedupeId)) return;
+  recentlyProcessedReactions.remember(dedupeId);
+  reactionQueue.push(event);
+  if (reactionQueue.length > MAX_QUEUE_SIZE) {
+    reactionQueue.shift();
+  }
+  try {
+    console.log(JSON.stringify({
+      event: 'reaction',
+      targetMessageId: event.targetMessageId,
+      emoji: event.emoji,
+      removal: event.removal,
+      chatId: redactWhatsAppId(event.chatId),
+    }));
+  } catch {}
 }
 
 function rememberSentId(id) {
@@ -681,6 +714,38 @@ async function startSocket() {
       }
 
       const messageContent = getMessageContent(msg);
+
+      // Emoji reactions ride in on messages.upsert with an empty body, so
+      // without this branch they fall through to the "Skip empty messages"
+      // guard below and vanish. They are NOT queued onto messageQueue:
+      // a reaction must never become an agent turn (it is answered
+      // deterministically by `fam react-hook`, no LLM). A separate queue
+      // + endpoint keeps every existing /messages consumer byte-identical.
+      if (messageContent.reactionMessage) {
+        const reaction = messageContent.reactionMessage;
+        const target = reaction.key || {};
+        // Only reactions on messages WE sent are actionable (a reminder
+        // is always ours). Reacting to someone else's message is a
+        // private gesture the gateway has no business seeing.
+        if (target.fromMe && target.id) {
+          enqueueReactionEvent({
+            targetMessageId: target.id,
+            emoji: reaction.text || '',
+            removal: !reaction.text,
+            chatId,
+            senderId,
+            timestamp: Math.floor(Date.now() / 1000),
+          });
+        } else {
+          emitDebugEvent({
+            stage: 'ignored',
+            reason: 'reaction_on_foreign_message',
+            chatId: redactWhatsAppId(chatId),
+          });
+        }
+        continue;
+      }
+
       if (messageContent.pollUpdateMessage) {
         const pollUpdateMessage = messageContent.pollUpdateMessage;
         const pollKey = pollUpdateMessage.pollCreationMessageKey || {
@@ -838,6 +903,38 @@ app.use((req, res, next) => {
 app.get('/messages', (req, res) => {
   const msgs = messageQueue.splice(0, messageQueue.length);
   res.json(msgs);
+});
+
+// Poll for emoji reactions on our own messages (see reactionQueue).
+app.get('/reactions', (req, res) => {
+  res.json(reactionQueue.splice(0, reactionQueue.length));
+});
+
+// Put (or remove) a reaction on a message we sent — the ✅ acknowledgement
+// Hermes shows once a reaction-ack landed. An empty `emoji` removes.
+app.post('/send-reaction', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+  const { chatId, messageId, emoji } = req.body;
+  const normalizedChatId = normalizeChatIdForSend(chatId);
+  if (!normalizedChatId || !messageId) {
+    return res.status(400).json({ error: 'chatId and messageId are required' });
+  }
+  try {
+    // fromMe: the reaction always targets one of our own outbound
+    // reminders (the adapter only ever acks those).
+    const sent = await sendWithTimeout(normalizedChatId, {
+      react: {
+        text: emoji || '',
+        key: { remoteJid: normalizedChatId, fromMe: true, id: messageId },
+      },
+    });
+    trackSentMessageId(sent);
+    res.json({ success: true, messageId: sent?.key?.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Send a message

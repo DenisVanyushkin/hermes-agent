@@ -16,6 +16,7 @@ with different backends via a bridge pattern.
 """
 
 import asyncio
+import json
 import logging
 import os
 import platform
@@ -458,6 +459,16 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
 
+        # Reaction acks (hermes-home / Amina): when configured, emoji
+        # reactions Amina puts on Hermes's own reminder messages are
+        # applied deterministically by an external hook command -- no
+        # model turn, no agent loop. Unset (the default, and the state on
+        # every other deployment incl. the VPS) means reactions are
+        # polled from nobody and this whole path stays dormant.
+        # config.yaml: gateway.platforms.whatsapp.extra.reaction_hook_cmd
+        self._reaction_hook_cmd = config.extra.get("reaction_hook_cmd") or None
+        self._reaction_poll_task: Optional[asyncio.Task] = None
+
     def _coerce_float_extra(self, key: str, default: float) -> float:
         """Read a float from ``config.extra``, guarding against bad/non-finite values.
 
@@ -873,6 +884,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                                     self._http_session = aiohttp.ClientSession()
                                     await self._apply_configured_profile_photo()
                                     self._poll_task = asyncio.create_task(self._poll_messages())
+                                    self._start_reaction_polling()
                                     return True
                                 print(
                                     f"[{self.name}] Running bridge is stale "
@@ -1004,6 +1016,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
 
             # Start message polling task
             self._poll_task = asyncio.create_task(self._poll_messages())
+            self._start_reaction_polling()
             
             self._mark_connected()
             print(f"[{self.name}] Bridge started on port {self._bridge_port}")
@@ -1097,6 +1110,14 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             except (asyncio.CancelledError, Exception):
                 pass
         self._poll_task = None
+
+        if self._reaction_poll_task and not self._reaction_poll_task.done():
+            self._reaction_poll_task.cancel()
+            try:
+                await self._reaction_poll_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._reaction_poll_task = None
 
         # Close the persistent HTTP session
         if self._http_session and not self._http_session.closed:
@@ -1546,6 +1567,110 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 await asyncio.sleep(5)
             
             await asyncio.sleep(1)  # Poll interval
+
+    # ── Reaction acks (config-gated) ────────────────────────────────
+
+    async def _poll_reactions(self) -> None:
+        """Drain the bridge's reaction queue and apply each reaction via
+        the configured hook command.
+
+        Only runs when ``extra.reaction_hook_cmd`` is set. The bridge only
+        queues reactions on messages Hermes itself sent, and its own
+        allowlist (WHATSAPP_ALLOWED_USERS) already gated the sender, so
+        this loop's job is transport, not policy.
+
+        The hook reads one JSON event on stdin and prints a JSON verdict:
+        ``{"react": "✅"}`` asks us to acknowledge the reaction visibly on
+        the original message; anything else means stay silent. A failing
+        hook must never take down the adapter -- it is logged and, when a
+        notify command is configured, reported to the operator.
+        """
+        import aiohttp
+
+        while self._running:
+            try:
+                if not self._http_session:
+                    break
+                async with self._http_session.get(
+                    f"http://127.0.0.1:{self._bridge_port}/reactions",
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    events = await resp.json() if resp.status == 200 else []
+                for event in events:
+                    await self._apply_reaction_event(event)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[{self.name}] Reaction poll error: {e}")
+                await asyncio.sleep(5)
+            await asyncio.sleep(1)
+
+    async def _apply_reaction_event(self, event: Dict[str, Any]) -> None:
+        """Run the reaction hook for one event and honour its verdict."""
+        payload = json.dumps({
+            "target_message_id": event.get("targetMessageId"),
+            "emoji": event.get("emoji") or "",
+            "removal": bool(event.get("removal")),
+            "chat_jid": event.get("chatId") or "",
+            "sender": event.get("senderId") or "",
+        }, ensure_ascii=False)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *self._reaction_hook_cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(payload.encode()), timeout=30)
+        except Exception as e:
+            print(f"[{self.name}] Reaction hook failed to run: {e}")
+            return
+        if proc.returncode != 0:
+            print(f"[{self.name}] Reaction hook exit {proc.returncode}: "
+                  f"{(stderr or b'').decode(errors='replace')[:200]}")
+            return
+        try:
+            verdict = json.loads((stdout or b"").decode().strip() or "{}")
+        except json.JSONDecodeError:
+            print(f"[{self.name}] Reaction hook returned non-JSON output")
+            return
+        feedback = verdict.get("react")
+        if feedback:
+            await self._send_reaction(
+                event.get("chatId") or "", event.get("targetMessageId") or "",
+                feedback)
+
+    async def _send_reaction(self, chat_id: str, message_id: str,
+                             emoji: str) -> bool:
+        """Put an emoji reaction on one of our own messages (empty emoji
+        removes it). Best-effort: the ack it confirms already happened."""
+        import aiohttp
+
+        if not (self._http_session and chat_id and message_id):
+            return False
+        try:
+            async with self._http_session.post(
+                f"http://127.0.0.1:{self._bridge_port}/send-reaction",
+                json={"chatId": chat_id, "messageId": message_id,
+                      "emoji": emoji},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    print(f"[{self.name}] send-reaction failed: {resp.status}")
+                    return False
+                return True
+        except Exception as e:
+            print(f"[{self.name}] send-reaction error: {e}")
+            return False
+
+    def _start_reaction_polling(self) -> None:
+        """Arm the reaction loop when configured (called from connect())."""
+        if not self._reaction_hook_cmd:
+            return
+        if self._reaction_poll_task and not self._reaction_poll_task.done():
+            return
+        self._reaction_poll_task = asyncio.create_task(self._poll_reactions())
 
     # ── Text debounce batching ──────────────────────────────────────
 

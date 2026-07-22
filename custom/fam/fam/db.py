@@ -177,6 +177,17 @@ CREATE TABLE IF NOT EXISTS goals (
   created_at TEXT NOT NULL,
   closed_at TEXT);                     -- UTC ISO; done И declined оба «закрывают»
 CREATE INDEX IF NOT EXISTS idx_goals_period ON goals(period_type, period, status);
+CREATE TABLE IF NOT EXISTS sent_messages (
+  id INTEGER PRIMARY KEY,
+  wa_message_id TEXT NOT NULL UNIQUE,   -- bridge /send's key.id (last chunk)
+  chat_jid TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL CHECK (kind IN ('reminder','med')),
+  ref_id INTEGER NOT NULL,              -- reminders.id | med_intakes.id
+  event_id INTEGER,                     -- reminder chains: ack scope key
+  ack_status TEXT NOT NULL DEFAULT 'none'
+    CHECK (ack_status IN ('none','confirmed','skipped')),
+  created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_sent_messages_kind_ref ON sent_messages(kind, ref_id);
 """
 
 def resolve_db_path():
@@ -287,10 +298,14 @@ def init_db(conn):
     # covers fresh installs and pre-v9 databases alike, no _ensure_column
     # migration needed (same pattern as `plans` in 3b, `meds`/`shopping`
     # in 5).
+    # -- v10 (reaction acks): `sent_messages` is a whole new table --
+    # CREATE TABLE IF NOT EXISTS above covers fresh installs and pre-v10
+    # databases alike, no _ensure_column migration needed (same pattern
+    # as `goals` in v9).
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','9')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','10')")
     conn.execute(
-        "UPDATE meta SET value='9' WHERE key='schema_version'")
+        "UPDATE meta SET value='10' WHERE key='schema_version'")
     conn.commit()
 
 

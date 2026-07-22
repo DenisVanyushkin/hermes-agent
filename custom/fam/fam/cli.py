@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, rem, series, shopping, tick
+from fam import audit, cal, db as famdb, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, series, shopping, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -13,6 +13,13 @@ def cmd_init(args):
     out = {"ok": True, "db": famdb.resolve_db_path()}
     print(json.dumps(out, ensure_ascii=False) if args.json else f"initialized {out['db']}")
     return 0
+
+def cmd_react_hook(args):
+    """Machine-to-machine entry: the WhatsApp adapter pipes ONE reaction
+    event as JSON on stdin, we apply the mapped ack and print the
+    adapter's feedback instruction. No human-facing output mode -- this
+    is never typed by the agent or by Denis (see fam/react.py)."""
+    return react.run_hook()
 
 def cmd_log(args):
     conn = famdb.connect()
@@ -1447,6 +1454,10 @@ def build_parser():
     # --json (e.g. `fam --json init`) — only overwrite when explicitly passed here.
     sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                      help="machine-readable output")
+
+    sp = sub.add_parser("react-hook",
+                        help="apply a WhatsApp reaction event read from stdin")
+    sp.set_defaults(func=cmd_react_hook)
 
     sp = sub.add_parser("log"); sp.set_defaults(func=cmd_log)
     sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,

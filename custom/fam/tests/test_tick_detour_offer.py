@@ -17,7 +17,7 @@ class FakeDeliver:
         self.responses = []
 
     def __call__(self, conn, kind, raw, human_fallback, cfg, force=False,
-                 now_utc=None):
+                 now_utc=None, sent_ref=None):
         self.calls.append({"kind": kind, "raw": raw,
                             "human_fallback": human_fallback})
         return self.responses.pop(0)

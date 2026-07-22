@@ -625,7 +625,10 @@ def reminders(conn, now_utc=None, cfg=None):
                 item["title"] for item in checklist) + ")"
 
         status = gate.deliver(conn, "reminder", raw, human_fallback, cfg,
-                               now_utc=now)
+                               now_utc=now,
+                               sent_ref={"kind": "reminder",
+                                         "ref_id": reminder["id"],
+                                         "event_id": event["id"]})
         if status == "sent":
             conn.execute(
                 "UPDATE reminders SET status='sent', sent_at=? WHERE id=?",
@@ -899,7 +902,9 @@ def _meds_series(conn, now_utc, cfg):
                 human_fallback = f"Пора принять {name}" + (
                     f" ({dose})" if dose else "")
                 status = gate.deliver(conn, "med", raw, human_fallback, cfg,
-                                       force=True, now_utc=now_utc)
+                                       force=True, now_utc=now_utc,
+                                       sent_ref={"kind": "med",
+                                                 "ref_id": intake_id})
                 repeat_min = cfg.get("med_repeat_min", 45)
                 next_utc = (now_dt + timedelta(minutes=repeat_min)).isoformat(
                     timespec="seconds")
