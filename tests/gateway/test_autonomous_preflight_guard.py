@@ -146,7 +146,9 @@ def test_block_message_lists_dirty_files(monkeypatch):
     assert "dirty_files:" in text
     assert "[untracked] scripts/idle_idea_context.py" in text
     assert "[root_owned] agent/foo.pyc" in text
-    assert "React 🧹 to run baseline-doctor." in text
+    assert "baseline-doctor" in text
+    assert "♻️" in text
+    assert "почисти" in text
 
 
 # --- auto-heal dirty baseline (task 11) ------------------------------------

@@ -97,3 +97,26 @@ def test_action_reaction_unknown_ts_ignored():
                  "item": {"channel": "C1", "ts": "unknown"}}
         asyncio.run(adapter._maybe_apply_baseline_action(event))
     client.chat_postMessage.assert_not_awaited()
+
+
+def test_alternative_free_reaction_also_runs_doctor():
+    """♻️/recycle is a free emoji everywhere; 🧹 is premium-only on WhatsApp."""
+    adapter = _adapter()
+    client = MagicMock()
+    client.conversations_replies = AsyncMock(return_value={
+        "messages": [{"user": "UBOT", "bot_id": "B1", "ts": "111.222",
+                      "text": "final_verdict: autonomous_preflight_blocked"}]
+    })
+    client.chat_postMessage = AsyncMock(return_value={"ts": "999.000"})
+    adapter._get_client = lambda ch: client
+
+    with (
+        patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP"}),
+        patch("plugins.platforms.slack.adapter.run_baseline_doctor",
+              return_value={"clean": True, "fixed": [], "remaining": []}),
+    ):
+        event = {"type": "reaction_added", "reaction": "recycle", "user": "UOP",
+                 "item": {"channel": "C1", "ts": "111.222"}}
+        asyncio.run(adapter._maybe_run_baseline_doctor(event))
+
+    client.chat_postMessage.assert_awaited()

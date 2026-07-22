@@ -20403,6 +20403,47 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
 
     @staticmethod
+    def _build_baseline_doctor_ack(message, source):
+        """Run baseline-doctor (or apply a parked action) on an operator text command.
+
+        Reactions are handled only by the Slack adapter, and \U0001F9F9 is a premium emoji
+        on WhatsApp, so a text command is the only trigger available on every
+        platform. Returns None for anything that is not an exact command, so
+        ordinary messages reach the agent untouched.
+        """
+        try:
+            from pathlib import Path as _Path
+
+            from hermes_cli import baseline_doctor_service as _svc
+
+            action = _svc.parse_doctor_command(message)
+            if not action:
+                return None
+
+            repo = _Path(__file__).resolve().parent.parent
+            if action == "run":
+                result = _svc.run_doctor(repo)
+                report = _svc.render_report(result, reactions=False)
+                if not result["clean"] and result["remaining"]:
+                    _svc.record_pending(_svc.TEXT_PENDING_KEY, result["remaining"])
+                return report
+
+            remaining = _svc.pop_pending(_svc.TEXT_PENDING_KEY)
+            if not remaining:
+                return None
+            applied = _svc.apply_action(repo, action, remaining)
+            recheck = _svc.run_doctor(repo)
+            status = "\u2705" if applied.get("ok") else "\u26a0\ufe0f"
+            return (
+                f"{status} {action}: {len(applied.get('paths') or [])} file(s). "
+                f"{applied.get('detail') or ''}\n\n"
+                + _svc.render_report(recheck, reactions=False)
+            )
+        except Exception:
+            logger.warning("baseline-doctor command intercept failed", exc_info=True)
+            return None
+
+    @staticmethod
     def _build_commit_approval_ack(message, source):
         """Commit or discard the pending commit-gate deliverable on an operator reply.
 
@@ -20600,7 +20641,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if lines:
                 dirty_suffix = (
                     f"\ndirty_files:\n{lines}{more}\n"
-                    "React 🧹 to run baseline-doctor."
+                    "React \u267b\ufe0f (or send \u00ab\u043f\u043e\u0447\u0438\u0441\u0442\u0438\u00bb) to run baseline-doctor."
                 )
 
         return (
@@ -21046,6 +21087,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": _us_ack},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
+        _doctor_ack = self._build_baseline_doctor_ack(message, source)
+        if _doctor_ack is not None:
+            logger.info(
+                "baseline-doctor command intercept: handled: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": _doctor_ack,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": _doctor_ack},
                 ],
                 "api_calls": 0,
                 "tools": [],

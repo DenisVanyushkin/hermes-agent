@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 import importlib.util as _ilu  # noqa: E402
 
 from hermes_cli.baseline_doctor_service import (  # noqa: E402
-    TRIGGER_REACTION,
+    is_trigger_reaction,
     classify_action,
     is_block_message,
     is_operator,
@@ -2203,7 +2203,7 @@ class SlackAdapter(BasePlatformAdapter):
         if str((event or {}).get("type") or "") != "reaction_added":
             return
         reaction = str((event or {}).get("reaction") or "").strip().lower()
-        if reaction != TRIGGER_REACTION:
+        if not is_trigger_reaction(reaction):
             return
         user = str((event or {}).get("user") or "").strip()
         if not is_operator(user):

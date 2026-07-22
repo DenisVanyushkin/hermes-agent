@@ -69,3 +69,30 @@ def test_apply_commit(tmp_path):
     log = subprocess.run(["git", "log", "--oneline", "-1"], cwd=repo,
                          capture_output=True, text=True).stdout
     assert "baseline-doctor" in log
+
+
+def test_is_trigger_reaction_accepts_slack_names_and_unicode():
+    # Slack delivers bare names, Telegram/WhatsApp deliver the unicode glyph.
+    for value in ("broom", ":broom:", "\U0001F9F9", "recycle", "♻️", "ok_hand", "\U0001F44C"):
+        assert svc.is_trigger_reaction(value) is True, value
+
+
+def test_is_trigger_reaction_rejects_unrelated():
+    for value in ("smile", "", None, "inbox_tray"):
+        assert svc.is_trigger_reaction(value) is False, value
+
+
+def test_parse_doctor_command_run():
+    for text in ("/baseline-doctor", "baseline-doctor", "почисти", "  Почисти  "):
+        assert svc.parse_doctor_command(text) == "run", text
+
+
+def test_parse_doctor_command_actions():
+    assert svc.parse_doctor_command("закоммить всё") == "commit"
+    assert svc.parse_doctor_command("gitignore") == "gitignore"
+    assert svc.parse_doctor_command("stash") == "stash"
+
+
+def test_parse_doctor_command_ignores_other_text():
+    for text in ("", None, "почисти базу данных", "what is baseline-doctor?"):
+        assert svc.parse_doctor_command(text) is None, text

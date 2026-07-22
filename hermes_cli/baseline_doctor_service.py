@@ -12,6 +12,44 @@ import subprocess
 from pathlib import Path
 
 TRIGGER_REACTION = "broom"
+# Every value that means "run baseline-doctor". Slack delivers bare emoji names,
+# Telegram/WhatsApp deliver the unicode glyph. 🧹 is a premium emoji on WhatsApp
+# and cannot be sent there, so free alternatives are accepted too.
+TRIGGER_REACTIONS = {
+    "broom", "\U0001F9F9",
+    "recycle", "\u267B\uFE0F", "\u267B",
+    "ok_hand", "\U0001F44C",
+}
+_COMMANDS = {
+    "run": {"/baseline-doctor", "baseline-doctor", "\u043f\u043e\u0447\u0438\u0441\u0442\u0438"},
+    "commit": {"\u0437\u0430\u043a\u043e\u043c\u043c\u0438\u0442\u044c \u0432\u0441\u0451", "\u0437\u0430\u043a\u043e\u043c\u043c\u0438\u0442\u044c \u0432\u0441\u0435", "commit"},
+    "gitignore": {"gitignore", "\u0432 gitignore"},
+    "stash": {"stash", "\u0432 stash"},
+}
+
+
+def _normalize_reaction(value: str | None) -> str:
+    return (value or "").strip().strip(":").lower()
+
+
+def is_trigger_reaction(value: str | None) -> bool:
+    """True when the reaction means "run baseline-doctor" on any platform."""
+    return _normalize_reaction(value) in TRIGGER_REACTIONS
+
+
+def parse_doctor_command(text: str | None) -> str | None:
+    """Map an exact operator text command to an action, else None.
+
+    Exact-match only: a bare "\u043f\u043e\u0447\u0438\u0441\u0442\u0438" is the trigger, but "\u043f\u043e\u0447\u0438\u0441\u0442\u0438 \u0431\u0430\u0437\u0443" is
+    an ordinary request and must reach the agent untouched.
+    """
+    normalized = (text or "").strip().lower().rstrip("!.")
+    if not normalized:
+        return None
+    for action, phrases in _COMMANDS.items():
+        if normalized in phrases:
+            return action
+    return None
 _ACTIONS = {"inbox_tray": "commit", "see_no_evil": "gitignore", "package": "stash"}
 _BLOCK_SIGNATURE = "final_verdict: autonomous_preflight_blocked"
 _MAX_PENDING = 50
@@ -104,3 +142,37 @@ def apply_action(repo: Path, action: str, remaining: list[dict]) -> dict:
         return {"applied": action, "paths": paths, "ok": commit.returncode == 0,
                 "detail": (commit.stderr or commit.stdout).strip()}
     return {"applied": action, "paths": paths, "ok": False, "detail": f"unknown action {action}"}
+
+
+# Pending key for the text-command path, which has no Slack message ts.
+TEXT_PENDING_KEY = "text"
+
+
+def run_doctor(repo: Path | None = None) -> dict:
+    """Run scripts/baseline_doctor.py against the agent repo."""
+    import importlib.util
+
+    target = repo or Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "baseline_doctor", target / "scripts" / "baseline_doctor.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.run_doctor(target)
+
+
+def render_report(result: dict, *, reactions: bool = True) -> str:
+    lines = ["\U0001F9F9 Baseline doctor"]
+    if result["fixed"]:
+        lines.append(f"\u2705 Fixed: chowned {len(result['fixed'])} root-owned file(s)")
+    if result["clean"]:
+        lines.append("\u2705 Baseline clean \u2014 retry the request.")
+        return "\n".join(lines)
+    lines.append("\u26a0\ufe0f Remaining (blocks run):")
+    for r in result["remaining"]:
+        lines.append(f"  \u2022 {r['path']} [{r['category']}] \u2014 {r.get('hint','')}")
+    if reactions:
+        lines.append("React:  \U0001F4E5 commit all \u00b7 \U0001F648 gitignore all \u00b7 \U0001F4E6 stash all")
+    else:
+        lines.append("Reply:  commit \u00b7 gitignore \u00b7 stash")
+    return "\n".join(lines)
