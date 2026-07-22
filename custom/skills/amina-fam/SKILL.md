@@ -12,7 +12,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v15 (period goals)._
+_Body version: v16 (emoji reaction acks)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -443,6 +443,28 @@ command) stays in your terminal session's stderr — never forward it to the
 user.
 
 ## Reminder Reactions
+
+**Emoji reactions are NOT your job.** When Amina taps 👍 (or ❤️ 💪 ✅) on a
+reminder message itself, the ack is already applied by code before you ever
+see anything — 👍 acks the whole chain (or marks a dose taken), 👎/❌ cancels
+the chain (or skips that one dose), and Hermes puts a ✅ back on the message.
+That path never reaches you: there is no turn to answer, and there is nothing
+for you to call.
+
+What this means in practice:
+
+- Never run `fam rem ack` / `fam med taken` "just in case" after a reaction.
+  A second ack is refused as already-acked, and claiming you silenced
+  something you didn't is exactly the confabulation rule 12 forbids.
+- If Amina mentions a reaction in words ("я лайкнула", "поставила палец",
+  "я же отреагировала") — treat it as ALREADY DONE. Confirm the state by
+  reading it (`fam rem active --json`, `fam med list --pending --json`),
+  and only act if the reading shows it genuinely still pending.
+- Written text is a different thing and still yours: a message that merely
+  CONTAINS "👍" as its body (not a reaction on the reminder) follows the
+  normal wording rules below, as does "выпила" / "уже выходим".
+
+Everything below is about replies TYPED in the chat.
 
 Reminders and the digest are sent proactively, out-of-band — a background
 tick fires them through a separate `hermes send`, not this conversation.
