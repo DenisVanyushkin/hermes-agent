@@ -1,0 +1,81 @@
+# Fragment appended to ~/.hermes/monitoring/prometheus/prometheus.yml
+# under scrape_configs. Kept in git for review; the live file is authoritative.
+#
+# Labels: dependency = which Hermes integration; tier = alert severity input;
+# layer = dependency (a remote service) vs channel (our own uplink).
+# Alerts and dashboards MUST select on these labels, never on __address__,
+# so that changing a URL does not silently break a rule.
+#
+# MAILHOST resolved 2026-07-22 from ~/.hermes/.env: IMAP and SMTP hosts differ
+# (imap.gmail.com vs smtp.gmail.com), so each gets its own target below.
+#
+# RESOLVER_ADDR: docker0 lookup from inside the blackbox container timed out
+# (systemd-resolved on this host only binds 127.0.0.53, not docker0's
+# 172.17.0.1), so per the brief's fallback policy this uses 1.1.1.1:53.
+# These dns_* probes therefore measure upstream DNS reachability, not the
+# host resolver's own health — the host resolver itself is covered by
+# net_probe_dns.py (Task 3), which runs on the host and uses getaddrinfo
+# directly.
+
+  - job_name: blackbox
+    metrics_path: /probe
+    scrape_interval: 30s
+    scrape_timeout: 20s
+    static_configs:
+      # --- layer: dependency -------------------------------------------
+      # NOTE: the bare root 302-redirects to core.telegram.org/bots (normal,
+      # permanent site routing, not an outage) which trips follow_redirects:
+      # false. Probing a bot-API path instead exercises the actual Bot API
+      # surface and returns a clean 404 (no token supplied) with no redirect
+      # — exactly the "root that legitimately 404s" case http_any_alive was
+      # built for. Verified 2026-07-22.
+      - targets: ['https://api.telegram.org/botFAKE/getMe']
+        labels: {module: http_any_alive, dependency: telegram, tier: critical, layer: dependency}
+      - targets: ['https://slack.com/api/api.test']
+        labels: {module: http_2xx, dependency: slack, tier: critical, layer: dependency}
+      - targets: ['wss-primary.slack.com:443']
+        labels: {module: tcp_tls, dependency: slack, tier: critical, layer: dependency}
+      - targets: ['https://chatgpt.com/backend-api/codex']
+        labels: {module: http_auth_expected, dependency: codex, tier: critical, layer: dependency}
+      - targets: ['https://openrouter.ai/api/v1/models']
+        labels: {module: http_2xx, dependency: openrouter, tier: critical, layer: dependency}
+      - targets: ['https://adilet.zan.kz/']
+        labels: {module: http_2xx_adilet, dependency: adilet, tier: important, layer: dependency}
+      - targets: ['imap.gmail.com:993']
+        labels: {module: tcp_tls, dependency: mail, tier: important, layer: dependency}
+      - targets: ['smtp.gmail.com:587']
+        labels: {module: tcp_connect, dependency: mail, tier: important, layer: dependency}
+      # KNOWN LIMITATION (2026-07-22): root 301-redirects to
+      # api-dashboard.search.brave.com/... (normal site routing). An
+      # unauthenticated request to a real search endpoint doesn't redirect
+      # but answers 422 (missing x-subscription-token header), which is
+      # outside http_auth_expected's [200,401,403]. Fixing this cleanly
+      # needs a blackbox.yml module change (out of this task's file scope)
+      # — left as probe_success=0 pending a coordinator decision; not a
+      # genuine brave outage (JSON error body confirms the API answered).
+      - targets: ['https://api.search.brave.com/']
+        labels: {module: http_auth_expected, dependency: brave, tier: important, layer: dependency}
+      # --- layer: channel ----------------------------------------------
+      - targets: ['1.1.1.1', '8.8.8.8']
+        labels: {module: icmp_v4, dependency: uplink, tier: baseline, layer: channel}
+      # For dns probes the target is the RESOLVER; the queried name is baked
+      # into the module. RESOLVER_ADDR = 1.1.1.1:53 (see note above on the
+      # docker0 fallback).
+      - targets: ['1.1.1.1:53']
+        labels: {module: dns_a_telegram, dependency: resolver, tier: baseline, layer: channel}
+      - targets: ['1.1.1.1:53']
+        labels: {module: dns_a_openrouter, dependency: resolver, tier: baseline, layer: channel}
+      - targets: ['1.1.1.1:53']
+        labels: {module: dns_a_chatgpt, dependency: resolver, tier: baseline, layer: channel}
+    relabel_configs:
+      # Move the target into the ?target= query parameter, then point the
+      # actual scrape at the exporter. This indirection is how blackbox
+      # works: Prometheus scrapes the exporter, not the target.
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [module]
+        target_label: __param_module
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
