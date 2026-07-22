@@ -65,6 +65,9 @@ tests:
       - series: 'up{job="blackbox",instance="blackbox:9115"}'
         values: '0+0x10'
     alert_rule_test:
+      - eval_time: 4m
+        alertname: BlackboxExporterDown
+        exp_alerts: []
       - eval_time: 6m
         alertname: BlackboxExporterDown
         exp_alerts:
@@ -105,6 +108,9 @@ tests:
       - series: 'hermes_dns_answer_mismatch{name="api.telegram.org"}'
         values: '1+0x10'
     alert_rule_test:
+      - eval_time: 4m
+        alertname: DNSResolverMismatch
+        exp_alerts: []
       - eval_time: 6m
         alertname: DNSResolverMismatch
         exp_alerts:
@@ -116,3 +122,119 @@ tests:
             exp_annotations:
               summary: "Resolver disagreement for api.telegram.org"
               description: "System resolver and DoH returned disjoint A records for 5m. Suspect the provider's resolver."
+
+  # An important-tier dependency down for 5m fires at warning severity
+  # (mirrors the critical-tier DependencyDown block, different rule instance).
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox",layer="dependency",dependency="wise",tier="important",instance="https://wise.com/api/v1/",module="http_any_alive"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DependencyDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: DependencyDown
+        exp_alerts:
+          - exp_labels:
+              alertname: DependencyDown
+              severity: warning
+              layer: dependency
+              dependency: wise
+              tier: important
+              instance: "https://wise.com/api/v1/"
+              job: blackbox
+              module: http_any_alive
+            exp_annotations:
+              summary: "Dependency wise unreachable"
+              description: "probe_success for https://wise.com/api/v1/ has been 0 for 5m (tier important)."
+
+  # DependencyFlapping: the pattern DependencyDown structurally cannot see —
+  # probe_success oscillates ("Failed to connect; Retrying..." x186 in the
+  # observed logs) without ever staying at 0 for a full 5m. 8 state changes
+  # inside the 30m window crosses the > 6 threshold at minute 7; for:10m
+  # means it must not fire before minute 17 and must fire once past it.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox",layer="dependency",dependency="telegram",tier="critical",instance="https://api.telegram.org/",module="http_any_alive"}'
+        values: '1 0 1 0 1 0 1 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: DependencyFlapping
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: DependencyFlapping
+        exp_alerts:
+          - exp_labels:
+              alertname: DependencyFlapping
+              severity: warning
+              layer: dependency
+              dependency: telegram
+              tier: critical
+              instance: "https://api.telegram.org/"
+              job: blackbox
+              module: http_any_alive
+            exp_annotations:
+              summary: "Dependency telegram is flapping"
+              description: "probe_success for https://api.telegram.org/ changed state more than 6 times in 30m."
+
+  # Companion series pinning the > 6 boundary: only 4 state changes in the
+  # same 30m window must never fire DependencyFlapping, however long it runs.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox",layer="dependency",dependency="openrouter",tier="important",instance="https://openrouter.ai/api/v1/",module="http_any_alive"}'
+        values: '1 0 1 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 39m
+        alertname: DependencyFlapping
+        exp_alerts: []
+
+  # System resolver taking over 1s must not fire before 10m, and must fire
+  # once sustained past it.
+  - interval: 1m
+    input_series:
+      - series: 'hermes_dns_resolve_seconds{name="api.telegram.org",resolver="system"}'
+        values: '2+0x19'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: DNSSlow
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: DNSSlow
+        exp_alerts:
+          - exp_labels:
+              alertname: DNSSlow
+              severity: warning
+              layer: channel
+              name: "api.telegram.org"
+              resolver: system
+            exp_annotations:
+              summary: "System DNS resolution is slow for api.telegram.org"
+              description: "System resolver took over 1s for 10m; DoH timings on the dashboard show whether the network or the resolver is at fault."
+
+  # ProbeLatencyDegraded: 60m of a 0.1s baseline (so avg_over_time[24h] is
+  # settled), then a sustained jump to 1.0s — over 3x baseline. Must not
+  # fire before 15m into the spike, must fire once sustained past it.
+  - interval: 1m
+    input_series:
+      - series: 'probe_duration_seconds{job="blackbox",layer="dependency",tier="important",dependency="wise",instance="https://wise.com/api/v1/",module="http_any_alive"}'
+        values: '0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: ProbeLatencyDegraded
+        exp_alerts: []
+      - eval_time: 77m
+        alertname: ProbeLatencyDegraded
+        exp_alerts:
+          - exp_labels:
+              alertname: ProbeLatencyDegraded
+              severity: warning
+              job: blackbox
+              layer: dependency
+              tier: important
+              dependency: wise
+              instance: "https://wise.com/api/v1/"
+              module: http_any_alive
+            exp_annotations:
+              summary: "Probe latency for wise is 3x its 24h baseline"
+              description: "https://wise.com/api/v1/ is responding far slower than normal. Check the latency phase breakdown to see whether it is resolve, connect, tls or processing."
