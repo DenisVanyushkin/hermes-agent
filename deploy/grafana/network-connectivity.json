@@ -1,0 +1,347 @@
+{
+  "uid": "network-connectivity",
+  "title": "Network Connectivity",
+  "tags": [
+    "network",
+    "connectivity"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "dependency",
+        "type": "query",
+        "includeAll": true,
+        "multi": true,
+        "datasource": {
+          "type": "prometheus",
+          "uid": "PBFA97CFB590B2093"
+        },
+        "query": "label_values(probe_success, dependency)",
+        "refresh": 1
+      },
+      {
+        "name": "tier",
+        "type": "query",
+        "includeAll": true,
+        "multi": true,
+        "datasource": {
+          "type": "prometheus",
+          "uid": "PBFA97CFB590B2093"
+        },
+        "query": "label_values(probe_success, tier)",
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Traffic Light",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+    },
+    {
+      "type": "stat",
+      "title": "$dependency",
+      "repeat": "dependency",
+      "repeatDirection": "h",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(probe_success{dependency=\"$dependency\"})",
+          "legendFormat": "$dependency",
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+        },
+        {
+          "refId": "B",
+          "expr": "avg_over_time(probe_success{dependency=\"$dependency\"}[24h])",
+          "legendFormat": "24h uptime",
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Channel vs Dependencies",
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 1 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Uplink vs Dependency Health",
+      "description": "Both lines down = provider/uplink. Only the lower line down = a specific service.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": { "x": 0, "y": 6, "w": 24, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "axisSoftMin": 0,
+            "axisSoftMax": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(probe_success{layer=\"channel\", module=\"icmp_v4\"})",
+          "legendFormat": "uplink (ICMP)",
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+        },
+        {
+          "refId": "B",
+          "expr": "avg(probe_success{layer=\"dependency\"})",
+          "legendFormat": "dependencies healthy (fraction)",
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Latency Breakdown",
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 1 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Critical Dependency Latency by Phase",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": { "x": 0, "y": 15, "w": 24, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "stacking": { "mode": "normal" },
+            "fillOpacity": 30
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "probe_http_duration_seconds{tier=\"critical\", dependency=~\"$dependency\"}",
+          "legendFormat": "{{dependency}} / {{phase}}",
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "DNS",
+      "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 }
+    },
+    {
+      "type": "timeseries",
+      "title": "DNS Resolution: System vs DoH, and Mismatches",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "C" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "max", "value": 1 },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "custom.fillOpacity", "value": 40 },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "hermes_dns_resolve_seconds{resolver=\"system\"}",
+          "legendFormat": "{{name}} system",
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+        },
+        {
+          "refId": "B",
+          "expr": "hermes_dns_resolve_seconds{resolver=\"doh\"}",
+          "legendFormat": "{{name}} DoH",
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+        },
+        {
+          "refId": "C",
+          "expr": "hermes_dns_answer_mismatch",
+          "legendFormat": "{{name}} mismatch",
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "TLS Expiry",
+      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 1 }
+    },
+    {
+      "type": "table",
+      "title": "Certificate Expiry (Days Left)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "days left" },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "yellow", "value": 14 },
+                    { "color": "green", "value": 30 }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "type": "color-background" }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(probe_ssl_earliest_cert_expiry - time()) / 86400",
+          "instant": true,
+          "format": "table",
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" }
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "dependency": true,
+              "instance": true,
+              "Value": true
+            },
+            "indexByName": {
+              "dependency": 0,
+              "instance": 1,
+              "Value": 2
+            },
+            "renameByName": {
+              "Value": "days left"
+            },
+            "excludeByName": {}
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              { "field": "days left", "desc": false }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Correlated Gateway Log",
+      "gridPos": { "x": 0, "y": 41, "w": 24, "h": 1 }
+    },
+    {
+      "type": "logs",
+      "title": "Gateway Log: Network-Related Errors",
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      },
+      "gridPos": { "x": 0, "y": 42, "w": 24, "h": 10 },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessages": true,
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{job=\"hermes\"} |~ \"Session is closed|network error|IMAP fetch error|name resolution|Bad Gateway\"",
+          "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" }
+        }
+      ]
+    }
+  ]
+}
