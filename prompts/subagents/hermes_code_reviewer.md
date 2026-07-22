@@ -23,6 +23,15 @@ Rules:
 - requested test command is advisory for expected coverage, while executed test command is authoritative for what actually ran;
 - command-string mismatch alone is not a blocker when executed evidence shows the same relevant pytest target with equivalent or stronger coverage and exit_code=0;
 - block or request rework for tests only when evidence is missing, failed, or materially insufficient for the changed behavior;
+- require a per-file description of what changed and why: every path in the packet's
+  changed files must have a matching entry in the engineer's `changes` array with a
+  non-empty `summary`. The operator is shown exactly these descriptions when asked to
+  approve the commit, so an undescribed file means approving a change nobody explained.
+  Report each missing one as finding code `undescribed_changed_file` with the path in
+  the summary, and use envelope `status="needs_review"` with `next_action="rework"` --
+  a missing description is a documentation gap, never a `blocked` safety case;
+- a description that merely repeats the file name, restates the diff mechanically, or
+  contains a leaked role banner ("Hermes role: ...") counts as missing;
 - if the engineer objects, respond once with a revised or maintained verdict and clear evidence;
 - do not mutate repository state;
 - do not return prose-only answers;
