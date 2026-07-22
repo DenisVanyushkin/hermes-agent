@@ -79,8 +79,8 @@ def main() -> int:
     data = load_candidates(news_dir() / "candidates-latest.json")
     now = datetime.now(timezone.utc)
     if data is None or is_stale(data, now):
-        print("[Активно собранные новости]: коллектор не дал свежих данных; "
-              "используй форварды Ideas collector и историю сессий.")
+        print("[Активно собранные новости]: свежих данных нет; не переиспользуй старые истории, "
+              "прямо укажи, что новых материалов нет.")
         return 0
     print(render_context(data, now))
     return 0

@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import sys
+import unicodedata
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ DEFAULTS = {
     "github_trending": {"topics": ["llm", "ai-agents"], "min_stars_week": 200},
     "max_items_per_day": 40,
     "freshness_hours": 36,
+    "dedupe_days": 30,
     "http_timeout": 20,
 }
 
@@ -78,10 +80,38 @@ def canonical_url(url: str) -> str:
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
+_TITLE_STOPWORDS = {
+    "a", "an", "and", "as", "at", "by", "for", "from", "how", "in", "into", "is", "of", "on",
+    "or", "that", "the", "to", "via", "with", "new", "your", "you", "this", "it", "its",
+    "это", "этот", "эта", "как", "что", "для", "или", "при", "из", "на", "в", "по", "о", "об",
+    "reddit", "show", "hn", "ask", "launch", "released", "release",
+}
+
+
+def normalize_title(title: str) -> str:
+    text = unicodedata.normalize("NFKC", (title or "").strip().lower())
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"\[[^\]]+\]|\([^\)]+\)", " ", text)
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def semantic_title_key(title: str) -> str:
+    tokens = [t for t in normalize_title(title).split() if len(t) > 2 and t not in _TITLE_STOPWORDS]
+    # Sorted, not source-ordered: the same story reworded ("X does Y" vs
+    # "Y is done by X") must produce the same key, or cross-source dedup misses.
+    ordered = sorted(set(tokens))
+    if len(ordered) < 2:
+        return ""
+    return " ".join(ordered[:12])
+
+
 def seen_connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.execute("CREATE TABLE IF NOT EXISTS seen "
                  "(url TEXT PRIMARY KEY, first_seen REAL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS seen_titles "
+                 "(title_key TEXT PRIMARY KEY, first_seen REAL)")
     conn.commit()
     return conn
 
@@ -92,17 +122,41 @@ def is_seen(conn: sqlite3.Connection, url: str) -> bool:
     return row is not None
 
 
+def is_seen_title(conn: sqlite3.Connection, title: str) -> bool:
+    keys = [key for key in (normalize_title(title), semantic_title_key(title)) if key]
+    if not keys:
+        return False
+    placeholders = ", ".join("?" for _ in keys)
+    row = conn.execute(
+        f"SELECT 1 FROM seen_titles WHERE title_key IN ({placeholders}) LIMIT 1",
+        tuple(keys),
+    ).fetchone()
+    return row is not None
+
+
 def mark_seen(conn: sqlite3.Connection, url: str, now: datetime) -> None:
     conn.execute("INSERT OR IGNORE INTO seen(url, first_seen) VALUES (?, ?)",
                  (canonical_url(url), now.timestamp()))
     conn.commit()
 
 
-def prune_seen(conn: sqlite3.Connection, now: datetime, ttl_days: int = 14) -> int:
-    cutoff = (now - timedelta(days=ttl_days)).timestamp()
-    cur = conn.execute("DELETE FROM seen WHERE first_seen < ?", (cutoff,))
+def mark_seen_title(conn: sqlite3.Connection, title: str, now: datetime) -> None:
+    for key in (normalize_title(title), semantic_title_key(title)):
+        if not key:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO seen_titles(title_key, first_seen) VALUES (?, ?)",
+            (key, now.timestamp()),
+        )
     conn.commit()
-    return cur.rowcount
+
+
+def prune_seen(conn: sqlite3.Connection, now: datetime, ttl_days: int = 30) -> int:
+    cutoff = (now - timedelta(days=ttl_days)).timestamp()
+    deleted_urls = conn.execute("DELETE FROM seen WHERE first_seen < ?", (cutoff,)).rowcount
+    deleted_titles = conn.execute("DELETE FROM seen_titles WHERE first_seen < ?", (cutoff,)).rowcount
+    conn.commit()
+    return deleted_urls + deleted_titles
 
 
 def normalize_item(raw: dict) -> dict:
@@ -130,21 +184,34 @@ def _parse_iso(s: str):
 
 def select_candidates(items, conn, now, max_items, freshness_hours):
     cutoff = now - timedelta(hours=freshness_hours)
-    fresh, batch_seen = [], set()
+    fresh, batch_seen_urls, batch_seen_titles = [], set(), set()
     for it in items:
         url = it["canonical_url"]
-        if not url or url in batch_seen or is_seen(conn, url):
+        title_key = normalize_title(it.get("title", ""))
+        semantic_key = semantic_title_key(it.get("title", ""))
+        if not url:
+            continue
+        if url in batch_seen_urls or is_seen(conn, url):
+            continue
+        if title_key and (title_key in batch_seen_titles or semantic_key in batch_seen_titles):
+            continue
+        if title_key and is_seen_title(conn, it.get("title", "")):
             continue
         pub = _parse_iso(it["published_at"])
         if pub is not None and pub < cutoff:
             continue
-        batch_seen.add(url)
+        batch_seen_urls.add(url)
+        if title_key:
+            batch_seen_titles.add(title_key)
+        if semantic_key:
+            batch_seen_titles.add(semantic_key)
         fresh.append(it)
     _oldest = datetime.min.replace(tzinfo=timezone.utc)
     fresh.sort(key=lambda i: (_parse_iso(i["published_at"]) or _oldest), reverse=True)
     emitted, carried = fresh[:max_items], fresh[max_items:]
     for it in emitted:
         mark_seen(conn, it["canonical_url"], now)
+        mark_seen_title(conn, it.get("title", ""), now)
     return emitted, carried
 
 
@@ -420,7 +487,7 @@ def main() -> int:
     cfg = load_sources(news_dir() / "sources.yaml")
     now = datetime.now(timezone.utc)
     conn = seen_connect(news_dir() / "seen.sqlite")
-    prune_seen(conn, now)
+    prune_seen(conn, now, int(cfg.get("dedupe_days", 30) or 30))
     fetchers = {"telegram": fetch_telegram, "feed": fetch_feed,
                 "hn": fetch_hn, "github": fetch_github}
     items, errors, dropped = gather_items(cfg, fetchers)

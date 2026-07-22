@@ -15,6 +15,7 @@ def test_load_sources_uses_defaults_when_file_missing(tmp_path):
     cfg = nc.load_sources(tmp_path / "nope.yaml")
     assert cfg["max_items_per_day"] == 40
     assert cfg["freshness_hours"] == 36
+    assert cfg["dedupe_days"] == 30
     assert "llm_news" in cfg["telegram_channels"]
     assert isinstance(cfg["rss_feeds"], list) and cfg["rss_feeds"]
 
@@ -46,15 +47,21 @@ def test_seen_store_roundtrip_and_prune(tmp_path):
     conn = nc.seen_connect(tmp_path / "seen.sqlite")
     now = datetime(2026, 7, 7, tzinfo=timezone.utc)
     url = "https://x.io/a"
+    title = "Show HN: Useful agent framework"
     assert nc.is_seen(conn, url) is False
+    assert nc.is_seen_title(conn, title) is False
     nc.mark_seen(conn, url, now)
+    nc.mark_seen_title(conn, title, now)
     assert nc.is_seen(conn, url) is True
+    assert nc.is_seen_title(conn, title) is True
     # not pruned within TTL
-    assert nc.prune_seen(conn, now + timedelta(days=13), ttl_days=14) == 0
+    assert nc.prune_seen(conn, now + timedelta(days=29), ttl_days=30) == 0
     assert nc.is_seen(conn, url) is True
-    # pruned past TTL
-    assert nc.prune_seen(conn, now + timedelta(days=15), ttl_days=14) == 1
+    assert nc.is_seen_title(title=title, conn=conn) is True
+    # pruned past TTL (url row + normalized title row + semantic title row)
+    assert nc.prune_seen(conn, now + timedelta(days=31), ttl_days=30) == 3
     assert nc.is_seen(conn, url) is False
+    assert nc.is_seen_title(conn, title) is False
 
 
 def _raw(url, title="t", published=None, source="s", typ="rss"):
@@ -74,11 +81,11 @@ def test_select_candidates_dedups_caps_and_carries(tmp_path):
     now = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
     iso = lambda h: (now - timedelta(hours=h)).isoformat()
     items = [
-        nc.normalize_item(_raw("https://x.io/1", published=iso(1))),
-        nc.normalize_item(_raw("https://x.io/2", published=iso(2))),
-        nc.normalize_item(_raw("https://x.io/2?utm_source=z", published=iso(2))),  # dup of /2
-        nc.normalize_item(_raw("https://x.io/3", published=iso(99))),              # stale
-        nc.normalize_item(_raw("https://x.io/4", published=iso(3))),
+        nc.normalize_item(_raw("https://x.io/1", title="Story 1", published=iso(1))),
+        nc.normalize_item(_raw("https://x.io/2", title="Story 2", published=iso(2))),
+        nc.normalize_item(_raw("https://x.io/2?utm_source=z", title="Story 2", published=iso(2))),  # dup of /2
+        nc.normalize_item(_raw("https://x.io/3", title="Story 3", published=iso(99))),              # stale
+        nc.normalize_item(_raw("https://x.io/4", title="Story 4", published=iso(3))),
     ]
     emitted, carried = nc.select_candidates(items, conn, now, max_items=2, freshness_hours=36)
     urls = [i["canonical_url"] for i in emitted]
@@ -214,6 +221,33 @@ def test_item_text_concatenates_fields():
     assert "T" in txt and "S" in txt and "P" in txt and "x.io/a" in txt
 
 
+def test_normalize_title_and_semantic_key_collapse_variants():
+    a = "Show HN: AI agent framework for product teams (Reddit)"
+    b = "AI agent framework for product teams"
+    assert nc.normalize_title(a) != ""
+    assert nc.semantic_title_key(a) == nc.semantic_title_key(b)
+
+
+def test_select_candidates_suppresses_seen_title_even_when_url_changes(tmp_path):
+    conn = nc.seen_connect(tmp_path / "seen.sqlite")
+    now = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+    iso = lambda h: (now - timedelta(hours=h)).isoformat()
+    first = [nc.normalize_item(_raw("https://reddit.com/r/foo/1?utm_source=x", title="AI agent framework for product teams", published=iso(1)))]
+    emitted, _ = nc.select_candidates(first, conn, now, max_items=5, freshness_hours=36)
+    assert [i["canonical_url"] for i in emitted] == ["https://reddit.com/r/foo/1"]
+
+    second = [
+        nc.normalize_item(_raw(
+            "https://news.ycombinator.com/item?id=99",
+            title="Show HN: AI agent framework for product teams (Reddit)",
+            published=iso(2),
+        ))
+    ]
+    emitted2, carried2 = nc.select_candidates(second, conn, now, max_items=5, freshness_hours=36)
+    assert emitted2 == []
+    assert carried2 == []
+
+
 def test_gather_items_isolates_source_failures():
     cfg = {"telegram_channels": ["llm_news"], "rss_feeds": ["https://f"],
            "hackernews": {"min_score": 150},
@@ -261,8 +295,8 @@ def test_select_candidates_undated_items_sort_after_dated(tmp_path):
     now = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
     iso = lambda h: (now - timedelta(hours=h)).isoformat()
     items = [
-        nc.normalize_item(_raw("https://x.io/undated", published="")),
-        nc.normalize_item(_raw("https://x.io/dated", published=iso(5))),
+        nc.normalize_item(_raw("https://x.io/undated", title="Undated story", published="")),
+        nc.normalize_item(_raw("https://x.io/dated", title="Dated story", published=iso(5))),
     ]
     emitted, _ = nc.select_candidates(items, conn, now, max_items=2, freshness_hours=36)
     assert [i["canonical_url"] for i in emitted] == ["https://x.io/dated", "https://x.io/undated"]
@@ -292,3 +326,24 @@ def test_http_get_rejects_non_http_scheme():
     for bad in ("file:///etc/passwd", "ftp://x/y", "gopher://x/1"):
         with pytest.raises(ValueError):
             nc.http_get(bad, 5)
+
+
+def test_semantic_title_key_is_word_order_independent():
+    """Same significant words in a different order must yield the same key.
+
+    Limitation this does NOT cover: a rewording that introduces a filler word
+    absent from the stopword list ("Product teams *get* an AI agent framework")
+    still yields a different key, because lookup is exact string equality in
+    SQL. Catching those needs set-overlap matching, not a sorted key.
+    """
+    a = "AI agent framework for product teams"
+    b = "For product teams: framework AI agent"
+    assert nc.semantic_title_key(a) == nc.semantic_title_key(b)
+
+
+def test_semantic_title_key_keeps_release_words_distinct():
+    """`new`/`release`/`launch` carry meaning for news; dropping them collapses
+    distinct stories about the same subject into one suppressed key."""
+    a = "OpenAI releases new model"
+    b = "OpenAI model"
+    assert nc.semantic_title_key(a) != nc.semantic_title_key(b)
