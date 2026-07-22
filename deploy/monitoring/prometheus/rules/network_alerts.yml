@@ -1,0 +1,99 @@
+groups:
+  - name: network_connectivity
+    rules:
+      # `for` matters more than the threshold here. At a 30s scrape interval a
+      # single failed probe is noise — observed Telegram reconnects arrive in
+      # 5s bursts and self-heal. An alert without `for` becomes spam, gets
+      # muted, and a muted alert is worse than no alert.
+      - alert: NetworkChannelDown
+        expr: min(probe_success{layer="channel", module="icmp_v4"}) == 0
+        for: 3m
+        labels:
+          severity: critical
+          layer: channel
+        annotations:
+          summary: "Uplink unreachable: ICMP to all baseline targets failing"
+          description: "No ICMP reply from any channel target for 3m. Dependency alerts are inhibited."
+
+      - alert: DependencyDown
+        expr: probe_success{layer="dependency", tier="critical"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          layer: dependency
+        annotations:
+          summary: "Dependency {{ $labels.dependency }} unreachable"
+          description: "probe_success for {{ $labels.instance }} has been 0 for 5m (tier {{ $labels.tier }})."
+
+      - alert: DependencyDown
+        expr: probe_success{layer="dependency", tier="important"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          layer: dependency
+        annotations:
+          summary: "Dependency {{ $labels.dependency }} unreachable"
+          description: "probe_success for {{ $labels.instance }} has been 0 for 5m (tier {{ $labels.tier }})."
+
+      # Catches the observed "Failed to connect; Retrying..." x186 pattern:
+      # probe_success oscillates without ever staying at 0 long enough for
+      # DependencyDown to fire, so instability itself is the signal.
+      - alert: DependencyFlapping
+        expr: changes(probe_success{layer="dependency"}[30m]) > 6
+        for: 10m
+        labels:
+          severity: warning
+          layer: dependency
+        annotations:
+          summary: "Dependency {{ $labels.dependency }} is flapping"
+          description: "probe_success for {{ $labels.instance }} changed state more than 6 times in 30m."
+
+      - alert: DNSResolverMismatch
+        expr: hermes_dns_answer_mismatch == 1
+        for: 5m
+        labels:
+          severity: warning
+          layer: channel
+        annotations:
+          summary: "Resolver disagreement for {{ $labels.name }}"
+          description: "System resolver and DoH returned disjoint A records for 5m. Suspect the provider's resolver."
+
+      - alert: DNSSlow
+        expr: hermes_dns_resolve_seconds{resolver="system"} > 1
+        for: 10m
+        labels:
+          severity: warning
+          layer: channel
+        annotations:
+          summary: "System DNS resolution is slow for {{ $labels.name }}"
+          description: "System resolver took over 1s for 10m; DoH timings on the dashboard show whether the network or the resolver is at fault."
+
+      - alert: ProbeLatencyDegraded
+        expr: >
+          probe_duration_seconds
+            > 3 * avg_over_time(probe_duration_seconds[24h])
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Probe latency for {{ $labels.dependency }} is 3x its 24h baseline"
+          description: "{{ $labels.instance }} is responding far slower than normal. Check the latency phase breakdown to see whether it is resolve, connect, tls or processing."
+
+      - alert: TLSCertExpiringSoon
+        expr: probe_ssl_earliest_cert_expiry - time() < 14 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate for {{ $labels.dependency }} expires soon"
+          description: "Certificate at {{ $labels.instance }} expires in under 14 days."
+
+      # Without this, the exporter dying looks like "all quiet, no alerts".
+      - alert: BlackboxExporterDown
+        expr: up{job="blackbox"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "blackbox_exporter is down"
+          description: "All network probes are blind. Monitoring that goes silent when it dies is a false sense of safety."

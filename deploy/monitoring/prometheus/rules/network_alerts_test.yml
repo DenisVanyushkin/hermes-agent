@@ -1,0 +1,118 @@
+rule_files:
+  - network_alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Channel down for 3m must fire; 2m must not.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox",layer="channel",module="icmp_v4",instance="1.1.1.1",dependency="uplink",tier="baseline"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NetworkChannelDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: NetworkChannelDown
+        exp_alerts:
+          - exp_labels:
+              alertname: NetworkChannelDown
+              severity: critical
+              layer: channel
+            exp_annotations:
+              summary: "Uplink unreachable: ICMP to all baseline targets failing"
+              description: "No ICMP reply from any channel target for 3m. Dependency alerts are inhibited."
+
+  # A critical dependency down for 5m fires at critical severity.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox",layer="dependency",dependency="codex",tier="critical",instance="https://chatgpt.com/backend-api/codex",module="http_auth_expected"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DependencyDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: DependencyDown
+        exp_alerts:
+          - exp_labels:
+              alertname: DependencyDown
+              severity: critical
+              layer: dependency
+              dependency: codex
+              tier: critical
+              instance: "https://chatgpt.com/backend-api/codex"
+              job: blackbox
+              module: http_auth_expected
+            exp_annotations:
+              summary: "Dependency codex unreachable"
+              description: "probe_success for https://chatgpt.com/backend-api/codex has been 0 for 5m (tier critical)."
+
+  # Self-healing blips must NOT fire the hard alert.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox",layer="dependency",dependency="telegram",tier="critical",instance="https://api.telegram.org/",module="http_any_alive"}'
+        values: '1 0 1 1 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DependencyDown
+        exp_alerts: []
+
+  # Blackbox exporter itself dying must be noticed.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="blackbox",instance="blackbox:9115"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BlackboxExporterDown
+        exp_alerts:
+          - exp_labels:
+              alertname: BlackboxExporterDown
+              severity: critical
+              job: blackbox
+              instance: "blackbox:9115"
+            exp_annotations:
+              summary: "blackbox_exporter is down"
+              description: "All network probes are blind. Monitoring that goes silent when it dies is a false sense of safety."
+
+  # A certificate 10 days out fires; 40 days out does not.
+  - interval: 1m
+    input_series:
+      # promtool's synthetic clock starts at unix 0, so this value must be
+      # expressed relative to that epoch, not to wall-clock time. 600000s is
+      # ~7 days — comfortably inside the 14d threshold at eval_time 65m.
+      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox",dependency="adilet",instance="https://adilet.zan.kz/"}'
+        values: '600000+0x120'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: TLSCertExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              alertname: TLSCertExpiringSoon
+              severity: warning
+              dependency: adilet
+              instance: "https://adilet.zan.kz/"
+              job: blackbox
+            exp_annotations:
+              summary: "TLS certificate for adilet expires soon"
+              description: "Certificate at https://adilet.zan.kz/ expires in under 14 days."
+
+  # Resolver disagreement fires after 5m.
+  - interval: 1m
+    input_series:
+      - series: 'hermes_dns_answer_mismatch{name="api.telegram.org"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DNSResolverMismatch
+        exp_alerts:
+          - exp_labels:
+              alertname: DNSResolverMismatch
+              severity: warning
+              layer: channel
+              name: "api.telegram.org"
+            exp_annotations:
+              summary: "Resolver disagreement for api.telegram.org"
+              description: "System resolver and DoH returned disjoint A records for 5m. Suspect the provider's resolver."
