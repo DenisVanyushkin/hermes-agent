@@ -1386,3 +1386,87 @@ portable to another user/path.
 `578 passed`, zero warnings —
 `PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`
 (re-run 2026-07-13, 5 T9 final review fixes, at HEAD `3d64c0215`).
+
+## Reaction acks — 👍 on a reminder (2026-07-22)
+
+Amina reacts on a reminder message; Hermes applies the ack **in code**,
+with no model turn involved.
+
+| Reaction | Event reminder | Med intake |
+|---|---|---|
+| 👍 ❤️ 💪 ✅ | `rem.ack_chain` — the WHOLE chain, whichever stage was reacted to | `meds.take` — taken, `remaining−1`, +45-min series stops |
+| 👎 ❌ | `rem.cancel_chain` | `meds.skip` — only this dose |
+| anything else, or un-reacting | ignored (audited) | ignored (audited) |
+
+Hermes confirms by putting ✅ on its own reminder message. No reply text
+is sent — the reaction itself is the acknowledgement.
+
+### How a reaction finds its reminder
+
+`sent_messages` (schema **v10**) maps the WhatsApp message id of every
+reminder/med send to the row it came from:
+
+```
+wa_message_id | chat_jid | kind (reminder|med) | ref_id | event_id | ack_status | created_at
+```
+
+`gate.deliver(..., sent_ref={"kind": ..., "ref_id": ..., "event_id": ...})`
+writes that row inside the caller's transaction, right next to the
+reminder's own `status='sent'` UPDATE. The id itself comes from
+`hermes send --json` → `send_message_tool` → the bridge's `/send`
+response. **A missing id is not a failure**: the message was delivered,
+only the reaction shortcut is unavailable for it, and the miss is
+audited as `gate.no_msgid`.
+
+Every stage of a chain (and every +45-min med resend) gets its own row,
+so a reaction on ANY of them acks once and marks the siblings — a later
+👍 on an older stage reads as `already_acked`, not a second ack.
+
+### Transport
+
+* **bridge.js** — reactions on our own messages go to a *separate*
+  `reactionQueue`, drained by `GET /reactions`. They never enter
+  `messageQueue`, so a reaction can never become an agent turn.
+  `POST /send-reaction` puts the ✅ back (empty emoji removes it).
+  Redelivered reactions (resync/reconnect) are deduped in the bridge.
+* **adapter.py** — `_poll_reactions()` runs only when
+  `whatsapp.reaction_hook_cmd` is configured, pipes each event into that
+  command as JSON on stdin, and honours its `{"react": "✅"}` verdict.
+  A failing hook is logged and skipped; it can never take down the
+  adapter or the message loop.
+* **`fam react-hook`** — the hook itself. Exit 0 for every handled
+  outcome (including "not one of ours"), exit 2 only on a malformed
+  event.
+
+### Config
+
+```yaml
+whatsapp:
+  reaction_hook_cmd:
+    - /home/denis/.hermes/hermes-agent/custom/fam/bin/fam
+    - react-hook
+```
+
+Unset (the default, and the state on the VPS) = the whole path stays
+dormant, nothing polls, nothing changes.
+
+### Idempotency & edge cases
+
+- Second 👍 → `already_acked`, no double-decrement, ✅ stays.
+- Amina says «выпила» *and* reacts → the intake already left `pending`,
+  so `meds.take` raises → treated as `already_acked` (a handled success,
+  not an operator alert).
+- Reaction on ordinary chat → `unknown_message`, silent, not audited
+  (routine; auditing it would flood `audit_log`).
+- Reaction on a message Hermes did NOT send → dropped in the bridge.
+
+### Reading the audit trail
+
+`fam log --kind react.handle --last-hours 24 --json` — one row per
+handled reaction with `result`, `kind`, `ref_id`, `event_id`, `emoji`.
+
+### Full suite
+
+`1128 passed` —
+`PYTHONPATH=custom/fam venv/bin/python -m pytest custom/fam/tests -q`
+(2026-07-22; +26 for this feature).
