@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import audit, cal, db as famdb, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, series, shopping, tick
+from fam import acks, audit, cal, db as famdb, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, series, shopping, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -1321,6 +1321,7 @@ def cmd_med_taken(args):
     conn = famdb.connect()
     result = meds.take(conn, args.id)
     conn.commit()
+    acks.write(conn, cfg=gate.load_config())
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
     else:
@@ -1367,6 +1368,7 @@ def cmd_med_skip(args):
     conn = famdb.connect()
     result = meds.skip(conn, args.id)
     conn.commit()
+    acks.write(conn, cfg=gate.load_config())
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
     else:

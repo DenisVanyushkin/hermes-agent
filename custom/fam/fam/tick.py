@@ -698,6 +698,16 @@ def reminders(conn, now_utc=None, cfg=None):
     except Exception:                                # noqa: BLE001 -- never fail the tick
         pass
 
+    # Project the open questions (pending doses) to the file the gateway
+    # injects into every turn -- so "did you take it?" survives a session
+    # reset, a restart or compression.  Same guard-per-hook pattern as the
+    # health alert above: a snapshot must never sink the tick.
+    try:
+        from fam import acks as _acks
+        _acks.write(conn, cfg=cfg)
+    except Exception:                                # noqa: BLE001 -- never fail the tick
+        pass
+
     audit.log(conn, "tick.reminders", counts)
     conn.commit()
     return counts

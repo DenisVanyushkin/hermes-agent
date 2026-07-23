@@ -1,0 +1,153 @@
+"""Pending-ack snapshot for the gateway's turn context.
+
+Why this exists: on 2026-07-23 the daily session reset landed between the
+09:00 medication reminder and Amina's 09:25 "Готово". The fresh session
+started with history=0, the agent never called a tool, and intake #3 stayed
+`pending` -- so the system re-nagged her at 09:45. Chat history is not a
+durable place to keep "there is an open question"; the DB already is. This
+module snapshots the open questions to a small JSON file the gateway reads
+on every turn, so the context survives resets, restarts and compression.
+"""
+import json
+import os
+import stat
+
+import pytest
+
+from fam import acks, meds
+
+
+def _insert_intake(db, med_id, plan_ts_utc, status="pending"):
+    cur = db.execute(
+        "INSERT INTO med_intakes(med_id, plan_ts_utc, taken_ts_utc, status, "
+        "series_next_utc, created_at) VALUES (?,?,?,?,?,?)",
+        (med_id, plan_ts_utc, None, status, None, plan_ts_utc),
+    )
+    return cur.lastrowid
+
+
+NOW = "2026-07-23T04:25:00+00:00"  # 09:25 Almaty -- the "Готово" reply
+
+
+# ---- build ----
+
+def test_build_includes_a_due_pending_intake(db):
+    med_id = meds.add(db, "мисол", ["09:00"], dose="1 таблетка")
+    db.commit()
+    intake_id = _insert_intake(db, med_id, "2026-07-23T04:00:00+00:00")
+    db.commit()
+
+    snap = acks.build(db, cfg={"target": "whatsapp:+77011102626"}, now_utc=NOW)
+
+    assert snap["target"] == "whatsapp:+77011102626"
+    assert len(snap["items"]) == 1
+    item = snap["items"][0]
+    assert item["kind"] == "med_intake"
+    assert item["id"] == intake_id
+    assert item["name"] == "мисол"
+    assert item["dose"] == "1 таблетка"
+    assert item["due_local"] == "09:00"
+    assert item["ack_cmd"] == f"fam med taken {intake_id}"
+    assert item["skip_cmd"] == f"fam med skip {intake_id}"
+
+
+def test_build_excludes_intakes_not_due_yet(db):
+    """A dose scheduled for tonight is not an open question yet."""
+    med_id = meds.add(db, "мисол", ["21:00"])
+    db.commit()
+    _insert_intake(db, med_id, "2026-07-23T16:00:00+00:00")  # 21:00 Almaty
+    db.commit()
+
+    assert acks.build(db, now_utc=NOW)["items"] == []
+
+
+def test_build_excludes_stale_intakes(db):
+    """Yesterday's unanswered dose must not haunt every turn forever."""
+    med_id = meds.add(db, "мисол", ["09:00"])
+    db.commit()
+    _insert_intake(db, med_id, "2026-07-22T04:00:00+00:00")
+    db.commit()
+
+    assert acks.build(db, now_utc=NOW)["items"] == []
+
+
+def test_build_excludes_resolved_intakes(db):
+    med_id = meds.add(db, "мисол", ["09:00"])
+    db.commit()
+    _insert_intake(db, med_id, "2026-07-23T04:00:00+00:00", status="taken")
+    db.commit()
+
+    assert acks.build(db, now_utc=NOW)["items"] == []
+
+
+def test_build_orders_by_due_time(db):
+    med_id = meds.add(db, "мисол", ["07:00", "09:00"])
+    db.commit()
+    later = _insert_intake(db, med_id, "2026-07-23T04:00:00+00:00")
+    earlier = _insert_intake(db, med_id, "2026-07-23T02:00:00+00:00")
+    db.commit()
+
+    ids = [i["id"] for i in acks.build(db, now_utc=NOW)["items"]]
+    assert ids == [earlier, later]
+
+
+def test_build_stamps_generated_at(db):
+    snap = acks.build(db, now_utc=NOW)
+    assert snap["generated_at"] == NOW
+
+
+# ---- write ----
+
+def test_write_creates_readable_json(db, tmp_path):
+    med_id = meds.add(db, "мисол", ["09:00"], dose="1 таблетка")
+    db.commit()
+    intake_id = _insert_intake(db, med_id, "2026-07-23T04:00:00+00:00")
+    db.commit()
+    path = tmp_path / "pending-acks.json"
+
+    acks.write(db, cfg={"target": "whatsapp:+77011102626"}, path=path,
+               now_utc=NOW)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert [i["id"] for i in data["items"]] == [intake_id]
+    assert data["target"] == "whatsapp:+77011102626"
+
+
+def test_write_is_owner_only(db, tmp_path):
+    """The snapshot names medications -- same sensitivity as the DB."""
+    path = tmp_path / "pending-acks.json"
+    acks.write(db, path=path, now_utc=NOW)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_write_clears_resolved_items(db, tmp_path):
+    """An empty snapshot must overwrite a stale one, not be skipped --
+    otherwise the gateway keeps injecting an already-answered question."""
+    med_id = meds.add(db, "мисол", ["09:00"])
+    db.commit()
+    intake_id = _insert_intake(db, med_id, "2026-07-23T04:00:00+00:00")
+    db.commit()
+    path = tmp_path / "pending-acks.json"
+    acks.write(db, path=path, now_utc=NOW)
+    assert json.loads(path.read_text(encoding="utf-8"))["items"]
+
+    meds.take(db, intake_id)
+    db.commit()
+    acks.write(db, path=path, now_utc=NOW)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["items"] == []
+
+
+def test_write_never_raises_on_unwritable_path(db, tmp_path):
+    """A broken snapshot must never break a tick or a med ack."""
+    path = tmp_path / "no-such-dir" / "pending-acks.json"
+    acks.write(db, path=path, now_utc=NOW)  # must not raise
+
+
+def test_write_is_atomic(db, tmp_path):
+    """No half-written file: readers see either the old or the new one."""
+    path = tmp_path / "pending-acks.json"
+    acks.write(db, path=path, now_utc=NOW)
+    acks.write(db, path=path, now_utc=NOW)
+    assert json.loads(path.read_text(encoding="utf-8"))["items"] == []
+    assert not list(tmp_path.glob("*.tmp*"))

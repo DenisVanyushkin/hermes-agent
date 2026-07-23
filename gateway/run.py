@@ -198,6 +198,117 @@ _GATEWAY_RAW_TEXT_PLATFORMS = frozenset(
 )
 
 
+# Pending acknowledgements ------------------------------------------------
+#
+# An assistant that asks "time to take your pill" owns an open question
+# until the user answers it.  Chat history is not a durable place to keep
+# that: on 2026-07-23 the daily session reset landed between the 09:00
+# reminder and the 09:25 "Готово", the fresh session started with
+# history=0, the agent called no tool, the dose stayed pending and the
+# user was re-nagged 20 minutes later.
+#
+# The state already lives in a database (fam's assistant.db).  fam
+# projects the currently-open questions into a small JSON file; the
+# gateway reads it per turn and injects a short note.  The gateway
+# deliberately knows nothing about fam beyond this file's shape -- fam is
+# a CLI, not an importable dependency of the gateway venv, and a
+# subprocess per inbound message would be both slow and fragile.
+
+# A snapshot older than this is ignored: if the writer died, silence beats
+# nagging about a dose the user may already have taken.
+_PENDING_ACKS_MAX_AGE_MINUTES = 60
+
+
+def _read_pending_acks(path: str) -> Optional[dict]:
+    """Load the snapshot file. Never raises — a broken file means no note."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _pending_acks_note(
+    snapshot: Any,
+    platform: str,
+    user_id: str,
+    now_utc: Optional[str] = None,
+) -> Optional[str]:
+    """Render the per-turn note, or None when there is nothing to say.
+
+    Returns None unless the snapshot is well-formed, fresh, non-empty and
+    addressed to *this* channel — the assistant's other channels (e.g. the
+    admin's Telegram) must never receive someone else's open questions.
+    """
+    from datetime import timedelta, timezone
+
+    if not isinstance(snapshot, dict):
+        return None
+    items = snapshot.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+
+    target = snapshot.get("target")
+    if not isinstance(target, str) or ":" not in target:
+        return None
+    target_platform, _, target_user = target.partition(":")
+    digits = lambda v: "".join(ch for ch in str(v) if ch.isdigit())
+    if target_platform.strip().lower() != str(platform).strip().lower():
+        return None
+    if not digits(target_user) or digits(target_user) != digits(user_id):
+        return None
+
+    def _parse(value):
+        dt = datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    try:
+        now = _parse(now_utc) if now_utc else datetime.now(timezone.utc)
+        generated = _parse(snapshot.get("generated_at"))
+    except Exception:
+        return None
+    if now - generated > timedelta(minutes=_PENDING_ACKS_MAX_AGE_MINUTES):
+        return None
+
+    lines = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        dose = str(item.get("dose") or "").strip()
+        due = str(item.get("due_local") or "").strip()
+        ack = str(item.get("ack_cmd") or "").strip()
+        skip = str(item.get("skip_cmd") or "").strip()
+        head = f"«{name}»" + (f" ({dose})" if dose else "")
+        when = f", запланирован на {due}" if due else ""
+        how = ""
+        if ack and skip:
+            how = f" — подтвердила: `{ack}`; пропустила/отказалась: `{skip}`"
+        elif ack:
+            how = f" — подтвердила: `{ack}`"
+        lines.append(f"- приём {head}{when}{how}")
+
+    if not lines:
+        return None
+
+    return (
+        "[Системная заметка: есть неподтверждённые пункты — пользователь уже "
+        "получил напоминание, но ответ ещё не записан:\n"
+        + "\n".join(lines)
+        + "\nЕсли текущее сообщение подтверждает или отклоняет один из них "
+        "(например «готово», «выпила», «приняла», «позже», «не буду»), "
+        "закрой его соответствующей командой, прежде чем отвечать. Если "
+        "сообщение не про это — не спрашивай о нём заново.]"
+    )
+
+
 def _gateway_surface_passes_raw_text(platform: Any) -> bool:
     """True only for programmatic/local surfaces that must keep raw text."""
     return _gateway_platform_value(platform) in _GATEWAY_RAW_TEXT_PLATFORMS
@@ -14040,6 +14151,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _vc_note = self._voice_channel_sidecar_note(event, source, session_key)
         if _vc_note:
             turn_sidecar_notes.append(_vc_note)
+
+        # -----------------------------------------------------------------
+        # Pending acknowledgements (see _pending_acks_note above): open
+        # questions the assistant already asked, carried on the current
+        # user message so they survive session resets and restarts.
+        # -----------------------------------------------------------------
+        try:
+            _acks_path = ""
+            try:
+                _acks_cfg = _load_gateway_config()
+                _acks_path = str(
+                    (_acks_cfg or {}).get("pending_acks_file", "") or ""
+                )
+            except Exception:
+                _acks_path = ""
+            if _acks_path:
+                _acks_note = _pending_acks_note(
+                    _read_pending_acks(_acks_path),
+                    source.platform.value if source.platform else "",
+                    source.user_id or "",
+                )
+                if _acks_note:
+                    turn_sidecar_notes.append(_acks_note)
+        except Exception:
+            logger.debug("pending-acks note skipped (non-fatal)", exc_info=True)
 
         # -----------------------------------------------------------------
         # Auto-analyze images sent by the user
