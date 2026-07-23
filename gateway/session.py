@@ -28,6 +28,53 @@ def _now() -> datetime:
     return datetime.now()
 
 
+def _daily_reset_boundary(now: datetime, at_hour: int) -> datetime:
+    """Return the most recent daily-reset boundary, on *now*'s own clock.
+
+    ``at_hour`` is a wall-clock hour in the USER's timezone (config
+    ``timezone`` / ``HERMES_TIMEZONE``), but session timestamps -- and
+    ``now`` -- are naive values from the HOST clock.  Interpreting
+    ``at_hour`` against the host clock silently moves the "nightly" reset
+    to whatever local hour the host offset lands on: on a UTC VM serving an
+    Asia/Almaty user, ``at_hour: 4`` fired at 09:00 local, wiping the
+    session between the morning medication reminder and the user's reply.
+
+    So: convert to the user's zone, take the boundary there, convert back.
+    Falls back to the plain host-clock behaviour when no valid timezone is
+    configured -- a bad timezone must never break session handling.
+    """
+    def _host_clock_boundary() -> datetime:
+        boundary = now.replace(hour=at_hour, minute=0, second=0, microsecond=0)
+        if now.hour < at_hour:
+            boundary -= timedelta(days=1)
+        return boundary
+
+    try:
+        from hermes_time import get_timezone
+        tz = get_timezone()
+    except Exception:
+        tz = None
+    if tz is None:
+        return _host_clock_boundary()
+
+    try:
+        host_now = now.astimezone()  # naive host-local -> aware
+        local_now = host_now.astimezone(tz)
+        boundary_local = local_now.replace(
+            hour=at_hour, minute=0, second=0, microsecond=0
+        )
+        if local_now.hour < at_hour:
+            boundary_local -= timedelta(days=1)
+        return boundary_local.astimezone(host_now.tzinfo).replace(tzinfo=None)
+    except Exception:
+        logger.warning(
+            "Daily reset boundary fell back to host clock "
+            "(timezone conversion failed)",
+            exc_info=True,
+        )
+        return _host_clock_boundary()
+
+
 # Default auto-continue freshness window in seconds (1 hour).  A session
 # interrupted by a restart is only auto-resumed — and only returned by
 # ``get_or_create_session`` — while it stays within this window of when
@@ -1949,12 +1996,7 @@ class SessionStore:
                 return True
 
         if policy.mode in {"daily", "both"}:
-            today_reset = now.replace(
-                hour=policy.at_hour,
-                minute=0, second=0, microsecond=0,
-            )
-            if now.hour < policy.at_hour:
-                today_reset -= timedelta(days=1)
+            today_reset = _daily_reset_boundary(now, policy.at_hour)
             if entry.updated_at < today_reset:
                 return True
 
@@ -2050,14 +2092,7 @@ class SessionStore:
                 return "idle"
         
         if policy.mode in {"daily", "both"}:
-            today_reset = now.replace(
-                hour=policy.at_hour, 
-                minute=0, 
-                second=0, 
-                microsecond=0
-            )
-            if now.hour < policy.at_hour:
-                today_reset -= timedelta(days=1)
+            today_reset = _daily_reset_boundary(now, policy.at_hour)
             
             if entry.updated_at < today_reset:
                 return "daily"
