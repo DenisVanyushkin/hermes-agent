@@ -189,6 +189,11 @@ infographic/
 
 # Runtime lock files and ephemeral artifacts created by hermes sandboxes
 .artifacts/
+# Benchmark/replay output. Canonical location is outside the repo
+# (job_intel/.../benchmark/paths.py) after the 2026-07-20 incident where an
+# untracked artifacts/ tree was destroyed with paid LLM recordings in it;
+# this entry stops a stray repo-relative run from being cleaned away too.
+artifacts/
 logs/
 data/
 tmp/

@@ -23,21 +23,28 @@ from .datasets import (
     export_cases_jsonl,
     golden_cases,
 )
+from .paths import artifact_root
 from .runner import run_benchmark
 
 BENCHMARK_ID = "5b3-deterministic-baseline"
-DEFAULT_OUT_ROOT = Path("artifacts/semantic-benchmark/5b3-deterministic-baseline")
 _BUILDERS = {"controls": control_cases, "golden": golden_cases,
              "decision": decision_cases}
 
 
+def default_out_root() -> Path:
+    """Resolved at call time, not import time: the artifact root is
+    environment-dependent and must never be baked into a module constant
+    that a test or a caller cannot override."""
+    return artifact_root() / BENCHMARK_ID
+
+
 def run_deterministic_baseline(
-    out_root: Path = DEFAULT_OUT_ROOT,
+    out_root: Optional[Path] = None,
     datasets: tuple[str, ...] = ("controls", "golden", "decision", "eligible"),
     db_path: Optional[str] = None,
     run_id: str = "r1",
 ) -> dict[str, dict[str, Any]]:
-    out_root = Path(out_root)
+    out_root = Path(out_root) if out_root is not None else default_out_root()
     outcome: dict[str, dict[str, Any]] = {}
     for name in datasets:
         if name == "eligible":
