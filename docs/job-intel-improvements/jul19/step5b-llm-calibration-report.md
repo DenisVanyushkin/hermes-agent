@@ -1,5 +1,10 @@
 # Step 5B — Slice 5B-4: LLM Calibration Live Run
 
+> **СУПЕРСЕДЕД ЧАСТИЧНО (2026-07-23).** Артефакты этого прогона уничтожены
+> инцидентом upstream-sync; прогон повторён после выноса артефактов из репозитория.
+> Актуальные числа и сравнение двух прогонов: .
+
+
 **Exit gate:** `STEP_5B_LLM_CALIBRATION_RUN_COMPLETE`
 **Date:** 2026-07-20 · **Approval:** `APPROVE_5B4_CALIBRATION_WITH_CAP_$3` (owner, in chat)
 **Spend:** **$0.5794 known** (cap $3, estimate $0.7–0.9) · 199/199 cases, 0 failed

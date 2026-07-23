@@ -1,5 +1,10 @@
 # Step 5B — Slice 5B-5: Calibration Comparison Report
 
+> **СУПЕРСЕДЕД ЧАСТИЧНО (2026-07-23).** Артефакты этого прогона уничтожены
+> инцидентом upstream-sync; прогон повторён после выноса артефактов из репозитория.
+> Актуальные числа и сравнение двух прогонов: .
+
+
 **Exit gate:** `STEP_5B_CALIBRATION_COMPARISON_COMPLETE`
 **Verdict (recommendation to owner): `LLM_HISTORICAL_REPLAY_INCONCLUSIVE`** — blocked on the mandatory manual review, see §Verdict.
 **Date:** 2026-07-20 · Inputs: 5B-3 deterministic baseline, 5B-4 canonical replay artifacts. $0 spent (all offline).

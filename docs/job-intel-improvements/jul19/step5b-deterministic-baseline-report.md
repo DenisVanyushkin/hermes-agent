@@ -1,5 +1,10 @@
 # Step 5B — Slice 5B-3: Offline Deterministic Baseline
 
+> **СУПЕРСЕДЕД ЧАСТИЧНО (2026-07-23).** Артефакты этого прогона уничтожены
+> инцидентом upstream-sync; прогон повторён после выноса артефактов из репозитория.
+> Актуальные числа и сравнение двух прогонов: .
+
+
 **Exit gate:** `STEP_5B_DETERMINISTIC_BASELINE_READY`
 **Date:** 2026-07-20
 **Cost:** $0 (deterministic provider, `cost_state=known_zero` throughout; DB access read-only)
