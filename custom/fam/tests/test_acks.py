@@ -17,11 +17,14 @@ import pytest
 from fam import acks, meds
 
 
-def _insert_intake(db, med_id, plan_ts_utc, status="pending"):
+def _insert_intake(db, med_id, plan_ts_utc, status="pending",
+                    deferred_until_utc=None):
     cur = db.execute(
         "INSERT INTO med_intakes(med_id, plan_ts_utc, taken_ts_utc, status, "
-        "series_next_utc, created_at) VALUES (?,?,?,?,?,?)",
-        (med_id, plan_ts_utc, None, status, None, plan_ts_utc),
+        "series_next_utc, deferred_until_utc, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (med_id, plan_ts_utc, None, status, deferred_until_utc,
+         deferred_until_utc, plan_ts_utc),
     )
     return cur.lastrowid
 
@@ -94,6 +97,56 @@ def test_build_orders_by_due_time(db):
 def test_build_stamps_generated_at(db):
     snap = acks.build(db, now_utc=NOW)
     assert snap["generated_at"] == NOW
+
+
+def test_build_shows_deferred_time_not_plan_time(db):
+    """T2.5: a dose deferred to 20:00 must show the deferred time, not
+    its original 09:00 plan_ts_utc -- otherwise a fresh/reset session
+    re-nags at the old (already-answered-by-deferral) time."""
+    med_id = meds.add(db, "мисол", ["09:00"], dose="1 таблетка")
+    db.commit()
+    intake_id = _insert_intake(
+        db, med_id, "2026-07-23T04:00:00+00:00",  # 09:00 Almaty
+        deferred_until_utc="2026-07-23T15:00:00+00:00",  # 20:00 Almaty
+    )
+    db.commit()
+
+    snap = acks.build(db, now_utc=NOW)
+
+    assert len(snap["items"]) == 1
+    item = snap["items"][0]
+    assert item["due_local"] == "20:00"
+    assert item["deferred"] is True
+
+
+def test_build_ignores_expired_deferral(db):
+    """A deferred_until_utc already in the past (edge case: clock passed
+    it without an ack) must not keep masking the original due time --
+    falls back to plan-time behavior, no regression."""
+    med_id = meds.add(db, "мисол", ["09:00"])
+    db.commit()
+    _insert_intake(
+        db, med_id, "2026-07-23T04:00:00+00:00",
+        deferred_until_utc="2026-07-23T04:10:00+00:00",  # before NOW (09:25)
+    )
+    db.commit()
+
+    item = acks.build(db, now_utc=NOW)["items"][0]
+    assert item["due_local"] == "09:00"
+    assert not item.get("deferred")
+
+
+def test_build_non_deferred_intake_unaffected(db):
+    """Regression: a normal due dose (no deferral) keeps its plan-time
+    due_local and carries no 'deferred' key."""
+    med_id = meds.add(db, "мисол", ["09:00"], dose="1 таблетка")
+    db.commit()
+    _insert_intake(db, med_id, "2026-07-23T04:00:00+00:00")
+    db.commit()
+
+    item = acks.build(db, now_utc=NOW)["items"][0]
+    assert item["due_local"] == "09:00"
+    assert not item.get("deferred")
 
 
 # ---- write ----

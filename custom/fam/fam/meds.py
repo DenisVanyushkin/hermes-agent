@@ -116,7 +116,8 @@ def list_pending(conn):
     """
     rows = conn.execute(
         "SELECT m.id AS intake_id, m.med_id AS med_id, d.name AS name, "
-        "m.plan_ts_utc AS plan_ts_utc, m.status AS status "
+        "m.plan_ts_utc AS plan_ts_utc, m.status AS status, "
+        "m.deferred_until_utc AS deferred_until_utc "
         "FROM med_intakes m JOIN meds d ON d.id = m.med_id "
         "WHERE m.status='pending' ORDER BY m.plan_ts_utc"
     ).fetchall()
@@ -369,8 +370,9 @@ def defer(conn, intake_id, until_utc, now_utc=None):
 
     med_id = row["med_id"]
     conn.execute(
-        "UPDATE med_intakes SET series_next_utc=? WHERE id=?",
-        (series_next_str, intake_id),
+        "UPDATE med_intakes SET series_next_utc=?, deferred_until_utc=? "
+        "WHERE id=?",
+        (series_next_str, series_next_str, intake_id),
     )
     audit.log(conn, "meds.defer", {
         "intake_id": intake_id, "med_id": med_id, "until_utc": series_next_str,

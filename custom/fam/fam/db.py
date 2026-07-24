@@ -302,10 +302,17 @@ def init_db(conn):
     # CREATE TABLE IF NOT EXISTS above covers fresh installs and pre-v10
     # databases alike, no _ensure_column migration needed (same pattern
     # as `goals` in v9).
+    # -- v11 (meds-defer T2.5): med_intakes.deferred_until_utc marks a
+    # dose whose reminder was explicitly deferred (fam med defer), so
+    # acks.build can show the deferred-to time instead of the original
+    # plan_ts_utc -- series_next_utc alone can't tell a deferral apart
+    # from an ordinary +45min nag, both land in the future the same way.
+    _ensure_column(conn, "med_intakes", "deferred_until_utc",
+                   "deferred_until_utc TEXT")
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','10')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','11')")
     conn.execute(
-        "UPDATE meta SET value='10' WHERE key='schema_version'")
+        "UPDATE meta SET value='11' WHERE key='schema_version'")
     conn.commit()
 
 

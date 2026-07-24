@@ -1412,6 +1412,7 @@ def cmd_med_defer(args):
     conn = famdb.connect()
     result = meds.defer(conn, args.id, until_utc)
     conn.commit()
+    acks.write(conn, cfg=gate.load_config())
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
     else:

@@ -10,7 +10,7 @@ def test_schema_v10_sent_messages_table(db):
             "ack_status", "created_at"} <= cols
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
 
 
 def test_sent_messages_rejects_unknown_kind_and_ack_status(db):
@@ -57,11 +57,11 @@ def test_schema_v10_migrates_from_v9(tmp_path):
     assert "sent_messages" in tables
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
     assert conn.execute(
         "SELECT title FROM events WHERE id=1").fetchone()["title"] == "старое событие"
 
     famdb.init_db(conn)  # idempotent re-run
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"

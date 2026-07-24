@@ -78,16 +78,27 @@ def build(conn, cfg=None, now_utc=None):
         if plan > now or plan < floor:
             continue
         med = meds.get(conn, row["med_id"]) or {}
-        items.append({
+        due_local = plan.astimezone(ALMATY).strftime("%H:%M")
+        deferred = False
+        deferred_until = row.get("deferred_until_utc")
+        if deferred_until:
+            deferred_dt = _parse_utc(deferred_until)
+            if deferred_dt > now:
+                due_local = deferred_dt.astimezone(ALMATY).strftime("%H:%M")
+                deferred = True
+        item = {
             "kind": "med_intake",
             "id": row["intake_id"],
             "name": row["name"],
             "dose": med.get("dose") or "",
             "plan_ts_utc": row["plan_ts_utc"],
-            "due_local": plan.astimezone(ALMATY).strftime("%H:%M"),
+            "due_local": due_local,
             "ack_cmd": f"fam med taken {row['intake_id']}",
             "skip_cmd": f"fam med skip {row['intake_id']}",
-        })
+        }
+        if deferred:
+            item["deferred"] = True
+        items.append(item)
 
     return {
         "generated_at": now_raw if isinstance(now_raw, str) else now.isoformat(),

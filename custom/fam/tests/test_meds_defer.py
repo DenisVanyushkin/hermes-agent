@@ -28,10 +28,13 @@ def test_defer_pending_moves_series_next_and_keeps_pending(db):
     out = meds.defer(db, iid, until, now_utc=now)
 
     row = db.execute(
-        "SELECT status, series_next_utc FROM med_intakes WHERE id=?", (iid,)
+        "SELECT status, series_next_utc, deferred_until_utc "
+        "FROM med_intakes WHERE id=?", (iid,)
     ).fetchone()
     assert row["status"] == "pending"
     assert row["series_next_utc"] == canonical
+    assert row["deferred_until_utc"] == canonical
+    assert row["deferred_until_utc"] == row["series_next_utc"]
     assert out["intake_id"] == iid
     assert out["med_id"] == med_id
     assert out["until_utc"] == canonical
@@ -90,6 +93,8 @@ def test_defer_twice_moves_again(db):
     meds.defer(db, iid, "2026-07-24T16:00:00Z", now_utc="2026-07-24T15:10:00Z")
 
     row = db.execute(
-        "SELECT series_next_utc FROM med_intakes WHERE id=?", (iid,)
+        "SELECT series_next_utc, deferred_until_utc FROM med_intakes WHERE id=?",
+        (iid,)
     ).fetchone()
     assert row["series_next_utc"] == "2026-07-24T16:00:00+00:00"
+    assert row["deferred_until_utc"] == "2026-07-24T16:00:00+00:00"

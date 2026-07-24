@@ -174,7 +174,20 @@ def test_harden_perms_missing_file_never_raises(tmp_path):
 def test_fresh_db_schema_version_current(db):
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
+
+def test_fresh_db_has_med_intakes_deferred_until_utc_column(db):
+    cols = {r["name"] for r in db.execute("PRAGMA table_info(med_intakes)")}
+    assert "deferred_until_utc" in cols
+
+def test_init_db_is_idempotent_with_deferred_until_utc_column(db):
+    from fam import db as famdb
+    famdb.init_db(db)  # re-run must not raise (column already present)
+    cols = {r["name"] for r in db.execute("PRAGMA table_info(med_intakes)")}
+    assert "deferred_until_utc" in cols
+    assert db.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "11"
 
 def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     from fam import db as famdb
@@ -191,7 +204,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
 
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -212,7 +225,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
     conn.close()
 
 def test_places_travel_min_default_zero(db):
@@ -304,7 +317,7 @@ def test_legacy_2b_db_gets_kind_column(legacy_2b_conn):
     assert "kind" in cols
     assert legacy_2b_conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
 
 # ---- schema 3a migration: events.travel_min_road, events.road_checked_at ----
 
@@ -355,7 +368,7 @@ CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
     assert "road_checked_at" in cols
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
     conn.close()
 
 def test_events_travel_min_road_nullable(db):
@@ -439,7 +452,7 @@ def test_schema_v8_columns(db):
     ver = db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(ver) == 10
+    assert int(ver) == 11
 
 def test_schema_v8_migrates_from_v7(tmp_path):
     from fam import db as famdb
@@ -534,7 +547,7 @@ CREATE TABLE plans (
     assert "home_place_id" in cols("people")
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
 
     # pre-existing rows survived the ALTER TABLE ADD COLUMN migration
     ev = conn.execute("SELECT title FROM events WHERE id=1").fetchone()
@@ -546,7 +559,7 @@ CREATE TABLE plans (
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
     conn.close()
 
 
@@ -593,7 +606,7 @@ def test_schema_v9_goals_table(db):
     ver = db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(ver) == 10
+    assert int(ver) == 11
 
 def test_schema_v9_migrates_from_v8(tmp_path):
     from fam import db as famdb
@@ -628,7 +641,7 @@ def test_schema_v9_migrates_from_v8(tmp_path):
             "closed_at"} <= cols
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
 
     # pre-existing data survived untouched
     ev = conn.execute("SELECT title FROM events WHERE id=1").fetchone()
@@ -638,4 +651,4 @@ def test_schema_v9_migrates_from_v8(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == "11"
