@@ -359,19 +359,27 @@ def defer(conn, intake_id, until_utc, now_utc=None):
             "generated automatically"
         )
 
+    # Store/return/audit the canonical "+00:00" form (this._now()'s own
+    # convention), not the caller's raw until_utc string. tick.py compares
+    # series_next_utc as a bare string against _now()'s "+00:00" output; a
+    # stored "...Z" value would sort wrong ('Z' 0x5A > '+' 0x2B), lagging or
+    # misfiring the minute tick's due check. `until` is already a
+    # tz-aware datetime via _parse_iso, so just re-serialize it.
+    series_next_str = until.astimezone(timezone.utc).isoformat(timespec="seconds")
+
     med_id = row["med_id"]
     conn.execute(
         "UPDATE med_intakes SET series_next_utc=? WHERE id=?",
-        (until_utc, intake_id),
+        (series_next_str, intake_id),
     )
     audit.log(conn, "meds.defer", {
-        "intake_id": intake_id, "med_id": med_id, "until_utc": until_utc,
+        "intake_id": intake_id, "med_id": med_id, "until_utc": series_next_str,
     })
 
     until_local = until.astimezone(_ALMATY).strftime("%H:%M")
     return {
         "intake_id": intake_id, "med_id": med_id,
-        "until_utc": until_utc, "until_local": until_local,
+        "until_utc": series_next_str, "until_local": until_local,
     }
 
 
