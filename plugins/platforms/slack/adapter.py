@@ -112,6 +112,190 @@ def _render_doctor_report(result: dict) -> str:
     return "\n".join(lines)
 
 
+# User-Agent prefix for outbound Slack API calls so platform partners can
+# identify HermesAgent traffic — matching other Hermes outbound surfaces
+# that already set ``HermesAgent/<version>`` for platform-partner attribution.
+try:
+    from hermes_cli import __version__ as _HERMES_VERSION
+except Exception:
+    _HERMES_VERSION = "unknown"
+_HERMES_SLACK_USER_AGENT_PREFIX = f"HermesAgent/{_HERMES_VERSION}"
+
+_SLACK_ERROR_BODY_LIMIT_BYTES = 8 * 1024
+
+
+async def _read_error_text_limited(
+    response: Any,
+    *,
+    limit: int = _SLACK_ERROR_BODY_LIMIT_BYTES,
+) -> str:
+    content = getattr(response, "content", None)
+    read = getattr(content, "read", None)
+    if callable(read):
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit:
+            size = min(4096, limit + 1 - total)
+            chunk = await read(size)
+            if not chunk:
+                break
+            data = bytes(chunk)
+            chunks.append(data)
+            total += len(data)
+        if total > limit:
+            release = getattr(response, "release", None)
+            if callable(release):
+                release()
+        return b"".join(chunks)[:limit].decode("utf-8", errors="replace")
+
+    text = await response.text()
+    return str(text)[:limit]
+
+
+_SLACK_SPECIAL_MENTION_RE = re.compile(
+    r"<!(?:everyone|channel|here)(?:\|[^>\n]*)?>", re.IGNORECASE
+)
+
+# Cap on how many thread-root images are downloaded and delivered when the
+# bot is mentioned mid-thread (cold-start hydrate). Prior thread messages'
+# attachments are surfaced as text markers only — the root is special
+# because it is very often the artifact the mention is about ("@bot what's
+# in this chart?" posted as a reply under an image).
+_THREAD_ROOT_IMAGE_MAX = 4
+
+
+def _slack_file_marker(file_obj: Dict[str, Any]) -> str:
+    """Render a compact text marker for a Slack file attachment.
+
+    Used by :meth:`SlackAdapter._render_message_text` so thread-context and
+    parent-text rendering surface that a message carried images/files even
+    though the context fetch is text-only. Name is sanitized (newlines and
+    brackets stripped) so a hostile filename can't fake context structure.
+    """
+    name = str(file_obj.get("name") or file_obj.get("title") or file_obj.get("id") or "file")
+    name = re.sub(r"[\r\n\[\]]+", " ", name).strip() or "file"
+    mimetype = str(file_obj.get("mimetype") or "")
+    if mimetype.startswith("image/"):
+        return f"[image: {name}]"
+    if mimetype.startswith("video/"):
+        return f"[video: {name}]"
+    if mimetype.startswith("audio/"):
+        return f"[audio: {name}]"
+    return f"[file: {name} ({mimetype})]" if mimetype else f"[file: {name}]"
+
+
+# ── GFM markdown table preprocessing ──────────────────────────────────────
+# Slack mrkdwn does not render GFM-style pipe tables — they appear as literal
+# pipes. Wrapping in ``` fences makes them render as monospace preformatted
+# text, and padding cells to per-column max display width (with East-Asian
+# Wide / CJK awareness) keeps the columns aligned for the reader.
+
+_TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*){1,}\|?\s*$"
+)
+
+
+def _is_table_row(line: str) -> bool:
+    """Return True if *line* could plausibly be a table data row."""
+    stripped = line.strip()
+    return bool(stripped) and "|" in stripped
+
+
+def _disp_width(s: str) -> int:
+    """Monospace display width: East-Asian Wide / Full-width chars count as 2."""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+
+
+def _pad(cell: str, width: int) -> str:
+    """Right-pad *cell* with spaces until its display width equals *width*."""
+    delta = width - _disp_width(cell)
+    return cell + (" " * delta if delta > 0 else "")
+
+
+def _split_table_row(line: str) -> List[str]:
+    """Split a ``| a | b | c |`` row into trimmed cells (outer pipes optional)."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def _align_table(rows: List[str]) -> List[str]:
+    """Re-emit a markdown table with cells padded to per-column max display width.
+
+    *rows[0]* is the header, *rows[1]* is the GFM separator (regenerated to
+    match new column widths), and *rows[2:]* are data rows. Cells are
+    normalized to a uniform column count (missing cells filled with empty
+    strings) before width calculation.
+    """
+    if len(rows) < 2:
+        return rows
+    parsed = [_split_table_row(r) for r in rows]
+    n_cols = max(len(r) for r in parsed)
+    for r in parsed:
+        while len(r) < n_cols:
+            r.append("")
+    sep_idx = 1
+    parsed[sep_idx] = ["---"] * n_cols  # placeholder; regenerated below
+    widths = [max(_disp_width(r[c]) for r in parsed) for c in range(n_cols)]
+    out: List[str] = []
+    for idx, row in enumerate(parsed):
+        if idx == sep_idx:
+            cells = ["-" * widths[c] for c in range(n_cols)]
+        else:
+            cells = [_pad(row[c], widths[c]) for c in range(n_cols)]
+        out.append("| " + " | ".join(cells) + " |")
+    return out
+
+
+def _wrap_markdown_tables(text: str) -> str:
+    """Wrap GFM pipe tables in ``` fences and align column widths.
+
+    Detected by a row containing ``|`` immediately followed by a delimiter row
+    matching :data:`_TABLE_SEPARATOR_RE`. Subsequent pipe-containing non-blank
+    lines are consumed as the table body. Tables already inside fenced code
+    blocks are left alone.
+    """
+    if not text or "|" not in text or "-" not in text:
+        return text
+
+    lines = text.split("\n")
+    out: List[str] = []
+    in_fence = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.lstrip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            out.append(line)
+            i += 1
+            continue
+        if in_fence:
+            out.append(line)
+            i += 1
+            continue
+        if (
+            "|" in line
+            and i + 1 < len(lines)
+            and _TABLE_SEPARATOR_RE.match(lines[i + 1])
+        ):
+            block = [line, lines[i + 1]]
+            j = i + 2
+            while j < len(lines) and _is_table_row(lines[j]):
+                block.append(lines[j])
+                j += 1
+            out.append("```")
+            out.extend(_align_table(block))
+            out.append("```")
+            i = j
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
 # ContextVar carrying the user_id of the slash-command invoker.
 # Set in _handle_slash_command, read in send() to match the correct
 # stashed response_url when multiple users issue commands on the same

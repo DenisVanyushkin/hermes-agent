@@ -865,6 +865,24 @@ def build_turn_context(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
+                if (
+                    messages is _preflight_input
+                    and compression_skipped_due_to_lock(agent)
+                ):
+                    # #69870 lock-skip: another path holds this session's
+                    # compression lock, so the pass no-oped. That is a
+                    # temporary DEFER, not proof the transcript cannot
+                    # compress — do NOT arm the insufficient-progress
+                    # blocker (the loop's error handlers must keep their
+                    # provider-proven retry budget) and stop preflight
+                    # passes for this turn; the lock winner is shrinking
+                    # the same session concurrently.
+                    logger.info(
+                        "Preflight compression deferred: compression lock "
+                        "held by another path (session %s)",
+                        agent.session_id or "none",
+                    )
+                    break
                 if messages is not None:
                     rebased_idx = next(
                         (

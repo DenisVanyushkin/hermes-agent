@@ -91,6 +91,7 @@ def finalize_turn(
     _turn_exit_reason,
     _pending_verification_response=None,
     response_pre_transformed=False,
+    _pending_verification_response_previewed=False,
 ):
     """Run the post-loop finalization and return the turn ``result`` dict.
 
@@ -799,4 +800,7 @@ def finalize_turn(
         logger.warning("on_session_end hook failed: %s", exc)
 
     agent._turn_runtime_request = None
+    agent._turn_preflight_display_snapshot = None
+    agent._turn_received_provider_response = False
+
     return result

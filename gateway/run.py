@@ -24355,9 +24355,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         first_response,
                         previewed=_previewed,
                     )
+                    # Apply the same predicate as the normal completed-turn path.
+                    # This direct queued-send branch predates intentional-silence
+                    # filtering, so without this check it leaks the literal marker.
+                    try:
+                        from gateway.response_filters import is_intentional_silence_agent_result
+                        _intentional_silence = is_intentional_silence_agent_result(
+                            _delivery_result, first_response,
+                        )
+                    except Exception:
+                        _intentional_silence = False
                     if first_response and _looks_like_internal_clarify_summary(first_response):
                         logger.info(
                             "Queued follow-up for session %s: suppressing internal clarify summary before continuing.",
+                            session_key or "?",
+                        )
+                    elif _intentional_silence:
+                        logger.info(
+                            "Queued follow-up for session %s: suppressing intentional silence marker before continuing.",
                             session_key or "?",
                         )
                     elif first_response and not _already_streamed:

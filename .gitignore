@@ -23,6 +23,8 @@ pip-wheel-metadata/
 *.swo
 
 # ── Virtual environments ───────────────────────────────────────────────────────
+act/
+.act-sandbox-agent.*
 .venv/
 .venv
 venv.old/
@@ -56,6 +58,37 @@ test_durations.json
 .coverage.*
 htmlcov/
 .tox/
+tmp/
+temp_vision_images/
+hermes-*/*
+examples/
+tests/quick_test_dataset.jsonl
+tests/sample_dataset.jsonl
+run_datagen_kimik2-thinking.sh
+run_datagen_megascience_glm4-6.sh
+run_datagen_sonnet.sh
+source-data/*
+run_datagen_megascience_glm4-6.sh
+data/*
+# No trailing slash: also matches node_modules SYMLINKS (worktrees often
+# symlink node_modules to the main checkout; the dir-only pattern let one
+# slip into a commit and break `npm ci` on CI with ENOTDIR).
+node_modules
+browser-use/
+agent-browser/
+# Private keys
+*.ppk
+*.pem
+privvy*
+images/
+__pycache__/
+hermes_agent.egg-info/
+wandb/
+testlogs
+playwright-report/
+test-results/
+# Playwright visual regression baselines — cached from main in CI, not committed
+*-snapshots/
 
 # CLI config (may contain sensitive SSH paths)
 cli-config.yaml
@@ -256,3 +289,4 @@ controlled_execution_report.json
 /preflight.json
 /partition_result.json
 /gen_pending.py
+native/fts5_cjk/*.so
