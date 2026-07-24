@@ -12,7 +12,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v16 (emoji reaction acks)._
+_Body version: v17 (medication defer verb)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -403,6 +403,7 @@ show after cancel), make a second, separate terminal call.
 | Edit a med | `fam meds edit <id> [--name] [--dose] [--times] [--remaining] [--threshold] [--enabled 0\|1]` |
 | Mark a dose taken | `fam med taken <intake_id>` |
 | Skip one dose | `fam med skip <intake_id>` |
+| Defer one dose to later | `fam med defer <intake_id> --until HH:MM` |
 | Add to shopping list | `fam shop add "NAME" [--qty Q] [--by WHO]` |
 | See shopping list | `fam shop list` |
 | Mark item bought | `fam shop done <id>` (bought med: add `--restock N`) |
@@ -659,11 +660,13 @@ conversation.
   X") → resolve `<id>` from `fam meds list` by name first — never guess
   it — then `fam meds edit <id> [--name] [--dose] [--times]
   [--remaining] [--threshold] [--enabled 0|1]`.
-- **"выпила"/"приняла" (this dose taken)** and **"пропускаю"/"перестань"
-  (skip this dose)** both need the pending intake_id first. The reminder
-  that fired is NOT in your session context (same out-of-band constraint
-  as Reminder Reactions above) — resolve it fresh, never guess, same
-  match-then-act pattern as Shopping Verbs' "Marking bought" below:
+- **Reactions to an active medication reminder — различай три!**
+  "выпила"/"приняла" (taken), "пропускаю"/"перестань" (skip), and
+  "напомни в 20:00"/"позже"/"отложи до HH:MM" (defer) all need the
+  pending intake_id first. The reminder that fired is NOT in your
+  session context (same out-of-band constraint as Reminder Reactions
+  above) — resolve it fresh, never guess, same match-then-act pattern
+  as Shopping Verbs' "Marking bought" below:
   1. `fam med list --pending --json` — every dose currently awaiting an
      ack.
   2. Match by medication name (and time, if the user gave one) against
@@ -671,15 +674,26 @@ conversation.
   3. Exactly one match → use its `intake_id`. Several plausible matches,
      or none → ask which dose they mean, or say nothing's pending for X
      — never guess an id.
-  - "выпила"/"приняла" → `fam med taken <intake_id>` (singular `med`,
-    not `meds` — `meds` manages med definitions, `med` acks one dose).
-    If the result has `"restock": true`, mention "пора купить X" in your
-    reply — it's already on the shopping list (auto-added just now, or
-    already open there); don't add it yourself.
-  - "пропускаю"/"перестань" → `fam med skip <intake_id>` — closes only
-    that one dose; `remaining` and the next scheduled dose are
-    untouched. If the user actually means "stop reminding me about X
-    altogether", that's `fam meds edit <id> --enabled 0`, not a skip.
+  - "выпила"/"приняла" (dose taken) → `fam med taken <intake_id>`
+    (singular `med`, not `meds` — `meds` manages med definitions, `med`
+    acks one dose). If the result has `"restock": true`, mention "пора
+    купить X" in your reply — it's already on the shopping list
+    (auto-added just now, or already open there); don't add it yourself.
+  - "пропускаю"/"сегодня не буду"/"перестань напоминать" (skip this
+    dose) → `fam med skip <intake_id>` — closes only that one dose;
+    `remaining` and the next scheduled dose are untouched. If the user
+    actually means "stop reminding me about X altogether", that's `fam
+    meds edit <id> --enabled 0`, not a skip.
+  - "напомни в 20:00"/"позже"/"сейчас не могу принять"/"отложи до
+    HH:MM" (defer — dose stays open, just remind again later) → `fam
+    med defer <intake_id> --until HH:MM`. Resolve `HH:MM` from "now" the
+    same way as the Time rule above (message's timestamp prefix, or one
+    `date` call) — never guess it. If the target time is after 21:30
+    Asia/Almaty, warn first: "после 21:30 напоминания молчат до утра —
+    точно на HH:MM?" and only run `defer` after an explicit
+    confirmation. Confirm the deferral itself as an ordinary
+    conversational reply ("хорошо, напомню про X в 20:00"), not a
+    proactive message — same as the taken/skip confirmations above.
 
 ## Shopping Verbs
 
