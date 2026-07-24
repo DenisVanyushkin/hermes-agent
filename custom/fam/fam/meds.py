@@ -4,13 +4,21 @@ Domain functions never commit — callers (tests, CLI) own the transaction,
 mirroring plans.py/people.py/places.py's pattern.
 """
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fam import audit, shopping
+
+_ALMATY = timezone(timedelta(hours=5))  # UTC+5, no DST
 
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_iso(s):
+    # accepts both "...Z" (brief/CLI convention) and "...+00:00"
+    # (this module's own _now()/take()/skip() convention).
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
 def _validate_times(times):
@@ -301,6 +309,70 @@ def skip(conn, intake_id):
     result["status"] = "skipped"
     result["series_next_utc"] = None
     return result
+
+
+def defer(conn, intake_id, until_utc, now_utc=None):
+    """Push a pending dose's persistent-reminder series out to until_utc,
+    without touching its status (T1, meds-defer). Unlike take()/skip(),
+    this dose is not being acked one way or the other -- it stays
+    'pending', so tick's own escalation logic (fam/tick.py) resumes
+    nagging from the new series_next_utc instead of the old one.
+
+    until_utc (ISO UTC, "...Z" or "...+00:00") must be strictly in the
+    future (> now_utc, defaulting to _now()) and strictly before local
+    midnight in Asia/Almaty today -- deferring past midnight would
+    collide with tomorrow's dose, which tick.meds_gen generates on its
+    own schedule regardless of what this call does. Both violations
+    raise ValueError, before any write, same "raise before any write"
+    contract as take()/skip() use for an already-acked intake.
+
+    Raises ValueError on an unknown intake_id or a non-pending status --
+    only a pending dose can be deferred; an already-taken/skipped/missed
+    intake is done, and a retried defer must not resurrect its series.
+
+    audit meds.defer: {intake_id, med_id, until_utc}.
+    """
+    row = conn.execute(
+        "SELECT * FROM med_intakes WHERE id=?", (intake_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown intake: {intake_id}")
+    if row["status"] != "pending":
+        raise ValueError(f"intake {intake_id} already {row['status']}")
+
+    now_str = now_utc or _now()
+    now = _parse_iso(now_str)
+    until = _parse_iso(until_utc)
+
+    if until <= now:
+        raise ValueError(
+            f"defer time must be in the future (now: {now_str})"
+        )
+
+    local_now = now.astimezone(_ALMATY)
+    next_local_midnight = (local_now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    if until.astimezone(_ALMATY) >= next_local_midnight:
+        raise ValueError(
+            "defer time crosses Almaty midnight; tomorrow's dose is "
+            "generated automatically"
+        )
+
+    med_id = row["med_id"]
+    conn.execute(
+        "UPDATE med_intakes SET series_next_utc=? WHERE id=?",
+        (until_utc, intake_id),
+    )
+    audit.log(conn, "meds.defer", {
+        "intake_id": intake_id, "med_id": med_id, "until_utc": until_utc,
+    })
+
+    until_local = until.astimezone(_ALMATY).strftime("%H:%M")
+    return {
+        "intake_id": intake_id, "med_id": med_id,
+        "until_utc": until_utc, "until_local": until_local,
+    }
 
 
 def restock_by_name(conn, name, n, now_utc=None):
