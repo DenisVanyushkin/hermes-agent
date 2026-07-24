@@ -1375,6 +1375,49 @@ def cmd_med_skip(args):
         print(f"skipped: intake {args.id}")
     return 0
 
+def _resolve_until_utc(raw):
+    """CLI-layer parsing for `med defer --until`: HH:MM resolves against
+    *today* in Asia/Almaty (reusing cal.ALMATY, same tz meds.defer itself
+    uses internally); anything else is treated as ISO-8601 and normalized
+    to UTC. meds.defer's own _parse_iso already tolerates both "...Z" and
+    "...+00:00", so either form works here -- ValueError on garbage
+    propagates to main()'s existing except ValueError -> exit 2, same
+    contract as an unknown/non-pending intake_id.
+    """
+    m = re.fullmatch(r"(\d{2}):(\d{2})", raw)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2))
+        if hh > 23 or mm > 59:
+            raise ValueError(f"bad --until time '{raw}'")
+        today_local = datetime.now(cal.ALMATY).replace(
+            hour=hh, minute=mm, second=0, microsecond=0)
+        return today_local.astimezone(timezone.utc).isoformat(timespec="seconds")
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"bad --until value '{raw}'")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+def cmd_med_defer(args):
+    """`fam med defer <intake_id> --until HH:MM|ISO` -- push a pending
+    dose's series_next_utc out without acking it (Task 2, meds-defer).
+    All validation (unknown/non-pending intake_id, past time, at/after
+    local midnight) lives in meds.defer (T1); this layer only resolves
+    --until to a UTC string first. Same ValueError -> exit 2 contract
+    (via main()) as cmd_med_taken/cmd_med_skip.
+    """
+    until_utc = _resolve_until_utc(args.until)
+    conn = famdb.connect()
+    result = meds.defer(conn, args.id, until_utc)
+    conn.commit()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"ок, напомню про приём в {result['until_local']}")
+    return 0
+
 def _fmt_shop(it):
     line = f"{it['id']}\t{it['name']}"
     if it.get("qty"):
@@ -1943,6 +1986,13 @@ def build_parser():
                       help="pending intakes only (default -- no other "
                            "status is worth listing here)")
     spl.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spd = med_sub.add_parser("defer"); spd.set_defaults(func=cmd_med_defer)
+    spd.add_argument("id", type=int, help="med_intakes row id")
+    spd.add_argument("--until", required=True,
+                      help="HH:MM (Almaty, today) or ISO-8601 UTC")
+    spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
     sp = sub.add_parser("shop")

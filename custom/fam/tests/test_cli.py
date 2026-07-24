@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from fam import audit, cal, cli, gate, mail, people, places, rem
+from fam import audit, cal, cli, gate, mail, meds, people, places, rem
 
 def _future_start(hours=0):
     """A start comfortably in the future so cal-add's past guard never trips.
@@ -1090,3 +1090,59 @@ def test_cal_add_no_place_allows_unknown_transport(db, capsys):
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["title"] == "Созвон"
+
+# --- Task 2 (meds-defer): `fam med defer <id> --until` ---
+
+_ALMATY = timezone(timedelta(hours=5))
+
+def _future_hhmm_almaty(hours=2):
+    """A HH:MM comfortably in the future by Almaty wall-clock, but never
+    crossing local midnight -- meds.defer() rejects `until` at/after
+    today's midnight, so a naive now+2h could flap right before 22:00
+    Almaty. Clamp to 23:59 instead of rolling into tomorrow."""
+    now = datetime.now(_ALMATY)
+    target = now + timedelta(hours=hours)
+    if target.date() != now.date():
+        target = now.replace(hour=23, minute=59, second=0, microsecond=0)
+        if target <= now:
+            target = now + timedelta(minutes=1)
+    return target.strftime("%H:%M")
+
+def _mk_pending_intake(db, name="мисол", plan="2026-07-24T04:00:00Z"):
+    med_id = meds.add(db, name, ["09:00"], remaining=10, threshold=1)
+    cur = db.execute(
+        "INSERT INTO med_intakes (med_id, plan_ts_utc, status, "
+        "series_next_utc, created_at) VALUES (?,?,?,?,?)",
+        (med_id, plan, "pending", plan, "2026-07-24T04:00:00Z"),
+    )
+    db.commit()
+    return cur.lastrowid
+
+def test_med_defer_hhmm_sets_series_next(db, capsys):
+    iid = _mk_pending_intake(db)
+    until = _future_hhmm_almaty()
+    rc = cli.main(["med", "defer", str(iid), "--until", until, "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    out = json.loads(captured.out)
+    assert out["intake_id"] == iid
+    assert out["until_local"] == until
+
+    row = db.execute(
+        "SELECT status, series_next_utc FROM med_intakes WHERE id=?", (iid,)
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["series_next_utc"] != "2026-07-24T04:00:00Z"
+
+def test_med_defer_bad_time_exits_2(db, capsys):
+    iid = _mk_pending_intake(db)
+    rc = cli.main(["med", "defer", str(iid), "--until", "25:99"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
+
+def test_med_defer_unknown_intake_exits_2(db, capsys):
+    rc = cli.main(["med", "defer", "999999", "--until", "23:00"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
