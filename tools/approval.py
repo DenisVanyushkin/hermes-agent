@@ -2522,6 +2522,17 @@ def _get_cron_approval_mode() -> str:
         return "deny"
 
 
+_REVIEW_SUBJECT_MAX_CHARS = 8192
+
+
+def _truncate_for_review(text: str) -> str:
+    """Cap the reviewer payload. A 200 KB script would blow the aux context."""
+    if len(text) <= _REVIEW_SUBJECT_MAX_CHARS:
+        return text
+    head = text[: _REVIEW_SUBJECT_MAX_CHARS - 200]
+    return f"{head}\n\n[... truncated {len(text) - len(head)} chars ...]"
+
+
 def resolve_cron_gate_decision(
     *,
     gate: str,
@@ -3846,25 +3857,29 @@ def check_execute_code_guard(code: str, env_type: str,
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
-    # Cron: no user is present to approve arbitrary code.
+    # Cron: no user is present to approve arbitrary code. Under cron_mode=smart
+    # the script body itself goes to the auxiliary reviewer — before this, smart
+    # fell through to the auto-approve tail and cron ran arbitrary Python
+    # entirely unreviewed, the widest hole of the four gates.
     if env_var_enabled("HERMES_CRON_SESSION"):
-        if _get_cron_approval_mode() == "deny":
-            return {
-                "approved": False,
-                "message": (
-                    "BLOCKED: execute_code runs arbitrary local Python "
-                    "(including subprocess calls that bypass shell-string "
-                    "approval checks). Cron jobs run without a user present "
-                    "to approve it. Use normal tools instead, or set "
-                    "approvals.cron_mode: approve only if this cron profile "
-                    "is intentionally trusted."
-                ),
-                "pattern_key": pattern_key,
-                "description": description,
-                "outcome": "blocked",
-                "user_consent": False,
-            }
-        return {"approved": True, "message": None}
+        decision = resolve_cron_gate_decision(
+            gate="execute_code",
+            # Same framing the interactive smart path below uses, so one script
+            # is reviewed identically no matter which session type triggered it.
+            subject_text=_truncate_for_review(f"execute_code <<'PY'\n{code}\nPY"),
+            description=description,
+            deny_message=(
+                "BLOCKED: execute_code runs arbitrary local Python "
+                "(including subprocess calls that bypass shell-string "
+                "approval checks). Cron jobs run without a user present "
+                "to approve it. Use normal tools instead, or set "
+                "approvals.cron_mode: smart to have the script reviewed."
+            ),
+        )
+        if not decision["approved"]:
+            return {**decision, "pattern_key": pattern_key,
+                    "outcome": "blocked", "user_consent": False}
+        return decision
 
     # Only gateway/ask contexts get the one-shot whole-script approval.
     #   * CLI interactive: the script's terminal() calls are guarded per-call
