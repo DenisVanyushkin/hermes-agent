@@ -15,8 +15,8 @@ def test_engineer_code_task_selects_coding_high_reasoning_policy():
 
     assert selection.policy_class == "coding"
     assert selection.policy_name == "coding_high_reasoning"
-    assert selection.preferred_provider == "openrouter"
-    assert selection.preferred_model == "xiaomi/mimo-v2.5-pro"
+    assert selection.preferred_provider == "openai-codex"
+    assert selection.preferred_model == "gpt-5.6-terra"  # tiers.coding
     assert selection.allow_fallback is True
     assert selection.fallback_chain_key == "coding_then_reasoning_then_standard"
 
@@ -56,7 +56,7 @@ def test_scribe_handoff_task_selects_stable_text_policy():
 
     assert selection.policy_class == "scribe"
     assert selection.policy_name == "scribe_stable_text"
-    assert selection.preferred_model == "gpt-5.4-mini"
+    assert selection.preferred_model == "gpt-5.6-luna"  # tiers.standard
 
 
 
@@ -245,7 +245,7 @@ def test_general_operator_haircut_task_selects_default_policy():
 
     assert selection.policy_class == "general_operator"
     assert selection.policy_name == "general_default"
-    assert selection.preferred_model == "gpt-5.4-mini"
+    assert selection.preferred_model == "gpt-5.6-luna"  # tiers.standard
 
 
 def test_research_complex_synthesis_selects_reasoning_model():
@@ -258,7 +258,7 @@ def test_research_complex_synthesis_selects_reasoning_model():
 
     assert selection.policy_class == "research"
     assert selection.policy_name == "research_reasoning"
-    assert selection.preferred_model == "gpt-5.4"
+    assert selection.preferred_model == "gpt-5.6-terra"  # tiers.reasoning
 
 
 def test_critical_approval_cloudflare_task_selects_approval_critical_policy():
@@ -271,7 +271,7 @@ def test_critical_approval_cloudflare_task_selects_approval_critical_policy():
 
     assert selection.policy_class == "approval_critical"
     assert selection.policy_name == "approval_critical"
-    assert selection.preferred_model == "gpt-5.5"
+    assert selection.preferred_model == "gpt-5.6-sol"  # tiers.critical
     assert selection.allow_fallback is False
     assert selection.fallback_chain_key == "stop_and_escalate"
 
@@ -296,11 +296,11 @@ def test_engineer_package_role_uses_canonical_engineer_coding_policy():
     assert selection.effective_role == "engineer"
     assert selection.policy_class == "coding"
     assert selection.policy_name == "coding_high_reasoning"
-    assert selection.preferred_provider == "openrouter"
-    assert selection.preferred_model == "xiaomi/mimo-v2.5-pro"
+    assert selection.preferred_provider == "openai-codex"
+    assert selection.preferred_model == "gpt-5.6-terra"  # tiers.coding
 
 
-def test_security_critical_engineer_task_uses_gpt_5_5_without_fallback():
+def test_security_critical_engineer_task_uses_critical_tier_without_fallback():
     selection = select_model_policy(
         selected_role="engineer",
         canonical_role="engineer",
@@ -310,5 +310,5 @@ def test_security_critical_engineer_task_uses_gpt_5_5_without_fallback():
 
     assert selection.policy_class == "approval_critical"
     assert selection.preferred_provider == "openai-codex"
-    assert selection.preferred_model == "gpt-5.5"
+    assert selection.preferred_model == "gpt-5.6-sol"  # tiers.critical
     assert selection.allow_fallback is False

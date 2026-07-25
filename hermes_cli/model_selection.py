@@ -14,10 +14,14 @@ from typing import Any
 
 _DEFAULT_PROVIDER = "openai-codex"
 _CODING_PROVIDER = "openai-codex"
-_DEFAULT_MODEL = "gpt-5.4-mini"
-_REASONING_MODEL = "gpt-5.4"
-_CRITICAL_MODEL = "gpt-5.5"
-_CODING_MODEL = "gpt-5.4"
+# Kept in sync with the tier block of config/hermes-model-policy.yaml, which is
+# the single source of truth for the sanctioned lineup. This module stays pure
+# and import-light (see the module docstring) rather than parsing YAML at import
+# time, so tests/hermes_cli/test_model_policy_lineup.py enforces the agreement.
+_DEFAULT_MODEL = "gpt-5.6-luna"      # tiers.standard
+_REASONING_MODEL = "gpt-5.6-terra"   # tiers.reasoning
+_CRITICAL_MODEL = "gpt-5.6-sol"      # tiers.critical
+_CODING_MODEL = "gpt-5.6-terra"      # tiers.coding
 
 _TRADING_ROLES = {"trading_observer_trader", "trading_observer_trader_deferred"}
 _SIMPLE_RESEARCH_HINTS = {
