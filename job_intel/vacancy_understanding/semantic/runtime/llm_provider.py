@@ -33,7 +33,12 @@ from job_intel.vacancy_understanding.semantic.runtime.models import Observation
 from job_intel.vacancy_understanding.semantic.runtime.pipeline import _values_for
 
 LLM_PROVIDER_ID = "llm-observation"
-LLM_PROMPT_VERSION = "llm-obs-1.0.0"
+LLM_PROMPT_VERSION = "llm-obs-1.0.0"  # default/frozen baseline
+# sha256 of build_prompt(load_semantic_contract()) — the 1.0.0 prompt is
+# frozen as the 5B benchmark baseline; a guard test pins this so the text can
+# never drift and orphan every recording keyed on it.
+FROZEN_PROMPT_V1_0_0_SHA256 = (
+    "051c18e40d15d65c15309d217831044267bf01abb77ac5019cbb6ec29e1d29d3")
 # Proposed Step 5A model (spend gate report); pinned exactly, no fallback.
 DEFAULT_MODEL_ID = "openai/gpt-5-mini"
 DEFAULT_TRANSPORT_PROVIDER = "openrouter"
@@ -152,6 +157,42 @@ Hard rules:
 """
 
 
+# 1.1.0 — additive change scoped by the 5B-5 owner review: the provider was
+# reliable on company facts but over-reached on mandate facts, inferring the
+# candidate's remit (scope_breadth, revenue_proximity, strategy_ownership,
+# ...) from company-level phrasing (scale, valuation, brand, ecosystem, HR
+# boilerplate). This block forbids exactly that, and nothing else.
+_MANDATE_GATING_RULE_V1_1_0 = """
+6. mandate.* signals describe what THIS ROLE owns or does — the candidate's
+   remit — and require evidence that describes the role's responsibilities.
+   NEVER infer a mandate signal from evidence that only describes the
+   COMPANY: its scale ("over 200,000 businesses", "26 offices"), valuation
+   or funding ("valued at US$8bn", "backed by ..."), brand or product
+   portfolio, market position, ecosystem, or hiring/culture boilerplate
+   ("we hire builders with founder-like energy"). Such quotes may support a
+   company.* signal but MUST NOT be used as maps_to a mandate.* fact. When a
+   role's mandate is not stated in responsibility language, emit nothing for
+   it — a company fact is not a mandate."""
+
+
+def build_prompt_v1_1_0(contract: SemanticFactContract) -> str:
+    return build_prompt(contract) + _MANDATE_GATING_RULE_V1_1_0
+
+
+# fact-leaf -> builder. 1.0.0 stays the default and is frozen.
+PROMPT_BUILDERS = {
+    "llm-obs-1.0.0": build_prompt,
+    "llm-obs-1.1.0": build_prompt_v1_1_0,
+}
+
+
+def build_prompt_for_version(version: str, contract: SemanticFactContract) -> str:
+    builder = PROMPT_BUILDERS.get(version)
+    if builder is None:
+        raise LLMProviderError("unknown_prompt_version", version)
+    return builder(contract)
+
+
 def response_schema() -> dict[str, Any]:
     """Structured-output schema derived from the existing Observation model.
 
@@ -258,7 +299,6 @@ class LLMObservationProvider:
     """
 
     provider_id = LLM_PROVIDER_ID
-    prompt_version = LLM_PROMPT_VERSION
 
     def __init__(
         self,
@@ -268,6 +308,7 @@ class LLMObservationProvider:
         model_id: str = DEFAULT_MODEL_ID,
         transport: Any = None,
         contract: Optional[SemanticFactContract] = None,
+        prompt_version: str = LLM_PROMPT_VERSION,
     ) -> None:
         if mode not in ("replay", "record"):
             raise LLMProviderError("invalid_mode", mode)
@@ -280,7 +321,11 @@ class LLMObservationProvider:
         self.store = store
         self._transport = transport
         self._contract = contract or load_semantic_contract()
-        self._prompt = build_prompt(self._contract)
+        # prompt_version is instance state: it participates in input_hash and
+        # is stored on every recording, so a 1.1.0 run is a distinct benchmark
+        # identity that never collides with or overwrites 1.0.0 recordings.
+        self.prompt_version = prompt_version
+        self._prompt = build_prompt_for_version(prompt_version, self._contract)
         self.last_call_metadata: dict[str, Any] = {}
 
     # -- identity -----------------------------------------------------------
@@ -415,7 +460,8 @@ class LLMObservationProvider:
 
 
 def build_live_llm_provider(
-    *, store_dir: Path | str, model_id: str = DEFAULT_MODEL_ID
+    *, store_dir: Path | str, model_id: str = DEFAULT_MODEL_ID,
+    prompt_version: str = LLM_PROMPT_VERSION,
 ) -> LLMObservationProvider:
     """Spend-gated factory for record mode. Refuses to build without the
     explicit owner-approval flag; replay mode never needs this factory."""
@@ -442,4 +488,4 @@ def build_live_llm_provider(
     client = client.with_options(max_retries=0)
     return LLMObservationProvider(
         store=RecordingStore(store_dir), mode="record",
-        model_id=model_id, transport=client)
+        model_id=model_id, transport=client, prompt_version=prompt_version)

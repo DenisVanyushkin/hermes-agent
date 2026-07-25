@@ -17,10 +17,12 @@ from job_intel.vacancy_understanding.semantic.contract import (
     load_semantic_contract,
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+    LLM_PROMPT_VERSION,
     LLMObservationProvider,
     RecordingStore,
     build_live_llm_provider,
     build_prompt,
+    build_prompt_for_version,
 )
 from job_intel.vacancy_understanding.semantic.runtime.provider import (
     DeterministicPhraseProvider,
@@ -84,9 +86,10 @@ def build_benchmark_provider(
             if missing:
                 raise ProviderRegistryError(
                     f"llm_replay pricing missing required keys: {sorted(missing)}")
+        prompt_version = spec.get("prompt_version", LLM_PROMPT_VERSION)
         provider = LLMObservationProvider(
             store=RecordingStore(store_dir), mode="replay",
-            model_id=model_id, contract=contract)
+            model_id=model_id, contract=contract, prompt_version=prompt_version)
         # store_dir is a path, not identity. Pricing IS identity: rows costed
         # under different prices are not comparable, so a resume under a
         # changed price must be blocked via provider_config_hash.
@@ -99,7 +102,8 @@ def build_benchmark_provider(
         identity = {
             "provider_id": provider.provider_id,
             "prompt_version": provider.prompt_version,
-            "provider_version": sha256_text(build_prompt(contract))[:16],
+            "provider_version": sha256_text(
+                build_prompt_for_version(provider.prompt_version, contract))[:16],
             "provider_config_hash": sha256_json(config_for_hash),
             "model_requested": model_id,
             "model_actual": None,  # filled per-case from recording; manifest carries the requested identity
@@ -130,11 +134,14 @@ def build_benchmark_provider(
             raise ProviderRegistryError(
                 "llm_live spec requires 'pricing' with input/output_usd_per_mtok "
                 "— a live benchmark run may never produce unknown costs by design")
-        provider = build_live_llm_provider(store_dir=store_dir, model_id=model_id)
+        prompt_version = spec.get("prompt_version", LLM_PROMPT_VERSION)
+        provider = build_live_llm_provider(
+            store_dir=store_dir, model_id=model_id, prompt_version=prompt_version)
         identity = {
             "provider_id": provider.provider_id,
             "prompt_version": provider.prompt_version,
-            "provider_version": sha256_text(build_prompt(contract))[:16],
+            "provider_version": sha256_text(
+                build_prompt_for_version(provider.prompt_version, contract))[:16],
             "provider_config_hash": sha256_json({
                 "model_id": model_id,
                 "pricing": {k: pricing[k] for k in
