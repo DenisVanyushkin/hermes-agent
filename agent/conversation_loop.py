@@ -101,6 +101,8 @@ from hermes_cli.profile_context import build_role_context_for_task
 from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches, env_var_enabled
 
+from agent.agent_runtime_helpers import switch_model
+
 logger = logging.getLogger(__name__)
 
 # Stable prefix of the local interrupt status string emitted when a turn is
@@ -126,6 +128,40 @@ _LOCAL_PROCESSING_MODULES = frozenset({
 _API_CALL_MODULES = frozenset({
     "chat_completion_helpers",
 })
+
+
+#: Models a role policy may repoint the runtime at. A stale or typo'd entry must
+#: not be able to send a turn somewhere unsanctioned, so this is a closed set --
+#: the same one profile_validation enforces for the policy file.
+_ROLE_SWITCHABLE_MODELS = frozenset({"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"})
+
+
+def apply_role_model(agent: Any, *, preferred_model: str, preferred_provider: str) -> str:
+    """Put the turn on the model its role calls for. Returns the model in effect.
+
+    Until this existed, ``select_model_policy()`` was advisory in the strict
+    sense -- it computed a per-role model that nothing ever applied, so every
+    role ran on whatever the gateway config had set. The log said one thing and
+    ``Turn ended`` said another.
+
+    Deliberately conservative in three ways. Only models from the sanctioned
+    lineup are honoured, so a stale policy entry cannot repoint the runtime. A
+    role already on its model does not switch. And a failing switch leaves the
+    turn on its current model rather than raising: choosing a model must never be
+    able to break a turn that would otherwise have worked.
+    """
+    current = str(getattr(agent, "model", "") or "")
+    target = str(preferred_model or "").strip()
+    if not target or target == current or target not in _ROLE_SWITCHABLE_MODELS:
+        return current
+    try:
+        switch_model(agent, target, str(preferred_provider or getattr(agent, "provider", "")))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "role model switch failed, staying on %s: %s", current or "-", exc
+        )
+        return current
+    return str(getattr(agent, "model", "") or target)
 
 
 def log_model_selection(
@@ -1433,6 +1469,11 @@ def run_conversation(
             critical_approval_required=bool(getattr(_role_context_result, "critical_approval_required", False)),
         )
         agent._model_selection = model_selection_to_dict(_model_selection_result)
+        _effective_model = apply_role_model(
+            agent,
+            preferred_model=agent._model_selection.get("preferred_model", ""),
+            preferred_provider=agent._model_selection.get("preferred_provider", ""),
+        )
         log_model_selection(
             session=agent.session_id or "-",
             policy=agent._model_selection.get("policy_name", ""),
@@ -1440,7 +1481,7 @@ def run_conversation(
             role=agent._model_selection.get("effective_role", ""),
             provider=agent._model_selection.get("preferred_provider", ""),
             policy_model=agent._model_selection.get("preferred_model", ""),
-            effective_model=getattr(agent, "model", None),
+            effective_model=_effective_model,
             fallback=agent._model_selection.get("fallback_chain_key", ""),
             allow_fallback=agent._model_selection.get("allow_fallback", True),
         )

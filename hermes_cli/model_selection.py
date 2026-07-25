@@ -24,6 +24,10 @@ _CRITICAL_MODEL = "gpt-5.6-sol"      # tiers.critical
 _CODING_MODEL = "gpt-5.6-terra"      # tiers.coding
 
 _TRADING_ROLES = {"trading_observer_trader", "trading_observer_trader_deferred"}
+#: Roles the policy file puts on the reasoning tier. chief_hermes had no branch
+#: here at all and silently took the default, so the file said terra and the
+#: runtime would have given it luna.
+_REASONING_ROLES = {"chief_hermes", "chief_coordinator"}
 _SIMPLE_RESEARCH_HINTS = {
     "weather",
     "news",
@@ -181,6 +185,22 @@ def select_model_policy(
             allow_fallback=True,
             reasoning_level="high",
             selection_reason="Engineer tasks use the coding/engineering policy for repo work, debugging, and tests.",
+            task_text=task_text,
+            critical_approval_required=critical_approval_required,
+        )
+
+    if effective_role in _REASONING_ROLES:
+        return _decision(
+            selected_role=normalized_selected or selected_role,
+            canonical_role=normalized_canonical,
+            effective_role=effective_role,
+            policy_name="coordination_reasoning",
+            policy_class="reasoning",
+            preferred_model=_REASONING_MODEL,
+            fallback_chain_key="reasoning_then_standard",
+            allow_fallback=True,
+            reasoning_level="high",
+            selection_reason="Coordination spans several roles at once and uses the reasoning tier.",
             task_text=task_text,
             critical_approval_required=critical_approval_required,
         )
