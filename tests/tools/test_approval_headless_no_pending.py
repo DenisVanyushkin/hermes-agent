@@ -183,3 +183,100 @@ def test_plugin_gate_headless_deny_carries_pattern_key(_interactive_session):
         "browser_navigate", "external URL", rule_key="ext-nav"
     )
     assert result["pattern_key"] == "plugin_rule:ext-nav"
+
+def _run_gate(gate):
+    """Drive whichever gate reaches the no-notifier resolver."""
+    if gate == "terminal":
+        return check_all_command_guards(DANGEROUS_CMD, "docker", has_host_access=True)
+    return check_execute_code_guard("import os", "host")
+
+
+class TestReviewerIsConsultedOncePerSubject:
+    """The resolver must not re-review a verdict the caller already holds.
+
+    ``approvals.mode: smart`` asks the auxiliary reviewer, and a DENY on a
+    surface that has an owner falls through to the approval channel. When no
+    notifier is bound, that channel is this resolver — and for a ``cron_*``-keyed
+    session (the stale-contextvar race this module's docstring describes) it
+    called resolve_cron_gate_decision, whose own ``smart`` mode asked the
+    reviewer AGAIN about the same text and let that second answer decide.
+
+    So reviewer non-determinism alone could turn a DENY into an APPROVE, and
+    every such command cost two reviewer calls. ``approvals.cron_mode`` stays
+    authoritative — these tests pin only that the verdict is reused, not
+    re-derived.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _smart_mode(self, monkeypatch):
+        monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "smart")
+
+    @pytest.mark.parametrize("gate", ["terminal", "execute_code"])
+    def test_non_cron_headless_reviews_once(self, monkeypatch, _interactive_session, gate):
+        calls = []
+
+        def counting(*args):
+            calls.append(args)
+            return "deny"
+
+        monkeypatch.setattr(approval_module, "_smart_approve", counting)
+
+        result = _run_gate(gate)
+
+        assert len(calls) == 1
+        assert result["approved"] is False
+
+    @pytest.mark.parametrize("gate", ["terminal", "execute_code"])
+    def test_cron_keyed_deny_is_not_overturned_by_a_second_review(
+        self, monkeypatch, _cron_session, gate
+    ):
+        monkeypatch.setattr(approval_module, "_get_cron_approval_mode", lambda: "smart")
+        calls = []
+
+        def flaky(*args):
+            calls.append(args)
+            # A reviewer that answers differently the second time around.
+            return "deny" if len(calls) == 1 else "approve"
+
+        monkeypatch.setattr(approval_module, "_smart_approve", flaky)
+
+        result = _run_gate(gate)
+
+        assert len(calls) == 1
+        assert result["approved"] is False
+        # resolve_cron_gate_decision's own smart-DENY contract, reached with the
+        # reused verdict rather than a fresh one.
+        assert result["smart_denied"] is True
+
+    @pytest.mark.parametrize("gate", ["terminal", "execute_code"])
+    def test_cron_keyed_escalate_fails_closed_without_re_reviewing(
+        self, monkeypatch, _cron_session, gate
+    ):
+        """An inconclusive verdict blocks; a headless session has no fallback."""
+        monkeypatch.setattr(approval_module, "_get_cron_approval_mode", lambda: "smart")
+        calls = []
+
+        def escalating(*args):
+            calls.append(args)
+            return "escalate" if len(calls) == 1 else "approve"
+
+        monkeypatch.setattr(approval_module, "_smart_approve", escalating)
+
+        result = _run_gate(gate)
+
+        assert len(calls) == 1
+        assert result["approved"] is False
+        assert result.get("status") != "pending_approval"
+        assert "do not retry" in result["message"].lower()
+
+    @pytest.mark.parametrize("gate", ["terminal", "execute_code"])
+    def test_cron_mode_stays_authoritative_over_the_reused_verdict(
+        self, monkeypatch, _cron_session, gate
+    ):
+        """cron_mode=approve still wins — reusing the verdict must not change that."""
+        monkeypatch.setattr(approval_module, "_get_cron_approval_mode", lambda: "approve")
+        monkeypatch.setattr(approval_module, "_smart_approve", lambda *_: "deny")
+
+        result = _run_gate(gate)
+
+        assert result["approved"] is True

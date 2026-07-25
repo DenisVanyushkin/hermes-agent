@@ -2542,6 +2542,7 @@ def resolve_cron_gate_decision(
     description: str,
     deny_message: str,
     mode: str | None = None,
+    smart_verdict: str | None = None,
 ) -> dict:
     """Single decision point for headless (cron) approvals.
 
@@ -2553,6 +2554,11 @@ def resolve_cron_gate_decision(
     asks the auxiliary reviewer and allows ONLY on an explicit APPROVE.
     Anything else — DENY, ESCALATE, an invalid answer, an exception — blocks:
     a headless session has no human fallback, so uncertainty must fail closed.
+
+    *smart_verdict* is an answer the caller already obtained for this exact
+    subject; ``smart`` mode reuses it instead of asking again. Asking twice
+    spent a second reviewer call on the same text and — because the second
+    answer decided — let reviewer non-determinism turn a DENY into an APPROVE.
     """
     resolved = (mode or _get_cron_approval_mode()).lower().strip()
     base = {"cron_gate": gate, "cron_mode": resolved}
@@ -2566,13 +2572,16 @@ def resolve_cron_gate_decision(
                 "cron_auto_approved": True, "description": description}
 
     if resolved == "smart":
-        try:
-            verdict = _smart_approve(subject_text, description)
-        except Exception as exc:  # _smart_approve already swallows, belt and braces
-            logger.warning(
-                "approval: smart review raised for %s (%s) — failing closed", gate, exc,
-            )
-            verdict = "escalate"
+        if smart_verdict is not None:
+            verdict = smart_verdict
+        else:
+            try:
+                verdict = _smart_approve(subject_text, description)
+            except Exception as exc:  # _smart_approve already swallows, belt and braces
+                logger.warning(
+                    "approval: smart review raised for %s (%s) — failing closed", gate, exc,
+                )
+                verdict = "escalate"
 
         if verdict == "approve":
             logger.info("approval: smart APPROVE for %s: %s", gate, description)
@@ -2623,6 +2632,7 @@ def _resolve_headless_gateway_approval(
     description: str,
     display_target: str,
     target_label: str,
+    smart_verdict: str | None = None,
 ) -> dict:
     """Deterministic decision for a gateway-context approval with no notifier.
 
@@ -2632,12 +2642,18 @@ def _resolve_headless_gateway_approval(
     (``_pending`` / ``submit_pending``) has since been deleted outright.
     Cron sessions follow ``approvals.cron_mode``; every other headless
     session gets a definitive deny the model can act on.
+
+    *smart_verdict* is the answer the caller already obtained from the auxiliary
+    reviewer for this exact subject, threaded through so a cron-keyed session is
+    not reviewed a second time here. It does not override ``cron_mode``: it is
+    only consulted where the old code would have asked the reviewer again.
     """
     if _headless_session_is_cron(session_key):
         decision = resolve_cron_gate_decision(
             gate="headless_gateway",
             subject_text=display_target,
             description=description,
+            smart_verdict=smart_verdict,
             deny_message=(
                 f"BLOCKED: {description}. This is a headless session with no user "
                 "present, so approval is impossible — do not retry this "
@@ -3554,6 +3570,9 @@ def check_all_command_guards(command: str, env_type: str,
     # Inspired by OpenAI Codex's Smart Approvals guardian subagent
     # (openai/codex#13860).
     smart_denied_for_owner = False
+    # The verdict this call obtains, so the headless resolver below never asks
+    # the auxiliary reviewer a second time about the same command.
+    smart_verdict: str | None = None
     # A cron/headless session has no human fallback, so its verdict is resolved
     # by the shared resolver — the single place that knows what each cron_mode
     # means. The interactive branch below keeps the owner-override semantics.
@@ -3591,6 +3610,7 @@ def check_all_command_guards(command: str, env_type: str,
             session_key=session_key,
         )
         verdict = _smart_approve(command, combined_desc_for_llm)
+        smart_verdict = verdict
         _observe_smart_approval_verdict(observer_payload, verdict)
         if verdict == "approve":
             # Approve this command only. Pattern-level persistence would let one
@@ -3749,6 +3769,7 @@ def check_all_command_guards(command: str, env_type: str,
             description=redact_sensitive_text(combined_desc),
             display_target=redact_sensitive_text(command),
             target_label="command",
+            smart_verdict=smart_verdict,
         )
 
     # CLI interactive: single combined prompt
@@ -3904,6 +3925,8 @@ def check_execute_code_guard(code: str, env_type: str,
     # suppresses the redundant whole-script prompt; the per-call terminal()
     # guards (restored by context propagation) still run independently.
     smart_denied_for_owner = False
+    # See check_all_command_guards: the resolver must not re-review this script.
+    smart_verdict: str | None = None
     if approval_mode == "smart":
         observer_payload = _prepare_smart_approval_observer(
             command=command,
@@ -3913,6 +3936,7 @@ def check_execute_code_guard(code: str, env_type: str,
             session_key=session_key,
         )
         verdict = _smart_approve(command, description)
+        smart_verdict = verdict
         _observe_smart_approval_verdict(observer_payload, verdict)
         if verdict == "approve":
             logger.debug("Smart approval: auto-approved execute_code for session %s",
@@ -3962,6 +3986,7 @@ def check_execute_code_guard(code: str, env_type: str,
             description=display_description,
             display_target=display_command,
             target_label="script",
+            smart_verdict=smart_verdict,
         )
 
     approval_data = {
