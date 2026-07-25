@@ -261,6 +261,198 @@ def prepare_run_worktree(*, repo_root: Path, workspace: Path, run_id: str) -> Ru
     return RunWorktree(path=resolved, branch=branch, head=head, created=True)
 
 
+class RunIntegration(SimpleNamespace):
+    """Outcome of trying to land a run branch on the mainline.
+
+    ``integrated`` -- did the mainline move; ``reason`` -- why not, if it did not;
+    ``target`` -- the branch we tried to land on; ``sha`` -- its tip afterwards;
+    ``detail`` -- git's own message, for the operator-facing reply.
+    """
+
+
+def _git_result(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
+
+
+def _branch_exists(repo_root: Path, branch: str) -> bool:
+    return _git_result(
+        repo_root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"
+    ).returncode == 0
+
+
+def integrate_run_branch(
+    *, repo_root: Path, branch: str, approved: bool, target: str | None = None
+) -> RunIntegration:
+    """Land an approved run branch on the mainline, fast-forward only.
+
+    ``approved`` is the gate, and it is the point of the whole step: the mainline
+    moves on a reviewer verdict, not because a turn happened to end.
+
+    Fast-forward only, deliberately. The mainline is a live branch the resident
+    agent also commits to, so a merge commit or a rebase performed on the
+    operator's behalf is not this step's call to make. When the mainline has moved
+    on, we say so and stop.
+
+    Every refusal leaves the run branch untouched, so nothing is ever stranded
+    beyond recovery -- the work can always be landed by hand.
+    """
+    repo_root = repo_root.resolve()
+    if not approved:
+        return RunIntegration(
+            integrated=False, reason="review_not_approved", target=None, sha=None,
+            detail="the reviewer has not approved this run",
+        )
+    if not _branch_exists(repo_root, branch):
+        return RunIntegration(
+            integrated=False, reason="run_branch_missing", target=None, sha=None,
+            detail=f"{branch} does not exist",
+        )
+
+    head = _git_result(repo_root, "rev-parse", "--abbrev-ref", "HEAD")
+    current = head.stdout.strip()
+    if head.returncode != 0 or not current or current == "HEAD":
+        return RunIntegration(
+            integrated=False, reason="target_detached", target=None, sha=None,
+            detail="the repository is not on a branch; cannot fast-forward it",
+        )
+    if target is not None and target != current:
+        return RunIntegration(
+            integrated=False, reason="target_not_checked_out", target=target, sha=None,
+            detail=f"{target} is not the branch checked out at {repo_root}",
+        )
+
+    merge = _git_result(repo_root, "merge", "--ff-only", branch)
+    if merge.returncode != 0:
+        # Two shapes end up here: the mainline has diverged, and the merge would
+        # have to overwrite a file the operator is currently editing. Neither is
+        # ours to resolve, and git's own message says which one it was.
+        detail = (merge.stderr or merge.stdout).strip()
+        reason = "not_fast_forward" if "fast-forward" in detail.lower() else "merge_refused"
+        return RunIntegration(
+            integrated=False, reason=reason, target=current, sha=None, detail=detail,
+        )
+
+    return RunIntegration(
+        integrated=True, reason="", target=current,
+        sha=_git_result(repo_root, "rev-parse", "HEAD").stdout.strip(),
+        detail=(merge.stdout or "").strip(),
+    )
+
+
+def release_run_worktree(
+    *, repo_root: Path, workspace: Path, delete_branch: bool = False
+) -> None:
+    """Give back a run's checkout. Best-effort: cleanup must never break a run.
+
+    ``delete_branch`` only after the work has landed -- removing the checkout is
+    reversible, dropping the branch is not.
+    """
+    branch = _git_result(workspace, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    _git_result(repo_root, "worktree", "remove", "--force", str(workspace))
+    if delete_branch and branch.startswith(RUN_BRANCH_PREFIX):
+        _git_result(repo_root, "branch", "-D", branch)
+    # Without this a wiped runs root (…/tmp is not tmpfs here, but it is swept)
+    # leaves the worktree registered forever, and the name cannot be reused.
+    _git_result(repo_root, "worktree", "prune")
+
+
+def sweep_run_worktrees(
+    *, repo_root: Path, runs_root: Path, max_age_seconds: float, now: float
+) -> list[str]:
+    """Drop run worktrees nobody came back for. Returns what was removed.
+
+    Age alone is not evidence that a checkout is disposable, so anything holding
+    uncommitted work is left where it is: an abandoned run with edits in it is
+    exactly the thing an operator comes looking for later.
+    """
+    if not runs_root.exists():
+        return []
+    removed: list[str] = []
+    for candidate in sorted(runs_root.iterdir()):
+        if not candidate.is_dir() or not (candidate / ".git").exists():
+            continue
+        if now - candidate.stat().st_mtime <= max_age_seconds:
+            continue
+        try:
+            if classify_dirty(candidate):
+                continue
+        except Exception:
+            continue
+        release_run_worktree(repo_root=repo_root, workspace=candidate)
+        if not candidate.exists():
+            removed.append(str(candidate))
+    return removed
+
+
+def _repo_root_of(workspace: Path) -> Path | None:
+    """The repository a worktree belongs to, or None if this is not one.
+
+    Call sites (the Slack reaction and the gateway reply intercept) only ever
+    know the workspace recorded in the commit-gate marker, so the mapping back to
+    the repository has to happen here. ``--git-common-dir`` is the one that
+    resolves across linked worktrees; ``--git-dir`` would give the per-worktree
+    admin directory instead.
+    """
+    result = _git_result(workspace, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if result.returncode != 0:
+        return None
+    common = Path(result.stdout.strip())
+    return common.parent if common.name == ".git" else None
+
+
+def land_run_branch_after_commit(
+    *, workspace: Path, approved: bool
+) -> RunIntegration | None:
+    """Land the run this workspace belongs to, then give the checkout back.
+
+    Returns None when the workspace is not a run worktree, so the in-place commit
+    path is left exactly as it was.
+
+    ``approved`` is passed in rather than derived. Today the commit gate fills it
+    from the operator's own approval, which is no weaker than the behaviour this
+    replaces (a commit straight onto the live branch, with no reviewer gate at
+    all). Task 6 replaces it with the reviewer's verdict; until then the seam is
+    explicit instead of guessed.
+
+    The branch is only dropped once its commits are on the mainline. Every other
+    outcome keeps both the branch and the checkout, so a refused landing is
+    always recoverable by hand.
+    """
+    workspace = Path(workspace)
+    branch = _git_result(workspace, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if not branch.startswith(RUN_BRANCH_PREFIX):
+        return None
+    repo_root = _repo_root_of(workspace)
+    if repo_root is None:
+        return RunIntegration(
+            integrated=False, reason="repo_root_unresolved", target=None, sha=None,
+            detail=f"cannot resolve the repository behind {workspace}",
+        )
+
+    result = integrate_run_branch(repo_root=repo_root, branch=branch, approved=approved)
+    if result.integrated:
+        release_run_worktree(repo_root=repo_root, workspace=workspace, delete_branch=True)
+    return result
+
+
+def describe_run_integration(result: RunIntegration | None) -> str:
+    """One operator-facing line. Empty when there is nothing to say."""
+    if result is None:
+        return ""
+    if result.integrated:
+        return f"↪️ Влито в {result.target} ({result.sha})."
+    hints = {
+        "review_not_approved": "ревью не одобрено",
+        "not_fast_forward": "основная ветка ушла вперёд",
+        "merge_refused": "мерж отклонён",
+        "run_branch_missing": "ветка прогона не найдена",
+        "target_detached": "репозиторий не на ветке",
+        "repo_root_unresolved": "не удалось определить репозиторий",
+    }
+    why = hints.get(result.reason, result.reason or "неизвестно")
+    return f"⏸ Не влито ({why}). Работа сохранена в ветке прогона."
+
+
 def _exclude_locally(workspace: Path, pattern: str) -> None:
     """Ignore a path in this worktree only, without touching tracked .gitignore.
 

@@ -20489,13 +20489,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not result.get("committed"):
                 return f"⚠️ Не удалось закоммитить: {result.get('detail') or 'unknown error'}"
             commit_gate_service.clear_pending()
+            # The run committed inside its own worktree; land it on the mainline.
+            # No-op (None) for the in-place commit path.
+            try:
+                from hermes_cli.pipeline_autonomous_execution import (
+                    describe_run_integration,
+                    land_run_branch_after_commit,
+                )
+
+                _landed = describe_run_integration(
+                    land_run_branch_after_commit(workspace=repo, approved=True)
+                )
+            except Exception:
+                _landed = ""
             sha = result.get("sha") or "?"
             n = len(changed_files)
+            _suffix = f"\n{_landed}" if _landed else ""
             if action == "commit_push":
                 if result.get("pushed"):
-                    return f"✅ Закоммичено и запушено: {sha} ({n} файлов)."
-                return f"✅ Закоммичено: {sha} ({n} файлов). ⚠️ Пуш не удался: {result.get('push_detail') or 'unknown'}"
-            return f"✅ Закоммичено: {sha} ({n} файлов). Пуш не делал (скажи «запушь», если нужно)."
+                    return f"✅ Закоммичено и запушено: {sha} ({n} файлов).{_suffix}"
+                return f"✅ Закоммичено: {sha} ({n} файлов). ⚠️ Пуш не удался: {result.get('push_detail') or 'unknown'}{_suffix}"
+            return f"✅ Закоммичено: {sha} ({n} файлов). Пуш не делал (скажи «запушь», если нужно).{_suffix}"
         except Exception:
             logger.warning("commit-approval intercept failed", exc_info=True)
             return None

@@ -2486,7 +2486,20 @@ class SlackAdapter(BasePlatformAdapter):
             )
             if result.get("committed"):
                 commit_gate_service.clear_pending()
+                try:
+                    from hermes_cli.pipeline_autonomous_execution import (
+                        describe_run_integration,
+                        land_run_branch_after_commit,
+                    )
+
+                    _landed = describe_run_integration(
+                        land_run_branch_after_commit(workspace=repo, approved=True)
+                    )
+                except Exception:
+                    _landed = ""
                 result_text = f"✅ Закоммичено: {result.get('sha') or '?'} ({len(changed_files)} файлов). Пуш не делал (скажи «запушь», если нужно)."
+                if _landed:
+                    result_text = f"{result_text}\n{_landed}"
             else:
                 result_text = f"⚠️ Не удалось закоммитить: {result.get('detail') or 'unknown'}"
 
