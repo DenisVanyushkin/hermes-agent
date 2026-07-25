@@ -651,29 +651,6 @@ def _validate_role_policies(data: Any) -> list[ValidationIssue]:
                 path,
             ))
 
-        escalation = role_policy.get("escalation")
-        if not isinstance(escalation, dict):
-            issues.append(_issue("error", f"{path}.escalation must be a mapping", path))
-        else:
-            if not isinstance(escalation.get("model_family"), str) or not str(escalation.get("model_family")).strip():
-                issues.append(_issue("error", f"{path}.escalation.model_family must be a non-empty string", path))
-            if "conditions" in escalation:
-                issues.extend(_validate_nonempty_string_list(escalation.get("conditions"), f"{path}.escalation.conditions", role_id, path=path) if escalation.get("conditions") else [])
-            if role_id == "engineer":
-                if escalation.get("model_family") != "specialized_coding":
-                    issues.append(_issue("error", f"{path}.escalation.model_family must be specialized_coding", path))
-                if escalation.get("example_model") != "xiaomi/mimo-v2.5-pro":
-                    issues.append(_issue("error", f"{path}.escalation.example_model must be xiaomi/mimo-v2.5-pro", path))
-            elif role_id in {"chief_coordinator", "security_auditor", "researcher", "career_strategist"}:
-                if escalation.get("model_family") != "strong_reasoning":
-                    issues.append(_issue("error", f"{path}.escalation.model_family must be strong_reasoning", path))
-            elif role_id in {"scribe", "general_operator"}:
-                if escalation.get("model_family") != "none":
-                    issues.append(_issue("error", f"{path}.escalation.model_family must be none", path))
-            elif role_id == "trading_observer_trader_deferred":
-                if escalation.get("model_family") != "deferred":
-                    issues.append(_issue("error", f"{path}.escalation.model_family must be deferred", path))
-
         free_fallback = role_policy.get("free_fallback")
         if not isinstance(free_fallback, dict):
             issues.append(_issue("error", f"{path}.free_fallback must be a mapping", path))

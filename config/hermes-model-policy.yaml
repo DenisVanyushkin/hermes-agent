@@ -110,13 +110,6 @@ fallback_selection_policy:
 role_policies:
   chief_coordinator:
     base_model: gpt-5.6-luna
-    escalation:
-      model_family: strong_reasoning
-      example_model: gpt-5.6-sol
-      conditions:
-      - routing_is_ambiguous
-      - risk_is_high
-      - cross_role_conflict_resolution_is_needed
     free_fallback:
       allowed_for:
       - routing
@@ -135,16 +128,6 @@ role_policies:
           supportsReasoning: true
   engineer:
     base_model: gpt-5.6-luna
-    escalation:
-      model_family: specialized_coding
-      example_model: xiaomi/mimo-v2.5-pro
-      conditions:
-      - complex_multi_file_changes
-      - difficult_bugfixes
-      - failing_test_diagnosis
-      - high_risk_engineering_changes
-      - runtime_deploy_gateway_auth_scheduler_related_changes
-      - base_model_uncertain_or_failed
     free_fallback:
       allowed_for:
       - draft
@@ -162,15 +145,6 @@ role_policies:
           contextLength: large
   security_auditor:
     base_model: gpt-5.6-luna
-    escalation:
-      model_family: strong_reasoning
-      example_model: gpt-5.6-sol
-      conditions:
-      - public_exposure
-      - auth_session_cookie_changes
-      - secrets_tool_permission_changes
-      - prompt_injection_risk
-      - complex_boundary_questions
     free_fallback:
       allowed_for:
       - risk_summary
@@ -188,10 +162,6 @@ role_policies:
           contextLength: large
   scribe:
     base_model: gpt-5.6-luna
-    escalation:
-      model_family: none
-      example_model: null
-      conditions: []
     free_fallback:
       allowed_for:
       - document
@@ -209,10 +179,6 @@ role_policies:
           latencyMs: low
   artist:
     base_model: gpt-5.6-luna
-    escalation:
-      model_family: none
-      example_model: null
-      conditions: []
     free_fallback:
       allowed_for:
       - clarifying_dialogue
@@ -229,14 +195,6 @@ role_policies:
           latencyMs: low
   researcher:
     base_model: gpt-5.6-luna
-    escalation:
-      model_family: strong_reasoning
-      example_model: gpt-5.5
-      conditions:
-      - conflicting_sources
-      - high_impact_decisions
-      - complex_synthesis
-      - weak_source_quality
     free_fallback:
       allowed_for:
       - source_gathering
@@ -254,10 +212,6 @@ role_policies:
           contextLength: large
   lawyer:
     base_model: gpt-5.6-luna
-    escalation:
-      model_family: none
-      example_model: null
-      conditions: []
     free_fallback:
       allowed_for:
       - clarifying_dialogue
@@ -272,15 +226,6 @@ role_policies:
           latencyMs: low
   career_strategist:
     base_model: gpt-5.6-luna
-    escalation:
-      model_family: strong_reasoning
-      example_model: gpt-5.6-sol
-      conditions:
-      - executive_decisions
-      - high_value_applications
-      - complex_positioning
-      - weak_evidence
-      - privacy_sensitive_cases
     free_fallback:
       allowed_for:
       - fit_assessment
@@ -298,10 +243,6 @@ role_policies:
           contextLength: large
   general_operator:
     base_model: gpt-5.6-luna
-    escalation:
-      model_family: none
-      example_model: null
-      conditions: []
     free_fallback:
       allowed_for:
       - personal_admin
@@ -321,11 +262,6 @@ role_policies:
   trading_observer_trader_deferred:
     status: deferred
     base_model: deferred
-    escalation:
-      model_family: deferred
-      example_model: null
-      conditions:
-      - separate_trading_policy_not_implemented
     free_fallback:
       allowed_for:
       - market_observation
