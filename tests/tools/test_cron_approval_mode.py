@@ -214,18 +214,25 @@ class TestCronSmartMode:
         assert result["smart_denied"]
 
     def test_aux_escalate_blocks_without_pending_approval(self, monkeypatch):
+        """Escalate under cron blocks outright — it never defers to a human.
+
+        This used to assert ``submit_pending`` was never called. That queue had
+        no consumer and has been deleted, so the guard now reads the status the
+        model actually sees: a deferral there is what stalled the agent in the
+        2026-07-12 weather-cron incident.
+        """
         self._setup_cron(monkeypatch)
         from unittest.mock import patch as mock_patch
         with (
             mock_patch("tools.approval._get_cron_approval_mode", return_value="smart"),
             mock_patch("tools.approval._get_approval_mode", return_value="manual"),
             mock_patch("tools.approval._smart_approve", return_value="escalate"),
-            mock_patch("tools.approval.submit_pending") as pending,
         ):
             result = check_all_command_guards("rm -rf /tmp/stuff", "local")
         assert not result["approved"]
         assert result["smart_escalated"]
-        pending.assert_not_called()
+        assert result.get("status") not in ("approval_required", "pending_approval")
+        assert result.get("approval_pending") is not True
 
     def test_hardline_never_calls_auxiliary_llm(self, monkeypatch):
         self._setup_cron(monkeypatch)
@@ -460,8 +467,8 @@ class TestCronWithGatewayOrigin:
     delivery routing (so cron output lands back in the origin chat). The
     API-server approvals work (PR #20311) made check_dangerous_command treat
     any contextvar-bound platform as a gateway session. That would route
-    cron-from-telegram/discord/etc. through submit_pending with no listener,
-    hanging the job instead of respecting approvals.cron_mode.
+    cron-from-telegram/discord/etc. through the gateway pending path with no
+    listener, hanging the job instead of respecting approvals.cron_mode.
     """
 
     def test_cron_with_telegram_origin_uses_cron_mode_not_gateway(self, monkeypatch):

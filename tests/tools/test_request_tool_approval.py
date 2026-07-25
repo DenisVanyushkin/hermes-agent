@@ -92,23 +92,22 @@ class TestRequestToolApproval:
         """Gateway context but no notify callback → resolve, never defer.
 
         This branch used to ``submit_pending`` and answer
-        ``status: approval_required``, which was a dead end: nothing consumes
-        the ``_pending`` queue and nothing reads that status, so the agent was
+        ``status: approval_required``, which was a dead end: the ``_pending``
+        queue had no consumer and nothing reads that status, so the agent was
         told a request had been sent that could never be delivered or
         answered (the 2026-07-12 weather-cron thrash). It now goes through
         ``_resolve_headless_gateway_approval`` like the terminal and
-        execute_code guards.
+        execute_code guards; queue and submitter are both deleted, so the
+        guard is asserted on the status instead of on a never-called mock.
         """
         monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
         monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: True)
-        monkeypatch.setattr(
-            approval, "submit_pending",
-            lambda sk, data: pytest.fail("must not queue an unanswerable approval"),
-        )
         res = request_tool_approval("browser_navigate", "external URL",
                                     rule_key="ext-nav")
         assert res["approved"] is False
         assert res["status"] == "denied_no_approver"
+        assert res["status"] not in ("approval_required", "pending_approval")
+        assert res.get("approval_pending") is not True
         assert res["pattern_key"] == "plugin_rule:ext-nav"
         assert "do not retry" in res["message"].lower()
 

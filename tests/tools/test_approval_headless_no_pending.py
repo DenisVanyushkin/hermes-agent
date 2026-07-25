@@ -3,8 +3,10 @@
 Incident 2026-07-12 (weather cron): a cron agent's terminal calls landed in
 the gateway approval branch (stale platform contextvar on a recycled pool
 thread + HERMES_CRON_SESSION not visible), found no notify callback, and got
-``status: pending_approval`` — a dead end, because nothing ever consumes the
-``_pending`` queue. The agent thrashed for ~30 minutes and failed the job.
+``status: pending_approval`` — a dead end, because the ``_pending`` queue it
+was filed into had no consumer at all. The agent thrashed for ~30 minutes and
+failed the job. (That queue has since been deleted; the contract below is
+asserted on the status the model actually receives.)
 
 New contract: when the gateway branch has no notify callback registered,
 resolve immediately:
@@ -156,15 +158,23 @@ def test_plugin_gate_non_cron_headless_denies_definitively(_interactive_session)
     assert "asking the user for approval" not in msg
 
 
-def test_plugin_gate_headless_deny_queues_nothing(_interactive_session):
-    """The legacy ``_pending`` queue must stay empty — nothing consumes it."""
-    with approval_module._lock:
-        approval_module._pending.pop(INTERACTIVE_SESSION_KEY, None)
+def test_plugin_gate_headless_deny_never_defers(_interactive_session):
+    """The gate must resolve here, never park the request for a later answer.
 
-    request_tool_approval("browser_navigate", "external URL", rule_key="ext-nav")
+    This used to assert the legacy ``_pending`` queue stayed empty. That queue
+    had no consumer and has been deleted, so the guard is expressed against the
+    only thing the model can observe: the returned status. A regression that
+    re-introduces a parking lot has to answer with one of the deferral statuses
+    below — which is precisely what the agent read as "wait" on 2026-07-12.
+    """
+    result = request_tool_approval(
+        "browser_navigate", "external URL", rule_key="ext-nav"
+    )
 
-    with approval_module._lock:
-        assert INTERACTIVE_SESSION_KEY not in approval_module._pending
+    assert result["approved"] is False
+    assert result["status"] == "denied_no_approver"
+    assert result["status"] not in ("approval_required", "pending_approval")
+    assert result.get("approval_pending") is not True
 
 
 def test_plugin_gate_headless_deny_carries_pattern_key(_interactive_session):

@@ -73,7 +73,6 @@ def _clear_approval_state():
     mod._gateway_notify_cbs.clear()
     mod._session_approved.clear()
     mod._permanent_approved.clear()
-    mod._pending.clear()
 
 
 # ------------------------------------------------------------------
@@ -719,9 +718,10 @@ class TestFallbackNoCallback:
 
         History: the status was ``approval_required``, then renamed to
         ``pending_approval`` to distinguish it from a failed tool call. Both
-        were dead ends — nothing consumes the ``_pending`` queue and nothing
-        reads either status, so the agent retried an approval that could never
-        arrive (2026-07-12 weather-cron incident). Commit 86e914f41 replaced it
+        were dead ends — the ``_pending`` queue had no consumer (it has since
+        been deleted outright) and nothing reads either status, so the agent
+        retried an approval that could never arrive (2026-07-12 weather-cron
+        incident). Commit 86e914f41 replaced it
         with a definitive ``denied_no_approver`` for non-cron headless
         sessions; this session key is not ``cron_*``, so no cron_mode applies.
         """

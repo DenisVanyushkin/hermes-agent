@@ -274,8 +274,9 @@ def test_guard_gateway_wait_uses_canonical_timeout(
 
 def test_guard_gateway_missing_notify_denies_definitively(gw_session):
     # No notify callback registered in a non-cron headless session → definitive
-    # deny. A pending approval would dead-end here: nothing consumes the legacy
-    # _pending queue, so the agent would retry forever (2026-07-12 incident).
+    # deny. A pending approval would dead-end here: the legacy _pending queue it
+    # fed had no consumer, so the agent retried forever (2026-07-12 incident).
+    # That queue is gone; the guard lives on the status the model receives.
     res = A.check_execute_code_guard("import os", "local")
     assert res["approved"] is False
     assert res["status"] != "pending_approval"
@@ -293,8 +294,8 @@ def test_guard_smart_mode(gw_session, monkeypatch):
     # Smart DENY on an interactive surface asks the owner for a one-operation
     # override — but this session has no notifier bound, so there is nobody to
     # ask and the headless resolver answers definitively. It must never come
-    # back pending: nothing consumes the legacy _pending queue, so the agent
-    # would retry forever (2026-07-12 weather-cron incident).
+    # back pending: the legacy _pending queue it fed had no consumer, so the
+    # agent retried forever (2026-07-12 weather-cron incident).
     monkeypatch.setattr(A, "_smart_approve", lambda c, d: "deny")
     res = A.check_execute_code_guard("import os", "local")
     assert res["approved"] is False and res["status"] == "denied_no_approver"
@@ -395,15 +396,15 @@ def test_terminal_smart_deny_without_approver_denies_and_persists_nothing(
 
     The owner-override sibling above needs a live notifier to offer the
     one-operation choice. Without one there is no owner to ask, so the headless
-    resolver must answer definitively rather than queue into ``_pending``:
-    nothing consumes that queue, so a pending answer dead-ended the agent into
-    retrying forever (2026-07-12 weather-cron incident). The "one operation"
-    guarantee survives as its stronger form — a denied command is never
-    allowlisted at all.
+    resolver must answer definitively rather than park the request: the legacy
+    ``_pending`` queue it would have gone into had no consumer, so a pending
+    answer dead-ended the agent into retrying forever (2026-07-12 weather-cron
+    incident). That queue has been deleted, so "did not park it" is asserted on
+    the returned status. The "one operation" guarantee survives as its stronger
+    form — a denied command is never allowlisted at all.
     """
     key = "pending-smart-deny"
     with A._lock:
-        A._pending.pop(gw_session, None)
         A._permanent_approved.discard(key)
         A._session_approved.get(gw_session, set()).discard(key)
     monkeypatch.setattr(A, "_get_approval_mode", lambda: "smart")
@@ -424,17 +425,15 @@ def test_terminal_smart_deny_without_approver_denies_and_persists_nothing(
     assert result["status"] == "denied_no_approver"
     assert result.get("approval_pending") is not True
     assert "do not retry" in result["message"].lower()
-    with A._lock:
-        assert gw_session not in A._pending
+    assert result["status"] not in ("approval_required", "pending_approval")
     assert A.is_approved(gw_session, key) is False
 
 
 def test_execute_code_smart_deny_without_approver_denies_and_persists_nothing(
     gw_session, monkeypatch
 ):
-    """execute_code mirror of the terminal case: definitive deny, no queue entry."""
+    """execute_code mirror of the terminal case: definitive deny, nothing parked."""
     with A._lock:
-        A._pending.pop(gw_session, None)
         A._permanent_approved.discard("execute_code")
         A._session_approved.get(gw_session, set()).discard("execute_code")
     monkeypatch.setattr(A, "_get_approval_mode", lambda: "smart")
@@ -446,8 +445,7 @@ def test_execute_code_smart_deny_without_approver_denies_and_persists_nothing(
     assert result["status"] == "denied_no_approver"
     assert result.get("approval_pending") is not True
     assert "do not retry" in result["message"].lower()
-    with A._lock:
-        assert gw_session not in A._pending
+    assert result["status"] not in ("approval_required", "pending_approval")
     assert A.is_approved(gw_session, "execute_code") is False
 
 
@@ -458,7 +456,7 @@ def test_terminal_serializes_smart_deny_as_definitive_block(monkeypatch):
     (``denied_no_approver`` from ``_resolve_headless_gateway_approval``). The
     terminal used to special-case ``status: pending_approval`` and echo back
     ``approval_pending: True`` plus the prompt capabilities — a dead end,
-    since nothing consumes the legacy ``_pending`` queue and nothing reads
+    since the legacy ``_pending`` queue had no consumer and nothing reads
     that status, so the agent waited on an approval that could never arrive
     (2026-07-12 weather-cron incident). Both the branch and the status are
     gone; what the model must get is the do-not-retry message.

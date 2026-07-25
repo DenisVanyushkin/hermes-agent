@@ -27,7 +27,6 @@ def _clear_approval_state():
     approval_mod._session_approved.clear()
     approval_mod._session_yolo.clear()
     approval_mod._permanent_approved.clear()
-    approval_mod._pending.clear()
     slash_confirm_mod._pending.clear()
     yield
     approval_mod._gateway_queues.clear()
@@ -35,7 +34,6 @@ def _clear_approval_state():
     approval_mod._session_approved.clear()
     approval_mod._session_yolo.clear()
     approval_mod._permanent_approved.clear()
-    approval_mod._pending.clear()
     slash_confirm_mod._pending.clear()
 
 

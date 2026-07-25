@@ -2013,7 +2013,6 @@ def detect_dangerous_command(command: str) -> tuple:
 # =========================================================================
 
 _lock = threading.Lock()
-_pending: dict[str, dict] = {}
 _session_approved: dict[str, set] = {}
 _session_yolo: set[str] = set()
 _permanent_approved: set = set()
@@ -2112,12 +2111,6 @@ def has_blocking_approval(session_key: str) -> bool:
         return bool(_gateway_queues.get(session_key))
 
 
-def submit_pending(session_key: str, approval: dict):
-    """Store a pending approval request for a session."""
-    with _lock:
-        _pending[session_key] = approval
-
-
 def approve_session(session_key: str, pattern_key: str):
     """Approve a pattern for this session only."""
     with _lock:
@@ -2147,7 +2140,6 @@ def clear_session(session_key: str) -> None:
     with _lock:
         _session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
-        _pending.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
     for entry in entries:
         # Session-boundary cleanup should cancel any blocked approval waits
@@ -2624,9 +2616,10 @@ def _resolve_headless_gateway_approval(
 ) -> dict:
     """Deterministic decision for a gateway-context approval with no notifier.
 
-    Nothing ever consumes the legacy ``_pending`` queue, so returning
-    ``pending_approval`` here was a dead end: the agent kept retrying a
-    command that could never be approved (2026-07-12 weather-cron incident).
+    Returning ``pending_approval`` here was a dead end: the legacy pending
+    queue it fed had no consumer, so the agent kept retrying a command that
+    could never be approved (2026-07-12 weather-cron incident). That queue
+    (``_pending`` / ``submit_pending``) has since been deleted outright.
     Cron sessions follow ``approvals.cron_mode``; every other headless
     session gets a definitive deny the model can act on.
     """

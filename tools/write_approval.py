@@ -324,8 +324,9 @@ def _interactive_approval_available() -> bool:
       which ``prompt_dangerous_approval`` never reaches; trying to prompt from
       a gateway session would hit the ``input()`` fallback and silently deny.
       Staging gives the user a real review affordance (``/memory pending``)
-      instead. (The legacy ``submit_pending`` queue is NOT part of this: it has
-      no consumer, which is why every gate stopped deferring to it.)
+      instead. (The legacy pending-approval queue is NOT part of this: it had
+      no consumer, which is why every gate stopped deferring to it and why it
+      was deleted.)
     * Scripts, cron, and background threads — no user present.
     """
     try:
