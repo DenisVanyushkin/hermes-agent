@@ -79,6 +79,145 @@ class ReviewGateDecision:
     warning: str = ""
 
 
+# ── Review debt (Task 5 / Task 6) ───────────────────────────────────────────
+# ``review_required`` on its own is ``material_change_detected``, computed from
+# the file-mutation tool calls of the current turn. A rework turn that edits
+# nothing new therefore looks like a turn with nothing to review, which is how a
+# changes_requested from one turn ended up settled by the model's own say-so two
+# turns later. Debt is the missing piece: it belongs to the session, not the turn.
+
+#: Operation categories that actually move code, and so may not proceed on debt.
+GATED_OPERATION_CATEGORIES = frozenset({
+    "repo_mutation", "git_remote_mutation", "security_critical_mutation",
+})
+#: Verdicts that settle debt. ``waived`` is an explicit operator override and is
+#: already treated as unblocking by evaluate_review_gate; honouring it here keeps
+#: the two consistent rather than adding a second, stricter rule.
+SETTLING_VERDICTS = frozenset({"approved", "waived"})
+#: Verdicts that create debt.
+DEBT_VERDICTS = frozenset({"changes_requested", "blocked"})
+
+
+@dataclass
+class ReviewRequirement:
+    review_required: bool
+    reason: str
+    outstanding_paths: list[str] = field(default_factory=list)
+
+
+@dataclass
+class OperationAuthorization:
+    allowed: bool
+    reason: str = ""
+    detail: str = ""
+
+
+@dataclass
+class ReviewGateState:
+    """Per-session review debt: paths a reviewer objected to and nobody settled."""
+
+    session: str
+    outstanding: dict[str, list[str]] = field(default_factory=dict)
+
+    def record_verdict(
+        self, verdict: str, *, changed_paths: list[str], findings: list[str] | None = None
+    ) -> None:
+        verdict = str(verdict or "").strip().lower()
+        paths = [str(p).strip() for p in (changed_paths or []) if str(p).strip()]
+        if verdict in DEBT_VERDICTS:
+            for path in paths:
+                self.outstanding.setdefault(path, [])
+                for finding in findings or []:
+                    if finding not in self.outstanding[path]:
+                        self.outstanding[path].append(finding)
+        elif verdict in SETTLING_VERDICTS:
+            # Only the paths the verdict actually covers. Otherwise approving one
+            # file discharges every objection in the session.
+            for path in paths:
+                self.outstanding.pop(path, None)
+
+    @property
+    def outstanding_paths(self) -> list[str]:
+        return sorted(self.outstanding)
+
+    # -- persistence -------------------------------------------------------
+    # A turn is not a process. The gateway restarts, and debt that lived only in
+    # memory would be discharged by an unrelated crash.
+
+    @staticmethod
+    def _path(session: str, root: Path) -> Path:
+        safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in str(session)) or "session"
+        return Path(root) / f"{safe}.json"
+
+    def save(self, root: Path) -> None:
+        target = self._path(self.session, root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps({"session": self.session, "outstanding": self.outstanding},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    @classmethod
+    def load(cls, session: str, root: Path) -> "ReviewGateState":
+        target = cls._path(session, root)
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return cls(session=session)
+        outstanding = payload.get("outstanding")
+        if not isinstance(outstanding, dict):
+            outstanding = {}
+        return cls(session=session, outstanding={
+            str(k): [str(x) for x in (v or [])] for k, v in outstanding.items()
+        })
+
+
+def evaluate_review_requirement(
+    state: ReviewGateState, *, changed_paths_this_turn: list[str] | None = None
+) -> ReviewRequirement:
+    """Is a review owed right now?
+
+    Debt is checked first: while it stands, ``not_required`` is not reachable no
+    matter how quiet the current turn was.
+    """
+    outstanding = state.outstanding_paths
+    if outstanding:
+        return ReviewRequirement(
+            review_required=True,
+            reason="unresolved_changes_requested",
+            outstanding_paths=outstanding,
+        )
+    if [p for p in (changed_paths_this_turn or []) if str(p).strip()]:
+        return ReviewRequirement(review_required=True, reason="changed_paths_this_turn")
+    return ReviewRequirement(review_required=False, reason="")
+
+
+def authorize_operation(
+    state: ReviewGateState, *, operation_category: str
+) -> OperationAuthorization:
+    """May this operation proceed given the session's review debt?
+
+    The refusal names the outstanding paths and findings: an operator who cannot
+    see what is unresolved cannot resolve it, and "review not passed" tells them
+    nothing they can act on.
+    """
+    if str(operation_category or "").strip() not in GATED_OPERATION_CATEGORIES:
+        return OperationAuthorization(allowed=True)
+    outstanding = state.outstanding_paths
+    if not outstanding:
+        return OperationAuthorization(allowed=True)
+    lines = []
+    for path in outstanding:
+        findings = state.outstanding.get(path) or []
+        lines.append(f"  • {path}" + ("".join(f"\n      - {f}" for f in findings)))
+    return OperationAuthorization(
+        allowed=False,
+        reason="unresolved_review_findings",
+        detail="Ревью не закрыто по этим путям:\n" + "\n".join(lines),
+    )
+
+
 def load_review_gate_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = config if isinstance(config, dict) else load_config_readonly()
     raw = cfg.get("review_gate")
