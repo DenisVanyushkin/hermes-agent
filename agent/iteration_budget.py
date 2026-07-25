@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import threading
 
+#: Kept identical to the _turn_exit_reason set in agent/conversation_loop.py.
+BUDGET_EXHAUSTED_REASON = "budget_exhausted"
+
 
 class IterationBudget:
     """Thread-safe iteration counter for an agent.
@@ -58,5 +61,20 @@ class IterationBudget:
         with self._lock:
             return max(0, self.max_total - self._used)
 
+    @property
+    def exhausted(self) -> bool:
+        with self._lock:
+            return self._used >= self.max_total
 
-__all__ = ["IterationBudget"]
+    @property
+    def exhausted_reason(self) -> str | None:
+        """``"budget_exhausted"`` once spent, otherwise ``None``.
+
+        The string matches the ``_turn_exit_reason`` the conversation loop
+        already sets, so the budget object and the turn outcome cannot describe
+        the same condition with two different words.
+        """
+        return BUDGET_EXHAUSTED_REASON if self.exhausted else None
+
+
+__all__ = ["IterationBudget", "BUDGET_EXHAUSTED_REASON"]

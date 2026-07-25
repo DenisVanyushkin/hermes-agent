@@ -49,6 +49,45 @@ from agent.model_metadata import (
 logger = logging.getLogger(__name__)
 
 
+#: Fallback when neither the caller nor the config says anything.
+DEFAULT_ITERATION_BUDGET = 90
+
+
+def resolve_iteration_budget(
+    *, role: str | None, config: dict | None = None, fallback: int | None = None
+) -> IterationBudget:
+    """Decide how many iterations a turn may spend, in one place.
+
+    The number is currently chosen independently by the gateway
+    (HERMES_MAX_ITERATIONS), agent_init, delegation.max_iterations,
+    pipeline_aiagent_executor and the engineering pipeline spec -- none of which
+    knows about the others, and none of which knows the role.
+
+    Deliberately behaviour-preserving: with no ``role_budgets`` block every
+    caller gets exactly the number it passes as ``fallback``, i.e. what it uses
+    today. The role only starts to matter once an operator configures it.
+
+    A malformed entry is ignored rather than obeyed. A typo that resolved to 0
+    would end every turn of that role immediately, which is a worse failure than
+    the budget simply not being applied.
+    """
+    default = fallback if isinstance(fallback, int) and fallback > 0 else DEFAULT_ITERATION_BUDGET
+    budgets = (config or {}).get("role_budgets")
+    if not isinstance(budgets, dict):
+        return IterationBudget(default)
+
+    for key in (role, "default"):
+        if key is None:
+            continue
+        value = budgets.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value > 0:
+            return IterationBudget(value)
+    return IterationBudget(default)
+
+
+
 def compose_user_api_content(
     content: Any,
     ext_prefetch_cache: str,
