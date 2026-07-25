@@ -2522,6 +2522,75 @@ def _get_cron_approval_mode() -> str:
         return "deny"
 
 
+def resolve_cron_gate_decision(
+    *,
+    gate: str,
+    subject_text: str,
+    description: str,
+    deny_message: str,
+    mode: str | None = None,
+) -> dict:
+    """Single decision point for headless (cron) approvals.
+
+    Every gate that used to branch on ``approvals.cron_mode`` calls this, so
+    the four gates can never drift again (they did: before this helper,
+    ``smart`` meant auto-approve in two gates and a hard deny in a third).
+
+    ``approve`` allows, ``deny`` blocks with the caller's message, ``smart``
+    asks the auxiliary reviewer and allows ONLY on an explicit APPROVE.
+    Anything else — DENY, ESCALATE, an invalid answer, an exception — blocks:
+    a headless session has no human fallback, so uncertainty must fail closed.
+    """
+    resolved = (mode or _get_cron_approval_mode()).lower().strip()
+    base = {"cron_gate": gate, "cron_mode": resolved}
+
+    if resolved == "approve":
+        logger.warning(
+            "approval: auto-approving flagged %s in headless session "
+            "(approvals.cron_mode=approve): %s", gate, description,
+        )
+        return {**base, "approved": True, "message": None,
+                "cron_auto_approved": True, "description": description}
+
+    if resolved == "smart":
+        try:
+            verdict = _smart_approve(subject_text, description)
+        except Exception as exc:  # _smart_approve already swallows, belt and braces
+            logger.warning(
+                "approval: smart review raised for %s (%s) — failing closed", gate, exc,
+            )
+            verdict = "escalate"
+
+        if verdict == "approve":
+            logger.info("approval: smart APPROVE for %s: %s", gate, description)
+            return {**base, "approved": True, "message": None,
+                    "smart_approved": True, "description": description}
+
+        if verdict == "deny":
+            logger.warning("approval: smart DENY for %s: %s", gate, description)
+            return {**base, "approved": False, "smart_denied": True,
+                    "description": description,
+                    "message": (
+                        f"BLOCKED by smart approval: {description}. The action was "
+                        "assessed as genuinely dangerous. Do NOT retry."
+                    )}
+
+        logger.warning(
+            "approval: smart ESCALATE/unavailable for %s (verdict=%r): %s",
+            gate, verdict, description,
+        )
+        return {**base, "approved": False, "smart_escalated": True,
+                "description": description,
+                "message": (
+                    f"BLOCKED by smart approval: {description}. The risk assessment "
+                    "was inconclusive and this session has no user available to "
+                    "approve it. Do NOT retry."
+                )}
+
+    return {**base, "approved": False, "message": deny_message,
+            "description": description}
+
+
 def _headless_session_is_cron(session_key: str) -> bool:
     """True when the current approval decision belongs to a cron job.
 
