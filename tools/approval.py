@@ -2791,7 +2791,11 @@ def _smart_approve(command: str, description: str) -> str:
             return "escalate"
 
     except Exception as e:
-        logger.debug("Smart approvals: LLM call failed (%s), escalating", e)
+        logger.warning(
+            "Smart approval: reviewer call failed (%s) — escalating (fails closed). "
+            "Repeated failures mean every flagged headless command is now blocked.",
+            e,
+        )
         return "escalate"
 
 
