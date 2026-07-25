@@ -69,6 +69,11 @@ class PipelineSession:
     planned_steps: list[PipelineStepPlan] = field(default_factory=list)
     selected_subagent_ids: list[str] = field(default_factory=list)
     reviewer_condition: str | None = None
+    #: Set only when the router reports needs_clarification. Carried here so the
+    #: gateway can put the question to the operator; it used to be written into an
+    #: observation payload that nothing read. Placed last because a dataclass
+    #: cannot have a defaulted field before undefaulted ones.
+    clarification_question: str | None = None
 
 
 def create_pipeline_session(*, request: PipelineSessionRequest) -> PipelineSession:
@@ -87,6 +92,9 @@ def create_pipeline_session(*, request: PipelineSessionRequest) -> PipelineSessi
         pipeline_id=pipeline_id,
         router_status=(router.status if router is not None and router.status else "unavailable"),
         router_confidence=float(router.confidence) if router is not None else 0.0,
+        clarification_question=(
+            getattr(router, "clarification_question", None) if router is not None else None
+        ),
         platform=request.platform,
         session_key=request.session_key,
         session_id=request.session_id,
