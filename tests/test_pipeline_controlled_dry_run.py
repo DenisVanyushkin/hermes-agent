@@ -170,28 +170,6 @@ def test_autonomous_context_fails_closed_when_the_worktree_cannot_be_created(mon
     assert runtime_context["mutation_workspace"] != str(repo_root.resolve())
 
 
-def test_prepare_autonomous_workspace_accepts_clean_repo_root_and_records_head(tmp_path: Path) -> None:
-    module = __import__("hermes_cli.pipeline_autonomous_execution", fromlist=["prepare_autonomous_workspace"])
-    repo_root = _init_git_repo(tmp_path / "repo")
-
-    workspace = module.prepare_autonomous_workspace(repo_root=repo_root, workspace=repo_root)
-
-    assert workspace == repo_root.resolve()
-
-
-def test_prepare_autonomous_workspace_rejects_dirty_repo_root(tmp_path: Path) -> None:
-    module = __import__("hermes_cli.pipeline_autonomous_execution", fromlist=["prepare_autonomous_workspace"])
-    repo_root = _init_git_repo(tmp_path / "repo")
-    (repo_root / "tracked.txt").write_text("dirty\n", encoding="utf-8")
-
-    try:
-        module.prepare_autonomous_workspace(repo_root=repo_root, workspace=repo_root)
-    except ValueError as exc:
-        assert str(exc) == "workspace_dirty_baseline"
-    else:
-        raise AssertionError("expected dirty repo root to fail closed")
-
-
 def test_build_controlled_manual_helper_context_builds_executor_bridge_mapping_when_gate_enabled(monkeypatch, tmp_path: Path) -> None:
     module = __import__("hermes_cli.pipeline_controlled_dry_run", fromlist=["unused"])
     monkeypatch.setattr(module, "GATEWAY_WORKSPACE_ROOT", tmp_path / "workspaces")
@@ -265,25 +243,3 @@ def test_build_controlled_manual_helper_context_fails_closed_when_reviewer_runti
     assert "executor_bridge" not in controlled_context
 
 
-def test_prepare_autonomous_workspace_ignores_own_report_artifact(tmp_path: Path) -> None:
-    module = __import__("hermes_cli.pipeline_autonomous_execution", fromlist=["prepare_autonomous_workspace"])
-    repo_root = _init_git_repo(tmp_path / "repo")
-    (repo_root / "controlled_execution_report.json").write_text("{}\n", encoding="utf-8")
-
-    workspace = module.prepare_autonomous_workspace(repo_root=repo_root, workspace=repo_root)
-
-    assert workspace == repo_root.resolve()
-
-
-def test_prepare_autonomous_workspace_still_rejects_tracked_dirt_alongside_report(tmp_path: Path) -> None:
-    module = __import__("hermes_cli.pipeline_autonomous_execution", fromlist=["prepare_autonomous_workspace"])
-    repo_root = _init_git_repo(tmp_path / "repo")
-    (repo_root / "controlled_execution_report.json").write_text("{}\n", encoding="utf-8")
-    (repo_root / "tracked.txt").write_text("dirty\n", encoding="utf-8")
-
-    try:
-        module.prepare_autonomous_workspace(repo_root=repo_root, workspace=repo_root)
-    except ValueError as exc:
-        assert str(exc) == "workspace_dirty_baseline"
-    else:
-        raise AssertionError("expected dirty repo root to fail closed")

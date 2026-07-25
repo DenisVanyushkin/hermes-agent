@@ -7,24 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from hermes_cli.baseline_git import DirtyEntry, classify_dirty
+from hermes_cli.baseline_git import classify_dirty
 from hermes_cli.pipeline_aiagent_executor import AIAgentReviewerExecutorBridge, AIAgentSubagentExecutorBridge
 from hermes_cli.pipeline_specs import load_pipeline_specs
 from hermes_cli.runtime_factory import RuntimeFactory, build_runtime_factory_plan
 from hermes_cli.subagent_runner import SubagentRunner
 
-
-class DirtyBaselineError(ValueError):
-    """Preflight block: the agent repo working tree is not clean.
-
-    ``str(err)`` stays ``"workspace_dirty_baseline"`` for backward compatibility
-    with existing ``blocked_reason`` handling; ``err.entries`` carries the
-    categorized dirty files for the enriched Slack block message.
-    """
-
-    def __init__(self, entries: list[DirtyEntry]) -> None:
-        super().__init__("workspace_dirty_baseline")
-        self.entries = entries
 
 ENGINEER_SUBAGENT_ID = "hermes_engineer_core"
 REVIEWER_SUBAGENT_ID = "hermes_code_reviewer"
@@ -156,37 +144,6 @@ def autonomous_workspace(*, session_id: str | None, pipeline_session_id: str | N
     return (AUTONOMOUS_WORKSPACE_ROOT / slug).resolve()
 
 
-def prepare_autonomous_workspace(*, repo_root: Path, workspace: Path, expected_repo_root: Path | None = None) -> Path:
-    """In-place / scaffold workspace preparation.
-
-    NO LONGER THE PRODUCTION PATH -- since the autonomous run moved into its own
-    worktree (``prepare_run_worktree``), this is retained only for the controlled
-    smoke and e2e fixtures that still exercise an in-place workspace. It is also
-    the last caller of ``_auto_heal_dirty_baseline``; both should go once those
-    fixtures are rebuilt.
-    """
-    resolved_repo_root = repo_root.resolve()
-    resolved_workspace = workspace.resolve() if workspace.exists() else workspace.resolve(strict=False)
-    if resolved_workspace == resolved_repo_root:
-        _validate_repo_root_workspace(repo_root=resolved_repo_root, expected_repo_root=expected_repo_root)
-        return resolved_repo_root
-    if workspace.exists():
-        if not workspace.is_dir() or not (workspace / ".git").exists():
-            raise ValueError("workspace_not_git_repo")
-        _ensure_workspace_layout(workspace=workspace, repo_root=repo_root)
-        return workspace.resolve()
-    workspace.mkdir(parents=True, exist_ok=False)
-    _git(workspace, "init", "-b", "main")
-    _git(workspace, "config", "user.name", "Hermes Autonomous Pipeline")
-    _git(workspace, "config", "user.email", "hermes-autonomous@example.com")
-    (workspace / ".gitignore").write_text("tests/__pycache__/\nvenv\n", encoding="utf-8")
-    (workspace / "tracked.txt").write_text("baseline\n", encoding="utf-8")
-    _git(workspace, "add", ".gitignore", "tracked.txt")
-    _git(workspace, "commit", "-m", "initial")
-    _ensure_workspace_layout(workspace=workspace, repo_root=repo_root)
-    return workspace.resolve()
-
-
 RUN_BRANCH_PREFIX = "hermes-run/"
 
 
@@ -212,7 +169,7 @@ def prepare_run_worktree(*, repo_root: Path, workspace: Path, run_id: str) -> Ru
     The point is that a worktree is created from a *commit*, so it is clean by
     construction no matter what state the repo root is in. That removes the
     dirty-baseline question instead of classifying it, and -- unlike
-    ``_auto_heal_dirty_baseline`` -- it never touches the operator's working
+    the stash-based self-heal it replaces -- it never touches the operator's working
     tree: no stash, no silent revert.
 
     It also covers the cases auto-heal refuses by design. Sandbox containers
@@ -491,67 +448,6 @@ def _ensure_workspace_layout(*, workspace: Path, repo_root: Path) -> None:
         _exclude_locally(workspace, "venv")
     except (ValueError, OSError):
         pass
-
-
-def _validate_repo_root_workspace(*, repo_root: Path, expected_repo_root: Path | None) -> None:
-    if not repo_root.exists() or not repo_root.is_dir():
-        raise ValueError("workspace_repo_missing")
-    if expected_repo_root is not None and repo_root != expected_repo_root.resolve():
-        raise ValueError("workspace_repo_root_mismatch")
-    if not (repo_root / ".git").exists():
-        raise ValueError("workspace_not_git_repo")
-    try:
-        _git_stdout(repo_root, "rev-parse", "--is-inside-work-tree")
-        _git_stdout(repo_root, "rev-parse", "HEAD")
-    except ValueError as exc:
-        raise ValueError("workspace_not_git_repo") from exc
-    # The pipeline writes its own controlled_execution_report.json into the
-    # workspace root after every run; classify_dirty already excludes it from
-    # the clean-baseline check.
-    entries = classify_dirty(repo_root)
-    if entries:
-        entries = _auto_heal_dirty_baseline(repo_root, entries)
-    if entries:
-        raise DirtyBaselineError(entries)
-
-
-def _auto_heal_dirty_baseline(repo_root: Path, entries: list[DirtyEntry]) -> list[DirtyEntry]:
-    """A prior blocked autonomous run can leave its own uncommitted edits in the
-    workspace (= repo root), which would DirtyBaselineError the next run. Best-effort
-    self-heal: stash the leftover (recoverable) and re-check. Returns the still-dirty
-    entries (empty if healed). Never raises; on any failure returns the original
-    entries so the caller falls back to the normal DirtyBaselineError.
-
-    Only auto-heals when there are no `stash_conflict` (unmerged/conflicted index)
-    or `root_owned` entries — `git stash` can't cleanly move those (the pipeline
-    runs as a non-root user, so root-owned leftovers need chown/baseline_doctor;
-    conflicted index state needs manual attention). Only the common modified/
-    untracked leftover from a prior blocked run is auto-healed.
-    """
-    if any(e.category in ("stash_conflict", "root_owned") for e in entries):
-        return entries
-    # Protect a commit-gate-pending deliverable: if the current dirty state is the
-    # deliverable awaiting the operator's «коммить»/«отмена», do NOT stash it — that
-    # would orphan it from its commit_gate marker. Leave it so the run blocks until
-    # the operator resolves it (commit/discard via the intercept). Best-effort.
-    try:
-        from hermes_cli import commit_gate_service
-        pending = commit_gate_service.get_pending()
-        if pending:
-            pending_files = {str(p) for p in (pending.get("changed_files") or [])}
-            dirty_files = {str(e.path) for e in entries}
-            if dirty_files and dirty_files <= pending_files:
-                return entries  # protected pending deliverable — do not stash
-    except Exception:
-        pass  # best-effort; fall through to normal auto-heal
-    try:
-        _git(
-            repo_root, "stash", "push", "-u", "-m",
-            "auto-heal: autonomous baseline leftover from a prior blocked run",
-        )
-    except Exception:
-        return entries
-    return classify_dirty(repo_root)
 
 
 def _build_bridge_runtime_plans(*, loaded_specs: Any, pipeline_session_id: str | None, user_message: str, config: dict[str, Any] | None) -> dict[str, Any]:
