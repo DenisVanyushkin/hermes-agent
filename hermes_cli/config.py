@@ -2787,7 +2787,7 @@ DEFAULT_CONFIG = {
     "approvals": {
         "mode": "smart",
         "timeout": 300,
-        "cron_mode": "deny",
+        "cron_mode": "deny",  # deny | smart | approve
         # User-defined deny rules: fnmatch globs matched against terminal
         # commands. A match blocks the command unconditionally — BEFORE the
         # --yolo / /yolo / mode=off bypass — making this the user-editable

@@ -2505,11 +2505,16 @@ def _get_approval_timeout() -> int:
 
 
 def _get_cron_approval_mode() -> str:
-    """Read the cron approval mode from config. Returns 'deny' or 'approve'."""
+    """Read the cron approval mode from config.
+
+    Returns ``deny``, ``smart``, or ``approve``. Unknown values fail closed.
+    """
     try:
         from hermes_cli.config import load_config
         config = load_config()
         mode = str(cfg_get(config, "approvals", "cron_mode", default="deny")).lower().strip()
+        if mode == "smart":
+            return "smart"
         if mode in {"approve", "off", "allow", "yes"}:
             return "approve"
         return "deny"
@@ -3314,12 +3319,14 @@ def check_all_command_guards(command: str, env_type: str,
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
+    cron_mode = _get_cron_approval_mode() if env_var_enabled("HERMES_CRON_SESSION") else ""
+
     # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
     # flows, we do not block on approvals and we skip external guard work.
     if not is_cli and not is_gateway and not is_ask:
         # Cron sessions: respect cron_mode config
         if env_var_enabled("HERMES_CRON_SESSION"):
-            if _get_cron_approval_mode() == "deny":
+            if cron_mode == "deny":
                 # Run detection to get a description for the block message
                 is_dangerous, _pk, description = detect_dangerous_command(command)
                 if is_dangerous:
@@ -3380,7 +3387,14 @@ def check_all_command_guards(command: str, env_type: str,
                             ),
                         }
                     # else: tirith_fail_open is True — allow as before
-        return {"approved": True, "message": None}
+            elif cron_mode == "approve":
+                return {"approved": True, "message": None}
+            # cron_mode=smart continues through the shared finding + smart
+            # approval flow below. It must not hit the historical auto-approve.
+        if env_var_enabled("HERMES_CRON_SESSION") and cron_mode == "smart":
+            pass
+        else:
+            return {"approved": True, "message": None}
 
     # --- Phase 1: Gather findings from both checks ---
 
@@ -3457,11 +3471,13 @@ def check_all_command_guards(command: str, env_type: str,
         return {"approved": True, "message": None}
 
     # --- Phase 2.5: Smart approval (auxiliary LLM risk assessment) ---
-    # When approvals.mode=smart, ask the aux LLM before prompting the user.
+    # When approvals.mode=smart, or cron_mode=smart, ask the aux LLM before
+    # prompting the user. Cron has no human fallback, so it fails closed.
     # Inspired by OpenAI Codex's Smart Approvals guardian subagent
     # (openai/codex#13860).
     smart_denied_for_owner = False
-    if approval_mode == "smart":
+    cron_smart = env_var_enabled("HERMES_CRON_SESSION") and cron_mode == "smart"
+    if approval_mode == "smart" or cron_smart:
         combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
         observer_payload = _prepare_smart_approval_observer(
             command=command,
@@ -3481,12 +3497,20 @@ def check_all_command_guards(command: str, env_type: str,
             return {"approved": True, "message": None,
                     "smart_approved": True,
                     "description": combined_desc_for_llm}
-        elif verdict == "deny" and not (is_cli or is_gateway or is_ask):
+        elif verdict == "deny" and (cron_smart or not (is_cli or is_gateway or is_ask)):
             return {
                 "approved": False,
                 "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
                            "The command was assessed as genuinely dangerous. Do NOT retry.",
                 "smart_denied": True,
+            }
+        elif verdict == "escalate" and cron_smart:
+            return {
+                "approved": False,
+                "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
+                           "The risk assessment was inconclusive and cron jobs "
+                           "have no user available to approve the command. Do NOT retry.",
+                "smart_escalated": True,
             }
         elif verdict == "deny":
             smart_denied_for_owner = True
