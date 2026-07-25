@@ -132,6 +132,102 @@ def prepare_autonomous_workspace(*, repo_root: Path, workspace: Path, expected_r
     return workspace.resolve()
 
 
+RUN_BRANCH_PREFIX = "hermes-run/"
+
+
+class RunWorktree(SimpleNamespace):
+    """Where one autonomous run does its work.
+
+    ``path`` -- the worktree directory; ``branch`` -- its per-run branch;
+    ``head`` -- the commit it was cut from; ``created`` -- False when an existing
+    worktree for this run was reused.
+    """
+
+
+def _run_slug(run_id: str | None) -> str:
+    slug = "".join(
+        ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in str(run_id or "")
+    ).strip("-_")
+    return slug or "autonomous"
+
+
+def prepare_run_worktree(*, repo_root: Path, workspace: Path, run_id: str) -> RunWorktree:
+    """Cut a clean, private worktree for one autonomous run.
+
+    The point is that a worktree is created from a *commit*, so it is clean by
+    construction no matter what state the repo root is in. That removes the
+    dirty-baseline question instead of classifying it, and -- unlike
+    ``_auto_heal_dirty_baseline`` -- it never touches the operator's working
+    tree: no stash, no silent revert.
+
+    It also covers the cases auto-heal refuses by design. Sandbox containers
+    leave root-owned files around the repo, and ``git stash`` cannot move those
+    because the pipeline does not run as root; a fresh worktree simply does not
+    contain them.
+
+    Each run gets branch ``hermes-run/<run_id>``. A per-run branch is not
+    optional: git refuses to check out one branch in two worktrees, so the run
+    cannot share the live branch even if we wanted it to. Landing that branch on
+    the mainline stays gated on an approving reviewer verdict.
+
+    Idempotent -- a retried turn within the same run reuses its worktree rather
+    than orphaning it.
+    """
+    repo_root = repo_root.resolve()
+    branch = f"{RUN_BRANCH_PREFIX}{_run_slug(run_id)}"
+    head = _git_stdout(repo_root, "rev-parse", "HEAD")
+
+    if workspace.exists():
+        if not workspace.is_dir() or not (workspace / ".git").exists():
+            raise ValueError("workspace_not_git_repo")
+        resolved = workspace.resolve()
+        _ensure_workspace_layout(workspace=resolved, repo_root=repo_root)
+        return RunWorktree(
+            path=resolved,
+            branch=_git_stdout(resolved, "rev-parse", "--abbrev-ref", "HEAD"),
+            head=_git_stdout(resolved, "rev-parse", "HEAD"),
+            created=False,
+        )
+
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    # Reuse the branch if a previous worktree for this run was already removed;
+    # `worktree add -b` would fail on an existing branch name.
+    existing = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=repo_root, text=True, capture_output=True, check=False,
+    ).returncode == 0
+    if existing:
+        _git(repo_root, "worktree", "add", str(workspace), branch)
+    else:
+        _git(repo_root, "worktree", "add", "-b", branch, str(workspace), head)
+
+    resolved = workspace.resolve()
+    _ensure_workspace_layout(workspace=resolved, repo_root=repo_root)
+    return RunWorktree(path=resolved, branch=branch, head=head, created=True)
+
+
+def _exclude_locally(workspace: Path, pattern: str) -> None:
+    """Ignore a path in this worktree only, without touching tracked .gitignore.
+
+    The venv symlink is injected by us, so the baseline check must not see it as
+    untracked dirt. Relying on the target repo happening to gitignore "venv"
+    would make a clean worktree depend on something we do not control -- and
+    ``classify_dirty`` is precisely the gate we are trying to keep meaningful.
+
+    ``rev-parse --git-path`` resolves info/exclude correctly for a linked
+    worktree, where ``.git`` is a file rather than a directory.
+    """
+    exclude = Path(_git_stdout(workspace, "rev-parse", "--git-path", "info/exclude"))
+    if not exclude.is_absolute():
+        exclude = workspace / exclude
+    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    if pattern in existing.split():
+        return
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    prefix = "" if not existing or existing.endswith("\n") else "\n"
+    exclude.write_text(f"{existing}{prefix}{pattern}\n", encoding="utf-8")
+
+
 def _ensure_workspace_layout(*, workspace: Path, repo_root: Path) -> None:
     expected_venv = (repo_root / "venv").resolve(strict=False)
     workspace_venv = workspace / "venv"
@@ -142,6 +238,12 @@ def _ensure_workspace_layout(*, workspace: Path, repo_root: Path) -> None:
     elif workspace_venv.exists():
         raise ValueError("workspace_venv_conflict")
     workspace_venv.symlink_to(repo_root / "venv")
+    # Only meaningful for a real git worktree; the fake smoke scaffold gitignores
+    # venv itself and a failure here must not break workspace preparation.
+    try:
+        _exclude_locally(workspace, "venv")
+    except (ValueError, OSError):
+        pass
 
 
 def _validate_repo_root_workspace(*, repo_root: Path, expected_repo_root: Path | None) -> None:
