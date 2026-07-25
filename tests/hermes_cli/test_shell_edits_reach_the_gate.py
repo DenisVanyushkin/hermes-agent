@@ -97,10 +97,32 @@ def test_tool_reported_and_shell_written_paths_are_both_reviewed(git_says):
             _call("write_file", '{"path": "hermes_cli/from_tool.py"}'),
             _call("execute_code", '{"code": "..."}'),
         ],
+        # Claiming both files belong to this turn requires knowing the tree was
+        # clean when it started. Without a baseline, git dirt cannot be
+        # attributed here at all -- see the test below.
+        baseline_dirty_paths=[],
     )
 
     assert required is True
     assert set(paths) == {"hermes_cli/from_tool.py", "hermes_cli/from_shell.py"}
+
+
+def test_without_a_baseline_git_may_not_add_to_known_paths(git_says):
+    """Unattributable dirt must not be reviewed as though the turn wrote it.
+
+    A caller with no baseline cannot say what was already dirty, so git may only
+    stand in for paths we do not have -- never extend paths we do. Production
+    always passes one (turn_context snapshots it at turn start); this is the
+    guard for every other caller.
+    """
+    git_says("hermes_cli/someone_elses_wip.py")
+
+    required, paths = detect_material_engineering_change(
+        _plan(), [_call("write_file", '{"path": "hermes_cli/from_tool.py"}')]
+    )
+
+    assert required is True
+    assert paths == ["hermes_cli/from_tool.py"]
 
 
 def test_baseline_dirt_is_still_not_blamed_on_the_turn(git_says):

@@ -55,6 +55,20 @@ PROFILE_ID_ALIASES = {
 
 MODEL_TIERS = {"standard", "reasoning", "coding", "critical", "code_review"}
 DEFAULT_BASE_MODEL = "gpt-5.6-luna"
+#: The lineup a role may name. Membership, not equality with DEFAULT_BASE_MODEL:
+#: roles are meant to differ, and pinning them all to one constant made the
+#: policy file unable to express that.
+#:
+#: The old equality check existed for a real reason and the reason has not gone
+#: away -- route_task() validates the whole architecture, any issue raises
+#: RoutingError, and profile_context catches it and returns general_operator for
+#: *every* task. One bad entry still collapses all role routing, which is why
+#: this stays a closed set and why validate_role_policies() reports per role.
+#: Kept in step with the tier block of config/hermes-model-policy.yaml by
+#: tests/hermes_cli/test_role_model_differentiation.py.
+SUPPORTED_BASE_MODELS = frozenset({"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"})
+#: Roles that are parked rather than configured.
+DEFERRED_BASE_MODEL = "deferred"
 CANONICAL_TOOL_CATEGORIES = {
     "repo_read",
     "repo_write",
@@ -564,6 +578,50 @@ def _validate_fallback_selection_policy(data: Any) -> list[ValidationIssue]:
     return issues
 
 
+@dataclass(frozen=True)
+class RolePolicyValidation:
+    """Per-role verdict on base_model.
+
+    ``invalid_roles`` is the point: the issue list that feeds
+    _validate_loaded_architecture cannot say *which* role is at fault, so a
+    single bad entry reads as "the architecture is broken" and every role ends
+    up on the general_operator fallback. Callers that want to degrade one role
+    instead of all of them need this shape.
+    """
+
+    valid: bool
+    errors: list[str]
+    invalid_roles: set[str]
+
+
+def validate_role_policies(policies: Any) -> RolePolicyValidation:
+    """Check each role's base_model against the sanctioned lineup, per role."""
+    if not isinstance(policies, dict):
+        return RolePolicyValidation(
+            valid=False, errors=["role_policies must be a mapping"], invalid_roles=set()
+        )
+
+    errors: list[str] = []
+    invalid: set[str] = set()
+    for role_id, policy in policies.items():
+        if not isinstance(policy, dict):
+            errors.append(f"{role_id}: role policy must be a mapping")
+            invalid.add(str(role_id))
+            continue
+        base_model = policy.get("base_model")
+        if base_model == DEFERRED_BASE_MODEL:
+            # A parked role names no model on purpose.
+            continue
+        if base_model not in SUPPORTED_BASE_MODELS:
+            errors.append(
+                f"{role_id}: base_model {base_model!r} is not in the sanctioned "
+                f"lineup {sorted(SUPPORTED_BASE_MODELS)}"
+            )
+            invalid.add(str(role_id))
+
+    return RolePolicyValidation(valid=not errors, errors=errors, invalid_roles=invalid)
+
+
 def _validate_role_policies(data: Any) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     if not isinstance(data, dict):
@@ -586,8 +644,12 @@ def _validate_role_policies(data: Any) -> list[ValidationIssue]:
                 issues.append(_issue("error", f"{path}.status must be deferred", path))
             if role_policy.get("base_model") != "deferred":
                 issues.append(_issue("error", f"{path}.base_model must be deferred", path))
-        elif role_policy.get("base_model") != DEFAULT_BASE_MODEL:
-            issues.append(_issue("error", f"{path}.base_model must be {DEFAULT_BASE_MODEL!r}", path))
+        elif role_policy.get("base_model") not in SUPPORTED_BASE_MODELS:
+            issues.append(_issue(
+                "error",
+                f"{path}.base_model must be one of {sorted(SUPPORTED_BASE_MODELS)}",
+                path,
+            ))
 
         escalation = role_policy.get("escalation")
         if not isinstance(escalation, dict):

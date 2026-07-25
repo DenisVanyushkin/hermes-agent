@@ -444,9 +444,20 @@ def detect_material_engineering_change(
     # would otherwise have half of itself reviewed.
     mutation_capable = has_file_mutation_tool_call or _has_code_execution_tool_call(messages)
     if mutation_capable:
-        for path in _material_repo_paths_from_git(repo_root, baseline_dirty_paths):
-            if path not in material_paths:
-                material_paths.append(path)
+        git_paths = _material_repo_paths_from_git(repo_root, baseline_dirty_paths)
+        if baseline_dirty_paths is not None:
+            # We know what was already dirty when the turn began, so whatever git
+            # reports on top of that is this turn's doing and belongs in the
+            # review alongside the tool-reported paths.
+            for path in git_paths:
+                if path not in material_paths:
+                    material_paths.append(path)
+        elif not material_paths:
+            # No baseline to subtract: repo dirt cannot be attributed to this turn,
+            # so git may only stand in for paths we do not have -- never add to
+            # paths we do. Otherwise an unrelated work-in-progress diff gets
+            # reviewed as though the turn had written it.
+            material_paths = git_paths
 
     if plan.operation_category in material_categories:
         if material_paths:
