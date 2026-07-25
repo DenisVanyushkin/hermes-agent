@@ -128,6 +128,47 @@ _API_CALL_MODULES = frozenset({
 })
 
 
+def log_model_selection(
+    *,
+    session: str,
+    policy: str,
+    model_class: str,
+    role: str,
+    provider: str,
+    policy_model: Optional[str],
+    effective_model: Optional[str],
+    fallback: str = "",
+    allow_fallback: bool = True,
+) -> None:
+    """Log the model decision with the policy's intent and the runtime fact apart.
+
+    ``select_model_policy()`` is advisory by construction — its own module
+    docstring says it selects "without mutating provider resolution, fallback
+    chains, or runtime model state". Logging its ``preferred_model`` as a bare
+    ``model=`` therefore asserted a fact it had never established: the line read
+    ``model=gpt-5.4`` on turns that ``Turn ended`` reported as
+    ``model=gpt-5.6-luna``, and model decisions were being made off that.
+
+    ``effective_model`` is ``agent.model`` — the model the turn actually starts
+    on. Runtime fallback can still move it mid-turn (``chat_completion_helpers``
+    assigns ``agent.model = fb_model``), so ``Turn ended`` stays the authority on
+    where a turn finished; read the two lines together to see any drift.
+    """
+    logger.info(
+        "model selection: session=%s policy=%s class=%s role=%s provider=%s "
+        "policy_model=%s effective_model=%s fallback=%s allow_fallback=%s",
+        session or "-",
+        policy,
+        model_class,
+        role,
+        provider,
+        policy_model or "unknown",
+        effective_model or "unknown",
+        fallback,
+        allow_fallback,
+    )
+
+
 def _apply_active_turn_redirect(agent: Any, messages: List[Dict[str, Any]], text: str) -> None:
     """Append a provider-safe checkpoint and correction to the live turn.
 
@@ -1392,16 +1433,16 @@ def run_conversation(
             critical_approval_required=bool(getattr(_role_context_result, "critical_approval_required", False)),
         )
         agent._model_selection = model_selection_to_dict(_model_selection_result)
-        logger.info(
-            "model selection: session=%s policy=%s class=%s role=%s provider=%s model=%s fallback=%s allow_fallback=%s",
-            agent.session_id or "-",
-            agent._model_selection.get("policy_name", ""),
-            agent._model_selection.get("policy_class", ""),
-            agent._model_selection.get("effective_role", ""),
-            agent._model_selection.get("preferred_provider", ""),
-            agent._model_selection.get("preferred_model", ""),
-            agent._model_selection.get("fallback_chain_key", ""),
-            agent._model_selection.get("allow_fallback", True),
+        log_model_selection(
+            session=agent.session_id or "-",
+            policy=agent._model_selection.get("policy_name", ""),
+            model_class=agent._model_selection.get("policy_class", ""),
+            role=agent._model_selection.get("effective_role", ""),
+            provider=agent._model_selection.get("preferred_provider", ""),
+            policy_model=agent._model_selection.get("preferred_model", ""),
+            effective_model=getattr(agent, "model", None),
+            fallback=agent._model_selection.get("fallback_chain_key", ""),
+            allow_fallback=agent._model_selection.get("allow_fallback", True),
         )
     except Exception as exc:
         logger.warning("model selection failed: %s", exc)
