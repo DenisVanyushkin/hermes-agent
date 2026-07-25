@@ -2876,14 +2876,16 @@ def _run_approval_gate(
     if not is_cli and not is_gateway:
         # Cron sessions: respect cron_mode config
         if env_var_enabled("HERMES_CRON_SESSION"):
-            if _get_cron_approval_mode() == "deny":
-                return {
-                    "approved": False,
-                    "message": cron_deny_message,
-                    "pattern_key": pattern_key,
-                    "description": description,
-                }
-            # cron_mode: approve — fall through to auto-approve below.
+            decision = resolve_cron_gate_decision(
+                gate="approval_gate",
+                subject_text=display_target,
+                description=description,
+                deny_message=cron_deny_message,
+            )
+            if not decision["approved"]:
+                return {**decision, "pattern_key": pattern_key}
+            # approve / smart-APPROVE — fall through to the auto-approve tail
+            # so the existing logging and persistence behaviour is preserved.
         elif fail_closed_when_no_human:
             # Non-cron, non-interactive, no gateway: no human can answer.
             # The plugin-escalation path opts in to fail-closed here so a
