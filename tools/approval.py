@@ -3095,8 +3095,8 @@ def check_dangerous_command(command: str, env_type: str,
             f"BLOCKED: Command flagged as dangerous ({description}) "
             "but cron jobs run without a user present to approve it. "
             "Find an alternative approach that avoids this command. "
-            "To allow dangerous commands in cron jobs, set "
-            "approvals.cron_mode: approve in config.yaml."
+            "To have such actions reviewed automatically instead of blocked, set "
+            "approvals.cron_mode: smart in config.yaml (approve disables review entirely)."
         ),
         autoapprove_log_prefix=(
             "AUTO-APPROVED dangerous command in non-interactive non-gateway context"
@@ -3175,8 +3175,9 @@ def request_tool_approval(
         cron_deny_message=(
             f"BLOCKED: Tool '{tool_name}' requires approval ({description}) "
             "but cron jobs run without a user present to approve it. Find an "
-            "alternative approach. To allow flagged actions in cron jobs, set "
-            "approvals.cron_mode: approve in config.yaml."
+            "alternative approach. To have such actions reviewed automatically "
+            "instead of blocked, set "
+            "approvals.cron_mode: smart in config.yaml (approve disables review entirely)."
         ),
         autoapprove_log_prefix=(
             f"plugin-escalated tool call '{tool_name}' in "
@@ -3415,8 +3416,8 @@ def check_all_command_guards(command: str, env_type: str,
                             f"BLOCKED: Command flagged as dangerous ({description}) "
                             "but cron jobs run without a user present to approve it. "
                             "Find an alternative approach that avoids this command. "
-                            "To allow dangerous commands in cron jobs, set "
-                            "approvals.cron_mode: approve in config.yaml."
+                            "To have such actions reviewed automatically instead of blocked, set "
+                            "approvals.cron_mode: smart in config.yaml (approve disables review entirely)."
                         ),
                     }
                 # Also run tirith check in cron-deny mode so content-level
@@ -3434,8 +3435,8 @@ def check_all_command_guards(command: str, env_type: str,
                                 f"BLOCKED: {_cron_desc} "
                                 "but cron jobs run without a user present to approve it. "
                                 "Find an alternative approach that avoids this command. "
-                                "To allow dangerous commands in cron jobs, set "
-                                "approvals.cron_mode: approve in config.yaml."
+                                "To have such actions reviewed automatically instead of blocked, set "
+                                "approvals.cron_mode: smart in config.yaml (approve disables review entirely)."
                             ),
                         }
                 except ImportError:
@@ -3462,7 +3463,7 @@ def check_all_command_guards(command: str, env_type: str,
                                 "so this command cannot be silently allowed — and "
                                 "cron jobs run without a user present to approve it. "
                                 "Find an alternative approach, install tirith, or set "
-                                "approvals.cron_mode: approve in config.yaml."
+                                "approvals.cron_mode: smart in config.yaml (approve disables review entirely)."
                             ),
                         }
                     # else: tirith_fail_open is True — allow as before

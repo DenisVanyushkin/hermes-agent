@@ -2775,9 +2775,17 @@ DEFAULT_CONFIG = {
     #   smart  — use auxiliary LLM to auto-approve low-risk commands (default)
     #   off    — skip all approval prompts (equivalent to --yolo)
     #
-    # cron_mode — what to do when a cron job hits a dangerous command:
-    #   deny    — block the command and let the agent find another way (default, safe)
-    #   approve — auto-approve all dangerous commands in cron jobs
+    # cron_mode — what to do when a headless (cron) session hits a flagged
+    # action. Applies uniformly to all four gates: terminal commands,
+    # execute_code scripts, plugin escalations, and gateway approvals with no
+    # notifier attached.
+    #   deny    — block the action and let the agent find another way (default, safe)
+    #   smart   — ask the auxiliary reviewer; ONLY an explicit APPROVE allows.
+    #             DENY, ESCALATE, an invalid answer or an unreachable reviewer
+    #             all block, so the mode fails closed.
+    #   approve — auto-approve every flagged action; disables review entirely
+    # Hardline blocks, approvals.deny rules and the sudo-stdin guard are
+    # evaluated BEFORE any of these and are never overridden by the mode.
     #
     # timeout — seconds to wait for the user's approve/deny before failing
     # closed (deny). Shared by the CLI prompt and gateway/messaging waits.

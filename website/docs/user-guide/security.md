@@ -44,7 +44,7 @@ The full set of keys:
 |---|---|---|
 | `mode` | `smart` | Approval policy for dangerous shell commands — see the table below. |
 | `timeout` | `300` | Seconds Hermes waits for an approval reply before timing out. |
-| `cron_mode` | `deny` | How [cron jobs](./features/cron.md) behave headlessly when they trigger a dangerous-command prompt. `deny` blocks the command; `smart` asks the auxiliary risk-review LLM and allows only `APPROVE`; `DENY`, `ESCALATE`, and review errors block; `approve` auto-approves recoverable findings. Hardline blocks always win. |
+| `cron_mode` | `deny` | How headless sessions ([cron jobs](./features/cron.md) and gateway sessions with no approver attached) behave when they trigger an approval gate. `deny` blocks; `smart` asks the auxiliary risk-review LLM and allows only on an explicit `APPROVE`; `approve` auto-approves and disables review entirely. Applies to all four gates — see the matrix below. Hardline blocks always win. |
 | `mcp_reload_confirm` | `true` | When true, `/reload-mcp` asks before rebuilding the MCP tool set. Rebuilding invalidates the provider prompt cache (tool schemas live in the system prompt), so the next message re-sends full input tokens. Users who click **Always Approve** flip this key to `false`. |
 | `destructive_slash_confirm` | `true` | When true, destructive session slash commands (`/clear`, `/new`, `/reset`, `/undo`) prompt before discarding conversation state. Three-option dialog (Approve Once / Always Approve / Cancel) routed through native yes/no buttons on Telegram, Discord, and Slack; text fallback elsewhere. Users who click **Always Approve** flip this key to `false`. TUI uses its own modal overlay (set `HERMES_TUI_NO_CONFIRM=1` to opt out there). |
 
@@ -57,6 +57,28 @@ The full set of keys:
 :::warning
 Setting `approvals.mode: off` disables all safety prompts. Use only in trusted environments (CI/CD, containers, etc.).
 :::
+
+### Headless approvals (`cron_mode`)
+
+A headless session — a cron job, or a gateway session with no approver
+attached — has no human to answer a prompt. `approvals.cron_mode` decides what
+happens instead, and it means the same thing at every gate:
+
+| Gate | `deny` | `smart` | `approve` |
+|---|---|---|---|
+| Terminal commands (`check_all_command_guards`) | block | aux-LLM review; only `APPROVE` passes | auto-approve |
+| `execute_code` scripts | block | aux-LLM reviews the script body | auto-approve |
+| Plugin escalations (`request_tool_approval`) | block | aux-LLM review | auto-approve |
+| Gateway approval with no notifier | block | aux-LLM review | auto-approve |
+
+`smart` fails closed everywhere: `DENY`, `ESCALATE`, an invalid answer, and an
+unreachable reviewer all block. `approve` disables review entirely.
+
+Hardline blocks, `approvals.deny` rules and the sudo-stdin guard are evaluated
+before any mode and are never overridden by it.
+
+All four gates resolve through a single helper, `resolve_cron_gate_decision()`
+in `tools/approval.py`, so the meaning of a mode cannot drift between them.
 
 ### YOLO Mode
 
