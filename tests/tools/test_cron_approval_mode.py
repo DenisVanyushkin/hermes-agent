@@ -235,6 +235,31 @@ class TestCronSmartMode:
         assert not result["approved"]
         smart.assert_not_called()
 
+    def test_smart_never_reaches_interactive_phase(self, monkeypatch):
+        """Cron+smart must never fall through to the human prompt path."""
+        self._setup_cron(monkeypatch)
+        from unittest.mock import patch as mock_patch
+        with (
+            mock_patch("tools.approval._get_cron_approval_mode", return_value="smart"),
+            mock_patch("tools.approval._get_approval_mode", return_value="manual"),
+            mock_patch("tools.approval._smart_approve", return_value="escalate"),
+            mock_patch("tools.approval.prompt_dangerous_approval") as prompt,
+        ):
+            result = check_all_command_guards("rm -rf /tmp/stuff", "local")
+        assert not result["approved"]
+        prompt.assert_not_called()
+
+    def test_smart_result_carries_gate_marker(self, monkeypatch):
+        self._setup_cron(monkeypatch)
+        from unittest.mock import patch as mock_patch
+        with (
+            mock_patch("tools.approval._get_cron_approval_mode", return_value="smart"),
+            mock_patch("tools.approval._get_approval_mode", return_value="manual"),
+            mock_patch("tools.approval._smart_approve", return_value="approve"),
+        ):
+            result = check_all_command_guards("python -c 'print(1)'", "local")
+        assert result["cron_gate"] == "terminal"
+
 
 # ---------------------------------------------------------------------------
 # check_all_command_guards() with cron session

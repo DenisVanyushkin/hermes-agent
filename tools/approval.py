@@ -3458,11 +3458,9 @@ def check_all_command_guards(command: str, env_type: str,
                     # else: tirith_fail_open is True — allow as before
             elif cron_mode == "approve":
                 return {"approved": True, "message": None}
-            # cron_mode=smart continues through the shared finding + smart
-            # approval flow below. It must not hit the historical auto-approve.
-        if env_var_enabled("HERMES_CRON_SESSION") and cron_mode == "smart":
-            pass
-        else:
+            # cron_mode=smart falls through to Phase 1/2 so the aux reviewer
+            # sees the tirith findings too; the verdict is resolved in Phase 2.5.
+        if cron_mode != "smart":
             return {"approved": True, "message": None}
 
     # --- Phase 1: Gather findings from both checks ---
@@ -3545,8 +3543,34 @@ def check_all_command_guards(command: str, env_type: str,
     # Inspired by OpenAI Codex's Smart Approvals guardian subagent
     # (openai/codex#13860).
     smart_denied_for_owner = False
-    cron_smart = env_var_enabled("HERMES_CRON_SESSION") and cron_mode == "smart"
-    if approval_mode == "smart" or cron_smart:
+    # A cron/headless session has no human fallback, so its verdict is resolved
+    # by the shared resolver — the single place that knows what each cron_mode
+    # means. The interactive branch below keeps the owner-override semantics.
+    if cron_mode == "smart":
+        combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
+        observer_payload = _prepare_smart_approval_observer(
+            command=command,
+            description=combined_desc_for_llm,
+            pattern_key=warnings[0][0],
+            pattern_keys=[key for key, _, _ in warnings],
+            session_key=session_key,
+        )
+        decision = resolve_cron_gate_decision(
+            gate="terminal",
+            subject_text=command,
+            description=combined_desc_for_llm,
+            deny_message="BLOCKED: no user present in this cron session.",
+            mode="smart",
+        )
+        _observe_smart_approval_verdict(
+            observer_payload,
+            "approve" if decision["approved"] else (
+                "deny" if decision.get("smart_denied") else "escalate"
+            ),
+        )
+        return decision
+
+    if approval_mode == "smart":
         combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
         observer_payload = _prepare_smart_approval_observer(
             command=command,
@@ -3566,20 +3590,12 @@ def check_all_command_guards(command: str, env_type: str,
             return {"approved": True, "message": None,
                     "smart_approved": True,
                     "description": combined_desc_for_llm}
-        elif verdict == "deny" and (cron_smart or not (is_cli or is_gateway or is_ask)):
+        elif verdict == "deny" and not (is_cli or is_gateway or is_ask):
             return {
                 "approved": False,
                 "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
                            "The command was assessed as genuinely dangerous. Do NOT retry.",
                 "smart_denied": True,
-            }
-        elif verdict == "escalate" and cron_smart:
-            return {
-                "approved": False,
-                "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
-                           "The risk assessment was inconclusive and cron jobs "
-                           "have no user available to approve the command. Do NOT retry.",
-                "smart_escalated": True,
             }
         elif verdict == "deny":
             smart_denied_for_owner = True
