@@ -390,9 +390,9 @@ def finalize_turn(
                 _debt_root = None
                 _review_state = None
                 try:
-                    from hermes_constants import get_hermes_home
+                    from hermes_cli.review_gate import default_debt_root
 
-                    _debt_root = get_hermes_home() / "cache" / "review_gate"
+                    _debt_root = default_debt_root()
                     _review_state = ReviewGateState.load(agent.session_id or "session", _debt_root)
                 except Exception:
                     _review_state = None

@@ -341,6 +341,64 @@ def sweep_run_worktrees(
     return removed
 
 
+class CommitGateAuthorization(SimpleNamespace):
+    """What the operator's commit approval may actually do.
+
+    ``allow_commit`` -- may the commit be made at all; ``approved_for_landing``
+    -- may its branch move the mainline; ``is_run_worktree`` -- which of the two
+    blast radii we are in; ``detail`` -- the outstanding findings, for the reply.
+    """
+
+
+def commit_gate_authorization(
+    *, workspace: Path, session_id: str, debt_root: Path | None = None
+) -> CommitGateAuthorization:
+    """Weigh a commit request against the session's outstanding review findings.
+
+    The two cases differ by blast radius, so they get different answers:
+
+    * inside a run worktree the commit is contained -- it lands on
+      ``hermes-run/<id>`` and moves nothing, so debt gates the *landing*, not the
+      commit. Refusing here would only strand the pipeline's own work.
+    * in the live repository the commit moves the mainline immediately. That is
+      the 25 July shape, where a commit reached origin with a changes_requested
+      still outstanding, so debt has to stop it outright.
+
+    Fails open. A missing session id or an unreadable debt store is absence of
+    evidence, not evidence of debt, and turning a cache problem into an
+    un-diagnosable refusal to commit is worse than the thing being guarded.
+    """
+    workspace = Path(workspace)
+    branch = _git_result(workspace, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    is_run_worktree = branch.startswith(RUN_BRANCH_PREFIX)
+
+    allowed, detail = True, ""
+    session = str(session_id or "").strip()
+    if session:
+        try:
+            from hermes_cli.review_gate import (
+                ReviewGateState,
+                authorize_operation,
+                default_debt_root,
+            )
+
+            root = debt_root if debt_root is not None else default_debt_root()
+            decision = authorize_operation(
+                ReviewGateState.load(session, root),
+                operation_category="git_remote_mutation",
+            )
+            allowed, detail = decision.allowed, decision.detail
+        except Exception:
+            allowed, detail = True, ""
+
+    return CommitGateAuthorization(
+        allow_commit=is_run_worktree or allowed,
+        approved_for_landing=allowed,
+        is_run_worktree=is_run_worktree,
+        detail=detail,
+    )
+
+
 def _repo_root_of(workspace: Path) -> Path | None:
     """The repository a worktree belongs to, or None if this is not one.
 

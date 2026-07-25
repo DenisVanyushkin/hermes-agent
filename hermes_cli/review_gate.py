@@ -173,6 +173,17 @@ class ReviewGateState:
         })
 
 
+def default_debt_root() -> Path:
+    """Where per-session review debt is kept.
+
+    One definition, so the finalizer that writes it and the commit gate that
+    reads it cannot end up looking at different directories.
+    """
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "cache" / "review_gate"
+
+
 def evaluate_review_requirement(
     state: ReviewGateState, *, changed_paths_this_turn: list[str] | None = None
 ) -> ReviewRequirement:

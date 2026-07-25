@@ -20480,6 +20480,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 commit_gate_service.clear_pending()
                 return "🗑 Изменения отклонены и убраны в stash. Ничего не закоммичено."
 
+
+            # The operator's approval is necessary, not sufficient: an unresolved
+            # changes_requested still blocks a commit that would move the mainline.
+            # A commit inside a run worktree is contained, so it proceeds and the
+            # debt gates the landing instead.
+            try:
+                from hermes_cli.pipeline_autonomous_execution import commit_gate_authorization
+
+                _auth = commit_gate_authorization(
+                    workspace=repo, session_id=str(pending.get("session_id") or "")
+                )
+            except Exception:
+                _auth = None
+            if _auth is not None and not _auth.allow_commit:
+                return (
+                    "\u26d4 \u041d\u0435 \u043a\u043e\u043c\u043c\u0438\u0447\u0443: \u0440\u0435\u0432\u044c\u044e \u043d\u0435 \u0437\u0430\u043a\u0440\u044b\u0442\u043e.\n"
+                    + (_auth.detail or "")
+                )
             result = commit_gate_service.apply_commit(
                 repo=repo,
                 changed_files=changed_files,
@@ -20498,7 +20516,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
 
                 _landed = describe_run_integration(
-                    land_run_branch_after_commit(workspace=repo, approved=True)
+                    land_run_branch_after_commit(
+                        workspace=repo,
+                        approved=bool(_auth.approved_for_landing) if _auth is not None else True,
+                    )
                 )
             except Exception:
                 _landed = ""
