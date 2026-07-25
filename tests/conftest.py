@@ -404,6 +404,20 @@ def _hermetic_environment(tmp_path, monkeypatch):
     (fake_hermes_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_hermes_home))
 
+    # 3b. Redirect the autonomous run-workspace root. Creating one of those is a
+    #     `git worktree add` against the *real* repository, which registers a
+    #     worktree and a hermes-run/* branch in live git state -- and does not
+    #     fail the test that did it, so the leak is silent. A test that means to
+    #     exercise the real thing passes an explicit workspace of its own.
+    try:
+        from hermes_cli import pipeline_autonomous_execution as _pae
+    except Exception:  # pragma: no cover - module unavailable in trimmed envs
+        pass
+    else:
+        monkeypatch.setattr(
+            _pae, "AUTONOMOUS_WORKSPACE_ROOT", tmp_path / "autonomous-runs", raising=False
+        )
+
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
     monkeypatch.setenv("TZ", "UTC")

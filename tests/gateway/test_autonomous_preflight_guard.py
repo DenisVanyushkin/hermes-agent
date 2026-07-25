@@ -341,14 +341,20 @@ def test_allow_model_escalation_true_when_real_provider_execution_enabled(monkey
     """build_autonomous_helper_context must enable allow_model_escalation in the
     controlled_runtime_context whenever real provider execution is allowed, so the
     bounded rework loop is permitted to escalate the engineer to senior_coding on
-    persistent failure. Short-circuits via a DirtyBaselineError right after the
-    runtime_context.update(...) call, so this never touches real git state."""
+    persistent failure. Short-circuits at workspace preparation, right after the
+    runtime_context.update(...) call, so this never touches real git state.
+
+    The short-circuit must patch whatever the production path actually calls.
+    It used to patch prepare_autonomous_workspace; when the run moved into a
+    per-run worktree that stopped being the callee, and this test quietly created
+    a real worktree and a hermes-run/* branch in the live repo while still
+    passing. See also the AUTONOMOUS_WORKSPACE_ROOT guard in tests/conftest.py."""
     import hermes_cli.pipeline_autonomous_execution as pae
 
-    def _raise_dirty(*_a, **_k):
-        raise pae.DirtyBaselineError([])
+    def _refuse(*_a, **_k):
+        raise ValueError("workspace_short_circuited_by_test")
 
-    monkeypatch.setattr(pae, "prepare_autonomous_workspace", _raise_dirty)
+    monkeypatch.setattr(pae, "prepare_run_worktree", _refuse)
 
     helper_context = pae.build_autonomous_helper_context(
         config={"pipelines": {"execution": {"allow_real_provider_execution": True}}},
