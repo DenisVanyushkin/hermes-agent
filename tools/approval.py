@@ -2631,34 +2631,27 @@ def _resolve_headless_gateway_approval(
     session gets a definitive deny the model can act on.
     """
     if _headless_session_is_cron(session_key):
-        if _get_cron_approval_mode() == "approve":
-            logger.warning(
-                "approval: auto-approving flagged %s in cron session %s "
-                "(approvals.cron_mode=approve): %s",
-                target_label, session_key, description,
-            )
-            return {
-                "approved": True,
-                "message": None,
-                "cron_auto_approved": True,
-                "description": description,
-            }
-        return {
-            "approved": False,
-            "pattern_key": pattern_key,
-            "status": "denied_no_approver",
-            "command": display_target,
-            "description": description,
-            "outcome": "denied",
-            "user_consent": False,
-            "message": (
-                f"BLOCKED: {description}. This is a cron session with no user "
+        decision = resolve_cron_gate_decision(
+            gate="headless_gateway",
+            subject_text=display_target,
+            description=description,
+            deny_message=(
+                f"BLOCKED: {description}. This is a headless session with no user "
                 "present, so approval is impossible — do not retry this "
                 f"{target_label} and do not wait for approval; none can arrive. "
-                "Find an alternative approach that avoids the flagged pattern, "
-                "or finish the task without it. To allow dangerous commands in "
-                "cron jobs, set approvals.cron_mode: approve in config.yaml."
+                "Find an alternative approach that avoids the flagged pattern. "
+                "To have such commands reviewed automatically, set "
+                "approvals.cron_mode: smart in config.yaml."
             ),
+        )
+        return {
+            **decision,
+            "pattern_key": pattern_key,
+            "command": display_target,
+            "description": description,
+            "status": "approved_no_approver" if decision["approved"] else "denied_no_approver",
+            "outcome": "approved" if decision["approved"] else "denied",
+            "user_consent": False,
         }
     return {
         "approved": False,
