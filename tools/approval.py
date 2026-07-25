@@ -2914,9 +2914,10 @@ def _run_approval_gate(
         # Interactive gateway round-trip when a notify callback is
         # registered for this session (Discord/Telegram/Slack embed +
         # buttons, same mechanism as check_dangerous_command). Blocks the
-        # agent thread until the user answers; the agent never sees
-        # "approval_required" on this path — it gets a definitive
-        # approved/BLOCKED outcome.
+        # agent thread until the user answers. The agent never sees
+        # "approval_required" from this branch — with a notifier it gets a
+        # definitive approved/BLOCKED outcome, and without one the headless
+        # resolver below answers definitively too.
         notify_cb = None
         with _lock:
             notify_cb = _gateway_notify_cbs.get(session_key)
@@ -2977,23 +2978,19 @@ def _run_approval_gate(
             return {"approved": True, "message": None}
 
         # No notify callback (e.g. API server without an attached chat):
-        # queue for /approve /deny review, agent sees approval_required.
-        submit_pending(session_key, {
-            "command": display_target,
-            "pattern_key": pattern_key,
-            "description": description,
-        })
-        return {
-            "approved": False,
-            "pattern_key": pattern_key,
-            "status": "approval_required",
-            "command": display_target,
-            "description": description,
-            "message": (
-                f"⚠️ This action is potentially dangerous ({description}). "
-                f"Asking the user for approval.\n\n**Target:**\n```\n{display_target}\n```"
-            ),
-        }
+        # resolve now — nothing consumes a pending approval in a headless
+        # session, so a "pending" answer would just stall the agent. Redact
+        # secrets in the user-facing copy — the allowlist keys off
+        # pattern_key, so redaction is display-only.
+        from agent.redact import redact_sensitive_text
+        return _resolve_headless_gateway_approval(
+            session_key,
+            pattern_key=pattern_key,
+            pattern_keys=[pattern_key],
+            description=redact_sensitive_text(description),
+            display_target=redact_sensitive_text(display_target),
+            target_label="action",
+        )
 
     choice = prompt_dangerous_approval(display_target, description,
                                        approval_callback=approval_callback)
@@ -3120,8 +3117,8 @@ def request_tool_approval(
     or bypass this — the tool call is intercepted before execution.
 
     It reuses the existing approval primitives (session/permanent allowlist,
-    ``prompt_dangerous_approval`` for CLI, ``submit_pending`` for the gateway
-    callback, ``[o]nce/[s]ession/[a]lways/[d]eny``, timeout fail-closed) so
+    ``prompt_dangerous_approval`` for CLI, the registered notify callback for
+    the gateway, ``[o]nce/[s]ession/[a]lways/[d]eny``, timeout fail-closed) so
     behavior is identical to a dangerous-command match — only the trigger
     (a plugin rule on any tool) differs.
 

@@ -3,7 +3,7 @@
 
 These verify that a plugin-driven approval reuses the SAME machinery as a
 Tier-2 dangerous-command match: session/permanent allowlist, the CLI prompt,
-the gateway submit_pending path, cron_mode, and fail-closed timeouts.
+the gateway notify callback, cron_mode, and fail-closed timeouts.
 """
 
 import pytest
@@ -88,17 +88,29 @@ class TestRequestToolApproval:
         assert persisted["key"] == "plugin_rule:ssh-writes"
         assert persisted["saved"] is True
 
-    def test_gateway_path_submits_pending_and_defers(self, monkeypatch):
+    def test_gateway_path_without_notifier_denies_definitively(self, monkeypatch):
+        """Gateway context but no notify callback → resolve, never defer.
+
+        This branch used to ``submit_pending`` and answer
+        ``status: approval_required``, which was a dead end: nothing consumes
+        the ``_pending`` queue and nothing reads that status, so the agent was
+        told a request had been sent that could never be delivered or
+        answered (the 2026-07-12 weather-cron thrash). It now goes through
+        ``_resolve_headless_gateway_approval`` like the terminal and
+        execute_code guards.
+        """
         monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
         monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: True)
-        submitted = {}
-        monkeypatch.setattr(approval, "submit_pending",
-                            lambda sk, data: submitted.update(data))
+        monkeypatch.setattr(
+            approval, "submit_pending",
+            lambda sk, data: pytest.fail("must not queue an unanswerable approval"),
+        )
         res = request_tool_approval("browser_navigate", "external URL",
                                     rule_key="ext-nav")
         assert res["approved"] is False
-        assert res["status"] == "approval_required"
-        assert submitted["pattern_key"] == "plugin_rule:ext-nav"
+        assert res["status"] == "denied_no_approver"
+        assert res["pattern_key"] == "plugin_rule:ext-nav"
+        assert "do not retry" in res["message"].lower()
 
     def test_cron_deny_mode_blocks(self, monkeypatch):
         monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)

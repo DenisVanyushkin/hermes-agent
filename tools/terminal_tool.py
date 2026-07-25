@@ -2385,21 +2385,12 @@ def terminal_tool(
                 has_host_access=_docker_has_host_access(config),
             )
             if not approval["approved"]:
-                # Check if this is an approval_required (gateway ask mode)
-                if approval.get("status") == "pending_approval":
-                    return json.dumps({
-                        "output": "",
-                        "exit_code": -1,
-                        "error": "",
-                        "status": "pending_approval",
-                        "approval_pending": True,
-                        "command": approval.get("command", command),
-                        "description": approval.get("description", "command flagged"),
-                        "pattern_key": approval.get("pattern_key", ""),
-                        "smart_denied": approval.get("smart_denied", False),
-                        "allow_permanent": approval.get("allow_permanent", True),
-                    }, ensure_ascii=False)
-                # Command was blocked
+                # No "pending_approval" branch here on purpose: the guards
+                # always resolve now (approved, or a definitive BLOCKED /
+                # denied_no_approver). Re-adding one would hand the model an
+                # approval_pending flag that nothing can answer — nothing
+                # consumes the legacy _pending queue and nothing reads that
+                # status — which is the 2026-07-12 weather-cron thrash.
                 desc = approval.get("description", "command flagged")
                 fallback_msg = (
                     f"Command denied: {desc}. "

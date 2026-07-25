@@ -451,7 +451,18 @@ def test_execute_code_smart_deny_without_approver_denies_and_persists_nothing(
     assert A.is_approved(gw_session, "execute_code") is False
 
 
-def test_terminal_serializes_smart_deny_pending_capabilities(monkeypatch):
+def test_terminal_serializes_smart_deny_as_definitive_block(monkeypatch):
+    """A smart DENY reaches the model as a blocked payload, never as pending.
+
+    The stub mirrors the shape the guards actually return now
+    (``denied_no_approver`` from ``_resolve_headless_gateway_approval``). The
+    terminal used to special-case ``status: pending_approval`` and echo back
+    ``approval_pending: True`` plus the prompt capabilities — a dead end,
+    since nothing consumes the legacy ``_pending`` queue and nothing reads
+    that status, so the agent waited on an approval that could never arrive
+    (2026-07-12 weather-cron incident). Both the branch and the status are
+    gone; what the model must get is the do-not-retry message.
+    """
     from tools import terminal_tool as terminal_module
 
     monkeypatch.setattr(
@@ -459,19 +470,20 @@ def test_terminal_serializes_smart_deny_pending_capabilities(monkeypatch):
         "_check_all_guards",
         lambda *_args, **_kwargs: {
             "approved": False,
-            "status": "pending_approval",
+            "status": "denied_no_approver",
             "command": "rm -rf /tmp/example",
             "description": "recursive delete",
             "pattern_key": "rm-rf",
             "smart_denied": True,
-            "allow_permanent": False,
+            "message": "BLOCKED: recursive delete. Do not retry this command.",
         },
     )
 
     payload = json.loads(terminal_module.terminal_tool(command="rm -rf /tmp/example"))
 
-    assert payload["smart_denied"] is True
-    assert payload["allow_permanent"] is False
+    assert payload["status"] == "blocked"
+    assert payload.get("approval_pending") is not True
+    assert "do not retry" in payload["error"].lower()
 
 
 def test_guard_session_yolo_bypasses(gw_session):

@@ -714,12 +714,16 @@ class TestFallbackNoCallback:
     def setup_method(self):
         _clear_approval_state()
 
-    def test_no_callback_returns_approval_required(self):
-        """Without a registered callback, the fallback returns pending_approval.
+    def test_no_callback_denies_definitively(self):
+        """Without a registered callback, the fallback resolves — never defers.
 
-        PR #6d495d9e7 renamed the LLM-visible status from ``approval_required``
-        to ``pending_approval`` to make the state distinguishable from a
-        failed tool call.
+        History: the status was ``approval_required``, then renamed to
+        ``pending_approval`` to distinguish it from a failed tool call. Both
+        were dead ends — nothing consumes the ``_pending`` queue and nothing
+        reads either status, so the agent retried an approval that could never
+        arrive (2026-07-12 weather-cron incident). Commit 86e914f41 replaced it
+        with a definitive ``denied_no_approver`` for non-cron headless
+        sessions; this session key is not ``cron_*``, so no cron_mode applies.
         """
         from tools.approval import check_all_command_guards
 
@@ -732,8 +736,9 @@ class TestFallbackNoCallback:
             os.environ.pop("HERMES_SESSION_KEY", None)
 
         assert result["approved"] is False
-        assert result.get("status") == "pending_approval"
-        assert result.get("approval_pending") is True
+        assert result.get("status") == "denied_no_approver"
+        assert result.get("approval_pending") is not True
+        assert "do not retry" in result["message"].lower()
 
 
 # ------------------------------------------------------------------
