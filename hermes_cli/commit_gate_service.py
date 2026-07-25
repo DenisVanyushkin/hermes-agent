@@ -86,7 +86,25 @@ def apply_commit(*, repo: Path, changed_files: list[str], commit_message: str, p
         result["push_detail"] = pushed.get("detail", "")
     return result
 
+# Kept in step with pipeline_autonomous_execution.RUN_BRANCH_PREFIX; duplicated
+# rather than imported to keep this module light, and held to that by
+# tests/hermes_cli/test_autonomous_worktree_wiring.py.
+RUN_BRANCH_PREFIX = "hermes-run/"
+
+
 def _push(repo: Path) -> dict[str, Any]:
+    branch_now = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if branch_now.startswith(RUN_BRANCH_PREFIX):
+        # Without an upstream the fallback below is `git push -u origin <branch>`,
+        # which would publish one hermes-run/* branch per run. Landing a run's work
+        # is the integration step and stays gated on an approving review verdict.
+        return {
+            "ok": False,
+            "detail": (
+                f"{branch_now} is a per-run branch; it is landed by the review "
+                "integration step, not pushed directly"
+            ),
+        }
     upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     if upstream.returncode == 0 and upstream.stdout.strip():
         p = _git(repo, "push")

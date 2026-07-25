@@ -63,19 +63,37 @@ def build_autonomous_helper_context(
         allow_test_commands=True,
         allow_model_escalation=True,
     )
+    # The run gets its own worktree, cut from the repo HEAD commit. It is clean by
+    # construction, so dirt in the operator's tree neither blocks the run nor gets
+    # stashed out from under them -- and root-owned sandbox leftovers, which
+    # `git stash` cannot move, are simply not present in a fresh checkout.
     try:
-        workspace = prepare_autonomous_workspace(
-            repo_root=base_repo_root,
-            workspace=workspace,
+        _validate_repo_root(
+            repo_root=base_repo_root.resolve(),
             expected_repo_root=inferred_repo_root if repo_root is None else None,
         )
-    except DirtyBaselineError as exc:
-        runtime_context["blocked_reason"] = str(exc)
-        runtime_context["blocked_dirty_entries"] = list(exc.entries)
-        return helper_context
     except ValueError as exc:
         runtime_context["blocked_reason"] = str(exc)
+        _fail_closed(runtime_context)
         return helper_context
+
+    try:
+        run_worktree = prepare_run_worktree(
+            repo_root=base_repo_root,
+            workspace=autonomous_workspace(
+                session_id=session_id, pipeline_session_id=pipeline_session_id
+            ),
+            run_id=pipeline_session_id or session_id or "autonomous",
+        )
+    except (ValueError, OSError):
+        # Isolation is not optional: if we cannot get it, stop rather than fall
+        # back to mutating the live repository.
+        runtime_context["blocked_reason"] = "workspace_worktree_failed"
+        _fail_closed(runtime_context)
+        return helper_context
+
+    workspace = run_worktree.path
+    runtime_context["run_branch"] = run_worktree.branch
 
     helper_context["repo_path"] = str(workspace)
     runtime_context["mutation_workspace"] = str(workspace)
@@ -103,6 +121,35 @@ def build_autonomous_helper_context(
     return helper_context
 
 
+def _validate_repo_root(*, repo_root: Path, expected_repo_root: Path | None) -> None:
+    """Check the repo we cut the run worktree from -- without judging its dirt.
+
+    The dirty-baseline veto used to live here. It is gone from this path on
+    purpose: the run no longer executes in this tree, so its cleanliness is the
+    operator's business, not a precondition for the pipeline.
+    """
+    if not repo_root.exists() or not repo_root.is_dir():
+        raise ValueError("workspace_repo_missing")
+    if expected_repo_root is not None and repo_root != expected_repo_root.resolve():
+        raise ValueError("workspace_repo_root_mismatch")
+    if not (repo_root / ".git").exists():
+        raise ValueError("workspace_not_git_repo")
+    try:
+        _git_stdout(repo_root, "rev-parse", "--is-inside-work-tree")
+        _git_stdout(repo_root, "rev-parse", "HEAD")
+    except ValueError as exc:
+        raise ValueError("workspace_not_git_repo") from exc
+
+
+def _fail_closed(runtime_context: dict[str, Any]) -> None:
+    """Never let a run that failed to get isolation touch the live tree."""
+    runtime_context["real_executor_ready"] = False
+    runtime_context["allow_mutations"] = False
+    runtime_context["allow_test_commands"] = False
+    runtime_context["mutation_workspace"] = ""
+    runtime_context["test_workspace"] = ""
+
+
 def autonomous_workspace(*, session_id: str | None, pipeline_session_id: str | None) -> Path:
     slug = pipeline_session_id or session_id or "autonomous"
     slug = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in str(slug)).strip("-_") or "autonomous"
@@ -110,6 +157,14 @@ def autonomous_workspace(*, session_id: str | None, pipeline_session_id: str | N
 
 
 def prepare_autonomous_workspace(*, repo_root: Path, workspace: Path, expected_repo_root: Path | None = None) -> Path:
+    """In-place / scaffold workspace preparation.
+
+    NO LONGER THE PRODUCTION PATH -- since the autonomous run moved into its own
+    worktree (``prepare_run_worktree``), this is retained only for the controlled
+    smoke and e2e fixtures that still exercise an in-place workspace. It is also
+    the last caller of ``_auto_heal_dirty_baseline``; both should go once those
+    fixtures are rebuilt.
+    """
     resolved_repo_root = repo_root.resolve()
     resolved_workspace = workspace.resolve() if workspace.exists() else workspace.resolve(strict=False)
     if resolved_workspace == resolved_repo_root:
