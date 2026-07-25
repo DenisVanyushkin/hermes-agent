@@ -35,6 +35,7 @@ RUNS_DIR = _runs_dir()
 def summarize_runs(reports: list[dict]) -> dict:
     reasons: Counter[str] = Counter()
     pipelines: Counter[str] = Counter()
+    router_statuses: Counter[str] = Counter()
     blocked_dirty = 0
     reviewer_invoked = 0
     commits_without_review = 0
@@ -43,6 +44,13 @@ def summarize_runs(reports: list[dict]) -> dict:
         per = report.get("pipeline_execution_report") or {}
         gate = per.get("gate") or {}
         reasons[gate.get("preflight_reason_code") or "unknown"] += 1
+
+        # The gate reports "router_not_selected" both when the router declined an
+        # ordinary chat turn and when routing genuinely failed. Only the router's
+        # own status tells them apart, and reading the reason code alone makes a
+        # working router look like the biggest source of lost runs.
+        routing = report.get("routing") or {}
+        router_statuses[routing.get("router_status") or "unknown"] += 1
 
         execution = report.get("execution") or {}
         pipelines[execution.get("effective_pipeline_id") or "unknown"] += 1
@@ -64,6 +72,9 @@ def summarize_runs(reports: list[dict]) -> dict:
     return {
         "total": len(reports),
         "by_reason_code": dict(reasons),
+        "by_router_status": dict(router_statuses),
+        "router_declined": router_statuses.get("no_specialized_pipeline", 0),
+        "router_needs_clarification": router_statuses.get("needs_clarification", 0),
         "by_pipeline": dict(pipelines),
         "blocked_dirty": blocked_dirty,
         "reviewer_invoked": reviewer_invoked,
