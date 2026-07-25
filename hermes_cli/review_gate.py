@@ -795,6 +795,7 @@ def evaluate_review_gate(
     policy_path: Path | str = DEFAULT_MODEL_POLICY_PATH,
     runtime_request: dict[str, Any] | None = None,
     baseline_dirty_paths: Iterable[str] | None = None,
+    state: ReviewGateState | None = None,
 ) -> ReviewGateDecision:
     gate_cfg = load_review_gate_config(config)
     mode = gate_cfg["mode"]
@@ -808,6 +809,12 @@ def evaluate_review_gate(
     )
     mutation_sources = _collect_file_mutation_tool_names(messages)
     review_required = material_change_detected
+    # Debt outranks the current turn. A rework turn that edits nothing new still
+    # owes the review its findings asked for -- that is the whole point of
+    # carrying it across turns.
+    debt_paths = state.outstanding_paths if state is not None else []
+    if debt_paths:
+        review_required = True
     packet = build_review_packet(
         plan,
         changed_paths=discovered_paths,
@@ -821,6 +828,8 @@ def evaluate_review_gate(
     status = str(verdict or ("pending" if review_required else "not_required")).strip().lower()
     if status not in VALID_REVIEW_GATE_VERDICTS:
         status = "pending" if review_required else "not_required"
+    if debt_paths and status == "not_required":
+        status = "pending"
     automatic_review_invoked = False
     automatic_review_verdict = "pending"
     reviewer_summary = ""
@@ -881,6 +890,18 @@ def evaluate_review_gate(
                     warning = f"reviewer unavailable: {exc}"
             elif mode == "observe" and review_required:
                 warning = "review would be required before marking this engineering change done"
+    if state is not None:
+        # An explicit verdict settles or creates debt; an automatic review does the
+        # same through automatic_review_verdict. Paths come from what the gate
+        # actually looked at, so an approval only covers what it reviewed.
+        _outcome = str(verdict or automatic_review_verdict or "").strip().lower()
+        if _outcome in (DEBT_VERDICTS | SETTLING_VERDICTS):
+            state.record_verdict(
+                _outcome,
+                changed_paths=list(discovered_paths),
+                findings=list(required_changes or reviewer_findings or []),
+            )
+
     return ReviewGateDecision(
         mode=mode,
         status=status,

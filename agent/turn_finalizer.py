@@ -43,6 +43,7 @@ def _is_pure_tool_call_tail(msg: dict) -> bool:
     return not flatten_message_text(msg.get("content")).strip()
 from hermes_cli.profile_execution import build_role_execution_plan
 from hermes_cli.review_gate import (
+    ReviewGateState,
     build_review_gate_evaluation_log_fields,
     decision_to_dict as review_gate_to_dict,
     evaluate_review_gate,
@@ -382,12 +383,32 @@ def finalize_turn(
                             operation_category=effective_operation_category,
                             review_gate_candidate=(effective_role == "engineer" and effective_operation_category in {"repo_mutation", "git_remote_mutation", "normal_operational_mutation", "security_critical_mutation"}),
                         )
+                # Review debt belongs to the session, not the turn: a rework turn
+                # that edits nothing new still owes the findings a re-review.
+                # Best-effort -- a missing or unreadable store must never break a
+                # turn, it just means the gate behaves as it did before.
+                _debt_root = None
+                _review_state = None
+                try:
+                    from hermes_constants import get_hermes_home
+
+                    _debt_root = get_hermes_home() / "cache" / "review_gate"
+                    _review_state = ReviewGateState.load(agent.session_id or "session", _debt_root)
+                except Exception:
+                    _review_state = None
+
                 review_gate = evaluate_review_gate(
                     review_plan,
                     messages,
                     runtime_request=runtime_request if isinstance(runtime_request, dict) else None,
                     baseline_dirty_paths=getattr(agent, "_turn_dirty_baseline", None),
+                    state=_review_state,
                 )
+                if _review_state is not None and _debt_root is not None:
+                    try:
+                        _review_state.save(_debt_root)
+                    except Exception:
+                        pass
                 review_gate_log = build_review_gate_evaluation_log_fields(review_gate)
                 logger.info(
                     "review gate evaluation: session=%s review_gate.mode=%s "
