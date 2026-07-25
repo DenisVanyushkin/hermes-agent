@@ -52,7 +52,11 @@ def test_valid_canonical_registry_passes():
         "general_operator",
         "trading_observer_trader_deferred",
     }
-    assert policy["role_policies"]["engineer"]["escalation"]["example_model"] == "xiaomi/mimo-v2.5-pro"
+    # The escalation block was removed in 41b16bea9: nothing implemented it, and
+    # it pinned a model outside the sanctioned lineup. Assert its absence so the
+    # fiction cannot come back unnoticed.
+    assert "escalation" not in policy["role_policies"]["engineer"]
+    assert policy["role_policies"]["engineer"]["base_model"] == "gpt-5.6-luna"
     assert policy["role_policies"]["general_operator"]["free_fallback"]["role_filters"]["prefer"]["latencyMs"] == "low"
     assert policy["role_policies"]["trading_observer_trader_deferred"]["status"] == "deferred"
 
