@@ -189,7 +189,20 @@ class TestSmartModeFiresHooks:
             result = guard(value, "local")
 
         assert result["approved"] is approved
-        assert result[f"smart_{'approved' if approved else 'denied'}"] is True
+        if approved:
+            # Live marker — terminal_tool renders "auto-approved by smart
+            # approval" off this key.
+            assert result["smart_approved"] is True
+        else:
+            # No `smart_denied` marker here, by design: on an interactive
+            # surface a smart DENY is handed to the owner for a one-operation
+            # override, so the outcome belongs to the approval channel rather
+            # than the reviewer. `_configure` binds no notifier, so the
+            # headless resolver denies definitively — never dead-end pending
+            # (2026-07-12 weather-cron incident). The reviewer's verdict stays
+            # observable through the post hook asserted just below.
+            assert result["status"] == "denied_no_approver"
+            assert "do not retry" in result["message"].lower()
         assert [name for name, _ in captured] == [
             "pre_approval_request",
             "post_approval_response",
