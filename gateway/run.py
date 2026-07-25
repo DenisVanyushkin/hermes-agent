@@ -20620,6 +20620,35 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "I can only provide a read-only plan for this request."
         )
 
+    def _pipeline_clarification_response(self, report: Any, *, orchestrator_mode: str) -> str | None:
+        """Put the router's clarifying question to the operator.
+
+        The router already writes one when it cannot tell a read-only question
+        from a request to change code; until now it went into an observation
+        payload nobody reads, and the turn quietly proceeded as ordinary chat.
+        The live cases were both "do the change per this plan" with no plan in the
+        message -- proceeding there means guessing at a mutation.
+
+        Narrow on purpose: only when the router itself asked for clarification,
+        and only when it actually produced a question. Stopping a turn with
+        nothing to ask would be strictly worse than letting it run.
+        """
+        if report is None:
+            return None
+        state = getattr(report, "state", None)
+        if str(getattr(state, "router_status", "") or "").strip().lower() != "needs_clarification":
+            return None
+        session = getattr(report, "session", None)
+        question = str(getattr(session, "clarification_question", "") or "").strip()
+        if not question:
+            return None
+        return (
+            f"{question}\n\n"
+            "status: not_executed\n"
+            "blocked_reason: needs_clarification\n"
+            "mutation: none"
+        )
+
     def _pipeline_autonomous_preflight_block_response(self, report: Any, *, orchestrator_mode: str) -> str | None:
         """Fail closed when the selected autonomous pipeline blocked before execution.
 
@@ -20657,28 +20686,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if blocked_reason is None:
             return None
 
-        dirty_suffix = ""
-        if blocked_reason == "workspace_dirty_baseline":
-            # Classify the tree at render time: the block happens in the same
-            # turn as preflight, so the working tree is unchanged, and this
-            # avoids threading entries through the controller/helper result.
-            from pathlib import Path as _DirtyPath
-
-            from hermes_cli.baseline_git import classify_dirty
-
-            try:
-                entries = classify_dirty(_DirtyPath(__file__).resolve().parents[1])
-            except Exception:
-                entries = []
-            shown = entries[:20]
-            lines = "\n".join(f"  • [{e.category}] {e.path}" for e in shown)
-            more = "" if len(entries) <= 20 else f"\n  … {len(entries) - 20} more"
-            if lines:
-                dirty_suffix = (
-                    f"\ndirty_files:\n{lines}{more}\n"
-                    "React \u267b\ufe0f (or send \u00ab\u043f\u043e\u0447\u0438\u0441\u0442\u0438\u00bb) to run baseline-doctor."
-                )
-
         return (
             "The autonomous engineering pipeline was selected for this request but "
             "blocked before execution started, so I did not make any changes.\n\n"
@@ -20691,7 +20698,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "mutation: none\n"
             "tests: not_run\n\n"
             "Resolve the blocker (e.g. clean the workspace) and retry the request."
-            + dirty_suffix
         )
 
     def _pipeline_autonomous_fail_closed_response(self, report: Any, *, orchestrator_mode: str, user_message: str) -> str | None:
@@ -21275,6 +21281,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "tools": [],
                 "history_offset": len(history),
                 "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
+        clarification_response = self._pipeline_clarification_response(
+            pipeline_orchestrator_report,
+            orchestrator_mode=_orchestrator_mode,
+        )
+        if clarification_response is not None:
+            logger.info(
+                "pipeline router asked for clarification: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": clarification_response,
                 "interrupted": False,
                 "compression_exhausted": False,
             }
