@@ -279,6 +279,11 @@ def _parse_tool_args(tool_call: dict[str, Any]) -> dict[str, Any]:
 
 
 _FILE_MUTATION_TOOL_NAMES = frozenset({"write_file", "patch", "edit_file", "apply_patch"})
+#: Tools that do not *report* a path but can certainly write one -- a heredoc, a
+#: `sed -i`, a `git apply`, a script. Naming only the four tools above meant an
+#: engineer working through the shell produced no review requirement at all, and
+#: with no verdict there was no debt either, so nothing downstream engaged.
+_CODE_EXECUTION_TOOL_NAMES = frozenset({"execute_code", "terminal"})
 _MATERIAL_PATH_PREFIXES = ("agent/", "hermes_cli/", "gateway/", "job_intel/", "tests/", "scripts/", "config/", "cron/")
 _MATERIAL_EXACT_NAMES = {"Dockerfile", "docker-compose.yml", "docker-compose.yaml", ".drone.yml"}
 
@@ -312,6 +317,19 @@ def collect_changed_paths(messages: list[dict[str, Any]]) -> list[str]:
             seen.add(path)
             deduped.append(path)
     return deduped
+
+
+def _has_code_execution_tool_call(messages: list[dict[str, Any]]) -> bool:
+    for msg in messages or []:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tool_call in msg.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+            if str(function.get("name") or "") in _CODE_EXECUTION_TOOL_NAMES:
+                return True
+    return False
 
 
 def _collect_file_mutation_tool_names(messages: list[dict[str, Any]]) -> list[str]:
@@ -409,8 +427,15 @@ def detect_material_engineering_change(
     tool_names = _collect_file_mutation_tool_names(messages)
     has_file_mutation_tool_call = bool(tool_names)
 
-    if not material_paths and has_file_mutation_tool_call:
-        material_paths = _material_repo_paths_from_git(repo_root, baseline_dirty_paths)
+    # Whether it is worth asking git is decided by the turn's tool calls; *what*
+    # changed is decided by git. Tool arguments are a hint, not the record -- a
+    # turn that writes one file with write_file and another through the shell
+    # would otherwise have half of itself reviewed.
+    mutation_capable = has_file_mutation_tool_call or _has_code_execution_tool_call(messages)
+    if mutation_capable:
+        for path in _material_repo_paths_from_git(repo_root, baseline_dirty_paths):
+            if path not in material_paths:
+                material_paths.append(path)
 
     if plan.operation_category in material_categories:
         if material_paths:
@@ -418,7 +443,10 @@ def detect_material_engineering_change(
         if not messages and changed_paths is None:
             return True, material_paths
 
-    if not has_file_mutation_tool_call:
+    if not mutation_capable:
+        # Keep the original protection: a turn that could not have written
+        # anything is never judged against a repository that other writers -- the
+        # resident agent, sandbox containers, the rebase cron -- also touch.
         return False, material_paths
 
     if material_paths:
