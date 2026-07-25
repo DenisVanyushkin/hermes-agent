@@ -29,6 +29,7 @@ _TRADING_ROLES = {"trading_observer_trader", "trading_observer_trader_deferred"}
 #: runtime would have given it luna.
 _REASONING_ROLES = {"chief_hermes", "chief_coordinator"}
 _SIMPLE_RESEARCH_HINTS = {
+    # English
     "weather",
     "news",
     "digest",
@@ -41,14 +42,44 @@ _SIMPLE_RESEARCH_HINTS = {
     "commissions",
     "lookup",
     "compare",
+    # Russian. Stems, not whole words: matching is substring-based, so "погод"
+    # covers погода/погоду/погоде and "новост" covers новости/новостей. Drawn
+    # from real requests in the gateway log rather than guessed.
+    "погод",
+    "новост",
+    "дайджест",
+    "саммари",
+    "сводк",
+    "отчет",
+    "комисси",
+    "сравн",
+    "найди",
+    "посмотри",
+    "узнай",
+    "сколько стоит",
+    "биткоин",
+    "бинанс",
 }
+# Checked before the simple hints and wins outright. It has to grow in the same
+# languages: with an English-only complex list, "сделай дайджест с анализом
+# противоречивых источников" would match "дайджест" and take the cheap path.
 _COMPLEX_RESEARCH_HINTS = {
+    # English
     "conflicting sources",
     "synthesis",
     "synthesize",
     "due diligence",
     "deep research",
     "high impact",
+    # Russian
+    "противоречив",
+    "синтез",
+    "глубокое исследование",
+    "глубокий анализ",
+    "сопостав",
+    "нескольких источник",
+    "разных источник",
+    "дью дилидженс",
 }
 
 
@@ -73,7 +104,11 @@ def _normalize_role(role: str | None) -> str:
 
 
 def _normalize_text(text: str | None) -> str:
-    return re.sub(r"\s+", " ", str(text or "").strip().lower())
+    # ё is folded to е: the hints below are matched as substrings, and without
+    # this every ё-word would have to be listed twice with one spelling still
+    # quietly missing. Only this heuristic uses the function.
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    return normalized.replace("ё", "е")
 
 
 def _research_prefers_fast_lookup(task_text: str) -> bool:

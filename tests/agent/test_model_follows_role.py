@@ -54,20 +54,20 @@ def test_researcher_is_the_documented_exception():
     assert _config_model("researcher") == "gpt-5.6-luna"
 
 
-def test_the_cheap_research_path_only_fires_in_english():
-    """A real limit of the heuristic, recorded rather than assumed away.
+def test_the_cheap_research_path_works_in_russian_too():
+    """Replaces a test that recorded the opposite.
 
-    _SIMPLE_RESEARCH_HINTS is an English word list ("weather", "news",
-    "digest"...). This operator writes in Russian, so the lookup half of the
-    researcher heuristic almost never fires for them and research turns land on
-    the reasoning tier. That is a cost consequence of keeping the selector
-    authoritative, and it should be visible here rather than discovered on a bill.
+    It used to assert that a Russian lookup landed on the reasoning tier, because
+    the hint lists were English-only and nothing matched. That gap is closed, so
+    the test now pins the fixed behaviour instead of the limitation. Detailed
+    coverage lives in tests/hermes_cli/test_research_hints_bilingual.py.
     """
-    assert _selector_model("researcher", "какая погода в Алматы") == "gpt-5.6-terra"
+    assert _selector_model("researcher", "какая погода в Алматы") == "gpt-5.6-luna"
     assert _selector_model("researcher", "what is the weather in Almaty") == "gpt-5.6-luna"
+    assert _selector_model(
+        "researcher", "сопоставь данные из нескольких источников"
+    ) == "gpt-5.6-terra"
 
-
-# ── The decision is applied ─────────────────────────────────────────────────
 
 @pytest.fixture
 def switches(monkeypatch):
