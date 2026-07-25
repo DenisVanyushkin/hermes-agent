@@ -866,6 +866,67 @@ class TestSensitiveRedirectPattern:
         assert desc is None
 
 
+class TestHomePrefixFoldGuard:
+    """Which resolved HOME / HERMES_HOME values may be folded to ``~``.
+
+    ``_home_prefix_fold_regex`` is the gate every absolute-home sensitive-path
+    check passes through. It used to require two components below the root,
+    which silently exempted a one-segment home — and ``/root`` is exactly what
+    the root-user sandbox containers and root cron sessions run with, so
+    ``echo x > /root/.ssh/authorized_keys`` bypassed every sensitive-write
+    pattern that the ``~/.ssh/authorized_keys`` form trips. The guard still has
+    to reject a degenerate home, which would fold unrelated prefixes.
+    """
+
+    @pytest.mark.parametrize("path", [
+        "/root",
+        "/home/alice",
+        "/Users/alice",
+        "C:\\Users\\alice",
+        "C:/Users/alice",
+    ])
+    def test_real_home_is_foldable(self, path):
+        assert approval_module._home_prefix_fold_regex(path) is not None
+
+    @pytest.mark.parametrize("path", ["", "/", "//", "C:\\", "C:/"])
+    def test_degenerate_home_is_not_foldable(self, path):
+        """An unset home or a bare filesystem/drive root must never fold."""
+        assert approval_module._home_prefix_fold_regex(path) is None
+
+
+class TestSingleSegmentHomeSensitivePaths:
+    """End-to-end pairing for the guard above, across the write idioms.
+
+    Parametrized over the home instead of reading the ambient one, so the
+    coverage holds whichever user runs the suite: under ``HOME=/root`` these
+    same assertions failed while passing for ``/home/<user>``.
+    """
+
+    @pytest.mark.parametrize("home", ["/root", "/home/alice"])
+    @pytest.mark.parametrize("template", [
+        "cat key >> {home}/.ssh/authorized_keys",
+        "echo alias > {home}/.bashrc",
+        "echo x | tee {home}/.bashrc",
+    ])
+    def test_absolute_home_write_is_sensitive(self, monkeypatch, home, template):
+        # POSIX expanduser("~") reads HOME, so setting it exercises the whole
+        # resolution path the detector uses.
+        monkeypatch.setenv("HOME", home)
+        dangerous, key, _desc = detect_dangerous_command(template.format(home=home))
+        assert dangerous is True
+        assert key is not None
+
+    @pytest.mark.parametrize("home", ["/root", "/home/alice"])
+    def test_other_users_home_is_not_sensitive(self, monkeypatch, home):
+        """Folding stays scoped to the current user; a sibling home is not it."""
+        monkeypatch.setenv("HOME", home)
+        dangerous, key, _desc = detect_dangerous_command(
+            "echo x > /home/someone-else/.bashrc"
+        )
+        assert dangerous is False
+        assert key is None
+
+
 class TestProjectSensitiveCopyPattern:
     def test_cp_to_local_dotenv_requires_approval(self):
         dangerous, key, desc = detect_dangerous_command("cp .env.local .env")
