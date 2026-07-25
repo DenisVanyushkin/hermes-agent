@@ -59,3 +59,41 @@ def test_every_selectable_model_is_in_the_sanctioned_lineup(tiers: dict):
         model_selection._CRITICAL_MODEL,
     }
     assert named <= sanctioned, f"outside the lineup: {sorted(named - sanctioned)}"
+
+
+# ── Everything else that names a model from the lineup ──────────────────────
+# The selector is not the only place that hardcodes model names. The router runs
+# on its own model, and the controlled smoke harness carries an allowlist of the
+# models it will let the engineer/reviewer really invoke. Both were left on the
+# 5.4/5.5 lineup: the allowlist in particular would have refused the very models
+# the runtime now uses, so the smoke path was latently broken.
+
+
+def test_router_model_is_the_standard_tier(tiers: dict):
+    from hermes_cli.pipeline_router import DEFAULT_ROUTER_LLM_MODEL
+
+    assert DEFAULT_ROUTER_LLM_MODEL == tiers["standard"]["model"]
+
+
+@pytest.mark.parametrize(
+    ("constant", "tier"),
+    [
+        ("SMOKE_ENGINEER_MODEL", "coding"),
+        ("SMOKE_REVIEWER_MODEL", "code_review"),
+        ("SMOKE_ROUTER_MODEL", "standard"),
+    ],
+)
+def test_smoke_harness_model_matches_policy_tier(tiers: dict, constant: str, tier: str):
+    from hermes_cli import pipeline_controlled_dry_run as dry_run
+
+    assert getattr(dry_run, constant) == tiers[tier]["model"]
+
+
+def test_smoke_allowlist_admits_exactly_the_engineer_and_reviewer_tiers(tiers: dict):
+    """An allowlist narrower than the lineup silently vetoes real runs."""
+    from hermes_cli import pipeline_controlled_dry_run as dry_run
+
+    assert set(dry_run.SMOKE_ALLOWED_REAL_MODELS) == {
+        tiers["coding"]["model"],
+        tiers["code_review"]["model"],
+    }

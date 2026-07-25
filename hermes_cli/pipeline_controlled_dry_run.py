@@ -20,6 +20,15 @@ from hermes_cli.subagent_runner import ControlledRuntimeRunner, SubagentRunner
 ENGINEER_SUBAGENT_ID = "hermes_engineer_core"
 REVIEWER_SUBAGENT_ID = "hermes_code_reviewer"
 ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
+
+# Models the controlled smoke harness may really invoke, per tier in
+# config/hermes-model-policy.yaml. An allowlist narrower than the live lineup
+# does not fail loudly -- it refuses the run, so keep these bound to the config
+# (enforced by tests/hermes_cli/test_model_policy_lineup.py).
+SMOKE_ENGINEER_MODEL = "gpt-5.6-terra"  # tiers.coding
+SMOKE_REVIEWER_MODEL = "gpt-5.6-sol"  # tiers.code_review
+SMOKE_ROUTER_MODEL = "gpt-5.6-luna"  # tiers.standard
+SMOKE_ALLOWED_REAL_MODELS = (SMOKE_ENGINEER_MODEL, SMOKE_REVIEWER_MODEL)
 # Legacy helper/test names remain for dry-run compatibility, but they now
 # exercise the autonomous execution path only.
 AUTONOMOUS_MODE = "autonomous"
@@ -54,22 +63,22 @@ def run_controlled_engineering_e2e_dry_run(*, task: str, workspace: Path | None)
             "allow_real_provider_execution": True,
             "request_real_provider_execution": True,
             "allowed_real_providers": ("openrouter", "openai-codex"),
-            "allowed_real_models": ("gpt-5.4", "gpt-5.5"),
+            "allowed_real_models": SMOKE_ALLOWED_REAL_MODELS,
             "allowed_real_providers_by_role": {
                 "engineer": ("openai-codex",),
                 "reviewer": ("openai-codex",),
             },
             "allowed_real_models_by_role": {
-                "engineer": ("gpt-5.4",),
-                "reviewer": ("gpt-5.5",),
+                "engineer": (SMOKE_ENGINEER_MODEL,),
+                "reviewer": (SMOKE_REVIEWER_MODEL,),
             },
             "allowed_real_providers_by_subagent": {
                 ENGINEER_SUBAGENT_ID: ("openai-codex",),
                 REVIEWER_SUBAGENT_ID: ("openai-codex",),
             },
             "allowed_real_models_by_subagent": {
-                ENGINEER_SUBAGENT_ID: ("gpt-5.4",),
-                REVIEWER_SUBAGENT_ID: ("gpt-5.5",),
+                ENGINEER_SUBAGENT_ID: (SMOKE_ENGINEER_MODEL,),
+                REVIEWER_SUBAGENT_ID: (SMOKE_REVIEWER_MODEL,),
             },
             "real_provider_client_factory": _manual_dry_run_provider_factory,
             "allow_mutations": True,
@@ -102,7 +111,7 @@ def run_controlled_engineering_e2e_dry_run(*, task: str, workspace: Path | None)
                 confidence=0.99,
                 reasoning_summary="local fake smoke harness",
                 selected_provider="openai-codex",
-                selected_model="gpt-5.4-mini",
+                selected_model=SMOKE_ROUTER_MODEL,
             ),
             workspace_path=dry_run_workspace,
             durable_root=None,
