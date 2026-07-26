@@ -35,12 +35,25 @@ def test_the_cli_marks_an_explicit_session_level_as_an_override():
     assert "_reasoning_session_override = parsed" in src
 
 
-def test_the_cli_stamps_that_override_onto_the_agent_it_builds():
-    from pathlib import Path
+def test_the_cli_stamps_that_override_onto_both_agents_it_builds():
+    """Пропущенная площадка = молчаливый отказ escape hatch на этом пути.
 
-    hits = [
-        p for p in Path("hermes_cli").glob("*.py")
-        if "agent._reasoning_session_override" in p.read_text()
-    ]
+    Их две: агент сессии и агент фоновой задачи /bg. Проверка «хоть где-то есть»
+    оставалась бы зелёной, если бы уронили одну из них.
+    """
+    import pathlib
 
-    assert hits, "CLI строит агента, но не переносит на него сессионный override"
+    for module in ("cli_agent_setup_mixin.py", "cli_commands_mixin.py"):
+        src = pathlib.Path("hermes_cli") / module
+        assert "_reasoning_session_override" in src.read_text(), module
+
+
+def test_the_tui_spawn_paths_do_not_inherit_the_raised_value():
+    """/background и перезапуск превью порождают НОВЫХ агентов от родительского
+    конфига — тот же класс бага, что чинили в делегировании."""
+    import pathlib
+
+    src = pathlib.Path("tui_gateway/server.py").read_text()
+
+    assert src.count("base_reasoning_config(agent)") >= 2
+    assert 'getattr(agent, "reasoning_config", None) or _load_reasoning_config' not in src

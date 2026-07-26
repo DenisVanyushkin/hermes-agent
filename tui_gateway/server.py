@@ -5277,6 +5277,7 @@ def _agent_fallback_model(agent):
 
 def _background_agent_kwargs(agent, task_id: str) -> dict:
     cfg = _load_cfg()
+    from hermes_cli.role_reasoning import base_reasoning_config
 
     return {
         "base_url": getattr(agent, "base_url", None) or None,
@@ -5303,7 +5304,7 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         "provider_data_collection": getattr(agent, "provider_data_collection", None),
         "openrouter_min_coding_score": getattr(agent, "openrouter_min_coding_score", None),
         "session_id": task_id,
-        "reasoning_config": getattr(agent, "reasoning_config", None)
+        "reasoning_config": base_reasoning_config(agent)
         or _load_reasoning_config(str(getattr(agent, "model", "") or "")),
         "service_tier": getattr(agent, "service_tier", None) or _load_service_tier(),
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
