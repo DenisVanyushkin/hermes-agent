@@ -3740,9 +3740,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
-        # Set per turn from _session_reasoning_override_active(); stamped onto
-        # every agent so the role-policy effort floor knows to stand down.
-        self._reasoning_floor_exempt: bool = False
         # Per-session fast-mode overrides from /fast.
         # Key: session_key, Value: "priority" or None (explicit normal).
         self._session_service_tier_overrides: Dict[str, Optional[str]] = {}
@@ -16152,7 +16149,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 source=source, model=model
             )
             self._reasoning_config = reasoning_config
-            self._reasoning_floor_exempt = self._session_reasoning_override_active(
+            _floor_exempt = self._session_reasoning_override_active(
                 source=source
             )
             self._service_tier = self._resolve_session_service_tier(source=source)
@@ -16207,7 +16204,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Reload from disk — do not reuse the startup snapshot (#60955).
                     fallback_model=self._refresh_fallback_model(),
                 )
-                agent._reasoning_floor_exempt = self._reasoning_floor_exempt
+                agent._reasoning_floor_exempt = _floor_exempt
                 try:
                     return agent.run_conversation(
                         user_message=enriched_prompt,
@@ -22533,7 +22530,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 model=model,
             )
             self._reasoning_config = reasoning_config
-            self._reasoning_floor_exempt = self._session_reasoning_override_active(
+            _floor_exempt = self._session_reasoning_override_active(
                 source=source, session_key=session_key
             )
             self._service_tier = self._resolve_session_service_tier(
@@ -22905,7 +22902,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Reload from disk — do not reuse the startup snapshot (#60955).
                     fallback_model=self._refresh_fallback_model(),
                 )
-                agent._reasoning_floor_exempt = self._reasoning_floor_exempt
+                agent._reasoning_floor_exempt = _floor_exempt
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
                         # Record the session_id the snapshot was taken for
@@ -22980,7 +22977,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent.notice_clear_callback = None
             agent.event_callback = _event_callback_sync
             agent.reasoning_config = reasoning_config
-            agent._reasoning_floor_exempt = self._reasoning_floor_exempt
+            agent._reasoning_floor_exempt = _floor_exempt
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
             # Must-deliver notes for THIS turn ride the current user message

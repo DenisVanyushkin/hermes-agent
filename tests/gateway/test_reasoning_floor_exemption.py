@@ -74,3 +74,20 @@ def test_every_agent_the_gateway_hands_out_gets_the_flag():
     src = pathlib.Path("gateway/run.py").read_text()
     stamps = re.findall(r"agent\._reasoning_floor_exempt = ", src)
     assert len(stamps) == 3, f"expected 3 agent stamps, found {len(stamps)}"
+
+
+def test_the_exemption_is_never_shared_state_on_the_gateway():
+    """Признак — на локальной переменной хода, а не на синглтоне гейтвея.
+
+    GatewayRunner один на процесс и обслуживает сессии параллельно, а между
+    вычислением признака и штампом на агенте есть точки await. Хранение его на
+    self означало бы, что соседняя сессия успевает подменить значение: чужой ход
+    либо теряет своё освобождение, либо получает чужое и молча обходит пол.
+    """
+    import pathlib
+
+    src = pathlib.Path("gateway/run.py").read_text()
+
+    assert "self._reasoning_floor_exempt" not in src
+    assert src.count("agent._reasoning_floor_exempt = ") == 3
+    assert src.count("_floor_exempt = self._session_reasoning_override_active(") == 2
