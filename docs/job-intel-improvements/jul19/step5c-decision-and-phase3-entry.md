@@ -103,7 +103,7 @@ Denis chose the path **A2 / B1 / C2**:
   (separate §8 work) before Stage 2 (explanations) surfaces mandate verdicts.
 - **B1 — 2-week observation window + drift report.** Shadow collects daily;
   at the checkpoint we compare shadow vs prod vs the owner's reactions.
-  Tooling built and committed (92147883c7):  (deduped to latest run per vacancy). **Checkpoint: 2026-08-06.**
+  Tooling built and committed (92147883c7): scripts/job_intel_shadow_drift_report.py (deduped to latest run per vacancy). **Checkpoint: 2026-08-06.**
   Live baseline at decision time (run 426, 46 reactions): shadow 0
   false-positives / 42 hedged; prod 22 false-positives / 7 aligned — early
   support for C2.
