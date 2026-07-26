@@ -1295,8 +1295,15 @@ def _build_child_agent(
         effective_provider = "copilot-acp"
         effective_api_mode = "chat_completions"
 
-    # Resolve reasoning config: delegation override > parent inherit
-    parent_reasoning = getattr(parent_agent, "reasoning_config", None)
+    # Resolve reasoning config: delegation override > parent inherit.
+    # The parent's PRE-FLOOR value is what a child inherits: a role policy floor
+    # belongs to the parent's turn and the parent's role. Inheriting the raised
+    # value put every child of an engineer turn on high -- including children
+    # whose own policy has no opinion about effort -- and overrode an explicit
+    # delegation.reasoning_effort the operator had set to keep children cheap.
+    from hermes_cli.role_reasoning import base_reasoning_config
+
+    parent_reasoning = base_reasoning_config(parent_agent)
     child_reasoning = parent_reasoning
     try:
         # Keep the raw value — ``str(x or "")`` would coerce a YAML boolean

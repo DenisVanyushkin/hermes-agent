@@ -3137,7 +3137,12 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
     provider = str(getattr(agent, "provider", "") or "").strip()
     base_url = str(getattr(agent, "base_url", "") or "").strip()
     api_mode = str(getattr(agent, "api_mode", "") or "").strip()
-    reasoning_config = getattr(agent, "reasoning_config", None)
+    # Pre-floor value: this dict is persisted as the session's runtime and
+    # restored on resume, so a role policy floor that belonged to one turn must
+    # not become a durable session setting.
+    from hermes_cli.role_reasoning import base_reasoning_config
+
+    reasoning_config = base_reasoning_config(agent)
     service_tier = getattr(agent, "service_tier", None)
 
     if model:

@@ -1713,6 +1713,9 @@ class CLICommandsMixin:
                     openrouter_min_coding_score=self._openrouter_min_coding_score,
                     fallback_model=self._fallback_model,
                 )
+                bg_agent._reasoning_session_override = getattr(
+                    self, "_reasoning_session_override", None
+                )
                 # Silence raw spinner; route thinking through TUI widget when no foreground agent is active.
                 bg_agent._print_fn = lambda *_a, **_kw: None
 
@@ -2625,6 +2628,12 @@ class CLICommandsMixin:
             return
 
         self.reasoning_config = parsed
+        # An explicit session-scoped level is exempt from the role policy floor,
+        # exactly as it is in the gateway. --global writes config.yaml instead,
+        # and a configured value is a floor candidate like any other.
+        self._reasoning_session_override = parsed
+        if explicit_global:
+            self._reasoning_session_override = None
         self.agent = None  # Force agent re-init with new reasoning config
 
         if explicit_global and save_config_value("agent.reasoning_effort", arg):
