@@ -114,17 +114,25 @@ def test_the_session_level_is_restored_after_a_role_model_switch():
 
 
 def test_the_restored_session_value_is_a_copy():
-    """Гейтвей отдаёт сохранённый словарь по ссылке; мутация испортила бы
-    настройку сессии навсегда."""
+    """Гейтвей штампует и конфиг агента, и override из ОДНОГО объекта.
+
+    Поэтому проверять надо именно алиасный случай: условная копия его
+    пропускала, и конфиг агента оставался тем же словарём, что лежит в
+    настройках сессии гейтвея — любая правка на месте испортила бы её навсегда.
+    """
     from hermes_cli.role_reasoning import apply_reasoning_floor
 
     stored = {"enabled": True, "effort": "low"}
-    agent = _agent({"enabled": True, "effort": "medium"}, _reasoning_session_override=stored)
+    agent = _agent(stored, _reasoning_session_override=stored)   # тот же объект
 
-    apply_reasoning_floor(agent, "high")
+    effective = apply_reasoning_floor(agent, "high")
 
+    assert effective == "low"
     assert agent.reasoning_config == stored
     assert agent.reasoning_config is not stored
+
+    agent.reasoning_config["effort"] = "MUTATED"
+    assert stored == {"enabled": True, "effort": "low"}
 
 
 def test_base_reasoning_config_reports_the_human_value_not_the_floor():

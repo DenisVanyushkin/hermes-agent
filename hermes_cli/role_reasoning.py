@@ -126,13 +126,18 @@ def apply_reasoning_floor(agent: Any, floor: str | None) -> str:
         logger.warning("reasoning floor: could not undo the previous raise: %s", exc)
         current = getattr(agent, "reasoning_config", None)
 
-    session_override = getattr(agent, "_reasoning_session_override", None)
+    try:
+        session_override = getattr(agent, "_reasoning_session_override", None)
+    except Exception:  # noqa: BLE001
+        session_override = None
+
     if session_override is not None:
         try:
-            if agent.reasoning_config != session_override:
-                # Copy: the gateway hands out the stored override by reference,
-                # and mutating it would corrupt the session's setting for good.
-                agent.reasoning_config = dict(session_override)
+            # Copy unconditionally. The gateway stamps the override and the
+            # agent's config from the SAME stored object, so a conditional copy
+            # leaves reasoning_config aliased to the session's saved setting --
+            # exactly the aliasing this copy exists to prevent.
+            agent.reasoning_config = dict(session_override)
         except Exception as exc:  # noqa: BLE001
             logger.warning("reasoning floor: could not restore the session level: %s", exc)
         return effort_label(getattr(agent, "reasoning_config", None))
