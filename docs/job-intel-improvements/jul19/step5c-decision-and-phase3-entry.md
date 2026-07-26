@@ -90,3 +90,28 @@ before. No data migration to undo.
    Stage 1 (feasibility gates only) is justified.
 2. Close the §7.2 mandate-extraction gap (separate §8 work) before any stage
    that surfaces mandate verdicts to the user.
+
+---
+
+## Part C — Owner gate decisions (2026-07-23)
+
+Denis chose the path **A2 / B1 / C2**:
+
+- **A2 — §7.2 mandate gap: defer.** Not fixed now; shadow (Stage 0) and
+  feasibility gates (Stage 1) do not surface mandate to the user, so the gap
+  is not exposed yet. Shadow data will localise the fix later. Must be closed
+  (separate §8 work) before Stage 2 (explanations) surfaces mandate verdicts.
+- **B1 — 2-week observation window + drift report.** Shadow collects daily;
+  at the checkpoint we compare shadow vs prod vs the owner's reactions.
+  Tooling built and committed (92147883c7):  (deduped to latest run per vacancy). **Checkpoint: 2026-08-06.**
+  Live baseline at decision time (run 426, 46 reactions): shadow 0
+  false-positives / 42 hedged; prod 22 false-positives / 7 aligned — early
+  support for C2.
+- **C2 — Stage 1 = soft feasibility (advisory, not a hard filter), and only
+  after the drift report.** Feasibility flags shown in the card without
+  killing the vacancy — ~80% of the value at near-zero risk of hiding a good
+  role. A hard filter is a later step, gated on clean drift evidence.
+
+Sequence: A2 (defer) → B1 (collect 2 weeks → drift report) → C2 (soft
+feasibility). Stages 2–5 remain unstarted, each its own owner go; Stage 2 is
+additionally gated on closing §7.2 (A).
