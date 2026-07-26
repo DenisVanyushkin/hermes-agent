@@ -38,14 +38,17 @@ def test_the_cli_marks_an_explicit_session_level_as_an_override():
 def test_the_cli_stamps_that_override_onto_both_agents_it_builds():
     """Пропущенная площадка = молчаливый отказ escape hatch на этом пути.
 
-    Их две: агент сессии и агент фоновой задачи /bg. Проверка «хоть где-то есть»
-    оставалась бы зелёной, если бы уронили одну из них.
+    Их две: агент сессии и агент фоновой задачи /bg. Проверять надо именно
+    штампы: подстрока `_reasoning_session_override` есть в этом файле и от
+    самого обработчика /reasoning, поэтому «есть хоть где-то» ничего не пиннит.
     """
     import pathlib
 
-    for module in ("cli_agent_setup_mixin.py", "cli_commands_mixin.py"):
-        src = pathlib.Path("hermes_cli") / module
-        assert "_reasoning_session_override" in src.read_text(), module
+    setup = pathlib.Path("hermes_cli/cli_agent_setup_mixin.py").read_text()
+    commands = pathlib.Path("hermes_cli/cli_commands_mixin.py").read_text()
+
+    assert "self.agent._reasoning_session_override = " in setup
+    assert "bg_agent._reasoning_session_override = " in commands
 
 
 def test_the_tui_spawn_paths_do_not_inherit_the_raised_value():

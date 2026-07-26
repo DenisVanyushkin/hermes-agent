@@ -7617,6 +7617,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         self.reasoning_config = _parse_reasoning_config(
             CLI_CONFIG["agent"].get("reasoning_effort", "")
         )
+        # A new session is a conversation boundary: an explicit session-scoped
+        # /reasoning does not carry forward, so the role-policy effort floor
+        # applies again from here.
+        self._reasoning_session_override = None
+        if self.agent is not None:
+            self.agent._reasoning_session_override = None
         # /new is a full conversation boundary: session-scoped runtime
         # overrides (/model --session, /fast, one-turn restores) do not carry
         # forward.  Re-derive model/provider and service tier from config.yaml

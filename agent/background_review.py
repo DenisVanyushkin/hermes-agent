@@ -726,6 +726,11 @@ def _run_review_in_thread(
             # provider defaults — matching the ``not _routed`` gate on
             # _cached_system_prompt below.
             if not _routed:
+                # Deliberate exception to the "spawned agents take the pre-floor
+                # value" rule (see delegate_tool.py): this fork must be
+                # byte-identical to the parent's live request for the prompt
+                # cache key, so the (possibly floor-raised) live value is used
+                # here on purpose instead of base_reasoning_config(agent).
                 _fork_kwargs["reasoning_config"] = getattr(agent, "reasoning_config", None)
             review_agent = AIAgent(
                 model=_rt.get("model") or agent.model,

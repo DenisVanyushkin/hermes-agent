@@ -1469,6 +1469,10 @@ def run_conversation(
         logger.warning("role context build failed: %s", exc)
 
     try:
+        # A block that fails here must not leave the previous turn's floor
+        # behind for chat_completion_helpers' fallback path to re-apply to a
+        # turn whose role never asked for it.
+        agent._reasoning_effort_floor = None
         _model_selection_result = select_model_policy(
             selected_role=getattr(_role_context_result, "selected_role", ""),
             canonical_role=getattr(_role_context_result, "canonical_role", None),

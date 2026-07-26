@@ -13260,6 +13260,13 @@ def _(rid, params: dict) -> dict:
                 session["create_reasoning_override"] = parsed
             if session and session.get("agent") is not None:
                 session["agent"].reasoning_config = parsed
+                # An explicit session-scoped level is exempt from the role-policy
+                # effort floor, exactly as it is in the CLI and messaging gateway.
+                # --global writes config.yaml instead, so the value becomes a
+                # floor candidate like any other rather than a session override.
+                session["agent"]._reasoning_session_override = (
+                    None if global_scope else parsed
+                )
                 _persist_live_session_runtime(session)
                 _emit(
                     "session.info",
