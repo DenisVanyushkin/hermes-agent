@@ -214,3 +214,42 @@ def test_the_policy_decision_really_carries_that_key():
     )
 
     assert decision["reasoning_level"] == "high"
+
+
+def test_the_fallback_reresolve_does_not_drop_the_floor():
+    """Перерезолвка при фолбэке читает только конфиг и теряет пол — причём
+    ровно на тех ходах, где основная модель уже отказала."""
+    from hermes_cli.role_reasoning import apply_reasoning_floor, raise_to_floor
+
+    agent = _agent({"enabled": True, "effort": "medium"})
+    apply_reasoning_floor(agent, "high")
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+    # Имитируем то, что делает chat_completion_helpers при свопе модели:
+    # конфиг перечитан с диска и снова говорит medium.
+    agent.model = "gpt-5.6-luna"
+    agent.reasoning_config = {"enabled": True, "effort": "medium"}
+
+    restored = apply_reasoning_floor(agent, getattr(agent, "_reasoning_effort_floor", None))
+
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+    assert restored == "high"
+    assert raise_to_floor(agent.reasoning_config, "high") is agent.reasoning_config
+
+
+def test_the_production_fallback_path_restores_the_floor():
+    """Контракт из теста выше бесполезен, если продакшн-путь его не зовёт.
+
+    Настоящий фолбэк живёт глубоко внутри цикла вызова модели и не поднимается
+    в тесте без сети и живого провайдера, поэтому здесь проверяется сам факт
+    вызова и его порядок: восстановление обязано идти ПОСЛЕ перерезолвки,
+    иначе оно перезатрётся тем же конфигом.
+    """
+    import pathlib
+
+    src = pathlib.Path("agent/chat_completion_helpers.py").read_text()
+    start = src.index("Re-resolve reasoning_config for the new fallback model")
+    block = src[start:start + 1400]
+
+    assert "apply_reasoning_floor(" in block, "фолбэк не восстанавливает пол"
+    assert block.index("resolve_reasoning_config(") < block.index("apply_reasoning_floor(")
