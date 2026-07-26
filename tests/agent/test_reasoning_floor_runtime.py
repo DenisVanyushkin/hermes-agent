@@ -70,6 +70,8 @@ def test_a_broken_agent_never_breaks_the_turn():
     effective = apply_reasoning_floor(Hostile(), "high")
 
     assert effective in {"low", "-"}   # ход продолжается, исключение не летит
+
+
 def test_the_log_line_separates_the_policy_demand_from_the_fact(caplog):
     """policy_model= и effective_model= уже печатаются раздельно ровно потому,
     что лог однажды утверждал одно, а ход шёл на другом. Усилие — тот же случай."""
@@ -173,3 +175,42 @@ def test_a_scribe_turn_is_left_on_the_configured_level():
 
     assert effective == "medium"
     assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+
+
+def test_the_turn_loop_actually_wires_the_floor_in():
+    """Тесты выше проверяют ингредиенты. Этот — что их позвали.
+
+    Настоящий блок живёт внутри хода и не поднимается в юнит-тесте без живого
+    провайдера, поэтому здесь проверяется факт вызова и его место: пол берётся
+    из решения политики, применяется ПОСЛЕ выбора модели и ДО лога, а лог
+    получает все три новых поля. Опечатка в ключе или забытый вызов оставили
+    бы всю остальную сюиту зелёной.
+    """
+    import pathlib
+
+    src = pathlib.Path("agent/conversation_loop.py").read_text()
+    start = src.index("_effective_model = apply_role_model(")
+    block = src[start:start + 1800]
+
+    assert 'agent._model_selection.get("reasoning_level", "")' in block
+    assert "apply_reasoning_floor(agent, _effort_floor)" in block
+    assert block.index("apply_role_model(") < block.index("apply_reasoning_floor(")
+    assert block.index("apply_reasoning_floor(") < block.index("log_model_selection(")
+    for field in ("policy_effort_floor=", "effective_effort=", "floor_exempt="):
+        assert field in block, field
+
+
+def test_the_policy_decision_really_carries_that_key():
+    """Гайд-тест выше сверяет строку. Этот доказывает, что строка — не выдумка."""
+    from hermes_cli.model_selection import model_selection_to_dict, select_model_policy
+
+    decision = model_selection_to_dict(
+        select_model_policy(
+            selected_role="engineer",
+            canonical_role="engineer",
+            task_text="rebase",
+            critical_approval_required=False,
+        )
+    )
+
+    assert decision["reasoning_level"] == "high"
