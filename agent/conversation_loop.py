@@ -1505,7 +1505,7 @@ def run_conversation(
             allow_fallback=agent._model_selection.get("allow_fallback", True),
             policy_effort_floor=_effort_floor or "-",
             effective_effort=_effective_effort,
-            floor_exempt=bool(getattr(agent, "_reasoning_floor_exempt", False)),
+            floor_exempt=getattr(agent, "_reasoning_session_override", None) is not None,
         )
     except Exception as exc:
         logger.warning("model selection failed: %s", exc)

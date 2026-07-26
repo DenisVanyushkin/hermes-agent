@@ -31,7 +31,10 @@ def test_a_lower_config_is_raised_on_the_agent():
 
 def test_a_session_override_is_exempt():
     """Явное /reasoning low для этой сессии главнее автоматики."""
-    agent = _agent({"enabled": True, "effort": "low"}, _reasoning_floor_exempt=True)
+    agent = _agent(
+        {"enabled": True, "effort": "low"},
+        _reasoning_session_override={"enabled": True, "effort": "low"},
+    )
 
     effective = apply_reasoning_floor(agent, "high")
 
@@ -55,6 +58,91 @@ def test_no_floor_leaves_everything_alone():
 
     assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
     assert effective == "medium"
+
+
+def test_the_raise_does_not_stick_across_turns_on_a_reused_agent():
+    """CLI chat и TUI строят агента один раз на всю сессию.
+
+    Никто не переприсваивает reasoning_config между ходами, поэтому без отката
+    один инженерный вопрос закрепил бы high до конца сессии — включая ходы,
+    политика которых об усилии мнения не имеет.
+    """
+    from hermes_cli.role_reasoning import apply_reasoning_floor
+
+    agent = _agent({"enabled": True, "effort": "medium"})
+
+    apply_reasoning_floor(agent, "high")          # инженерный ход
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+    effective = apply_reasoning_floor(agent, None)  # следующий ход, роль scribe
+
+    assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+    assert effective == "medium"
+
+
+def test_an_external_change_between_turns_is_not_clobbered():
+    """Откат снимает только наш собственный подъём, опознанный по идентичности."""
+    from hermes_cli.role_reasoning import apply_reasoning_floor
+
+    agent = _agent({"enabled": True, "effort": "medium"})
+    apply_reasoning_floor(agent, "high")
+
+    agent.reasoning_config = {"enabled": True, "effort": "xhigh"}   # /reasoning xhigh
+    effective = apply_reasoning_floor(agent, None)
+
+    assert agent.reasoning_config == {"enabled": True, "effort": "xhigh"}
+    assert effective == "xhigh"
+
+
+def test_the_session_level_is_restored_after_a_role_model_switch():
+    """switch_model() перерезолвливает конфиг из файла и стирает сессионное
+    значение ДО того, как пол его увидит. Освобождение обязано его вернуть,
+    иначе /reasoning low не работает ровно на инженерных ходах."""
+    from hermes_cli.role_reasoning import apply_reasoning_floor
+
+    agent = _agent(
+        {"enabled": True, "effort": "low"},
+        _reasoning_session_override={"enabled": True, "effort": "low"},
+    )
+    # switch_model() затирает сессионное значение конфиговым:
+    agent.reasoning_config = {"enabled": True, "effort": "medium"}
+
+    effective = apply_reasoning_floor(agent, "high")
+
+    assert agent.reasoning_config == {"enabled": True, "effort": "low"}
+    assert effective == "low"
+
+
+def test_the_restored_session_value_is_a_copy():
+    """Гейтвей отдаёт сохранённый словарь по ссылке; мутация испортила бы
+    настройку сессии навсегда."""
+    from hermes_cli.role_reasoning import apply_reasoning_floor
+
+    stored = {"enabled": True, "effort": "low"}
+    agent = _agent({"enabled": True, "effort": "medium"}, _reasoning_session_override=stored)
+
+    apply_reasoning_floor(agent, "high")
+
+    assert agent.reasoning_config == stored
+    assert agent.reasoning_config is not stored
+
+
+def test_base_reasoning_config_reports_the_human_value_not_the_floor():
+    """TUI пишет это значение в персистентный runtime сессии."""
+    from hermes_cli.role_reasoning import apply_reasoning_floor, base_reasoning_config
+
+    agent = _agent({"enabled": True, "effort": "medium"})
+    apply_reasoning_floor(agent, "high")
+
+    assert base_reasoning_config(agent) == {"enabled": True, "effort": "medium"}
+
+
+def test_base_reasoning_config_passes_through_when_no_floor_was_applied():
+    from hermes_cli.role_reasoning import base_reasoning_config
+
+    agent = _agent({"enabled": True, "effort": "low"})
+
+    assert base_reasoning_config(agent) == {"enabled": True, "effort": "low"}
 
 
 def test_a_broken_agent_never_breaks_the_turn():
@@ -124,7 +212,7 @@ def test_the_log_line_names_the_session_exemption(caplog):
 def test_an_engineer_turn_goes_from_the_configured_medium_to_high():
     """Сквозной путь от решения политики до конфига на агенте.
 
-    Агент здесь без атрибута _reasoning_floor_exempt вовсе — это ровно форма
+    Агент здесь без атрибута _reasoning_session_override вовсе — это ровно форма
     кроновского прогона: сессионного слоя там нет, поэтому ни одна джоба не
     нуждается в новых полях в jobs.json, чтобы получить своё усилие.
     """
@@ -141,7 +229,7 @@ def test_an_engineer_turn_goes_from_the_configured_medium_to_high():
         critical_approval_required=False,
     )
     agent = _agent({"enabled": True, "effort": "medium"})
-    assert not hasattr(agent, "_reasoning_floor_exempt")
+    assert not hasattr(agent, "_reasoning_session_override")
 
     effective = apply_reasoning_floor(
         agent, resolve_role_effort_floor(decision.reasoning_level)

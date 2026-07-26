@@ -78,25 +78,72 @@ def effort_label(reasoning_config: Any) -> str:
     return str(reasoning_config.get("effort") or "-")
 
 
+def base_reasoning_config(agent: Any) -> Any:
+    """The reasoning config as it was before any policy floor was applied.
+
+    A surface that PERSISTS a session's settings must record what the human
+    configured, not a floor that belonged to one turn's role: the TUI copies
+    ``agent.reasoning_config`` into the stored session runtime, and a delegated
+    child inherits it. Both want this value, not the raised one.
+    """
+    current = getattr(agent, "reasoning_config", None)
+    if current is not None and current is getattr(agent, "_reasoning_floor_applied", None):
+        return getattr(agent, "_reasoning_pre_floor_config", current)
+    return current
+
+
 def apply_reasoning_floor(agent: Any, floor: str | None) -> str:
     """Put the turn on at least the effort its role calls for.
 
     Returns the effort in effect, for the log line. Mirrors
     ``apply_role_model()`` in being unable to break a turn: any failure leaves
-    the agent exactly as it was.
+    the agent as it was.
 
-    An agent carrying ``_reasoning_floor_exempt`` is skipped entirely -- the
-    human set an explicit ``/reasoning`` level for this session, and that wins
-    outright, including when it is lower than the floor.
+    Three things happen here, in order.
+
+    First the previous turn's raise is undone. The gateway's main path assigns a
+    fresh ``reasoning_config`` every turn, but CLI chat and the TUI build one
+    agent and reuse it forever -- there, without an undo, a single engineer
+    question would pin the whole session to ``high``. Only OUR raise is undone,
+    recognised by object identity, so a ``/reasoning`` typed between turns is
+    never clobbered.
+
+    Then an explicit session level wins outright, and is RE-APPLIED rather than
+    merely respected: ``switch_model()`` re-resolves ``reasoning_config`` from
+    config.yaml on every role model switch, so by the time we run, the human's
+    value is already gone. Restoring it is the only way ``/reasoning low``
+    survives an engineer turn.
+
+    Only then does the floor raise anything.
     """
-    current = getattr(agent, "reasoning_config", None)
-    if getattr(agent, "_reasoning_floor_exempt", False):
-        return effort_label(current)
+    try:
+        current = getattr(agent, "reasoning_config", None)
+        if current is not None and current is getattr(agent, "_reasoning_floor_applied", None):
+            current = getattr(agent, "_reasoning_pre_floor_config", current)
+            agent.reasoning_config = current
+            agent._reasoning_floor_applied = None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reasoning floor: could not undo the previous raise: %s", exc)
+        current = getattr(agent, "reasoning_config", None)
+
+    session_override = getattr(agent, "_reasoning_session_override", None)
+    if session_override is not None:
+        try:
+            if agent.reasoning_config != session_override:
+                # Copy: the gateway hands out the stored override by reference,
+                # and mutating it would corrupt the session's setting for good.
+                agent.reasoning_config = dict(session_override)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reasoning floor: could not restore the session level: %s", exc)
+        return effort_label(getattr(agent, "reasoning_config", None))
+
     try:
         agent._reasoning_effort_floor = floor
         updated = raise_to_floor(current, floor)
         if updated is not current:
+            agent._reasoning_pre_floor_config = current
             agent.reasoning_config = updated
+            agent._reasoning_floor_applied = updated
         return effort_label(updated)
     except Exception as exc:  # noqa: BLE001
         logger.warning("reasoning floor not applied, staying on current effort: %s", exc)
