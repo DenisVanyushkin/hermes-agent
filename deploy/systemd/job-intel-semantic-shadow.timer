@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule job-intel semantic shadow (after daily)
+
+[Timer]
+OnCalendar=*-*-* 09:30:00 UTC
+Persistent=true
+Unit=job-intel-semantic-shadow.service
+
+[Install]
+WantedBy=timers.target

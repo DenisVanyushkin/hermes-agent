@@ -71,6 +71,7 @@ disable_timers_on_failure() {
     job-intel-enrichment.timer
     job-intel-market.timer
     job-intel-strategic.timer
+    job-intel-semantic-shadow.timer
   )
   local services=(
     job-intel-daily.service
@@ -79,6 +80,7 @@ disable_timers_on_failure() {
     job-intel-enrichment.service
     job-intel-market.service
     job-intel-strategic.service
+    job-intel-semantic-shadow.service
     job-intel-metrics-exporter.service
   )
   local unit
