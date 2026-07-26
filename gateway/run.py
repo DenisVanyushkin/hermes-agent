@@ -3740,6 +3740,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+        # Set per turn from _session_reasoning_override_active(); stamped onto
+        # every agent so the role-policy effort floor knows to stand down.
+        self._reasoning_floor_exempt: bool = False
         # Per-session fast-mode overrides from /fast.
         # Key: session_key, Value: "priority" or None (explicit normal).
         self._session_service_tier_overrides: Dict[str, Optional[str]] = {}
@@ -5847,6 +5850,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._session_reasoning_overrides.pop(session_key, None)
         else:
             self._session_reasoning_overrides[session_key] = dict(reasoning_config)
+
+    def _session_reasoning_override_active(
+        self,
+        *,
+        source: Optional[SessionSource] = None,
+        session_key: Optional[str] = None,
+    ) -> bool:
+        """Whether this session carries an explicit ``/reasoning`` override.
+
+        The role policy's effort floor must never raise a level a human set by
+        hand for this session. By the time a turn reaches the floor the two are
+        indistinguishable -- a session override and a configured global value
+        are both just ``{"enabled": True, "effort": ...}`` -- so the fact has to
+        travel as its own flag on the agent.
+        """
+        resolved_session_key = session_key
+        if not resolved_session_key and source is not None:
+            try:
+                resolved_session_key = self._session_key_for_source(source)
+            except Exception:
+                resolved_session_key = None
+        overrides = getattr(self, "_session_reasoning_overrides", {}) or {}
+        return bool(resolved_session_key and resolved_session_key in overrides)
 
     def _resolve_session_service_tier(
         self,
@@ -16126,6 +16152,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 source=source, model=model
             )
             self._reasoning_config = reasoning_config
+            self._reasoning_floor_exempt = self._session_reasoning_override_active(
+                source=source
+            )
             self._service_tier = self._resolve_session_service_tier(source=source)
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
 
@@ -16178,6 +16207,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Reload from disk — do not reuse the startup snapshot (#60955).
                     fallback_model=self._refresh_fallback_model(),
                 )
+                agent._reasoning_floor_exempt = self._reasoning_floor_exempt
                 try:
                     return agent.run_conversation(
                         user_message=enriched_prompt,
@@ -22503,6 +22533,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 model=model,
             )
             self._reasoning_config = reasoning_config
+            self._reasoning_floor_exempt = self._session_reasoning_override_active(
+                source=source, session_key=session_key
+            )
             self._service_tier = self._resolve_session_service_tier(
                 source=source, session_key=session_key
             )
@@ -22872,6 +22905,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Reload from disk — do not reuse the startup snapshot (#60955).
                     fallback_model=self._refresh_fallback_model(),
                 )
+                agent._reasoning_floor_exempt = self._reasoning_floor_exempt
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
                         # Record the session_id the snapshot was taken for
@@ -22946,6 +22980,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent.notice_clear_callback = None
             agent.event_callback = _event_callback_sync
             agent.reasoning_config = reasoning_config
+            agent._reasoning_floor_exempt = self._reasoning_floor_exempt
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
             # Must-deliver notes for THIS turn ride the current user message
