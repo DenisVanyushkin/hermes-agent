@@ -2116,6 +2116,40 @@ PRAGMA foreign_keys=ON;
                 ),
             )
 
+    def fetch_shadow_vs_prod(self, *, lookback_days: int = 14) -> list[dict]:
+        """Join observe-only shadow verdicts to the production evaluation of
+        the SAME run, plus any active reaction on that vacancy, over a
+        lookback window. Read-only (drift report, Phase III B1)."""
+        self.bootstrap()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT sse.vacancy_key       AS vacancy_key,
+                       sse.recommendation    AS shadow_recommendation,
+                       ve.recommendation     AS prod_recommendation,
+                       fs.feedback_type      AS feedback_type
+                FROM semantic_shadow_evaluation sse
+                JOIN (
+                    SELECT vacancy_key, MAX(run_id) AS run_id
+                    FROM semantic_shadow_evaluation
+                    WHERE created_at >= datetime('now', ?)
+                    GROUP BY vacancy_key
+                ) latest
+                  ON latest.vacancy_key = sse.vacancy_key
+                 AND latest.run_id = sse.run_id
+                LEFT JOIN vacancy_evaluations ve
+                       ON ve.vacancy_key = sse.vacancy_key
+                      AND ve.run_id = sse.run_id
+                LEFT JOIN vacancy_feedback_state fs
+                       ON fs.vacancy_key = sse.vacancy_key
+                      AND fs.active = 1
+                WHERE sse.created_at >= datetime('now', ?)
+                GROUP BY sse.vacancy_key
+                """,
+                (f'-{int(lookback_days)} days', f'-{int(lookback_days)} days'),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def fetch_vacancies_for_run(self, run_id: int) -> list[dict]:
         """Vacancy rows evaluated in a given run (for the decoupled Phase III
         shadow job). Joins the run's evaluations back to the vacancies table."""
