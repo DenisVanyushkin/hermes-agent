@@ -554,6 +554,25 @@ CREATE TABLE IF NOT EXISTS vacancy_scoring_shadow (
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS semantic_shadow_evaluation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    vacancy_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    recommendation TEXT,
+    action TEXT,
+    lane TEXT,
+    confidence TEXT,
+    applied_caps_json TEXT,
+    semantic_hash TEXT,
+    observations_total INTEGER,
+    shadow_version TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, vacancy_key),
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS company_intelligence (
     company TEXT PRIMARY KEY,
     summary TEXT NOT NULL,
@@ -2096,6 +2115,90 @@ PRAGMA foreign_keys=ON;
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
+
+    def fetch_vacancies_for_run(self, run_id: int) -> list[dict]:
+        """Vacancy rows evaluated in a given run (for the decoupled Phase III
+        shadow job). Joins the run's evaluations back to the vacancies table."""
+        self.bootstrap()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT v.* FROM vacancies v
+                JOIN vacancy_evaluations e ON e.vacancy_key = v.vacancy_key
+                WHERE e.run_id = ?
+                ORDER BY v.id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_run_id(self) -> int | None:
+        self.bootstrap()
+        with self.connect() as conn:
+            row = conn.execute("SELECT MAX(id) FROM runs").fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def upsert_semantic_shadow_evaluation(
+        self,
+        *,
+        run_id: int,
+        vacancy_key: str,
+        source: str,
+        recommendation: str | None,
+        action: str | None,
+        lane: str | None,
+        confidence: str | None,
+        applied_caps: list | None,
+        semantic_hash: str | None,
+        observations_total: int | None,
+        shadow_version: str,
+        error: str | None,
+    ) -> None:
+        """Persist one observe-only Phase III shadow decision. Never touches
+        production evaluation tables."""
+        self.bootstrap()
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO semantic_shadow_evaluation (
+                    run_id, vacancy_key, source, recommendation, action, lane,
+                    confidence, applied_caps_json, semantic_hash,
+                    observations_total, shadow_version, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, vacancy_key) DO UPDATE SET
+                    source=excluded.source,
+                    recommendation=excluded.recommendation,
+                    action=excluded.action,
+                    lane=excluded.lane,
+                    confidence=excluded.confidence,
+                    applied_caps_json=excluded.applied_caps_json,
+                    semantic_hash=excluded.semantic_hash,
+                    observations_total=excluded.observations_total,
+                    shadow_version=excluded.shadow_version,
+                    error=excluded.error,
+                    created_at=excluded.created_at
+                """,
+                (
+                    run_id, vacancy_key, source, recommendation, action, lane,
+                    confidence, json.dumps(applied_caps or [], ensure_ascii=False),
+                    semantic_hash, observations_total, shadow_version, error, now,
+                ),
+            )
+
+    def fetch_semantic_shadow_evaluations(self, *, run_id: int) -> list[dict]:
+        self.bootstrap()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM semantic_shadow_evaluation WHERE run_id=? ORDER BY id",
+                (run_id,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["applied_caps"] = json.loads(d.pop("applied_caps_json") or "[]")
+            out.append(d)
+        return out
 
     def upsert_vacancy_scoring_shadow(
         self,
