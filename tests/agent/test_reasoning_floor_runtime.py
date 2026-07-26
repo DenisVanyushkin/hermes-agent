@@ -253,3 +253,9 @@ def test_the_production_fallback_path_restores_the_floor():
 
     assert "apply_reasoning_floor(" in block, "фолбэк не восстанавливает пол"
     assert block.index("resolve_reasoning_config(") < block.index("apply_reasoning_floor(")
+    assert 'apply_reasoning_floor(agent, getattr(agent, "_reasoning_effort_floor", None))' in block
+    def _indent(needle: str) -> int:
+        line_start = block.rindex("\n", 0, block.index(needle)) + 1
+        return len(block[line_start:block.index(needle)])
+
+    assert _indent("apply_reasoning_floor(agent, getattr(") == _indent("agent.reasoning_config = resolve_reasoning_config(")
