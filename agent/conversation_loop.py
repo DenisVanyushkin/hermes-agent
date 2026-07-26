@@ -175,6 +175,9 @@ def log_model_selection(
     effective_model: Optional[str],
     fallback: str = "",
     allow_fallback: bool = True,
+    policy_effort_floor: str = "-",
+    effective_effort: str = "-",
+    floor_exempt: bool = False,
 ) -> None:
     """Log the model decision with the policy's intent and the runtime fact apart.
 
@@ -192,7 +195,8 @@ def log_model_selection(
     """
     logger.info(
         "model selection: session=%s policy=%s class=%s role=%s provider=%s "
-        "policy_model=%s effective_model=%s fallback=%s allow_fallback=%s",
+        "policy_model=%s effective_model=%s fallback=%s allow_fallback=%s "
+        "policy_effort_floor=%s effective_effort=%s effort_floor_exempt=%s",
         session or "-",
         policy,
         model_class,
@@ -202,6 +206,9 @@ def log_model_selection(
         effective_model or "unknown",
         fallback,
         allow_fallback,
+        policy_effort_floor or "-",
+        effective_effort or "-",
+        "session" if floor_exempt else "-",
     )
 
 
@@ -1474,6 +1481,18 @@ def run_conversation(
             preferred_model=agent._model_selection.get("preferred_model", ""),
             preferred_provider=agent._model_selection.get("preferred_provider", ""),
         )
+        # The policy has always named an effort and nothing applied it. It is a
+        # floor, not a value: it raises, never lowers, and a session-scoped
+        # /reasoning override exempts the turn entirely.
+        from hermes_cli.role_reasoning import (
+            apply_reasoning_floor,
+            resolve_role_effort_floor,
+        )
+
+        _effort_floor = resolve_role_effort_floor(
+            agent._model_selection.get("reasoning_level", "")
+        )
+        _effective_effort = apply_reasoning_floor(agent, _effort_floor)
         log_model_selection(
             session=agent.session_id or "-",
             policy=agent._model_selection.get("policy_name", ""),
@@ -1484,6 +1503,9 @@ def run_conversation(
             effective_model=_effective_model,
             fallback=agent._model_selection.get("fallback_chain_key", ""),
             allow_fallback=agent._model_selection.get("allow_fallback", True),
+            policy_effort_floor=_effort_floor or "-",
+            effective_effort=_effective_effort,
+            floor_exempt=bool(getattr(agent, "_reasoning_floor_exempt", False)),
         )
     except Exception as exc:
         logger.warning("model selection failed: %s", exc)

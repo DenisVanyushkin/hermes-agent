@@ -70,3 +70,106 @@ def test_a_broken_agent_never_breaks_the_turn():
     effective = apply_reasoning_floor(Hostile(), "high")
 
     assert effective in {"low", "-"}   # ход продолжается, исключение не летит
+def test_the_log_line_separates_the_policy_demand_from_the_fact(caplog):
+    """policy_model= и effective_model= уже печатаются раздельно ровно потому,
+    что лог однажды утверждал одно, а ход шёл на другом. Усилие — тот же случай."""
+    import logging
+
+    from agent.conversation_loop import log_model_selection
+
+    with caplog.at_level(logging.INFO, logger="agent.conversation_loop"):
+        log_model_selection(
+            session="s1",
+            policy="coding_high_reasoning",
+            model_class="coding",
+            role="engineer",
+            provider="openai-codex",
+            policy_model="gpt-5.6-terra",
+            effective_model="gpt-5.6-terra",
+            policy_effort_floor="high",
+            effective_effort="high",
+            floor_exempt=False,
+        )
+
+    line = caplog.text
+    assert "policy_effort_floor=high" in line
+    assert "effective_effort=high" in line
+    assert "effort_floor_exempt=-" in line
+
+
+def test_the_log_line_names_the_session_exemption(caplog):
+    import logging
+
+    from agent.conversation_loop import log_model_selection
+
+    with caplog.at_level(logging.INFO, logger="agent.conversation_loop"):
+        log_model_selection(
+            session="s1",
+            policy="coding_high_reasoning",
+            model_class="coding",
+            role="engineer",
+            provider="openai-codex",
+            policy_model="gpt-5.6-terra",
+            effective_model="gpt-5.6-terra",
+            policy_effort_floor="high",
+            effective_effort="low",
+            floor_exempt=True,
+        )
+
+    assert "effort_floor_exempt=session" in caplog.text
+
+
+def test_an_engineer_turn_goes_from_the_configured_medium_to_high():
+    """Сквозной путь от решения политики до конфига на агенте.
+
+    Агент здесь без атрибута _reasoning_floor_exempt вовсе — это ровно форма
+    кроновского прогона: сессионного слоя там нет, поэтому ни одна джоба не
+    нуждается в новых полях в jobs.json, чтобы получить своё усилие.
+    """
+    from hermes_cli.model_selection import select_model_policy
+    from hermes_cli.role_reasoning import (
+        apply_reasoning_floor,
+        resolve_role_effort_floor,
+    )
+
+    decision = select_model_policy(
+        selected_role="engineer",
+        canonical_role="engineer",
+        task_text="upstream sync run: rebase local customizations",
+        critical_approval_required=False,
+    )
+    agent = _agent({"enabled": True, "effort": "medium"})
+    assert not hasattr(agent, "_reasoning_floor_exempt")
+
+    effective = apply_reasoning_floor(
+        agent, resolve_role_effort_floor(decision.reasoning_level)
+    )
+
+    assert decision.policy_name == "coding_high_reasoning"
+    assert effective == "high"
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+
+def test_a_scribe_turn_is_left_on_the_configured_level():
+    """Политика scribe называет уровень "stable" — это не усилие, и пол не
+    появляется. Ход остаётся ровно там, где его поставил конфиг."""
+    from hermes_cli.model_selection import select_model_policy
+    from hermes_cli.role_reasoning import (
+        apply_reasoning_floor,
+        resolve_role_effort_floor,
+    )
+
+    decision = select_model_policy(
+        selected_role="scribe",
+        canonical_role="scribe",
+        task_text="оформи отчёт",
+        critical_approval_required=False,
+    )
+    agent = _agent({"enabled": True, "effort": "medium"})
+
+    effective = apply_reasoning_floor(
+        agent, resolve_role_effort_floor(decision.reasoning_level)
+    )
+
+    assert effective == "medium"
+    assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
