@@ -522,6 +522,7 @@ def execute_bounded_rework_loop(
                         policy_source=policy_source,
                         original_task=user_message,
                         repo_path=repo_path,
+                        ops_plan=current_ops_plan,
                         appended_rework_context=appended_rework_context,
                         completion_allowed=allow_completion_after_review and bool(escalation_result["completion_allowed"]),
                         candidate_complete=bool(escalation_result["candidate_complete"]),
@@ -577,6 +578,7 @@ def execute_bounded_rework_loop(
                     policy_source=policy_source,
                     original_task=user_message,
                     repo_path=repo_path,
+                    ops_plan=current_ops_plan,
                     appended_rework_context=appended_rework_context,
                     completion_allowed=False,
                     candidate_complete=False,
@@ -786,6 +788,7 @@ def execute_bounded_rework_loop(
                     policy_source=policy_source,
                     original_task=user_message,
                     repo_path=repo_path,
+                    ops_plan=current_ops_plan,
                     appended_rework_context=appended_rework_context,
                     completion_allowed=allow_completion_after_review,
                     candidate_complete=True,
@@ -844,6 +847,7 @@ def execute_bounded_rework_loop(
                     policy_source=policy_source,
                     original_task=user_message,
                     repo_path=repo_path,
+                    ops_plan=current_ops_plan,
                     appended_rework_context=appended_rework_context,
                     completion_allowed=allow_completion_after_review and bool(escalation_result["completion_allowed"]),
                     candidate_complete=bool(escalation_result["candidate_complete"]),
@@ -899,6 +903,7 @@ def execute_bounded_rework_loop(
                 policy_source=policy_source,
                 original_task=user_message,
                 repo_path=repo_path,
+                ops_plan=current_ops_plan,
                 appended_rework_context=appended_rework_context,
                 completion_allowed=False,
                 candidate_complete=False,
@@ -951,6 +956,7 @@ def execute_bounded_rework_loop(
                 policy_source=policy_source,
                 original_task=user_message,
                 repo_path=repo_path,
+                ops_plan=current_ops_plan,
                 appended_rework_context=appended_rework_context,
                 completion_allowed=True,
                 candidate_complete=True,
@@ -1177,6 +1183,7 @@ def execute_bounded_rework_loop(
                 policy_source=policy_source,
                 original_task=user_message,
                 repo_path=repo_path,
+                ops_plan=current_ops_plan,
                 appended_rework_context=appended_rework_context,
                 completion_allowed=False,
                 candidate_complete=False,
@@ -1220,6 +1227,7 @@ def execute_bounded_rework_loop(
                 policy_source=policy_source,
                 original_task=user_message,
                 repo_path=repo_path,
+                ops_plan=current_ops_plan,
                 appended_rework_context=appended_rework_context,
                 completion_allowed=completion_allowed,
                 candidate_complete=True,
@@ -1270,6 +1278,7 @@ def execute_bounded_rework_loop(
                 policy_source=policy_source,
                 original_task=user_message,
                 repo_path=repo_path,
+                ops_plan=current_ops_plan,
                 appended_rework_context=appended_rework_context,
                 completion_allowed=False,
                 candidate_complete=False,
@@ -2473,6 +2482,7 @@ def _finalize_loop_result(
     test_summary: dict[str, Any] | None = None,
     model_escalations_used: int = 0,
     repo_path: str | None = None,
+    ops_plan: list[dict[str, Any]] | None = None,
 ) -> PipelineReworkLoopResult:
     gate_reached = completion_allowed and candidate_complete and blocked_reason is None
     if gate_reached and repo_path:
@@ -2509,6 +2519,12 @@ def _finalize_loop_result(
             git_gate=git_gate,
             original_task=original_task,
             reviewer_packet=reviewer_packet,
+        )
+        _record_ops_gate_pending(
+            session=session,
+            repo_path=repo_path,
+            ops_plan=ops_plan,
+            original_task=original_task,
         )
     return PipelineReworkLoopResult(
         fuse=fuse,
@@ -2590,6 +2606,41 @@ def _record_commit_gate_pending(
             workspace_path=str(repo_path or ""),
             changed_files=changed_files,
             commit_message=_draft_commit_message(original_task=original_task, reviewer_packet=reviewer_packet),
+        )
+    except Exception:
+        pass
+
+
+def _record_ops_gate_pending(
+    *,
+    session: PipelineSession,
+    repo_path: str | None,
+    ops_plan: list[dict[str, Any]] | None,
+    original_task: str,
+) -> None:
+    """Best-effort: raise the operator gate when the reviewed plan changes state.
+
+    Only reached from the `gate_reached` branch, so the plan has already been
+    through the reviewer (Task 7 keeps every plan-bearing run on the reviewing
+    path). A plan that is entirely `read` raises nothing -- there is nothing to
+    approve. A plan holding even one `mutate`/`destroy` goes through approval AS
+    A WHOLE: running the read part now would execute half a plan before the
+    operator has seen the other half. Like the commit-gate marker, this can
+    never break finalize -- the marker serves the reply intercept, not the
+    pipeline's own correctness."""
+    plan = [dict(item) for item in (ops_plan or []) if isinstance(item, dict)]
+    if not plan:
+        return
+    if all(str(item.get("risk") or "") == "read" for item in plan):
+        return
+    try:
+        from hermes_cli import ops_gate_service
+
+        ops_gate_service.record_pending(
+            session_id=getattr(session, "pipeline_session_id", "") or "",
+            repo_path=str(repo_path or ""),
+            plan=plan,
+            original_task=str(original_task or ""),
         )
     except Exception:
         pass

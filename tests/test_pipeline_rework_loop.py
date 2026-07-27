@@ -1099,6 +1099,161 @@ def test_finalize_loop_result_read_only_run_does_not_write_pending_marker(tmp_pa
     assert commit_gate_service.get_pending() is None
 
 
+def _finalize_with_ops_plan(
+    *,
+    module,
+    tmp_path: Path,
+    monkeypatch,
+    session_id: str,
+    ops_plan: list[dict] | None,
+    original_task: str,
+    completion_allowed: bool = True,
+    candidate_complete: bool = True,
+    blocked_reason: str | None = None,
+) -> Path:
+    """Drive `_finalize_loop_result` the way the loop does, carrying an ops plan.
+
+    Mirrors the commit-gate marker tests: the plan is threaded in as a keyword
+    argument rather than re-read off the bridge, so the finalizer sees exactly the
+    plan the reviewer saw."""
+    session_module = importlib.import_module("hermes_cli.pipeline_session")
+    state_module = importlib.import_module("hermes_cli.pipeline_state_machine")
+    loaded_specs = _loaded_specs(tmp_path)[1]
+
+    common = _finalize_result_common_kwargs(
+        tmp_path=tmp_path,
+        loaded_specs=loaded_specs,
+        session_module=session_module,
+        state_module=state_module,
+        current_state="rework_loop_candidate_complete",
+        session_id=session_id,
+    )
+    repo_dir = tmp_path / "repo"
+
+    module._finalize_loop_result(
+        fuse=module.PipelineExecutionFuseResult(
+            execution_mode="autonomous",
+            actual_invocation_allowed=True,
+            blocked_reason=None,
+            selected_pipeline_id="engineering_review_pipeline",
+            selected_step_kind="reviewer",
+            selected_subagent_id="hermes_code_reviewer",
+        ),
+        session=common["session"],
+        snapshot=common["snapshot"],
+        preflight_allowed=True,
+        preflight_reason_code="rework_loop_fuse_allowed",
+        iteration_history=[],
+        review_iterations_completed=1,
+        max_review_iterations=3,
+        policy_source="pipeline_spec",
+        original_task=original_task,
+        appended_rework_context=[],
+        completion_allowed=completion_allowed,
+        candidate_complete=candidate_complete,
+        user_action_required=True,
+        blocked_reason=blocked_reason,
+        git_gate={"changed_files": []},
+        reviewer_packet={"packet_status": "ready_for_review"},
+        subagent_runs=[],
+        peer_messages=[],
+        disagreements=[],
+        decisive_subagent=None,
+        model_escalations=[],
+        tests={},
+        mutation_summary={},
+        review_overrides={},
+        test_summary={"status": "not_requested"},
+        repo_path=str(repo_dir),
+        ops_plan=ops_plan,
+    )
+    return repo_dir
+
+
+def test_finalize_writes_an_ops_pending_marker_for_a_mutating_plan(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+
+    repo_dir = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-marker-1",
+        ops_plan=[
+            {"op_id": "git_status", "risk": "read", "argv": ["git", "status"]},
+            {"op_id": "git_push", "risk": "mutate", "argv": ["git", "push", "origin", "main"]},
+        ],
+        original_task="запушь ветку",
+    )
+
+    pending = ops_gate_service.get_pending()
+    assert pending is not None
+    assert pending["session_id"] == "pipe-ops-marker-1"
+    assert pending["repo_path"] == str(repo_dir)
+    assert pending["original_task"] == "запушь ветку"
+    assert pending["status"] == "awaiting_ops"
+    # Одна mutate поднимает гейт для ВСЕГО плана: read-часть не исполняется
+    # заранее, оператор видит план целиком.
+    assert [item["op_id"] for item in pending["plan"]] == ["git_status", "git_push"]
+
+
+def test_finalize_writes_no_marker_for_a_read_only_plan(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+
+    _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-marker-2",
+        ops_plan=[{"op_id": "git_status", "risk": "read", "argv": ["git", "status"]}],
+        original_task="покажи статус",
+    )
+
+    # План целиком из read гейт не поднимает: одобрять нечего.
+    assert ops_gate_service.get_pending() is None
+
+
+def test_finalize_writes_no_ops_marker_when_the_run_did_not_reach_the_gate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+
+    _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-marker-3",
+        ops_plan=[{"op_id": "git_push", "risk": "mutate", "argv": ["git", "push", "origin", "main"]}],
+        original_task="запушь ветку",
+        completion_allowed=False,
+        candidate_complete=False,
+        blocked_reason="reviewer_decisive_after_disagreement",
+    )
+
+    # Ревьюер заблокировал прогон -- операторский гейт не поднимается.
+    assert ops_gate_service.get_pending() is None
+
+
+def test_finalize_without_an_ops_plan_leaves_the_commit_gate_untouched(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+
+    _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-marker-4",
+        ops_plan=None,
+        original_task="почини тест",
+    )
+
+    assert ops_gate_service.get_pending() is None
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
