@@ -110,6 +110,22 @@ dependencies = [
   # policy; the code relies on this version's exact request-hashing
   # behavior.
   "starline==0.1.5",
+  # RRULE recurrence expansion (custom/fam/fam/extcal.py `expand()`) --
+  # the Amina family assistant's iCloud CalDAV import: her recurring
+  # calendar events (RRULE) are expanded into concrete occurrences via
+  # `dateutil.rrule`, not translated into fam's own weekly-by-days
+  # `event_series`. Same custom/fam manifest note as `starline` above:
+  # this venv's pyproject.toml is the only one that governs its install.
+  # Already present transitively (botocore/croniter/mistralai all pull
+  # it), pinned explicitly here now that fam code imports it directly --
+  # exact version matches what's already resolved in uv.lock, so this is
+  # a declaration, not a version bump. Import is DEFERRED inside
+  # extcal.py (never at module top level): the Amina agent's Docker
+  # sandbox does not have this package until its image is separately
+  # rebuilt (see extcal.py's module docstring), and `import extcal` (and
+  # therefore every `fam` command via cli.py) must keep working there
+  # regardless.
+  "python-dateutil==2.9.0.post0",
   "fastapi>=0.104.0,<1",
   "uvicorn[standard]>=0.24.0,<1",
   # Streaming multipart uploads for the dashboard file manager (NS-501).

@@ -1,4 +1,5 @@
-"""iCloud CalDAV transport + read-only probe (Task 0 Steps 1-2 + Task 1).
+"""iCloud CalDAV transport + read-only probe + ICS parser/recurrence
+expansion (Task 0 Steps 1-2 + Task 1 + Task 2).
 
 Scope of THIS module, as landed so far:
   - `_request`     -- one raw HTTP request over CalDAV verbs (PROPFIND,
@@ -13,10 +14,17 @@ Scope of THIS module, as landed so far:
                        across her calendars and returns coarse counts
                        (timed/all_day/with_rrule/with_valarm/total). Writes
                        NOTHING to the DB and NOTHING to iCloud.
-
-ICS parsing here is deliberately crude (regex over raw VEVENT blocks) --
-the real streaming/unfolding parser is Task 2. `probe` only needs feature
-COUNTS, not correct values.
+  - `parse_ics`     -- Task 2: the REAL streaming/unfolding stdlib ICS
+                       parser (VEVENT only), producing `Component` dicts.
+                       `probe`'s own `_tally_ics` stays the crude
+                       regex-over-raw-text diagnostic it always was --
+                       it only ever needed coarse counts, not correctness,
+                       and is left alone per the task boundary.
+  - `expand`        -- Task 2: RRULE recurrence expansion (via
+                       `dateutil.rrule`, DEFERRED import -- see
+                       `_load_rrule_module`) of `Component`s into concrete
+                       `Occurrence`s inside a caller-given window, honoring
+                       EXDATE and RECURRENCE-ID overrides.
 
 Style/contract mirrors weather.py and geo2gis.py, the two existing network
 modules in this package:
@@ -36,6 +44,20 @@ modules in this package:
     written to disk by this module). It is folded into a Basic-auth header
     and nowhere else: never returned from any public function, never part
     of a repr, never part of an exception message or a stderr diagnostic.
+
+`python-dateutil` availability: `fam` runs inside the Amina agent's Docker
+sandbox, which does NOT have `python-dateutil` installed until the image is
+separately rebuilt (a later, production-rollout step -- not this task). So:
+  - `dateutil` is NEVER imported at module top level here -- only inside
+    `_load_rrule_module()`, called lazily by `expand()` and ONLY when a
+    component with an actual RRULE needs expanding. `import extcal` (and
+    therefore `cli.py`, and every other `fam` command) works with zero
+    recurring events in scope whether or not `dateutil` is installed;
+  - if `expand()` DOES need to expand an RRULE and `dateutil` turns out to
+    be missing, that is surfaced as an explicit sentinel entry in the
+    returned list (`{"error": "dateutil_missing", ...}`, `uid` is None) --
+    never a silently-empty/short result indistinguishable from "this
+    calendar genuinely has no recurring events".
 """
 import base64
 import os
@@ -47,6 +69,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlsplit
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as _xml_escape
+from zoneinfo import ZoneInfo
 
 # ---- constants -------------------------------------------------------
 
@@ -751,3 +774,492 @@ def probe(cfg, request=None):
             f"calendar(s) by url/name -- check spelling/case in config")
 
     return {"calendars": calendars_out, "counts": counts, "errors": errors}
+
+
+# ---- ICS parsing (Task 2) -------------------------------------------------
+#
+# Stdlib-only, single-pass over unfolded content lines. A Component is a
+# plain dict (not a class), so it round-trips freely through tests and
+# other modules without importing a private type:
+#
+#   {uid, summary, location, status, seq, has_alarm,
+#    dtstart_utc, dtend_utc, all_day,
+#    recurrence_id_utc, exdates_utc, rrule}
+#
+# Every datetime field on a Component is an AWARE UTC `datetime` object
+# (never naive, never a string) -- the datetime-vs-ISO-string boundary is
+# `expand()`'s OUTPUT only (Occurrence), matching how `cal.py` itself works
+# with aware datetimes internally but stores/exchanges start_utc/end_utc as
+# ISO strings.
+#
+# `parse_ics` never raises: input that isn't ICS at all, a truncated
+# BEGIN with no matching END, or any other garbage degrades to `[]`; a
+# single malformed VEVENT inside an otherwise-good feed is dropped (see
+# `_finalize_component`) without losing its siblings.
+
+ALMATY = ZoneInfo("Asia/Almaty")
+
+
+def _unfold(text):
+    """RFC 5545 line unfolding: a line break immediately followed by a
+    single SPACE or TAB is a FOLD, not a real line break -- the SPACE/TAB
+    is removed and the two physical lines rejoin into one logical content
+    line. Real-world feeds are inconsistent about CRLF vs bare LF/CR, so
+    all three are normalized to `\\n` first.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    out = []
+    for line in text.split("\n"):
+        if line[:1] in (" ", "\t") and out:
+            out[-1] += line[1:]
+        else:
+            out.append(line)
+    return out
+
+
+def _split_property_line(line):
+    """One unfolded content line -> (NAME, {PARAM: value}, raw_value), or
+    None if there is no unquoted top-level colon at all (not a property
+    line -- e.g. stray garbage). Param NAMES are upper-cased for matching;
+    param VALUES keep their original case (TZID is case-sensitive, e.g.
+    `Asia/Almaty`), with surrounding quotes stripped if present.
+    """
+    in_quotes = False
+    split_at = None
+    for i, ch in enumerate(line):
+        if ch == '"':
+            in_quotes = not in_quotes
+        elif ch == ":" and not in_quotes:
+            split_at = i
+            break
+    if split_at is None:
+        return None
+    head, value = line[:split_at], line[split_at + 1:]
+    parts = head.split(";")
+    name = parts[0].strip().upper()
+    if not name:
+        return None
+    params = {}
+    for part in parts[1:]:
+        if "=" not in part:
+            continue
+        pname, _, pval = part.partition("=")
+        pval = pval.strip()
+        if len(pval) >= 2 and pval[0] == '"' and pval[-1] == '"':
+            pval = pval[1:-1]
+        params[pname.strip().upper()] = pval
+    return name, params, value
+
+
+def _unescape_text(value):
+    """RFC 5545 TEXT unescaping: `\\\\` -> `\\`, `\\;` -> `;`, `\\,` -> `,`,
+    `\\n`/`\\N` -> newline. An unrecognized escape is left exactly as
+    written (lenient -- a third-party feed's minor quirk here must not
+    lose the whole event).
+    """
+    if not value:
+        return ""
+    out = []
+    i, n = 0, len(value)
+    while i < n:
+        c = value[i]
+        if c == "\\" and i + 1 < n:
+            nxt = value[i + 1]
+            if nxt == "\\":
+                out.append("\\"); i += 2; continue
+            if nxt == ";":
+                out.append(";"); i += 2; continue
+            if nxt == ",":
+                out.append(","); i += 2; continue
+            if nxt in ("n", "N"):
+                out.append("\n"); i += 2; continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _parse_dt_value(raw, params):
+    """One DTSTART/DTEND/RECURRENCE-ID/EXDATE value -> (aware UTC
+    datetime, all_day) -- or (None, False) if unparseable. Never raises.
+
+      - `VALUE=DATE` (or a bare 8-digit value): all-day -- interpreted as
+        an Asia/Almaty calendar date at local midnight, converted to UTC
+        (documented assumption -- see task-2-report.md's Apple-format
+        assumptions list).
+      - a value ending in `Z`: already UTC, used as-is.
+      - `TZID=<iana-name>`: localized via `zoneinfo.ZoneInfo`, then
+        converted to UTC. An unresolvable TZID (unknown name, or no
+        system tzdata for it) falls back to Asia/Almaty rather than
+        failing the whole component.
+      - no `Z`, no `TZID`, no `VALUE=DATE` ("floating" time): assumed
+        Asia/Almaty local (documented assumption -- her devices/locale).
+    """
+    if not raw:
+        return None, False
+    raw = raw.strip()
+    value_type = (params.get("VALUE") or "").upper()
+    tzid = params.get("TZID")
+    try:
+        if value_type == "DATE" or (len(raw) == 8 and raw.isdigit()):
+            d = datetime.strptime(raw, "%Y%m%d")
+            local_midnight = d.replace(tzinfo=ALMATY)
+            return local_midnight.astimezone(timezone.utc), True
+        is_utc = raw.endswith("Z") or raw.endswith("z")
+        core = raw[:-1] if is_utc else raw
+        naive = datetime.strptime(core, "%Y%m%dT%H%M%S")
+        if is_utc:
+            return naive.replace(tzinfo=timezone.utc), False
+        tz = ALMATY
+        if tzid:
+            try:
+                tz = ZoneInfo(tzid)
+            except Exception:
+                tz = ALMATY  # unresolvable TZID -- fallback, not a failure
+        return naive.replace(tzinfo=tz).astimezone(timezone.utc), False
+    except Exception:
+        return None, False
+
+
+def _new_component():
+    return {
+        "uid": None, "summary": "", "location": "", "status": None,
+        "seq": 0, "has_alarm": False,
+        "dtstart_raw": None, "dtend_raw": None, "recurrence_id_raw": None,
+        "exdate_raws": [], "rrule": None,
+    }
+
+
+def _apply_property(cur, name, params, value):
+    if name == "UID":
+        cur["uid"] = _unescape_text(value.strip()) or None
+    elif name == "SUMMARY":
+        cur["summary"] = _unescape_text(value)
+    elif name == "LOCATION":
+        cur["location"] = _unescape_text(value)
+    elif name == "STATUS":
+        cur["status"] = value.strip().upper() or None
+    elif name == "SEQUENCE":
+        try:
+            cur["seq"] = int(value.strip())
+        except (ValueError, AttributeError):
+            cur["seq"] = 0
+    elif name == "DTSTART":
+        cur["dtstart_raw"] = (value, dict(params))
+    elif name == "DTEND":
+        cur["dtend_raw"] = (value, dict(params))
+    elif name == "RECURRENCE-ID":
+        cur["recurrence_id_raw"] = (value, dict(params))
+    elif name == "EXDATE":
+        for v in value.split(","):
+            v = v.strip()
+            if v:
+                cur["exdate_raws"].append((v, dict(params)))
+    elif name == "RRULE":
+        cur["rrule"] = value.strip() or None
+    # Everything else (DESCRIPTION, ORGANIZER, ATTENDEE, TRANSP, ...) is
+    # outside this module's declared field list -- silently ignored.
+
+
+def _finalize_component(cur):
+    """Raw-value dict -> resolved Component, or None if it lacks a UID or
+    a usable DTSTART (unusable as an occurrence either way -- this is
+    where a single malformed VEVENT inside an otherwise-good feed gets
+    dropped without losing its siblings).
+    """
+    if not cur["uid"]:
+        return None
+    dtstart_utc, all_day = (None, False)
+    if cur["dtstart_raw"]:
+        dtstart_utc, all_day = _parse_dt_value(*cur["dtstart_raw"])
+    if dtstart_utc is None:
+        return None
+    dtend_utc = None
+    if cur["dtend_raw"]:
+        dtend_utc, _ = _parse_dt_value(*cur["dtend_raw"])
+    if dtend_utc is None:
+        # Design doc edge case #4: no DTEND -> 1 hour default duration,
+        # regardless of all_day -- this is the literal fam convention
+        # (NOT RFC 5545's own "1 day" all-day default).
+        dtend_utc = dtstart_utc + timedelta(hours=1)
+    recurrence_id_utc = None
+    if cur["recurrence_id_raw"]:
+        recurrence_id_utc, _ = _parse_dt_value(*cur["recurrence_id_raw"])
+    exdates_utc = []
+    for raw, params in cur["exdate_raws"]:
+        dt, _ = _parse_dt_value(raw, params)
+        if dt is not None:
+            exdates_utc.append(dt)
+    return {
+        "uid": cur["uid"], "summary": cur["summary"], "location": cur["location"],
+        "status": cur["status"], "seq": cur["seq"], "has_alarm": cur["has_alarm"],
+        "dtstart_utc": dtstart_utc, "dtend_utc": dtend_utc, "all_day": all_day,
+        "recurrence_id_utc": recurrence_id_utc, "exdates_utc": exdates_utc,
+        "rrule": cur["rrule"],
+    }
+
+
+def parse_ics(text):
+    """Raw VCALENDAR text -> `list[Component]` (VEVENTs only -- VTODO/
+    VJOURNAL/VTIMEZONE are out of scope, matching the design doc). A
+    nested VALARM's own properties are skipped entirely (only its
+    PRESENCE, as `has_alarm`, is recorded); any other nested sub-component
+    is skipped the same defensive way.
+
+    Never raises: garbage input (not ICS, truncated, undecodable-as-text)
+    yields `[]`; a single malformed VEVENT inside an otherwise-good feed
+    is dropped (see `_finalize_component`) without losing its siblings.
+    """
+    if not text:
+        return []
+    try:
+        text = text.lstrip("﻿")  # tolerate a leading UTF-8 BOM
+        lines = _unfold(text)
+        components = []
+        cur = None
+        nested_depth = 0
+        for raw_line in lines:
+            if not raw_line:
+                continue
+            parsed = _split_property_line(raw_line)
+            if parsed is None:
+                continue
+            name, params, value = parsed
+
+            if name == "BEGIN":
+                kind = value.strip().upper()
+                if cur is None:
+                    if kind == "VEVENT":
+                        cur = _new_component()
+                    continue  # BEGIN:VCALENDAR/VTIMEZONE/... at top level
+                nested_depth += 1
+                if kind == "VALARM":
+                    cur["has_alarm"] = True
+                continue
+
+            if name == "END":
+                kind = value.strip().upper()
+                if cur is not None and nested_depth == 0 and kind == "VEVENT":
+                    finalized = _finalize_component(cur)
+                    if finalized is not None:
+                        components.append(finalized)
+                    cur = None
+                elif cur is not None and nested_depth > 0:
+                    nested_depth -= 1
+                continue
+
+            if cur is None or nested_depth > 0:
+                continue  # property outside any tracked VEVENT, or inside VALARM
+            _apply_property(cur, name, params, value)
+        return components
+    except Exception:
+        return []
+
+
+# ---- recurrence expansion (Task 2) ----------------------------------------
+#
+# `dateutil.rrule` is NEVER imported at module level -- see
+# `_load_rrule_module`'s docstring and the module docstring above. This
+# keeps `import extcal` (and therefore `cli.py`, and every other `fam`
+# command) working whether or not python-dateutil is installed.
+
+def _load_rrule_module():
+    """Deferred import -- the ONLY place in this module (or, transitively,
+    anywhere in `fam`'s import graph via cli.py) that touches `dateutil`.
+    Returns the `dateutil.rrule` module, or None if it isn't installed.
+    Never raises.
+    """
+    try:
+        from dateutil import rrule
+        return rrule
+    except ImportError:
+        return None
+
+
+def _coerce_utc_dt(value):
+    """Accept an aware/naive `datetime` OR an ISO-8601 string for a window
+    bound; a naive value is treated as already-UTC (the same forgiving
+    rule as `gate._parse_utc`), so a caller can pass either a `datetime`
+    or a plain ISO string produced elsewhere in `fam`. Returns None (never
+    raises) on anything unparseable.
+    """
+    if value is None:
+        return None
+    try:
+        dt = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _iso(dt):
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _occurrence_from(comp, start_utc, end_utc, recurrence_id_utc):
+    return {
+        "uid": comp["uid"],
+        "recurrence_id": _iso(recurrence_id_utc),
+        "title": comp.get("summary") or "",
+        "start_utc": _iso(start_utc),
+        "end_utc": _iso(end_utc),
+        "all_day": bool(comp.get("all_day")),
+        "location": comp.get("location") or "",
+        "status": comp.get("status"),
+        "seq": comp.get("seq") or 0,
+        "has_alarm": bool(comp.get("has_alarm")),
+    }
+
+
+def _expand_master(master, w_start_utc, w_end_utc, rrule_mod):
+    """One RRULE-bearing master Component -> list of (start_utc, end_utc)
+    tuples inside [w_start_utc, w_end_utc], with EXDATE already
+    subtracted. The RRULE is generated in Asia/Almaty LOCAL time (not raw
+    UTC) and only converted to UTC per-result -- Almaty has a fixed UTC+5
+    offset with no DST (see meds.py's own
+    `_ALMATY = timezone(timedelta(hours=5))`), so this is not a
+    DST-correctness fix, it's a day-ROLLOVER fix: evaluating a
+    BYMONTHDAY/BYDAY rule directly against a UTC-shifted dtstart could
+    land on the wrong calendar day for an early-morning local event (e.g.
+    01:00 Almaty is still 20:00 UTC the PREVIOUS day). Generating in local
+    time and converting each result back to UTC avoids that entirely.
+
+    Never raises: an unparseable/unsupported RRULE string yields `[]`
+    (that master silently contributes nothing rather than aborting the
+    whole `expand()` call).
+    """
+    dtstart_utc = master["dtstart_utc"]
+    duration = (master["dtend_utc"] - dtstart_utc) if master["dtend_utc"] else timedelta(hours=1)
+    dtstart_local = dtstart_utc.astimezone(ALMATY)
+    try:
+        rule = rrule_mod.rrulestr(f"RRULE:{master['rrule']}", dtstart=dtstart_local)
+        starts_local = rule.between(w_start_utc.astimezone(ALMATY),
+                                     w_end_utc.astimezone(ALMATY), inc=True)
+    except Exception:
+        return []
+    exdates_utc = master.get("exdates_utc") or []
+    out = []
+    for start_local in starts_local:
+        start_utc = start_local.astimezone(timezone.utc)
+        if any(abs((start_utc - ex).total_seconds()) < 1 for ex in exdates_utc):
+            continue
+        out.append((start_utc, start_utc + duration))
+    return out
+
+
+# Sentinel returned (as one EXTRA list entry, never in place of real
+# occurrences) when `expand()` needed to expand at least one RRULE master
+# and `python-dateutil` was not importable -- task brief hard requirement
+# #3: absence of the library must never look like "zero recurrences".
+# Every normal Occurrence key is present (so a caller that merely does
+# `occ.get("title")` etc. without special-casing this never KeyErrors),
+# but `uid` is None -- which a real occurrence (parse_ics drops anything
+# without a UID) can never be -- and the extra `"error"`/`"detail"` keys
+# make it unambiguous on inspection.
+_DATEUTIL_MISSING_OCCURRENCE = {
+    "uid": None, "recurrence_id": None, "title": None,
+    "start_utc": None, "end_utc": None, "all_day": None,
+    "location": None, "status": "error", "seq": None, "has_alarm": None,
+}
+
+
+def expand(components, window_start, window_end):
+    """`list[Component]` -> `list[Occurrence]` inside [window_start,
+    window_end] (inclusive at both ends; either bound may be an
+    aware/naive `datetime` or an ISO-8601 string). `Occurrence` =
+    `{uid, recurrence_id, title, start_utc, end_utc, all_day, location,
+    status, seq, has_alarm}` -- `start_utc`/`end_utc`/`recurrence_id` are
+    ISO-8601 UTC strings (matching how `cal.py` stores/exchanges events),
+    or None only in the dateutil-missing sentinel described below.
+
+    Never raises. RRULE handling:
+      - an RRULE-bearing component with no RECURRENCE-ID is a "master" --
+        expanded via `dateutil.rrule` (deferred import) into individual
+        occurrences across the window, EXDATE removed, each carrying its
+        own `recurrence_id` (its ORIGINAL, un-overridden start) so a
+        caller can key any single instance by (uid, recurrence_id) --
+        matching the design doc's "ключ вхождения" convention.
+      - a component WITH a RECURRENCE-ID is an override: it REPLACES the
+        master's generated occurrence at that original slot (never
+        emitted alongside it), and its OWN (possibly moved) start/end
+        decides window visibility -- an instance moved INTO the window
+        appears even if its original slot was outside it, and vice versa.
+      - a component with neither RRULE nor RECURRENCE-ID is a plain
+        single occurrence, included iff its own start falls in the window.
+      - `STATUS:CANCELLED` is carried through as the occurrence's
+        `status`, never used to drop it from the result here -- deciding
+        cancel-vs-drop is `plan_changes`' job (a later task), not this
+        one's.
+
+    dateutil-missing guard (task brief hard requirement #3): if ANY
+    RRULE-bearing master needed expanding and `python-dateutil` is not
+    importable, this does NOT silently return an empty/partial list as if
+    there were simply no recurrences -- exactly one extra dict is
+    appended (see `_DATEUTIL_MISSING_OCCURRENCE`), distinguishable from a
+    real occurrence by `uid is None` or by the presence of an `"error"`
+    key. Every non-recurring component (singles, overrides) is still
+    expanded normally in this case; only the RRULE masters are skipped.
+    """
+    w_start = _coerce_utc_dt(window_start)
+    w_end = _coerce_utc_dt(window_end)
+    if w_start is None or w_end is None or not components:
+        return []
+
+    masters, overrides_by_uid, singles = [], {}, []
+    for comp in components:
+        if not comp or not comp.get("uid") or comp.get("dtstart_utc") is None:
+            continue
+        if comp.get("recurrence_id_utc") is not None:
+            overrides_by_uid.setdefault(comp["uid"], []).append(comp)
+        elif comp.get("rrule"):
+            masters.append(comp)
+        else:
+            singles.append(comp)
+
+    occurrences = []
+    dateutil_missing = False
+    rrule_mod = _load_rrule_module() if masters else None
+    if masters and rrule_mod is None:
+        dateutil_missing = True
+
+    for master in masters:
+        if rrule_mod is None:
+            continue
+        overrides = {ov["recurrence_id_utc"]: ov
+                     for ov in overrides_by_uid.get(master["uid"], [])}
+        for start_utc, end_utc in _expand_master(master, w_start, w_end, rrule_mod):
+            if any(abs((rid - start_utc).total_seconds()) < 1 for rid in overrides):
+                continue  # replaced by an override, emitted separately below
+            occurrences.append(_occurrence_from(master, start_utc, end_utc,
+                                                 recurrence_id_utc=start_utc))
+
+    for ovs in overrides_by_uid.values():
+        for ov in ovs:
+            start_utc = ov["dtstart_utc"]
+            end_utc = ov["dtend_utc"] or (start_utc + timedelta(hours=1))
+            if not (w_start <= start_utc <= w_end):
+                continue
+            occurrences.append(_occurrence_from(
+                ov, start_utc, end_utc, recurrence_id_utc=ov["recurrence_id_utc"]))
+
+    for single in singles:
+        start_utc = single["dtstart_utc"]
+        end_utc = single["dtend_utc"] or (start_utc + timedelta(hours=1))
+        if not (w_start <= start_utc <= w_end):
+            continue
+        occurrences.append(_occurrence_from(single, start_utc, end_utc,
+                                             recurrence_id_utc=None))
+
+    if dateutil_missing:
+        sentinel = dict(_DATEUTIL_MISSING_OCCURRENCE)
+        sentinel["error"] = "dateutil_missing"
+        sentinel["detail"] = (
+            "python-dateutil not installed; RRULE recurrences could not "
+            "be expanded (non-recurring components were still processed)")
+        occurrences.append(sentinel)
+
+    occurrences.sort(key=lambda o: o.get("start_utc") or "")
+    return occurrences
