@@ -1110,7 +1110,7 @@ def _finalize_with_ops_plan(
     completion_allowed: bool = True,
     candidate_complete: bool = True,
     blocked_reason: str | None = None,
-) -> Path:
+) -> tuple[Path, object]:
     """Drive `_finalize_loop_result` the way the loop does, carrying an ops plan.
 
     Mirrors the commit-gate marker tests: the plan is threaded in as a keyword
@@ -1130,7 +1130,7 @@ def _finalize_with_ops_plan(
     )
     repo_dir = tmp_path / "repo"
 
-    module._finalize_loop_result(
+    result = module._finalize_loop_result(
         fuse=module.PipelineExecutionFuseResult(
             execution_mode="autonomous",
             actual_invocation_allowed=True,
@@ -1167,7 +1167,7 @@ def _finalize_with_ops_plan(
         repo_path=str(repo_dir),
         ops_plan=ops_plan,
     )
-    return repo_dir
+    return repo_dir, result
 
 
 def test_finalize_writes_an_ops_pending_marker_for_a_mutating_plan(tmp_path: Path, monkeypatch) -> None:
@@ -1175,7 +1175,7 @@ def test_finalize_writes_an_ops_pending_marker_for_a_mutating_plan(tmp_path: Pat
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
     ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
 
-    repo_dir = _finalize_with_ops_plan(
+    repo_dir, _result = _finalize_with_ops_plan(
         module=module,
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
@@ -1252,6 +1252,76 @@ def test_finalize_without_an_ops_plan_leaves_the_commit_gate_untouched(tmp_path:
     )
 
     assert ops_gate_service.get_pending() is None
+
+
+def test_finalize_delivers_the_ops_plan_in_the_final_response(tmp_path: Path, monkeypatch) -> None:
+    """Маркер без отрисованного плана = «выполни» вслепую: оператор одобрил бы
+    операции, которых не видел. Гейт и текст обязаны появляться вместе."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+
+    repo_dir, result = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-message-1",
+        ops_plan=[
+            {"op_id": "git_push", "risk": "mutate",
+             "argv": ["git", "push", "origin", "local/customizations"],
+             "description": "опубликовать local/customizations", "irreversible": None},
+        ],
+        original_task="запушь текущую ветку в origin",
+    )
+
+    text = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert "ПЛАН ОПЕРАЦИЙ" in text
+    assert "git push origin local/customizations" in text  # то, что уйдёт в execve
+    assert "запушь текущую ветку в origin" in text  # дословный запрос рядом с планом
+    assert str(repo_dir) in text
+    assert "«выполни»" in text
+    assert ops_gate_service.get_pending() is not None
+
+
+def test_finalize_read_only_plan_adds_no_ops_block_to_the_final_response(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    _repo_dir, result = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-message-2",
+        ops_plan=[{"op_id": "git_status", "risk": "read", "argv": ["git", "status"]}],
+        original_task="покажи статус",
+    )
+
+    text = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert "ПЛАН ОПЕРАЦИЙ" not in text
+
+
+def test_finalize_destroy_plan_asks_for_the_operation_id_in_the_final_response(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    _repo_dir, result = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-message-3",
+        ops_plan=[
+            {"op_id": "git_branch_delete", "risk": "destroy",
+             "argv": ["git", "branch", "-D", "old"], "description": "удалить ветку old",
+             "irreversible": "невлитые коммиты восстановимы только по SHA"},
+        ],
+        original_task="удали ветку old",
+    )
+
+    text = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert "«подтверждаю git_branch_delete»" in text
+    assert "невлитые коммиты" in text
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:

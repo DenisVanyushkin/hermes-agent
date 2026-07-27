@@ -5,8 +5,11 @@
 """
 
 import subprocess
+import time
 import types
 from pathlib import Path
+
+import pytest
 
 from gateway.run import GatewayRunner
 from hermes_cli import commit_gate_service, ops_gate_service
@@ -146,9 +149,141 @@ def test_confirmation_of_another_operation_does_not_run_the_plan(tmp_path, monke
 
     ack = GatewayRunner._build_ops_approval_ack("подтверждаю git_tag_delete", _source())
 
+    # Подтверждение не этого плана -- не ответ гейту: обычный путь продолжается.
+    assert ack is None
     assert "doomed" in _branches(repo)
     assert ops_gate_service.get_pending() is not None
-    assert ack is None or "подтверждаю git_branch_delete" in ack
+
+
+def test_execution_stops_at_the_first_non_zero_exit_and_clears_the_marker(tmp_path, monkeypatch):
+    """Остальные операции могли опираться на упавшую — их не выполняем, а маркер
+    снимаем: ответ на него прогнал бы уже выполненную часть плана заново."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _record(repo, [
+        _create_op("first-ok"),
+        # `git branch -D` несуществующей ветки -> ненулевой exit, без исключения.
+        {"op_id": "git_branch_delete_missing", "risk": "mutate",
+         "argv": ["git", "branch", "-D", "no-such-branch"],
+         "description": "падающая операция", "irreversible": None},
+        _create_op("never-created"),
+    ])
+
+    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+
+    assert ack is not None
+    assert "first-ok" in _branches(repo)
+    assert "never-created" not in _branches(repo)
+    assert "never-created" not in ack.split("Не выполнялись:")[0]
+    assert "Не выполнялись:" in ack
+    assert ops_gate_service.get_pending() is None
+
+
+def test_a_raising_operation_still_clears_the_marker_and_acks(tmp_path, monkeypatch):
+    """Не только OpsExecutionError: отсутствующий бинарник даёт FileNotFoundError.
+    Если он утечёт наружу, оператор получит None при уже выполненной части плана,
+    а взведённый маркер прогонит план повторно на следующее «выполни»."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _record(repo, [
+        _create_op("ran-before-the-crash"),
+        {"op_id": "missing_binary", "risk": "mutate",
+         "argv": ["hermes-no-such-binary-xyz", "restart"],
+         "description": "несуществующий бинарник", "irreversible": None},
+        _create_op("after-the-crash"),
+    ])
+
+    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+
+    assert ack is not None
+    assert "missing_binary" in ack
+    assert "ran-before-the-crash" in _branches(repo)
+    assert "after-the-crash" not in _branches(repo)
+    assert ops_gate_service.get_pending() is None
+
+
+def test_plan_with_two_destroy_operations_is_refused_and_disarmed(tmp_path, monkeypatch):
+    """Одно сообщение подтверждает ровно один id, поэтому такой план неотвечаем.
+    Взведённый маркер, на который нельзя ответить, хуже отсутствующего."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "branch", "doomed")
+    _record(repo, [
+        _delete_op(),
+        {"op_id": "git_tag_delete", "risk": "destroy", "argv": ["git", "tag", "-d", "v1"],
+         "description": "удалить тег", "irreversible": "тег восстанавливать вручную"},
+    ])
+
+    ack = GatewayRunner._build_ops_approval_ack("подтверждаю git_branch_delete", _source())
+
+    assert ack is not None
+    assert "git_tag_delete" in ack
+    assert "doomed" in _branches(repo)
+    assert ops_gate_service.get_pending() is None
+
+
+def test_empty_repo_path_falls_back_to_the_repo_root_not_the_process_cwd(tmp_path, monkeypatch):
+    """Path("") -> "." -- это была бы произвольная текущая директория процесса.
+    Пустой путь означает «неизвестно», поэтому берётся тот же фолбэк, что у
+    коммитного гейта: корень репозитория, в котором лежит gateway/run.py."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    ops_gate_service.record_pending(
+        session_id="sess-1", repo_path="", plan=[_create_op("must-not-exist")],
+        original_task="сделай это",
+    )
+    seen = {}
+
+    def _fake_execute(operation, *, cwd, **kwargs):
+        seen["cwd"] = Path(cwd)
+        return {"op_id": operation.op_id, "status": 0, "output": "", "truncated": False}
+
+    monkeypatch.setattr("hermes_cli.ops_executor.execute_operation", _fake_execute)
+
+    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+
+    assert ack is not None
+    assert seen["cwd"] not in (Path(""), Path("."))
+    assert seen["cwd"].is_absolute()
+    assert (seen["cwd"] / "gateway" / "run.py").exists()
+
+
+def test_unresolvable_repo_path_is_refused_and_disarmed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    ops_gate_service.record_pending(
+        session_id="sess-1", repo_path=str(tmp_path / "gone"),
+        plan=[_create_op("must-not-exist")], original_task="сделай это",
+    )
+    monkeypatch.setattr(
+        "hermes_cli.ops_executor.execute_operation",
+        lambda *a, **k: pytest.fail("операция не должна выполняться без рабочей директории"),
+    )
+
+    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+
+    assert ack is not None
+    assert "Не выполняю" in ack
+    assert ops_gate_service.get_pending() is None
+
+
+def test_expired_marker_is_not_answerable(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    ops_gate_service.record_pending(
+        session_id="sess-1",
+        repo_path=str(repo),
+        plan=[_create_op("expired-plan")],
+        original_task="сделай это",
+        created_at=time.time() - ops_gate_service.PENDING_TTL_SECONDS - 60,
+    )
+
+    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+
+    assert ack is None
+    assert "expired-plan" not in _branches(repo)
 
 
 def test_slack_non_operator_reply_is_ignored(tmp_path, monkeypatch):

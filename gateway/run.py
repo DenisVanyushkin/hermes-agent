@@ -20482,7 +20482,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from pathlib import Path as _Path
             from hermes_cli import ops_gate_service
             from hermes_cli.ops_catalog import ResolvedOperation
-            from hermes_cli.ops_executor import OpsExecutionError, execute_operation
+            from hermes_cli.ops_executor import execute_operation
 
             action = ops_gate_service.parse_ops_reply(message)
             # «подтверждаю <op_id>» -- тоже ответ гейту, но parse_ops_reply о нём
@@ -20535,6 +20535,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not action and not confirmed:
                 # Префикс совпал, но это подтверждение не этого плана.
                 return None
+            if len(destroy_ids) > 1:
+                # Одно сообщение подтверждает ровно один id: parse_destroy_confirmation
+                # требует, чтобы сообщение было целиком «подтверждаю <op_id>». Значит
+                # такой план неотвечаем в принципе -- взведённый маркер, на который
+                # нельзя ответить, хуже отсутствующего (он ещё час ловит ответы и
+                # отвечает отказом). Снимаем и просим разбить план.
+                ops_gate_service.clear_pending()
+                listed = ", ".join(destroy_ids)
+                return (
+                    f"⛔ Не выполняю: в плане больше одной необратимой операции ({listed}). "
+                    "За раз подтверждается одна — перезапроси план по частям. Маркер снят."
+                )
+
             unconfirmed = [op_id for op_id in destroy_ids if op_id not in confirmed]
             if unconfirmed:
                 # Деструктив не выполняется по «выполни»: нужен явный эхо-повтор id.
@@ -20542,30 +20555,69 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 needed = ", ".join(f"«подтверждаю {op_id}»" for op_id in unconfirmed)
                 return f"⛔ Не выполняю: план содержит необратимые операции. Ответь {needed}."
 
-            repo = _Path(str(pending.get("repo_path") or ""))
-            lines = []
-            for item in plan:
-                operation = ResolvedOperation(
-                    op_id=str(item.get("op_id")),
-                    risk=str(item.get("risk")),
-                    argv=tuple(item.get("argv") or ()),
-                    description=str(item.get("description") or ""),
-                    irreversible=item.get("irreversible"),
+            # Path("") -> "." -- в проде это живой чекаут hermes-agent. Пустой
+            # repo_path означает «неизвестно», а не «текущая директория», поэтому
+            # тот же фолбэк, что у коммитного гейта, и отказ вместо догадки, если
+            # даже он не указывает на существующую директорию.
+            repo_raw = str(pending.get("repo_path") or "").strip()
+            repo = _Path(repo_raw) if repo_raw else _Path(__file__).resolve().parent.parent
+            if not repo.is_dir():
+                ops_gate_service.clear_pending()
+                return (
+                    f"⛔ Не выполняю: рабочая директория плана не определена ({repo_raw or 'пусто'}). "
+                    "Маркер снят — перезапроси операцию."
                 )
-                try:
-                    result = execute_operation(operation, cwd=repo)
-                except OpsExecutionError as exc:
-                    lines.append(f"❌ {operation.op_id}: {exc}")
-                    break  # первая ошибка останавливает план: остальное могло на неё опираться
-                marker = "✅" if result["status"] == 0 else "⚠️"
-                lines.append(f"{marker} {operation.op_id} (exit {result['status']})")
-                if result["output"]:
-                    lines.append(f"```\n{result['output']}\n```")
-                if result["status"] != 0:
-                    break
-            ops_gate_service.clear_pending()
+
+            lines = []
+            stopped_at = None
+            try:
+                for index, item in enumerate(plan):
+                    operation = ResolvedOperation(
+                        op_id=str(item.get("op_id")),
+                        risk=str(item.get("risk")),
+                        argv=tuple(item.get("argv") or ()),
+                        description=str(item.get("description") or ""),
+                        irreversible=item.get("irreversible"),
+                    )
+                    try:
+                        result = execute_operation(operation, cwd=repo)
+                    except Exception as exc:  # noqa: BLE001
+                        # Широко, а не только OpsExecutionError: отсутствующий бинарник
+                        # даёт FileNotFoundError, нехватка прав -- PermissionError. Утечка
+                        # такого исключения во внешний except вернула бы None ПОСЛЕ того,
+                        # как часть плана уже выполнилась, и оставила бы маркер взведённым:
+                        # следующее «выполни» прогнало бы план с начала (второй
+                        # service_restart, второй force-push).
+                        lines.append(f"❌ {operation.op_id}: {type(exc).__name__}: {exc}")
+                        stopped_at = index
+                        break  # первая ошибка останавливает план: остальное могло на неё опираться
+                    marker = "✅" if result["status"] == 0 else "⚠️"
+                    lines.append(f"{marker} {operation.op_id} (exit {result['status']})")
+                    if result["output"]:
+                        lines.append(f"```\n{result['output']}\n```")
+                    if result["status"] != 0:
+                        stopped_at = index
+                        break
+            finally:
+                # Исполнение началось -- маркер больше не должен быть отвечаемым ни при
+                # каком исходе: ответ на него повторил бы уже выполненные операции.
+                ops_gate_service.clear_pending()
+            if stopped_at is not None:
+                skipped = [str(item.get("op_id")) for item in plan[stopped_at + 1:]]
+                lines.append(
+                    "⏹ План остановлен на первой ошибке, маркер снят."
+                    + (
+                        f" Не выполнялись: {', '.join(skipped)} — перезапроси их отдельно."
+                        if skipped
+                        else ""
+                    )
+                )
             return "\n".join(lines) or "Нечего выполнять."
         except Exception:
+            # Возврат None здесь корректен только ДО начала исполнения: всё, что
+            # может упасть после первой запущенной операции, ловится внутри цикла,
+            # а маркер снимается в finally, поэтому «тихий» None уже не может
+            # привести к повторному прогону выполненной части плана.
             logger.warning("ops approval intercept failed", exc_info=True)
             return None
 
@@ -21288,9 +21340,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # оставить оба маркера (правки файлов + мутирующий план), а отвечают на
         # них обычным текстом, и наборы слов пересекаются.
         #  1) Парсер ops строгий (сообщение должно БЫТЬ ответом целиком), а
-        #     коммитный ищет подстроку. Поэтому только этот порядок безопасен:
-        #     «подтверждаю git_push_force_with_lease» содержит "push" и был бы
-        #     прочитан коммитным гейтом как «закоммить и запушь».
+        #     коммитный ищет подстроку в сообщении до 40 символов. Строгий парсер
+        #     идёт первым: он не может забрать чужой ответ, а подстрочный -- может,
+        #     поэтому право первого отказа принадлежит тому, кто ошибается реже.
         #  2) Слова аппрува не пересекаются («выполни» vs «коммить/запушь»), так
         #     что ops-интерцепт возвращает None на коммитных ответах и живой
         #     коммитный путь не меняется.

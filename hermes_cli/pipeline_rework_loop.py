@@ -2346,6 +2346,11 @@ def _render_change_section(git_gate, safe_packet) -> list[str]:
     return lines
 
 
+def _join_with_ops_block(lines: list[str], ops_block: str) -> str:
+    text = "\n".join(lines)
+    return f"{text}\n\n{ops_block}" if ops_block else text
+
+
 def _completion_allowed_final_response_text(
     *,
     git_gate: dict[str, Any] | None,
@@ -2353,6 +2358,9 @@ def _completion_allowed_final_response_text(
     reviewer_packet: dict[str, Any] | None,
     review_iterations_completed: int = 0,
     model_escalations_used: int = 0,
+    ops_plan: list[dict[str, Any]] | None = None,
+    repo_path: str | None = None,
+    original_task: str = "",
 ) -> str:
     # A run with no material repo changes is an investigation/Q&A, not a code
     # change waiting at the commit gate -- the commit-gate framing is misleading
@@ -2361,6 +2369,14 @@ def _completion_allowed_final_response_text(
     read_only_run = not bool(gate.get("material_changes_present")) and not [
         item for item in list(gate.get("changed_files") or []) if str(item).strip()
     ]
+
+    # Оператор обязан увидеть план, который одобряет: интерцепт исполняет его по
+    # обычному «выполни», поэтому неотрисованный план был бы выполнен вслепую.
+    # Тот же предикат, что поднимает маркер (_gated_ops_plan) -- сообщение и маркер
+    # не могут разойтись.
+    ops_block = _ops_gate_approval_block(
+        repo_path=repo_path, ops_plan=ops_plan, original_task=original_task
+    )
 
     # reviewer_packet is the safe metadata wrapper built by _reviewer_packet_metadata
     # ({present, packet_status, ..., safe_packet: {...}}); engineer_summary lives
@@ -2399,7 +2415,7 @@ def _completion_allowed_final_response_text(
         lines.extend(finding_lines)
         while lines and lines[-1] == "":
             lines.pop()
-        return "\n".join(lines)
+        return _join_with_ops_block(lines, ops_block)
 
     lines = [
         "✅ ЗАДАЧА ВЫПОЛНЕНА — ревьюер одобрил, жду твоего «коммить»",
@@ -2449,7 +2465,7 @@ def _completion_allowed_final_response_text(
     while lines and lines[-1] == "":
         lines.pop()
 
-    return "\n".join(lines)
+    return _join_with_ops_block(lines, ops_block)
 
 
 def _finalize_loop_result(
@@ -2504,6 +2520,9 @@ def _finalize_loop_result(
             reviewer_packet=reviewer_packet,
             review_iterations_completed=review_iterations_completed,
             model_escalations_used=model_escalations_used,
+            ops_plan=ops_plan,
+            repo_path=repo_path,
+            original_task=original_task,
         )
         if gate_reached
         else _blocked_final_response_text(
@@ -2611,6 +2630,44 @@ def _record_commit_gate_pending(
         pass
 
 
+def _gated_ops_plan(ops_plan: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """План, который обязан пройти операторский гейт, либо пустой список.
+
+    Единственное место, где живёт этот предикат: маркер и текст сообщения обязаны
+    подниматься по одному и тому же условию, иначе оператор получит план без
+    маркера (нечем ответить) или маркер без плана (ответ вслепую)."""
+    plan = [dict(item) for item in (ops_plan or []) if isinstance(item, dict)]
+    if not plan:
+        return []
+    if all(str(item.get("risk") or "") == "read" for item in plan):
+        return []
+    return plan
+
+
+def _ops_gate_approval_block(
+    *,
+    repo_path: str | None,
+    ops_plan: list[dict[str, Any]] | None,
+    original_task: str,
+) -> str:
+    """Отрисованный план для финального ответа; пустая строка, если гейт не поднят.
+
+    Best-effort как и сам маркер: сбой рендера не должен ронять финализацию."""
+    plan = _gated_ops_plan(ops_plan)
+    if not plan:
+        return ""
+    try:
+        from hermes_cli.ops_gate_message import render_ops_approval_message
+
+        return render_ops_approval_message({
+            "repo_path": str(repo_path or ""),
+            "plan": plan,
+            "original_task": str(original_task or ""),
+        })
+    except Exception:
+        return ""
+
+
 def _record_ops_gate_pending(
     *,
     session: PipelineSession,
@@ -2628,10 +2685,8 @@ def _record_ops_gate_pending(
     operator has seen the other half. Like the commit-gate marker, this can
     never break finalize -- the marker serves the reply intercept, not the
     pipeline's own correctness."""
-    plan = [dict(item) for item in (ops_plan or []) if isinstance(item, dict)]
+    plan = _gated_ops_plan(ops_plan)
     if not plan:
-        return
-    if all(str(item.get("risk") or "") == "read" for item in plan):
         return
     try:
         from hermes_cli import ops_gate_service
