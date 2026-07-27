@@ -65,6 +65,25 @@ def test_review_prompt_includes_persona_from_soul_path(tmp_path):
     assert "НЕ рекомендуй убирать теплоту" in captured["prompt"]
 
 
+def test_review_prompt_forbids_deriving_facts_from_corpus():
+    """Регресс 2026-07-27: ревьюер вывел «25 июля — день рождения Таи» из
+    дайджестов недельной давности и объявил ошибкой корректный дайджест,
+    в котором событий не было. ДР удалили из базы 20.07 — корпус (окно 7
+    дней по gate.sent) об этом знать не может. Корпус = образцы стиля;
+    правдивость проверяется только внутри одного сообщения (final vs raw)."""
+    captured = {}
+
+    def caller(prompt, cfg_):
+        captured["prompt"] = prompt
+        return json.dumps({"examples": [], "assessment": "x"})
+
+    brevity.review(CORPUS, CFG, caller=caller)
+    prompt = captured["prompt"]
+    assert "не источник истины" in prompt
+    assert "могли измениться или быть удалены" in prompt
+    assert "final с raw_text ОДНОГО И ТОГО ЖЕ сообщения" in prompt
+
+
 def test_review_prompt_falls_back_to_embedded_persona(tmp_path):
     missing = tmp_path / "nope" / "SOUL.md"
     cfg = dict(CFG, brevity_soul_path=str(missing))
