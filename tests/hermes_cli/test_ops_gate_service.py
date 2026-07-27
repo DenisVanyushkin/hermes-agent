@@ -63,3 +63,31 @@ def test_destroy_requires_the_operation_id_not_a_bare_yes():
 def test_operator_check_is_closed_when_uid_is_unset(monkeypatch):
     monkeypatch.delenv("HERMES_OPERATOR_SLACK_UID", raising=False)
     assert ops_gate_service.is_operator("U123") is False
+
+
+def test_destroy_confirmation_rejects_a_sentence_that_merely_mentions_the_op_id():
+    # "confirmed" starts with "confirm", and the op_id appears in the text --
+    # but this is a report of a past manual action, not an approval typed now.
+    assert ops_gate_service.parse_destroy_confirmation(
+        "confirmed, git_branch_delete was handled manually yesterday",
+        "git_branch_delete",
+    ) is False
+    # "подтверждающий" starts with "подтверждаю" -- same trap in Russian.
+    assert ops_gate_service.parse_destroy_confirmation(
+        "подтверждающий документ для git_branch_delete прикреплён",
+        "git_branch_delete",
+    ) is False
+
+
+def test_destroy_confirmation_op_id_match_is_word_bounded():
+    # op_id "git_push" must not be satisfied by a message that confirms a
+    # different, longer-named operation ("git_push_force") which merely
+    # starts with the same characters.
+    assert ops_gate_service.parse_destroy_confirmation(
+        "подтверждаю git_push_force", "git_push"
+    ) is False
+
+
+def test_parser_ignores_quoted_or_reported_speech():
+    # Reporting that someone else said the word is not an approval.
+    assert ops_gate_service.parse_ops_reply("он написал: выполни") is None

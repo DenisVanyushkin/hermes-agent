@@ -15,9 +15,14 @@ from typing import Any
 
 PENDING_TTL_SECONDS = 3600
 
-_EXECUTE_WORDS = ("выполни", "выполняй", "execute")
-_CANCEL_WORDS = ("отмена", "отмени", "отменить", "cancel", "не выполняй")
+# Exact, whole-message answer forms. The gate reply must BE the answer, not a
+# sentence that merely contains one of these words -- "он написал: выполни"
+# (quoted/reported speech) and "спасибо, выполнил задачу вчера" (an unrelated
+# sentence with the same root) must not approve anything.
+_EXECUTE_PHRASES = {"выполни", "выполняй", "execute", "да, выполняй"}
+_CANCEL_PHRASES = {"отмена", "отмени", "отменить", "cancel", "не выполняй"}
 _CONFIRM_PREFIXES = ("подтверждаю", "confirm")
+_TRAILING_PUNCT = ".,!?;:…»›\"')]}~"
 
 
 def _pending_path() -> Path:
@@ -72,33 +77,43 @@ def clear_pending() -> None:
         pass
 
 
-def _contains_word(t: str, words: tuple[str, ...]) -> bool:
-    # Word-boundary match, not substring: a naive `w in t` check makes
-    # "выполни" match inside "выполнил" ("...выполнил задачу вчера" is
-    # ordinary chat, not a gate reply), which is exactly the false-positive
-    # this parser exists to avoid.
-    return any(re.search(r"\b" + re.escape(w) + r"\b", t) for w in words)
+def _normalize(text: str) -> str:
+    """Strip surrounding whitespace and trailing punctuation, collapse internal
+    whitespace, casefold. Used so the gate matches the whole message, not a
+    substring buried inside a longer sentence."""
+    t = (text or "").strip()
+    t = t.rstrip(_TRAILING_PUNCT)
+    t = re.sub(r"\s+", " ", t)
+    return t.casefold()
 
 
 def parse_ops_reply(text: str) -> str | None:
     """Узкий парсер: возвращает 'execute' | 'cancel' | None.
 
-    None на всём, что не является недвусмысленным ответом гейту, чтобы обычная
-    переписка никогда не запускала операции.
+    Контракт: сообщение должно БЫТЬ ответом гейту целиком, а не просто
+    содержать нужное слово -- иначе цитата ("он написал: выполни") или
+    обычная фраза с тем же корнем ("выполнил задачу вчера") ошибочно
+    одобрили бы операцию. Всё вне явного набора форм -> None; оператор
+    перепечатывает точный ответ, ничего не выполняется молча.
     """
-    t = (text or "").strip().lower()
+    t = _normalize(text)
     if not t or len(t) > 40:
         return None
-    if _contains_word(t, _CANCEL_WORDS):
+    if t in _CANCEL_PHRASES:
         return "cancel"
-    if _contains_word(t, _EXECUTE_WORDS):
+    if t in _EXECUTE_PHRASES:
         return "execute"
     return None
 
 
 def parse_destroy_confirmation(text: str, op_id: str) -> bool:
-    """Деструктив требует эха id операции: короткое «да» ставят не глядя."""
-    t = (text or "").strip().lower()
-    if not any(t.startswith(prefix) for prefix in _CONFIRM_PREFIXES):
+    """Деструктив требует эха id операции: короткое «да» ставят не глядя.
+
+    Контракт узкий как и у parse_ops_reply: сообщение должно быть ровно
+    "<префикс> <op_id>", а не предложением, которое просто упоминает оба.
+    """
+    t = _normalize(text)
+    op = str(op_id or "").strip().casefold()
+    if not t or not op:
         return False
-    return str(op_id or "").strip().lower() in t
+    return any(t == f"{prefix} {op}" for prefix in _CONFIRM_PREFIXES)
