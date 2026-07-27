@@ -16,6 +16,15 @@ def test_review_block_shows_argv_and_the_original_request():
     assert "запушь текущую ветку в origin" in block
 
 
+def test_review_block_names_the_field_the_gate_actually_reads():
+    # findings -- свободные словари; ревьюер, назвавший поле code, молча пройдёт мимо
+    # блокировки, поэтому схема должна быть в тексте, а не только в голове автора.
+    block = render_ops_review_block([{"op_id": "git_push", "argv": ["git", "push"]}], "запушь")
+    assert '"type"' in block
+    for finding_type in OPS_HARD_FINDING_TYPES:
+        assert finding_type in block
+
+
 def test_hard_finding_blocks_regardless_of_severity():
     assert has_blocking_ops_finding([{"type": "ops_not_requested", "severity": "low"}]) is True
 

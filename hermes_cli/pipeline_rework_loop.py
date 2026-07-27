@@ -26,6 +26,7 @@ from hermes_cli.pipeline_one_step_execution import (
 )
 from hermes_cli.pipeline_git_delta import GitMaterialChangeResult, GitSnapshot, capture_git_snapshot, compare_git_snapshots
 from hermes_cli.pipeline_mutations import MutationDenied, apply_controlled_mutations
+from hermes_cli.ops_review import has_blocking_ops_finding, render_ops_review_block
 from hermes_cli.pipeline_report import (
     _mapping_list,
     _mapping_value,
@@ -50,6 +51,7 @@ from hermes_cli.subagent_runner import (
 
 SAFE_FALLBACK_MAX_REVIEW_ITERATIONS = 1
 REVIEWER_APPROVAL_STATUS = "candidate_complete"
+OPS_PLAN_BLOCKING_FINDING = "ops_plan_blocking_finding"
 ESCALATED_REVIEWER_SUBAGENT_ID = "hermes_code_reviewer_escalated"
 ESCALATED_REVIEWER_ROLE_ID = "reviewer"
 ESCALATED_REVIEWER_DECISION_APPROVED = "approved"
@@ -243,6 +245,7 @@ def execute_bounded_rework_loop(
     disagreements: list[dict[str, Any]] = []
     model_escalations: list[dict[str, Any]] = []
     pending_reviewer_blockers: list[str] = []
+    current_ops_plan: list[dict[str, Any]] = []
     invalid_output_retries_used = 0
     test_rework_iterations_used = 0
     peer_round_used = False
@@ -310,6 +313,9 @@ def execute_bounded_rework_loop(
         current_snapshot = engineer_result.state_snapshot
         _append_step_run(accumulated_subagent_runs, current_snapshot, 0)
         engineer_output = _step_structured_output(current_snapshot, 0)
+        # Read the plan off the bridge before the reviewer step reuses it: the plan is
+        # per-invocation state and the reviewer must be judged against THIS iteration's.
+        current_ops_plan = _engineer_ops_plan(runtime_context)
         try:
             current_mutation_summary = _apply_step_mutations(
                 step_kind="engineer",
@@ -631,6 +637,13 @@ def execute_bounded_rework_loop(
                 original_task=user_message,
                 peer_message=peer_message,
             )
+            # The peer round can approve and finalize without ever reaching the main
+            # reviewer step below -- leaving it unwired would be a bypass of the gate.
+            reviewer_message = _with_ops_review_block(
+                reviewer_message,
+                ops_plan=current_ops_plan,
+                original_task=user_message,
+            )
             reviewer_result = _execute_step(
                 config=config,
                 session=session,
@@ -718,9 +731,15 @@ def execute_bounded_rework_loop(
             reviewer_eval = getattr(reviewer_step, "evaluation_result", None) or {}
             reviewer_blockers = list(reviewer_eval.get("blockers") or [])
             reviewer_status = str(reviewer_eval.get("status") or "not_evaluated")
+            peer_reviewer_structured_output = _step_structured_output(current_snapshot, 1)
+            reviewer_blockers.extend(
+                item
+                for item in _ops_plan_blockers(peer_reviewer_structured_output, ops_plan=current_ops_plan)
+                if item not in reviewer_blockers
+            )
             current_reviewer_packet = _with_reviewer_findings(
                 current_reviewer_packet,
-                _extract_reviewer_findings(_step_structured_output(current_snapshot, 1)),
+                _extract_reviewer_findings(peer_reviewer_structured_output),
             )
             if reviewer_status == REVIEWER_APPROVAL_STATUS and not reviewer_blockers:
                 disagreements[-1]["status"] = "resolved"
@@ -964,6 +983,11 @@ def execute_bounded_rework_loop(
             engineer_message=engineer_message,
             appended_rework_context=appended_rework_context,
         )
+        reviewer_message = _with_ops_review_block(
+            reviewer_message,
+            ops_plan=current_ops_plan,
+            original_task=user_message,
+        )
         try:
             reviewer_result = _execute_step(
                 config=config,
@@ -1072,6 +1096,11 @@ def execute_bounded_rework_loop(
         reviewer_blockers = list(reviewer_eval.get("blockers") or [])
         reviewer_status = str(reviewer_eval.get("status") or "not_evaluated")
         reviewer_structured_output = _step_structured_output(current_snapshot, 1)
+        reviewer_blockers.extend(
+            item
+            for item in _ops_plan_blockers(reviewer_structured_output, ops_plan=current_ops_plan)
+            if item not in reviewer_blockers
+        )
         current_reviewer_packet = _with_reviewer_findings(
             current_reviewer_packet,
             _extract_reviewer_findings(reviewer_structured_output),
@@ -1520,6 +1549,69 @@ def _resolve_executor_bridge(executor_bridge: Any, subagent_id: str) -> Any:
             raise ExecutorBridgeResolutionError(f"executor_bridge_invalid:{subagent_id}")
         return selected
     raise ExecutorBridgeResolutionError("executor_bridge_invalid_configuration")
+
+
+def _engineer_ops_plan(runtime_context: ControlledRuntimeContext | None) -> list[dict[str, Any]]:
+    """Operations the engineer proposed during the engineer step just executed.
+
+    Read off the bridge instance rather than out of the step result: the plan is
+    structured data (op_id, risk class, argv) and ``SubagentRunnerResult`` -- shared
+    by every pipeline caller -- has no field to carry it. Best-effort by design: a
+    legacy runner, an unmapped bridge or a bridge without the attribute yields an
+    empty plan, which is exactly the pre-ops behaviour.
+    """
+    if runtime_context is None:
+        return []
+    try:
+        bridge = _resolve_executor_bridge(
+            getattr(runtime_context, "executor_bridge", None), ENGINEER_SUBAGENT_ID
+        )
+    except ExecutorBridgeResolutionError:
+        return []  # a bridge the loop cannot resolve is reported by the step itself
+    plan = getattr(bridge, "ops_plan", None)
+    if not isinstance(plan, list):
+        return []
+    return [dict(item) for item in plan if isinstance(item, Mapping)]
+
+
+def _with_ops_review_block(
+    reviewer_message: str,
+    *,
+    ops_plan: list[dict[str, Any]],
+    original_task: str,
+) -> str:
+    """Append the proposed operations and the VERBATIM user request to reviewer input.
+
+    Verbatim on purpose: the engineer's paraphrase of the task is precisely where an
+    over-broad plan hides, so the reviewer has to compare argv against the user's own
+    words and not against a summary of them.
+    """
+    if not ops_plan:
+        return reviewer_message
+    try:
+        return "\n\n".join([reviewer_message, render_ops_review_block(ops_plan, original_task)])
+    except Exception:
+        return reviewer_message  # rendering is best-effort; never break the review step
+
+
+def _ops_plan_blockers(
+    reviewer_structured_output: dict[str, Any],
+    *,
+    ops_plan: list[dict[str, Any]],
+) -> list[str]:
+    """Hard ops findings block regardless of the severity the reviewer assigned them.
+
+    Same policy as the review gates elsewhere in this codebase: the TYPE of the
+    finding blocks, not its severity. An operation nobody asked for is dangerous
+    however mildly the reviewer worded it.
+    """
+    if not ops_plan:
+        return []
+    try:
+        findings = _mapping_list((reviewer_structured_output or {}).get("findings"))
+    except Exception:
+        return []  # a malformed envelope is already handled by the reviewer fail-closed path
+    return [OPS_PLAN_BLOCKING_FINDING] if has_blocking_ops_finding(findings) else []
 
 
 def _execute_model_escalation_if_allowed(

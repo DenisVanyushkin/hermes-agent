@@ -30,6 +30,10 @@ def render_ops_review_block(plan: list[Mapping[str, Any]], original_task: str) -
         "Проверь: нет ли операций шире запроса (ops_not_requested); та ли цель "
         "(ops_wrong_target); верен ли класс риска (ops_risk_class_mismatch); "
         "обоснован ли деструктив (ops_unjustified_destroy).",
+        # Без явной схемы гейт не сработает: findings в конверте -- свободные словари,
+        # и ревьюер, назвавший поле code, молча пройдёт мимо блокировки.
+        'Нашёл такое -- добавь в findings объект с полем "type", равным одному из '
+        "этих четырёх идентификаторов: " + ", ".join(sorted(OPS_HARD_FINDING_TYPES)) + ".",
     ])
     return "\n".join(lines)
 

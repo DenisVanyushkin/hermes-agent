@@ -4997,3 +4997,142 @@ def test_commit_gate_strips_leaked_role_banner_from_summary() -> None:
     assert "Hermes role:" not in text
     assert "Operation category:" not in text
     assert "инженер не предоставил описание изменений" in text
+
+
+class _OpsPlanEngineerBridge:
+    """Callable bridge that carries an ops plan, like AIAgentSubagentExecutorBridge."""
+
+    def __init__(self, plan: list[dict[str, object]]) -> None:
+        self._plan = plan
+        self.ops_plan: list[dict[str, object]] = []
+
+    def __call__(self, _request, _runtime_plan):
+        self.ops_plan = [dict(item) for item in self._plan]
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _engineer_output()},
+        }
+
+
+_OPS_PLAN_FIXTURE = [
+    {
+        "op_id": "git_push",
+        "risk": "mutate",
+        "argv": ["git", "push", "origin", "main"],
+        "description": "опубликовать main",
+        "irreversible": None,
+    }
+]
+
+_OPS_VERBATIM_REQUEST = "запушь текущую ветку в origin, ничего больше не трогай"
+
+
+def test_reviewer_receives_the_ops_plan_and_the_verbatim_request(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    reviewer_messages: list[str] = []
+
+    def _reviewer_executor(request, _runtime_plan):
+        reviewer_messages.append(request.input_messages[0]["content"])
+        return {
+            "output_text": "approved",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=_OPS_VERBATIM_REQUEST,
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _OpsPlanEngineerBridge(_OPS_PLAN_FIXTURE),
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+        },
+    )
+
+    assert reviewer_messages, "reviewer must have been invoked"
+    assert "git push origin main" in reviewer_messages[0]
+    # Пересказ -- то место, где план расширяется; ревьюер обязан видеть дословный запрос.
+    assert _OPS_VERBATIM_REQUEST in reviewer_messages[0]
+
+
+def test_hard_ops_finding_blocks_even_when_the_reviewer_approves(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+
+    def _reviewer_executor(_request, _runtime_plan):
+        return {
+            "output_text": "approved",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": _reviewer_output_with_findings(
+                    blockers=[],
+                    findings=[{"type": "ops_not_requested", "severity": "low", "summary": "push никто не просил"}],
+                    status="succeeded",
+                    next_action="none",
+                )
+            },
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=_OPS_VERBATIM_REQUEST,
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _OpsPlanEngineerBridge(_OPS_PLAN_FIXTURE),
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+        },
+    )
+
+    assert "ops_plan_blocking_finding" in result.iteration_history[0].reviewer_blockers
+    assert result.candidate_complete is False
+    assert result.completion_allowed is False
+    assert result.blocked_reason == "reviewer_verdict_blocked"
+
+
+def test_empty_ops_plan_leaves_the_reviewer_input_untouched(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    reviewer_messages: list[str] = []
+
+    def _reviewer_executor(request, _runtime_plan):
+        reviewer_messages.append(request.input_messages[0]["content"])
+        return {
+            "output_text": "approved",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=_OPS_VERBATIM_REQUEST,
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _OpsPlanEngineerBridge([]),
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+        },
+    )
+
+    assert "ПЛАН ОПЕРАЦИЙ НА РЕВЬЮ" not in reviewer_messages[0]
+    assert result.candidate_complete is True
