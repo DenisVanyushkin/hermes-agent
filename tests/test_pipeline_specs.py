@@ -137,3 +137,16 @@ def test_default_pipeline_without_general_operator_fails(tmp_path: Path) -> None
     _write_yaml(pipeline_path, pipeline)
 
     _assert_validation_error(repo_root, "Default pipeline must reference general_operator as primary")
+
+
+def test_engineering_pipeline_declares_the_ops_states() -> None:
+    loaded = load_pipeline_specs(repo_root=REPO_ROOT)
+
+    spec = loaded.pipeline_specs["engineering_review_pipeline"]
+    states = set(spec["state_machine"]["states"])
+    assert {
+        "ops_plan_proposed",
+        "ops_approval_requested",
+        "ops_executed",
+        "ops_refused",
+    } <= states
