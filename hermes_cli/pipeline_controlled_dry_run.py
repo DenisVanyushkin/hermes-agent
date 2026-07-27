@@ -605,7 +605,7 @@ def _reviewer_output(*, blockers: list[str]) -> dict[str, Any]:
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(['git', '-C', str(repo), *args], check=True, text=True, capture_output=True)
+    return subprocess.run(['git', '-C', str(repo), *args], check=True, text=True, encoding="utf-8", capture_output=True)
 
 
 def _result_status(result: Any) -> str:

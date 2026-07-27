@@ -3125,8 +3125,8 @@ def _working_tree_diff(repo_path: str | None, *, max_chars: int = 4000, since_re
         diff_cmd = ["git", "-C", repo_path, "diff", since_ref]
     stat_cmd = ["git", "-C", repo_path, "diff", "--stat"] if not since_ref else ["git", "-C", repo_path, "diff", "--stat", since_ref]
     try:
-        stat = subprocess.run(stat_cmd, capture_output=True, text=True, errors="replace", timeout=15)
-        body = subprocess.run(diff_cmd, capture_output=True, text=True, errors="replace", timeout=15)
+        stat = subprocess.run(stat_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+        body = subprocess.run(diff_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
     except (OSError, subprocess.SubprocessError, ValueError):
         return ""
     if body.returncode != 0:

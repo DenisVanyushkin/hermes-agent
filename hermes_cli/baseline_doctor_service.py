@@ -107,7 +107,7 @@ def pop_pending(report_ts: str) -> list[dict] | None:
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, encoding="utf-8")
 
 
 def apply_action(repo: Path, action: str, remaining: list[dict]) -> dict:

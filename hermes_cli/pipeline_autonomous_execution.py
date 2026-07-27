@@ -206,7 +206,7 @@ def prepare_run_worktree(*, repo_root: Path, workspace: Path, run_id: str) -> Ru
     # `worktree add -b` would fail on an existing branch name.
     existing = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
-        cwd=repo_root, text=True, capture_output=True, check=False,
+        cwd=repo_root, text=True, encoding="utf-8", capture_output=True, check=False,
     ).returncode == 0
     if existing:
         _git(repo_root, "worktree", "add", str(workspace), branch)
@@ -228,7 +228,7 @@ class RunIntegration(SimpleNamespace):
 
 
 def _git_result(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
+    return subprocess.run(["git", *args], cwd=cwd, text=True, encoding="utf-8", capture_output=True, check=False)
 
 
 def _branch_exists(repo_root: Path, branch: str) -> bool:
@@ -551,13 +551,13 @@ def _allow_real_provider_execution(config: dict[str, Any] | None) -> bool:
 
 
 def _git(cwd: Path, *args: str) -> None:
-    result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
+    result = subprocess.run(["git", *args], cwd=cwd, text=True, encoding="utf-8", capture_output=True, check=False)
     if result.returncode != 0:
         raise ValueError("workspace_git_setup_failed")
 
 
 def _git_stdout(cwd: Path, *args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
+    result = subprocess.run(["git", *args], cwd=cwd, text=True, encoding="utf-8", capture_output=True, check=False)
     if result.returncode != 0:
         raise ValueError("workspace_git_setup_failed")
     return result.stdout.strip()

@@ -66,7 +66,7 @@ def parse_commit_reply(text: str) -> str | None:
     return None
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=str(repo), capture_output=True, text=True)
+    return subprocess.run(["git", *args], cwd=str(repo), capture_output=True, text=True, encoding="utf-8")
 
 def apply_commit(*, repo: Path, changed_files: list[str], commit_message: str, push: bool = False) -> dict[str, Any]:
     paths = [p for p in (changed_files or []) if str(p).strip()]
