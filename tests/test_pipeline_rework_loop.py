@@ -3,8 +3,11 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 import shutil
+import time
 from types import SimpleNamespace
 import subprocess
+
+import pytest
 
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
@@ -1110,6 +1113,7 @@ def _finalize_with_ops_plan(
     completion_allowed: bool = True,
     candidate_complete: bool = True,
     blocked_reason: str | None = None,
+    repo_path: Path | None = None,
 ) -> tuple[Path, object]:
     """Drive `_finalize_loop_result` the way the loop does, carrying an ops plan.
 
@@ -1128,7 +1132,7 @@ def _finalize_with_ops_plan(
         current_state="rework_loop_candidate_complete",
         session_id=session_id,
     )
-    repo_dir = tmp_path / "repo"
+    repo_dir = Path(repo_path) if repo_path is not None else tmp_path / "repo"
 
     result = module._finalize_loop_result(
         fuse=module.PipelineExecutionFuseResult(
@@ -1347,6 +1351,51 @@ def test_finalize_destroy_plan_asks_for_the_operation_id_in_the_final_response(
     text = result.execution_report.to_safe_dict()["final_response"]["text"]
     assert "«подтверждаю git_branch_delete»" in text
     assert "невлитые коммиты" in text
+
+
+def _ops_repo_with_run_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """Главный чекаут и per-run воркtree на hermes-run/*, как в autonomous-режиме."""
+    repo = tmp_path / "ops-main"
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Test User")
+    _git(repo, "config", "user.email", "test@example.com")
+    _write(repo, "tracked.txt", "baseline\n")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-q", "-m", "initial")
+    worktree = tmp_path / "autonomous-runs" / "3d5f0f4d"
+    _git(repo, "worktree", "add", "-q", "-b", "hermes-run/3d5f0f4d", str(worktree))
+    return repo, worktree
+
+
+def test_finalize_records_the_main_checkout_not_the_run_worktree(tmp_path: Path, monkeypatch) -> None:
+    """В autonomous-режиме repo_path прогона -- это воркtree на ветке hermes-run/*,
+    в которой исполнитель отказывается работать (refused_run_branch). Маркер обязан
+    хранить главный чекаут, иначе одобренный план невыполним; и он же обязан быть
+    показан оператору."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+    repo, worktree = _ops_repo_with_run_worktree(tmp_path)
+
+    _repo_dir, result = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-worktree-1",
+        ops_plan=[{"op_id": "git_push", "risk": "mutate",
+                   "argv": ["git", "push", "origin", "main"],
+                   "description": "опубликовать main", "irreversible": None}],
+        original_task="запушь ветку",
+        repo_path=worktree,
+    )
+
+    pending = ops_gate_service.get_pending()
+    assert pending is not None
+    assert pending["repo_path"] == str(repo)
+    text = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert f"cwd:  {repo}" in text
+    assert str(worktree) not in text
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:

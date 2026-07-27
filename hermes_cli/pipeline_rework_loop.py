@@ -2702,10 +2702,15 @@ def _record_ops_gate_pending(
         return
     try:
         from hermes_cli import ops_gate_service
+        from hermes_cli.ops_gate_message import resolve_operation_cwd
 
         ops_gate_service.record_pending(
             session_id=getattr(session, "pipeline_session_id", "") or "",
-            repo_path=str(repo_path or ""),
+            # Тот же резолвер, что подставил `cwd:` в показанное сообщение, и тот
+            # же, которым интерцепт возьмёт cwd. Резолвим ЗДЕСЬ, пока воркtree
+            # прогона ещё существует: ночной gc может убрать его до ответа
+            # оператора, а главный чекаут никуда не денется.
+            repo_path=resolve_operation_cwd(repo_path),
             plan=plan,
             original_task=str(original_task or ""),
         )

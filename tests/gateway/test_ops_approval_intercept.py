@@ -95,6 +95,53 @@ def test_execute_runs_the_plan_and_clears_the_marker(tmp_path, monkeypatch):
     assert ops_gate_service.get_pending() is None
 
 
+def test_plan_recorded_in_a_run_worktree_runs_in_the_main_checkout(tmp_path, monkeypatch):
+    """Прод пишет в маркер воркtree прогона (/tmp/hermes-gateway-autonomous-runs/...)
+    на ветке hermes-run/*, где исполнитель отказывается работать. Отказ остаётся --
+    чинится путь: операции обязаны выполняться в ГЛАВНОМ чекауте."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    worktree = tmp_path / "runs" / "3d5f0f4d"
+    _git(repo, "worktree", "add", "-q", "-b", "hermes-run/3d5f0f4d", str(worktree))
+    _record(worktree, [_create_op()])
+
+    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+
+    assert ack is not None
+    assert "refused_run_branch" not in ack
+    assert "ops-made-this" in _branches(repo)
+    assert ops_gate_service.get_pending() is None
+
+
+def test_operator_sees_the_directory_the_plan_actually_runs_in(tmp_path, monkeypatch):
+    """`cwd:` в сообщении и cwd исполнения -- один резолвер; расхождение означало
+    бы, что оператор одобрил операцию не там, где она произойдёт."""
+    from hermes_cli.ops_gate_message import render_ops_approval_message
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    worktree = tmp_path / "runs" / "9c1"
+    _git(repo, "worktree", "add", "-q", "-b", "hermes-run/9c1", str(worktree))
+    _record(worktree, [_create_op("shown-and-run")])
+    pending = ops_gate_service.get_pending()
+    shown = render_ops_approval_message(pending)
+
+    seen = {}
+
+    def _fake_execute(operation, *, cwd, **kwargs):
+        seen["cwd"] = Path(cwd)
+        return {"op_id": operation.op_id, "status": 0, "output": "", "truncated": False}
+
+    monkeypatch.setattr("hermes_cli.ops_executor.execute_operation", _fake_execute)
+
+    GatewayRunner._build_ops_approval_ack("выполни", _source())
+
+    assert f"cwd:  {seen['cwd']}" in shown
+    assert seen["cwd"] == repo
+
+
 def test_cancel_clears_the_marker_without_running_anything(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     repo = tmp_path / "repo"

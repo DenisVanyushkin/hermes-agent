@@ -18,11 +18,41 @@ def resolve_operation_cwd(repo_path: Any) -> str:
     в сообщение пусто нельзя: «где» -- половина смысла `git push` и
     `git reset --hard`. Фолбэк тот же, что у коммитного гейта: корень
     репозитория, в котором лежит этот модуль.
+
+    Записанный путь резолвится в ГЛАВНЫЙ чекаут репозитория. В autonomous-режиме
+    прогон живёт в per-run воркtree на ветке `hermes-run/*`, и именно этот путь
+    попадает в маркер; исполнитель такую ветку не обслуживает (refused_run_branch),
+    так что одобренный план оказался бы невыполним. Ops-операции адресованы
+    репозиторию, а не черновику одного прогона: `git push` публикует ветку
+    репозитория, `service_restart` вообще не про рабочее дерево. Побочно это
+    переживает уборку воркtree ночным gc между показом плана и ответом оператора.
     """
     raw = str(repo_path or "").strip()
     if raw:
-        return raw
+        return _main_checkout_or(raw)
     return str(Path(__file__).resolve().parent.parent)
+
+
+def _main_checkout_or(raw: str) -> str:
+    """Главный чекаут репозитория, которому принадлежит ``raw``; сам ``raw``,
+    если git не смог ответить (не репозиторий, каталога больше нет, git недоступен).
+
+    Резолвер один на весь гейт: `pipeline_autonomous_execution.main_checkout_of`
+    (`git rev-parse --git-common-dir`) -- тот же, которым коммитный гейт
+    отображает воркtree обратно на репозиторий. Импорт ленивый: модуль сообщения
+    обязан оставаться лёгким, а оба вызывающих процесса эту зависимость уже
+    держат. Операция идемпотентна, поэтому маркер может хранить уже
+    отрезолвленный путь, а интерцепт -- резолвить его второй раз.
+    """
+    try:
+        from hermes_cli.pipeline_autonomous_execution import main_checkout_of
+
+        resolved = main_checkout_of(Path(raw))
+    except Exception:
+        # Резолв -- уточнение, а не условие показа плана: его сбой не должен
+        # ни ронять рендер, ни прятать план от оператора.
+        return raw
+    return str(resolved) if resolved is not None else raw
 
 
 def render_ops_approval_message(pending: Mapping[str, Any]) -> str:

@@ -415,6 +415,25 @@ def _repo_root_of(workspace: Path) -> Path | None:
     return common.parent if common.name == ".git" else None
 
 
+def main_checkout_of(workspace: Path) -> Path | None:
+    """The repository's MAIN checkout for any path inside it, or None.
+
+    Public name for `_repo_root_of` -- the ops gate needs exactly this mapping
+    and must not grow a second implementation of it. A linked worktree (a per-run
+    `hermes-run/*` one included) resolves to the main worktree; the main worktree
+    resolves to itself, so applying this twice is a no-op. Anything git cannot
+    answer for (not a repository, missing directory, a repo whose common dir is
+    not named `.git`) is None -- the caller decides what to do with "unknown"
+    rather than getting a guess.
+    """
+    try:
+        return _repo_root_of(Path(workspace))
+    except OSError:
+        # A recorded path that no longer exists (the run worktree was swept)
+        # makes subprocess fail before git ever runs.
+        return None
+
+
 def land_run_branch_after_commit(
     *, workspace: Path, approved: bool
 ) -> RunIntegration | None:
