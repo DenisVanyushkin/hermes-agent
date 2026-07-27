@@ -1115,31 +1115,39 @@ def _occurrence_from(comp, start_utc, end_utc, recurrence_id_utc):
 
 
 def _expand_master(master, w_start_utc, w_end_utc, rrule_mod):
-    """One RRULE-bearing master Component -> list of (start_utc, end_utc)
-    tuples inside [w_start_utc, w_end_utc], with EXDATE already
-    subtracted. The RRULE is generated in Asia/Almaty LOCAL time (not raw
-    UTC) and only converted to UTC per-result -- Almaty has a fixed UTC+5
-    offset with no DST (see meds.py's own
-    `_ALMATY = timezone(timedelta(hours=5))`), so this is not a
-    DST-correctness fix, it's a day-ROLLOVER fix: evaluating a
-    BYMONTHDAY/BYDAY rule directly against a UTC-shifted dtstart could
-    land on the wrong calendar day for an early-morning local event (e.g.
-    01:00 Almaty is still 20:00 UTC the PREVIOUS day). Generating in local
-    time and converting each result back to UTC avoids that entirely.
+    """One RRULE-bearing master Component -> `(occurrence_tuples, error)`,
+    where `occurrence_tuples` is a list of `(start_utc, end_utc)` inside
+    [w_start_utc, w_end_utc] with EXDATE already subtracted, and `error` is
+    `None` on success or a short diagnostic string on failure. The RRULE is
+    generated in Asia/Almaty LOCAL time (not raw UTC) and only converted to
+    UTC per-result -- Almaty has a fixed UTC+5 offset with no DST (see
+    meds.py's own `_ALMATY = timezone(timedelta(hours=5))`), so this is not
+    a DST-correctness fix, it's a day-ROLLOVER fix: evaluating a
+    BYMONTHDAY/BYDAY rule directly against a UTC-shifted dtstart could land
+    on the wrong calendar day for an early-morning local event (e.g. 01:00
+    Almaty is still 20:00 UTC the PREVIOUS day). Generating in local time
+    and converting each result back to UTC avoids that entirely.
 
-    Never raises: an unparseable/unsupported RRULE string yields `[]`
-    (that master silently contributes nothing rather than aborting the
-    whole `expand()` call).
+    Never raises: an unparseable/unsupported RRULE string (a real Apple
+    quirk `dateutil.rrulestr` doesn't accept -- non-standard BYSETPOS, an
+    unusual WKST, a floating-time UNTIL instead of UTC, ...) returns `([],
+    "<reason>")` -- the caller surfaces that reason in `expand()`'s
+    `errors` list (review finding I2: a silently-vanishing series is the
+    same failure mode as the dateutil-missing case, just from the other
+    end, and gets the same treatment here, not a bare `except: return []`).
     """
     dtstart_utc = master["dtstart_utc"]
-    duration = (master["dtend_utc"] - dtstart_utc) if master["dtend_utc"] else timedelta(hours=1)
+    # dtend_utc is guaranteed non-None by _finalize_component (missing
+    # DTEND already defaulted to +1h there) -- no fallback needed here.
+    duration = master["dtend_utc"] - dtstart_utc
     dtstart_local = dtstart_utc.astimezone(ALMATY)
     try:
         rule = rrule_mod.rrulestr(f"RRULE:{master['rrule']}", dtstart=dtstart_local)
         starts_local = rule.between(w_start_utc.astimezone(ALMATY),
                                      w_end_utc.astimezone(ALMATY), inc=True)
-    except Exception:
-        return []
+    except Exception as e:
+        return [], (f"RRULE {master.get('rrule')!r} for uid={master.get('uid')!r} "
+                     f"could not be parsed/evaluated ({type(e).__name__}: {e})")
     exdates_utc = master.get("exdates_utc") or []
     out = []
     for start_local in starts_local:
@@ -1147,41 +1155,50 @@ def _expand_master(master, w_start_utc, w_end_utc, rrule_mod):
         if any(abs((start_utc - ex).total_seconds()) < 1 for ex in exdates_utc):
             continue
         out.append((start_utc, start_utc + duration))
-    return out
-
-
-# Sentinel returned (as one EXTRA list entry, never in place of real
-# occurrences) when `expand()` needed to expand at least one RRULE master
-# and `python-dateutil` was not importable -- task brief hard requirement
-# #3: absence of the library must never look like "zero recurrences".
-# Every normal Occurrence key is present (so a caller that merely does
-# `occ.get("title")` etc. without special-casing this never KeyErrors),
-# but `uid` is None -- which a real occurrence (parse_ics drops anything
-# without a UID) can never be -- and the extra `"error"`/`"detail"` keys
-# make it unambiguous on inspection.
-_DATEUTIL_MISSING_OCCURRENCE = {
-    "uid": None, "recurrence_id": None, "title": None,
-    "start_utc": None, "end_utc": None, "all_day": None,
-    "location": None, "status": "error", "seq": None, "has_alarm": None,
-}
+    return out, None
 
 
 def expand(components, window_start, window_end):
-    """`list[Component]` -> `list[Occurrence]` inside [window_start,
-    window_end] (inclusive at both ends; either bound may be an
-    aware/naive `datetime` or an ISO-8601 string). `Occurrence` =
-    `{uid, recurrence_id, title, start_utc, end_utc, all_day, location,
-    status, seq, has_alarm}` -- `start_utc`/`end_utc`/`recurrence_id` are
-    ISO-8601 UTC strings (matching how `cal.py` stores/exchanges events),
-    or None only in the dateutil-missing sentinel described below.
+    """`list[Component]` -> `{"occurrences": list[Occurrence], "errors":
+    list[str]}` inside [window_start, window_end] (inclusive at both ends;
+    either bound may be an aware/naive `datetime` or an ISO-8601 string).
+    `Occurrence` = `{uid, recurrence_id, title, start_utc, end_utc,
+    all_day, location, status, seq, has_alarm}` -- `start_utc`/`end_utc`/
+    `recurrence_id` are ISO-8601 UTC strings (matching how `cal.py`
+    stores/exchanges events).
 
-    Never raises. RRULE handling:
+    This return shape -- a dict with a SEPARATE `errors` list, the same
+    convention `probe()` already uses in this module -- is deliberate
+    (coordinator review finding C1): every entry in `occurrences` is a
+    real, fully-populated Occurrence, so an error can never be mistaken
+    for data by a caller that forgets to special-case it. The earlier
+    design (one shape, with a `{"error": ...}` sentinel dict mixed into
+    the same list as real occurrences) made a caller's `if occ.get
+    ("error")` check optional-by-construction -- a single skipped guard
+    anywhere in a Task 4 pipeline would hand a `start_utc=None` dict to
+    `cal.add()` and crash the whole tick batch, including every correctly
+    expanded occurrence alongside it. With this shape, "treat every item
+    in `occurrences` as real" requires no discipline from the caller at
+    all -- there is structurally nowhere for a fake occurrence to hide.
+
+    Never raises (top-level try/except backstop, matching `parse_ics`'s
+    own style, on top of defensive checks at every step): a malformed
+    window bound, an empty/None `components`, or a non-dict entry inside
+    `components` all degrade to a `errors` entry rather than an
+    exception -- this docstring's "never raises" claim is backed by a
+    dedicated garbage-input test, the same standard `parse_ics` is held to.
+
+    RRULE handling:
       - an RRULE-bearing component with no RECURRENCE-ID is a "master" --
         expanded via `dateutil.rrule` (deferred import) into individual
         occurrences across the window, EXDATE removed, each carrying its
         own `recurrence_id` (its ORIGINAL, un-overridden start) so a
         caller can key any single instance by (uid, recurrence_id) --
-        matching the design doc's "ключ вхождения" convention.
+        matching the design doc's "ключ вхождения" convention. An RRULE
+        `dateutil` can't parse/evaluate contributes NO occurrences from
+        that master AND one entry in `errors` naming the uid and reason
+        (finding I2) -- never a silent gap indistinguishable from "this
+        series produced zero instances in this window".
       - a component WITH a RECURRENCE-ID is an override: it REPLACES the
         master's generated occurrence at that original slot (never
         emitted alongside it), and its OWN (possibly moved) start/end
@@ -1196,70 +1213,77 @@ def expand(components, window_start, window_end):
 
     dateutil-missing guard (task brief hard requirement #3): if ANY
     RRULE-bearing master needed expanding and `python-dateutil` is not
-    importable, this does NOT silently return an empty/partial list as if
-    there were simply no recurrences -- exactly one extra dict is
-    appended (see `_DATEUTIL_MISSING_OCCURRENCE`), distinguishable from a
-    real occurrence by `uid is None` or by the presence of an `"error"`
-    key. Every non-recurring component (singles, overrides) is still
-    expanded normally in this case; only the RRULE masters are skipped.
+    importable, one entry is appended to `errors` (`"python-dateutil not
+    installed; ..."`) -- `occurrences` for those masters is simply empty,
+    which is now safe to be "just empty" precisely because the error
+    lives in a channel a real occurrence can never appear in. Every
+    non-recurring component (singles, overrides) is still expanded
+    normally in this case; only the RRULE masters are skipped.
     """
-    w_start = _coerce_utc_dt(window_start)
-    w_end = _coerce_utc_dt(window_end)
-    if w_start is None or w_end is None or not components:
-        return []
+    errors = []
+    try:
+        w_start = _coerce_utc_dt(window_start)
+        w_end = _coerce_utc_dt(window_end)
+        if w_start is None or w_end is None:
+            errors.append("expand(): invalid/unparseable window_start or window_end")
+            return {"occurrences": [], "errors": errors}
+        if not components:
+            return {"occurrences": [], "errors": errors}
 
-    masters, overrides_by_uid, singles = [], {}, []
-    for comp in components:
-        if not comp or not comp.get("uid") or comp.get("dtstart_utc") is None:
-            continue
-        if comp.get("recurrence_id_utc") is not None:
-            overrides_by_uid.setdefault(comp["uid"], []).append(comp)
-        elif comp.get("rrule"):
-            masters.append(comp)
-        else:
-            singles.append(comp)
+        masters, overrides_by_uid, singles = [], {}, []
+        for comp in components:
+            if not isinstance(comp, dict):
+                errors.append(f"expand(): skipped a non-dict component ({type(comp).__name__})")
+                continue
+            if not comp.get("uid") or comp.get("dtstart_utc") is None:
+                continue
+            if comp.get("recurrence_id_utc") is not None:
+                overrides_by_uid.setdefault(comp["uid"], []).append(comp)
+            elif comp.get("rrule"):
+                masters.append(comp)
+            else:
+                singles.append(comp)
 
-    occurrences = []
-    dateutil_missing = False
-    rrule_mod = _load_rrule_module() if masters else None
-    if masters and rrule_mod is None:
-        dateutil_missing = True
+        occurrences = []
+        rrule_mod = _load_rrule_module() if masters else None
+        if masters and rrule_mod is None:
+            errors.append(
+                "python-dateutil not installed; RRULE recurrences could not "
+                "be expanded (non-recurring components were still processed)")
 
-    for master in masters:
-        if rrule_mod is None:
-            continue
-        overrides = {ov["recurrence_id_utc"]: ov
-                     for ov in overrides_by_uid.get(master["uid"], [])}
-        for start_utc, end_utc in _expand_master(master, w_start, w_end, rrule_mod):
-            if any(abs((rid - start_utc).total_seconds()) < 1 for rid in overrides):
-                continue  # replaced by an override, emitted separately below
-            occurrences.append(_occurrence_from(master, start_utc, end_utc,
-                                                 recurrence_id_utc=start_utc))
+        for master in masters:
+            if rrule_mod is None:
+                continue
+            overrides = {ov["recurrence_id_utc"]: ov
+                         for ov in overrides_by_uid.get(master["uid"], [])}
+            expanded, err = _expand_master(master, w_start, w_end, rrule_mod)
+            if err:
+                errors.append(f"expand(): {err}")
+            for start_utc, end_utc in expanded:
+                if any(abs((rid - start_utc).total_seconds()) < 1 for rid in overrides):
+                    continue  # replaced by an override, emitted separately below
+                occurrences.append(_occurrence_from(master, start_utc, end_utc,
+                                                     recurrence_id_utc=start_utc))
 
-    for ovs in overrides_by_uid.values():
-        for ov in ovs:
-            start_utc = ov["dtstart_utc"]
-            end_utc = ov["dtend_utc"] or (start_utc + timedelta(hours=1))
+        for ovs in overrides_by_uid.values():
+            for ov in ovs:
+                start_utc = ov["dtstart_utc"]
+                end_utc = ov["dtend_utc"] or (start_utc + timedelta(hours=1))
+                if not (w_start <= start_utc <= w_end):
+                    continue
+                occurrences.append(_occurrence_from(
+                    ov, start_utc, end_utc, recurrence_id_utc=ov["recurrence_id_utc"]))
+
+        for single in singles:
+            start_utc = single["dtstart_utc"]
+            end_utc = single["dtend_utc"] or (start_utc + timedelta(hours=1))
             if not (w_start <= start_utc <= w_end):
                 continue
-            occurrences.append(_occurrence_from(
-                ov, start_utc, end_utc, recurrence_id_utc=ov["recurrence_id_utc"]))
+            occurrences.append(_occurrence_from(single, start_utc, end_utc,
+                                                 recurrence_id_utc=None))
 
-    for single in singles:
-        start_utc = single["dtstart_utc"]
-        end_utc = single["dtend_utc"] or (start_utc + timedelta(hours=1))
-        if not (w_start <= start_utc <= w_end):
-            continue
-        occurrences.append(_occurrence_from(single, start_utc, end_utc,
-                                             recurrence_id_utc=None))
-
-    if dateutil_missing:
-        sentinel = dict(_DATEUTIL_MISSING_OCCURRENCE)
-        sentinel["error"] = "dateutil_missing"
-        sentinel["detail"] = (
-            "python-dateutil not installed; RRULE recurrences could not "
-            "be expanded (non-recurring components were still processed)")
-        occurrences.append(sentinel)
-
-    occurrences.sort(key=lambda o: o.get("start_utc") or "")
-    return occurrences
+        occurrences.sort(key=lambda o: o.get("start_utc") or "")
+        return {"occurrences": occurrences, "errors": errors}
+    except Exception as e:
+        errors.append(f"expand(): unexpected failure ({type(e).__name__})")
+        return {"occurrences": [], "errors": errors}
