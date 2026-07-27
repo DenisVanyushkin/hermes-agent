@@ -37,8 +37,14 @@ def _snap(events=None, plans=None):
     return {"events": events or [], "plans": plans or []}
 
 
-def _event_row(id, external_uid, title, start_utc, end_utc=None, location="",
-                status="active", owner="iphone", external_seq=0):
+def _event_row(id, uid, title, start_utc, end_utc=None, location="",
+                status="active", owner="iphone", external_seq=0, recurrence_id=None):
+    # `uid` (plain ICS uid, or None for a hermes row that never carries one)
+    # is run through the SAME `_occurrence_key` encoding plan_changes itself
+    # uses, so a fixture row genuinely links against a remote Occurrence
+    # built from the same raw uid/recurrence_id -- exercising the real
+    # length-prefixed contract instead of a hand-rolled stand-in for it.
+    external_uid = extcal._occurrence_key(uid, recurrence_id) if uid else None
     return {
         "id": id, "owner": owner, "external_uid": external_uid,
         "external_seq": external_seq, "status": status, "title": title,
@@ -47,8 +53,9 @@ def _event_row(id, external_uid, title, start_utc, end_utc=None, location="",
     }
 
 
-def _plan_row(id, external_uid, title, deadline, location="", status="open",
-              owner="iphone"):
+def _plan_row(id, uid, title, deadline, location="", status="open",
+              owner="iphone", recurrence_id=None):
+    external_uid = extcal._occurrence_key(uid, recurrence_id) if uid else None
     return {
         "id": id, "owner": owner, "external_uid": external_uid,
         "status": status, "title": title, "deadline": deadline,
@@ -74,7 +81,8 @@ def test_new_timed_occurrence_is_event_insert():
     assert cs["events"]["insert"] == [{
         "title": "Йога", "start_utc": "2026-07-28T13:00:00+00:00",
         "end_utc": "2026-07-28T14:00:00+00:00", "location": "Invictus",
-        "external_uid": "uid-1@icloud.com", "external_seq": 0, "owner": "iphone",
+        "external_uid": extcal._occurrence_key("uid-1@icloud.com", None),
+        "external_seq": 0, "owner": "iphone",
     }]
     assert cs["events"]["update"] == cs["events"]["cancel"] == []
     assert cs["plans"]["insert"] == cs["plans"]["update"] == cs["plans"]["drop"] == []
@@ -93,7 +101,7 @@ def test_new_single_day_all_day_occurrence_is_plan_insert_with_start_date():
     ins = cs["plans"]["insert"][0]
     assert ins["deadline"] == "2026-07-31"
     assert ins["owner"] == "iphone"
-    assert ins["external_uid"] == "uid-2@icloud.com"
+    assert ins["external_uid"] == extcal._occurrence_key("uid-2@icloud.com", None)
     assert cs["events"]["insert"] == []
 
 
@@ -161,14 +169,16 @@ def test_disappeared_uid_is_event_cancel():
     existing = _event_row(8, "uid-7@icloud.com", "Стоматолог",
                            "2026-07-30T09:00:00+00:00")
     cs = extcal.plan_changes([], _snap(events=[existing]), NOW)
-    assert cs["events"]["cancel"] == [{"id": 8, "external_uid": "uid-7@icloud.com"}]
+    assert cs["events"]["cancel"] == [
+        {"id": 8, "external_uid": extcal._occurrence_key("uid-7@icloud.com", None)}]
     assert cs["events"]["insert"] == [] and cs["events"]["update"] == []
 
 
 def test_disappeared_uid_is_plan_drop():
     existing = _plan_row(9, "uid-8@icloud.com", "Забрать посылку", "2026-07-30")
     cs = extcal.plan_changes([], _snap(plans=[existing]), NOW)
-    assert cs["plans"]["drop"] == [{"id": 9, "external_uid": "uid-8@icloud.com"}]
+    assert cs["plans"]["drop"] == [
+        {"id": 9, "external_uid": extcal._occurrence_key("uid-8@icloud.com", None)}]
 
 
 def test_disappearance_suppressed_for_stale_past_row_out_of_window_floor():
@@ -319,6 +329,31 @@ def test_fuzzy_match_plan_same_deadline_and_casefold_title_is_collision():
     assert cs["collisions"][0]["local_id"] == 44
 
 
+def test_fuzzy_claim_sets_are_independent_across_events_and_plans_tables():
+    # Review finding C1: events and plans have INDEPENDENT autoincrement
+    # PKs, so id=3 in `events` and id=3 in `plans` are two unrelated rows
+    # that both routinely exist at once. A single shared "claimed" set keyed
+    # on the bare id would let claiming the hermes EVENT (id=3) wrongly
+    # suppress claiming the entirely different hermes PLAN (id=3) later in
+    # the SAME call, turning what should be a second `collisions` entry into
+    # a silent duplicate insert.
+    hermes_event = _event_row(3, None, "Тренировка", "2026-08-01T05:00:00+00:00",
+                               owner="hermes")
+    hermes_plan = _plan_row(3, None, "Купить подарок", "2026-07-31", owner="hermes")
+    timed_occ = _occ("uid-40@icloud.com", "тренировка", "2026-08-01T05:05:00+00:00")
+    all_day_start = _all_day_utc("2026-07-31")
+    all_day_occ = _occ("uid-41@icloud.com", "купить подарок", all_day_start,
+                        end_utc=all_day_start, all_day=True)
+    cs = extcal.plan_changes([timed_occ, all_day_occ],
+                              _snap(events=[hermes_event], plans=[hermes_plan]), NOW)
+
+    assert cs["events"]["insert"] == []
+    assert cs["plans"]["insert"] == []
+    assert len(cs["collisions"]) == 2
+    branches = {c["branch"]: c["local_id"] for c in cs["collisions"]}
+    assert branches == {"events": 3, "plans": 3}
+
+
 # ---------------------------------------------------------------------
 # timed -> events, all-day -> plans (branch routing + crossing)
 # ---------------------------------------------------------------------
@@ -344,7 +379,8 @@ def test_item_that_became_all_day_drops_the_stale_event_row():
     start = _all_day_utc("2026-07-29")
     occ = _occ("uid-23@icloud.com", "Дело", start, end_utc=start, all_day=True)
     cs = extcal.plan_changes([occ], _snap(events=[stale_event]), NOW)
-    assert cs["events"]["cancel"] == [{"id": 50, "external_uid": "uid-23@icloud.com"}]
+    assert cs["events"]["cancel"] == [
+        {"id": 50, "external_uid": extcal._occurrence_key("uid-23@icloud.com", None)}]
     assert len(cs["plans"]["insert"]) == 1
 
 
@@ -352,7 +388,8 @@ def test_item_that_became_timed_drops_the_stale_plan_row():
     stale_plan = _plan_row(51, "uid-24@icloud.com", "Дело", "2026-07-29")
     occ = _occ("uid-24@icloud.com", "Дело", "2026-07-29T13:00:00+00:00")
     cs = extcal.plan_changes([occ], _snap(plans=[stale_plan]), NOW)
-    assert cs["plans"]["drop"] == [{"id": 51, "external_uid": "uid-24@icloud.com"}]
+    assert cs["plans"]["drop"] == [
+        {"id": 51, "external_uid": extcal._occurrence_key("uid-24@icloud.com", None)}]
     assert len(cs["events"]["insert"]) == 1
 
 
@@ -363,8 +400,8 @@ def test_item_that_became_timed_drops_the_stale_plan_row():
 def test_recurring_instances_share_uid_but_link_independently_by_recurrence_id():
     rid1 = "2026-08-03T05:00:00+00:00"
     rid2 = "2026-08-10T05:00:00+00:00"
-    existing = _event_row(60, f"uid-25@icloud.com::{rid1}", "Тренировка",
-                           "2026-08-03T05:00:00+00:00")
+    existing = _event_row(60, "uid-25@icloud.com", "Тренировка",
+                           "2026-08-03T05:00:00+00:00", recurrence_id=rid1)
     occ_unchanged = _occ("uid-25@icloud.com", "Тренировка", "2026-08-03T05:00:00+00:00",
                           recurrence_id=rid1)
     occ_new_instance = _occ("uid-25@icloud.com", "Тренировка", "2026-08-10T05:00:00+00:00",
@@ -372,13 +409,24 @@ def test_recurring_instances_share_uid_but_link_independently_by_recurrence_id()
     cs = extcal.plan_changes([occ_unchanged, occ_new_instance], _snap(events=[existing]), NOW)
     assert cs["events"]["update"] == []  # rid1 instance unchanged
     assert len(cs["events"]["insert"]) == 1  # rid2 is a brand-new instance
-    assert cs["events"]["insert"][0]["external_uid"] == f"uid-25@icloud.com::{rid2}"
+    assert cs["events"]["insert"][0]["external_uid"] == extcal._occurrence_key(
+        "uid-25@icloud.com", rid2)
+
+
+def test_occurrence_key_is_unambiguous_across_uid_and_recurrence_id_boundary():
+    # Review finding I3: a bare "uid::recurrence_id" join is ambiguous --
+    # uid="A::B" with no recurrence_id must NEVER produce the same key as
+    # uid="A" with recurrence_id="B". The length-prefixed encoding must
+    # keep them distinct.
+    key_embedded_separator = extcal._occurrence_key("A::B", None)
+    key_split_across_fields = extcal._occurrence_key("A", "B")
+    assert key_embedded_separator != key_split_across_fields
 
 
 def test_moved_recurring_instance_is_update_not_new_row():
     rid1 = "2026-08-03T05:00:00+00:00"
-    existing = _event_row(61, f"uid-26@icloud.com::{rid1}", "Тренировка",
-                           "2026-08-03T05:00:00+00:00")
+    existing = _event_row(61, "uid-26@icloud.com", "Тренировка",
+                           "2026-08-03T05:00:00+00:00", recurrence_id=rid1)
     # The instance moved to a new time, but RECURRENCE-ID (the key) still
     # names its ORIGINAL slot -- must link to the same row as an update.
     moved = _occ("uid-26@icloud.com", "Тренировка", "2026-08-03T07:00:00+00:00",
@@ -389,6 +437,41 @@ def test_moved_recurring_instance_is_update_not_new_row():
     assert cs["events"]["update"][0]["id"] == 61
     assert cs["events"]["update"][0]["changes"]["start_utc"] == (
         "2026-08-03T05:00:00+00:00", "2026-08-03T07:00:00+00:00")
+
+
+# ---------------------------------------------------------------------
+# intra-batch dedup (review finding I2)
+# ---------------------------------------------------------------------
+
+def test_duplicate_occurrence_within_one_batch_produces_single_insert():
+    # Same event visible through two of her subscribed calendars at once
+    # (extcal_read_calendars == [] reads all of them) -- both readings are
+    # byte-identical Occurrences carrying the same uid. Must not queue two
+    # inserts with the same external_uid (schema v12's partial UNIQUE index
+    # on that column would only catch this later, at T5's write time).
+    occ_from_cal_a = _occ("uid-30@icloud.com", "Йога", "2026-07-28T13:00:00+00:00")
+    occ_from_cal_b = _occ("uid-30@icloud.com", "Йога", "2026-07-28T13:00:00+00:00")
+    cs = extcal.plan_changes([occ_from_cal_a, occ_from_cal_b], _snap(), NOW)
+    assert len(cs["events"]["insert"]) == 1
+
+
+def test_duplicate_all_day_occurrence_within_one_batch_produces_single_insert():
+    start = _all_day_utc("2026-07-31")
+    occ_from_cal_a = _occ("uid-31@icloud.com", "Купить подарок", start, end_utc=start,
+                           all_day=True)
+    occ_from_cal_b = _occ("uid-31@icloud.com", "Купить подарок", start, end_utc=start,
+                           all_day=True)
+    cs = extcal.plan_changes([occ_from_cal_a, occ_from_cal_b], _snap(), NOW)
+    assert len(cs["plans"]["insert"]) == 1
+
+
+def test_duplicate_occurrence_against_an_existing_row_produces_at_most_one_update():
+    existing = _event_row(70, "uid-32@icloud.com", "Йога", "2026-07-28T13:00:00+00:00")
+    occ_a = _occ("uid-32@icloud.com", "Йога (зал)", "2026-07-28T13:00:00+00:00")
+    occ_b = _occ("uid-32@icloud.com", "Йога (зал)", "2026-07-28T13:00:00+00:00")
+    cs = extcal.plan_changes([occ_a, occ_b], _snap(events=[existing]), NOW)
+    assert len(cs["events"]["update"]) == 1
+    assert cs["events"]["insert"] == []
 
 
 # ---------------------------------------------------------------------

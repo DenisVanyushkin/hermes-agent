@@ -1316,11 +1316,20 @@ def expand(components, window_start, window_end):
 # (partial UNIQUE: one local row per value) and no separate recurrence-id
 # column of its own, so a recurring series' individual occurrences are told
 # apart by encoding BOTH the ICS UID and the RECURRENCE-ID into that single
-# column -- see `_occurrence_key` below (`f"{uid}::{recurrence_id}"`, or the
-# bare `uid` when there is no recurrence_id). T5 (the DB writer) and T6 (the
-# tick) MUST persist `external_uid` using this exact same convention, or a
-# moved recurring instance will look like a brand-new occurrence on the next
-# sync instead of an update to the existing row.
+# column -- see `_occurrence_key` below for the exact, LENGTH-PREFIXED
+# encoding (`f"u{len(uid)}:{uid}"`, or `f"u{len(uid)}:{uid}r{len(rid)}:{rid}"`
+# when there is a recurrence_id). This is a REQUIRED CONTRACT for T5 (the DB
+# writer) and T6 (the tick): `external_uid` MUST be persisted using this
+# exact same `_occurrence_key(uid, recurrence_id)` encoding, or (a) a moved
+# recurring instance will look like a brand-new occurrence on the next sync
+# instead of an update, and (b) if a caller ever needs to recover the plain
+# `uid`/`recurrence_id` back out of a stored `external_uid` (e.g. to look up
+# a fetch_changes item's href/etag by uid), a naive `"::"`.split()-style
+# un-join would be ambiguous -- RFC 5545 does not forbid a literal `"::"`
+# inside a UID, so `uid="A::B"` with no recurrence_id and `uid="A"` with
+# `recurrence_id="B"` would collide under a bare separator-join. The
+# length-prefix makes every key unambiguously re-parseable regardless of
+# what characters the uid/recurrence_id themselves contain.
 #
 # `local_snapshot` is expected to hold every CANDIDATE row for this sync:
 # every owner='iphone' row (any status -- tombstones must be visible) whose
@@ -1373,18 +1382,30 @@ def expand(components, window_start, window_end):
 
 def _occurrence_key(uid, recurrence_id):
     """The composite occurrence-identity convention stored in the schema's
-    single `external_uid` column (see the module note above): the bare ICS
-    UID for a non-recurring item (or a recurring series' own un-keyed
-    identity), `f"{uid}::{recurrence_id}"` for one specific occurrence of a
-    recurring series. `recurrence_id` here is already the ISO-8601 UTC
-    string `expand()` puts on an Occurrence -- the ORIGINAL slot's time, not
-    the current (possibly moved) one -- so this key stays stable across a
-    moved occurrence, which is exactly what lets a later sync recognize
-    "same occurrence, new time" as an UPDATE rather than a new row.
+    single `external_uid` column (see the module note above): a
+    LENGTH-PREFIXED encoding, `f"u{len(uid)}:{uid}"` for a non-recurring
+    item (or a recurring series' own un-keyed identity), or
+    `f"u{len(uid)}:{uid}r{len(recurrence_id)}:{recurrence_id}"` for one
+    specific occurrence of a recurring series. `recurrence_id` here is
+    already the ISO-8601 UTC string `expand()` puts on an Occurrence -- the
+    ORIGINAL slot's time, not the current (possibly moved) one -- so this
+    key stays stable across a moved occurrence, which is exactly what lets a
+    later sync recognize "same occurrence, new time" as an UPDATE rather
+    than a new row.
+
+    Length-prefixed rather than a bare `f"{uid}::{recurrence_id}"` join
+    (review finding I3): RFC 5545 does not forbid a literal separator
+    sequence inside a UID, so a plain-join key is ambiguous on its face --
+    `uid="A::B"` with no recurrence_id and `uid="A"` with
+    `recurrence_id="B"` would produce the exact same string. Prefixing each
+    part with its own exact length makes the encoding unambiguous to
+    re-parse regardless of what characters `uid`/`recurrence_id` contain --
+    THIS is the contract T5/T6 must follow when persisting/reading
+    `external_uid` (see the module note above).
     """
     if not recurrence_id:
-        return uid
-    return f"{uid}::{recurrence_id}"
+        return f"u{len(uid)}:{uid}"
+    return f"u{len(uid)}:{uid}r{len(recurrence_id)}:{recurrence_id}"
 
 
 def _pc_norm_text(v):
@@ -1579,6 +1600,18 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
     occurrence is then processed fresh on its NEW branch (insert, or a fuzzy
     check) -- it is never left stranded as a phantom in the wrong table.
 
+    Intra-batch dedup (review finding I2): if `remote_occurrences` itself
+    contains two occurrences with the SAME `_occurrence_key` for the SAME
+    branch -- e.g. she is visible to the same underlying iCloud event
+    through two of her subscribed calendars at once (`extcal_read_calendars
+    == []` reads all of them) -- only the FIRST one seen is processed; every
+    later repeat is silently skipped via the same `seen_events`/`seen_plans`
+    sets used for disappearance tracking. Without this, two identical
+    occurrences would both see `existing=None` and both queue an insert
+    carrying the same `external_uid`, an internally-inconsistent `Changeset`
+    that would only fail later, at T5's write time, against schema v12's
+    partial UNIQUE index.
+
     Disappearance: any owner='iphone' row not seen in this batch (by key) is
     cancel/drop-worthy UNLESS it is already tombstoned, or falls outside
     `_disappearance_in_scope`'s window-floor safety check.
@@ -1620,7 +1653,17 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
                 hermes_plans.append(row)
 
         seen_events, seen_plans = set(), set()
-        claimed_hermes = set()
+        # SEPARATE claimed-sets per branch (review finding C1): events and
+        # plans have independent autoincrement PKs, so id=3 in `events` and
+        # id=3 in `plans` are two unrelated rows that both routinely exist
+        # at once. A single shared claimed-set keyed on the bare `id` would
+        # let a fuzzy-claim on a hermes EVENT with id=3 wrongly suppress a
+        # fuzzy-claim on an entirely different hermes PLAN that also happens
+        # to have id=3 -- silently turning what should be a `collisions`
+        # entry into a plain (duplicate) insert. Keeping the two branches'
+        # claimed-sets independent removes the cross-table id collision
+        # entirely, without needing a synthetic (branch, id) tuple key.
+        claimed_hermes_events, claimed_hermes_plans = set(), set()
 
         for occ in remote_occurrences:
             try:
@@ -1634,6 +1677,18 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
                 all_day = bool(occ.get("all_day"))
 
                 if all_day:
+                    if key in seen_plans:
+                        # Same occurrence reported twice in this very batch
+                        # (review finding I2) -- e.g. she reads the SAME
+                        # iCloud event through two of her subscribed
+                        # calendars at once (extcal_read_calendars=[] reads
+                        # all of them). Without this guard, both copies
+                        # would see existing=None and both queue an insert
+                        # with the identical external_uid, which downstream
+                        # collides with schema v12's partial UNIQUE index.
+                        # Keep the FIRST occurrence seen for this key in the
+                        # batch, silently skip exact repeats.
+                        continue
                     seen_plans.add(key)
                     # Branch-crossing: this key used to be a timed event.
                     stale = events_by_key.get(key)
@@ -1646,7 +1701,7 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
                     deadline = _deadline_from_occurrence(occ)
                     existing = plans_by_key.get(key)
                     if existing is None:
-                        fuzzy = _fuzzy_match_plan(occ, hermes_plans, deadline, claimed_hermes)
+                        fuzzy = _fuzzy_match_plan(occ, hermes_plans, deadline, claimed_hermes_plans)
                         if fuzzy is not None:
                             changeset["collisions"].append({
                                 "branch": "plans", "local_id": fuzzy["id"],
@@ -1675,6 +1730,8 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
                         changeset["plans"]["update"].append(
                             {"id": existing["id"], "changes": changes})
                 else:
+                    if key in seen_events:
+                        continue  # duplicate occurrence within this batch (I2, see above)
                     seen_events.add(key)
                     # Branch-crossing: this key used to be an all-day plan.
                     stale = plans_by_key.get(key)
@@ -1686,7 +1743,7 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
 
                     existing = events_by_key.get(key)
                     if existing is None:
-                        fuzzy = _fuzzy_match_event(occ, hermes_events, claimed_hermes)
+                        fuzzy = _fuzzy_match_event(occ, hermes_events, claimed_hermes_events)
                         if fuzzy is not None:
                             changeset["collisions"].append({
                                 "branch": "events", "local_id": fuzzy["id"],
