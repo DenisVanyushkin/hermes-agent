@@ -20471,6 +20471,105 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return None
 
     @staticmethod
+    def _build_ops_approval_ack(message, source):
+        """Выполнить или отменить одобренный план операций по ответу оператора.
+
+        Возвращает строку-ack, когда ``message`` -- распознанный ответ гейту И план
+        ожидает решения; иначе None, чтобы обычный путь продолжился.
+        """
+        try:
+            import os as _os
+            from pathlib import Path as _Path
+            from hermes_cli import ops_gate_service
+            from hermes_cli.ops_catalog import ResolvedOperation
+            from hermes_cli.ops_executor import OpsExecutionError, execute_operation
+
+            action = ops_gate_service.parse_ops_reply(message)
+            # «подтверждаю <op_id>» -- тоже ответ гейту, но parse_ops_reply о нём
+            # знать не может: id операции виден только из pending-плана. Здесь --
+            # дешёвая проверка префикса, чтобы не читать маркер на каждое
+            # сообщение; само решение всегда через parse_destroy_confirmation.
+            looks_like_confirmation = str(message or "").strip().casefold().startswith(
+                ("подтверждаю", "confirm")
+            )
+            if not action and not looks_like_confirmation:
+                return None
+            pending = ops_gate_service.get_pending()
+            if not pending:
+                return None
+
+            platform = str(getattr(source, "platform", "") or "")
+            user_id = str(getattr(source, "user_id", "") or "")
+            # Operator gate for Slack when an operator UID is configured; other
+            # platforms fall through to the pending-marker gate (sole-operator setup).
+            if platform == "slack" and (_os.getenv("HERMES_OPERATOR_SLACK_UID") or "").strip():
+                if not ops_gate_service.is_operator(user_id):
+                    return None
+
+            plan = list(pending.get("plan") or [])
+
+            if action == "cancel":
+                ops_gate_service.clear_pending()
+                # Слова отмены -- единственное пересечение двух гейтов:
+                # отмена/отмени/отменить/cancel принимаются и parse_commit_reply
+                # (как discard). Двусмысленная отмена читается как «пусть ничего
+                # не произойдёт», поэтому снимаем оба маркера: молча оставить
+                # коммитный гейт висеть -- это решение за оператора, которого он
+                # не принимал. Коммитный интерцепт вызываем явно, а не через
+                # возврат None, чтобы ack был один и упоминал обе отмены.
+                _commit_ack = GatewayRunner._build_commit_approval_ack(message, source)
+                if _commit_ack:
+                    return "🚫 План операций отменён. Ничего не выполнено.\n" + _commit_ack
+                return "🚫 План отменён. Ничего не выполнено."
+
+            destroy_ids = [
+                str(item.get("op_id"))
+                for item in plan
+                if str(item.get("risk") or "") == "destroy"
+            ]
+            confirmed = {
+                op_id
+                for op_id in destroy_ids
+                if ops_gate_service.parse_destroy_confirmation(message, op_id)
+            }
+            if not action and not confirmed:
+                # Префикс совпал, но это подтверждение не этого плана.
+                return None
+            unconfirmed = [op_id for op_id in destroy_ids if op_id not in confirmed]
+            if unconfirmed:
+                # Деструктив не выполняется по «выполни»: нужен явный эхо-повтор id.
+                # Маркер НЕ снимаем -- оператор должен иметь возможность ответить.
+                needed = ", ".join(f"«подтверждаю {op_id}»" for op_id in unconfirmed)
+                return f"⛔ Не выполняю: план содержит необратимые операции. Ответь {needed}."
+
+            repo = _Path(str(pending.get("repo_path") or ""))
+            lines = []
+            for item in plan:
+                operation = ResolvedOperation(
+                    op_id=str(item.get("op_id")),
+                    risk=str(item.get("risk")),
+                    argv=tuple(item.get("argv") or ()),
+                    description=str(item.get("description") or ""),
+                    irreversible=item.get("irreversible"),
+                )
+                try:
+                    result = execute_operation(operation, cwd=repo)
+                except OpsExecutionError as exc:
+                    lines.append(f"❌ {operation.op_id}: {exc}")
+                    break  # первая ошибка останавливает план: остальное могло на неё опираться
+                marker = "✅" if result["status"] == 0 else "⚠️"
+                lines.append(f"{marker} {operation.op_id} (exit {result['status']})")
+                if result["output"]:
+                    lines.append(f"```\n{result['output']}\n```")
+                if result["status"] != 0:
+                    break
+            ops_gate_service.clear_pending()
+            return "\n".join(lines) or "Нечего выполнять."
+        except Exception:
+            logger.warning("ops approval intercept failed", exc_info=True)
+            return None
+
+    @staticmethod
     def _build_commit_approval_ack(message, source):
         """Commit or discard the pending commit-gate deliverable on an operator reply.
 
@@ -21176,6 +21275,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": _doctor_ack},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
+        # Порядок гейтов задан явно: ops ПЕРЕД коммитным. Один прогон может
+        # оставить оба маркера (правки файлов + мутирующий план), а отвечают на
+        # них обычным текстом, и наборы слов пересекаются.
+        #  1) Парсер ops строгий (сообщение должно БЫТЬ ответом целиком), а
+        #     коммитный ищет подстроку. Поэтому только этот порядок безопасен:
+        #     «подтверждаю git_push_force_with_lease» содержит "push" и был бы
+        #     прочитан коммитным гейтом как «закоммить и запушь».
+        #  2) Слова аппрува не пересекаются («выполни» vs «коммить/запушь»), так
+        #     что ops-интерцепт возвращает None на коммитных ответах и живой
+        #     коммитный путь не меняется.
+        #  3) Слова отмены пересекаются; их разводит сам _build_ops_approval_ack,
+        #     снимая оба маркера (см. комментарий в ветке cancel).
+        _ops_ack = self._build_ops_approval_ack(message, source)
+        if _ops_ack is not None:
+            logger.info(
+                "ops-approval intercept: handled reply: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": _ops_ack,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": _ops_ack},
                 ],
                 "api_calls": 0,
                 "tools": [],
