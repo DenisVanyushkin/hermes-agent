@@ -147,3 +147,66 @@ def test_credential_helper_is_passed_per_invocation_not_persisted(tmp_path, monk
     assert "credential.helper" in joined
     # Секрет передаётся окружением, а не аргументом командной строки: argv виден в ps.
     assert "ghp_" not in joined
+
+
+def test_local_operations_strip_an_ambient_github_token(tmp_path, monkeypatch):
+    # Regression test for: env=None means "inherit the ambient process
+    # environment as-is". In production, hermes_cli.env_loader.load_hermes_dotenv()
+    # already loaded GITHUB_TOKEN into os.environ at import time (it's called
+    # from cli.py, main.py, gateway/run.py -- the very processes that host
+    # this executor). So a bare inherit would leak the token into a
+    # non-remote operation's subprocess too, even though _git_credential_env
+    # correctly returns {} for it -- the "only 3 operations get the token"
+    # invariant would only look enforced, not actually be enforced. Simulate
+    # that by setting GITHUB_TOKEN ambiently ourselves.
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_ambient_example")
+
+    repo = _init_repo(tmp_path, "main")
+    calls = []
+
+    def fake_runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(argv, 0, "main\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    execute_operation(resolve_operation("git_status", {}), cwd=repo, subprocess_runner=fake_runner)
+
+    # calls[-1] is the operation's own invocation (git_status), not the
+    # branch check -- that's the one whose env matters here.
+    op_argv, op_kwargs = calls[-1]
+    assert "status" in op_argv
+    op_env = op_kwargs.get("env")
+    assert op_env is not None
+    assert "GITHUB_TOKEN" not in op_env
+
+
+@pytest.mark.parametrize("op_id, params", [
+    ("git_fetch", {"remote": "origin"}),
+    ("git_push_force_with_lease", {"remote": "origin", "branch": "main"}),
+])
+def test_other_remote_operations_also_receive_credentials(tmp_path, monkeypatch, op_id, params):
+    # Coverage for _REMOTE_OPERATIONS beyond git_push, so a future edit that
+    # silently drops git_fetch or git_push_force_with_lease from the set
+    # gets caught here instead of failing quietly in production.
+    env_dir = tmp_path / ".hermes"
+    env_dir.mkdir()
+    (env_dir / ".env").write_text("GITHUB_TOKEN=ghp_example\n")
+    monkeypatch.setenv("HERMES_HOME", str(env_dir))
+
+    repo = _init_repo(tmp_path, "main")
+    calls = []
+
+    def fake_runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(argv, 0, "main\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    execute_operation(resolve_operation(op_id, params), cwd=repo, subprocess_runner=fake_runner)
+
+    op_argv, op_kwargs = calls[-1]
+    joined = " ".join(op_argv)
+    assert "credential.helper" in joined
+    assert "ghp_" not in joined
+    assert op_kwargs.get("env", {}).get("GITHUB_TOKEN") == "ghp_example"

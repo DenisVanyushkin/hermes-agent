@@ -95,7 +95,21 @@ def execute_operation(
         # Временный helper только для этого вызова: git читает его через -c,
         # ничего не пишется в .git/config и в URL remote не попадает.
         argv = [argv[0], "-c", f"credential.helper={_CREDENTIAL_HELPER}", *argv[1:]]
-    run_env = {**os.environ, **credential_env} if credential_env else None
+        run_env = {**os.environ, **credential_env}
+    else:
+        # env=None would inherit the ambient process environment as-is --
+        # and hermes_cli.env_loader.load_hermes_dotenv() (called at import
+        # time from cli.py, main.py, gateway/run.py, the very processes that
+        # host this executor) already loaded GITHUB_TOKEN into os.environ.
+        # So a bare inherit would leak the token into every non-remote
+        # operation's subprocess too, silently defeating the whole point of
+        # _git_credential_env returning {} for them. Strip *only*
+        # GITHUB_TOKEN, not a *_TOKEN/*_KEY/*_SECRET pattern: several
+        # operations (gateway_restart in particular) spawn real, separately
+        # privileged processes with their own legitimate credential needs,
+        # and a broad strip could silently break one in a way no offline
+        # test would catch.
+        run_env = {k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"}
 
     try:
         completed = subprocess_runner(
