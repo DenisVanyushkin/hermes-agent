@@ -42,7 +42,18 @@ def record_pending(
     plan: list[dict[str, Any]],
     original_task: str,
     created_at: float | None = None,
-) -> None:
+) -> bool:
+    """Взвести маркер. True -- взведён, False -- слот занят живым маркером.
+
+    Маркер один, а ответ оператора («выполни») адресован «текущему» плану, а не
+    конкретному сообщению. Поэтому перезаписать чужой неистёкший маркер значит
+    подставить свой план под чужое одобрение: оператор отвечает плану A, а
+    выполняется план B. Новый прогон уступает -- пусть сначала ответят на
+    висящий гейт. Истёкший маркер (и любой, который get_pending уже не считает
+    отвечаемым) занимать слот не может и свободно замещается.
+    """
+    if get_pending() is not None:
+        return False
     path = _pending_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
@@ -53,6 +64,7 @@ def record_pending(
         "created_at": float(created_at if created_at is not None else time.time()),
         "status": "awaiting_ops",
     }))
+    return True
 
 
 def get_pending() -> dict[str, Any] | None:

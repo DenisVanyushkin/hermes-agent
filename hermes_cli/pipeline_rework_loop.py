@@ -2516,6 +2516,26 @@ def _finalize_loop_result(
         if gate_reached
         else ""
     )
+    ops_note = ""
+    if gate_reached:
+        # Гейт вооружается ДО сборки текста: план показывается с «выполни» только
+        # если маркер действительно взведён на него. Иначе (слот занят чужим
+        # неотвеченным планом, запись маркера упала) блок обязан исчезнуть из
+        # ответа -- «выполни» ушло бы чужому маркеру и выполнило чужой план.
+        if ops_block:
+            not_armed = _record_ops_gate_pending(
+                session=session,
+                repo_path=repo_path,
+                ops_plan=ops_plan,
+                original_task=original_task,
+            )
+            if not_armed:
+                ops_block = ""
+                ops_note = _OPS_GATE_NOT_ARMED_NOTES[not_armed]
+        elif _gated_ops_plan(ops_plan):
+            # Рендер упал -- например, нестроковый элемент argv ломает ' '.join.
+            # Взведённый маркер на неувиденный план дал бы «выполни» вслепую.
+            ops_note = _OPS_PLAN_UNRENDERABLE_NOTE
     final_response_text = (
         _completion_allowed_final_response_text(
             git_gate=git_gate,
@@ -2540,23 +2560,8 @@ def _finalize_loop_result(
             original_task=original_task,
             reviewer_packet=reviewer_packet,
         )
-        # Маркер и текст живут и умирают вместе: гейт вооружается ТОЛЬКО если план
-        # был показан оператору. Иначе (рендер упал -- например, нестроковый элемент
-        # argv ломает ' '.join) получился бы взведённый маркер на план, которого
-        # оператор не видел: «выполни» одобрило бы невидимые операции.
-        if ops_block:
-            _record_ops_gate_pending(
-                session=session,
-                repo_path=repo_path,
-                ops_plan=ops_plan,
-                original_task=original_task,
-            )
-        elif _gated_ops_plan(ops_plan):
-            final_response_text = (
-                f"{final_response_text}\n\n"
-                "⚠️ План операций не удалось показать — гейт не поднят, "
-                "ничего выполнено не будет. Перезапроси операцию."
-            )
+        if ops_note:
+            final_response_text = f"{final_response_text}\n\n{ops_note}"
     return PipelineReworkLoopResult(
         fuse=fuse,
         state_snapshot=snapshot,
@@ -2642,6 +2647,23 @@ def _record_commit_gate_pending(
         pass
 
 
+_OPS_PLAN_UNRENDERABLE_NOTE = (
+    "⚠️ План операций не удалось показать — гейт не поднят, "
+    "ничего выполнено не будет. Перезапроси операцию."
+)
+
+_OPS_GATE_NOT_ARMED_NOTES = {
+    "gate_busy": (
+        "⚠️ Операторский гейт занят другим планом операций, который ещё ждёт ответа. "
+        "Этот план не вооружён и выполнен не будет: ответь на предыдущий план "
+        "(«выполни» или «отмена») и перезапроси эту операцию."
+    ),
+    "marker_failed": (
+        "⚠️ Операторский гейт не удалось поднять — план не вооружён, "
+        "ничего выполнено не будет. Перезапроси операцию."
+    ),
+}
+
 def _gated_ops_plan(ops_plan: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """План, который обязан пройти операторский гейт, либо пустой список.
 
@@ -2686,8 +2708,12 @@ def _record_ops_gate_pending(
     repo_path: str | None,
     ops_plan: list[dict[str, Any]] | None,
     original_task: str,
-) -> None:
+) -> str:
     """Best-effort: raise the operator gate when the reviewed plan changes state.
+
+    Returns "" when the gate is armed, otherwise a reason code the caller turns
+    into text: "gate_busy" (another plan is still awaiting an answer -- see
+    ops_gate_service.record_pending) or "marker_failed".
 
     Only reached from the `gate_reached` branch, so the plan has already been
     through the reviewer (Task 7 keeps every plan-bearing run on the reviewing
@@ -2699,12 +2725,12 @@ def _record_ops_gate_pending(
     pipeline's own correctness."""
     plan = _gated_ops_plan(ops_plan)
     if not plan:
-        return
+        return ""
     try:
         from hermes_cli import ops_gate_service
         from hermes_cli.ops_gate_message import resolve_operation_cwd
 
-        ops_gate_service.record_pending(
+        armed = ops_gate_service.record_pending(
             session_id=getattr(session, "pipeline_session_id", "") or "",
             # Тот же резолвер, что подставил `cwd:` в показанное сообщение, и тот
             # же, которым интерцепт возьмёт cwd. Резолвим ЗДЕСЬ, пока воркtree
@@ -2715,7 +2741,8 @@ def _record_ops_gate_pending(
             original_task=str(original_task or ""),
         )
     except Exception:
-        pass
+        return "marker_failed"
+    return "" if armed else "gate_busy"
 
 
 def _normalize_controlled_runtime_context(

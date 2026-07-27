@@ -1398,6 +1398,68 @@ def test_finalize_records_the_main_checkout_not_the_run_worktree(tmp_path: Path,
     assert str(worktree) not in text
 
 
+def test_finalize_does_not_steal_an_outstanding_ops_gate(tmp_path: Path, monkeypatch) -> None:
+    """Маркер один. Молча переписав его, прогон B подставил бы свой план под
+    «выполни», адресованное плану A."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+
+    ops_gate_service.record_pending(
+        session_id="pipe-ops-slot-A",
+        repo_path=str(tmp_path / "repo"),
+        plan=[{"op_id": "git_push", "risk": "mutate", "argv": ["git", "push", "origin", "main"]}],
+        original_task="запушь main",
+    )
+    _repo_dir, result_b = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-slot-B",
+        ops_plan=[{"op_id": "git_branch_create", "risk": "mutate",
+                   "argv": ["git", "branch", "other"],
+                   "description": "создать ветку other", "irreversible": None}],
+        original_task="создай ветку other",
+    )
+
+    pending = ops_gate_service.get_pending()
+    assert pending is not None
+    assert pending["session_id"] == "pipe-ops-slot-A"
+    assert [item["op_id"] for item in pending["plan"]] == ["git_push"]
+    text = result_b.execution_report.to_safe_dict()["final_response"]["text"]
+    # План B не показан с «выполни»: ответ ушёл бы плану A.
+    assert "ПЛАН ОПЕРАЦИЙ" not in text
+    assert "занят" in text
+
+
+def test_finalize_replaces_an_expired_ops_gate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+    ops_gate_service.record_pending(
+        session_id="stale",
+        repo_path=str(tmp_path / "repo"),
+        plan=[{"op_id": "git_push", "risk": "mutate", "argv": ["git", "push"]}],
+        original_task="старое",
+        created_at=time.time() - ops_gate_service.PENDING_TTL_SECONDS - 60,
+    )
+
+    _repo_dir, result = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-slot-C",
+        ops_plan=[{"op_id": "git_branch_create", "risk": "mutate",
+                   "argv": ["git", "branch", "fresh"],
+                   "description": "создать ветку fresh", "irreversible": None}],
+        original_task="создай ветку fresh",
+    )
+
+    pending = ops_gate_service.get_pending()
+    assert pending is not None and pending["session_id"] == "pipe-ops-slot-C"
+    assert "ПЛАН ОПЕРАЦИЙ" in result.execution_report.to_safe_dict()["final_response"]["text"]
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(repo), *args],

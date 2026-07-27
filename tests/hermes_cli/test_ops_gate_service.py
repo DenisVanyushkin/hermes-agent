@@ -11,11 +11,11 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _record(created_at=None):
-    ops_gate_service.record_pending(
-        session_id="s1",
+def _record(created_at=None, session_id="s1", op_id="git_push"):
+    return ops_gate_service.record_pending(
+        session_id=session_id,
         repo_path="/repo",
-        plan=[{"op_id": "git_push", "risk": "mutate", "argv": ["git", "push", "origin", "main"]}],
+        plan=[{"op_id": op_id, "risk": "mutate", "argv": ["git", "push", "origin", "main"]}],
         original_task="запушь текущую ветку в origin",
         created_at=created_at,
     )
@@ -26,6 +26,26 @@ def test_pending_round_trips(home):
     pending = ops_gate_service.get_pending()
     assert pending["original_task"] == "запушь текущую ветку в origin"
     assert pending["plan"][0]["op_id"] == "git_push"
+
+
+def test_recording_refuses_to_replace_an_unexpired_marker(home):
+    """Маркер один. Тихо переписав чужой, прогон B подставил бы свой план под
+    «выполни», адресованное плану A: оператор одобрил бы не то, что видел."""
+    assert _record(session_id="s1", op_id="git_push") is True
+
+    assert _record(session_id="s2", op_id="git_branch_delete") is False
+
+    pending = ops_gate_service.get_pending()
+    assert pending["session_id"] == "s1"
+    assert pending["plan"][0]["op_id"] == "git_push"
+
+
+def test_recording_replaces_an_expired_marker(home):
+    # Протухший маркер уже неотвечаем -- занимать им слот незачем.
+    _record(created_at=time.time() - ops_gate_service.PENDING_TTL_SECONDS - 1, session_id="old")
+
+    assert _record(session_id="new") is True
+    assert ops_gate_service.get_pending()["session_id"] == "new"
 
 
 def test_pending_expires_after_the_ttl(home):
