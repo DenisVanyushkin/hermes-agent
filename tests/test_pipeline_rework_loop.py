@@ -1283,6 +1283,31 @@ def test_finalize_delivers_the_ops_plan_in_the_final_response(tmp_path: Path, mo
     assert ops_gate_service.get_pending() is not None
 
 
+def test_finalize_does_not_arm_the_gate_when_the_plan_cannot_be_rendered(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Маркер и текст живут и умирают вместе. Нестроковый элемент argv ломает
+    ' '.join, рендер отдаёт пустую строку — и взведённый маркер на неувиденный
+    план дал бы ровно то, что мы запрещаем: «выполни» вслепую."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+
+    _repo_dir, result = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-unrenderable-1",
+        ops_plan=[{"op_id": "git_push", "risk": "mutate", "argv": ["git", None]}],
+        original_task="запушь ветку",
+    )
+
+    assert ops_gate_service.get_pending() is None
+    text = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert "ПЛАН ОПЕРАЦИЙ" not in text
+    assert "не удалось показать" in text
+
+
 def test_finalize_read_only_plan_adds_no_ops_block_to_the_final_response(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")

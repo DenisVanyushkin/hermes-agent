@@ -20556,11 +20556,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return f"⛔ Не выполняю: план содержит необратимые операции. Ответь {needed}."
 
             # Path("") -> "." -- в проде это живой чекаут hermes-agent. Пустой
-            # repo_path означает «неизвестно», а не «текущая директория», поэтому
-            # тот же фолбэк, что у коммитного гейта, и отказ вместо догадки, если
-            # даже он не указывает на существующую директорию.
+            # repo_path означает «неизвестно», а не «текущая директория». Резолвер
+            # общий с сообщением гейта (resolve_operation_cwd), поэтому оператор
+            # видел ровно ту директорию, в которой всё и выполнится; отказ вместо
+            # догадки, если даже фолбэк не указывает на существующую директорию.
+            from hermes_cli.ops_gate_message import resolve_operation_cwd
+
             repo_raw = str(pending.get("repo_path") or "").strip()
-            repo = _Path(repo_raw) if repo_raw else _Path(__file__).resolve().parent.parent
+            repo = _Path(resolve_operation_cwd(repo_raw))
             if not repo.is_dir():
                 ops_gate_service.clear_pending()
                 return (

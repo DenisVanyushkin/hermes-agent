@@ -2358,9 +2358,7 @@ def _completion_allowed_final_response_text(
     reviewer_packet: dict[str, Any] | None,
     review_iterations_completed: int = 0,
     model_escalations_used: int = 0,
-    ops_plan: list[dict[str, Any]] | None = None,
-    repo_path: str | None = None,
-    original_task: str = "",
+    ops_block: str = "",
 ) -> str:
     # A run with no material repo changes is an investigation/Q&A, not a code
     # change waiting at the commit gate -- the commit-gate framing is misleading
@@ -2370,13 +2368,9 @@ def _completion_allowed_final_response_text(
         item for item in list(gate.get("changed_files") or []) if str(item).strip()
     ]
 
-    # Оператор обязан увидеть план, который одобряет: интерцепт исполняет его по
-    # обычному «выполни», поэтому неотрисованный план был бы выполнен вслепую.
-    # Тот же предикат, что поднимает маркер (_gated_ops_plan) -- сообщение и маркер
-    # не могут разойтись.
-    ops_block = _ops_gate_approval_block(
-        repo_path=repo_path, ops_plan=ops_plan, original_task=original_task
-    )
+    # ops_block приходит готовым из _finalize_loop_result: ровно та строка, наличие
+    # которой решает, поднимать ли маркер. Рендерить его здесь второй раз значило бы
+    # допустить, что показанный текст и вооружённый гейт разойдутся.
 
     # reviewer_packet is the safe metadata wrapper built by _reviewer_packet_metadata
     # ({present, packet_status, ..., safe_packet: {...}}); engineer_summary lives
@@ -2513,6 +2507,15 @@ def _finalize_loop_result(
             )
         except Exception:
             git_gate = dict(git_gate or {})  # stats are optional; never block the gate
+    # Отрисовываем план ОДИН раз и здесь: та же строка идёт в сообщение и решает,
+    # поднимать ли маркер. Пустая строка = плана нет либо его не удалось показать.
+    ops_block = (
+        _ops_gate_approval_block(
+            repo_path=repo_path, ops_plan=ops_plan, original_task=original_task
+        )
+        if gate_reached
+        else ""
+    )
     final_response_text = (
         _completion_allowed_final_response_text(
             git_gate=git_gate,
@@ -2520,9 +2523,7 @@ def _finalize_loop_result(
             reviewer_packet=reviewer_packet,
             review_iterations_completed=review_iterations_completed,
             model_escalations_used=model_escalations_used,
-            ops_plan=ops_plan,
-            repo_path=repo_path,
-            original_task=original_task,
+            ops_block=ops_block,
         )
         if gate_reached
         else _blocked_final_response_text(
@@ -2539,12 +2540,23 @@ def _finalize_loop_result(
             original_task=original_task,
             reviewer_packet=reviewer_packet,
         )
-        _record_ops_gate_pending(
-            session=session,
-            repo_path=repo_path,
-            ops_plan=ops_plan,
-            original_task=original_task,
-        )
+        # Маркер и текст живут и умирают вместе: гейт вооружается ТОЛЬКО если план
+        # был показан оператору. Иначе (рендер упал -- например, нестроковый элемент
+        # argv ломает ' '.join) получился бы взведённый маркер на план, которого
+        # оператор не видел: «выполни» одобрило бы невидимые операции.
+        if ops_block:
+            _record_ops_gate_pending(
+                session=session,
+                repo_path=repo_path,
+                ops_plan=ops_plan,
+                original_task=original_task,
+            )
+        elif _gated_ops_plan(ops_plan):
+            final_response_text = (
+                f"{final_response_text}\n\n"
+                "⚠️ План операций не удалось показать — гейт не поднят, "
+                "ничего выполнено не будет. Перезапроси операцию."
+            )
     return PipelineReworkLoopResult(
         fuse=fuse,
         state_snapshot=snapshot,
