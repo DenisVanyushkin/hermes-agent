@@ -1287,3 +1287,449 @@ def expand(components, window_start, window_end):
     except Exception as e:
         errors.append(f"expand(): unexpected failure ({type(e).__name__})")
         return {"occurrences": [], "errors": errors}
+
+
+# ---- reconciliation (Task 4) -----------------------------------------------
+#
+# `plan_changes` is the pure decision layer between what `expand()` reports
+# as currently live on her iCloud calendars (`remote_occurrences`, a
+# `list[Occurrence]`) and what Hermes already has on file (`local_snapshot`).
+# Like every other function in this module it NEVER touches the DB, the
+# network, or the system clock -- "now" is the caller's `now_utc` (a
+# `datetime` or ISO-8601 string, same forgiving coercion as `expand()`'s own
+# window bounds), never `datetime.now()`. Applying a returned `Changeset` to
+# the DB is a LATER task (T5) -- nothing here writes anything anywhere.
+#
+# Contract -- `local_snapshot`:
+#   {"events": [EventRow, ...], "plans": [PlanRow, ...]}
+#     EventRow = {id, owner, external_uid, external_seq, status, title,
+#                 start_utc, end_utc, location}
+#     PlanRow  = {id, owner, external_uid, status, title, deadline, location}
+#
+# `owner` is 'hermes' or 'iphone' (schema v12's CHECK). `status` is the
+# row's own status column ('active'/'cancelled'/'done' for events,
+# 'open'/'dropped'/'done' for plans) -- tombstoned (cancelled/dropped) rows
+# MUST still be included so a re-appearing remote item can be recognized as
+# "already tombstoned, do not resurrect" rather than looking new.
+#
+# Schema v12 gives `events`/`plans` exactly ONE `external_uid TEXT` column
+# (partial UNIQUE: one local row per value) and no separate recurrence-id
+# column of its own, so a recurring series' individual occurrences are told
+# apart by encoding BOTH the ICS UID and the RECURRENCE-ID into that single
+# column -- see `_occurrence_key` below (`f"{uid}::{recurrence_id}"`, or the
+# bare `uid` when there is no recurrence_id). T5 (the DB writer) and T6 (the
+# tick) MUST persist `external_uid` using this exact same convention, or a
+# moved recurring instance will look like a brand-new occurrence on the next
+# sync instead of an update to the existing row.
+#
+# `local_snapshot` is expected to hold every CANDIDATE row for this sync:
+# every owner='iphone' row (any status -- tombstones must be visible) whose
+# start_utc/deadline falls inside the SAME horizon window `remote_occurrences`
+# was fetched for, plus every owner='hermes' row with status active/open
+# (candidates for fuzzy-collision detection only, see guard below). Rows
+# outside that window are the CALLER's concern to exclude; this function has
+# no window bounds of its own to filter by.
+#
+# Contract -- `Changeset`:
+#   {"events": {"insert": [...], "update": [...], "cancel": [...]},
+#    "plans":  {"insert": [...], "update": [...], "drop": [...]},
+#    "collisions": [...]}
+#
+#   - insert entries (events): {title, start_utc, end_utc, location,
+#     external_uid, external_seq, owner:"iphone"}.
+#   - insert entries (plans): {title, deadline, location, external_uid,
+#     owner:"iphone"}.
+#     NEITHER carries external_href/external_etag: those live per-HREF on
+#     the raw `fetch_changes` item, not per-Occurrence (one recurring
+#     master's single ICS resource expands into MANY occurrences sharing one
+#     href/etag) -- T5/T6 must attach them itself, keyed by `uid`, from the
+#     `fetch_changes` items it already has alongside `remote_occurrences`.
+#   - update entries: {"id": <local row id>, "changes": {field: (was, now)}}
+#     -- same shape as `seed.diff()`'s `Diff.updates`, deliberately (task
+#     brief: reuse seed.py's style). Compared fields: title, start_utc,
+#     end_utc, location (events); title, deadline, location (plans).
+#   - cancel/drop entries: {"id": <local row id>, "external_uid": <key>}.
+#   - collisions entries: {"branch": "events"|"plans", "local_id": <hermes
+#     row id>, "remote_uid", "recurrence_id", "title", and "start_utc"
+#     (events) or "deadline" (plans)} -- a fuzzy match against an
+#     owner='hermes' row (design doc rule #2: she added the same thing in
+#     both places). Her iPhone copy is NOT inserted (would duplicate the
+#     alarm-owning Hermes row) and the Hermes row is NOT updated from it
+#     either (its VALARM/ownership stays untouched) -- this is purely a
+#     reporting channel for T6's audit/nightly-summary.
+#
+# Guard (rule #3, the most important one, tested explicitly): owner='hermes'
+# rows are NEVER placed in insert/update/cancel/drop for either branch. They
+# only ever appear as fuzzy-match CANDIDATES (read-only lookups) -- ingest
+# has no path that can mutate what Hermes itself created.
+#
+# Tombstone semantics: a local row already at a terminal status
+# ('cancelled'/'dropped') is left alone even if the SAME uid/recurrence_id
+# reappears in `remote_occurrences` looking "active" again (a sync-token
+# replay, or Apple re-sending an unchanged resource) -- it is neither
+# updated nor re-inserted. This is a one-way ratchet: once cancelled/dropped
+# locally, a row only leaves that state via an explicit, separate action
+# (not implemented by this function), never by this reconciliation pass.
+
+def _occurrence_key(uid, recurrence_id):
+    """The composite occurrence-identity convention stored in the schema's
+    single `external_uid` column (see the module note above): the bare ICS
+    UID for a non-recurring item (or a recurring series' own un-keyed
+    identity), `f"{uid}::{recurrence_id}"` for one specific occurrence of a
+    recurring series. `recurrence_id` here is already the ISO-8601 UTC
+    string `expand()` puts on an Occurrence -- the ORIGINAL slot's time, not
+    the current (possibly moved) one -- so this key stays stable across a
+    moved occurrence, which is exactly what lets a later sync recognize
+    "same occurrence, new time" as an UPDATE rather than a new row.
+    """
+    if not recurrence_id:
+        return uid
+    return f"{uid}::{recurrence_id}"
+
+
+def _pc_norm_text(v):
+    return (v or "").strip()
+
+
+def _deadline_from_occurrence(occ):
+    """All-day Occurrence -> local (Asia/Almaty) 'YYYY-MM-DD' deadline date.
+    Design doc rule: single-day -> that day; multi-day -> the END date.
+
+    RFC 5545 quirk this has to work around: `parse_ics`/`expand` (Task 2,
+    already landed, out of scope to edit here) do NOT adjust for VALUE=DATE's
+    end-EXCLUSIVE convention -- an all-day DTEND is officially the day AFTER
+    the last real day, but the parser treats DTSTART/DTEND identically. A
+    component with no real DTEND at all falls back (in `_finalize_component`)
+    to a 1-HOUR default duration, not RFC 5545's own 1-day all-day default --
+    so a single-day all-day Occurrence's `end_utc` is only ~1h after
+    `start_utc`, while a genuine multi-day DTEND always differs from DTSTART
+    by a whole number of 24h days. That duration gap is exactly what tells
+    the two cases apart here: <=1h duration means "no real DTEND" (single
+    day, use the start date); a longer duration means a real (exclusive)
+    DTEND, so its local date is stepped back by one day to land on the
+    actual last day of the event.
+    """
+    start_utc = _coerce_utc_dt(occ.get("start_utc"))
+    if start_utc is None:
+        return None
+    start_local_date = start_utc.astimezone(ALMATY).date()
+    end_utc = _coerce_utc_dt(occ.get("end_utc"))
+    if end_utc is None or (end_utc - start_utc) <= timedelta(hours=1):
+        return start_local_date.isoformat()
+    end_local_date = (end_utc.astimezone(ALMATY) - timedelta(days=1)).date()
+    if end_local_date < start_local_date:
+        return start_local_date.isoformat()
+    return end_local_date.isoformat()
+
+
+def _event_diff(existing, occ):
+    """{field: (was, now)} for whatever differs between a matched local
+    EventRow and the remote Occurrence it was linked to -- title, start_utc,
+    end_utc, location. Datetimes compare by PARSED value (via
+    `_coerce_utc_dt`), never by raw string, so a harmless formatting
+    difference (e.g. `+00:00` vs `Z`, or a dropped/added `:00` seconds
+    field) between what `local_snapshot` happens to store and what
+    `expand()` emits is never mistaken for a real change.
+    """
+    changes = {}
+    if _pc_norm_text(existing.get("title")) != _pc_norm_text(occ.get("title")):
+        changes["title"] = (existing.get("title"), occ.get("title"))
+    new_start = _coerce_utc_dt(occ.get("start_utc"))
+    old_start = _coerce_utc_dt(existing.get("start_utc"))
+    if _iso(new_start) != _iso(old_start):
+        changes["start_utc"] = (existing.get("start_utc"), _iso(new_start))
+    new_end = _coerce_utc_dt(occ.get("end_utc"))
+    old_end = _coerce_utc_dt(existing.get("end_utc"))
+    if _iso(new_end) != _iso(old_end):
+        changes["end_utc"] = (existing.get("end_utc"), _iso(new_end))
+    if _pc_norm_text(existing.get("location")) != _pc_norm_text(occ.get("location")):
+        changes["location"] = (existing.get("location"), occ.get("location"))
+    return changes
+
+
+def _plan_diff(existing, occ, deadline):
+    """Same idea as `_event_diff` for the plans branch: title, deadline
+    (already resolved by `_deadline_from_occurrence`), location."""
+    changes = {}
+    if _pc_norm_text(existing.get("title")) != _pc_norm_text(occ.get("title")):
+        changes["title"] = (existing.get("title"), occ.get("title"))
+    if (existing.get("deadline") or None) != (deadline or None):
+        changes["deadline"] = (existing.get("deadline"), deadline)
+    if _pc_norm_text(existing.get("location")) != _pc_norm_text(occ.get("location")):
+        changes["location"] = (existing.get("location"), occ.get("location"))
+    return changes
+
+
+_FUZZY_WINDOW_SECONDS = 15 * 60
+
+
+def _fuzzy_match_event(occ, hermes_rows, claimed):
+    """Design doc rule #2's fuzzy link for the events branch: an
+    owner='hermes' row whose start is within +-15 minutes of `occ` AND whose
+    title matches casefold-insensitively (Cyrillic-safe -- SQLite's NOCASE
+    collation does not fold Cyrillic case, so this comparison is done here,
+    in Python, via `str.casefold()`, never left to a caller's SQL). Only
+    'active' (or status-less, for a lenient snapshot) Hermes rows are
+    candidates -- a cancelled/done Hermes row is not a live duplicate to
+    protect. `claimed` prevents one Hermes row from being fuzzy-matched to
+    two different remote occurrences in the same pass.
+    """
+    occ_start = _coerce_utc_dt(occ.get("start_utc"))
+    occ_title = _pc_norm_text(occ.get("title")).casefold()
+    if occ_start is None or not occ_title:
+        return None
+    for row in hermes_rows:
+        if not isinstance(row, dict):
+            continue
+        rid = row.get("id")
+        if rid is None or rid in claimed:
+            continue
+        if row.get("status") not in (None, "active"):
+            continue
+        row_start = _coerce_utc_dt(row.get("start_utc"))
+        if row_start is None:
+            continue
+        if abs((occ_start - row_start).total_seconds()) > _FUZZY_WINDOW_SECONDS:
+            continue
+        if _pc_norm_text(row.get("title")).casefold() != occ_title:
+            continue
+        claimed.add(rid)
+        return row
+    return None
+
+
+def _fuzzy_match_plan(occ, hermes_rows, deadline, claimed):
+    """Plans-branch analogue of `_fuzzy_match_event`: same deadline date
+    (there is no "time" to compare +-15 minutes on an all-day item) and a
+    casefold-insensitive title match, against 'open' (or status-less)
+    owner='hermes' plan rows only.
+    """
+    occ_title = _pc_norm_text(occ.get("title")).casefold()
+    if not occ_title or not deadline:
+        return None
+    for row in hermes_rows:
+        if not isinstance(row, dict):
+            continue
+        rid = row.get("id")
+        if rid is None or rid in claimed:
+            continue
+        if row.get("status") not in (None, "open"):
+            continue
+        if row.get("deadline") != deadline:
+            continue
+        if _pc_norm_text(row.get("title")).casefold() != occ_title:
+            continue
+        claimed.add(rid)
+        return row
+    return None
+
+
+def _disappearance_in_scope(existing, field, now_dt):
+    """Whether a local row that VANISHED from this sync's remote batch is
+    close enough to "now" for its absence to be trustworthy evidence of a
+    real deletion on the phone, rather than having simply aged out of the
+    read window's own floor (today-1 day, see `_time_range`) on its own --
+    without this, an event that started more than a day ago would look
+    "cancelled" on every sync forever after it naturally scrolls out of the
+    fetch window, even though nobody touched it on the phone.
+
+    Fails CLOSED (returns False, i.e. SUPPRESS the cancel/drop) whenever the
+    relevant date can't be determined at all -- matching this module's
+    overall "never guess into a destructive action" posture (mirrors how
+    `_request` degrades to `None` rather than half-acting on a botched
+    response): an uncertain `now_utc` or an uncertain local row date must
+    never itself be the reason something gets tombstoned.
+    """
+    if now_dt is None:
+        return False
+    dt = _coerce_utc_dt(existing.get(field))
+    if dt is None:
+        return False
+    return dt >= (now_dt - timedelta(days=1))
+
+
+def plan_changes(remote_occurrences, local_snapshot, now_utc):
+    """`(list[Occurrence], local_snapshot, now_utc) -> Changeset` -- the pure
+    reconciliation decision layer (see the module note above for the full
+    `local_snapshot`/`Changeset` contract). Never raises: malformed input
+    anywhere (a non-list `remote_occurrences`, a non-dict `local_snapshot`,
+    garbage rows/occurrences mixed in with good ones, an unparseable
+    `now_utc`) degrades to "skip that one item" or "treat that one guard as
+    closed", never an exception -- a single bad occurrence must not sink
+    reconciliation for every OTHER occurrence in the same batch, matching
+    `parse_ics`'s own per-component defensiveness.
+
+    Linking, per occurrence: primary path is by `_occurrence_key` (ICS
+    UID(+RECURRENCE-ID)) against the matching branch's owner='iphone' rows.
+    On a miss, fuzzy-link against owner='hermes' rows (rule #2) -- a hit
+    there is a `collisions` entry, NOT an insert/update. A miss on both is a
+    plain insert (unless the occurrence itself carries STATUS:CANCELLED,
+    in which case there is nothing to insert OR cancel -- it never existed
+    locally to begin with).
+
+    Guard (rule #3): owner='hermes' rows never appear in insert/update/
+    cancel/drop for either branch -- `events_by_key`/`plans_by_key` below are
+    built from owner='iphone' rows ONLY, so a hermes row is structurally
+    unreachable as a write target; it can only ever be a fuzzy-match
+    candidate.
+
+    Branch-crossing edge case: if the SAME key was previously imported into
+    the OTHER branch (an item flipped between all-day and timed between two
+    syncs), the stale other-branch row is cancelled/dropped and this
+    occurrence is then processed fresh on its NEW branch (insert, or a fuzzy
+    check) -- it is never left stranded as a phantom in the wrong table.
+
+    Disappearance: any owner='iphone' row not seen in this batch (by key) is
+    cancel/drop-worthy UNLESS it is already tombstoned, or falls outside
+    `_disappearance_in_scope`'s window-floor safety check.
+    """
+    changeset = {
+        "events": {"insert": [], "update": [], "cancel": []},
+        "plans": {"insert": [], "update": [], "drop": []},
+        "collisions": [],
+    }
+    try:
+        remote_occurrences = list(remote_occurrences or [])
+        local_snapshot = local_snapshot if isinstance(local_snapshot, dict) else {}
+        local_events = local_snapshot.get("events") or []
+        local_plans = local_snapshot.get("plans") or []
+        now_dt = _coerce_utc_dt(now_utc)
+
+        events_by_key, hermes_events = {}, []
+        for row in local_events:
+            if not isinstance(row, dict):
+                continue
+            owner = row.get("owner")
+            if owner == "iphone":
+                key = row.get("external_uid")
+                if key:
+                    events_by_key[key] = row
+            elif owner == "hermes":
+                hermes_events.append(row)
+
+        plans_by_key, hermes_plans = {}, []
+        for row in local_plans:
+            if not isinstance(row, dict):
+                continue
+            owner = row.get("owner")
+            if owner == "iphone":
+                key = row.get("external_uid")
+                if key:
+                    plans_by_key[key] = row
+            elif owner == "hermes":
+                hermes_plans.append(row)
+
+        seen_events, seen_plans = set(), set()
+        claimed_hermes = set()
+
+        for occ in remote_occurrences:
+            try:
+                if not isinstance(occ, dict):
+                    continue
+                uid = occ.get("uid")
+                if not uid or _coerce_utc_dt(occ.get("start_utc")) is None:
+                    continue  # garbage occurrence -- nothing usable to link on
+                key = _occurrence_key(uid, occ.get("recurrence_id"))
+                is_cancelled = _pc_norm_text(occ.get("status")).upper() == "CANCELLED"
+                all_day = bool(occ.get("all_day"))
+
+                if all_day:
+                    seen_plans.add(key)
+                    # Branch-crossing: this key used to be a timed event.
+                    stale = events_by_key.get(key)
+                    if stale is not None:
+                        seen_events.add(key)
+                        if stale.get("status") != "cancelled":
+                            changeset["events"]["cancel"].append(
+                                {"id": stale["id"], "external_uid": key})
+
+                    deadline = _deadline_from_occurrence(occ)
+                    existing = plans_by_key.get(key)
+                    if existing is None:
+                        fuzzy = _fuzzy_match_plan(occ, hermes_plans, deadline, claimed_hermes)
+                        if fuzzy is not None:
+                            changeset["collisions"].append({
+                                "branch": "plans", "local_id": fuzzy["id"],
+                                "remote_uid": uid, "recurrence_id": occ.get("recurrence_id"),
+                                "title": occ.get("title"), "deadline": deadline,
+                            })
+                            continue
+                        if is_cancelled:
+                            continue  # never existed locally -- nothing to insert
+                        changeset["plans"]["insert"].append({
+                            "title": occ.get("title") or "", "deadline": deadline,
+                            "location": occ.get("location") or "",
+                            "external_uid": key, "owner": "iphone",
+                        })
+                        continue
+
+                    if is_cancelled:
+                        if existing.get("status") != "dropped":
+                            changeset["plans"]["drop"].append(
+                                {"id": existing["id"], "external_uid": key})
+                        continue
+                    if existing.get("status") == "dropped":
+                        continue  # tombstone -- never resurrect
+                    changes = _plan_diff(existing, occ, deadline)
+                    if changes:
+                        changeset["plans"]["update"].append(
+                            {"id": existing["id"], "changes": changes})
+                else:
+                    seen_events.add(key)
+                    # Branch-crossing: this key used to be an all-day plan.
+                    stale = plans_by_key.get(key)
+                    if stale is not None:
+                        seen_plans.add(key)
+                        if stale.get("status") != "dropped":
+                            changeset["plans"]["drop"].append(
+                                {"id": stale["id"], "external_uid": key})
+
+                    existing = events_by_key.get(key)
+                    if existing is None:
+                        fuzzy = _fuzzy_match_event(occ, hermes_events, claimed_hermes)
+                        if fuzzy is not None:
+                            changeset["collisions"].append({
+                                "branch": "events", "local_id": fuzzy["id"],
+                                "remote_uid": uid, "recurrence_id": occ.get("recurrence_id"),
+                                "title": occ.get("title"), "start_utc": occ.get("start_utc"),
+                            })
+                            continue
+                        if is_cancelled:
+                            continue
+                        changeset["events"]["insert"].append({
+                            "title": occ.get("title") or "", "start_utc": occ.get("start_utc"),
+                            "end_utc": occ.get("end_utc"), "location": occ.get("location") or "",
+                            "external_uid": key, "external_seq": occ.get("seq") or 0,
+                            "owner": "iphone",
+                        })
+                        continue
+
+                    if is_cancelled:
+                        if existing.get("status") != "cancelled":
+                            changeset["events"]["cancel"].append(
+                                {"id": existing["id"], "external_uid": key})
+                        continue
+                    if existing.get("status") == "cancelled":
+                        continue  # tombstone -- never resurrect
+                    changes = _event_diff(existing, occ)
+                    if changes:
+                        changeset["events"]["update"].append(
+                            {"id": existing["id"], "changes": changes})
+            except Exception:
+                continue  # one malformed occurrence must not sink the batch
+
+        for key, row in events_by_key.items():
+            if key in seen_events or row.get("status") == "cancelled":
+                continue
+            if _disappearance_in_scope(row, "start_utc", now_dt):
+                changeset["events"]["cancel"].append({"id": row["id"], "external_uid": key})
+
+        for key, row in plans_by_key.items():
+            if key in seen_plans or row.get("status") == "dropped":
+                continue
+            if _disappearance_in_scope(row, "deadline", now_dt):
+                changeset["plans"]["drop"].append({"id": row["id"], "external_uid": key})
+
+        return changeset
+    except Exception:
+        return changeset
