@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import acks, audit, cal, db as famdb, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, series, shopping, tick
+from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, series, shopping, tick
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -964,6 +964,34 @@ def cmd_road(args):
     else:
         print(f"road: event {args.event_id} travel_min_road={out['travel_min_road']} "
               f"source={out['source']} leave_at={out['leave_at_local']}")
+    return 0
+
+def cmd_cal_ext_probe(args):
+    """`fam cal-ext probe` -- Task 0 read-only recon over her iCloud
+    calendars (Task 1 CalDAV transport underneath). Never writes to the
+    DB or to iCloud: gate.load_config() is the only I/O besides the
+    network reads inside extcal.probe(). Always exits 0 -- a probe
+    failure (missing password, network error, ...) is reported inside
+    the result's `errors` list, not as a CLI error, since this command
+    IS the diagnostic for exactly those conditions.
+    """
+    cfg = gate.load_config()
+    result = extcal.probe(cfg)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    counts = result["counts"]
+    print(f"cal-ext probe: {len(result['calendars'])} calendar(s), "
+          f"{counts['total']} event(s) "
+          f"(timed={counts['timed']}, all_day={counts['all_day']}, "
+          f"rrule={counts['with_rrule']}, valarm={counts['with_valarm']})")
+    for cal_info in result["calendars"]:
+        print(f"  - {cal_info['name']}: ctag={cal_info['ctag']} "
+              f"sync_token={'yes' if cal_info['supports_sync_token'] else 'no'}")
+    if result["errors"]:
+        print("errors:")
+        for e in result["errors"]:
+            print(f"  - {e}")
     return 0
 
 def _fmt_plan(p):
@@ -1930,6 +1958,13 @@ def build_parser():
     sp.add_argument("event_id", type=int)
     sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                      help="machine-readable output")
+
+    sp = sub.add_parser("cal-ext")
+    cal_ext_sub = sp.add_subparsers(dest="cal_ext_cmd", required=True)
+
+    spp = cal_ext_sub.add_parser("probe"); spp.set_defaults(func=cmd_cal_ext_probe)
+    spp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
 
     sp = sub.add_parser("meds")
     meds_sub = sp.add_subparsers(dest="meds_cmd", required=True)
