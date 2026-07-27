@@ -171,6 +171,57 @@ def test_probe_skips_write_target_calendar_by_url(monkeypatch):
 
 
 # ---------------------------------------------------------------------
+# I2: a non-empty extcal_read_calendars that matches NOTHING must be
+# distinguishable from "she genuinely has zero calendars" -- both used
+# to come back as an identical empty/silent result.
+# ---------------------------------------------------------------------
+
+def test_probe_read_filter_matching_nothing_reports_error(monkeypatch):
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+    collections_xml = _collections_xml()  # one real calendar: "Personal"
+    events_xml = _multistatus(_TIMED_WITH_VALARM)
+    fake = _fake_server(collections_xml, {"/123/cal/personal/": events_xml})
+
+    # Typo'd/mismatched filter: discover() DID find a calendar, but it
+    # matches neither by url nor by (case-sensitive) name.
+    cfg = _cfg(extcal_read_calendars=["personal"])  # actual name is "Personal"
+    result = extcal.probe(cfg, request=fake)
+
+    assert result["calendars"] == []
+    assert result["counts"] == extcal._empty_counts()
+    assert result["errors"] != []
+    assert any("extcal_read_calendars" in e and "0" in e for e in result["errors"])
+
+
+def test_probe_read_filter_matching_something_is_silent(monkeypatch):
+    # Sanity companion to the above: when the filter DOES match, no
+    # spurious "matched 0 of N" error should appear.
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+    collections_xml = _collections_xml()
+    events_xml = _multistatus(_TIMED_WITH_VALARM)
+    fake = _fake_server(collections_xml, {"/123/cal/personal/": events_xml})
+
+    cfg = _cfg(extcal_read_calendars=["Personal"])
+    result = extcal.probe(cfg, request=fake)
+
+    assert len(result["calendars"]) == 1
+    assert result["errors"] == []
+
+
+def test_probe_empty_read_filter_with_zero_real_calendars_has_no_spurious_error(monkeypatch):
+    # The write-target-only scenario (belt 1) must NOT trip the new I2
+    # error -- that's a different, expected situation, not a filter typo.
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+    collections_xml = _collections_xml(name="Hermes", href="/123/cal/hermes/")
+    fake = _fake_server(collections_xml, {})
+    cfg = _cfg(extcal_write_calendar="https://p1-caldav.icloud.com/123/cal/hermes/")
+
+    result = extcal.probe(cfg, request=fake)
+    assert result["calendars"] == []
+    assert result["errors"] == []
+
+
+# ---------------------------------------------------------------------
 # failure modes: never raise
 # ---------------------------------------------------------------------
 
@@ -203,6 +254,24 @@ def test_probe_malformed_xml_records_error_not_exception(monkeypatch):
     def fake(method, url, headers=None, body=None, timeout=20):
         if url == extcal.WELL_KNOWN_URL:
             return extcal.Response(207, b"<this is not < valid xml")
+        raise AssertionError("unreachable")
+
+    result = extcal.probe(_cfg(), request=fake)
+    assert result["calendars"] == []
+    assert result["errors"] != []
+
+
+def test_probe_dtd_bearing_response_records_error_not_exception(monkeypatch):
+    # I3: a DOCTYPE/ENTITY-bearing response must degrade the same way a
+    # malformed one does -- error in `errors`, no exception, no attempt
+    # to actually expand any entity.
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+    bomb = (b'<?xml version="1.0"?><!DOCTYPE d [<!ENTITY x "y">]>'
+            b'<d:multistatus xmlns:d="DAV:"/>')
+
+    def fake(method, url, headers=None, body=None, timeout=20):
+        if url == extcal.WELL_KNOWN_URL:
+            return extcal.Response(207, bomb)
         raise AssertionError("unreachable")
 
     result = extcal.probe(_cfg(), request=fake)

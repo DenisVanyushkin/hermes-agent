@@ -280,24 +280,43 @@ def _time_range(horizon_weeks):
 
 # xml.etree.ElementTree (stdlib, via pyexpat) does not resolve EXTERNAL
 # entities by default, so classic XXE (file/URL disclosure) is not a
-# practical risk here. It does still expand INTERNAL entities without a
-# built-in nesting limit ("billion laughs"). This module is stdlib-only
-# by explicit project constraint (no defusedxml/lxml dependency for this
-# task), so as a cheap, dependency-free mitigation, any response body
-# past this size is treated as a parse failure BEFORE it reaches
-# ET.fromstring -- a legitimate PROPFIND/REPORT response for one
-# person's calendar over an 8-week horizon is nowhere near this size.
-# Residual risk is further bounded by the host-guard: only TLS
-# (`https://`) responses from `*.icloud.com` are ever parsed at all, not
-# arbitrary/attacker-supplied XML.
+# practical risk here. It IS officially listed as vulnerable to "billion
+# laughs" and "quadratic blowup" -- a small document whose DTD declares
+# nested <!ENTITY> definitions only expands to something huge DURING
+# ET.fromstring itself, so a pre-parse BYTE-COUNT check alone does NOT
+# close this off: the dangerous growth happens strictly inside the parse
+# call, after a size check on the small input would already have passed.
+# This module is stdlib-only by explicit project constraint (no
+# defusedxml/lxml dependency for this task), so the actual mitigation
+# here is a CONTENT check, not a size check: a legitimate CalDAV
+# PROPFIND/REPORT multistatus response never contains a <!DOCTYPE or
+# <!ENTITY declaration (CalDAV has no legitimate use for either), so any
+# response body containing one (case-insensitive) is rejected as a parse
+# failure BEFORE it ever reaches ET.fromstring -- this closes off
+# entity-expansion attacks entirely, regardless of nesting depth, unlike
+# a size cap. MAX_XML_BYTES below is a SEPARATE, orthogonal guard against
+# a simply oversized-but-DTD-free response -- it is NOT what defeats
+# billion laughs. Residual risk is further bounded by the host-guard:
+# only TLS (`https://`) responses from `*.icloud.com` are ever parsed at
+# all, not arbitrary/attacker-supplied XML.
 MAX_XML_BYTES = 8 * 1024 * 1024
+
+_DTD_MARKERS = ("<!doctype", "<!entity")
 
 
 def _parse_xml(text):
-    """ET.fromstring wrapper enforcing MAX_XML_BYTES. Raises ET.ParseError
-    (same as a real malformed-XML failure) when the body is oversized, so
-    every existing try/except ET.ParseError call site handles it for
-    free."""
+    """ET.fromstring wrapper. Raises ET.ParseError (same failure mode as
+    genuinely malformed XML, so every existing try/except ET.ParseError
+    call site handles both for free) when:
+      - the body contains a `<!DOCTYPE` or `<!ENTITY` marker
+        (case-insensitive) -- the billion-laughs/quadratic-blowup
+        mitigation, see the module comment above;
+      - the body exceeds MAX_XML_BYTES -- a separate, plain size guard.
+    """
+    lowered = text.lower()
+    if any(marker in lowered for marker in _DTD_MARKERS):
+        raise ET.ParseError(
+            "response body contains a DOCTYPE/ENTITY declaration, refusing to parse")
     if len(text.encode("utf-8")) > MAX_XML_BYTES:
         raise ET.ParseError(f"response body exceeds {MAX_XML_BYTES} bytes, refusing to parse")
     return ET.fromstring(text)
@@ -427,7 +446,16 @@ def _discover(cfg, request):
     base = WELL_KNOWN_URL
     if resp.status in (301, 302, 303, 307, 308):
         location = resp.headers.get("Location") or resp.headers.get("location")
-        if not location or not _scheme_and_host_ok(location):
+        if not location:
+            errors.append("well-known redirect had no Location header")
+            return [], errors
+        # Resolve BEFORE the host-guard check (same order as
+        # principal_href/home_href below) -- a relative Location (e.g.
+        # "/next") has urlsplit().hostname == "" and would otherwise be
+        # rejected with a misleading "disallowed host" reason instead of
+        # being correctly resolved against `base` first.
+        location = urljoin(base, location)
+        if not _scheme_and_host_ok(location):
             errors.append("well-known redirected to a disallowed host")
             return [], errors
         base = location
@@ -492,29 +520,39 @@ def discover(cfg, request=None):
 # ---- fetch_changes ---------------------------------------------------
 
 def _sync_collection(cfg, calendar_url, sync_token, request):
+    """Returns (items, new_token, ok, reason). `reason` is only
+    meaningful when ok is False -- a short machine-matchable string
+    ("no_response", "http_<status>", "malformed_xml") a caller/audit log
+    can key off, distinct from a free-text message."""
     body = _SYNC_BODY_TMPL.format(token=_xml_escape(sync_token))
     resp = request("REPORT", calendar_url, headers=_dav_headers(cfg, "1"),
                     body=body, timeout=DEFAULT_TIMEOUT)
-    if resp is None or resp.status not in (200, 207):
-        return None, None, False
+    if resp is None:
+        return None, None, False, "no_response"
+    if resp.status not in (200, 207):
+        return None, None, False, f"http_{resp.status}"
     try:
         items, new_token = _parse_multistatus_items(resp.text)
     except Exception:
-        return None, None, False
-    return items, new_token, True
+        return None, None, False, "malformed_xml"
+    return items, new_token, True, None
 
 
 def _calendar_query(cfg, calendar_url, horizon_weeks, request):
+    """Returns (items, reason). `reason` is only meaningful when items is
+    None -- same short machine-matchable vocabulary as _sync_collection."""
     start, end = _time_range(horizon_weeks)
     body = _QUERY_BODY_TMPL.format(start=start, end=end)
     resp = request("REPORT", calendar_url, headers=_dav_headers(cfg, "1"),
                     body=body, timeout=DEFAULT_TIMEOUT)
-    if resp is None or resp.status not in (200, 207):
-        return None, None
+    if resp is None:
+        return None, "no_response"
+    if resp.status not in (200, 207):
+        return None, f"http_{resp.status}"
     try:
         items, _token = _parse_multistatus_items(resp.text)
     except Exception:
-        return None, None
+        return None, "malformed_xml"
     # calendar-query is not incremental -- it never yields a usable
     # sync-token for the next round.
     return items, None
@@ -524,17 +562,46 @@ def fetch_changes(cfg, calendar, sync_token=None, request=None):
     """One page of changes for `calendar` (a Calendar dict from
     discover(), or a bare url string).
 
-    - sync_token given: REPORT sync-collection. If the server accepts it
-      (2xx/207 with parseable XML), returns (items, new_token).
-    - sync_token given but the server rejects it (any non-2xx/207 status,
-      e.g. 403 "invalid sync-token", or a 5xx, or malformed XML): falls
-      back to REPORT calendar-query over the horizon time-range.
-    - sync_token is None (first sync for this calendar): goes straight to
-      the calendar-query fallback -- an unfiltered sync-collection would
-      return the WHOLE collection, unbounded by the horizon window.
+    Returns `(items, new_token, sync_info)`. `sync_info` is
+    `{"mode": ..., "reason": ...}` -- the diagnostic channel this
+    function's callers (Task 6's tick, in particular) need to tell a
+    routine "first sync, no token yet" apart from "sync-collection was
+    attempted and REJECTED, we silently fell back to a full re-scan"
+    (Important finding I1): without it, both cases return byte-identical
+    `(items, None)` and a broken sync-token exchange would look healthy
+    forever, doing a full re-scan every 15 minutes with nothing to show
+    for it.
 
-    Never raises. On total failure (missing credentials, network error,
-    every attempted REPORT failing, malformed XML) returns (None, None).
+    `sync_info["mode"]` is one of:
+      - "sync_collection": REPORT sync-collection succeeded; `new_token`
+        holds the fresh token to persist for next time.
+      - "initial_full": `sync_token` was None going in (no prior state
+        for this calendar) -- calendar-query was used BY DESIGN, not as
+        a failure fallback. `sync_info["reason"]` is None.
+      - "fallback_full": `sync_token` WAS supplied but sync-collection
+        failed, so calendar-query rescued the read. `sync_info["reason"]`
+        explains why sync-collection failed ("no_response",
+        "http_<status>", or "malformed_xml") -- a caller (or Task 6's
+        `audit cal.ext.sync`) that keeps seeing this mode on every tick,
+        instead of the token eventually settling into steady-state
+        "sync_collection", has a real, previously-invisible signal that
+        the sync-token exchange itself is broken.
+      - "error": every attempt failed outright (missing credentials, or
+        both sync-collection AND calendar-query failed, or the only
+        attempted call -- calendar-query, when there was no token to try
+        sync-collection with -- failed). `items`/`new_token` are None;
+        `sync_info["reason"]` describes what failed.
+
+    sync_token given but the server rejects it (any non-2xx/207 status,
+    e.g. 403 "invalid sync-token", a 5xx, a dropped connection, or
+    malformed XML): falls back to REPORT calendar-query over the horizon
+    time-range -- mode "fallback_full". sync_token is None (first sync
+    for this calendar): goes straight to calendar-query -- mode
+    "initial_full" -- since an unfiltered sync-collection would return
+    the WHOLE collection, unbounded by the horizon window.
+
+    Never raises. On total failure returns `(None, None, {"mode":
+    "error", "reason": "..."})`.
 
     `items` is a list of `{href, deleted, etag, ics}` dicts -- `ics` is
     the raw VCALENDAR text for a live item, None for a tombstoned
@@ -545,16 +612,30 @@ def fetch_changes(cfg, calendar, sync_token=None, request=None):
     calendar_url = calendar["url"] if isinstance(calendar, dict) else calendar
 
     if _auth_header(cfg) is None:
-        return None, None
+        return None, None, {"mode": "error", "reason": "missing_credentials"}
 
+    fallback_reason = None
     if sync_token:
-        items, new_token, ok = _sync_collection(cfg, calendar_url, sync_token, request)
+        items, new_token, ok, reason = _sync_collection(cfg, calendar_url, sync_token, request)
         if ok:
-            return items, new_token
-        # fall through to calendar-query below
+            return items, new_token, {"mode": "sync_collection", "reason": None}
+        # sync-collection failed -- remember why, then attempt the
+        # calendar-query fallback below. This IS the case I1 is about.
+        fallback_reason = reason
 
     horizon_weeks = cfg.get("extcal_horizon_weeks", 8)
-    return _calendar_query(cfg, calendar_url, horizon_weeks, request)
+    items, cq_reason = _calendar_query(cfg, calendar_url, horizon_weeks, request)
+
+    if items is None:
+        if fallback_reason:
+            reason = f"sync_collection_failed:{fallback_reason};calendar_query_failed:{cq_reason}"
+        else:
+            reason = f"calendar_query_failed:{cq_reason}"
+        return None, None, {"mode": "error", "reason": reason}
+
+    if fallback_reason is not None:
+        return items, None, {"mode": "fallback_full", "reason": fallback_reason}
+    return items, None, {"mode": "initial_full", "reason": None}
 
 
 # ---- probe (read-only diagnostic, Task 0) --------------------------------
@@ -613,6 +694,12 @@ def probe(cfg, request=None):
     instead of propagating an exception. Nothing here ever puts the
     password -- or any event content beyond UID/flags -- into the
     returned dict.
+
+    Important finding I2 fix: if `extcal_read_calendars` is non-empty but
+    matches NONE of the calendars discover() actually found (typo, case
+    mismatch, unicode-normalization mismatch in a display name, ...),
+    that is reported as an `errors` entry ("matched 0 of N") rather than
+    silently looking identical to "she genuinely has zero calendars".
     """
     cfg = cfg or {}
     request = request or _request
@@ -625,12 +712,18 @@ def probe(cfg, request=None):
 
     write_url = cfg.get("extcal_write_calendar") or ""
     read_filter = set(cfg.get("extcal_read_calendars") or [])
+    # eligible: calendars that aren't the write-target echo collection --
+    # counted separately from calendars_out so a read_filter that matches
+    # nothing can be told apart from "the only calendar found was the
+    # write target" (a different, non-error situation).
+    eligible = 0
 
     for calendar in calendars:
         # Anti-echo belt 1 (design doc invariant #4): never read back our
         # own write-target collection as if it were "her" data.
         if write_url and _same_calendar(calendar["url"], write_url):
             continue
+        eligible += 1
         if read_filter and calendar["url"] not in read_filter and calendar["name"] not in read_filter:
             continue
 
@@ -641,13 +734,20 @@ def probe(cfg, request=None):
             "supports_sync_token": calendar.get("supports_sync_token", False),
         })
 
-        items, _new_token = fetch_changes(cfg, calendar, sync_token=None, request=request)
+        items, _new_token, sync_info = fetch_changes(
+            cfg, calendar, sync_token=None, request=request)
         if items is None:
-            errors.append(f"fetch failed for calendar: {calendar['name']}")
+            errors.append(f"fetch failed for calendar: {calendar['name']} "
+                           f"({sync_info.get('reason')})")
             continue
         for item in items:
             if item.get("deleted"):
                 continue
             _tally_ics(counts, item.get("ics"))
+
+    if read_filter and eligible > 0 and not calendars_out:
+        errors.append(
+            f"extcal_read_calendars matched 0 of {eligible} discovered "
+            f"calendar(s) by url/name -- check spelling/case in config")
 
     return {"calendars": calendars_out, "counts": counts, "errors": errors}

@@ -11,6 +11,7 @@ network. Two layers are tested:
 """
 import socket
 import urllib.error
+from xml.etree import ElementTree as ET
 
 from fam import extcal
 
@@ -255,6 +256,37 @@ def test_discover_rejects_redirect_to_foreign_host(monkeypatch):
     assert result == []
 
 
+# ---- M1: well-known's Location must be resolved (urljoin) BEFORE the
+# host-guard check, same order as principal_href/home_href below it --
+# otherwise a relative Location is rejected for the wrong reason
+# (urlsplit().hostname == "" reads as "disallowed host", not "relative").
+
+def test_discover_well_known_relative_redirect_is_resolved_before_guard(monkeypatch):
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+    # WELL_KNOWN_URL is https://caldav.icloud.com/.well-known/caldav --
+    # a relative Location must resolve against THAT host, which IS
+    # allowed, so discovery should proceed rather than bail out.
+    calls = []
+
+    def fake(method, url, headers=None, body=None, timeout=20):
+        calls.append(url)
+        if url == extcal.WELL_KNOWN_URL:
+            return extcal.Response(301, b"", {"Location": "/next"})
+        if url == "https://caldav.icloud.com/next":
+            # reached only if the relative Location was correctly
+            # resolved to an allowed host instead of being rejected
+            xml = ('<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">'
+                   '<d:response><d:href>/123/principal/</d:href>'
+                   '<d:propstat><d:prop><d:current-user-principal>'
+                   '<d:href>/123/principal/</d:href></d:current-user-principal>'
+                   '</d:prop></d:propstat></d:response></d:multistatus>')
+            return extcal.Response(207, xml.encode())
+        return extcal.Response(404, b"")
+
+    extcal.discover({"extcal_username": "amina@icloud.com"}, request=fake)
+    assert "https://caldav.icloud.com/next" in calls
+
+
 def test_discover_timeout_returns_empty_no_exception(monkeypatch):
     monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
 
@@ -271,6 +303,55 @@ def test_discover_malformed_xml_returns_empty_no_exception(monkeypatch):
     def fake(method, url, headers=None, body=None, timeout=20):
         if url == extcal.WELL_KNOWN_URL:
             return extcal.Response(207, b"<not><valid xml at all")
+        raise AssertionError("unreachable")
+
+    result = extcal.discover({"extcal_username": "amina@icloud.com"}, request=fake)
+    assert result == []
+
+
+# ---------------------------------------------------------------------
+# I3: _parse_xml rejects any body carrying a DTD/entity declaration
+# (billion-laughs/quadratic-blowup mitigation), not just oversized ones.
+# ---------------------------------------------------------------------
+
+def test_parse_xml_rejects_doctype_with_entity_bomb():
+    bomb = ('<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol">'
+            '<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;">]>'
+            '<d:multistatus xmlns:d="DAV:">&lol2;</d:multistatus>')
+    try:
+        extcal._parse_xml(bomb)
+        assert False, "expected ET.ParseError"
+    except ET.ParseError:
+        pass
+
+
+def test_parse_xml_rejects_doctype_case_insensitively():
+    bomb = ('<?xml version="1.0"?><!doctype lolz [<!entity lol "lol">]>'
+            '<d:multistatus xmlns:d="DAV:">&lol;</d:multistatus>')
+    try:
+        extcal._parse_xml(bomb)
+        assert False, "expected ET.ParseError"
+    except ET.ParseError:
+        pass
+
+
+def test_parse_xml_accepts_normal_multistatus_without_doctype():
+    ok = '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response/></d:multistatus>'
+    root = extcal._parse_xml(ok)
+    assert root is not None
+
+
+def test_discover_rejects_dtd_bearing_response_no_exception(monkeypatch):
+    # Even if a compromised/misbehaving server (or a broken fake in a
+    # future test) sends a DOCTYPE-bearing body, discover() must degrade
+    # to [] + an error, never raise and never actually expand entities.
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+    bomb = ('<?xml version="1.0"?><!DOCTYPE d [<!ENTITY x "y">]>'
+            '<d:multistatus xmlns:d="DAV:"/>').encode()
+
+    def fake(method, url, headers=None, body=None, timeout=20):
+        if url == extcal.WELL_KNOWN_URL:
+            return extcal.Response(207, bomb)
         raise AssertionError("unreachable")
 
     result = extcal.discover({"extcal_username": "amina@icloud.com"}, request=fake)
@@ -330,14 +411,16 @@ def test_fetch_changes_sync_collection_with_token(monkeypatch):
         assert "sync-token-old" in body
         return extcal.Response(207, _SYNC_RESPONSE_XML.encode())
 
-    items, new_token = extcal.fetch_changes(_cfg(), _CALENDAR,
-                                             sync_token="sync-token-old", request=fake)
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token="sync-token-old", request=fake)
     assert new_token == "sync-token-2"
     assert len(items) == 1
     assert items[0]["href"].endswith("evt-1.ics")
     assert items[0]["etag"] == '"etag-1"'
     assert "Yoga" in items[0]["ics"]
     assert seen["method"] == "REPORT"
+    # I1: steady-state incremental sync is unambiguously reported.
+    assert sync_info == {"mode": "sync_collection", "reason": None}
 
 
 def test_fetch_changes_falls_back_to_calendar_query_on_error(monkeypatch):
@@ -352,11 +435,15 @@ def test_fetch_changes_falls_back_to_calendar_query_on_error(monkeypatch):
         assert "time-range" in body
         return extcal.Response(207, _QUERY_RESPONSE_XML.encode())
 
-    items, new_token = extcal.fetch_changes(_cfg(), _CALENDAR,
-                                             sync_token="stale-token", request=fake)
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token="stale-token", request=fake)
     assert new_token is None  # calendar-query never yields an incremental token
     assert len(items) == 1
     assert len(calls) == 2  # sync-collection attempt, then calendar-query fallback
+    # I1: this IS the case the finding is about -- a token was offered,
+    # sync-collection was rejected, and a full re-scan silently happened.
+    # That must be visible and distinguishable from "no token yet".
+    assert sync_info == {"mode": "fallback_full", "reason": "http_403"}
 
 
 def test_fetch_changes_no_token_goes_straight_to_calendar_query(monkeypatch):
@@ -366,9 +453,42 @@ def test_fetch_changes_no_token_goes_straight_to_calendar_query(monkeypatch):
         assert "calendar-query" in body
         return extcal.Response(207, _QUERY_RESPONSE_XML.encode())
 
-    items, new_token = extcal.fetch_changes(_cfg(), _CALENDAR, sync_token=None, request=fake)
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token=None, request=fake)
     assert new_token is None
     assert len(items) == 1
+    # I1: NOT a fallback -- no token was ever offered, so this is the
+    # expected initial full sync, not a broken incremental exchange.
+    assert sync_info == {"mode": "initial_full", "reason": None}
+
+
+def test_fetch_changes_distinguishes_initial_full_from_fallback_full(monkeypatch):
+    """I1's core requirement: a caller (Task 6's tick) must be able to
+    tell "first sync, no token yet" apart from "sync-collection was
+    attempted and REJECTED, we silently fell back to a full re-scan" --
+    even though both paths return the exact same `items`/`new_token`
+    shape. Only `sync_info["mode"]` carries the distinction.
+    """
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+
+    def fake_initial(method, url, headers=None, body=None, timeout=20):
+        return extcal.Response(207, _QUERY_RESPONSE_XML.encode())
+
+    def fake_fallback(method, url, headers=None, body=None, timeout=20):
+        if "sync-collection" in body:
+            return extcal.Response(403, b"<error/>")
+        return extcal.Response(207, _QUERY_RESPONSE_XML.encode())
+
+    _items1, _tok1, info_initial = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token=None, request=fake_initial)
+    _items2, _tok2, info_fallback = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token="some-token", request=fake_fallback)
+
+    assert info_initial["mode"] == "initial_full"
+    assert info_fallback["mode"] == "fallback_full"
+    assert info_initial["mode"] != info_fallback["mode"]
+    assert info_fallback["reason"] is not None
+    assert info_initial["reason"] is None
 
 
 def test_fetch_changes_timeout_returns_none_no_exception(monkeypatch):
@@ -377,8 +497,11 @@ def test_fetch_changes_timeout_returns_none_no_exception(monkeypatch):
     def fake(method, url, headers=None, body=None, timeout=20):
         return None
 
-    items, new_token = extcal.fetch_changes(_cfg(), _CALENDAR, sync_token=None, request=fake)
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token=None, request=fake)
     assert items is None and new_token is None
+    assert sync_info["mode"] == "error"
+    assert "no_response" in sync_info["reason"]
 
 
 def test_fetch_changes_5xx_returns_none_no_exception(monkeypatch):
@@ -387,8 +510,30 @@ def test_fetch_changes_5xx_returns_none_no_exception(monkeypatch):
     def fake(method, url, headers=None, body=None, timeout=20):
         return extcal.Response(500, b"server error")
 
-    items, new_token = extcal.fetch_changes(_cfg(), _CALENDAR, sync_token="tok", request=fake)
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token="tok", request=fake)
     assert items is None and new_token is None
+    assert sync_info["mode"] == "error"
+    assert "http_500" in sync_info["reason"]
+
+
+def test_fetch_changes_reports_both_failures_when_fallback_also_fails(monkeypatch):
+    # sync_token given, sync-collection fails (403), the calendar-query
+    # fallback ALSO fails (500) -- error reason must surface both, not
+    # just whichever failed last.
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+
+    def fake(method, url, headers=None, body=None, timeout=20):
+        if "sync-collection" in body:
+            return extcal.Response(403, b"<error/>")
+        return extcal.Response(500, b"boom")
+
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token="tok", request=fake)
+    assert items is None and new_token is None
+    assert sync_info["mode"] == "error"
+    assert "http_403" in sync_info["reason"]
+    assert "http_500" in sync_info["reason"]
 
 
 def test_fetch_changes_malformed_xml_returns_none_no_exception(monkeypatch):
@@ -397,8 +542,11 @@ def test_fetch_changes_malformed_xml_returns_none_no_exception(monkeypatch):
     def fake(method, url, headers=None, body=None, timeout=20):
         return extcal.Response(207, b"<broken xml")
 
-    items, new_token = extcal.fetch_changes(_cfg(), _CALENDAR, sync_token=None, request=fake)
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token=None, request=fake)
     assert items is None and new_token is None
+    assert sync_info["mode"] == "error"
+    assert "malformed_xml" in sync_info["reason"]
 
 
 def test_fetch_changes_missing_password_returns_none(monkeypatch):
@@ -407,8 +555,10 @@ def test_fetch_changes_missing_password_returns_none(monkeypatch):
     def boom(method, url, headers=None, body=None, timeout=20):
         raise AssertionError("must not touch the network without credentials")
 
-    items, new_token = extcal.fetch_changes(_cfg(), _CALENDAR, sync_token=None, request=boom)
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token=None, request=boom)
     assert items is None and new_token is None
+    assert sync_info == {"mode": "error", "reason": "missing_credentials"}
 
 
 def test_fetch_changes_reports_deleted_items(monkeypatch):
@@ -426,8 +576,10 @@ def test_fetch_changes_reports_deleted_items(monkeypatch):
     def fake(method, url, headers=None, body=None, timeout=20):
         return extcal.Response(207, xml.encode())
 
-    items, new_token = extcal.fetch_changes(_cfg(), _CALENDAR, sync_token="tok", request=fake)
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token="tok", request=fake)
     assert new_token == "sync-token-3"
     assert len(items) == 1
     assert items[0]["deleted"] is True
     assert items[0]["ics"] is None
+    assert sync_info["mode"] == "sync_collection"
