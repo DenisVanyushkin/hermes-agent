@@ -67,3 +67,21 @@ def test_timeout_is_reported_not_raised_as_a_bare_exception(tmp_path):
     with pytest.raises(OpsExecutionError) as exc:
         execute_operation(resolve_operation("git_status", {}), cwd=repo, subprocess_runner=fake_runner)
     assert "timeout" in str(exc.value)
+
+
+def test_fails_closed_when_the_branch_cannot_be_resolved(tmp_path):
+    repo = _init_repo(tmp_path, "main")
+    calls = []
+
+    def fake_runner(argv, **kwargs):
+        calls.append(argv)
+        # Simulate `git rev-parse` failing (not a repo, lock contention,
+        # permission error, ...): non-zero return code, no usable stdout.
+        return subprocess.CompletedProcess(argv, 128, "", "fatal: not a git repository")
+
+    with pytest.raises(OpsExecutionError):
+        execute_operation(resolve_operation("git_status", {}), cwd=repo, subprocess_runner=fake_runner)
+
+    # Only the branch-check call happened; the operation's own command must
+    # never be invoked once the branch cannot be resolved.
+    assert len(calls) == 1

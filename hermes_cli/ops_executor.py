@@ -28,7 +28,15 @@ def _current_branch(cwd: Path, runner: Callable[..., Any]) -> str:
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=str(cwd), text=True, capture_output=True, check=False,
     )
-    return (getattr(completed, "stdout", "") or "").strip()
+    if int(getattr(completed, "returncode", 1)) != 0:
+        # Fail closed: an unresolved branch must never be treated as "not a
+        # run branch". A rev-parse failure (not a repo, lock contention,
+        # permission error) is not evidence of safety.
+        raise OpsExecutionError(f"branch_unresolved:{cwd}")
+    branch = (getattr(completed, "stdout", "") or "").strip()
+    if not branch:
+        raise OpsExecutionError(f"branch_unresolved:{cwd}")
+    return branch
 
 
 def execute_operation(
