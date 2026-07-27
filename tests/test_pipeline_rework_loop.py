@@ -5136,3 +5136,166 @@ def test_empty_ops_plan_leaves_the_reviewer_input_untouched(tmp_path: Path) -> N
 
     assert "ПЛАН ОПЕРАЦИЙ НА РЕВЬЮ" not in reviewer_messages[0]
     assert result.candidate_complete is True
+
+
+def test_ops_only_run_without_file_changes_still_reaches_the_reviewer(tmp_path: Path) -> None:
+    # `propose_ops` пишет план, а не файлы. Ранний выход по «нет материальных изменений»
+    # завершал бы такой прогон до ревьюера -- план ушёл бы к оператору неотсмотренным.
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    reviewer_messages: list[str] = []
+
+    def _reviewer_executor(request, _runtime_plan):
+        reviewer_messages.append(request.input_messages[0]["content"])
+        return {
+            "output_text": "approved",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=_OPS_VERBATIM_REQUEST,
+        repo_path=str(git_repo),
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _OpsPlanEngineerBridge(_OPS_PLAN_FIXTURE),
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+        },
+    )
+
+    assert result.git_gate["material_changes_present"] is False
+    assert reviewer_messages, "план операций обязан дойти до ревьюера даже без правок в дереве"
+    assert "git push origin main" in reviewer_messages[0]
+    assert _OPS_VERBATIM_REQUEST in reviewer_messages[0]
+
+
+def test_unrenderable_ops_plan_blocks_instead_of_passing_silently(tmp_path: Path) -> None:
+    # Отрисовка не должна ронять пайплайн, но «ревьюер плана не увидел» не имеет права
+    # деградировать в «плана и не было».
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    broken_plan = [{"op_id": "git_push", "risk": "mutate", "argv": [1, 2], "description": "битый argv"}]
+    reviewer_messages: list[str] = []
+
+    def _reviewer_executor(request, _runtime_plan):
+        reviewer_messages.append(request.input_messages[0]["content"])
+        return {
+            "output_text": "approved",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=_OPS_VERBATIM_REQUEST,
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _OpsPlanEngineerBridge(broken_plan),
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+        },
+    )
+
+    assert "ПЛАН ОПЕРАЦИЙ НА РЕВЬЮ" not in reviewer_messages[0]
+    assert "ops_plan_unreviewable" in result.iteration_history[0].reviewer_blockers
+    assert result.candidate_complete is False
+    assert result.completion_allowed is False
+
+
+class _DisagreeThenOpsPlanEngineerBridge(_OpsPlanEngineerBridge):
+    """Engineer that proposes ops, then disagrees with the reviewer to force escalation."""
+
+    def __init__(self, plan: list[dict[str, object]]) -> None:
+        super().__init__(plan)
+        self.calls = 0
+
+    def __call__(self, _request, _runtime_plan):
+        self.calls += 1
+        self.ops_plan = [dict(item) for item in self._plan]
+        payload = (
+            _engineer_output()
+            if self.calls == 1
+            else _engineer_output(
+                status="disagree_with_reviewer",
+                summary="Engineer disagrees with reviewer blocker.",
+                findings=[],
+                blockers=[],
+                artifacts=[],
+                requires_review=True,
+                next_action="disagreement",
+                reviewer_objections=["missing regression test"],
+                evidence=["tests/test_pipeline_rework_loop.py"],
+                risks=[],
+                confidence=0.8,
+            )
+        )
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": payload},
+        }
+
+
+def test_escalated_reviewer_also_sees_the_ops_plan(tmp_path: Path) -> None:
+    # Эскалированный ревьюер вправе снять жёсткую находку -- значит, не должен
+    # арбитражить вслепую: argv и дословный запрос обязаны быть у него перед глазами.
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    escalation_messages: list[str] = []
+    reviewer_rounds = {"count": 0}
+
+    def _reviewer_executor(_request, _runtime_plan):
+        reviewer_rounds["count"] += 1
+        blockers = ["missing regression test"] if reviewer_rounds["count"] == 1 else ["maintained blocker"]
+        return {
+            "output_text": "review blocked",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {"structured_output": _reviewer_output(blockers=blockers)},
+        }
+
+    def _escalation_client(runtime, payload):
+        escalation_messages.append(payload["input_messages"][0]["content"])
+        return {
+            "provider": runtime.provider,
+            "model": runtime.model,
+            "structured_output": _escalated_reviewer_output(decision="approved"),
+            "output_text": "escalated approved",
+        }
+
+    module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
+        user_message=_OPS_VERBATIM_REQUEST,
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "executor_bridge": {
+                "hermes_engineer_core": _DisagreeThenOpsPlanEngineerBridge(_OPS_PLAN_FIXTURE),
+                "hermes_code_reviewer": _reviewer_executor,
+            },
+            "invocation_client": _escalation_client,
+            "allow_model_escalation": True,
+        },
+    )
+
+    assert escalation_messages, "escalated reviewer must have been invoked"
+    assert "git push origin main" in escalation_messages[0]
+    assert _OPS_VERBATIM_REQUEST in escalation_messages[0]

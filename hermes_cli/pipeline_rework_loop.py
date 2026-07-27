@@ -52,6 +52,7 @@ from hermes_cli.subagent_runner import (
 SAFE_FALLBACK_MAX_REVIEW_ITERATIONS = 1
 REVIEWER_APPROVAL_STATUS = "candidate_complete"
 OPS_PLAN_BLOCKING_FINDING = "ops_plan_blocking_finding"
+OPS_PLAN_UNREVIEWABLE = "ops_plan_unreviewable"
 ESCALATED_REVIEWER_SUBAGENT_ID = "hermes_code_reviewer_escalated"
 ESCALATED_REVIEWER_ROLE_ID = "reviewer"
 ESCALATED_REVIEWER_DECISION_APPROVED = "approved"
@@ -246,6 +247,7 @@ def execute_bounded_rework_loop(
     model_escalations: list[dict[str, Any]] = []
     pending_reviewer_blockers: list[str] = []
     current_ops_plan: list[dict[str, Any]] = []
+    ops_render_blockers: list[str] = []
     invalid_output_retries_used = 0
     test_rework_iterations_used = 0
     peer_round_used = False
@@ -495,6 +497,7 @@ def execute_bounded_rework_loop(
                     active_reviewer_blockers=active_reviewer_blockers,
                     trigger="reviewer_maintains_blocker_after_max_peer_round",
                     reason="reviewer maintained blocker after allowed peer disagreement round",
+                    ops_plan=current_ops_plan,
                 )
                 if escalation_result is not None:
                     escalation_result = _apply_completion_gate_to_escalation_result(
@@ -639,7 +642,7 @@ def execute_bounded_rework_loop(
             )
             # The peer round can approve and finalize without ever reaching the main
             # reviewer step below -- leaving it unwired would be a bypass of the gate.
-            reviewer_message = _with_ops_review_block(
+            reviewer_message, ops_render_blockers = _with_ops_review_block(
                 reviewer_message,
                 ops_plan=current_ops_plan,
                 original_task=user_message,
@@ -734,7 +737,10 @@ def execute_bounded_rework_loop(
             peer_reviewer_structured_output = _step_structured_output(current_snapshot, 1)
             reviewer_blockers.extend(
                 item
-                for item in _ops_plan_blockers(peer_reviewer_structured_output, ops_plan=current_ops_plan)
+                for item in [
+                    *ops_render_blockers,
+                    *_ops_plan_blockers(peer_reviewer_structured_output, ops_plan=current_ops_plan),
+                ]
                 if item not in reviewer_blockers
             )
             current_reviewer_packet = _with_reviewer_findings(
@@ -813,6 +819,7 @@ def execute_bounded_rework_loop(
                 active_reviewer_blockers=reviewer_blockers,
                 trigger="reviewer_maintains_blocker_after_peer_round",
                 reason="reviewer maintained blocker after allowed peer disagreement round",
+                ops_plan=current_ops_plan,
             )
             if escalation_result is not None:
                 escalation_result = _apply_completion_gate_to_escalation_result(
@@ -911,7 +918,18 @@ def execute_bounded_rework_loop(
                 test_summary=current_test_summary,
             )
 
-        if git_result is not None and not git_result.review_required and not git_result.material_changes_present:
+        # A proposed operation is the change; it just does not live in the working tree.
+        # `propose_ops` writes no files, so an ops-only run ("запушь ветку", "перезапусти
+        # сервис") has no material changes and would otherwise complete here -- before the
+        # reviewer fuse, before the reviewer step, with the plan never shown and no hard
+        # finding possible -- and hand an unreviewed plan straight to the operator gate.
+        # The skip itself is deliberate and stays exactly as it was for planless runs.
+        if (
+            git_result is not None
+            and not current_ops_plan
+            and not git_result.review_required
+            and not git_result.material_changes_present
+        ):
             final_snapshot = replace(
                 current_snapshot,
                 state="rework_loop_candidate_complete",
@@ -983,7 +1001,7 @@ def execute_bounded_rework_loop(
             engineer_message=engineer_message,
             appended_rework_context=appended_rework_context,
         )
-        reviewer_message = _with_ops_review_block(
+        reviewer_message, ops_render_blockers = _with_ops_review_block(
             reviewer_message,
             ops_plan=current_ops_plan,
             original_task=user_message,
@@ -1098,7 +1116,10 @@ def execute_bounded_rework_loop(
         reviewer_structured_output = _step_structured_output(current_snapshot, 1)
         reviewer_blockers.extend(
             item
-            for item in _ops_plan_blockers(reviewer_structured_output, ops_plan=current_ops_plan)
+            for item in [
+                *ops_render_blockers,
+                *_ops_plan_blockers(reviewer_structured_output, ops_plan=current_ops_plan),
+            ]
             if item not in reviewer_blockers
         )
         current_reviewer_packet = _with_reviewer_findings(
@@ -1574,24 +1595,42 @@ def _engineer_ops_plan(runtime_context: ControlledRuntimeContext | None) -> list
     return [dict(item) for item in plan if isinstance(item, Mapping)]
 
 
+def _rendered_ops_review_block(
+    ops_plan: list[dict[str, Any]],
+    original_task: str,
+) -> tuple[str | None, list[str]]:
+    """Render the plan block, or say why the reviewer will not be seeing it.
+
+    Rendering never raises into the pipeline. But "the reviewer never saw the plan"
+    must not degrade into "the run proceeds as if there were no plan": an unrendered
+    non-empty plan comes back as a blocker instead.
+    """
+    if not ops_plan:
+        return None, []
+    try:
+        return render_ops_review_block(ops_plan, original_task), []
+    except Exception:
+        return None, [OPS_PLAN_UNREVIEWABLE]
+
+
 def _with_ops_review_block(
     reviewer_message: str,
     *,
     ops_plan: list[dict[str, Any]],
     original_task: str,
-) -> str:
+) -> tuple[str, list[str]]:
     """Append the proposed operations and the VERBATIM user request to reviewer input.
 
     Verbatim on purpose: the engineer's paraphrase of the task is precisely where an
     over-broad plan hides, so the reviewer has to compare argv against the user's own
     words and not against a summary of them.
+
+    Returns the message plus any blockers earned by failing to show the plan.
     """
-    if not ops_plan:
-        return reviewer_message
-    try:
-        return "\n\n".join([reviewer_message, render_ops_review_block(ops_plan, original_task)])
-    except Exception:
-        return reviewer_message  # rendering is best-effort; never break the review step
+    block, blockers = _rendered_ops_review_block(ops_plan, original_task)
+    if block is None:
+        return reviewer_message, blockers
+    return "\n\n".join([reviewer_message, block]), blockers
 
 
 def _ops_plan_blockers(
@@ -1626,9 +1665,18 @@ def _execute_model_escalation_if_allowed(
     active_reviewer_blockers: list[str],
     trigger: str,
     reason: str,
+    ops_plan: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     if runtime_context is None or not runtime_context.allow_model_escalation:
         return None
+
+    # The escalated reviewer can clear a hard ops finding, so it must not be asked to
+    # arbitrate one blind: it gets the same plan and the same verbatim request.
+    ops_review_block, ops_render_blockers = _rendered_ops_review_block(
+        list(ops_plan or []), original_task
+    )
+    if ops_render_blockers:
+        return None  # unrenderable plan => no escalation; the standing blocker holds
 
     escalation_run = _run_escalated_reviewer(
         config=config,
@@ -1640,6 +1688,7 @@ def _execute_model_escalation_if_allowed(
         active_reviewer_blockers=active_reviewer_blockers,
         trigger=trigger,
         reason=reason,
+        ops_review_block=ops_review_block,
     )
     accumulated_subagent_runs.append(dict(escalation_run["subagent_run"]))
 
@@ -1679,6 +1728,7 @@ def _run_escalated_reviewer(
     active_reviewer_blockers: list[str],
     trigger: str,
     reason: str,
+    ops_review_block: str | None = None,
 ) -> dict[str, Any]:
     reviewer_step = list(current_snapshot.planned_steps)[1]
     reviewer_spec = dict(loaded_specs.subagent_specs.get(REVIEWER_SUBAGENT_ID) or {})
@@ -1702,9 +1752,14 @@ def _run_escalated_reviewer(
         allowed_real_models_by_subagent=runtime_context.allowed_real_models_by_subagent,
         real_provider_client_factory=runtime_context.real_provider_client_factory,
     )
+    escalation_message = _compose_escalation_message(
+        original_task=original_task, reviewer_blockers=active_reviewer_blockers, reason=reason
+    )
+    if ops_review_block:
+        escalation_message = "\n\n".join([escalation_message, ops_review_block])
     controlled_result = runtime_context.controlled_runner.run(
         runtime,
-        input_messages=[{"role": "user", "content": _compose_escalation_message(original_task=original_task, reviewer_blockers=active_reviewer_blockers, reason=reason)}],
+        input_messages=[{"role": "user", "content": escalation_message}],
         request_metadata={
             "execution_backend": "controlled_runtime_runner",
             "execution_scope": "controlled_model_escalation_only",

@@ -16,11 +16,11 @@ def test_review_block_shows_argv_and_the_original_request():
     assert "запушь текущую ветку в origin" in block
 
 
-def test_review_block_names_the_field_the_gate_actually_reads():
-    # findings -- свободные словари; ревьюер, назвавший поле code, молча пройдёт мимо
-    # блокировки, поэтому схема должна быть в тексте, а не только в голове автора.
+def test_review_block_names_the_fields_the_gate_actually_reads():
+    # findings -- свободные словари; схема должна быть в тексте, а не только в голове автора.
     block = render_ops_review_block([{"op_id": "git_push", "argv": ["git", "push"]}], "запушь")
     assert '"type"' in block
+    assert '"code"' in block
     for finding_type in OPS_HARD_FINDING_TYPES:
         assert finding_type in block
 
@@ -36,3 +36,17 @@ def test_ordinary_finding_does_not_block_by_itself():
 def test_every_hard_type_is_actually_hard():
     for finding_type in OPS_HARD_FINDING_TYPES:
         assert has_blocking_ops_finding([{"type": finding_type, "severity": "info"}]) is True
+
+
+def test_code_is_read_as_well_as_type():
+    # `code` -- канонический ключ находки в этом коде (pipeline_reviewer_packet,
+    # аварийный конверт инженера); только legal_review_gate пишет `type`.
+    for finding_type in OPS_HARD_FINDING_TYPES:
+        assert has_blocking_ops_finding([{"code": finding_type, "severity": "info"}]) is True
+    assert has_blocking_ops_finding([{"code": "style", "severity": "high"}]) is False
+
+
+def test_either_key_alone_is_enough_when_both_are_present():
+    assert has_blocking_ops_finding([{"type": "style", "code": "ops_wrong_target"}]) is True
+    assert has_blocking_ops_finding([{"type": "ops_wrong_target", "code": "style"}]) is True
+    assert has_blocking_ops_finding([{"type": "style", "code": "nitpick"}]) is False

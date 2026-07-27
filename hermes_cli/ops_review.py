@@ -32,14 +32,24 @@ def render_ops_review_block(plan: list[Mapping[str, Any]], original_task: str) -
         "обоснован ли деструктив (ops_unjustified_destroy).",
         # Без явной схемы гейт не сработает: findings в конверте -- свободные словари,
         # и ревьюер, назвавший поле code, молча пройдёт мимо блокировки.
-        'Нашёл такое -- добавь в findings объект с полем "type", равным одному из '
-        "этих четырёх идентификаторов: " + ", ".join(sorted(OPS_HARD_FINDING_TYPES)) + ".",
+        'Нашёл такое -- добавь в findings объект, у которого "code" (или "type") равен '
+        "одному из этих четырёх идентификаторов: "
+        + ", ".join(sorted(OPS_HARD_FINDING_TYPES))
+        + ".",
     ])
     return "\n".join(lines)
 
 
+#: Ключи, под которыми ревьюер может назвать тип находки. `code` -- канонический
+#: в этом коде (`_sanitize_findings` в pipeline_reviewer_packet, аварийный конверт
+#: инженера), `type` -- в legal_review_gate. Читаем оба: гейт, промахнувшийся мимо
+#: ключа, молча пропускает операцию, которой не просили.
+OPS_FINDING_TYPE_KEYS = ("type", "code")
+
+
 def has_blocking_ops_finding(findings: list[Mapping[str, Any]] | None) -> bool:
     for finding in findings or []:
-        if str(finding.get("type") or "").strip() in OPS_HARD_FINDING_TYPES:
-            return True
+        for key in OPS_FINDING_TYPE_KEYS:
+            if str(finding.get(key) or "").strip() in OPS_HARD_FINDING_TYPES:
+                return True
     return False
