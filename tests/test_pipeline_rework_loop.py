@@ -1312,7 +1312,10 @@ def test_finalize_does_not_arm_the_gate_when_the_plan_cannot_be_rendered(
     assert "не удалось показать" in text
 
 
-def test_finalize_read_only_plan_adds_no_ops_block_to_the_final_response(tmp_path: Path, monkeypatch) -> None:
+def test_finalize_read_only_plan_never_asks_for_approval(tmp_path: Path, monkeypatch) -> None:
+    """read исполняется сразу и апрува не просит. Здесь repo_path -- не репозиторий,
+    поэтому исполнитель отказывается; важно, что ответ всё равно собран, а блока
+    апрува в нём нет."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
 
@@ -1327,6 +1330,9 @@ def test_finalize_read_only_plan_adds_no_ops_block_to_the_final_response(tmp_pat
 
     text = result.execution_report.to_safe_dict()["final_response"]["text"]
     assert "ПЛАН ОПЕРАЦИЙ" not in text
+    assert "«выполни»" not in text
+    assert "git_status" in text  # отказ исполнителя виден, а не проглочен
+    assert importlib.import_module("hermes_cli.ops_gate_service").get_pending() is None
 
 
 def test_finalize_destroy_plan_asks_for_the_operation_id_in_the_final_response(
@@ -1457,6 +1463,120 @@ def test_finalize_replaces_an_expired_ops_gate(tmp_path: Path, monkeypatch) -> N
 
     pending = ops_gate_service.get_pending()
     assert pending is not None and pending["session_id"] == "pipe-ops-slot-C"
+    assert "ПЛАН ОПЕРАЦИЙ" in result.execution_report.to_safe_dict()["final_response"]["text"]
+
+
+def test_finalize_executes_a_read_only_plan_and_reports_its_output(tmp_path: Path, monkeypatch) -> None:
+    """read не требует апрува по построению класса. Если его никто не исполняет,
+    весь класс каталога -- мёртвый код: план из git_status отвечает тишиной."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+    repo, _worktree = _ops_repo_with_run_worktree(tmp_path)
+    _write(repo, "dirty.txt", "uncommitted\n")
+
+    _repo_dir, result = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-read-1",
+        ops_plan=[{"op_id": "git_status", "risk": "read",
+                   "argv": ["git", "status", "--short", "--branch"],
+                   "description": "состояние рабочего дерева", "irreversible": None}],
+        original_task="покажи статус",
+        repo_path=repo,
+    )
+
+    text = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert "git_status" in text
+    assert "dirty.txt" in text  # реальный вывод операции, а не её описание
+    assert "ПЛАН ОПЕРАЦИЙ" not in text  # апрув для read не запрашивается
+    assert ops_gate_service.get_pending() is None
+
+
+def test_finalize_read_plan_stops_at_the_first_failure(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo, _worktree = _ops_repo_with_run_worktree(tmp_path)
+
+    _repo_dir, result = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-read-2",
+        ops_plan=[
+            {"op_id": "git_log", "risk": "read",
+             "argv": ["git", "log", "--oneline", "no-such-branch"],
+             "description": "коммиты", "irreversible": None},
+            {"op_id": "git_status", "risk": "read",
+             "argv": ["git", "status", "--short"],
+             "description": "статус", "irreversible": None},
+        ],
+        original_task="покажи лог и статус",
+        repo_path=repo,
+    )
+
+    text = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert "git_log" in text
+    assert "git_status" in text  # назван как невыполненный
+    assert "Остановлено на первой ошибке" in text
+
+
+def test_finalize_read_plan_failure_does_not_break_finalize(tmp_path: Path, monkeypatch) -> None:
+    """Исполнение read -- удобство, а не корректность пайплайна: любая его ошибка
+    обязана деградировать в сообщение, а не уронить финализацию."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo, _worktree = _ops_repo_with_run_worktree(tmp_path)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("исполнитель упал")
+
+    monkeypatch.setattr("hermes_cli.ops_executor.execute_operation", _boom)
+
+    _repo_dir, result = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-read-3",
+        ops_plan=[{"op_id": "git_status", "risk": "read",
+                   "argv": ["git", "status"], "description": "статус", "irreversible": None}],
+        original_task="покажи статус",
+        repo_path=repo,
+    )
+
+    text = result.execution_report.to_safe_dict()["final_response"]["text"]
+    assert "git_status" in text
+    assert "исполнитель упал" in text
+
+
+def test_finalize_mixed_plan_executes_nothing_before_approval(tmp_path: Path, monkeypatch) -> None:
+    """Одна mutate делает гейтом ВЕСЬ план: read-часть не исполняется заранее."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    ops_gate_service = importlib.import_module("hermes_cli.ops_gate_service")
+    repo, _worktree = _ops_repo_with_run_worktree(tmp_path)
+    monkeypatch.setattr(
+        "hermes_cli.ops_executor.execute_operation",
+        lambda *a, **k: pytest.fail("до апрува не должно выполняться ничего"),
+    )
+
+    _repo_dir, result = _finalize_with_ops_plan(
+        module=module,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        session_id="pipe-ops-mixed-1",
+        ops_plan=[
+            {"op_id": "git_status", "risk": "read", "argv": ["git", "status"],
+             "description": "статус", "irreversible": None},
+            {"op_id": "git_push", "risk": "mutate", "argv": ["git", "push", "origin", "main"],
+             "description": "опубликовать main", "irreversible": None},
+        ],
+        original_task="покажи статус и запушь",
+        repo_path=repo,
+    )
+
+    assert ops_gate_service.get_pending() is not None
     assert "ПЛАН ОПЕРАЦИЙ" in result.execution_report.to_safe_dict()["final_response"]["text"]
 
 

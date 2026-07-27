@@ -2536,6 +2536,10 @@ def _finalize_loop_result(
             # Рендер упал -- например, нестроковый элемент argv ломает ' '.join.
             # Взведённый маркер на неувиденный план дал бы «выполни» вслепую.
             ops_note = _OPS_PLAN_UNRENDERABLE_NOTE
+        else:
+            # План целиком из read апрува не требует по построению класса: он
+            # исполняется здесь же, а вывод идёт оператору в ответе.
+            ops_block = _read_ops_result_block(repo_path=repo_path, ops_plan=ops_plan)
     final_response_text = (
         _completion_allowed_final_response_text(
             git_gate=git_gate,
@@ -2664,6 +2668,9 @@ _OPS_GATE_NOT_ARMED_NOTES = {
     ),
 }
 
+_OPS_READ_RESULT_HEADER = "🔍 ОПЕРАЦИИ (read) — выполнены без апрува"
+
+
 def _gated_ops_plan(ops_plan: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """План, который обязан пройти операторский гейт, либо пустой список.
 
@@ -2718,11 +2725,12 @@ def _record_ops_gate_pending(
     Only reached from the `gate_reached` branch, so the plan has already been
     through the reviewer (Task 7 keeps every plan-bearing run on the reviewing
     path). A plan that is entirely `read` raises nothing -- there is nothing to
-    approve. A plan holding even one `mutate`/`destroy` goes through approval AS
-    A WHOLE: running the read part now would execute half a plan before the
-    operator has seen the other half. Like the commit-gate marker, this can
-    never break finalize -- the marker serves the reply intercept, not the
-    pipeline's own correctness."""
+    approve; it is executed straight away instead (see `_read_ops_result_block`).
+    A plan holding even one `mutate`/`destroy` goes through approval AS A WHOLE:
+    running the read part now would execute half a plan before the operator has
+    seen the other half. Like the commit-gate marker, this can never break
+    finalize -- the marker serves the reply intercept, not the pipeline's own
+    correctness."""
     plan = _gated_ops_plan(ops_plan)
     if not plan:
         return ""
@@ -2743,6 +2751,91 @@ def _record_ops_gate_pending(
     except Exception:
         return "marker_failed"
     return "" if armed else "gate_busy"
+
+
+def _read_only_ops_plan(ops_plan: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """План, целиком состоящий из read-операций, либо пустой список.
+
+    Дополнение `_gated_ops_plan`: ровно один из двух предикатов непуст для
+    непустого плана, так что план не может одновременно исполниться сразу и уйти
+    на апрув."""
+    plan = [dict(item) for item in (ops_plan or []) if isinstance(item, dict)]
+    if not plan:
+        return []
+    if all(str(item.get("risk") or "") == "read" for item in plan):
+        return plan
+    return []
+
+
+def _read_ops_result_block(
+    *,
+    repo_path: str | None,
+    ops_plan: list[dict[str, Any]] | None,
+) -> str:
+    """Выполнить read-план и вернуть его вывод; пустая строка, если плана нет.
+
+    read-класс не требует апрува по построению: операция не меняет ни репозиторий,
+    ни сервис, ни remote. Без исполнения здесь весь класс мёртв -- план из
+    `git_status` отвечал бы тишиной, потому что другого вызывающего у
+    `execute_operation` нет.
+
+    Границы: тот же `execute_operation` (обрезка вывода 8000 символов, таймаут
+    120 с, отказ в per-run ветке), тот же резолвер cwd, что у гейта, остановка на
+    первой ошибке (следующая операция могла на неё опираться). Исполнение read --
+    удобство, а не корректность пайплайна: любая ошибка обязана деградировать в
+    сообщение, поэтому наружу не выпускается ни одно исключение."""
+    plan = _read_only_ops_plan(ops_plan)
+    if not plan:
+        return ""
+    try:
+        from hermes_cli.ops_catalog import ResolvedOperation
+        from hermes_cli import ops_executor
+        from hermes_cli.ops_gate_message import resolve_operation_cwd
+
+        cwd = Path(resolve_operation_cwd(repo_path))
+        if not cwd.is_dir():
+            return (
+                f"{_OPS_READ_RESULT_HEADER}\n"
+                f"⛔ Не выполнено: рабочая директория не определена ({repo_path or 'пусто'})."
+            )
+        lines = [_OPS_READ_RESULT_HEADER]
+        stopped_at: int | None = None
+        for index, item in enumerate(plan):
+            operation = ResolvedOperation(
+                op_id=str(item.get("op_id")),
+                risk=str(item.get("risk")),
+                argv=tuple(item.get("argv") or ()),
+                description=str(item.get("description") or ""),
+                irreversible=item.get("irreversible"),
+            )
+            try:
+                # Через модуль, а не через импортированное имя: так подмена
+                # исполнителя в тестах видна, а поведение то же.
+                result = ops_executor.execute_operation(operation, cwd=cwd)
+            except Exception as exc:  # noqa: BLE001
+                # Широко: отсутствующий бинарник -- FileNotFoundError, нехватка
+                # прав -- PermissionError, отказ исполнителя -- OpsExecutionError.
+                lines.append(f"❌ {operation.op_id}: {type(exc).__name__}: {exc}")
+                stopped_at = index
+                break
+            marker = "✅" if result["status"] == 0 else "⚠️"
+            lines.append(f"{marker} {operation.op_id} (exit {result['status']})")
+            if result["output"]:
+                lines.append(f"```\n{result['output']}\n```")
+            if result.get("truncated"):
+                lines.append("… вывод обрезан")
+            if result["status"] != 0:
+                stopped_at = index
+                break
+        if stopped_at is not None:
+            skipped = [str(item.get("op_id")) for item in plan[stopped_at + 1:]]
+            lines.append(
+                "⏹ Остановлено на первой ошибке."
+                + (f" Не выполнялись: {', '.join(skipped)}." if skipped else "")
+            )
+        return "\n".join(lines)
+    except Exception:
+        return f"{_OPS_READ_RESULT_HEADER}\n⚠️ Операции не выполнены (внутренняя ошибка)."
 
 
 def _normalize_controlled_runtime_context(
