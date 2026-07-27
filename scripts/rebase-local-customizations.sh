@@ -69,7 +69,7 @@ ensure_personal_remote_https() {
   fi
 }
 
-push_personal_branch() {
+_push_personal_branch_once() {
   ensure_personal_remote_https
   github_token="$(load_github_token || true)"
   if [ -z "$github_token" ]; then
@@ -90,13 +90,37 @@ EOF
   chmod 700 "$askpass_script"
   if ! GIT_ASKPASS="$askpass_script" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$github_token" git -C "$REPO" push --force-with-lease "$PERSONAL_REMOTE" "$BRANCH" >/dev/null; then
     rm -rf "$askpass_dir"
-    # A rejected push means another host advanced the shared branch after
-    # our fetch. Swallowing this (pre-2026-07-16 behavior) let the hosts
-    # silently diverge for days; fail loudly so the next run re-integrates.
-    echo "FAILED: push to $PERSONAL_REMOTE/$BRANCH rejected (lease stale) — another host pushed after our fetch. Re-run to integrate their commits." >&2
     return 1
   fi
   rm -rf "$askpass_dir"
+  return 0
+}
+
+# The push is the last thing this script does, long after the rebase landed.
+# A rejected lease means only that the other host pushed inside that window.
+# Swallowing it (pre-2026-07-16) let the two lineages diverge for days; dying
+# on it (pre-2026-07-27) made the finalizer roll back a rebase that was
+# already correct. Neither is right — the work is done, the lease is merely
+# stale. Fold their commits in and push once more.
+push_personal_branch() {
+  if _push_personal_branch_once; then
+    return 0
+  fi
+  echo "Push to $PERSONAL_REMOTE/$BRANCH rejected (lease stale) — another host pushed after our fetch; re-integrating and retrying once..." >&2
+  if ! integrate_personal_remote; then
+    echo "FAILED: could not fold in the other host's commits after the stale-lease rejection. Integrate manually, then re-run." >&2
+    return 1
+  fi
+  # We are about to publish code we have not parsed since the rebase.
+  if ! verify_tree_compiles; then
+    echo "FAILED: the tree does not parse after folding in the other host's commits — not pushing (see SYNTAX ERROR lines above)." >&2
+    return 1
+  fi
+  if ! _push_personal_branch_once; then
+    echo "FAILED: push to $PERSONAL_REMOTE/$BRANCH still rejected after re-integration — the shared branch is moving faster than one run can follow. Resolve manually." >&2
+    return 1
+  fi
+  echo "Push succeeded after folding in the other host's commits." >&2
   return 0
 }
 

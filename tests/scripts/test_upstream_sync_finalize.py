@@ -292,7 +292,10 @@ class TestPersonalRemoteIntegrationAfterHistoryRewrite:
                 "HOME": str(home),
                 "HERMES_PERSONAL_REMOTE_URL": str(personal),
                 "HERMES_UPSTREAM_FETCH_URL": str(upstream),
-                "GITHUB_TOKEN": "",
+                # Any non-empty value: pushing to a local bare repo never
+                # consults the askpass helper, but an empty token makes
+                # push_personal_branch skip the push it is here to exercise.
+                "GITHUB_TOKEN": "dummy",
                 "PATH": f"{_stub_bin(tmp_path)}:{os.environ['PATH']}",
             }
         )
@@ -359,6 +362,51 @@ class TestPersonalRemoteIntegrationAfterHistoryRewrite:
         assert (repo / "fam.py").exists()
         assert (repo / "custom.py").exists()
         assert (repo / "core.py").read_text() == "VERSION = 2\n"
+
+
+class TestStaleLeaseIsReintegratedNotFatal:
+    """The push comes last, after the rebase has already landed locally. If the
+    other host pushes in the window between our fetch and our push, the
+    --force-with-lease check rejects us — and a bare `push_personal_branch`
+    under `set -e` killed the script there, so the finalizer rolled back a
+    rebase that was fine. Same shape as the 2026-07-27 outage: a late, benign
+    failure destroying finished work. Re-integrate and push once instead.
+    """
+
+    def test_a_push_landing_mid_run_is_absorbed(self, tmp_path):
+        world = TestPersonalRemoteIntegrationAfterHistoryRewrite()
+        repo, personal, upstream, _u2 = world._world(tmp_path)
+        other = tmp_path / "other-host"
+
+        # The sync helper runs immediately before the push — a precise stand-in
+        # for "the other host committed while we were working".
+        helper = repo / "scripts" / "sync-runtime-scripts.sh"
+        helper.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -e\n"
+            f'cd "{other}"\n'
+            'echo "LATE = True" > late.py\n'
+            "git add -A\n"
+            'git commit -qm "fix(fam): committed while the sync was running"\n'
+            "git push -q origin local/customizations\n"
+        )
+        helper.chmod(0o755)
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "test: racing sync helper")
+
+        proc = world._run(repo, personal, upstream, tmp_path)
+
+        assert proc.returncode == 0, proc.stderr
+        # Their late commit is ours now...
+        assert (repo / "late.py").exists(), proc.stderr
+        # ...and the shared branch carries what we hold: the push went through.
+        remote_tip = subprocess.run(
+            ["git", "rev-parse", "local/customizations"],
+            cwd=personal,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert remote_tip == _git(repo, "rev-parse", "HEAD"), proc.stderr
 
 
 class TestFinalizeReportsWhichStageFailed:
