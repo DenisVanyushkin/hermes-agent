@@ -702,9 +702,15 @@ def reminders(conn, now_utc=None, cfg=None):
     # injects into every turn -- so "did you take it?" survives a session
     # reset, a restart or compression.  Same guard-per-hook pattern as the
     # health alert above: a snapshot must never sink the tick.
+    #
+    # now_utc is forwarded like it is to road_recompute/list_reminders
+    # above: acks.build's DUE_WINDOW_HOURS filter is clock-driven, so a
+    # snapshot built off wall-clock while the rest of the tick runs on an
+    # injected clock projects a different set of open questions than the
+    # tick just acted on.
     try:
         from fam import acks as _acks
-        _acks.write(conn, cfg=cfg)
+        _acks.write(conn, cfg=cfg, now_utc=now)
     except Exception:                                # noqa: BLE001 -- never fail the tick
         pass
 
