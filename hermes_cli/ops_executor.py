@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +18,35 @@ _OUTPUT_LIMIT = 8000
 # Совпадает с pipeline_autonomous_execution.RUN_BRANCH_PREFIX; дублируется, чтобы
 # модуль оставался лёгким (та же причина, что в commit_gate_service).
 RUN_BRANCH_PREFIX = "hermes-run/"
+
+# Только эти операции обращаются к remote и нуждаются в токене; всё остальное
+# выполняется без единого credential в окружении.
+_REMOTE_OPERATIONS = frozenset({"git_push", "git_push_force_with_lease", "git_fetch"})
+
+# Токен уходит в окружение процесса, а не в argv: командная строка видна в `ps`
+# любому пользователю хоста, окружение чужого процесса -- нет. Хелпер печатает
+# username/password на стандартный вывод по запросу git, забирая пароль из
+# переменной окружения, а не из своего собственного текста.
+_CREDENTIAL_HELPER = '!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f'
+
+
+def _git_credential_env(op_id: str) -> dict[str, str]:
+    """Переменные окружения для операции, обращающейся к remote.
+
+    Возвращает пустой словарь для всего, что не входит в _REMOTE_OPERATIONS --
+    остальные операции не получают ни токена, ни какого-либо credential.
+    """
+    if op_id not in _REMOTE_OPERATIONS:
+        return {}
+    home = Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes"))
+    try:
+        for line in (home / ".env").read_text(encoding="utf-8").splitlines():
+            if line.startswith("GITHUB_TOKEN="):
+                token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                return {"GITHUB_TOKEN": token} if token else {}
+    except OSError:
+        return {}
+    return {}
 
 
 class OpsExecutionError(RuntimeError):
@@ -59,14 +89,23 @@ def execute_operation(
         # обслуживается ops-операциями: та же граница, что в commit_gate_service.
         raise OpsExecutionError(f"refused_run_branch:{branch}")
 
+    argv = list(operation.argv)
+    credential_env = _git_credential_env(operation.op_id)
+    if credential_env:
+        # Временный helper только для этого вызова: git читает его через -c,
+        # ничего не пишется в .git/config и в URL remote не попадает.
+        argv = [argv[0], "-c", f"credential.helper={_CREDENTIAL_HELPER}", *argv[1:]]
+    run_env = {**os.environ, **credential_env} if credential_env else None
+
     try:
         completed = subprocess_runner(
-            list(operation.argv),
+            argv,
             cwd=str(cwd),
             text=True,
             capture_output=True,
             check=False,
             timeout=timeout,
+            env=run_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise OpsExecutionError(f"timeout:{operation.op_id}") from exc
