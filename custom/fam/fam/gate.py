@@ -139,6 +139,29 @@ CONFIG_DEFAULTS = {
     # [2]=21+. Denser early in the month (more runway to act), sparser
     # by month's end. Tercile boundaries themselves are not config.
     "goal_digest_intervals": [4, 2, 1],
+    # Task 3 (external calendar sync, schema v12): config surface for the
+    # upcoming iCloud CalDAV module (transport/parser/tick land in later
+    # tasks) -- these keys only gate/parametrize that module, they do not
+    # wire it up. `extcal_enabled` is the master switch (default off:
+    # the feature must be explicitly turned on after live setup).
+    # `extcal_username` is the Apple ID; the app-specific password itself
+    # is deliberately NOT a config key -- it's read only from
+    # ICLOUD_APP_PASSWORD in ~/.hermes/.env (chmod 600), same pattern as
+    # TOMTOM_API_KEY, so it never lands in fam-config.json, audit rows,
+    # or test fixtures. `extcal_read_calendars` empty means "every
+    # calendar except the write target"; `extcal_write_calendar` is the
+    # URL of the "Гермес" collection events get exported to.
+    # `extcal_horizon_weeks` bounds both the read and write window.
+    # `extcal_all_day_as` controls whether an imported all-day VEVENT
+    # becomes a `plan` or an `event`. `extcal_stale_hours` is the
+    # threshold for the staleness health probe.
+    "extcal_enabled": False,
+    "extcal_username": "",
+    "extcal_read_calendars": [],
+    "extcal_write_calendar": "",
+    "extcal_horizon_weeks": 8,
+    "extcal_all_day_as": "plan",
+    "extcal_stale_hours": 6,
 }
 
 GATE_STYLE_INSTRUCTION = (

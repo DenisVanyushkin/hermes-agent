@@ -188,6 +188,12 @@ CREATE TABLE IF NOT EXISTS sent_messages (
     CHECK (ack_status IN ('none','confirmed','skipped')),
   created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_sent_messages_kind_ref ON sent_messages(kind, ref_id);
+CREATE TABLE IF NOT EXISTS ext_exports (
+  event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+  href TEXT,
+  etag TEXT,
+  body_hash TEXT,
+  synced_at TEXT);
 """
 
 def resolve_db_path():
@@ -309,10 +315,46 @@ def init_db(conn):
     # from an ordinary +45min nag, both land in the future the same way.
     _ensure_column(conn, "med_intakes", "deferred_until_utc",
                    "deferred_until_utc TEXT")
+    # -- v12 (external calendar sync, Task 3): events/plans gain `owner`
+    # ('hermes'|'iphone', CHECK-enforced, DEFAULT 'hermes') so the
+    # upcoming CalDAV ingest can tell which side created a row without
+    # touching anything that already exists -- ALTER TABLE ADD COLUMN
+    # with both NOT NULL DEFAULT and CHECK backfills every pre-v12 row to
+    # 'hermes' in one statement (verified against this SQLite build,
+    # unlike the CHECK-on-ALTER caveat noted for reminders.kind/places.
+    # category above). `external_uid`/`external_href`/`external_etag`
+    # track the iCloud VEVENT identity for round-tripping; `external_seq`
+    # (events only -- plans have no SEQUENCE concept) lets the sync tick
+    # detect a stale write. The partial UNIQUE index on
+    # events.external_uid enforces one local event per remote UID while
+    # leaving every locally-created event (external_uid IS NULL) alone --
+    # SQLite partial indexes simply skip NULL rows, so any number of them
+    # coexist. `ext_exports` is a whole new table (CREATE TABLE IF NOT
+    # EXISTS above covers fresh installs and pre-v12 databases alike, no
+    # _ensure_column migration needed -- same pattern as `goals` in v9 /
+    # `sent_messages` in v10): one row per Hermes-owned event that has
+    # been PUT to the "Гермес" collection, so the export tick can compare
+    # body_hash and skip a no-op PUT.
+    _ensure_column(conn, "events", "owner",
+                   "owner TEXT NOT NULL DEFAULT 'hermes' "
+                   "CHECK (owner IN ('hermes','iphone'))")
+    _ensure_column(conn, "events", "external_uid", "external_uid TEXT")
+    _ensure_column(conn, "events", "external_href", "external_href TEXT")
+    _ensure_column(conn, "events", "external_etag", "external_etag TEXT")
+    _ensure_column(conn, "events", "external_seq", "external_seq INTEGER")
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','11')")
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_external_uid "
+        "ON events(external_uid) WHERE external_uid IS NOT NULL")
+    _ensure_column(conn, "plans", "owner",
+                   "owner TEXT NOT NULL DEFAULT 'hermes' "
+                   "CHECK (owner IN ('hermes','iphone'))")
+    _ensure_column(conn, "plans", "external_uid", "external_uid TEXT")
+    _ensure_column(conn, "plans", "external_href", "external_href TEXT")
+    _ensure_column(conn, "plans", "external_etag", "external_etag TEXT")
     conn.execute(
-        "UPDATE meta SET value='11' WHERE key='schema_version'")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','12')")
+    conn.execute(
+        "UPDATE meta SET value='12' WHERE key='schema_version'")
     conn.commit()
 
 

@@ -49,5 +49,12 @@
   "detour_offer_min_min": 2,
   "detour_max_min": 30,
   "goal_ritual_window_days": 3,
-  "goal_digest_intervals": [4, 2, 1]
+  "goal_digest_intervals": [4, 2, 1],
+  "extcal_enabled": false,
+  "extcal_username": "",
+  "extcal_read_calendars": [],
+  "extcal_write_calendar": "",
+  "extcal_horizon_weeks": 8,
+  "extcal_all_day_as": "plan",
+  "extcal_stale_hours": 6
 }

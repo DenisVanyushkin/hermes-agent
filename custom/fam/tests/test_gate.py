@@ -53,6 +53,18 @@ CFG = {
     "detour_max_min": 30,
     "goal_ritual_window_days": 3,
     "goal_digest_intervals": [4, 2, 1],
+    # Task 3 (external calendar sync, schema v12): keep this hand-mirror
+    # of gate.CONFIG_DEFAULTS in sync, same as every prior addition above
+    # -- test_load_config_creates_from_example_when_absent below does an
+    # exact `cfg == CFG` comparison, so a CONFIG_DEFAULTS key missing here
+    # shows up as a spurious extra-key failure, not a real regression.
+    "extcal_enabled": False,
+    "extcal_username": "",
+    "extcal_read_calendars": [],
+    "extcal_write_calendar": "",
+    "extcal_horizon_weeks": 8,
+    "extcal_all_day_as": "plan",
+    "extcal_stale_hours": 6,
 }
 
 

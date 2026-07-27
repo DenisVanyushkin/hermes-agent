@@ -6,7 +6,13 @@ from fam import series, cal, people, places
 
 def test_schema_v7(db):
     ver = db.execute("SELECT value FROM meta WHERE key=\x27schema_version\x27").fetchone()[0]
-    assert ver == "11"
+    # event_series/event_series_participants were introduced in schema 7
+    # (db.py: "schema 7: recurring event series"). This test's concern is
+    # "series tables exist in a fresh db", not pinning the CURRENT overall
+    # schema_version -- that global invariant already has its own home in
+    # test_db.py, and an exact match here just breaks this unrelated test
+    # on every future, unrelated schema bump.
+    assert int(ver) >= 7
     tabs = {r["name"] for r in db.execute(
         "SELECT name FROM sqlite_master WHERE type=\x27table\x27")}
     assert {"event_series", "event_series_participants"} <= tabs

@@ -66,14 +66,22 @@ def test_backup_rotation_keeps_newest(tmp_path):
 
 
 def test_verify_backup_passes_on_real_db(db, tmp_path):
-    # `db` is an initialised assistant.db (schema_version=7); back it up and verify
+    # `db` is an initialised assistant.db; back it up and verify. The
+    # expected version is read from `db` itself rather than hardcoded --
+    # this test's real property is "verify_backup reports the backup's
+    # actual schema_version", not a pin to whatever version happens to be
+    # current (that global invariant already has its own home in
+    # test_db.py, and re-pinning a literal here just breaks this test
+    # again on every future, unrelated schema bump).
+    expected_version = db.execute(
+        "SELECT value FROM meta WHERE key='schema_version'").fetchone()["value"]
     src = maint.backup_db(Path(db.execute("PRAGMA database_list").fetchone()[2]),
                           tmp_path / "b", keep=7,
                           now=datetime(2026, 7, 13, tzinfo=timezone.utc))
     ok, detail = maint.verify_backup(src)
     assert ok is True
     assert detail["integrity"] == "ok"
-    assert detail["schema_version"] == "11"
+    assert detail["schema_version"] == expected_version
 
 def test_verify_backup_fails_on_corrupt_file(tmp_path):
     bad = tmp_path / "corrupt.db"
