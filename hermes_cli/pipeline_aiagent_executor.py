@@ -27,6 +27,7 @@ _ENGINEER_ALLOWED_TOOL_NAMES = (
     "git_diff",
     "git_remote_status",
     "pytest",
+    "propose_ops",
 )
 _REVIEWER_ALLOWED_TOOL_NAMES = (
     "read_file",
@@ -68,11 +69,13 @@ class AIAgentSubagentExecutorBridge:
         self.subprocess_runner = subprocess_runner
         self.max_iterations = max_iterations
         self._tool_calls: list[dict[str, Any]] = []
+        self.ops_plan: list[dict[str, Any]] = []
 
     def __call__(self, request: Any, runtime_plan: Any) -> dict[str, Any]:
         self._validate_runtime_plan(runtime_plan)
         self._validate_request(request, runtime_plan)
         self._tool_calls = []
+        self.ops_plan = []
         agent = self._build_agent(runtime_plan)
         result = self.conversation_runner(self, agent, request, runtime_plan)
         normalized = self._normalize_result(result)
@@ -226,6 +229,8 @@ class AIAgentSubagentExecutorBridge:
                 result = summary.to_safe_dict()
                 if summary.blocked_reason is not None:
                     raise AIAgentExecutorBridgeError(summary.blocked_reason)
+            elif tool_name == "propose_ops":
+                result = self._propose_ops(args)
             else:
                 raise AIAgentExecutorBridgeError(f"tool_not_implemented:{tool_name}")
         except AIAgentExecutorBridgeError as exc:
@@ -800,6 +805,20 @@ class AIAgentSubagentExecutorBridge:
                 },
                 ["targets"],
             ),
+            "propose_ops": self._tool_definition(
+                "propose_ops",
+                (
+                    "Propose operational actions from the fixed catalog (git push/fetch/status, "
+                    "service and container control). This RECORDS a plan for review and operator "
+                    "approval -- it executes nothing. Use it for tasks that ask you to perform an "
+                    "operation rather than change code."
+                ),
+                {"operations": {"type": "array", "items": {"type": "object", "properties": {
+                    "op_id": {"type": "string"},
+                    "params": {"type": "object"},
+                }, "required": ["op_id"]}}},
+                ["operations"],
+            ),
         }
         return [definitions[name] for name in self._allowed_tool_names()]
 
@@ -875,6 +894,35 @@ class AIAgentSubagentExecutorBridge:
                 truncated = True
                 break
         return {"status": "ok", "pattern": pattern, "files": files, "truncated": truncated}
+
+    def _propose_ops(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        """Записать план операций. Ничего не выполняет -- по замыслу.
+
+        Валидация здесь, а не при исполнении: инженер должен получить отказ
+        внутри своего цикла и успеть исправить параметры, а не через ревьюера.
+        """
+        from hermes_cli.ops_catalog import OpsCatalogError, resolve_operation
+
+        raw = arguments.get("operations")
+        if not isinstance(raw, list) or not raw:
+            raise AIAgentExecutorBridgeError("propose_ops_empty_plan")
+        accepted: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                raise AIAgentExecutorBridgeError("propose_ops_invalid_item")
+            try:
+                resolved = resolve_operation(str(item.get("op_id") or ""), item.get("params") or {})
+            except OpsCatalogError as exc:
+                raise AIAgentExecutorBridgeError(f"propose_ops_rejected:{exc}") from exc
+            accepted.append({
+                "op_id": resolved.op_id,
+                "risk": resolved.risk,
+                "argv": list(resolved.argv),
+                "description": resolved.description,
+                "irreversible": resolved.irreversible,
+            })
+        self.ops_plan = accepted
+        return {"accepted": [item["op_id"] for item in accepted], "plan_size": len(accepted)}
 
     def _git_remote_status(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         """Read-only comparison of the local HEAD against a remote's tracking branch.

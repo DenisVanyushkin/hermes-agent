@@ -2753,3 +2753,40 @@ def test_bridge_dispatch_is_context_local_and_leaves_globals_untouched(tmp_path:
         assert dispatch_function_call("read_file", {"path": "x"}) == "original_dispatch"
     finally:
         run_agent.handle_function_call = original_handle
+
+
+def test_propose_ops_validates_and_records_the_plan(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=repo, agent_factory=_FakeAgent)
+
+    payload = json.loads(bridge.execute_tool("propose_ops", {
+        "operations": [{"op_id": "git_push", "params": {"remote": "origin", "branch": "local/customizations"}}]
+    }))
+
+    assert payload["plan_size"] == 1
+    assert bridge.ops_plan[0]["argv"] == ["git", "push", "origin", "local/customizations"]
+    assert bridge.ops_plan[0]["risk"] == "mutate"
+
+
+def test_propose_ops_refuses_an_operation_outside_the_catalog(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=repo, agent_factory=_FakeAgent)
+
+    with pytest.raises(AIAgentExecutorBridgeError):
+        bridge.execute_tool("propose_ops", {"operations": [{"op_id": "rm_rf", "params": {}}]})
+    assert bridge.ops_plan == []
+
+
+def test_propose_ops_does_not_execute_anything(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=repo, agent_factory=_FakeAgent)
+    head_before = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                 check=True, text=True, capture_output=True).stdout
+
+    bridge.execute_tool("propose_ops", {
+        "operations": [{"op_id": "git_reset_hard", "params": {"branch": "HEAD"}}]
+    })
+
+    head_after = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                check=True, text=True, capture_output=True).stdout
+    assert head_before == head_after
