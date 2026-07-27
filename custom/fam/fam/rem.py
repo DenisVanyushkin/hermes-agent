@@ -153,6 +153,29 @@ def regenerate(conn, event_id, now_utc=None):
     )
 
     event = cal.get(conn, event_id)
+
+    # Invariant #2 (extcal design doc, Task 5): Hermes never owns the alarm
+    # for an event imported from her iPhone's calendar -- her phone already
+    # rings for it, and a second, Hermes-side chain would be exactly the
+    # duplicate-reminder problem the whole extcal feature exists to avoid.
+    # cal.add()/cal.update() call regenerate() unconditionally for EVERY
+    # event regardless of owner, so THIS early exit -- not any guard inside
+    # extcal.py itself -- is the single choke point that actually keeps
+    # owner='iphone' rows reminder-free: extcal.apply_changes() (Task 5)
+    # writes the row via cal.add()/cal.update() same as any other caller
+    # (which insert/update with schema v12's DEFAULT owner='hermes' still in
+    # effect, since neither has an `owner` kwarg), then flips owner to
+    # 'iphone' via its own follow-up write and calls regenerate() again
+    # itself -- relying entirely on this check to retract whatever chain the
+    # still-'hermes'-owned write transiently built, before that same
+    # transaction ever commits. The DELETE above still runs first regardless
+    # of owner -- clearing any leftover pending rows (e.g. left over from
+    # before a future `cal adopt`/`disown` ownership flip) is correct and
+    # cheap either way; only the CREATE half below is skipped here.
+    if event is not None and event.get("owner") == "iphone":
+        audit.log(conn, "rem.regenerate", {"event_id": event_id, "created": 0})
+        return 0
+
     created = 0
     if event is not None and event["status"] == "active":
         anchors = {

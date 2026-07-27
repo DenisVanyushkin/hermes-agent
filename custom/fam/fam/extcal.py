@@ -71,6 +71,15 @@ from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as _xml_escape
 from zoneinfo import ZoneInfo
 
+# Task 5 (application layer) is the first part of this module that touches
+# the DB -- everything above it (discover/fetch_changes/parse_ics/expand/
+# plan_changes) is read-only network or pure. These are ordinary, always-
+# present fam submodules (unlike `dateutil`, there is no missing-package
+# concern here), and none of them import `extcal` back (only cli.py does,
+# module-level) -- so a plain top-level import is safe, no deferred-import
+# seam needed.
+from fam import audit, cal, places, plans, rem
+
 # ---- constants -------------------------------------------------------
 
 # Anti-SSRF allowlist: only this host or a subdomain of it is ever
@@ -1790,3 +1799,353 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
         return changeset
     except Exception:
         return changeset
+
+
+# ---- application (Task 5) --------------------------------------------------
+#
+# `apply_changes(conn, changeset, cfg)` is the ONLY place in this module that
+# touches the DB. Everything above it (discover/fetch_changes/parse_ics/
+# expand/plan_changes) is read-only or pure; this is where a `Changeset`
+# (plan_changes' output) actually gets written -- exclusively through
+# `cal.*`/`plans.*` wherever those modules expose an entry point, so every
+# such write still inherits `audit_log`, `rem.regenerate`'s reminder-chain
+# recompute, and `places.resolve`'s casefold place lookup, same as any
+# hand-typed `fam cal add`/`fam plan add`.
+#
+# TWO narrow, deliberate, documented exceptions to "only cal.*/plans.*"
+# below -- both direct DB writes, both scoped to things neither module's
+# CURRENT surface (this task's boundary excludes touching cal.py/plans.py)
+# exposes a setter for:
+#   1. `owner`/`external_uid`/`external_href`/`external_etag`/`external_seq`
+#      on `events`/`plans` -- schema v12 (Task 3) added these columns, but
+#      `cal.add`/`cal.update`/`plans.add` have no kwarg for any of them, so
+#      there is no cal.*/plans.* entry point that can set them at all.
+#   2. A plans-branch "update" (title/deadline/location edit on an EXISTING
+#      imported plan) -- `plans.py` has `add`/`mark`/`attach` but, unlike
+#      `cal.update` on the events side, no generic `update()` verb -- an
+#      in-place plan edit has nowhere to go through `plans.*` either.
+# Both gaps are a real, load-bearing observation for whoever scopes cal.py's/
+# plans.py's next revision (T5's report flags this explicitly), not
+# something this task is scoped to fix. Every OTHER mutation below (insert,
+# cancel, drop, and the title/start_utc/end_utc/place fields of an event
+# update) goes through cal.*/plans.* exactly as documented.
+
+
+def _apply_ref_or_none(text):
+    """Empty/whitespace-only location text -> None (no place ref attempted,
+    cal.add/plans.add's own default), matching cal.add's own `place=None`
+    "no place" convention rather than trying to resolve an empty string.
+    """
+    text = _pc_norm_text(text)
+    return text or None
+
+
+def _apply_event_insert(conn, entry):
+    """One `events.insert` Changeset entry -> a new owner='iphone' event.
+
+    `cal.add()` inserts the row with schema v12's DEFAULT owner='hermes'
+    (it has no `owner` kwarg) and, as its very last step, calls
+    `rem.regenerate()` on that still-'hermes' row -- which, under today's
+    rules (nothing yet knows this event is hers), WOULD build a full
+    reminder chain for it. The raw UPDATE below flips owner (and attaches
+    the external_* identity) BEFORE this function's own explicit
+    `rem.regenerate()` call runs a second time -- THAT second call is what
+    actually deletes the transient chain, via the early-exit Task 5 adds to
+    rem.regenerate (see rem.py). apply_changes' caller (`_apply_one`)
+    commits per-entry, never mid-entry, so the transient 'hermes'-shaped
+    chain this function's own `cal.add()` call built is never visible to
+    any other connection -- only ever present-then-retracted inside this
+    one function's own uncommitted work.
+
+    `location` (free text from her iCloud event) is passed straight through
+    as `cal.add`'s `place` ref -- resolved the same casefold way any other
+    `cal.add(place=...)` caller's ref is. A location that doesn't match any
+    known place/alias raises `cal.UnknownRefError`, same as it would for a
+    human typing `fam cal add`; that's an accepted, unhandled-here edge
+    case (see this task's report) -- it surfaces to `_apply_one`'s per-row
+    guard like any other failure, so one unresolvable location never sinks
+    the rest of the batch, but that one event stays un-imported until its
+    location text is recognizable (an alias is added, or it coincidentally
+    matches) -- this module never auto-creates a place from raw text (that
+    would need geo2gis's live geocoding, out of scope / no live network
+    calls in this task).
+    """
+    place_ref = _apply_ref_or_none(entry.get("location"))
+    added = cal.add(conn, entry.get("title") or "", entry["start_utc"],
+                     end_utc=entry.get("end_utc"), place=place_ref)
+    event_id = added["id"]
+    conn.execute(
+        "UPDATE events SET owner='iphone', external_uid=?, external_href=?, "
+        "external_etag=?, external_seq=? WHERE id=?",
+        (entry.get("external_uid"), entry.get("external_href"),
+         entry.get("external_etag"), entry.get("external_seq"), event_id),
+    )
+    rem.regenerate(conn, event_id)
+    audit.log(conn, "cal.ext.apply", {
+        "branch": "events", "action": "insert", "id": event_id,
+        "external_uid": entry.get("external_uid"),
+    })
+
+
+def _apply_event_update(conn, entry):
+    """One `events.update` Changeset entry -> `cal.update()` for whatever
+    user-visible fields changed (title/start_utc/end_utc -- `location` maps
+    to cal.update's own `place` kwarg, same casefold resolution/UnknownRef
+    risk as the insert side above). `changes` is never empty for a real
+    update entry (`plan_changes` only ever appends one after `_event_diff`
+    found something), so this always calls `cal.update()` at least once.
+
+    Also attaches external_href/external_etag/external_seq when the CALLER
+    put them on this entry (Task 6's job -- attaching them by uid from
+    fetch_changes' raw items is not yet wired up anywhere as of this task;
+    absent here today, so this is a no-op `COALESCE` until T6 exists) --
+    `COALESCE(?, external_<col>)` so a caller that only ever supplies
+    `changes` (no href/etag/seq keys at all) can never accidentally clobber
+    an already-stored value back to NULL.
+
+    Never calls `rem.regenerate()` itself: `cal.update()` already does,
+    but ONLY when start_utc (or travel_min/place/participants/prep_min)
+    is among the changed fields -- exactly the same trigger any other
+    `cal.update()` caller gets, no special-casing needed here. `owner`
+    stays 'iphone' throughout (this function never touches that column),
+    so `rem.regenerate`'s early exit (invariant #2) keeps this event
+    reminder-free across the update the same as right after insert.
+    """
+    event_id = entry["id"]
+    changes = entry.get("changes") or {}
+    fields = {}
+    if "title" in changes:
+        fields["title"] = changes["title"][1]
+    if "start_utc" in changes:
+        fields["start_utc"] = changes["start_utc"][1]
+    if "end_utc" in changes:
+        fields["end_utc"] = changes["end_utc"][1]
+    if "location" in changes:
+        fields["place"] = _apply_ref_or_none(changes["location"][1])
+    if fields:
+        cal.update(conn, event_id, **fields)
+
+    href = entry.get("external_href")
+    etag = entry.get("external_etag")
+    seq = entry.get("external_seq")
+    if href is not None or etag is not None or seq is not None:
+        conn.execute(
+            "UPDATE events SET "
+            "external_href=COALESCE(?, external_href), "
+            "external_etag=COALESCE(?, external_etag), "
+            "external_seq=COALESCE(?, external_seq) WHERE id=?",
+            (href, etag, seq, event_id),
+        )
+
+    audit.log(conn, "cal.ext.apply", {
+        "branch": "events", "action": "update", "id": event_id,
+        "changes": changes,
+    })
+
+
+def _apply_event_cancel(conn, entry):
+    """One `events.cancel` Changeset entry -> `cal.cancel()` -- marks the
+    event cancelled, cancels its pending reminder chain (`rem.cancel_
+    chain`), and drops any open prep-plans tied to it -- exactly the same
+    call any other cancellation path in `fam` uses.
+    """
+    event_id = entry["id"]
+    cal.cancel(conn, event_id)
+    audit.log(conn, "cal.ext.apply", {
+        "branch": "events", "action": "cancel", "id": event_id,
+        "external_uid": entry.get("external_uid"),
+    })
+
+
+def _apply_plan_insert(conn, entry):
+    """One `plans.insert` Changeset entry -> a new owner='iphone' plan via
+    `plans.add()`, then the same owner/external_* raw-UPDATE pattern
+    `_apply_event_insert` uses (see the module note above -- `plans.add`
+    has no kwarg for any of these columns either). Plans carry no reminder
+    chain of their own (only events do, via `reminders`), so there is no
+    second `rem.regenerate()` call needed here -- otherwise this is the
+    plans-branch mirror of `_apply_event_insert`, including the same
+    accepted unresolvable-location edge case.
+    """
+    place_ref = _apply_ref_or_none(entry.get("location"))
+    plan_id = plans.add(conn, entry.get("title") or "", place=place_ref,
+                         deadline=entry.get("deadline"))
+    conn.execute(
+        "UPDATE plans SET owner='iphone', external_uid=?, external_href=?, "
+        "external_etag=? WHERE id=?",
+        (entry.get("external_uid"), entry.get("external_href"),
+         entry.get("external_etag"), plan_id),
+    )
+    audit.log(conn, "cal.ext.apply", {
+        "branch": "plans", "action": "insert", "id": plan_id,
+        "external_uid": entry.get("external_uid"),
+    })
+
+
+def _apply_plan_update(conn, entry):
+    """One `plans.update` Changeset entry -> a direct UPDATE of `plans`'
+    title/deadline/place_id. `plans.py` has no generic `update()` verb at
+    all (see the module note above) -- this is the one genuinely
+    unavoidable raw-SQL mutation of plan CONTENT (not just bookkeeping
+    columns) in this module. `location` is resolved through `places.
+    resolve()` -- the SAME resolver `plans.add`/`cal.add` use internally --
+    so an unresolvable place name raises ValueError here exactly as it
+    would from `plans.add`, caught by this module's per-row guard
+    (`_apply_one`) like any other row failure.
+    """
+    plan_id = entry["id"]
+    changes = entry.get("changes") or {}
+    set_clauses, params = [], []
+    if "title" in changes:
+        set_clauses.append("title=?")
+        params.append(changes["title"][1])
+    if "deadline" in changes:
+        set_clauses.append("deadline=?")
+        params.append(changes["deadline"][1])
+    if "location" in changes:
+        place_ref = _apply_ref_or_none(changes["location"][1])
+        place_id = None
+        if place_ref is not None:
+            pl = places.resolve(conn, place_ref)
+            if pl is None:
+                raise ValueError(f"unknown place: {place_ref}")
+            place_id = pl["id"]
+        set_clauses.append("place_id=?")
+        params.append(place_id)
+    if set_clauses:
+        params.append(plan_id)
+        conn.execute(
+            f"UPDATE plans SET {', '.join(set_clauses)} WHERE id=?", params)
+
+    href = entry.get("external_href")
+    etag = entry.get("external_etag")
+    if href is not None or etag is not None:
+        conn.execute(
+            "UPDATE plans SET external_href=COALESCE(?, external_href), "
+            "external_etag=COALESCE(?, external_etag) WHERE id=?",
+            (href, etag, plan_id),
+        )
+
+    audit.log(conn, "cal.ext.apply", {
+        "branch": "plans", "action": "update", "id": plan_id,
+        "changes": changes,
+    })
+
+
+def _apply_plan_drop(conn, entry):
+    """One `plans.drop` Changeset entry -> `plans.mark(conn, plan_id,
+    'dropped')` -- exactly the same call any other plan-dropping path in
+    `fam` uses, including its attached_event_id recompute/regenerate
+    cascade if this plan happened to be attached to an event.
+    """
+    plan_id = entry["id"]
+    plans.mark(conn, plan_id, "dropped")
+    audit.log(conn, "cal.ext.apply", {
+        "branch": "plans", "action": "drop", "id": plan_id,
+        "external_uid": entry.get("external_uid"),
+    })
+
+
+_APPLY_STEPS = (
+    ("events", "insert", _apply_event_insert, "events_inserted"),
+    ("events", "update", _apply_event_update, "events_updated"),
+    ("events", "cancel", _apply_event_cancel, "events_cancelled"),
+    ("plans", "insert", _apply_plan_insert, "plans_inserted"),
+    ("plans", "update", _apply_plan_update, "plans_updated"),
+    ("plans", "drop", _apply_plan_drop, "plans_dropped"),
+)
+
+
+def _apply_one(conn, branch, action, fn, entry, counts, count_key):
+    """Per-row guard (task brief hard requirement: one bad row must not
+    sink the batch) -- same pattern as `tick.py::_meds_series`'s own
+    per-row try/except/rollback/commit. Each entry gets its OWN commit: a
+    failure rolls back ONLY this entry's own uncommitted writes (its
+    cal.*/plans.* call, the owner/external_* UPDATE, and/or its own
+    rem.regenerate) -- never the previous entries from this same
+    `apply_changes()` call, which are already committed by the time this
+    one runs. The failure is then audited fresh on the now-clean
+    transaction (mirroring _meds_series' own `conn.rollback()` ->
+    `audit.log(...)` -> `conn.commit()` sequence), so one bad row is
+    visible for diagnosis rather than silently eaten.
+    """
+    try:
+        fn(conn, entry)
+        conn.commit()
+        counts[count_key] += 1
+    except Exception as e:
+        conn.rollback()
+        ref = entry.get("external_uid")
+        row_id = entry.get("id")
+        error = f"{type(e).__name__}: {e}"[:300]
+        audit.log(conn, "cal.ext.apply_error", {
+            "branch": branch, "action": action, "id": row_id,
+            "external_uid": ref, "error": error,
+        })
+        conn.commit()
+        counts["errors"].append({
+            "branch": branch, "action": action, "id": row_id,
+            "external_uid": ref, "error": error,
+        })
+
+
+def apply_changes(conn, changeset, cfg=None):
+    """Write one `plan_changes()` Changeset to the DB. Returns a counts
+    dict: `{events_inserted, events_updated, events_cancelled,
+    plans_inserted, plans_updated, plans_dropped, collisions, errors}`.
+
+    `errors` is a list of `{branch, action, id, external_uid, error}` for
+    every entry that raised (see `_apply_one`) -- every OTHER entry in the
+    same batch still gets applied.
+
+    `collisions` is simply `len(changeset["collisions"])`, passed through
+    for Task 6's tick to fold into its own `audit cal.ext.sync` counts
+    without recomputing it -- this function does not itself write anything
+    for collisions: `plan_changes`' own docstring assigns that reporting
+    job to Task 6 ("purely a reporting channel for T6's audit/nightly-
+    summary"), so logging it here too would be a second, redundant writer.
+
+    Every actual mutation goes through `cal.*`/`plans.*` wherever those
+    modules expose an entry point for it (see the module note above for
+    the two narrow, documented raw-SQL exceptions this still requires,
+    given cal.py/plans.py's CURRENT kwarg surface) -- audit_log, rem.
+    regenerate's reminder-chain recompute, and places.resolve's casefold
+    place lookup are all inherited for free from those calls.
+
+    `cfg` is accepted for interface symmetry with the rest of this
+    module's cfg-taking public entry points (discover/fetch_changes/
+    probe); nothing here currently branches on it.
+
+    Never raises: a malformed `changeset` (not a dict, missing branches,
+    a non-dict entry inside a branch's list) degrades to "nothing to
+    apply for that slot" (counts stay 0 for anything malformed away); a
+    single bad (but well-formed) entry inside a branch is caught by
+    `_apply_one`'s per-row guard and recorded in `errors`, never sinking
+    the rest of the batch.
+    """
+    cfg = cfg or {}
+    changeset = changeset if isinstance(changeset, dict) else {}
+    raw_events = changeset.get("events")
+    raw_plans = changeset.get("plans")
+    by_branch = {
+        "events": raw_events if isinstance(raw_events, dict) else {},
+        "plans": raw_plans if isinstance(raw_plans, dict) else {},
+    }
+
+    counts = {
+        "events_inserted": 0, "events_updated": 0, "events_cancelled": 0,
+        "plans_inserted": 0, "plans_updated": 0, "plans_dropped": 0,
+        "collisions": len(changeset.get("collisions") or []),
+        "errors": [],
+    }
+
+    for branch, action, fn, count_key in _APPLY_STEPS:
+        entries = by_branch.get(branch, {}).get(action)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            _apply_one(conn, branch, action, fn, entry, counts, count_key)
+
+    return counts
