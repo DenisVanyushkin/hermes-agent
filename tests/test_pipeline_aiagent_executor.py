@@ -403,6 +403,52 @@ def test_git_remote_status_is_available_to_reviewer_bridge(tmp_path: Path) -> No
     assert payload["comparison_available"] is True
 
 
+def _clone_with_run_worktree(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A clone plus a per-run worktree cut from it, mirroring the checkout the
+    autonomous pipeline hands the engineer: HEAD on ``hermes-run/<run_id>``."""
+    origin, clone = _init_git_repo_with_origin(tmp_path)
+    workspace = tmp_path / "runs" / "run-1"
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "-C", str(clone), "worktree", "add", "-b", "hermes-run/run-1", str(workspace), "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return origin, clone, workspace
+
+
+def test_git_remote_status_compares_a_run_worktree_against_the_branch_it_lands_on(tmp_path: Path) -> None:
+    origin, _clone, workspace = _clone_with_run_worktree(tmp_path)
+    (origin / "tracked.txt").write_text("baseline\nupdated on origin\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(origin), "commit", "-am", "origin-only change"], check=True, text=True, capture_output=True)
+
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=workspace, agent_factory=_FakeAgent)
+    payload = json.loads(bridge.execute_tool("git_remote_status", {}))
+
+    # origin/hermes-run/run-1 does not exist and never will -- a run branch is
+    # landed by the integration step, never published. The comparison that means
+    # anything is against the branch the run will land on.
+    assert payload["remote_ref"] == "origin/main"
+    assert payload["comparison_available"] is True
+    assert payload["local_behind_remote_count"] == 1
+    assert "origin-only change" in payload["commits_on_remote_not_local"]
+
+
+def test_git_remote_status_reports_an_unresolvable_run_branch_base_instead_of_guessing(tmp_path: Path) -> None:
+    _origin, clone, workspace = _clone_with_run_worktree(tmp_path)
+    subprocess.run(["git", "-C", str(clone), "checkout", "--detach", "--quiet"], check=True, text=True, capture_output=True)
+
+    bridge = AIAgentSubagentExecutorBridge(workspace_root=workspace, agent_factory=_FakeAgent)
+    payload = json.loads(bridge.execute_tool("git_remote_status", {}))
+
+    assert payload["comparison_available"] is False
+    assert payload["comparison_error"] == "run_branch_base_unresolved"
+    # Never fall back to the run branch itself: origin/hermes-run/* is a ref that
+    # cannot exist, and reporting it reads as "the remote lost your work".
+    assert payload["remote_ref"] is None
+
+
 def test_normalize_result_preserves_raw_metadata_structured_output(tmp_path: Path) -> None:
     repo_root, _runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)

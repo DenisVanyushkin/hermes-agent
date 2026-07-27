@@ -143,9 +143,10 @@ def test_baseline_head_is_the_worktree_head(build):
 
 
 def test_run_branch_prefix_agrees_across_modules():
-    from hermes_cli import commit_gate_service
+    from hermes_cli import commit_gate_service, pipeline_aiagent_executor
 
     assert commit_gate_service.RUN_BRANCH_PREFIX == pae.RUN_BRANCH_PREFIX
+    assert pipeline_aiagent_executor.RUN_BRANCH_PREFIX == pae.RUN_BRANCH_PREFIX
 
 
 def test_push_refuses_a_run_branch(repo: Path, tmp_path: Path):

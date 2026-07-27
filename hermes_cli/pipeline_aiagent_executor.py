@@ -39,6 +39,12 @@ _REVIEWER_ALLOWED_TOOL_NAMES = (
 _GIT_REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
 _GIT_REMOTE_STATUS_TIMEOUT_SECONDS = 30
 
+# Kept in step with pipeline_autonomous_execution.RUN_BRANCH_PREFIX; duplicated
+# rather than imported because that module builds this bridge (importing it back
+# would be circular), and held to that by
+# tests/hermes_cli/test_autonomous_worktree_wiring.py.
+RUN_BRANCH_PREFIX = "hermes-run/"
+
 
 class AIAgentExecutorBridgeError(RuntimeError):
     """Bridge configuration or execution failed closed."""
@@ -774,7 +780,9 @@ class AIAgentSubagentExecutorBridge:
                     "Read-only comparison of local HEAD against a remote's tracking branch. "
                     "Fetches the remote-tracking ref (no working-tree changes, no local branch update, "
                     "no merge, no push) and reports ahead/behind counts plus a oneline log of commits "
-                    "present on the remote but not local. Use this to check what changed on origin."
+                    "present on the remote but not local. Use this to check what changed on origin. "
+                    "Inside a per-run workspace the comparison is against the branch the run lands on, "
+                    "since the run's own branch is never published."
                 ),
                 {"remote": {"type": "string"}},
                 [],
@@ -908,6 +916,17 @@ class AIAgentSubagentExecutorBridge:
             check=False,
         )
         branch = (branch_completed.stdout or "").strip() or "HEAD"
+        if branch.startswith(RUN_BRANCH_PREFIX):
+            branch = self._run_branch_base_branch()
+            if branch is None:
+                return {
+                    "status": 0,
+                    "remote": remote,
+                    "remote_ref": None,
+                    "fetch_output": (fetch_completed.stderr or fetch_completed.stdout or "").strip(),
+                    "comparison_available": False,
+                    "comparison_error": "run_branch_base_unresolved",
+                }
         remote_ref = f"{remote}/{branch}"
 
         counts_completed = self.subprocess_runner(
@@ -947,6 +966,42 @@ class AIAgentSubagentExecutorBridge:
             "local_behind_remote_count": behind,
             "commits_on_remote_not_local": (log_completed.stdout or "").strip(),
         }
+
+    def _run_branch_base_branch(self) -> str | None:
+        """The branch a per-run worktree will land on: the one checked out at the
+        repository's main worktree.
+
+        A ``hermes-run/*`` branch is integrated by the review step and never
+        pushed, so ``origin/hermes-run/<id>`` is a ref that cannot exist and
+        comparing against it can only fail. The mainline is the same target
+        ``integrate_run_branch`` fast-forwards onto, so the comparison answers the
+        question actually being asked: how does this work sit against the remote
+        it is headed for.
+
+        Returns None when the main worktree is not on a branch -- an honest
+        "unknown" beats naming a ref that will never resolve.
+        """
+        completed = self.subprocess_runner(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=str(self.workspace_root),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return None
+        # The first block is always the main worktree, and a detached one carries
+        # no `branch` line at all -- stop at the block boundary instead of falling
+        # through to the run worktree's own branch.
+        for line in (completed.stdout or "").splitlines():
+            if not line.strip():
+                break
+            if line.startswith("branch refs/heads/"):
+                candidate = line[len("branch refs/heads/"):].strip()
+                if candidate and not candidate.startswith(RUN_BRANCH_PREFIX):
+                    return candidate
+                return None
+        return None
 
     def _record_tool_call(
         self,
