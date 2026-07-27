@@ -187,6 +187,223 @@ class TestFinalizeNotifiesSlack:
         assert _result(state)["status"] == "ok", proc.stderr
 
 
+def _stub_bin(tmp_path: Path) -> Path:
+    """PATH shim so the script never touches the real gateway."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    hermes = bin_dir / "hermes"
+    hermes.write_text('#!/usr/bin/env bash\nexit 0\n')
+    hermes.chmod(0o755)
+    return bin_dir
+
+
+class TestPersonalRemoteIntegrationAfterHistoryRewrite:
+    """2026-07-27: the sync destroyed its own finished work.
+
+    The Mode B agent rebased ``local/customizations`` onto upstream and asked
+    the host finalizer to land it.  The rebase script's first step,
+    ``integrate_personal_remote``, tests ``origin/<branch>`` for ancestry of
+    HEAD — but after a history rewrite *no* commit keeps its SHA, so that test
+    is false even when the shared branch holds nothing new.  The script read
+    its own pre-rewrite lineage as "742 commits from another host" and rebased
+    the 428 fresh commits back onto it.  Conflict, abort, rollback of a good
+    rebase.  Integration must be additive: replay only what the other host
+    actually added, on top of the branch we were handed.
+    """
+
+    def _world(
+        self, tmp_path: Path, local_touches_core: bool = False
+    ) -> tuple[Path, Path, Path, str]:
+        """upstream(main: u1,u2) / repo(branch off u1 + local commit) /
+        personal(shared branch + another host's commit).
+
+        ``local_touches_core`` gives the local branch a commit on the same file
+        upstream changed — the shape of every feature the operator is asked to
+        decide (F2/F3 in the 2026-07-27 run). Its resolution only exists on the
+        rewritten branch, so replaying it onto the pre-rewrite shared lineage
+        conflicts, exactly as production did.
+        """
+        up_work = tmp_path / "upstream-work"
+        up_work.mkdir()
+        _git(up_work, "init", "-q", "-b", "main")
+        _git(up_work, "config", "user.email", "u@u")
+        _git(up_work, "config", "user.name", "u")
+        (up_work / "core.py").write_text("VERSION = 1\n")
+        _git(up_work, "add", "-A")
+        _git(up_work, "commit", "-qm", "u1")
+        u1 = _git(up_work, "rev-parse", "HEAD")
+        (up_work / "core.py").write_text("VERSION = 2\n")
+        _git(up_work, "add", "-A")
+        _git(up_work, "commit", "-qm", "u2")
+        u2 = _git(up_work, "rev-parse", "HEAD")
+        upstream = tmp_path / "upstream.git"
+        subprocess.run(
+            ["git", "clone", "-q", "--bare", str(up_work), str(upstream)], check=True
+        )
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "local/customizations")
+        _git(repo, "config", "user.email", "t@t")
+        _git(repo, "config", "user.name", "t")
+        _git(repo, "fetch", "-q", str(upstream), "main")
+        _git(repo, "reset", "-q", "--hard", u1)
+        # Layout the script's REPO heuristic keys off, plus the sync helper it
+        # calls after a successful rebase.
+        (repo / "agent").mkdir()
+        (repo / "gateway").mkdir()
+        (repo / "scripts").mkdir()
+        helper = repo / "scripts" / "sync-runtime-scripts.sh"
+        helper.write_text("#!/usr/bin/env bash\nexit 0\n")
+        helper.chmod(0o755)
+        (repo / "agent" / "__init__.py").write_text("")
+        (repo / "gateway" / "__init__.py").write_text("")
+        (repo / "custom.py").write_text("LOCAL = True\n")
+        if local_touches_core:
+            (repo / "core.py").write_text("VERSION = 1\nLOCAL_PATCH = True\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "local customization")
+
+        personal = tmp_path / "personal.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(personal)], check=True)
+        _git(repo, "remote", "add", "origin", str(personal))
+        _git(repo, "push", "-q", "origin", "local/customizations")
+
+        other = tmp_path / "other-host"
+        subprocess.run(
+            ["git", "clone", "-q", "-b", "local/customizations", str(personal), str(other)],
+            check=True,
+        )
+        _git(other, "config", "user.email", "o@o")
+        _git(other, "config", "user.name", "o")
+        (other / "fam.py").write_text("OTHER_HOST = True\n")
+        _git(other, "add", "-A")
+        _git(other, "commit", "-qm", "fix(fam): another host's work")
+        _git(other, "push", "-q", "origin", "local/customizations")
+
+        return repo, personal, upstream, u2
+
+    def _run(self, repo: Path, personal: Path, upstream: Path, tmp_path: Path):
+        home = tmp_path / "home"
+        home.mkdir(exist_ok=True)
+        env = dict(os.environ)
+        env.update(
+            {
+                "HOME": str(home),
+                "HERMES_PERSONAL_REMOTE_URL": str(personal),
+                "HERMES_UPSTREAM_FETCH_URL": str(upstream),
+                "GITHUB_TOKEN": "",
+                "PATH": f"{_stub_bin(tmp_path)}:{os.environ['PATH']}",
+            }
+        )
+        return subprocess.run(
+            ["bash", str(REBASE)],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def test_rewritten_branch_keeps_its_rebase_and_gains_the_other_host_work(
+        self, tmp_path
+    ):
+        repo, personal, upstream, u2 = self._world(tmp_path, local_touches_core=True)
+        # Mode B: the agent rebases onto the new upstream and resolves the
+        # both-modified file the way the operator decided (merge-both). Every
+        # local SHA changes, and the resolution exists only on this new branch.
+        subprocess.run(["git", "rebase", u2], cwd=repo, capture_output=True, text=True)
+        (repo / "core.py").write_text("VERSION = 2\nLOCAL_PATCH = True\n")
+        _git(repo, "add", "-A")
+        subprocess.run(
+            ["git", "rebase", "--continue"],
+            cwd=repo,
+            env={**os.environ, "GIT_EDITOR": "true"},
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        handed_in = _git(repo, "rev-parse", "HEAD")
+
+        proc = self._run(repo, personal, upstream, tmp_path)
+
+        assert proc.returncode == 0, proc.stderr
+        # The other host's commit must land — silently skipping integration
+        # after a rewrite would drop their work at the next force-push.
+        assert (repo / "fam.py").exists(), proc.stderr
+        # ...and it must land ON TOP of the rebase we were handed, not by
+        # replaying our history onto the stale shared lineage.
+        assert (
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", handed_in, "HEAD"], cwd=repo
+            ).returncode
+            == 0
+        ), (
+            "the handed-in rebase was rewritten instead of built upon\n"
+            f"handed_in={handed_in}\n"
+            f"{_git(repo, 'log', '--oneline', '--graph', '-12')}\n"
+            f"stderr:\n{proc.stderr}"
+        )
+        # The operator's resolution survived — it was never replayed onto the
+        # lineage that predates it.
+        assert (repo / "core.py").read_text() == "VERSION = 2\nLOCAL_PATCH = True\n"
+        assert (repo / "custom.py").exists()
+
+    def test_unrewritten_branch_still_integrates_the_other_host_work(self, tmp_path):
+        # Mode A: nobody rewrote anything; the shared branch is simply ahead.
+        repo, personal, upstream, _u2 = self._world(tmp_path)
+
+        proc = self._run(repo, personal, upstream, tmp_path)
+
+        assert proc.returncode == 0, proc.stderr
+        assert (repo / "fam.py").exists()
+        assert (repo / "custom.py").exists()
+        assert (repo / "core.py").read_text() == "VERSION = 2\n"
+
+
+class TestFinalizeReportsWhichStageFailed:
+    """The 2026-07-27 rollback was announced as "smoketest failed" when the
+    rebase stage had died first — ``if rebase && smoketest`` collapses two
+    stages into one status, and the operator-facing summary guessed."""
+
+    def _stubs(self, tmp_path: Path, rebase_rc: int, smoketest_rc: int) -> Path:
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        for name, rc in (
+            ("rebase-local-customizations.sh", rebase_rc),
+            ("upstream-sync-smoketest.sh", smoketest_rc),
+            ("upstream-sync-rollback.sh", 0),
+        ):
+            p = scripts / name
+            p.write_text(f"#!/usr/bin/env bash\nexit {rc}\n")
+            p.chmod(0o755)
+        return scripts
+
+    def test_rebase_stage_failure_is_named_as_such(self, tmp_path, state):
+        repo = _make_repo(tmp_path)
+        parent = _git(repo, "rev-parse", "HEAD~1")
+        scripts = self._stubs(tmp_path, rebase_rc=1, smoketest_rc=0)
+
+        _request(state, "finalize", parent)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "rebase"
+
+    def test_smoketest_stage_failure_is_named_as_such(self, tmp_path, state):
+        repo = _make_repo(tmp_path)
+        parent = _git(repo, "rev-parse", "HEAD~1")
+        scripts = self._stubs(tmp_path, rebase_rc=0, smoketest_rc=1)
+
+        _request(state, "finalize", parent)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "smoketest"
+
+
 class TestRepoLock:
     def test_rebase_script_refuses_to_run_while_repo_lock_is_held(self, tmp_path):
         # Minimal layout so the script resolves REPO to cwd.

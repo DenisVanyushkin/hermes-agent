@@ -105,6 +105,16 @@ EOF
 # with a stale view is exactly how the two lineages diverged for days
 # (2026-07-13..16 incident). No token needed — fetch is read-only.
 integrate_personal_remote() {
+  # Where the shared branch stood at our last sync. Captured BEFORE the fetch
+  # overwrites the tracking ref — it is the only reliable anchor for "what did
+  # the other host add". Ancestry cannot answer that once our branch has been
+  # rewritten (Mode B rebases it onto upstream before handing it to this
+  # script): no commit keeps its SHA, so the shared tip stops being an ancestor
+  # of HEAD even when it holds nothing new. Patch-equivalence is no better —
+  # on 2026-07-27 `--cherry-pick` called 12 commits foreign where 2 were.
+  local prev_tip
+  prev_tip="$(git -C "$REPO" rev-parse --verify -q "refs/remotes/$PERSONAL_REMOTE/$BRANCH" 2>/dev/null || true)"
+
   if ! git -C "$REPO" fetch "$PERSONAL_REMOTE_URL" "+refs/heads/$BRANCH:refs/remotes/$PERSONAL_REMOTE/$BRANCH" >/dev/null 2>&1; then
     echo "Warning: could not fetch $PERSONAL_REMOTE_URL; proceeding with local view only." >&2
     return 0
@@ -115,6 +125,42 @@ integrate_personal_remote() {
   if git -C "$REPO" merge-base --is-ancestor "$remote_tip" HEAD; then
     return 0
   fi
+
+  # Our branch was rewritten since the last sync: the shared tip still descends
+  # from where we were, but our new commits do not. Rebasing them onto that
+  # stale lineage replays the whole upstream sync a second time — through the
+  # very conflicts the operator just resolved. It cost a finished sync on
+  # 2026-07-27. Replay only what the other host added, on top of what we hold.
+  if [ -n "$prev_tip" ] && \
+     ! git -C "$REPO" merge-base --is-ancestor "$prev_tip" HEAD && \
+     git -C "$REPO" merge-base --is-ancestor "$prev_tip" "$remote_tip"; then
+    local incoming incoming_count incoming_merges cherry_log
+    incoming="$(git -C "$REPO" rev-list --reverse "$prev_tip..$remote_tip")"
+    if [ -z "$incoming" ]; then
+      echo "Shared branch on $PERSONAL_REMOTE carries only our pre-rewrite lineage — nothing to integrate." >&2
+      return 0
+    fi
+    incoming_count="$(git -C "$REPO" rev-list --count "$prev_tip..$remote_tip")"
+    incoming_merges="$(git -C "$REPO" rev-list --merges --count "$prev_tip..$remote_tip")"
+    if [ "${incoming_merges:-0}" -gt 0 ]; then
+      echo "FAILED: the shared branch gained $incoming_merges merge commit(s) since $prev_tip; cherry-pick cannot replay them onto the rewritten branch. Integrate manually." >&2
+      return 1
+    fi
+    echo "Shared branch on $PERSONAL_REMOTE has $incoming_count new commit(s) from another host, and our branch was rewritten since the last sync — replaying theirs on top instead of rebasing ours onto the stale lineage..." >&2
+    cherry_log="$(mktemp)"
+    # shellcheck disable=SC2086
+    if ! git -C "$REPO" cherry-pick $incoming >"$cherry_log" 2>&1; then
+      git -C "$REPO" cherry-pick --abort >/dev/null 2>&1 || true
+      echo "FAILED: could not replay the other host's commit(s) onto the rewritten branch." >&2
+      echo "Cherry-pick output:" >&2
+      cat "$cherry_log" >&2
+      rm -f "$cherry_log"
+      return 1
+    fi
+    rm -f "$cherry_log"
+    return 0
+  fi
+
   echo "Shared branch on $PERSONAL_REMOTE has $(git -C "$REPO" rev-list --count "HEAD..$remote_tip") commit(s) from another host — integrating before the upstream rebase..." >&2
   local integrate_log
   integrate_log="$(mktemp)"

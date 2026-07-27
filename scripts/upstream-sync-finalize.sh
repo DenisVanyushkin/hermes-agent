@@ -59,19 +59,26 @@ ACTION="$(json_field action)"
 UPSTREAM_SHA="$(json_field upstream_sha)"
 BACKUP_REF="$(json_field backup_ref)"
 
+# Which stage of the apply pipeline died, if any. The apply used to be one
+# `if rebase && smoketest` with a single status, so a rebase failure was
+# reported to the operator as a failed smoketest (2026-07-27) — the log tail
+# they were shown started well after the real cause.
+FAILED_STAGE=""
+
 write_result() {
   # Keep the complete log next to the result: the JSON detail is truncated
   # to its tail, which has already hidden the actual failure cause once
   # (2026-07-16: a pre-report error line was cut off, leaving a causeless
   # rollback). One file, overwritten per run.
   cp -f "$DETAIL_LOG" "$STATE_DIR/finalize-detail.log" 2>/dev/null || true
-  python3 - "$RESULT" "$ACTION" "$1" "$2" "$BACKUP_REF" <<'PY'
+  python3 - "$RESULT" "$ACTION" "$1" "$2" "$BACKUP_REF" "$FAILED_STAGE" <<'PY'
 import json, sys, datetime
-path, action, status, detail, backup = sys.argv[1:6]
+path, action, status, detail, backup, stage = sys.argv[1:7]
 json.dump({
     "action": action, "status": status, "detail": detail[-4000:],
     "detail_log": "finalize-detail.log",
     "backup_ref": backup,
+    "failed_stage": stage or None,
     "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }, open(path, "w"), ensure_ascii=False, indent=1)
 PY
@@ -96,7 +103,7 @@ notify_slack() {
   fi
   [ -n "$token" ] || return 0
   command -v curl >/dev/null 2>&1 || return 0
-  text="upstream-sync finalizer: action=$ACTION status=$status backup_ref=${BACKUP_REF:-none} (details: finalize-result.json / finalize-detail.log)"
+  text="upstream-sync finalizer: action=$ACTION status=$status${FAILED_STAGE:+ failed_stage=$FAILED_STAGE} backup_ref=${BACKUP_REF:-none} (details: finalize-result.json / finalize-detail.log)"
   curl -sS -m 15 -X POST "https://slack.com/api/chat.postMessage" \
     -H "Authorization: Bearer $token" \
     -H "Content-Type: application/json; charset=utf-8" \
@@ -118,6 +125,24 @@ do_rollback() {
   fi
 }
 
+# Apply the sync: rebase, then smoke-test. Each stage reports under its own
+# name so the operator-facing summary never has to guess which one died.
+run_apply_pipeline() {
+  if ! run_logged bash "$SCRIPTS_DIR/rebase-local-customizations.sh"; then
+    FAILED_STAGE=rebase
+    do_rollback
+    write_result failed "rebase stage failed — the smoketest never ran. $(cat "$DETAIL_LOG")"
+    return
+  fi
+  if ! run_logged bash "$SCRIPTS_DIR/upstream-sync-smoketest.sh" "$UPSTREAM_SHA"; then
+    FAILED_STAGE=smoketest
+    do_rollback
+    write_result failed "smoketest stage failed after a successful rebase. $(cat "$DETAIL_LOG")"
+    return
+  fi
+  write_result ok "$(cat "$DETAIL_LOG")"
+}
+
 case "$ACTION" in
   rebase)
     if [ -z "$BACKUP_REF" ]; then
@@ -126,13 +151,7 @@ case "$ACTION" in
       run_logged git -C "$REPO" branch "$BACKUP_REF" HEAD || true
       run_logged git -C "$REPO" tag "$BACKUP_REF" HEAD || true
     fi
-    if run_logged bash "$SCRIPTS_DIR/rebase-local-customizations.sh" && \
-       run_logged bash "$SCRIPTS_DIR/upstream-sync-smoketest.sh" "$UPSTREAM_SHA"; then
-      write_result ok "$(cat "$DETAIL_LOG")"
-    else
-      do_rollback
-      write_result failed "$(cat "$DETAIL_LOG")"
-    fi
+    run_apply_pipeline
     ;;
   finalize)
     # finalize means "the sandbox agent already rebased the repo". Verify that
@@ -146,13 +165,7 @@ case "$ACTION" in
       write_result failed "finalize requested but the repo is not rebased onto upstream_sha — refusing to run; repo untouched, no rollback. $(cat "$DETAIL_LOG")"
       exit 0
     fi
-    if run_logged bash "$SCRIPTS_DIR/rebase-local-customizations.sh" && \
-       run_logged bash "$SCRIPTS_DIR/upstream-sync-smoketest.sh" "$UPSTREAM_SHA"; then
-      write_result ok "$(cat "$DETAIL_LOG")"
-    else
-      do_rollback
-      write_result failed "$(cat "$DETAIL_LOG")"
-    fi
+    run_apply_pipeline
     ;;
   rollback)
     if [ -z "$BACKUP_REF" ]; then
