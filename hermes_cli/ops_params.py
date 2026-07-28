@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 
 _BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]{1,200}")
@@ -67,3 +68,47 @@ def validate_container(value: object) -> str:
     if text not in ALLOWED_CONTAINERS:
         raise OpsParamError("invalid_container")
     return text
+
+
+#: Корни, внутри которых разрешено спрашивать метаданные путей на хосте.
+#: Список намеренно узкий: инспекция окружения не должна превращаться в обход
+#: файловой системы. Расширять его -- сознательное решение, а не побочный эффект.
+ALLOWED_PATH_ROOTS = frozenset({
+    "/var/lib/browser-desktop",
+    "/var/lib/job-intel",
+    "/var/lib/hermes-metrics",
+    "/home/hermes/.hermes",
+    "/etc/job-intel",
+    "/tmp/hermes-gateway-autonomous-runs",
+})
+
+#: venv-ы, о составе пакетов которых разрешено спрашивать.
+ALLOWED_VENV_ROOTS = frozenset({
+    "/var/lib/browser-desktop/playwright-venv",
+    "/home/hermes/.hermes/hermes-agent/venv",
+})
+
+
+def _under_allowed_root(text: str, roots: frozenset[str]) -> bool:
+    # normpath ДО сравнения: иначе "/var/lib/../../etc/shadow" пройдёт по префиксу.
+    # Сравнение либо на равенство корню, либо на префикс С РАЗДЕЛИТЕЛЕМ -- иначе
+    # "/etc/job-intelligence" совпал бы с корнем "/etc/job-intel".
+    resolved = os.path.normpath(text)
+    return any(resolved == root or resolved.startswith(root + "/") for root in roots)
+
+
+def validate_host_path(value: object) -> str:
+    text = str(value or "").strip()
+    if not text.startswith("/") or not _under_allowed_root(text, ALLOWED_PATH_ROOTS):
+        raise OpsParamError("invalid_host_path")
+    return os.path.normpath(text)
+
+
+def validate_venv_path(value: object) -> str:
+    text = str(value or "").strip()
+    if not text.startswith("/"):
+        raise OpsParamError("invalid_venv_path")
+    resolved = os.path.normpath(text)
+    if resolved not in ALLOWED_VENV_ROOTS:
+        raise OpsParamError("invalid_venv_path")
+    return resolved
