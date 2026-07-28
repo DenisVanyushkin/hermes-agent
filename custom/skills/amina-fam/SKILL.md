@@ -5,6 +5,7 @@ version: 1.0.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
+required_environment_variables: [TOMTOM_API_KEY]
 metadata:
   hermes:
     tags: [fam, calendar, family, people, places, cli, amina]
