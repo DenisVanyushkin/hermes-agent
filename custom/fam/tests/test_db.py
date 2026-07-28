@@ -659,11 +659,16 @@ def test_schema_v9_migrates_from_v8(tmp_path):
 def test_schema_v12_columns_and_table(db):
     cols_events = {r["name"] for r in db.execute("PRAGMA table_info(events)")}
     assert {"owner", "external_uid", "external_href", "external_etag",
-            "external_seq"} <= cols_events
+            "external_seq", "external_location"} <= cols_events
     cols_plans = {r["name"] for r in db.execute("PRAGMA table_info(plans)")}
-    assert {"owner", "external_uid", "external_href", "external_etag"} <= cols_plans
+    assert {"owner", "external_uid", "external_href", "external_etag",
+            "external_location"} <= cols_plans
     # controller decision #1: external_seq lives on events only
     assert "external_seq" not in cols_plans
+    # Task 5 fix-round 4: `external_location` (BOTH tables) holds the raw
+    # free-text iCloud LOCATION of an owner='iphone' row. It exists so the
+    # sync never has to hide machine data in the human-owned `notes`
+    # column, which `fam cal update --notes` replaces wholesale.
 
     tables = {r["name"] for r in db.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -723,12 +728,19 @@ def test_schema_v12_migrates_from_v11(tmp_path):
     famdb.init_db(conn)  # migrate
 
     # every pre-existing row got owner='hermes' (controller decision #3)
-    ev = conn.execute("SELECT owner, title FROM events WHERE id=1").fetchone()
+    ev = conn.execute(
+        "SELECT owner, title, external_location FROM events WHERE id=1").fetchone()
     assert ev["owner"] == "hermes"
     assert ev["title"] == "старое событие"
-    pl = conn.execute("SELECT owner, title FROM plans WHERE id=1").fetchone()
+    pl = conn.execute(
+        "SELECT owner, title, external_location FROM plans WHERE id=1").fetchone()
     assert pl["owner"] == "hermes"
     assert pl["title"] == "старый план"
+    # fix-round 4: the new external_location column backfills to NULL on
+    # every pre-existing row -- a locally-created (hermes) row has no
+    # external location by definition, and nothing reads it for one.
+    assert ev["external_location"] is None
+    assert pl["external_location"] is None
 
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}

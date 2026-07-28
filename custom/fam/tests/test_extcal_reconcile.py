@@ -5,7 +5,9 @@ Occurrence fixture here is built by hand in the exact shape `expand()`
 documents (`{uid, recurrence_id, title, start_utc, end_utc, all_day,
 location, status, seq, has_alarm}`), and every `local_snapshot` fixture is
 built by hand in the shape documented on `plan_changes` itself
-(`{"events": [EventRow, ...], "plans": [PlanRow, ...]}`) -- neither touches
+(`{"events": [EventRow, ...], "plans": [PlanRow, ...]}` -- note the local
+side's location key is `external_location`, schema v12's own column) --
+neither touches
 `cal.py`/`plans.py`/`db.py` at all, per the task boundary.
 """
 from datetime import datetime, timezone
@@ -45,11 +47,16 @@ def _event_row(id, uid, title, start_utc, end_utc=None, location="",
     # built from the same raw uid/recurrence_id -- exercising the real
     # length-prefixed contract instead of a hand-rolled stand-in for it.
     external_uid = extcal._occurrence_key(uid, recurrence_id) if uid else None
+    # `external_location` (not `location`) is the snapshot key `_event_diff`
+    # reads -- schema v12's own column name, so a real snapshot row is just
+    # `dict(row)` over `SELECT * FROM events` with no mapping (Task 5
+    # fix-round 4: the raw iCloud LOCATION text lives in its own
+    # machine-owned column, never in the human-owned `notes`).
     return {
         "id": id, "owner": owner, "external_uid": external_uid,
         "external_seq": external_seq, "status": status, "title": title,
         "start_utc": start_utc, "end_utc": end_utc or start_utc,
-        "location": location,
+        "external_location": location,
     }
 
 
@@ -59,7 +66,7 @@ def _plan_row(id, uid, title, deadline, location="", status="open",
     return {
         "id": id, "owner": owner, "external_uid": external_uid,
         "status": status, "title": title, "deadline": deadline,
-        "location": location,
+        "external_location": location,
     }
 
 

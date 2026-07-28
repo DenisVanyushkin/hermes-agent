@@ -1312,8 +1312,21 @@ def expand(components, window_start, window_end):
 # Contract -- `local_snapshot`:
 #   {"events": [EventRow, ...], "plans": [PlanRow, ...]}
 #     EventRow = {id, owner, external_uid, external_seq, status, title,
-#                 start_utc, end_utc, location}
-#     PlanRow  = {id, owner, external_uid, status, title, deadline, location}
+#                 start_utc, end_utc, external_location}
+#     PlanRow  = {id, owner, external_uid, status, title, deadline,
+#                 external_location}
+#
+# `external_location` is schema v12's column of the same name, read
+# VERBATIM off the row -- a plain `dict(row)` of `SELECT * FROM events/
+# plans` already satisfies this contract with no mapping work at all (that
+# is the point of the column; see the fix-round-4 note further down). It
+# is the raw iCloud LOCATION text `apply_changes` last wrote, which is
+# exactly what `_event_diff`/`_plan_diff` compare the incoming
+# occurrence's LOCATION against. NEVER substitute the row's `notes` (human
+# text -- see the note below) or its resolved place's `name` (Hermes's own
+# canonical spelling, not necessarily byte-identical to her phone's free
+# text) for it: either one risks a spurious "changed" on every tick
+# forever, or a real edit on the phone silently never landing.
 #
 # `owner` is 'hermes' or 'iphone' (schema v12's CHECK). `status` is the
 # row's own status column ('active'/'cancelled'/'done' for events,
@@ -1460,6 +1473,13 @@ def _event_diff(existing, occ):
     difference (e.g. `+00:00` vs `Z`, or a dropped/added `:00` seconds
     field) between what `local_snapshot` happens to store and what
     `expand()` emits is never mistaken for a real change.
+
+    The local side of the location comparison is the row's
+    `external_location` COLUMN (fix-round 4) -- the raw iCloud text as
+    stored by `apply_changes`, read straight off the row with no parsing
+    of any kind. The emitted change key stays `"location"` (that is the
+    Changeset's own field name, consumed by `_apply_event_update`); only
+    the source of the "was" value is the dedicated column.
     """
     changes = {}
     if _pc_norm_text(existing.get("title")) != _pc_norm_text(occ.get("title")):
@@ -1472,21 +1492,25 @@ def _event_diff(existing, occ):
     old_end = _coerce_utc_dt(existing.get("end_utc"))
     if _iso(new_end) != _iso(old_end):
         changes["end_utc"] = (existing.get("end_utc"), _iso(new_end))
-    if _pc_norm_text(existing.get("location")) != _pc_norm_text(occ.get("location")):
-        changes["location"] = (existing.get("location"), occ.get("location"))
+    old_location = existing.get("external_location")
+    if _pc_norm_text(old_location) != _pc_norm_text(occ.get("location")):
+        changes["location"] = (old_location, occ.get("location"))
     return changes
 
 
 def _plan_diff(existing, occ, deadline):
     """Same idea as `_event_diff` for the plans branch: title, deadline
-    (already resolved by `_deadline_from_occurrence`), location."""
+    (already resolved by `_deadline_from_occurrence`), location -- the
+    latter compared against the row's `external_location` column, same as
+    `_event_diff` (fix-round 4)."""
     changes = {}
     if _pc_norm_text(existing.get("title")) != _pc_norm_text(occ.get("title")):
         changes["title"] = (existing.get("title"), occ.get("title"))
     if (existing.get("deadline") or None) != (deadline or None):
         changes["deadline"] = (existing.get("deadline"), deadline)
-    if _pc_norm_text(existing.get("location")) != _pc_norm_text(occ.get("location")):
-        changes["location"] = (existing.get("location"), occ.get("location"))
+    old_location = existing.get("external_location")
+    if _pc_norm_text(old_location) != _pc_norm_text(occ.get("location")):
+        changes["location"] = (old_location, occ.get("location"))
     return changes
 
 
@@ -1815,12 +1839,15 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
 # below -- all direct DB reads/writes, all scoped to things neither module's
 # CURRENT surface (this task's boundary excludes touching cal.py/plans.py)
 # exposes an entry point for:
-#   1. `owner`/`external_uid`/`external_href`/`external_etag`/`external_seq`
-#      on `events`/`plans` -- schema v12 (Task 3) added these columns, but
-#      `cal.add`/`cal.update`/`plans.add` have no kwarg for any of them, so
-#      there is no cal.*/plans.* entry point that can set them at all.
-#   2. A plans-branch "update" (title/deadline/notes edit on an EXISTING
-#      imported plan) -- `plans.py` has `add`/`mark`/`attach` but, unlike
+#   1. `owner`/`external_uid`/`external_href`/`external_etag`/`external_seq`/
+#      `external_location` on `events`/`plans` -- schema v12 added these
+#      columns, but `cal.add`/`cal.update`/`plans.add` have no kwarg for any
+#      of them, so there is no cal.*/plans.* entry point that can set them at
+#      all. (Reading them back out needs no change to either module: both
+#      `cal.get` and `plans.get` are `dict(row)` over `SELECT *`, so every
+#      one of these columns is already part of what they return.)
+#   2. A plans-branch "update" (title/deadline edit on an EXISTING imported
+#      plan) -- `plans.py` has `add`/`mark`/`attach` but, unlike
 #      `cal.update` on the events side, no generic `update()` verb -- an
 #      in-place plan edit has nowhere to go through `plans.*` either.
 #   3. A `SELECT owner, ... FROM events/plans WHERE id=?` read-only ownership
@@ -1841,10 +1868,10 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
 # her free-text locations like "Стоматология, Абая 150" essentially never
 # match an existing `places` entry), `place` is simply left None/NULL --
 # NEVER `cal.UnknownRefError`/raise. Either way, the raw (normalized) text
-# is ALSO stored verbatim in `notes` (both `cal.add`/`cal.update` and
-# `plans.add` already accept a `notes` kwarg, so this half needs no raw SQL
-# of its own) -- see the Task 6 contract note below for why `notes`, not
-# the resolved place name, is the field that matters for round-tripping.
+# is ALSO stored verbatim in the `external_location` COLUMN (fix-round 4 --
+# see the note on that column below), so nothing she typed is ever lost on
+# a resolution miss, and the next sync has something byte-stable to diff
+# the incoming LOCATION against.
 #
 # Rationale (Denis): place carries no OPERATIONAL weight for an
 # owner='iphone' row -- her phone rings for it, and neither `leave_at` nor
@@ -1859,22 +1886,13 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
 # entry for something that will never resolve itself).
 #
 # **Contract for Task 6** (finding I4): when Task 6 builds `local_snapshot`
-# for `plan_changes()`, an `owner='iphone'` `EventRow`/`PlanRow`'s
-# `"location"` key MUST be populated from that row's `notes` COLUMN, NEVER
-# from its resolved place name (even on the rows where one exists). `_event_
-# diff`/`_plan_diff` compare `existing.get("location")` against the remote
-# occurrence's raw `LOCATION` text via `_pc_norm_text` on both sides;
-# `notes` is the one field guaranteed to hold EXACTLY that same normalized
-# text on every sync, whether or not `place` also resolved -- feeding the
-# comparison anything else (e.g. the resolved place's `name`, which is
-# Denis's/Hermes's OWN canonical spelling, not necessarily byte-identical
-# to her phone's free text) risks a spurious "changed" on every tick
-# forever, or a real edit on the phone silently never landing, depending on
-# which way the mismatch goes. This does not apply to `owner='hermes'`
-# rows -- `plan_changes` never diffs those at all (the ownership guard
-# keeps them out of `events_by_key`/`plans_by_key` entirely), so their
-# genuine, human-authored `notes` are never at risk of being read as if
-# they were a LOCATION passthrough.
+# for `plan_changes()`, an `owner='iphone'` `EventRow`/`PlanRow` must carry
+# its `external_location` COLUMN verbatim -- `dict(row)` over `SELECT *`
+# already does this, no mapping needed. `_event_diff`/`_plan_diff` compare
+# that value against the remote occurrence's raw `LOCATION` via
+# `_pc_norm_text` on both sides, and `apply_changes` writes that same
+# normalized text back into the same column, so the round trip is exact
+# and a re-applied, unchanged occurrence produces no update forever.
 
 
 def _require_iphone_owned(conn, table, row_id):
@@ -1962,117 +1980,66 @@ def _resolve_place_ref(conn, raw_text):
     return resolved["id"] if resolved else None
 
 
-# ---- notes: machine-owned location block vs. human-owned text ------------
+# ---- external_location: the machine's own column ------------------------
 #
-# Fix-round-2 finding N1: before this, an insert/update simply OVERWROTE the
-# entire `notes` column with the raw iCloud LOCATION text -- a human note
-# attached to an imported row (e.g. Amina, or Hermes on her behalf, writing
-# "взяла паспорт" against her dentist appointment) was silently destroyed
-# the next time her iCloud LOCATION changed on a later sync, with no trace
-# anywhere: the old value is gone from the DB, and `_audit_safe_changes`
-# redacts `notes`/`location` VALUES from the audit trail by design (M3), so
-# there is no way to recover it even from `audit_log`. `cal.update`/`plans.
-# add` themselves have no concept of "this column has two owners" -- this
-# is purely an extcal-side convention layered on top of one plain TEXT
-# column, using a delimited block neither `cal.py` nor `plans.py` needs to
-# know anything about (no edit to either module).
+# Fix-round 4 (finding N1, third and final redesign -- this time by
+# REMOVING the mechanism rather than re-encoding it). Rounds 1-3 all kept
+# the raw iCloud LOCATION text inside `notes`, and each round only traded
+# one failure mode for the next:
 #
-# Fix-round-3 finding N1 (round 2's marker was rejected on re-review): round
-# 2 wrapped the location in READABLE bracket text, `[extcal:location]`/
-# `[/extcal:location]`, each on its own line. The reviewer reproduced the
-# exact failure this was supposed to prevent: a human note that happens to
-# CONTAIN that literal, readable marker pair (typed on purpose, or -- far
-# more realistically -- because she saw the marker in her own notes and
-# quoted/duplicated it, since quoting visible text is completely ordinary
-# human behavior) gets silently parsed as "the machine's own block" and
-# whatever sits between the markers is destroyed on the next sync, with the
-# SAME "no trace in audit_log" problem N1 was about in the first place.
-# Readable words in brackets fail requirement (1) below precisely BECAUSE
-# they are readable: a human can type them, and -- just as importantly --
-# can quote/copy them from having seen them once.
+#   round 1 overwrote `notes` wholesale on every location change, silently
+#     destroying any human note attached to the row ("взяла паспорт" against
+#     her dentist appointment) with no trace anywhere -- `_audit_safe_
+#     changes` redacts location/title VALUES from the audit trail by design,
+#     so it was not recoverable from `audit_log` either;
+#   round 2 fenced the machine's half off with a READABLE marker pair,
+#     `[extcal:location]...[/extcal:location]` -- and the reviewer
+#     reproduced, live, a human note containing that same literal marker
+#     pair (quoting visible text is completely ordinary behavior) being
+#     parsed as the machine's own block and destroyed;
+#   round 3 replaced the marker with invisible Unicode format characters --
+#     which closed that narrow case but not the class: `notes` is ALSO
+#     edited by `fam cal update --notes`, which REPLACES the whole column,
+#     and its caller is an LLM agent. An agent rewriting a note it read
+#     will not reliably carry five invisible code points through; drop one
+#     marker and the block stops being recognized forever, so the next sync
+#     appends a second one beside it -- silent, accumulating duplicates.
 #
-# The fix: the BEGIN/END markers are now sequences of Unicode FORMAT
-# characters (zero-width space, zero-width non-joiner, zero-width joiner,
-# word joiner, invisible separator/plus) -- each renders as NOTHING in any
-# text view, has NO key or standard input method on iOS (there is no way to
-# "type" U+200B), and is never produced by an ordinary copy of VISIBLE text
-# (a natural drag-select or "copy this line" only ever captures what is
-# actually rendered -- there is nothing rendered here to select). This
-# satisfies requirement (1) verbatim: not just unlikely to be typed/copied
-# "by meaning" -- there is no meaning to perceive at all, so there is
-# nothing for a human to intentionally reproduce. The raw location text
-# itself sits BETWEEN the two marker sequences with nothing else around it
-# (no brackets, no label) -- satisfies requirement (2): still fully,
-# plainly visible to Amina, now with LESS visual clutter than round 2's
-# bracket text, not more. Requirement (3): `_strip_location_block` only
-# ever removes a matched BEGIN-through-END span; anything else, including
-# ordinary human text that happens to contain a stray, unpaired marker
-# character (Unicode format characters can theoretically enter text some
-# other way, e.g. a stray paste), is left untouched -- there is no partial
-# or fuzzy matching. Requirement (4): the OLD (round 2) bracket format is
-# deliberately NOT recognized/migrated -- prod is still on v11 and has never
-# run this code, so there is no real data in that format to carry forward,
-# and re-adding recognition of readable bracket text would simply reopen
-# this exact finding for anyone who has since typed/quoted `[extcal:
-# location]` as ordinary text.
-# Deliberately written as explicit \uXXXX escapes, never as literal glyphs
-# in this source file: these are invisible/zero-width by definition, so a
-# literal glyph here would be silently unverifiable by reading the source
-# (and at real risk of mangling/normalization across editors, terminals,
-# or the scp transfer this file goes through to reach the VM). Each
-# constant is a short, fixed sequence of Unicode FORMAT characters (Cf
-# general category) with zero rendered width and no standard keyboard
-# input path on iOS: ZERO WIDTH SPACE, ZERO WIDTH NON-JOINER, ZERO WIDTH
-# JOINER, WORD JOINER, then a final code point that differs between BEGIN
-# (INVISIBLE SEPARATOR) and END (INVISIBLE PLUS) so the two are only ever
-# confused with each other, never with ordinary text.
-_LOC_BLOCK_BEGIN = "\u200b\u200c\u200d\u2060\u2063"
-_LOC_BLOCK_END = "\u200b\u200c\u200d\u2060\u2064"
-_LOC_BLOCK_RE = re.compile(
-    re.escape(_LOC_BLOCK_BEGIN) + r".*?" + re.escape(_LOC_BLOCK_END), re.S)
+# The common root was never the delimiter: it was that machine data lived
+# in a column a human (and an agent acting for her) owns and rewrites
+# wholesale. Schema v12 therefore carries a dedicated `external_location
+# TEXT` on both `events` and `plans`, and this module writes the raw
+# LOCATION text there and NOWHERE else:
+#
+#   * `notes` is now purely human. `extcal` never reads it, never writes
+#     it, never parses it. Whatever Amina (or Hermes on her behalf) puts
+#     there survives any number of syncs, any change of location, and the
+#     location being deleted on the phone entirely -- not because a
+#     delimiter protects it, but because nothing here touches the column.
+#   * `external_location` is purely machine. Nothing in `fam` writes it
+#     except `apply_changes`; `cal.update`'s `_UPDATE_FIELDS` does not
+#     include it, so `fam cal update` cannot reach it even by accident.
+#   * There is no marker, no parsing, no merge step, and therefore no
+#     collision to reason about at all. That whole class is gone rather
+#     than re-encoded -- which is the only reason to believe a fourth
+#     round of this same finding is not coming.
+#
+# Amina can still see the address: both `cal.get` and `plans.get` are
+# `dict(row)` over `SELECT *`, so `external_location` is already part of
+# every event/plan dict they return (and of `fam cal show --json` /
+# `fam cal day --json` / `fam plan list --json` on top of them), which is
+# how the agent answers "а по какому адресу стоматология?".
 
 
-def _strip_location_block(notes):
-    """Remove any existing extcal-owned location block from `notes`,
-    returning whatever HUMAN text is left (blank-line runs the removed
-    block leaves behind are collapsed, outer whitespace trimmed). Absent a
-    block (no occurrence of the exact BEGIN...END marker span -- ordinary
-    text, including text that happens to contain the RETIRED round-2
-    bracket markers or an unpaired/stray marker character, never matches),
-    `notes` comes back unchanged (just trimmed). This is what makes
-    re-merging idempotent: the OLD block (if any) is always fully removed
-    before a new one is appended, so repeated syncs never leave behind a
-    growing stack of stale blocks.
+def _external_location_value(raw_text):
+    """Raw iCloud `LOCATION` text -> what goes in the `external_location`
+    column: the same `_pc_norm_text` normalization `_event_diff`/
+    `_plan_diff` apply to BOTH sides of their comparison (so a re-applied,
+    unchanged occurrence can never diff against its own stored value), and
+    NULL rather than an empty string when the location was deleted on the
+    phone -- "no location" is one state in the DB, not two.
     """
-    if not notes:
-        return ""
-    stripped = _LOC_BLOCK_RE.sub("", notes)
-    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
-    return stripped.strip()
-
-
-def _merge_notes_with_location(existing_notes, raw_location):
-    """The ONLY place that decides a final `notes` string for the events/
-    plans insert/update paths (fix-round-2 finding N1, marker redesigned in
-    fix-round 3). Always starts from the row's CURRENT `notes` value (never
-    from the changeset entry, which only ever carries the latest
-    `location`, never a full notes snapshot), strips out whatever
-    machine-owned block it already holds (see `_strip_location_block`), and
-    appends a FRESH block for the current raw location -- or appends
-    nothing at all when the location was cleared on the phone
-    (`raw_location` empty/None), so a deleted iCloud location leaves no
-    dangling empty block behind. The human text found outside the old block
-    is carried forward untouched either way -- it survives any number of
-    location changes, survives the location being removed entirely, and
-    (fix-round 3) survives even containing what LOOKS like an old-style
-    marker, since that text is no longer special to this function at all.
-    """
-    human = _strip_location_block(existing_notes)
-    location = _pc_norm_text(raw_location)
-    if not location:
-        return human
-    block = f"{_LOC_BLOCK_BEGIN}{location}{_LOC_BLOCK_END}"
-    return f"{human}\n\n{block}" if human else block
+    return _pc_norm_text(raw_text) or None
 
 
 def _existing_id_by_external_uid(conn, table, external_uid):
@@ -2114,10 +2081,10 @@ def _apply_event_insert(conn, entry):
     `place` is resolved via `_resolve_place_ref` (fix-round finding C1 --
     see the module note above): a known `places` match is used, an
     unmatched free-text location leaves `place` None/NULL. Either way the
-    raw text ALSO goes into a fresh `notes` location block (see
-    `_merge_notes_with_location` -- a brand-new row has no prior `notes` to
-    preserve, so this is just that function's "no existing human text"
-    case).
+    raw text ALSO goes into the `external_location` column, via the same
+    raw UPDATE that attaches the rest of the external identity (fix-round
+    4). `notes` is never passed at all -- a fresh imported row starts with
+    an EMPTY, entirely human-owned notes column.
 
     Idempotency guard (fix-round finding I3 for plans; extended here to
     events in fix-round 2, finding N3): `events.external_uid` already has
@@ -2146,14 +2113,14 @@ def _apply_event_insert(conn, entry):
 
     added = cal.add(conn, entry.get("title") or "", entry["start_utc"],
                      end_utc=entry.get("end_utc"),
-                     place=_resolve_place_ref(conn, entry.get("location")),
-                     notes=_merge_notes_with_location("", entry.get("location")))
+                     place=_resolve_place_ref(conn, entry.get("location")))
     event_id = added["id"]
     conn.execute(
         "UPDATE events SET owner='iphone', external_uid=?, external_href=?, "
-        "external_etag=?, external_seq=? WHERE id=?",
+        "external_etag=?, external_seq=?, external_location=? WHERE id=?",
         (entry.get("external_uid"), entry.get("external_href"),
-         entry.get("external_etag"), entry.get("external_seq"), event_id),
+         entry.get("external_etag"), entry.get("external_seq"),
+         _external_location_value(entry.get("location")), event_id),
     )
     rem.regenerate(conn, event_id)
     audit.log(conn, "cal.ext.apply", {
@@ -2169,19 +2136,20 @@ def _apply_event_update(conn, entry):
     entry (`plan_changes` only ever appends one after `_event_diff` found
     something), so this always calls `cal.update()` at least once.
 
-    `location` maps to BOTH `cal.update`'s `notes` kwarg AND its `place`
-    kwarg. `notes` is produced by `_merge_notes_with_location(existing
-    ["notes"], ...)` (fix-round-2 finding N1) -- NEVER a bare overwrite
-    with the raw text: `existing` (this function's OWN row snapshot, from
-    `_require_iphone_owned` below) carries whatever notes the row already
-    had, human text included, and the merge only ever replaces the
-    machine-owned location block inside it, leaving everything else
-    byte-for-byte intact. `place` is re-resolved via `_resolve_place_ref`
-    (fix-round finding C1, see the module note above); passing it
-    explicitly (even as `None`) makes `cal.update` clear a previously-set
-    place when the new location text no longer matches anything, exactly
-    as it should -- `cal.update`'s own `place_given = "place" in fields`
-    check treats `place=None` as "clear it", not "leave unchanged".
+    A `location` change maps to `cal.update`'s `place` kwarg plus a direct
+    write of the `external_location` column -- and touches `notes` not at
+    all (fix-round 4: `notes` is human-owned, this module neither reads nor
+    writes it, so a human note on an imported row survives every location
+    change, and the location being deleted, for free). `place` is
+    re-resolved via `_resolve_place_ref` (fix-round finding C1, see the
+    module note above); passing it explicitly (even as `None`) makes
+    `cal.update` clear a previously-set place when the new location text no
+    longer matches anything, exactly as it should -- `cal.update`'s own
+    `place_given = "place" in fields` check treats `place=None` as "clear
+    it", not "leave unchanged". `external_location` is set unconditionally
+    whenever `"location"` is among the changes, INCLUDING to NULL when she
+    deleted the location on her phone (`_external_location_value`), so a
+    stale address can never linger past the edit that removed it.
 
     Also attaches external_href/external_etag/external_seq when the CALLER
     put them on this entry (Task 6's job -- attaching them by uid from
@@ -2204,7 +2172,7 @@ def _apply_event_update(conn, entry):
     reminder-free across the update the same as right after insert.
     """
     event_id = entry["id"]
-    existing = _require_iphone_owned(conn, "events", event_id)
+    _require_iphone_owned(conn, "events", event_id)
 
     changes = entry.get("changes") or {}
     fields = {}
@@ -2215,11 +2183,21 @@ def _apply_event_update(conn, entry):
     if "end_utc" in changes:
         fields["end_utc"] = changes["end_utc"][1]
     if "location" in changes:
-        raw_location = changes["location"][1]
-        fields["notes"] = _merge_notes_with_location(existing.get("notes"), raw_location)
-        fields["place"] = _resolve_place_ref(conn, raw_location)
+        fields["place"] = _resolve_place_ref(conn, changes["location"][1])
     if fields:
         cal.update(conn, event_id, **fields)
+
+    if "location" in changes:
+        # The machine's own column -- see the fix-round-4 note above. Set
+        # unconditionally (not COALESCE'd like href/etag/seq below): a
+        # deleted iCloud LOCATION must actually clear it, and only a real
+        # `"location"` entry in `changes` gets here at all, so this can
+        # never blank a value the changeset simply didn't mention.
+        conn.execute(
+            "UPDATE events SET external_location=? "
+            "WHERE id=? AND owner='iphone'",
+            (_external_location_value(changes["location"][1]), event_id),
+        )
 
     href = entry.get("external_href")
     etag = entry.get("external_etag")
@@ -2267,9 +2245,9 @@ def _apply_plan_insert(conn, entry):
 
     `place` is resolved via `_resolve_place_ref`, same as
     `_apply_event_insert` (fix-round finding C1); the raw `location` text
-    ALSO goes into a fresh `notes` location block via
-    `_merge_notes_with_location` (a brand-new row has no prior `notes` to
-    preserve).
+    ALSO goes into the `external_location` column via the same raw UPDATE
+    that attaches the external identity (fix-round 4). `notes` is not
+    passed at all -- the column stays empty and entirely human-owned.
 
     Idempotency guard (fix-round finding I3, and this same pattern
     extended to the events branch in fix-round 2's N3): unlike `events.
@@ -2303,13 +2281,13 @@ def _apply_plan_insert(conn, entry):
 
     plan_id = plans.add(conn, entry.get("title") or "",
                          place=_resolve_place_ref(conn, entry.get("location")),
-                         deadline=entry.get("deadline"),
-                         notes=_merge_notes_with_location("", entry.get("location")))
+                         deadline=entry.get("deadline"))
     conn.execute(
         "UPDATE plans SET owner='iphone', external_uid=?, external_href=?, "
-        "external_etag=? WHERE id=?",
+        "external_etag=?, external_location=? WHERE id=?",
         (entry.get("external_uid"), entry.get("external_href"),
-         entry.get("external_etag"), plan_id),
+         entry.get("external_etag"),
+         _external_location_value(entry.get("location")), plan_id),
     )
     audit.log(conn, "cal.ext.apply", {
         "branch": "plans", "action": "insert", "id": plan_id,
@@ -2320,17 +2298,16 @@ def _apply_plan_insert(conn, entry):
 
 def _apply_plan_update(conn, entry):
     """One `plans.update` Changeset entry -> a direct UPDATE of `plans`'
-    title/deadline/notes. `plans.py` has no generic `update()` verb at all
+    title/deadline. `plans.py` has no generic `update()` verb at all
     (see the module note above) -- this is the one genuinely unavoidable
     raw-SQL mutation of plan CONTENT (not just bookkeeping columns) in this
-    module. `location` maps to BOTH `notes` (via `_merge_notes_with_
-    location(existing["notes"], ...)`, fix-round-2 finding N1 -- NEVER a
-    bare overwrite; `existing`'s own `notes` -- human text included -- is
-    always the merge's starting point) AND `place_id` (re-resolved via
-    `_resolve_place_ref`, same as events -- fix-round finding C1): a
-    location edit that stops matching a previously-resolved place clears
-    `place_id` back to NULL, same "explicit None clears it" semantics
-    `cal.update` gives events.
+    module. A `location` change maps to `external_location` (the machine's
+    own column, fix-round 4 -- `notes` is never read or written here) AND
+    `place_id` (re-resolved via `_resolve_place_ref`, same as events --
+    fix-round finding C1): a location edit that stops matching a
+    previously-resolved place clears `place_id` back to NULL, same
+    "explicit None clears it" semantics `cal.update` gives events, and a
+    location deleted on the phone clears `external_location` to NULL too.
 
     Guarded by `_require_iphone_owned` FIRST (fix-round finding I2) -- its
     return value is also this function's only source for `attached_event_id`
@@ -2384,8 +2361,8 @@ def _apply_plan_update(conn, entry):
         params.append(new_deadline)
     if "location" in changes:
         raw_location = changes["location"][1]
-        set_clauses.append("notes=?")
-        params.append(_merge_notes_with_location(existing.get("notes"), raw_location))
+        set_clauses.append("external_location=?")
+        params.append(_external_location_value(raw_location))
         new_place_id = _resolve_place_ref(conn, raw_location)
         set_clauses.append("place_id=?")
         params.append(new_place_id)

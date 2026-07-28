@@ -6,8 +6,15 @@
   - an imported event/plan's `place` is resolved when its free-text
     iCloud `LOCATION` matches a known `places` name/alias, and left
     None/NULL (never a raised error) when it doesn't -- the raw text is
-    ALSO always stored verbatim in `notes` regardless (fix-round finding
-    C1, Denis's decision, refined in the second fix round).
+    ALSO always stored verbatim in the `external_location` COLUMN
+    regardless (fix-round finding C1, Denis's decision; the dedicated
+    column itself is fix-round 4).
+  - `notes` is human-owned and `extcal` never reads or writes it: a note
+    Amina (or Hermes on her behalf) attached to an imported row survives
+    any number of syncs, any change of location, and the location being
+    deleted on the phone -- fix-round 4 closes finding N1 by removing the
+    shared column entirely instead of re-encoding a delimiter a fourth
+    time.
   - `apply_changes` never mutates an `owner='hermes'` row, even when a
     Changeset entry's `id` points at one (fix-round finding I2 -- a race
     with `cal adopt`/`disown` between fetch and apply).
@@ -22,7 +29,10 @@ conftest.py) -- never the live assistant.db. Changeset entries are built by
 hand in the exact shape `extcal.plan_changes` documents/emits (see
 test_extcal_reconcile.py's own fixtures for the same convention).
 """
+from datetime import datetime, timezone
+
 from fam import audit, cal, extcal, gate, places, plans, rem
+from fam.extcal import ALMATY
 
 
 def _event_insert(uid, title, start_utc, end_utc=None, location="", seq=0,
@@ -77,16 +87,42 @@ def _get_plan_by_uid(conn, external_uid):
     return dict(row) if row else None
 
 
-def _loc_block(text):
-    """The exact machine-owned `notes` block `_merge_notes_with_location`
-    produces for a bare (no pre-existing human text) row -- fix-round-2
-    finding N1, marker redesigned in fix-round 3 (invisible Unicode
-    sentinels wrapping the raw text directly, no newlines, no visible
-    brackets). Tests that need to assert alongside PRESERVED human text
-    build the expected string by hand instead (see
-    test_event_update_location_change_preserves_human_notes below).
+def _occ(uid, title, start_utc, end_utc=None, all_day=False, location="",
+         status=None, seq=0, has_alarm=False, recurrence_id=None):
+    """An `expand()`-shaped Occurrence, same fixture shape
+    test_extcal_reconcile.py uses -- needed here (not just there) by the
+    fix-round-4 round-trip tests, which drive the REAL
+    `plan_changes` -> `apply_changes` -> snapshot -> `plan_changes` loop
+    against a real DB instead of hand-building the second changeset.
     """
-    return f"{extcal._LOC_BLOCK_BEGIN}{text}{extcal._LOC_BLOCK_END}"
+    return {
+        "uid": uid, "recurrence_id": recurrence_id, "title": title,
+        "start_utc": start_utc, "end_utc": end_utc or start_utc,
+        "all_day": all_day, "location": location, "status": status,
+        "seq": seq, "has_alarm": has_alarm,
+    }
+
+
+def _all_day_utc(date_str):
+    """The same VALUE=DATE -> UTC conversion `extcal._parse_dt_value` does:
+    local Asia/Almaty midnight of `date_str`, in UTC (computed, never
+    hardcoded -- Kazakhstan's UTC offset has changed within living
+    memory)."""
+    d = datetime.strptime(date_str, "%Y-%m-%d")
+    return d.replace(tzinfo=ALMATY).astimezone(timezone.utc).isoformat()
+
+
+def _snapshot_from_db(conn):
+    """`local_snapshot` in exactly the shape `plan_changes` documents,
+    built the way Task 6 will: `dict(row)` over `SELECT *`, no mapping and
+    no text parsing anywhere -- which is only possible because the raw
+    iCloud LOCATION lives in its own `external_location` column
+    (fix-round 4).
+    """
+    return {
+        "events": [dict(r) for r in conn.execute("SELECT * FROM events")],
+        "plans": [dict(r) for r in conn.execute("SELECT * FROM plans")],
+    }
 
 
 # ---------------------------------------------------------------------
@@ -178,14 +214,15 @@ def test_regenerate_skips_owner_iphone_directly(db):
 
 
 # ---------------------------------------------------------------------
-# C1: place is NEVER resolved for an imported row -- raw text -> notes
+# C1 (+ fix-round 4): place is resolved when it matches, and the raw text
+# ALWAYS lands in `external_location` -- never in the human-owned `notes`.
 # ---------------------------------------------------------------------
 
-def test_insert_event_with_unresolvable_location_leaves_place_none_uses_notes(db):
+def test_insert_event_with_unresolvable_location_stores_external_location(db):
     # This location text matches NOTHING in `places` -- under the FIRST
     # fix-round cut this raised UnknownRefError and the event never
     # imported at all. Now it must succeed unconditionally: place stays
-    # NULL, the raw text lands in notes.
+    # NULL, the raw text lands in external_location, notes stays empty.
     entry = _event_insert("uid-200@icloud.com", "Стоматолог",
                            "2037-07-20T13:00:00+00:00",
                            location="Стоматология, Абая 150")
@@ -195,15 +232,17 @@ def test_insert_event_with_unresolvable_location_leaves_place_none_uses_notes(db
 
     row = _get_event_by_uid(db, entry["external_uid"])
     assert row["place_id"] is None
-    assert row["notes"] == _loc_block("Стоматология, Абая 150")
+    assert row["external_location"] == "Стоматология, Абая 150"
+    assert row["notes"] == ""
 
 
-def test_insert_event_with_resolvable_location_sets_place_and_notes(db):
+def test_insert_event_with_resolvable_location_sets_place_and_external_location(db):
     # Refined C1 (Denis, second fix round): "точное совпадение с places
     # по-прежнему используем, когда оно есть" -- a location that DOES
-    # match a known place is resolved and used, not discarded; notes still
-    # carries the raw text either way (that's the field T6 must diff
-    # against, per the module's Task 6 contract note -- not the place).
+    # match a known place is resolved and used, not discarded;
+    # external_location still carries the raw text either way (that's the
+    # column T6 must diff against, per the module's Task 6 contract note --
+    # not the place, whose name is Hermes's own canonical spelling).
     invictus = places.add(db, "Invictus")
     db.commit()
     entry = _event_insert("uid-201@icloud.com", "Йога",
@@ -213,10 +252,21 @@ def test_insert_event_with_resolvable_location_sets_place_and_notes(db):
 
     row = _get_event_by_uid(db, entry["external_uid"])
     assert row["place_id"] == invictus["id"]
-    assert row["notes"] == _loc_block("Invictus")
+    assert row["external_location"] == "Invictus"
+    assert row["notes"] == ""
 
 
-def test_insert_plan_with_unresolvable_location_leaves_place_none_uses_notes(db):
+def test_insert_event_without_location_leaves_external_location_null(db):
+    # "no location on the phone" is ONE state in the DB, not two: NULL,
+    # never an empty string (see _external_location_value).
+    entry = _event_insert("uid-207@icloud.com", "Йога",
+                           "2037-07-20T13:00:00+00:00")
+    extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
+    row = _get_event_by_uid(db, entry["external_uid"])
+    assert row["external_location"] is None
+
+
+def test_insert_plan_with_unresolvable_location_stores_external_location(db):
     entry = _plan_insert("uid-202@icloud.com", "Купить подарок", "2037-07-31",
                           location="Meга, 2 этаж")
     counts = extcal.apply_changes(db, _changeset(plans_insert=[entry]), {})
@@ -224,10 +274,11 @@ def test_insert_plan_with_unresolvable_location_leaves_place_none_uses_notes(db)
 
     row = _get_plan_by_uid(db, entry["external_uid"])
     assert row["place_id"] is None
-    assert row["notes"] == _loc_block("Meга, 2 этаж")
+    assert row["external_location"] == "Meга, 2 этаж"
+    assert row["notes"] == ""
 
 
-def test_insert_plan_with_resolvable_location_sets_place_and_notes(db):
+def test_insert_plan_with_resolvable_location_sets_place_and_external_location(db):
     mega = places.add(db, "Мега")
     db.commit()
     entry = _plan_insert("uid-203@icloud.com", "Купить подарок", "2037-07-31",
@@ -237,10 +288,11 @@ def test_insert_plan_with_resolvable_location_sets_place_and_notes(db):
 
     row = _get_plan_by_uid(db, entry["external_uid"])
     assert row["place_id"] == mega["id"]
-    assert row["notes"] == _loc_block("Мега")
+    assert row["external_location"] == "Мега"
+    assert row["notes"] == ""
 
 
-def test_event_update_unresolvable_location_change_updates_notes_leaves_place_none(db):
+def test_event_update_unresolvable_location_change_updates_external_location(db):
     entry = _event_insert("uid-204@icloud.com", "Стоматолог",
                            "2037-07-20T13:00:00+00:00", location="Клиника А")
     extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
@@ -255,7 +307,8 @@ def test_event_update_unresolvable_location_change_updates_notes_leaves_place_no
 
     after = cal.get(db, row["id"])
     assert after["place"] is None
-    assert after["notes"] == _loc_block("Клиника Б, каб. 12")
+    assert after["external_location"] == "Клиника Б, каб. 12"
+    assert after["notes"] == ""
 
 
 def test_event_update_location_change_resolves_new_place(db):
@@ -274,7 +327,7 @@ def test_event_update_location_change_resolves_new_place(db):
     extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
     after = cal.get(db, row["id"])
     assert after["place"]["id"] == invictus["id"]
-    assert after["notes"] == _loc_block("Invictus")
+    assert after["external_location"] == "Invictus"
 
 
 def test_event_update_location_change_clears_previously_resolved_place(db):
@@ -295,7 +348,7 @@ def test_event_update_location_change_clears_previously_resolved_place(db):
     extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
     after = cal.get(db, row["id"])
     assert after["place"] is None
-    assert after["notes"] == _loc_block("Invictus, филиал на Достык")
+    assert after["external_location"] == "Invictus, филиал на Достык"
 
 
 def test_plan_update_changes_title_deadline_and_location(db):
@@ -318,7 +371,8 @@ def test_plan_update_changes_title_deadline_and_location(db):
     assert after["title"] == "Купить подарок маме"
     assert after["deadline"] == "2037-08-02"
     assert after["place"] is None
-    assert after["notes"] == _loc_block("Мега, 2 этаж")
+    assert after["external_location"] == "Мега, 2 этаж"
+    assert after["notes"] == ""
 
 
 def test_plan_update_location_change_resolves_and_clears_place(db):
@@ -341,7 +395,7 @@ def test_plan_update_location_change_resolves_and_clears_place(db):
     extcal.apply_changes(db, _changeset(plans_update=[clear_entry]), {})
     after_clear = plans.get(db, row["id"])
     assert after_clear["place"] is None
-    assert after_clear["notes"] == _loc_block("Мега, филиал 2")
+    assert after_clear["external_location"] == "Мега, филиал 2"
 
 
 # ---------------------------------------------------------------------
@@ -731,7 +785,7 @@ def test_update_audit_redacts_title_and_location_values(db):
     # the real content IS in the DB row itself -- redaction is audit-only.
     after = cal.get(db, row["id"])
     assert after["title"] == "Другое название"
-    assert after["notes"] == _loc_block("Новое тайное место")
+    assert after["external_location"] == "Новое тайное место"
 
 
 def test_plan_update_audit_redacts_title_and_location_values(db):
@@ -767,14 +821,62 @@ def test_plan_update_audit_redacts_title_and_location_values(db):
 
     after = plans.get(db, row["id"])
     assert after["title"] == "Другое название плана"
-    assert after["notes"] == _loc_block("Новое тайное место плана")
+    assert after["external_location"] == "Новое тайное место плана"
+
+
+def test_raw_location_text_never_reaches_audit_log_on_any_path(db):
+    # Privacy sweep (fix-round 4): the design doc's rule is "тела VEVENT
+    # целиком не логируются, только UID и счётчики", and
+    # `_audit_safe_changes` covers extcal's OWN update entries -- but until
+    # fix-round 4 the raw location ALSO travelled as `notes` through
+    # `cal.add`/`cal.update`/`plan.add`, each of which logs its own audit
+    # payload with the notes value in it verbatim, entirely outside
+    # `_audit_safe_changes`' reach. Now that nothing passes the location
+    # as notes at all, the raw text must appear in NO audit row from ANY
+    # path: insert, update, or plan insert/update.
+    secret = "Клиника интимного здоровья, Абая 150"
+    secret_plan = "Аптека на Розыбакиева, 3 этаж"
+    ins = _event_insert("uid-720@icloud.com", "Врач",
+                         "2037-07-20T13:00:00+00:00", location=secret)
+    extcal.apply_changes(db, _changeset(events_insert=[ins]), {})
+    row = _get_event_by_uid(db, ins["external_uid"])
+    upd = {"id": row["id"], "changes": {"location": (secret, secret + ", каб. 4")}}
+    extcal.apply_changes(db, _changeset(events_update=[upd]), {})
+
+    plan_ins = _plan_insert("uid-721@icloud.com", "Забрать лекарство",
+                             "2037-08-01", location=secret_plan)
+    extcal.apply_changes(db, _changeset(plans_insert=[plan_ins]), {})
+    plan_row = _get_plan_by_uid(db, plan_ins["external_uid"])
+    plan_upd = {"id": plan_row["id"],
+                "changes": {"location": (secret_plan, secret_plan + " (новый)")}}
+    extcal.apply_changes(db, _changeset(plans_update=[plan_upd]), {})
+
+    # every audit row this DB has, whatever its kind -- cal.add,
+    # cal.update, plan.add, rem.regenerate, cal.ext.apply, ...
+    all_rows = db.execute("SELECT kind, payload FROM audit_log").fetchall()
+    assert all_rows  # the sweep would be vacuous on an empty table
+    blob = " ".join(f"{r['kind']} {r['payload']}" for r in all_rows)
+    assert "Абая 150" not in blob
+    assert "Розыбакиева" not in blob
+
+    # ...while the values themselves really are on the rows.
+    assert cal.get(db, row["id"])["external_location"] == secret + ", каб. 4"
+    assert plans.get(db, plan_row["id"])["external_location"] == \
+        secret_plan + " (новый)"
 
 
 # ---------------------------------------------------------------------
-# N1: notes carry a machine-owned location block; human text survives
+# fix-round 4 (finding N1, closed by removing the mechanism): `notes` is
+# human-owned, `external_location` is machine-owned, and the two never
+# meet. Rounds 1-3 all kept the raw location INSIDE `notes` and only
+# traded one failure mode for the next (wholesale overwrite -> a readable
+# marker a human can quote -> invisible markers an LLM agent driving
+# `fam cal update --notes` drops on a rewrite). These tests assert the
+# property those rounds were reaching for, now that it holds structurally:
+# nothing here parses, merges, or delimits anything.
 # ---------------------------------------------------------------------
 
-def test_event_update_location_change_preserves_human_notes(db):
+def test_human_note_survives_a_location_change_on_an_event(db):
     entry = _event_insert("uid-704@icloud.com", "Стоматолог",
                            "2037-07-20T13:00:00+00:00", location="Клиника А")
     extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
@@ -782,8 +884,9 @@ def test_event_update_location_change_preserves_human_notes(db):
 
     # a human (Amina, or Hermes on her behalf) attaches a note directly,
     # NOT through extcal -- the exact scenario the review's N1 repro
-    # describes.
-    cal.update(db, row["id"], notes=row["notes"] + "\n\nвзяла паспорт")
+    # describes. Note this is a WHOLESALE replacement of the column, which
+    # is precisely what `fam cal update --notes` does.
+    cal.update(db, row["id"], notes="взяла паспорт")
     db.commit()
 
     update_entry = {
@@ -793,41 +896,38 @@ def test_event_update_location_change_preserves_human_notes(db):
     extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
 
     after = cal.get(db, row["id"])
-    assert "взяла паспорт" in after["notes"]
-    assert _loc_block("Клиника Б, каб. 12") in after["notes"]
-    # the OLD machine block is gone -- not left behind as a stale
-    # duplicate alongside the new one.
-    assert "Клиника А" not in after["notes"]
+    assert after["notes"] == "взяла паспорт"  # byte-for-byte, not merged
+    assert after["external_location"] == "Клиника Б, каб. 12"
 
 
-def test_event_update_clearing_location_preserves_human_notes_drops_block(db):
+def test_human_note_survives_the_location_being_deleted_on_the_phone(db):
     entry = _event_insert("uid-705@icloud.com", "Стоматолог",
                            "2037-07-20T13:00:00+00:00", location="Клиника А")
     extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
     row = _get_event_by_uid(db, entry["external_uid"])
-    cal.update(db, row["id"], notes=row["notes"] + "\n\nвзяла паспорт")
+    cal.update(db, row["id"], notes="взяла паспорт")
     db.commit()
 
-    # she deleted the location on the phone entirely.
+    # she deleted the location on the phone entirely: external_location
+    # must go back to NULL (no stale address left behind), notes must not
+    # so much as flinch.
     update_entry = {"id": row["id"], "changes": {"location": ("Клиника А", "")}}
     extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
 
     after = cal.get(db, row["id"])
-    assert after["notes"].strip() == "взяла паспорт"
+    assert after["notes"] == "взяла паспорт"
+    assert after["external_location"] is None
 
 
-def test_plan_update_location_change_preserves_human_notes(db):
+def test_human_note_survives_a_location_change_on_a_plan(db):
     entry = _plan_insert("uid-706@icloud.com", "Купить подарок", "2037-07-31",
                           location="Мега, 2 этаж")
     extcal.apply_changes(db, _changeset(plans_insert=[entry]), {})
     row = _get_plan_by_uid(db, entry["external_uid"])
 
-    # a human note attached directly, not through extcal (plans.py has no
-    # generic update() -- raw SQL here stands in for "however a human note
-    # ends up on this column", mirroring how _apply_plan_update itself has
-    # no choice but to use raw SQL for plan content).
-    db.execute("UPDATE plans SET notes=? WHERE id=?",
-               (row["notes"] + "\n\nнужен чек", row["id"]))
+    # plans.py has no generic update() -- raw SQL here stands in for
+    # "however a human note ends up on this column".
+    db.execute("UPDATE plans SET notes=? WHERE id=?", ("нужен чек", row["id"]))
     db.commit()
 
     update_entry = {
@@ -837,124 +937,182 @@ def test_plan_update_location_change_preserves_human_notes(db):
     extcal.apply_changes(db, _changeset(plans_update=[update_entry]), {})
 
     after = plans.get(db, row["id"])
-    assert "нужен чек" in after["notes"]
-    assert _loc_block("Мега, 3 этаж") in after["notes"]
-    assert "2 этаж" not in after["notes"]
+    assert after["notes"] == "нужен чек"
+    assert after["external_location"] == "Мега, 3 этаж"
 
 
-def test_repeated_syncs_never_duplicate_the_location_block(db):
+def test_human_note_survives_many_syncs_and_set_clear_set_cycles(db):
+    # The accumulation/erosion failure every earlier round eventually hit:
+    # repeated syncs, with the location set, cleared, and set again, and a
+    # human note present the whole time. Nothing may accumulate (no second
+    # copy of anything), nothing may erode (the note is byte-identical at
+    # the end), and the note's content is deliberately hostile -- it
+    # contains round 2's retired readable marker pair AND round 3's
+    # invisible marker code points, both of which are now just ordinary,
+    # completely inert characters in a column extcal never reads.
+    # written with explicit \uXXXX escapes, never literal invisible glyphs:
+    # a literal zero-width character in a source file is unverifiable by
+    # reading it and at real risk of mangling across editors/transfers.
+    hostile_note = (
+        "заметка от Амины:\n[extcal:location]\n"
+        "это моя личная заметка, не место!\n[/extcal:location]\n"
+        "и немного невидимых: "
+        "\u200b\u200c\u200d\u2060\u2063 \u200b\u200c\u200d\u2060\u2064\n"
+        "конец"
+    )
     entry = _event_insert("uid-707@icloud.com", "Стоматолог",
                            "2037-07-20T13:00:00+00:00", location="Клиника А")
     extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
     row = _get_event_by_uid(db, entry["external_uid"])
-
-    # the SAME location, re-synced three times in a row (an unchanged
-    # LOCATION would still show up as an "update" entry if some OTHER
-    # field also changed, e.g. SEQUENCE bumped with nothing substantive
-    # different) -- must never grow a second/third block.
-    for _ in range(3):
-        update_entry = {
-            "id": row["id"],
-            "changes": {"location": ("Клиника А", "Клиника А")},
-        }
-        extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
-
-    after = cal.get(db, row["id"])
-    assert after["notes"].count(extcal._LOC_BLOCK_BEGIN) == 1
-    assert after["notes"] == _loc_block("Клиника А")
-
-
-# ---------------------------------------------------------------------
-# fix-round 3: the marker itself must be practically un-typable/
-# un-copyable, not just unlikely -- these three tests are the exact class
-# the reviewer's live repro targeted.
-# ---------------------------------------------------------------------
-
-def test_human_text_containing_literal_old_style_bracket_markers_survives(db):
-    # This is the reviewer's own repro, verbatim: round 2's marker was
-    # READABLE bracket text, so a human note containing that exact literal
-    # pair (typed on purpose, or quoted/duplicated after having seen it
-    # once -- ordinary human behavior) was silently parsed as "the
-    # machine's own block" and destroyed. Fix-round 3's marker is no
-    # longer readable text at all, so this string is now just ordinary,
-    # completely inert human content -- ANY of it, including a perfect
-    # copy of the retired format.
-    old_style_human_note = (
-        "заметка от Амины:\n[extcal:location]\n"
-        "это моя личная заметка, не место!\n[/extcal:location]\nконец"
-    )
-    entry = _event_insert("uid-708@icloud.com", "Стоматолог",
-                           "2037-07-20T13:00:00+00:00", location="Клиника А")
-    extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
-    row = _get_event_by_uid(db, entry["external_uid"])
-
-    # a human note that happens to contain the old, now-meaningless marker
-    # text -- written directly, standing in for however it got there
-    # (typed, quoted, pasted).
-    cal.update(db, row["id"], notes=old_style_human_note)
-    db.commit()
-
-    update_entry = {
-        "id": row["id"],
-        "changes": {"location": ("Клиника А", "Клиника Б")},
-    }
-    extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
-
-    after = cal.get(db, row["id"])
-    # completely untouched, byte for byte -- not partially stripped, not
-    # reinterpreted, not silently gone.
-    assert old_style_human_note in after["notes"]
-    assert _loc_block("Клиника Б") in after["notes"]
-
-
-def test_human_text_containing_an_unpaired_new_marker_is_left_untouched(db):
-    # A human note that happens to contain just ONE of the two invisible
-    # marker sequences (no matching partner to close a span) must never be
-    # misread as a block boundary -- _strip_location_block only removes a
-    # COMPLETE BEGIN...END span, never a lone marker character.
-    stray = f"заметка{extcal._LOC_BLOCK_BEGIN}без конца"
-    assert extcal._strip_location_block(stray) == stray.strip()
-
-    stray_end_only = f"начало{extcal._LOC_BLOCK_END}без начала"
-    assert extcal._strip_location_block(stray_end_only) == stray_end_only.strip()
-
-
-def test_human_text_containing_a_full_new_marker_span_is_treated_as_a_block(db):
-    # Documents the one remaining, DELIBERATE edge case (requirement 3 in
-    # the fix-round-3 dispatch is about ordinary human text surviving --
-    # this is the one scenario that is genuinely no longer "ordinary"): if
-    # a human's text contains a COMPLETE BEGIN-through-END span (both
-    # invisible marker sequences, in order, with something between them),
-    # it is structurally indistinguishable from a real location block and
-    # is treated as one. Reaching this state requires copying the
-    # INVISIBLE marker bytes themselves, not just the visible text between
-    # them -- a fundamentally different, far less likely action than
-    # quoting/retyping something you can see (round 2's actual failure
-    # mode). This test exists to PIN that this is well-defined,
-    # non-crashing behavior, not to claim it never happens.
-    quoted_whole_block = f"до{extcal._LOC_BLOCK_BEGIN}что-то{extcal._LOC_BLOCK_END}после"
-    stripped = extcal._strip_location_block(quoted_whole_block)
-    assert stripped == "допосле"
-
-
-def test_repeated_set_clear_set_cycle_does_not_accumulate_blank_lines(db):
-    entry = _event_insert("uid-709@icloud.com", "Стоматолог",
-                           "2037-07-20T13:00:00+00:00", location="Клиника А")
-    extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
-    row = _get_event_by_uid(db, entry["external_uid"])
-    cal.update(db, row["id"], notes=row["notes"] + "\n\nвзяла паспорт")
+    cal.update(db, row["id"], notes=hostile_note)
     db.commit()
 
     for _ in range(3):
-        clear_entry = {"id": row["id"], "changes": {"location": ("Клиника А", "")}}
-        extcal.apply_changes(db, _changeset(events_update=[clear_entry]), {})
-        set_entry = {"id": row["id"], "changes": {"location": ("", "Клиника А")}}
-        extcal.apply_changes(db, _changeset(events_update=[set_entry]), {})
+        # same location re-synced (an unchanged LOCATION still shows up as
+        # an update entry when some OTHER field changed)
+        extcal.apply_changes(db, _changeset(events_update=[
+            {"id": row["id"], "changes": {"location": ("Клиника А", "Клиника А")}}]), {})
+        # cleared on the phone, then set again
+        extcal.apply_changes(db, _changeset(events_update=[
+            {"id": row["id"], "changes": {"location": ("Клиника А", "")}}]), {})
+        extcal.apply_changes(db, _changeset(events_update=[
+            {"id": row["id"], "changes": {"location": ("", "Клиника А")}}]), {})
 
     after = cal.get(db, row["id"])
-    assert after["notes"] == "взяла паспорт\n\n" + _loc_block("Клиника А")
-    assert after["notes"].count(extcal._LOC_BLOCK_BEGIN) == 1
-    assert "\n\n\n" not in after["notes"]
+    assert after["notes"] == hostile_note  # byte-for-byte after 9 updates
+    assert after["external_location"] == "Клиника А"  # exactly one value
+
+
+def test_extcal_module_has_no_notes_marker_machinery_left(db):
+    # Fix-round 4 deleted the delimiter mechanism outright rather than
+    # re-encoding it a fourth time; this pins that it stays deleted, so a
+    # future edit can't quietly reintroduce a shared-column convention.
+    for name in ("_LOC_BLOCK_BEGIN", "_LOC_BLOCK_END", "_LOC_BLOCK_RE",
+                 "_strip_location_block", "_merge_notes_with_location"):
+        assert not hasattr(extcal, name), f"{name} is back"
+
+
+# ---------------------------------------------------------------------
+# fix-round 4: the value is READABLE from outside, and a full
+# plan_changes -> apply_changes -> snapshot -> plan_changes round trip
+# settles to zero changes.
+# ---------------------------------------------------------------------
+
+def test_cal_get_and_plans_get_expose_external_location(db):
+    # This is how Amina gets the address back: the agent runs
+    # `fam cal show <id> --json` / `fam plan list --json`, which serialize
+    # exactly these dicts, so it can answer "а где стоматология?" with the
+    # text off her own phone even though no `places` entry matched.
+    ev = _event_insert("uid-800@icloud.com", "Стоматолог",
+                        "2037-07-20T13:00:00+00:00",
+                        location="Стоматология, Абая 150")
+    pl = _plan_insert("uid-801@icloud.com", "Забрать анализы", "2037-07-31",
+                       location="Инвитро, Сейфуллина 500")
+    extcal.apply_changes(
+        db, _changeset(events_insert=[ev], plans_insert=[pl]), {})
+
+    event_row = _get_event_by_uid(db, ev["external_uid"])
+    plan_row = _get_plan_by_uid(db, pl["external_uid"])
+
+    got_event = cal.get(db, event_row["id"])
+    assert got_event["external_location"] == "Стоматология, Абая 150"
+    got_plan = plans.get(db, plan_row["id"])
+    assert got_plan["external_location"] == "Инвитро, Сейфуллина 500"
+
+    # and through the list-shaped read paths the digest/day views use
+    day = cal.day(db, "2037-07-20")
+    assert [e["external_location"] for e in day if e["id"] == event_row["id"]] == \
+        ["Стоматология, Абая 150"]
+    open_plans = plans.list_open(db)
+    assert [p["external_location"] for p in open_plans if p["id"] == plan_row["id"]] == \
+        ["Инвитро, Сейфуллина 500"]
+
+
+def test_round_trip_timed_event_settles_to_zero_changes(db):
+    # The real idempotency question, end to end: plan_changes decides,
+    # apply_changes writes, T6's snapshot (`dict(row)` over `SELECT *`)
+    # reads back, plan_changes decides again on the SAME occurrence. With
+    # the raw text in its own column this MUST be empty -- with it hidden
+    # in `notes` behind a delimiter, every round of this task had to trust
+    # that a parse and a re-serialize agreed.
+    occ = _occ("uid-900@icloud.com", "Стоматолог", "2037-07-20T13:00:00+00:00",
+                "2037-07-20T14:00:00+00:00", location="Стоматология, Абая 150")
+    now = "2037-07-19T06:00:00+00:00"
+
+    cs1 = extcal.plan_changes([occ], {"events": [], "plans": []}, now)
+    assert len(cs1["events"]["insert"]) == 1
+    counts1 = extcal.apply_changes(db, cs1, {})
+    assert counts1["events_inserted"] == 1
+    assert counts1["errors"] == []
+
+    cs2 = extcal.plan_changes([occ], _snapshot_from_db(db), now)
+    assert cs2["events"]["insert"] == []
+    assert cs2["events"]["update"] == []
+    assert cs2["events"]["cancel"] == []
+    counts2 = extcal.apply_changes(db, cs2, {})
+    assert counts2["events_inserted"] == 0
+    assert counts2["events_updated"] == 0
+    assert counts2["errors"] == []
+
+
+def test_round_trip_all_day_plan_settles_to_zero_changes(db):
+    start = _all_day_utc("2037-07-31")
+    occ = _occ("uid-901@icloud.com", "Купить подарок", start, end_utc=start,
+                all_day=True, location="Мега, 2 этаж")
+    now = "2037-07-20T06:00:00+00:00"
+
+    cs1 = extcal.plan_changes([occ], {"events": [], "plans": []}, now)
+    assert len(cs1["plans"]["insert"]) == 1
+    assert extcal.apply_changes(db, cs1, {})["plans_inserted"] == 1
+
+    cs2 = extcal.plan_changes([occ], _snapshot_from_db(db), now)
+    assert cs2["plans"]["insert"] == []
+    assert cs2["plans"]["update"] == []
+    assert cs2["plans"]["drop"] == []
+
+
+def test_round_trip_is_stable_even_with_a_human_note_attached(db):
+    # A human note on the row must not make the sync think anything
+    # changed -- the diff has no reason to look at `notes` at all now, and
+    # this pins that it doesn't.
+    occ = _occ("uid-902@icloud.com", "Стоматолог", "2037-07-20T13:00:00+00:00",
+                "2037-07-20T14:00:00+00:00", location="Стоматология, Абая 150")
+    now = "2037-07-19T06:00:00+00:00"
+    extcal.apply_changes(
+        db, extcal.plan_changes([occ], {"events": [], "plans": []}, now), {})
+
+    event_id = _snapshot_from_db(db)["events"][0]["id"]
+    cal.update(db, event_id, notes="взяла паспорт и полис")
+    db.commit()
+
+    cs = extcal.plan_changes([occ], _snapshot_from_db(db), now)
+    assert cs["events"]["update"] == []
+    assert cs["events"]["insert"] == []
+    assert cs["events"]["cancel"] == []
+
+
+def test_round_trip_detects_a_real_location_edit_on_the_phone(db):
+    # The other half of the same contract: the round trip must be quiet on
+    # no change, and must NOT be quiet on a real one -- otherwise "zero
+    # updates" would be a vacuous property.
+    occ = _occ("uid-903@icloud.com", "Стоматолог", "2037-07-20T13:00:00+00:00",
+                "2037-07-20T14:00:00+00:00", location="Клиника А")
+    now = "2037-07-19T06:00:00+00:00"
+    extcal.apply_changes(
+        db, extcal.plan_changes([occ], {"events": [], "plans": []}, now), {})
+
+    moved = dict(occ, location="Клиника Б, каб. 12")
+    cs = extcal.plan_changes([moved], _snapshot_from_db(db), now)
+    assert len(cs["events"]["update"]) == 1
+    assert cs["events"]["update"][0]["changes"]["location"] == (
+        "Клиника А", "Клиника Б, каб. 12")
+
+    extcal.apply_changes(db, cs, {})
+    event_id = _snapshot_from_db(db)["events"][0]["id"]
+    assert cal.get(db, event_id)["external_location"] == "Клиника Б, каб. 12"
+    # ...and it settles immediately afterwards
+    assert extcal.plan_changes([moved], _snapshot_from_db(db), now)[
+        "events"]["update"] == []
 
 
 # ---------------------------------------------------------------------

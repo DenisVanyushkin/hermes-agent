@@ -335,6 +335,21 @@ def init_db(conn):
     # `sent_messages` in v10): one row per Hermes-owned event that has
     # been PUT to the "Гермес" collection, so the export tick can compare
     # body_hash and skip a no-op PUT.
+    #
+    # `external_location` (Task 5 fix-round 4, controller-authorized into
+    # this same still-unmigrated v12 block -- prod is on v11, no version
+    # bump needed) holds the RAW free-text iCloud `LOCATION` of an
+    # owner='iphone' row: the text exactly as it stands on Amina's phone,
+    # whether or not it also happened to match a `places` entry (in which
+    # case `place_id` is set too -- the two are independent). It exists
+    # because that text has to be stored SOMEWHERE for the sync to diff
+    # against on the next tick, and `notes` -- the column three earlier
+    # attempts used -- is human-owned: `fam cal update --notes` replaces
+    # it wholesale, and an LLM agent driving that command cannot be relied
+    # on to reproduce any in-band delimiter a machine hid in it. A column
+    # nothing but extcal reads or writes removes that whole class of
+    # collision instead of re-encoding it: `notes` stays purely human,
+    # `external_location` stays purely machine.
     _ensure_column(conn, "events", "owner",
                    "owner TEXT NOT NULL DEFAULT 'hermes' "
                    "CHECK (owner IN ('hermes','iphone'))")
@@ -342,6 +357,7 @@ def init_db(conn):
     _ensure_column(conn, "events", "external_href", "external_href TEXT")
     _ensure_column(conn, "events", "external_etag", "external_etag TEXT")
     _ensure_column(conn, "events", "external_seq", "external_seq INTEGER")
+    _ensure_column(conn, "events", "external_location", "external_location TEXT")
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_external_uid "
         "ON events(external_uid) WHERE external_uid IS NOT NULL")
@@ -351,6 +367,7 @@ def init_db(conn):
     _ensure_column(conn, "plans", "external_uid", "external_uid TEXT")
     _ensure_column(conn, "plans", "external_href", "external_href TEXT")
     _ensure_column(conn, "plans", "external_etag", "external_etag TEXT")
+    _ensure_column(conn, "plans", "external_location", "external_location TEXT")
     # Same partial UNIQUE as events.external_uid above, added to this same
     # v12 migration (Task 5 fix-round finding I3, controller-authorized:
     # prod is still on v11 as of this addition, so widening the v12
