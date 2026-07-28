@@ -1808,36 +1808,158 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
 # expand/plan_changes) is read-only or pure; this is where a `Changeset`
 # (plan_changes' output) actually gets written -- exclusively through
 # `cal.*`/`plans.*` wherever those modules expose an entry point, so every
-# such write still inherits `audit_log`, `rem.regenerate`'s reminder-chain
-# recompute, and `places.resolve`'s casefold place lookup, same as any
-# hand-typed `fam cal add`/`fam plan add`.
+# such write still inherits `audit_log` and `rem.regenerate`'s reminder-chain
+# recompute, same as any hand-typed `fam cal add`/`fam plan add`.
 #
-# TWO narrow, deliberate, documented exceptions to "only cal.*/plans.*"
-# below -- both direct DB writes, both scoped to things neither module's
+# THREE narrow, deliberate, documented exceptions to "only cal.*/plans.*"
+# below -- all direct DB reads/writes, all scoped to things neither module's
 # CURRENT surface (this task's boundary excludes touching cal.py/plans.py)
-# exposes a setter for:
+# exposes an entry point for:
 #   1. `owner`/`external_uid`/`external_href`/`external_etag`/`external_seq`
 #      on `events`/`plans` -- schema v12 (Task 3) added these columns, but
 #      `cal.add`/`cal.update`/`plans.add` have no kwarg for any of them, so
 #      there is no cal.*/plans.* entry point that can set them at all.
-#   2. A plans-branch "update" (title/deadline/location edit on an EXISTING
+#   2. A plans-branch "update" (title/deadline/notes edit on an EXISTING
 #      imported plan) -- `plans.py` has `add`/`mark`/`attach` but, unlike
 #      `cal.update` on the events side, no generic `update()` verb -- an
 #      in-place plan edit has nowhere to go through `plans.*` either.
-# Both gaps are a real, load-bearing observation for whoever scopes cal.py's/
-# plans.py's next revision (T5's report flags this explicitly), not
+#   3. A `SELECT owner, ... FROM events/plans WHERE id=?` read-only ownership
+#      guard (`_require_iphone_owned`, fix-round finding I2) before ANY
+#      mutation of an EXISTING row -- see that function's own docstring.
+# All three gaps are a real, load-bearing observation for whoever scopes
+# cal.py's/plans.py's next revision (T5's report flags this explicitly), not
 # something this task is scoped to fix. Every OTHER mutation below (insert,
-# cancel, drop, and the title/start_utc/end_utc/place fields of an event
-# update) goes through cal.*/plans.* exactly as documented.
+# cancel, drop, and the title/start_utc/end_utc fields of an event update)
+# goes through cal.*/plans.* exactly as documented.
+#
+# Fix-round finding C1 (Denis's decision, refined after the first fix
+# round): an imported event/plan's `place` is resolved via `places.
+# resolve()` -- the SAME resolver `cal.add`/`plans.add` already use
+# internally -- when the free-text iCloud `LOCATION` happens to match a
+# known `places` name/alias ("Точное совпадение с places по-прежнему
+# используем, когда оно есть"). When it does NOT match (the common case --
+# her free-text locations like "Стоматология, Абая 150" essentially never
+# match an existing `places` entry), `place` is simply left None/NULL --
+# NEVER `cal.UnknownRefError`/raise. Either way, the raw (normalized) text
+# is ALSO stored verbatim in `notes` (both `cal.add`/`cal.update` and
+# `plans.add` already accept a `notes` kwarg, so this half needs no raw SQL
+# of its own) -- see the Task 6 contract note below for why `notes`, not
+# the resolved place name, is the field that matters for round-tripping.
+#
+# Rationale (Denis): place carries no OPERATIONAL weight for an
+# owner='iphone' row -- her phone rings for it, and neither `leave_at` nor
+# road/`по пути` are ever computed on the strength of it -- so there is
+# nothing to lose by leaving it unresolved when it doesn't match, and
+# nothing forced about resolving it when it happens to: a known place is
+# used for free (lets `fam cal day` show a proper place card, keeps `по
+# пути` matching available for her events too, no cost either way), an
+# unknown one is no longer a hard import failure like the first cut of
+# this fix made it (`UnknownRefError` -> per-row guard swallow -> retried
+# every 15 minutes forever, plus a nightly `cal.ext.apply_error` summary
+# entry for something that will never resolve itself).
+#
+# **Contract for Task 6** (finding I4): when Task 6 builds `local_snapshot`
+# for `plan_changes()`, an `owner='iphone'` `EventRow`/`PlanRow`'s
+# `"location"` key MUST be populated from that row's `notes` COLUMN, NEVER
+# from its resolved place name (even on the rows where one exists). `_event_
+# diff`/`_plan_diff` compare `existing.get("location")` against the remote
+# occurrence's raw `LOCATION` text via `_pc_norm_text` on both sides;
+# `notes` is the one field guaranteed to hold EXACTLY that same normalized
+# text on every sync, whether or not `place` also resolved -- feeding the
+# comparison anything else (e.g. the resolved place's `name`, which is
+# Denis's/Hermes's OWN canonical spelling, not necessarily byte-identical
+# to her phone's free text) risks a spurious "changed" on every tick
+# forever, or a real edit on the phone silently never landing, depending on
+# which way the mismatch goes. This does not apply to `owner='hermes'`
+# rows -- `plan_changes` never diffs those at all (the ownership guard
+# keeps them out of `events_by_key`/`plans_by_key` entirely), so their
+# genuine, human-authored `notes` are never at risk of being read as if
+# they were a LOCATION passthrough.
 
 
-def _apply_ref_or_none(text):
-    """Empty/whitespace-only location text -> None (no place ref attempted,
-    cal.add/plans.add's own default), matching cal.add's own `place=None`
-    "no place" convention rather than trying to resolve an empty string.
+def _require_iphone_owned(conn, table, row_id):
+    """Read-only ownership guard (fix-round finding I2) -- called as the
+    FIRST thing inside every `_apply_*` helper that mutates an EXISTING row
+    (update/cancel/drop; insert has nothing to guard, it only ever creates a
+    brand-new row). `table` is always one of the two literal strings
+    "events"/"plans" from this module's own `_APPLY_STEPS` wiring below,
+    never caller-supplied data, so the f-string is safe.
+
+    Race this closes: `plan_changes()`'s own "never touch owner='hermes'"
+    guard is a snapshot-time decision -- it only knows what `owner` a row
+    had at the moment Task 6's tick took its `local_snapshot`. A live
+    CalDAV `fetch_changes()` round-trip is real wall-clock time (seconds to
+    minutes); in that window, `fam cal adopt <id>` (design doc's
+    "адоптирование по явной просьбе Амины") can flip that SAME row's
+    `owner` to 'hermes'. Without this guard, a stale `cancel`/`update`/`drop`
+    entry built from the pre-adopt snapshot would reach `cal.cancel()`/
+    `cal.update()`/`plans.mark()` and silently act on what is, by the time
+    `apply_changes()` actually runs, a Hermes-owned row -- undoing the
+    adoption (and its freshly-regenerated reminder chain) the operator
+    asked for, with no visible error. Raising here instead routes that race
+    through `_apply_one`'s ordinary per-row guard: the entry is skipped,
+    logged as `cal.ext.apply_error`, and every OTHER entry in the batch
+    still applies.
+
+    Returns the full existing row as a dict (used by `_apply_plan_update`
+    for its `attached_event_id` cascade check, finding I1) when the row
+    exists AND is `owner='iphone'`; raises `LookupError` otherwise (unknown
+    id, or a real ownership mismatch) -- both cases are just "this entry no
+    longer applies", indistinguishable to the caller and both handled the
+    same way by `_apply_one`.
     """
-    text = _pc_norm_text(text)
-    return text or None
+    row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (row_id,)).fetchone()
+    if row is None:
+        raise LookupError(f"{table} id={row_id}: no longer exists")
+    d = dict(row)
+    if d.get("owner") != "iphone":
+        raise LookupError(
+            f"{table} id={row_id}: owner={d.get('owner')!r}, expected "
+            f"'iphone' -- refusing to apply an extcal mutation (I2: likely "
+            f"a race with `cal adopt`/`disown` between fetch and apply)")
+    return d
+
+
+_AUDIT_REDACT_KEYS = ("title", "location")
+
+
+def _audit_safe_changes(changes):
+    """`changes` (an update entry's `{field: (was, now)}` dict) with free
+    TEXT fields' VALUES replaced by a fixed redaction marker before it goes
+    into `audit_log` -- design doc privacy requirement: "тела VEVENT целиком
+    не логируются, только UID и счётчики" (fix-round Minor finding, VEVENT
+    SUMMARY/LOCATION content must not land in the audit trail, which several
+    other things on this VM besides Denis routinely read). `title`/
+    `location` are the two fields that can carry her free-text event/plan
+    content; `start_utc`/`end_utc`/`deadline` are timestamps -- WHEN
+    something moved, not WHAT it is -- and are kept as-is (operationally
+    useful for a human skimming `audit_log`, and not the "body" the design
+    doc's rule is about).
+    """
+    safe = {}
+    for key, pair in (changes or {}).items():
+        if key in _AUDIT_REDACT_KEYS:
+            safe[key] = "<redacted>"
+        else:
+            safe[key] = pair
+    return safe
+
+
+def _resolve_place_ref(conn, raw_text):
+    """Free iCloud `LOCATION` text -> a `places.*`-usable ref (the matched
+    place's `id`) or None -- fix-round finding C1 (Denis's refined
+    decision, see the module note above): resolved via `places.resolve()`,
+    the SAME resolver `cal.add`/`plans.add` use internally, so a known
+    place is picked up for free; an unmatched text (the common case for her
+    free-text locations) is simply None, NEVER a raised `UnknownRefError`
+    -- callers pass this straight through as `place=`, which both `cal.add`/
+    `cal.update` and `plans.add` treat identically to "no place given".
+    """
+    text = _pc_norm_text(raw_text)
+    if not text:
+        return None
+    resolved = places.resolve(conn, text)
+    return resolved["id"] if resolved else None
 
 
 def _apply_event_insert(conn, entry):
@@ -1857,22 +1979,18 @@ def _apply_event_insert(conn, entry):
     any other connection -- only ever present-then-retracted inside this
     one function's own uncommitted work.
 
-    `location` (free text from her iCloud event) is passed straight through
-    as `cal.add`'s `place` ref -- resolved the same casefold way any other
-    `cal.add(place=...)` caller's ref is. A location that doesn't match any
-    known place/alias raises `cal.UnknownRefError`, same as it would for a
-    human typing `fam cal add`; that's an accepted, unhandled-here edge
-    case (see this task's report) -- it surfaces to `_apply_one`'s per-row
-    guard like any other failure, so one unresolvable location never sinks
-    the rest of the batch, but that one event stays un-imported until its
-    location text is recognizable (an alias is added, or it coincidentally
-    matches) -- this module never auto-creates a place from raw text (that
-    would need geo2gis's live geocoding, out of scope / no live network
-    calls in this task).
+    `place` is resolved via `_resolve_place_ref` (fix-round finding C1 --
+    see the module note above): a known `places` match is used, an
+    unmatched free-text location leaves `place` None/NULL. Either way the
+    raw text ALSO goes into `notes` verbatim (normalized via
+    `_pc_norm_text` -- see the Task 6 contract note above for why this
+    exact normalization, and `notes` specifically rather than the resolved
+    place's name, matters for round-trip stability).
     """
-    place_ref = _apply_ref_or_none(entry.get("location"))
     added = cal.add(conn, entry.get("title") or "", entry["start_utc"],
-                     end_utc=entry.get("end_utc"), place=place_ref)
+                     end_utc=entry.get("end_utc"),
+                     place=_resolve_place_ref(conn, entry.get("location")),
+                     notes=_pc_norm_text(entry.get("location")))
     event_id = added["id"]
     conn.execute(
         "UPDATE events SET owner='iphone', external_uid=?, external_href=?, "
@@ -1889,11 +2007,17 @@ def _apply_event_insert(conn, entry):
 
 def _apply_event_update(conn, entry):
     """One `events.update` Changeset entry -> `cal.update()` for whatever
-    user-visible fields changed (title/start_utc/end_utc -- `location` maps
-    to cal.update's own `place` kwarg, same casefold resolution/UnknownRef
-    risk as the insert side above). `changes` is never empty for a real
-    update entry (`plan_changes` only ever appends one after `_event_diff`
-    found something), so this always calls `cal.update()` at least once.
+    user-visible fields changed. `changes` is never empty for a real update
+    entry (`plan_changes` only ever appends one after `_event_diff` found
+    something), so this always calls `cal.update()` at least once.
+
+    `location` maps to BOTH `cal.update`'s `notes` kwarg (the raw text,
+    always) AND its `place` kwarg (re-resolved via `_resolve_place_ref` --
+    fix-round finding C1, see the module note above): passing `place`
+    explicitly (even as `None`) makes `cal.update` clear a previously-set
+    place when the new location text no longer matches anything, exactly
+    as it should -- `cal.update`'s own `place_given = "place" in fields`
+    check treats `place=None` as "clear it", not "leave unchanged".
 
     Also attaches external_href/external_etag/external_seq when the CALLER
     put them on this entry (Task 6's job -- attaching them by uid from
@@ -1901,17 +2025,23 @@ def _apply_event_update(conn, entry):
     absent here today, so this is a no-op `COALESCE` until T6 exists) --
     `COALESCE(?, external_<col>)` so a caller that only ever supplies
     `changes` (no href/etag/seq keys at all) can never accidentally clobber
-    an already-stored value back to NULL.
+    an already-stored value back to NULL. The `AND owner='iphone'` guard
+    (fix-round finding I2) is redundant with `_require_iphone_owned` below
+    within this SAME connection/transaction (nothing else can be racing it
+    here), but costs nothing and keeps this UPDATE self-defending even if a
+    future refactor ever calls it from a different context.
 
     Never calls `rem.regenerate()` itself: `cal.update()` already does,
-    but ONLY when start_utc (or travel_min/place/participants/prep_min)
-    is among the changed fields -- exactly the same trigger any other
+    but ONLY when start_utc (or travel_min/place/participants/prep_min) is
+    among the changed fields -- exactly the same trigger any other
     `cal.update()` caller gets, no special-casing needed here. `owner`
     stays 'iphone' throughout (this function never touches that column),
     so `rem.regenerate`'s early exit (invariant #2) keeps this event
     reminder-free across the update the same as right after insert.
     """
     event_id = entry["id"]
+    _require_iphone_owned(conn, "events", event_id)
+
     changes = entry.get("changes") or {}
     fields = {}
     if "title" in changes:
@@ -1921,7 +2051,8 @@ def _apply_event_update(conn, entry):
     if "end_utc" in changes:
         fields["end_utc"] = changes["end_utc"][1]
     if "location" in changes:
-        fields["place"] = _apply_ref_or_none(changes["location"][1])
+        fields["notes"] = _pc_norm_text(changes["location"][1])
+        fields["place"] = _resolve_place_ref(conn, changes["location"][1])
     if fields:
         cal.update(conn, event_id, **fields)
 
@@ -1933,13 +2064,14 @@ def _apply_event_update(conn, entry):
             "UPDATE events SET "
             "external_href=COALESCE(?, external_href), "
             "external_etag=COALESCE(?, external_etag), "
-            "external_seq=COALESCE(?, external_seq) WHERE id=?",
+            "external_seq=COALESCE(?, external_seq) "
+            "WHERE id=? AND owner='iphone'",
             (href, etag, seq, event_id),
         )
 
     audit.log(conn, "cal.ext.apply", {
         "branch": "events", "action": "update", "id": event_id,
-        "changes": changes,
+        "changes": _audit_safe_changes(changes),
     })
 
 
@@ -1947,14 +2079,20 @@ def _apply_event_cancel(conn, entry):
     """One `events.cancel` Changeset entry -> `cal.cancel()` -- marks the
     event cancelled, cancels its pending reminder chain (`rem.cancel_
     chain`), and drops any open prep-plans tied to it -- exactly the same
-    call any other cancellation path in `fam` uses.
+    call any other cancellation path in `fam` uses. Guarded by
+    `_require_iphone_owned` (fix-round finding I2) first, same race as
+    `_apply_event_update`'s own guard.
     """
     event_id = entry["id"]
+    _require_iphone_owned(conn, "events", event_id)
     cal.cancel(conn, event_id)
     audit.log(conn, "cal.ext.apply", {
         "branch": "events", "action": "cancel", "id": event_id,
         "external_uid": entry.get("external_uid"),
     })
+
+
+_SKIPPED = object()
 
 
 def _apply_plan_insert(conn, entry):
@@ -1963,13 +2101,48 @@ def _apply_plan_insert(conn, entry):
     `_apply_event_insert` uses (see the module note above -- `plans.add`
     has no kwarg for any of these columns either). Plans carry no reminder
     chain of their own (only events do, via `reminders`), so there is no
-    second `rem.regenerate()` call needed here -- otherwise this is the
-    plans-branch mirror of `_apply_event_insert`, including the same
-    accepted unresolvable-location edge case.
+    second `rem.regenerate()` call needed here.
+
+    `place` is resolved via `_resolve_place_ref`, same as
+    `_apply_event_insert` (fix-round finding C1); the raw `location` text
+    ALSO goes into `notes` unconditionally (`plans.add` already accepts a
+    `notes` kwarg -- no raw SQL needed for this part).
+
+    Idempotency guard (fix-round finding I3): unlike `events.external_uid`
+    (a partial UNIQUE index, db.py), `plans.external_uid` has NO index at
+    all -- schema v12 is already committed/frozen by a separate task, out
+    of this task's scope to extend (explicit controller instruction: do not
+    widen the schema). A re-applied Changeset (a retried tick after a
+    mid-batch crash, or -- theoretically -- two overlapping tick runs)
+    would otherwise insert a SECOND plans row for the exact same iCloud
+    occurrence, and it would stay a permanent, undeletable phantom "горящий
+    план" in her digest: `plan_changes()`'s own `plans_by_key[key] = row`
+    dict construction (one entry per key) means only ONE of the two
+    duplicate rows is ever visible again as an update/drop target, so nothing
+    downstream can ever clean up the other one. Closed the same way
+    `tick.py::meds_gen` closes its own no-unique-index-backstop case: a
+    `SELECT ... WHERE external_uid=?` existence check immediately before
+    the insert. A hit is treated as a no-op success (returns the `_SKIPPED`
+    sentinel, which `_apply_one` recognizes and does NOT count as a fresh
+    insert) -- the row already exists, which is exactly the intended
+    end state.
     """
-    place_ref = _apply_ref_or_none(entry.get("location"))
-    plan_id = plans.add(conn, entry.get("title") or "", place=place_ref,
-                         deadline=entry.get("deadline"))
+    external_uid = entry.get("external_uid")
+    if external_uid:
+        existing = conn.execute(
+            "SELECT id FROM plans WHERE external_uid=?", (external_uid,)
+        ).fetchone()
+        if existing is not None:
+            audit.log(conn, "cal.ext.apply", {
+                "branch": "plans", "action": "insert_skipped_duplicate",
+                "id": existing["id"], "external_uid": external_uid,
+            })
+            return _SKIPPED
+
+    plan_id = plans.add(conn, entry.get("title") or "",
+                         place=_resolve_place_ref(conn, entry.get("location")),
+                         deadline=entry.get("deadline"),
+                         notes=_pc_norm_text(entry.get("location")))
     conn.execute(
         "UPDATE plans SET owner='iphone', external_uid=?, external_href=?, "
         "external_etag=? WHERE id=?",
@@ -1980,65 +2153,111 @@ def _apply_plan_insert(conn, entry):
         "branch": "plans", "action": "insert", "id": plan_id,
         "external_uid": entry.get("external_uid"),
     })
+    return None
 
 
 def _apply_plan_update(conn, entry):
     """One `plans.update` Changeset entry -> a direct UPDATE of `plans`'
-    title/deadline/place_id. `plans.py` has no generic `update()` verb at
-    all (see the module note above) -- this is the one genuinely
-    unavoidable raw-SQL mutation of plan CONTENT (not just bookkeeping
-    columns) in this module. `location` is resolved through `places.
-    resolve()` -- the SAME resolver `plans.add`/`cal.add` use internally --
-    so an unresolvable place name raises ValueError here exactly as it
-    would from `plans.add`, caught by this module's per-row guard
-    (`_apply_one`) like any other row failure.
+    title/deadline/notes. `plans.py` has no generic `update()` verb at all
+    (see the module note above) -- this is the one genuinely unavoidable
+    raw-SQL mutation of plan CONTENT (not just bookkeeping columns) in this
+    module. `location` maps to BOTH `notes` (raw text, always) AND
+    `place_id` (re-resolved via `_resolve_place_ref`, same as events --
+    fix-round finding C1): a location edit that stops matching a
+    previously-resolved place clears `place_id` back to NULL, same
+    "explicit None clears it" semantics `cal.update` gives events.
+
+    Guarded by `_require_iphone_owned` FIRST (fix-round finding I2) -- its
+    return value is also this function's only source for `attached_event_id`
+    below, so there is no second row-fetch needed for the cascade check.
+    `AND owner='iphone'` on both raw UPDATEs (redundant with the guard
+    within this same transaction, kept for the same self-defense reason
+    `_apply_event_update` keeps it).
+
+    Cascade (fix-round finding I1): `plans.mark`/`plans.attach` both
+    recompute the attached event's road figure and reminder chain
+    (`cal.recompute_road` then `rem.regenerate`, in that order) whenever an
+    attached plan's state changes -- unconditionally, not just when the
+    change happens to be place-related, since a plan's CONTRIBUTION to the
+    route depends on its resolved place regardless of which field the
+    caller touched. This raw UPDATE bypassed that entirely. Reproduced
+    here explicitly, same order, gated the same way `plans.mark`/
+    `plans.attach` gate it: only when `attached_event_id is not None` AND
+    this update actually changed something. With C1's refined resolution
+    above, `place_id` genuinely CAN change here now (a location edit that
+    starts or stops matching a known place) -- exactly the scenario I1's
+    own repro describes (her address edit on the phone silently leaving a
+    Hermes event's road/leave_at stale) -- so this cascade is a real,
+    load-bearing fix, not just defensive symmetry.
     """
     plan_id = entry["id"]
+    existing = _require_iphone_owned(conn, "plans", plan_id)
+
     changes = entry.get("changes") or {}
     set_clauses, params = [], []
     if "title" in changes:
         set_clauses.append("title=?")
         params.append(changes["title"][1])
     if "deadline" in changes:
+        new_deadline = changes["deadline"][1]
+        # `plans.add`'s own `_validate_deadline` runs before every insert;
+        # this raw UPDATE has no equivalent gate of its own by construction
+        # (it deliberately doesn't go through `plans.add`), so a malformed
+        # deadline would otherwise land straight in the DB unvalidated --
+        # `plans.py`'s own docstring says exactly why that's a real risk,
+        # not a theoretical one: "tick._burning_plans parses deadline with
+        # date.fromisoformat and would otherwise crash the daily digest on
+        # a bad value" (plans.py, Final review Finding 1). Reusing
+        # `plans._validate_deadline` here (a read, not an edit of
+        # plans.py) keeps this raw UPDATE honoring the exact same contract
+        # `plans.add` already guarantees, rather than quietly being a
+        # weaker, unvalidated back door to the same column.
+        plans._validate_deadline(new_deadline)
         set_clauses.append("deadline=?")
-        params.append(changes["deadline"][1])
+        params.append(new_deadline)
     if "location" in changes:
-        place_ref = _apply_ref_or_none(changes["location"][1])
-        place_id = None
-        if place_ref is not None:
-            pl = places.resolve(conn, place_ref)
-            if pl is None:
-                raise ValueError(f"unknown place: {place_ref}")
-            place_id = pl["id"]
+        raw_location = changes["location"][1]
+        set_clauses.append("notes=?")
+        params.append(_pc_norm_text(raw_location))
         set_clauses.append("place_id=?")
-        params.append(place_id)
+        params.append(_resolve_place_ref(conn, raw_location))
     if set_clauses:
         params.append(plan_id)
         conn.execute(
-            f"UPDATE plans SET {', '.join(set_clauses)} WHERE id=?", params)
+            f"UPDATE plans SET {', '.join(set_clauses)} "
+            f"WHERE id=? AND owner='iphone'", params)
 
     href = entry.get("external_href")
     etag = entry.get("external_etag")
     if href is not None or etag is not None:
         conn.execute(
             "UPDATE plans SET external_href=COALESCE(?, external_href), "
-            "external_etag=COALESCE(?, external_etag) WHERE id=?",
+            "external_etag=COALESCE(?, external_etag) "
+            "WHERE id=? AND owner='iphone'",
             (href, etag, plan_id),
         )
 
+    attached_event_id = existing.get("attached_event_id")
+    if set_clauses and attached_event_id is not None:
+        cal.recompute_road(conn, attached_event_id)
+        rem.regenerate(conn, attached_event_id)
+
     audit.log(conn, "cal.ext.apply", {
         "branch": "plans", "action": "update", "id": plan_id,
-        "changes": changes,
+        "changes": _audit_safe_changes(changes),
     })
 
 
 def _apply_plan_drop(conn, entry):
     """One `plans.drop` Changeset entry -> `plans.mark(conn, plan_id,
     'dropped')` -- exactly the same call any other plan-dropping path in
-    `fam` uses, including its attached_event_id recompute/regenerate
-    cascade if this plan happened to be attached to an event.
+    `fam` uses, including its own attached_event_id recompute/regenerate
+    cascade if this plan happened to be attached to an event. Guarded by
+    `_require_iphone_owned` first (fix-round finding I2), same race as the
+    events-branch guards above.
     """
     plan_id = entry["id"]
+    _require_iphone_owned(conn, "plans", plan_id)
     plans.mark(conn, plan_id, "dropped")
     audit.log(conn, "cal.ext.apply", {
         "branch": "plans", "action": "drop", "id": plan_id,
@@ -2064,29 +2283,51 @@ def _apply_one(conn, branch, action, fn, entry, counts, count_key):
     cal.*/plans.* call, the owner/external_* UPDATE, and/or its own
     rem.regenerate) -- never the previous entries from this same
     `apply_changes()` call, which are already committed by the time this
-    one runs. The failure is then audited fresh on the now-clean
-    transaction (mirroring _meds_series' own `conn.rollback()` ->
-    `audit.log(...)` -> `conn.commit()` sequence), so one bad row is
-    visible for diagnosis rather than silently eaten.
+    one runs.
+
+    `fn` may return the `_SKIPPED` sentinel (currently only
+    `_apply_plan_insert`'s idempotency guard, finding I3) to mean "handled,
+    but nothing new was actually created" -- `count_key` is then left
+    untouched rather than incremented, so `counts` reflects real inserts,
+    not idempotent no-ops. Any other return value (including plain `None`,
+    every other `_apply_*` helper's implicit return) counts as a normal
+    success.
+
+    The failure branch is ITSELF wrapped in a nested try/except (fix-round
+    Minor finding b): `conn.rollback()`/`audit.log()`/`conn.commit()` are
+    ordinary DB operations against the SAME file the minute-tick reminders
+    timer and other tick jobs also touch, so "database is locked" (or any
+    other transient failure) is a real possibility here, not a
+    theoretical one. `counts["errors"].append(...)` happens FIRST and is
+    pure in-memory bookkeeping that cannot itself fail, so this row's
+    failure is recorded in the returned counts no matter what happens
+    next; if the rollback/audit/commit sequence itself then fails, that
+    second failure is swallowed here rather than propagating out of
+    `_apply_one` and aborting every REMAINING entry in the batch -- one bad
+    row (even a doubly-unlucky one) must never take down the rest.
     """
     try:
-        fn(conn, entry)
+        result = fn(conn, entry)
         conn.commit()
-        counts[count_key] += 1
+        if result is not _SKIPPED:
+            counts[count_key] += 1
     except Exception as e:
-        conn.rollback()
         ref = entry.get("external_uid")
         row_id = entry.get("id")
         error = f"{type(e).__name__}: {e}"[:300]
-        audit.log(conn, "cal.ext.apply_error", {
-            "branch": branch, "action": action, "id": row_id,
-            "external_uid": ref, "error": error,
-        })
-        conn.commit()
         counts["errors"].append({
             "branch": branch, "action": action, "id": row_id,
             "external_uid": ref, "error": error,
         })
+        try:
+            conn.rollback()
+            audit.log(conn, "cal.ext.apply_error", {
+                "branch": branch, "action": action, "id": row_id,
+                "external_uid": ref, "error": error,
+            })
+            conn.commit()
+        except Exception:
+            pass  # see docstring: the failure is already in counts["errors"]
 
 
 def apply_changes(conn, changeset, cfg=None):
@@ -2107,21 +2348,32 @@ def apply_changes(conn, changeset, cfg=None):
 
     Every actual mutation goes through `cal.*`/`plans.*` wherever those
     modules expose an entry point for it (see the module note above for
-    the two narrow, documented raw-SQL exceptions this still requires,
-    given cal.py/plans.py's CURRENT kwarg surface) -- audit_log, rem.
-    regenerate's reminder-chain recompute, and places.resolve's casefold
-    place lookup are all inherited for free from those calls.
+    the three narrow, documented raw-SQL/raw-SELECT exceptions this still
+    requires, given cal.py/plans.py's CURRENT surface) -- audit_log and
+    rem.regenerate's reminder-chain recompute are inherited for free from
+    those calls wherever they're used.
 
     `cfg` is accepted for interface symmetry with the rest of this
     module's cfg-taking public entry points (discover/fetch_changes/
     probe); nothing here currently branches on it.
 
-    Never raises: a malformed `changeset` (not a dict, missing branches,
-    a non-dict entry inside a branch's list) degrades to "nothing to
-    apply for that slot" (counts stay 0 for anything malformed away); a
-    single bad (but well-formed) entry inside a branch is caught by
-    `_apply_one`'s per-row guard and recorded in `errors`, never sinking
-    the rest of the batch.
+    **Transaction contract (fix-round Minor finding e):** this function
+    commits and rolls back `conn` itself, per entry (see `_apply_one`) --
+    it must only ever be called on a connection with NO caller-pending
+    uncommitted work of its own; anything the caller had staged but not
+    yet committed before calling this will be committed (or rolled back)
+    as a side effect of processing the FIRST Changeset entry, not on the
+    caller's own terms. This mirrors `tick.py::_meds_series`'s identical
+    contract (that module's own docstring: ticks own their transaction
+    boundary; `cal.py`/`plans.py`/`rem.py` themselves never commit and
+    leave that decision to whoever calls them).
+
+    Never raises: a malformed `changeset` (not a dict, missing/wrong-typed
+    branches or slots, a non-dict entry inside a branch's list) degrades to
+    "nothing to apply for that slot" (counts stay 0 for anything malformed
+    away, including a non-list `collisions`); a single bad (but
+    well-formed) entry inside a branch is caught by `_apply_one`'s per-row
+    guard and recorded in `errors`, never sinking the rest of the batch.
     """
     cfg = cfg or {}
     changeset = changeset if isinstance(changeset, dict) else {}
@@ -2131,11 +2383,12 @@ def apply_changes(conn, changeset, cfg=None):
         "events": raw_events if isinstance(raw_events, dict) else {},
         "plans": raw_plans if isinstance(raw_plans, dict) else {},
     }
+    raw_collisions = changeset.get("collisions")
 
     counts = {
         "events_inserted": 0, "events_updated": 0, "events_cancelled": 0,
         "plans_inserted": 0, "plans_updated": 0, "plans_dropped": 0,
-        "collisions": len(changeset.get("collisions") or []),
+        "collisions": len(raw_collisions) if isinstance(raw_collisions, list) else 0,
         "errors": [],
     }
 

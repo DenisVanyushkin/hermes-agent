@@ -351,6 +351,23 @@ def init_db(conn):
     _ensure_column(conn, "plans", "external_uid", "external_uid TEXT")
     _ensure_column(conn, "plans", "external_href", "external_href TEXT")
     _ensure_column(conn, "plans", "external_etag", "external_etag TEXT")
+    # Same partial UNIQUE as events.external_uid above, added to this same
+    # v12 migration (Task 5 fix-round finding I3, controller-authorized:
+    # prod is still on v11 as of this addition, so widening the v12
+    # migration itself -- rather than bumping to a new schema version --
+    # is safe; there is no already-migrated v12 database anywhere whose
+    # plans.external_uid values this index could retroactively conflict
+    # with). Without it, a re-applied Changeset (a retried tick after a
+    # mid-batch crash, or two overlapping tick runs) could insert a SECOND
+    # plans row for the same iCloud occurrence with nothing at the DB
+    # level to stop it -- extcal.apply_changes' own SELECT-before-insert
+    # check (mirroring tick.py::meds_gen's identical no-index-yet
+    # bootstrapping pattern) is the first line of defense; this index is
+    # the same TOCTOU backstop idx_events_external_uid already is for the
+    # events branch.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_external_uid "
+        "ON plans(external_uid) WHERE external_uid IS NOT NULL")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','12')")
     conn.execute(

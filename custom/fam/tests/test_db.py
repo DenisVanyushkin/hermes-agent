@@ -674,6 +674,12 @@ def test_schema_v12_columns_and_table(db):
     idx = {r["name"] for r in db.execute(
         "SELECT name FROM sqlite_master WHERE type='index'")}
     assert "idx_events_external_uid" in idx
+    # Task 5 fix-round finding I3: plans.external_uid gets the same
+    # partial UNIQUE events.external_uid already had -- added to this
+    # same v12 migration (controller-authorized: prod was still on v11
+    # when this was added, so there is no already-migrated database this
+    # could retroactively conflict with).
+    assert "idx_plans_external_uid" in idx
 
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
@@ -807,6 +813,28 @@ def test_events_external_uid_unique_rejects_duplicate(db):
             "INSERT INTO events(title, start_utc, created_at, updated_at, external_uid) "
             "VALUES ('E2','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',"
             "'2026-01-01T00:00:00Z','uid-1')")
+
+
+def test_plans_external_uid_partial_unique_allows_multiple_null(db):
+    # Same partial-index rationale as the events test above, mirrored for
+    # plans (Task 5 fix-round finding I3).
+    db.execute("INSERT INTO plans(title, created_at) VALUES ('P1','2026-01-01T00:00:00Z')")
+    db.execute("INSERT INTO plans(title, created_at) VALUES ('P2','2026-01-01T00:00:00Z')")
+    db.commit()  # both rows have external_uid IS NULL
+    count = db.execute(
+        "SELECT COUNT(*) c FROM plans WHERE external_uid IS NULL").fetchone()["c"]
+    assert count == 2
+
+
+def test_plans_external_uid_unique_rejects_duplicate(db):
+    db.execute(
+        "INSERT INTO plans(title, created_at, external_uid) "
+        "VALUES ('P1','2026-01-01T00:00:00Z','uid-1')")
+    db.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO plans(title, created_at, external_uid) "
+            "VALUES ('P2','2026-01-01T00:00:00Z','uid-1')")
 
 
 def test_ext_exports_table_shape_and_cascade(db):
