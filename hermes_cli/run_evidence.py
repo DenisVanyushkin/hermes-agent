@@ -29,6 +29,11 @@ import json
 #: сообщениях вызовами инструментов не появляются и выводятся своим блоком.
 SANDBOX_TOOL_NAMES = frozenset({"terminal", "execute_code"})
 
+#: Отказ ядра в записи. Ищется в РЕЗУЛЬТАТАХ инструментов, а не в тексте
+#: агента: собственное рассуждение про read-only -- это его слова, а нас
+#: интересует ответ системы.
+_WRITE_REFUSAL_MARKERS = ("read-only file system",)
+
 _MAX_SHOWN = 5
 _MAX_COMMAND_CHARS = 120
 
@@ -68,7 +73,27 @@ def observed_sandbox_commands(messages: object) -> list[str]:
     return found
 
 
-def render_execution_locus_block(sandbox_commands: list[str]) -> str:
+def observed_write_refusals(messages: object) -> int:
+    """Сколько раз системе отказали в записи за этот ход.
+
+    Отказы приходят в результате инструмента и НИКОГДА не доходят до
+    `errors.log`: они происходят внутри контейнера. Поэтому наблюдать их можно
+    только здесь -- проверка «grep read-only в хостовом логе» пуста даже тогда,
+    когда записи отклонялись весь ход.
+    """
+    count = 0
+    for message in list(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        lowered = content.lower()
+        count += sum(lowered.count(marker) for marker in _WRITE_REFUSAL_MARKERS)
+    return count
+
+
+def render_execution_locus_block(sandbox_commands: list[str], write_refusals: int = 0) -> str:
     """Где выполнялись проверки этого хода.
 
     Пустая строка, когда команд не было вовсе: приписка «ничего не выполнялось»
@@ -85,6 +110,14 @@ def render_execution_locus_block(sandbox_commands: list[str]) -> str:
         lines.append(f"- `{command}`")
     if len(sandbox_commands) > _MAX_SHOWN:
         lines.append(f"- …и ещё {len(sandbox_commands) - _MAX_SHOWN}")
+    if write_refusals:
+        # Ставится ПЕРЕД дисклеймером и рядом с командами: 2026-07-28 ответ
+        # утверждал «сейчас в рабочем дереве изменения», когда все записи были
+        # отклонены. Противоречие видно без ревьюера, если оба факта рядом.
+        lines.append(
+            f"Отклонено попыток записи в репозиторий: {write_refusals} "
+            "(смонтирован :ro, правки возможны только через инженерный пайплайн)"
+        )
     lines.append(
         "Наблюдения из песочницы не описывают состояние хоста: файлы, порты, "
         "сервисы и установленные пакеты там свои."

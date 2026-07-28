@@ -576,10 +576,14 @@ def finalize_turn(
         try:
             from hermes_cli.run_evidence import (
                 observed_sandbox_commands,
+                observed_write_refusals,
                 render_execution_locus_block,
             )
 
-            _locus = render_execution_locus_block(observed_sandbox_commands(messages))
+            _locus = render_execution_locus_block(
+                observed_sandbox_commands(messages),
+                write_refusals=observed_write_refusals(messages),
+            )
             if _locus:
                 final_response = final_response.rstrip() + "\n\n" + _locus
         except Exception as _locus_err:
