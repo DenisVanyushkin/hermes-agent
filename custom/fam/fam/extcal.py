@@ -1962,6 +1962,90 @@ def _resolve_place_ref(conn, raw_text):
     return resolved["id"] if resolved else None
 
 
+# ---- notes: machine-owned location block vs. human-owned text ------------
+#
+# Fix-round-2 finding N1: before this, an insert/update simply OVERWROTE the
+# entire `notes` column with the raw iCloud LOCATION text -- a human note
+# attached to an imported row (e.g. Amina, or Hermes on her behalf, writing
+# "взяла паспорт" against her dentist appointment) was silently destroyed
+# the next time her iCloud LOCATION changed on a later sync, with no trace
+# anywhere: the old value is gone from the DB, and `_audit_safe_changes`
+# redacts `notes`/`location` VALUES from the audit trail by design (M3), so
+# there is no way to recover it even from `audit_log`. `cal.update`/`plans.
+# add` themselves have no concept of "this column has two owners" -- this
+# is purely an extcal-side convention layered on top of one plain TEXT
+# column, using a delimited block neither `cal.py` nor `plans.py` needs to
+# know anything about (no edit to either module).
+#
+# The block is a fixed BEGIN/END marker pair wrapping the raw location text
+# on its own line(s) -- still fully visible to Amina in `fam cal day`/`fam
+# plan list` (the requirement: "сырой текст места по-прежнему виден Амине в
+# заметках"), just clearly delimited as machine-owned. Everything OUTSIDE
+# the block, in whatever position it was in, is human text and is never
+# touched.
+_LOC_BLOCK_BEGIN = "[extcal:location]"
+_LOC_BLOCK_END = "[/extcal:location]"
+_LOC_BLOCK_RE = re.compile(
+    re.escape(_LOC_BLOCK_BEGIN) + r"\n.*?\n" + re.escape(_LOC_BLOCK_END), re.S)
+
+
+def _strip_location_block(notes):
+    """Remove any existing extcal-owned location block from `notes`,
+    returning whatever HUMAN text is left (blank-line runs the removed
+    block leaves behind are collapsed, outer whitespace trimmed). Absent a
+    block, `notes` comes back unchanged (just trimmed) -- this is what
+    makes re-merging idempotent: the OLD block (if any) is always fully
+    removed before a new one is appended, so repeated syncs never leave
+    behind a growing stack of stale blocks.
+    """
+    if not notes:
+        return ""
+    stripped = _LOC_BLOCK_RE.sub("", notes)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+    return stripped.strip()
+
+
+def _merge_notes_with_location(existing_notes, raw_location):
+    """The ONLY place that decides a final `notes` string for the events/
+    plans insert/update paths (fix-round-2 finding N1). Always starts from
+    the row's CURRENT `notes` value (never from the changeset entry, which
+    only ever carries the latest `location`, never a full notes snapshot),
+    strips out whatever machine-owned block it already holds (see
+    `_strip_location_block`), and appends a FRESH block for the current
+    raw location -- or appends nothing at all when the location was
+    cleared on the phone (`raw_location` empty/None), so a deleted iCloud
+    location leaves no dangling empty block behind. The human text found
+    outside the old block is carried forward untouched either way -- it
+    survives any number of location changes, and survives the location
+    being removed entirely.
+    """
+    human = _strip_location_block(existing_notes)
+    location = _pc_norm_text(raw_location)
+    if not location:
+        return human
+    block = f"{_LOC_BLOCK_BEGIN}\n{location}\n{_LOC_BLOCK_END}"
+    return f"{human}\n\n{block}" if human else block
+
+
+def _existing_id_by_external_uid(conn, table, external_uid):
+    """SELECT id FROM {table} WHERE external_uid=? -- `table` is always one
+    of this module's own two literal strings ("events"/"plans"), never
+    caller-supplied data, so the f-string is safe. Shared by both insert
+    paths' idempotency guard (fix-round finding I3, and its fix-round-2
+    extension to the events branch, finding N3 -- see `_apply_event_insert`/
+    `_apply_plan_insert`).
+    """
+    if not external_uid:
+        return None
+    row = conn.execute(
+        f"SELECT id FROM {table} WHERE external_uid=?", (external_uid,)
+    ).fetchone()
+    return row["id"] if row else None
+
+
+_SKIPPED = object()
+
+
 def _apply_event_insert(conn, entry):
     """One `events.insert` Changeset entry -> a new owner='iphone' event.
 
@@ -1982,15 +2066,40 @@ def _apply_event_insert(conn, entry):
     `place` is resolved via `_resolve_place_ref` (fix-round finding C1 --
     see the module note above): a known `places` match is used, an
     unmatched free-text location leaves `place` None/NULL. Either way the
-    raw text ALSO goes into `notes` verbatim (normalized via
-    `_pc_norm_text` -- see the Task 6 contract note above for why this
-    exact normalization, and `notes` specifically rather than the resolved
-    place's name, matters for round-trip stability).
+    raw text ALSO goes into a fresh `notes` location block (see
+    `_merge_notes_with_location` -- a brand-new row has no prior `notes` to
+    preserve, so this is just that function's "no existing human text"
+    case).
+
+    Idempotency guard (fix-round finding I3 for plans; extended here to
+    events in fix-round 2, finding N3): `events.external_uid` already has
+    a partial UNIQUE index (db.py), so a duplicate insert here would
+    previously have gone all the way through `cal.add()` -- INSERT,
+    `recompute_road`, `rem.regenerate`, `cal.add`'s own audit entry --
+    only to fail on the UNIQUE constraint and get fully rolled back by
+    `_apply_one`: correct, but an expensive and noisy way to be idempotent
+    (a real `cal.ext.apply_error` entry for something that isn't actually
+    an error, just a re-applied Changeset). The same cheap `SELECT`-before-
+    insert check `_apply_plan_insert` already uses for its own
+    no-index-of-its-own case is used here too -- a hit is a clean,
+    audited no-op (`_SKIPPED`), not a wasted insert-then-rollback. The
+    UNIQUE index remains as the TOCTOU backstop for both branches, same
+    dual-layer pattern `tick.py::meds_gen` uses for its own SELECT-guarded
+    inserts.
     """
+    external_uid = entry.get("external_uid")
+    existing_id = _existing_id_by_external_uid(conn, "events", external_uid)
+    if existing_id is not None:
+        audit.log(conn, "cal.ext.apply", {
+            "branch": "events", "action": "insert_skipped_duplicate",
+            "id": existing_id, "external_uid": external_uid,
+        })
+        return _SKIPPED
+
     added = cal.add(conn, entry.get("title") or "", entry["start_utc"],
                      end_utc=entry.get("end_utc"),
                      place=_resolve_place_ref(conn, entry.get("location")),
-                     notes=_pc_norm_text(entry.get("location")))
+                     notes=_merge_notes_with_location("", entry.get("location")))
     event_id = added["id"]
     conn.execute(
         "UPDATE events SET owner='iphone', external_uid=?, external_href=?, "
@@ -2003,6 +2112,7 @@ def _apply_event_insert(conn, entry):
         "branch": "events", "action": "insert", "id": event_id,
         "external_uid": entry.get("external_uid"),
     })
+    return None
 
 
 def _apply_event_update(conn, entry):
@@ -2011,9 +2121,15 @@ def _apply_event_update(conn, entry):
     entry (`plan_changes` only ever appends one after `_event_diff` found
     something), so this always calls `cal.update()` at least once.
 
-    `location` maps to BOTH `cal.update`'s `notes` kwarg (the raw text,
-    always) AND its `place` kwarg (re-resolved via `_resolve_place_ref` --
-    fix-round finding C1, see the module note above): passing `place`
+    `location` maps to BOTH `cal.update`'s `notes` kwarg AND its `place`
+    kwarg. `notes` is produced by `_merge_notes_with_location(existing
+    ["notes"], ...)` (fix-round-2 finding N1) -- NEVER a bare overwrite
+    with the raw text: `existing` (this function's OWN row snapshot, from
+    `_require_iphone_owned` below) carries whatever notes the row already
+    had, human text included, and the merge only ever replaces the
+    machine-owned location block inside it, leaving everything else
+    byte-for-byte intact. `place` is re-resolved via `_resolve_place_ref`
+    (fix-round finding C1, see the module note above); passing it
     explicitly (even as `None`) makes `cal.update` clear a previously-set
     place when the new location text no longer matches anything, exactly
     as it should -- `cal.update`'s own `place_given = "place" in fields`
@@ -2040,7 +2156,7 @@ def _apply_event_update(conn, entry):
     reminder-free across the update the same as right after insert.
     """
     event_id = entry["id"]
-    _require_iphone_owned(conn, "events", event_id)
+    existing = _require_iphone_owned(conn, "events", event_id)
 
     changes = entry.get("changes") or {}
     fields = {}
@@ -2051,8 +2167,9 @@ def _apply_event_update(conn, entry):
     if "end_utc" in changes:
         fields["end_utc"] = changes["end_utc"][1]
     if "location" in changes:
-        fields["notes"] = _pc_norm_text(changes["location"][1])
-        fields["place"] = _resolve_place_ref(conn, changes["location"][1])
+        raw_location = changes["location"][1]
+        fields["notes"] = _merge_notes_with_location(existing.get("notes"), raw_location)
+        fields["place"] = _resolve_place_ref(conn, raw_location)
     if fields:
         cal.update(conn, event_id, **fields)
 
@@ -2092,9 +2209,6 @@ def _apply_event_cancel(conn, entry):
     })
 
 
-_SKIPPED = object()
-
-
 def _apply_plan_insert(conn, entry):
     """One `plans.insert` Changeset entry -> a new owner='iphone' plan via
     `plans.add()`, then the same owner/external_* raw-UPDATE pattern
@@ -2105,44 +2219,44 @@ def _apply_plan_insert(conn, entry):
 
     `place` is resolved via `_resolve_place_ref`, same as
     `_apply_event_insert` (fix-round finding C1); the raw `location` text
-    ALSO goes into `notes` unconditionally (`plans.add` already accepts a
-    `notes` kwarg -- no raw SQL needed for this part).
+    ALSO goes into a fresh `notes` location block via
+    `_merge_notes_with_location` (a brand-new row has no prior `notes` to
+    preserve).
 
-    Idempotency guard (fix-round finding I3): unlike `events.external_uid`
-    (a partial UNIQUE index, db.py), `plans.external_uid` has NO index at
-    all -- schema v12 is already committed/frozen by a separate task, out
-    of this task's scope to extend (explicit controller instruction: do not
-    widen the schema). A re-applied Changeset (a retried tick after a
-    mid-batch crash, or -- theoretically -- two overlapping tick runs)
-    would otherwise insert a SECOND plans row for the exact same iCloud
-    occurrence, and it would stay a permanent, undeletable phantom "горящий
-    план" in her digest: `plan_changes()`'s own `plans_by_key[key] = row`
-    dict construction (one entry per key) means only ONE of the two
-    duplicate rows is ever visible again as an update/drop target, so nothing
-    downstream can ever clean up the other one. Closed the same way
-    `tick.py::meds_gen` closes its own no-unique-index-backstop case: a
-    `SELECT ... WHERE external_uid=?` existence check immediately before
-    the insert. A hit is treated as a no-op success (returns the `_SKIPPED`
-    sentinel, which `_apply_one` recognizes and does NOT count as a fresh
-    insert) -- the row already exists, which is exactly the intended
-    end state.
+    Idempotency guard (fix-round finding I3, and this same pattern
+    extended to the events branch in fix-round 2's N3): unlike `events.
+    external_uid` (a partial UNIQUE index in db.py from the start of this
+    task), `plans.external_uid` had NO index at all until fix-round 1's
+    own I3 fix added one (still v12, prod is not yet migrated). A
+    re-applied Changeset (a retried tick after a mid-batch crash, or --
+    theoretically -- two overlapping tick runs) would otherwise insert a
+    SECOND plans row for the exact same iCloud occurrence, and it would
+    stay a permanent, undeletable phantom "горящий план" in her digest:
+    `plan_changes()`'s own `plans_by_key[key] = row` dict construction
+    (one entry per key) means only ONE of the two duplicate rows is ever
+    visible again as an update/drop target, so nothing downstream can ever
+    clean up the other one. Closed the same way `tick.py::meds_gen` closes
+    its own no-unique-index-backstop case: a `SELECT ... WHERE
+    external_uid=?` existence check immediately before the insert (shared
+    with the events branch via `_existing_id_by_external_uid`). A hit is
+    treated as a no-op success (returns the `_SKIPPED` sentinel, which
+    `_apply_one` recognizes and does NOT count as a fresh insert) -- the
+    row already exists, which is exactly the intended end state. The
+    UNIQUE index remains the TOCTOU backstop underneath this check.
     """
     external_uid = entry.get("external_uid")
-    if external_uid:
-        existing = conn.execute(
-            "SELECT id FROM plans WHERE external_uid=?", (external_uid,)
-        ).fetchone()
-        if existing is not None:
-            audit.log(conn, "cal.ext.apply", {
-                "branch": "plans", "action": "insert_skipped_duplicate",
-                "id": existing["id"], "external_uid": external_uid,
-            })
-            return _SKIPPED
+    existing_id = _existing_id_by_external_uid(conn, "plans", external_uid)
+    if existing_id is not None:
+        audit.log(conn, "cal.ext.apply", {
+            "branch": "plans", "action": "insert_skipped_duplicate",
+            "id": existing_id, "external_uid": external_uid,
+        })
+        return _SKIPPED
 
     plan_id = plans.add(conn, entry.get("title") or "",
                          place=_resolve_place_ref(conn, entry.get("location")),
                          deadline=entry.get("deadline"),
-                         notes=_pc_norm_text(entry.get("location")))
+                         notes=_merge_notes_with_location("", entry.get("location")))
     conn.execute(
         "UPDATE plans SET owner='iphone', external_uid=?, external_href=?, "
         "external_etag=? WHERE id=?",
@@ -2161,40 +2275,45 @@ def _apply_plan_update(conn, entry):
     title/deadline/notes. `plans.py` has no generic `update()` verb at all
     (see the module note above) -- this is the one genuinely unavoidable
     raw-SQL mutation of plan CONTENT (not just bookkeeping columns) in this
-    module. `location` maps to BOTH `notes` (raw text, always) AND
-    `place_id` (re-resolved via `_resolve_place_ref`, same as events --
-    fix-round finding C1): a location edit that stops matching a
-    previously-resolved place clears `place_id` back to NULL, same
-    "explicit None clears it" semantics `cal.update` gives events.
+    module. `location` maps to BOTH `notes` (via `_merge_notes_with_
+    location(existing["notes"], ...)`, fix-round-2 finding N1 -- NEVER a
+    bare overwrite; `existing`'s own `notes` -- human text included -- is
+    always the merge's starting point) AND `place_id` (re-resolved via
+    `_resolve_place_ref`, same as events -- fix-round finding C1): a
+    location edit that stops matching a previously-resolved place clears
+    `place_id` back to NULL, same "explicit None clears it" semantics
+    `cal.update` gives events.
 
     Guarded by `_require_iphone_owned` FIRST (fix-round finding I2) -- its
     return value is also this function's only source for `attached_event_id`
-    below, so there is no second row-fetch needed for the cascade check.
-    `AND owner='iphone'` on both raw UPDATEs (redundant with the guard
-    within this same transaction, kept for the same self-defense reason
-    `_apply_event_update` keeps it).
+    (and the PRE-update `place_id`, for the cascade gate below) so there is
+    no second row-fetch needed. `AND owner='iphone'` on both raw UPDATEs
+    (redundant with the guard within this same transaction, kept for the
+    same self-defense reason `_apply_event_update` keeps it).
 
-    Cascade (fix-round finding I1): `plans.mark`/`plans.attach` both
-    recompute the attached event's road figure and reminder chain
-    (`cal.recompute_road` then `rem.regenerate`, in that order) whenever an
-    attached plan's state changes -- unconditionally, not just when the
-    change happens to be place-related, since a plan's CONTRIBUTION to the
-    route depends on its resolved place regardless of which field the
-    caller touched. This raw UPDATE bypassed that entirely. Reproduced
-    here explicitly, same order, gated the same way `plans.mark`/
-    `plans.attach` gate it: only when `attached_event_id is not None` AND
-    this update actually changed something. With C1's refined resolution
-    above, `place_id` genuinely CAN change here now (a location edit that
-    starts or stops matching a known place) -- exactly the scenario I1's
-    own repro describes (her address edit on the phone silently leaving a
-    Hermes event's road/leave_at stale) -- so this cascade is a real,
-    load-bearing fix, not just defensive symmetry.
+    Cascade (fix-round finding I1, gate narrowed in fix-round 2's N2):
+    `plans.mark`/`plans.attach` both recompute the attached event's road
+    figure and reminder chain (`cal.recompute_road` then `rem.regenerate`)
+    whenever an attached plan's state changes; this raw UPDATE bypassed
+    that entirely for a place-affecting edit. Reproduced here, same order,
+    but gated on `place_id` HAVING ACTUALLY CHANGED (`new_place_id !=
+    existing["place_id"]`) rather than on "any field changed" -- the
+    first-round fix gated on any `set_clauses` at all, which fired
+    `cal.recompute_road` (a potentially LIVE TomTom call) on something as
+    inconsequential as a title-only edit; only a location edit can ever
+    move `place_id`, and only when it actually resolves to something
+    different than before is there anything for the attached event's route
+    to recompute. This also keeps the daily TomTom budget (100 calls) from
+    being spent on edits that can't possibly change the route -- a
+    separate, related finding (her whole calendar import competing for
+    that same budget) is T6's to address, not this narrower one.
     """
     plan_id = entry["id"]
     existing = _require_iphone_owned(conn, "plans", plan_id)
 
     changes = entry.get("changes") or {}
     set_clauses, params = [], []
+    place_changed = False
     if "title" in changes:
         set_clauses.append("title=?")
         params.append(changes["title"][1])
@@ -2218,9 +2337,11 @@ def _apply_plan_update(conn, entry):
     if "location" in changes:
         raw_location = changes["location"][1]
         set_clauses.append("notes=?")
-        params.append(_pc_norm_text(raw_location))
+        params.append(_merge_notes_with_location(existing.get("notes"), raw_location))
+        new_place_id = _resolve_place_ref(conn, raw_location)
         set_clauses.append("place_id=?")
-        params.append(_resolve_place_ref(conn, raw_location))
+        params.append(new_place_id)
+        place_changed = new_place_id != existing.get("place_id")
     if set_clauses:
         params.append(plan_id)
         conn.execute(
@@ -2238,7 +2359,7 @@ def _apply_plan_update(conn, entry):
         )
 
     attached_event_id = existing.get("attached_event_id")
-    if set_clauses and attached_event_id is not None:
+    if place_changed and attached_event_id is not None:
         cal.recompute_road(conn, attached_event_id)
         rem.regenerate(conn, attached_event_id)
 

@@ -77,6 +77,16 @@ def _get_plan_by_uid(conn, external_uid):
     return dict(row) if row else None
 
 
+def _loc_block(text):
+    """The exact machine-owned `notes` block `_merge_notes_with_location`
+    produces for a bare (no pre-existing human text) row -- fix-round-2
+    finding N1. Tests that need to assert alongside PRESERVED human text
+    build the expected string by hand instead (see
+    test_event_update_location_change_preserves_human_notes below).
+    """
+    return f"{extcal._LOC_BLOCK_BEGIN}\n{text}\n{extcal._LOC_BLOCK_END}"
+
+
 # ---------------------------------------------------------------------
 # the main invariant: owner='iphone' never gets a reminder chain
 # ---------------------------------------------------------------------
@@ -183,7 +193,7 @@ def test_insert_event_with_unresolvable_location_leaves_place_none_uses_notes(db
 
     row = _get_event_by_uid(db, entry["external_uid"])
     assert row["place_id"] is None
-    assert row["notes"] == "Стоматология, Абая 150"
+    assert row["notes"] == _loc_block("Стоматология, Абая 150")
 
 
 def test_insert_event_with_resolvable_location_sets_place_and_notes(db):
@@ -201,7 +211,7 @@ def test_insert_event_with_resolvable_location_sets_place_and_notes(db):
 
     row = _get_event_by_uid(db, entry["external_uid"])
     assert row["place_id"] == invictus["id"]
-    assert row["notes"] == "Invictus"
+    assert row["notes"] == _loc_block("Invictus")
 
 
 def test_insert_plan_with_unresolvable_location_leaves_place_none_uses_notes(db):
@@ -212,7 +222,7 @@ def test_insert_plan_with_unresolvable_location_leaves_place_none_uses_notes(db)
 
     row = _get_plan_by_uid(db, entry["external_uid"])
     assert row["place_id"] is None
-    assert row["notes"] == "Meга, 2 этаж"
+    assert row["notes"] == _loc_block("Meга, 2 этаж")
 
 
 def test_insert_plan_with_resolvable_location_sets_place_and_notes(db):
@@ -225,7 +235,7 @@ def test_insert_plan_with_resolvable_location_sets_place_and_notes(db):
 
     row = _get_plan_by_uid(db, entry["external_uid"])
     assert row["place_id"] == mega["id"]
-    assert row["notes"] == "Мега"
+    assert row["notes"] == _loc_block("Мега")
 
 
 def test_event_update_unresolvable_location_change_updates_notes_leaves_place_none(db):
@@ -243,7 +253,7 @@ def test_event_update_unresolvable_location_change_updates_notes_leaves_place_no
 
     after = cal.get(db, row["id"])
     assert after["place"] is None
-    assert after["notes"] == "Клиника Б, каб. 12"
+    assert after["notes"] == _loc_block("Клиника Б, каб. 12")
 
 
 def test_event_update_location_change_resolves_new_place(db):
@@ -262,7 +272,7 @@ def test_event_update_location_change_resolves_new_place(db):
     extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
     after = cal.get(db, row["id"])
     assert after["place"]["id"] == invictus["id"]
-    assert after["notes"] == "Invictus"
+    assert after["notes"] == _loc_block("Invictus")
 
 
 def test_event_update_location_change_clears_previously_resolved_place(db):
@@ -283,7 +293,7 @@ def test_event_update_location_change_clears_previously_resolved_place(db):
     extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
     after = cal.get(db, row["id"])
     assert after["place"] is None
-    assert after["notes"] == "Invictus, филиал на Достык"
+    assert after["notes"] == _loc_block("Invictus, филиал на Достык")
 
 
 def test_plan_update_changes_title_deadline_and_location(db):
@@ -306,7 +316,7 @@ def test_plan_update_changes_title_deadline_and_location(db):
     assert after["title"] == "Купить подарок маме"
     assert after["deadline"] == "2037-08-02"
     assert after["place"] is None
-    assert after["notes"] == "Мега, 2 этаж"
+    assert after["notes"] == _loc_block("Мега, 2 этаж")
 
 
 def test_plan_update_location_change_resolves_and_clears_place(db):
@@ -329,22 +339,17 @@ def test_plan_update_location_change_resolves_and_clears_place(db):
     extcal.apply_changes(db, _changeset(plans_update=[clear_entry]), {})
     after_clear = plans.get(db, row["id"])
     assert after_clear["place"] is None
-    assert after_clear["notes"] == "Мега, филиал 2"
+    assert after_clear["notes"] == _loc_block("Мега, филиал 2")
 
 
 # ---------------------------------------------------------------------
-# I1: a plan update cascades recompute_road/regenerate when attached
+# I1 / N2: a plan update cascades recompute_road/regenerate when
+# attached AND the place actually changed -- never on an unrelated field
+# (fix-round-2 narrowed the gate: title/deadline-only edits used to
+# trigger a live-TomTom-risking recompute for nothing).
 # ---------------------------------------------------------------------
 
-def test_plan_update_cascades_recompute_and_regenerate_when_attached(db, monkeypatch):
-    hermes_event = cal.add(db, "Стоматолог", "2037-07-20T09:00:00+00:00")
-    db.commit()
-    entry = _plan_insert("uid-300@icloud.com", "Забрать анализы", "2037-07-19")
-    extcal.apply_changes(db, _changeset(plans_insert=[entry]), {})
-    row = _get_plan_by_uid(db, entry["external_uid"])
-    assert plans.attach(db, row["id"], hermes_event["id"]) is True
-    db.commit()
-
+def _patch_cascade_tracking(monkeypatch):
     calls = []
     monkeypatch.setattr(
         extcal.cal, "recompute_road",
@@ -352,6 +357,44 @@ def test_plan_update_cascades_recompute_and_regenerate_when_attached(db, monkeyp
     monkeypatch.setattr(
         extcal.rem, "regenerate",
         lambda conn, event_id, now_utc=None: calls.append(("regen", event_id)))
+    return calls
+
+
+def test_plan_update_cascades_when_attached_and_place_actually_changes(db, monkeypatch):
+    invictus = places.add(db, "Invictus")
+    db.commit()
+    hermes_event = cal.add(db, "Стоматолог", "2037-07-20T09:00:00+00:00")
+    db.commit()
+    entry = _plan_insert("uid-300@icloud.com", "Забрать анализы", "2037-07-19")
+    extcal.apply_changes(db, _changeset(plans_insert=[entry]), {})
+    row = _get_plan_by_uid(db, entry["external_uid"])
+    assert row["place_id"] is None
+    assert plans.attach(db, row["id"], hermes_event["id"]) is True
+    db.commit()
+
+    calls = _patch_cascade_tracking(monkeypatch)
+
+    update_entry = {
+        "id": row["id"],
+        "changes": {"location": ("", "Invictus")},
+    }
+    counts = extcal.apply_changes(db, _changeset(plans_update=[update_entry]), {})
+    assert counts["plans_updated"] == 1
+    assert plans.get(db, row["id"])["place"]["id"] == invictus["id"]
+    assert ("recompute", hermes_event["id"]) in calls
+    assert ("regen", hermes_event["id"]) in calls
+
+
+def test_plan_update_does_not_cascade_on_title_only_change_even_when_attached(db, monkeypatch):
+    hermes_event = cal.add(db, "Стоматолог", "2037-07-20T09:00:00+00:00")
+    db.commit()
+    entry = _plan_insert("uid-301@icloud.com", "Забрать анализы", "2037-07-19")
+    extcal.apply_changes(db, _changeset(plans_insert=[entry]), {})
+    row = _get_plan_by_uid(db, entry["external_uid"])
+    assert plans.attach(db, row["id"], hermes_event["id"]) is True
+    db.commit()
+
+    calls = _patch_cascade_tracking(monkeypatch)
 
     update_entry = {
         "id": row["id"],
@@ -359,26 +402,45 @@ def test_plan_update_cascades_recompute_and_regenerate_when_attached(db, monkeyp
     }
     counts = extcal.apply_changes(db, _changeset(plans_update=[update_entry]), {})
     assert counts["plans_updated"] == 1
-    assert ("recompute", hermes_event["id"]) in calls
-    assert ("regen", hermes_event["id"]) in calls
+    assert calls == []  # N2: title-only edit must never trigger a recompute
+
+
+def test_plan_update_does_not_cascade_when_location_change_keeps_same_place(db, monkeypatch):
+    mega = places.add(db, "Мега")
+    db.commit()
+    hermes_event = cal.add(db, "Стоматолог", "2037-07-20T09:00:00+00:00")
+    db.commit()
+    entry = _plan_insert("uid-302@icloud.com", "Купить подарок", "2037-07-31",
+                          location="Мега")
+    extcal.apply_changes(db, _changeset(plans_insert=[entry]), {})
+    row = _get_plan_by_uid(db, entry["external_uid"])
+    assert row["place_id"] == mega["id"]
+    assert plans.attach(db, row["id"], hermes_event["id"]) is True
+    db.commit()
+
+    calls = _patch_cascade_tracking(monkeypatch)
+
+    # the location TEXT changed (casing), but it still resolves to the
+    # SAME place -- place_id doesn't actually move, so no cascade.
+    update_entry = {"id": row["id"], "changes": {"location": ("Мега", "мега")}}
+    extcal.apply_changes(db, _changeset(plans_update=[update_entry]), {})
+    assert calls == []
 
 
 def test_plan_update_does_not_cascade_when_not_attached(db, monkeypatch):
-    entry = _plan_insert("uid-301@icloud.com", "Купить подарок", "2037-07-31")
+    invictus = places.add(db, "Invictus")
+    db.commit()
+    entry = _plan_insert("uid-303@icloud.com", "Купить подарок", "2037-07-31")
     extcal.apply_changes(db, _changeset(plans_insert=[entry]), {})
     row = _get_plan_by_uid(db, entry["external_uid"])
 
-    calls = []
-    monkeypatch.setattr(
-        extcal.cal, "recompute_road",
-        lambda conn, event_id: calls.append(("recompute", event_id)))
-    monkeypatch.setattr(
-        extcal.rem, "regenerate",
-        lambda conn, event_id, now_utc=None: calls.append(("regen", event_id)))
+    calls = _patch_cascade_tracking(monkeypatch)
 
-    update_entry = {"id": row["id"],
-                     "changes": {"title": ("Купить подарок", "Купить подарок папе")}}
+    # a genuine place change -- but this plan was never attached to
+    # anything, so there is no event to recompute at all.
+    update_entry = {"id": row["id"], "changes": {"location": ("", "Invictus")}}
     extcal.apply_changes(db, _changeset(plans_update=[update_entry]), {})
+    assert plans.get(db, row["id"])["place"]["id"] == invictus["id"]
     assert calls == []
 
 
@@ -446,6 +508,13 @@ def test_plan_drop_pointing_at_hermes_row_is_refused(db):
 # ---------------------------------------------------------------------
 
 def test_reapplying_same_changeset_is_idempotent(db):
+    # fix-round-2 finding N3: the FIRST fix round left this test checking
+    # only two of the three zeroes it claimed ("zero new rows, zero
+    # updates") -- the third, "zero extra audit noise", was actually
+    # non-zero (a real cal.ext.apply_error for the events branch, since it
+    # relied purely on the UNIQUE index + full rollback). Extending the
+    # SELECT-before-insert guard to the events branch (matching plans, see
+    # _apply_event_insert) makes this a TRUE zero on every axis now.
     event_entry = _event_insert("uid-400@icloud.com", "Йога",
                                  "2037-07-20T13:00:00+00:00")
     plan_entry = _plan_insert("uid-401@icloud.com", "Подарок", "2037-07-31")
@@ -456,15 +525,12 @@ def test_reapplying_same_changeset_is_idempotent(db):
     assert counts1["plans_inserted"] == 1
     assert counts1["errors"] == []
 
+    audit_before = audit.query(db, None, "cal.ext.apply", None, limit=50)
+
     counts2 = extcal.apply_changes(db, cs, {})
-    # events: rejected by the partial UNIQUE index -> IntegrityError,
-    # caught by the per-row guard -- no duplicate row, but an error entry.
     assert counts2["events_inserted"] == 0
-    # plans: no unique index (I3) -- caught by the explicit SELECT-before-
-    # insert guard instead -- a clean no-op, no error entry for it.
     assert counts2["plans_inserted"] == 0
-    assert len(counts2["errors"]) == 1
-    assert counts2["errors"][0]["branch"] == "events"
+    assert counts2["errors"] == []  # true zero -- not "expected 1", zero
 
     events_n = db.execute(
         "SELECT COUNT(*) AS n FROM events WHERE external_uid=?",
@@ -475,6 +541,23 @@ def test_reapplying_same_changeset_is_idempotent(db):
     assert events_n == 1
     assert plans_n == 1
 
+    # zero cal.ext.apply_error rows ever; the only NEW cal.ext.apply
+    # entries from the second pass are the two expected, explicitly
+    # audited "insert_skipped_duplicate" breadcrumbs (not silence, but not
+    # a real re-insert or an error either) -- pinned explicitly rather than
+    # just asserting "no error", per the review's "либо зафиксируй
+    # ожидаемые записи в ассерте теста явно".
+    assert audit.query(db, None, "cal.ext.apply_error", None, limit=10) == []
+    audit_after = audit.query(db, None, "cal.ext.apply", None, limit=50)
+    new_count = len(audit_after) - len(audit_before)
+    assert new_count == 2
+    # audit.query orders newest-first (id DESC) -- the newest `new_count`
+    # rows are exactly what this second apply_changes() call just wrote.
+    new_actions = {(r["payload"]["branch"], r["payload"]["action"])
+                   for r in audit_after[:new_count]}
+    assert new_actions == {("events", "insert_skipped_duplicate"),
+                            ("plans", "insert_skipped_duplicate")}
+
 
 def test_duplicate_external_uid_within_one_call_events_branch_inserts_once(db):
     e1 = _event_insert("uid-402@icloud.com", "Йога", "2037-07-20T13:00:00+00:00")
@@ -483,7 +566,10 @@ def test_duplicate_external_uid_within_one_call_events_branch_inserts_once(db):
 
     counts = extcal.apply_changes(db, _changeset(events_insert=[e1, e2]), {})
     assert counts["events_inserted"] == 1
-    assert len(counts["errors"]) == 1
+    # fix-round-2 (N3): events now use the same SELECT-before-insert guard
+    # plans already had -- the second (duplicate-key) entry is a clean,
+    # audited skip, not an IntegrityError-driven rollback.
+    assert counts["errors"] == []
 
     n = db.execute(
         "SELECT COUNT(*) AS n FROM events WHERE external_uid=?",
@@ -643,7 +729,137 @@ def test_update_audit_redacts_title_and_location_values(db):
     # the real content IS in the DB row itself -- redaction is audit-only.
     after = cal.get(db, row["id"])
     assert after["title"] == "Другое название"
-    assert after["notes"] == "Новое тайное место"
+    assert after["notes"] == _loc_block("Новое тайное место")
+
+
+def test_plan_update_audit_redacts_title_and_location_values(db):
+    # fix-round-2 finding N4: the events-branch redaction test above had
+    # no plans-branch mirror, even though `_apply_plan_update` calls the
+    # exact same `_audit_safe_changes` helper.
+    ins = _plan_insert("uid-703@icloud.com", "Секретный план", "2037-08-01",
+                        location="Тайное место плана")
+    extcal.apply_changes(db, _changeset(plans_insert=[ins]), {})
+    row = _get_plan_by_uid(db, ins["external_uid"])
+
+    upd = {
+        "id": row["id"],
+        "changes": {
+            "title": ("Секретный план", "Другое название плана"),
+            "location": ("Тайное место плана", "Новое тайное место плана"),
+            "deadline": ("2037-08-01", "2037-08-05"),
+        },
+    }
+    extcal.apply_changes(db, _changeset(plans_update=[upd]), {})
+
+    audit_rows = audit.query(db, None, "cal.ext.apply", None, limit=50)
+    update_rows = [r for r in audit_rows
+                   if r["payload"]["branch"] == "plans"
+                   and r["payload"]["action"] == "update"]
+    assert len(update_rows) == 1
+    payload = update_rows[0]["payload"]
+    assert payload["changes"]["title"] == "<redacted>"
+    assert payload["changes"]["location"] == "<redacted>"
+    assert payload["changes"]["deadline"] == ["2037-08-01", "2037-08-05"]
+    assert "Другое название плана" not in str(payload)
+    assert "Новое тайное место плана" not in str(payload)
+
+    after = plans.get(db, row["id"])
+    assert after["title"] == "Другое название плана"
+    assert after["notes"] == _loc_block("Новое тайное место плана")
+
+
+# ---------------------------------------------------------------------
+# N1: notes carry a machine-owned location block; human text survives
+# ---------------------------------------------------------------------
+
+def test_event_update_location_change_preserves_human_notes(db):
+    entry = _event_insert("uid-704@icloud.com", "Стоматолог",
+                           "2037-07-20T13:00:00+00:00", location="Клиника А")
+    extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
+    row = _get_event_by_uid(db, entry["external_uid"])
+
+    # a human (Amina, or Hermes on her behalf) attaches a note directly,
+    # NOT through extcal -- the exact scenario the review's N1 repro
+    # describes.
+    cal.update(db, row["id"], notes=row["notes"] + "\n\nвзяла паспорт")
+    db.commit()
+
+    update_entry = {
+        "id": row["id"],
+        "changes": {"location": ("Клиника А", "Клиника Б, каб. 12")},
+    }
+    extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
+
+    after = cal.get(db, row["id"])
+    assert "взяла паспорт" in after["notes"]
+    assert _loc_block("Клиника Б, каб. 12") in after["notes"]
+    # the OLD machine block is gone -- not left behind as a stale
+    # duplicate alongside the new one.
+    assert "Клиника А" not in after["notes"]
+
+
+def test_event_update_clearing_location_preserves_human_notes_drops_block(db):
+    entry = _event_insert("uid-705@icloud.com", "Стоматолог",
+                           "2037-07-20T13:00:00+00:00", location="Клиника А")
+    extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
+    row = _get_event_by_uid(db, entry["external_uid"])
+    cal.update(db, row["id"], notes=row["notes"] + "\n\nвзяла паспорт")
+    db.commit()
+
+    # she deleted the location on the phone entirely.
+    update_entry = {"id": row["id"], "changes": {"location": ("Клиника А", "")}}
+    extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
+
+    after = cal.get(db, row["id"])
+    assert after["notes"].strip() == "взяла паспорт"
+
+
+def test_plan_update_location_change_preserves_human_notes(db):
+    entry = _plan_insert("uid-706@icloud.com", "Купить подарок", "2037-07-31",
+                          location="Мега, 2 этаж")
+    extcal.apply_changes(db, _changeset(plans_insert=[entry]), {})
+    row = _get_plan_by_uid(db, entry["external_uid"])
+
+    # a human note attached directly, not through extcal (plans.py has no
+    # generic update() -- raw SQL here stands in for "however a human note
+    # ends up on this column", mirroring how _apply_plan_update itself has
+    # no choice but to use raw SQL for plan content).
+    db.execute("UPDATE plans SET notes=? WHERE id=?",
+               (row["notes"] + "\n\nнужен чек", row["id"]))
+    db.commit()
+
+    update_entry = {
+        "id": row["id"],
+        "changes": {"location": ("Мега, 2 этаж", "Мега, 3 этаж")},
+    }
+    extcal.apply_changes(db, _changeset(plans_update=[update_entry]), {})
+
+    after = plans.get(db, row["id"])
+    assert "нужен чек" in after["notes"]
+    assert _loc_block("Мега, 3 этаж") in after["notes"]
+    assert "2 этаж" not in after["notes"]
+
+
+def test_repeated_syncs_never_duplicate_the_location_block(db):
+    entry = _event_insert("uid-707@icloud.com", "Стоматолог",
+                           "2037-07-20T13:00:00+00:00", location="Клиника А")
+    extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
+    row = _get_event_by_uid(db, entry["external_uid"])
+
+    # the SAME location, re-synced three times in a row (an unchanged
+    # LOCATION would still show up as an "update" entry if some OTHER
+    # field also changed, e.g. SEQUENCE bumped with nothing substantive
+    # different) -- must never grow a second/third block.
+    for _ in range(3):
+        update_entry = {
+            "id": row["id"],
+            "changes": {"location": ("Клиника А", "Клиника А")},
+        }
+        extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
+
+    after = cal.get(db, row["id"])
+    assert after["notes"].count(extcal._LOC_BLOCK_BEGIN) == 1
+    assert after["notes"] == _loc_block("Клиника А")
 
 
 # ---------------------------------------------------------------------
