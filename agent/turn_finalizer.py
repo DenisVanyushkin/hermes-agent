@@ -565,6 +565,26 @@ def finalize_turn(
         except Exception as _ver_err:
             logger.debug("file-mutation verifier footer failed: %s", _ver_err)
 
+    # Где выполнялись проверки этого хода.
+    #
+    # Наблюдаемый факт, а не заявление агента: команды берутся из tool_calls
+    # хода, а `terminal`/`execute_code` исполняются внутри контейнера. 2026-07-28
+    # агент подал `EXIT=0`, полученный в песочнице без браузерного окружения, как
+    # доказательство работоспособности -- и никто не спросил, где он это мерил.
+    # Блок не блокирует и ничего не требует: он просто не даёт умолчать о месте.
+    if final_response and not interrupted:
+        try:
+            from hermes_cli.run_evidence import (
+                observed_sandbox_commands,
+                render_execution_locus_block,
+            )
+
+            _locus = render_execution_locus_block(observed_sandbox_commands(messages))
+            if _locus:
+                final_response = final_response.rstrip() + "\n\n" + _locus
+        except Exception as _locus_err:
+            logger.debug("execution locus block failed: %s", _locus_err)
+
     # Turn-completion explainer.
     # When a turn ends abnormally after substantive work — empty content
     # after retries, a partial/truncated stream, a still-pending tool

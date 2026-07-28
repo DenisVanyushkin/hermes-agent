@@ -1,54 +1,75 @@
+import json
+
 import pytest
 
 from hermes_cli.run_evidence import (
     PromiseItem,
-    ReproductionRecord,
+    observed_sandbox_commands,
+    render_execution_locus_block,
     render_promise_block,
-    render_reproduction_block,
     unaccounted_promises,
 )
 
 
-def test_block_states_where_the_command_actually_ran():
-    # Точный случай 2026-07-28: EXIT=0 получен в песочнице, где браузерного
-    # окружения нет, и поэтому ничего не воспроизводил.
-    block = render_reproduction_block(
-        ReproductionRecord(
-            command="python3 -m job_intel doctor",
-            ran_on="sandbox",
-            observed="EXIT=0",
-            reproduced=False,
-        )
-    )
+def _call(name, arguments):
+    return {"role": "assistant", "tool_calls": [{"function": {"name": name, "arguments": arguments}}]}
 
-    assert "в песочнице" in block
+
+def test_terminal_calls_are_observed_as_sandbox_commands():
+    messages = [
+        {"role": "user", "content": "посмотри, в чем проблема"},
+        _call("terminal", json.dumps({"command": "timeout 30s python3 -m job_intel doctor"})),
+        _call("execute_code", json.dumps({"code": "import job_intel\nprint(1)"})),
+    ]
+
+    assert observed_sandbox_commands(messages) == [
+        "timeout 30s python3 -m job_intel doctor",
+        "import job_intel",
+    ]
+
+
+def test_non_executing_tools_are_not_counted():
+    messages = [_call("read_file", json.dumps({"path": "job_intel/cli.py"}))]
+
+    assert observed_sandbox_commands(messages) == []
+
+
+def test_malformed_arguments_never_raise():
+    messages = [
+        _call("terminal", "{not json"),
+        _call("terminal", None),
+        _call("terminal", json.dumps({})),
+        {"role": "assistant", "tool_calls": [{"function": "not a dict"}]},
+        {"role": "assistant", "tool_calls": "not a list"},
+        "not a dict at all",
+    ]
+
+    assert observed_sandbox_commands(messages) == []
+
+
+def test_none_messages_are_tolerated():
+    assert observed_sandbox_commands(None) == []
+
+
+def test_block_names_the_sandbox_and_warns_it_is_not_the_host():
+    block = render_execution_locus_block(["python3 -m job_intel doctor"])
+
+    assert "В песочнице" in block
     assert "python3 -m job_intel doctor" in block
-    assert "сбой не воспроизведён" in block
+    assert "не описывают состояние хоста" in block
 
 
-def test_host_and_sandbox_are_distinguishable_in_the_rendered_block():
-    on_host = render_reproduction_block(
-        ReproductionRecord(command="c", ran_on="host", observed="o", reproduced=True)
-    )
-    assert "на хосте" in on_host
-    assert "сбой воспроизведён" in on_host
+def test_block_truncates_a_long_list_but_says_how_many_were_hidden():
+    block = render_execution_locus_block([f"cmd{i}" for i in range(9)])
+
+    assert "9" in block
+    assert "и ещё 4" in block
 
 
-def test_an_ambiguous_result_is_said_so_rather_than_rounded():
-    block = render_reproduction_block(
-        ReproductionRecord(command="c", ran_on="host", observed="таймаут", reproduced=None)
-    )
-    assert "неоднозначен" in block
-
-
-def test_absent_record_is_stated_not_omitted():
-    assert "не выполнялось" in render_reproduction_block(None)
-
-
-@pytest.mark.parametrize("ran_on", ["somewhere", "", "HOST", None])
-def test_ran_on_accepts_only_host_or_sandbox(ran_on):
-    with pytest.raises(ValueError, match="invalid_ran_on"):
-        ReproductionRecord(command="c", ran_on=ran_on, observed="o", reproduced=True)
+def test_a_turn_with_no_commands_renders_nothing():
+    # Приписка "ничего не выполнялось" к ходу, который и не собирался ничего
+    # выполнять, -- шум, а шум пролистывают вместе с сигналом.
+    assert render_execution_locus_block([]) == ""
 
 
 def test_item_without_an_outcome_is_unaccounted():
@@ -85,7 +106,7 @@ def test_block_lists_every_item_with_its_outcome_and_reason():
     assert "починить CDP: не отчитано" in block
 
 
-def test_empty_list_renders_nothing_rather_than_an_empty_heading():
+def test_empty_promise_list_renders_nothing():
     assert render_promise_block([]) == ""
 
 
