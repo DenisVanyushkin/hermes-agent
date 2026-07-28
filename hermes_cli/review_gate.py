@@ -114,20 +114,38 @@ class OperationAuthorization:
 
 @dataclass
 class ReviewGateState:
-    """Per-session review debt: paths a reviewer objected to and nobody settled."""
+    """Per-task review debt: paths a reviewer objected to and nobody settled.
 
-    session: str
+    Ключ -- ЗАДАЧА (стабильный per-chat ключ гейтвея), а не прогон. Раунд
+    доработки заводит новый прогон с новым session_id; долг, ключёванный по
+    прогону, каждый раз грузился бы пустым, и «долгов нет» означало бы «ledger
+    только что создан», а не «возражений не осталось». Ровно это и случилось
+    2026-07-28: три раунда подряд отчитались чисто, пока пять находок
+    предыдущего прогона висели неразрешёнными.
+    """
+
+    task_key: str
     outstanding: dict[str, list[str]] = field(default_factory=dict)
 
     def record_verdict(
-        self, verdict: str, *, changed_paths: list[str], findings: list[str] | None = None
+        self,
+        verdict: str,
+        *,
+        changed_paths: list[str],
+        findings: list[str] | None = None,
+        findings_by_path: dict[str, list[str]] | None = None,
     ) -> None:
         verdict = str(verdict or "").strip().lower()
         paths = [str(p).strip() for p in (changed_paths or []) if str(p).strip()]
         if verdict in DEBT_VERDICTS:
             for path in paths:
                 self.outstanding.setdefault(path, [])
-                for finding in findings or []:
+                # Находки, у которых есть свой путь, кладутся только туда.
+                # Прежнее поведение вешало все находки на каждый изменённый файл:
+                # 5 находок по трём файлам превращались в 15 записей, и понять,
+                # к чему относится претензия, по ledger'у было нельзя.
+                scoped = (findings_by_path or {}).get(path)
+                for finding in (scoped if scoped is not None else (findings or [])):
                     if finding not in self.outstanding[path]:
                         self.outstanding[path].append(finding)
         elif verdict in SETTLING_VERDICTS:
@@ -145,32 +163,52 @@ class ReviewGateState:
     # memory would be discharged by an unrelated crash.
 
     @staticmethod
-    def _path(session: str, root: Path) -> Path:
-        safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in str(session)) or "session"
+    def _path(task_key: str, root: Path) -> Path:
+        safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in str(task_key)) or "task"
         return Path(root) / f"{safe}.json"
 
     def save(self, root: Path) -> None:
-        target = self._path(self.session, root)
+        target = self._path(self.task_key, root)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
-            json.dumps({"session": self.session, "outstanding": self.outstanding},
+            json.dumps({"task": self.task_key, "outstanding": self.outstanding},
                        ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
     @classmethod
-    def load(cls, session: str, root: Path) -> "ReviewGateState":
-        target = cls._path(session, root)
+    def load(cls, task_key: str, root: Path) -> "ReviewGateState":
+        # Файлы, записанные до 2026-07-28, несут ключ "session" в теле. Он и
+        # тогда не читался -- идентичность берётся из имени файла, -- поэтому
+        # старые файлы остаются читаемыми без миграции.
+        target = cls._path(task_key, root)
         try:
             payload = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return cls(session=session)
+            return cls(task_key=task_key)
         outstanding = payload.get("outstanding")
         if not isinstance(outstanding, dict):
             outstanding = {}
-        return cls(session=session, outstanding={
+        return cls(task_key=task_key, outstanding={
             str(k): [str(x) for x in (v or [])] for k, v in outstanding.items()
         })
+
+
+def debt_key(*, gateway_session_key: object = None, session_id: object = None) -> str:
+    """Под каким ключом искать долг ревью.
+
+    Стабильный per-chat ключ гейтвея (`agent._gateway_session_key`, например
+    `agent:main:slack:group:C0.....:1778823633.1`) переживает раунды доработки;
+    `session_id` вида `20260728_110558_818767` создаётся заново на каждый прогон
+    и поэтому годится только как запасной вариант там, где гейтвея нет вовсе
+    (CLI, тесты). Выбор вынесен сюда, чтобы обе стороны -- тот, кто пишет долг,
+    и тот, кто его читает, -- не могли разойтись в том, что считают задачей.
+    """
+    stable = str(gateway_session_key or "").strip()
+    if stable:
+        return stable
+    fallback = str(session_id or "").strip()
+    return fallback or "task"
 
 
 def default_debt_root() -> Path:

@@ -23,7 +23,7 @@ def _plan():
 
 def test_quiet_turn_with_debt_cannot_report_not_required():
     """The 07:16 shape: nothing edited this turn, findings still outstanding."""
-    state = ReviewGateState(session="s1")
+    state = ReviewGateState(task_key="s1")
     state.record_verdict("changes_requested", changed_paths=["tools/approval.py"])
 
     decision = evaluate_review_gate(
@@ -37,7 +37,7 @@ def test_quiet_turn_with_debt_cannot_report_not_required():
 def test_quiet_turn_without_debt_is_unchanged():
     """No debt must mean exactly the old behaviour."""
     decision = evaluate_review_gate(
-        _plan(), [], config=OBSERVE, changed_paths=[], state=ReviewGateState(session="s1")
+        _plan(), [], config=OBSERVE, changed_paths=[], state=ReviewGateState(task_key="s1")
     )
     assert decision.review_required is False
     assert decision.status == "not_required"
@@ -51,7 +51,7 @@ def test_omitting_the_state_keeps_the_previous_behaviour():
 
 
 def test_settled_debt_stops_forcing_review():
-    state = ReviewGateState(session="s1")
+    state = ReviewGateState(task_key="s1")
     state.record_verdict("changes_requested", changed_paths=["tools/approval.py"])
     state.record_verdict("approved", changed_paths=["tools/approval.py"])
 
@@ -62,7 +62,7 @@ def test_settled_debt_stops_forcing_review():
 
 
 def test_an_explicit_changes_requested_verdict_records_debt():
-    state = ReviewGateState(session="s1")
+    state = ReviewGateState(task_key="s1")
 
     evaluate_review_gate(
         _plan(), [], config=OBSERVE,
@@ -73,7 +73,7 @@ def test_an_explicit_changes_requested_verdict_records_debt():
 
 
 def test_an_approving_verdict_settles_what_it_covers():
-    state = ReviewGateState(session="s1")
+    state = ReviewGateState(task_key="s1")
     state.record_verdict("changes_requested", changed_paths=["tools/approval.py"])
 
     evaluate_review_gate(
