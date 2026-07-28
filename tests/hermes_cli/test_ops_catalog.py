@@ -78,3 +78,74 @@ def test_every_destroy_operation_declares_what_cannot_be_undone():
     for op in CATALOG.values():
         if op.risk == RISK_DESTROY:
             assert op.irreversible, f"{op.op_id} без описания необратимости"
+
+
+def test_host_path_stat_resolves_to_an_exact_argv():
+    op = resolve_operation("host_path_stat", {"path": "/var/lib/browser-desktop/playwright-venv"})
+    assert op.risk == RISK_READ
+    assert op.argv == (
+        "stat",
+        "--format=%n type=%F owner=%U:%G mode=%a size=%s mtime=%y",
+        "/var/lib/browser-desktop/playwright-venv",
+    )
+    assert op.irreversible is None
+
+
+def test_host_path_stat_never_reads_file_contents():
+    # Инвариант класса read: метаданные -- да, байты файла -- нет. Иначе инспекция
+    # окружения становится способом прочитать .env и auth.json.
+    op = resolve_operation("host_path_stat", {"path": "/etc/job-intel"})
+    assert not {"cat", "head", "tail", "less", "strings", "xxd", "od"} & set(op.argv)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"path": "/root/.ssh/id_rsa"},
+        {"path": "/home/hermes/.hermes/../../root/.bashrc"},
+        {"path": ""},
+        {},
+    ],
+)
+def test_host_path_stat_refuses_paths_outside_the_allowlist(params):
+    with pytest.raises(OpsCatalogError):
+        resolve_operation("host_path_stat", params)
+
+
+def test_host_listening_ports_takes_no_parameters():
+    op = resolve_operation("host_listening_ports", {})
+    assert op.risk == RISK_READ
+    assert op.argv == ("ss", "--listening", "--tcp", "--numeric", "--processes")
+    # Параметров нет вовсе: нечего валидировать, нечем управлять извне.
+    assert resolve_operation("host_listening_ports", {"anything": "ignored"}).argv == op.argv
+
+
+def test_venv_packages_executes_the_venv_python():
+    op = resolve_operation("venv_packages", {"venv": "/var/lib/browser-desktop/playwright-venv"})
+    assert op.risk == RISK_READ
+    assert op.argv == (
+        "/var/lib/browser-desktop/playwright-venv/bin/python",
+        "-m",
+        "pip",
+        "list",
+        "--format=json",
+    )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"venv": "/tmp/attacker-venv"},
+        {"venv": "/var/lib/browser-desktop"},
+        {},
+    ],
+)
+def test_venv_packages_refuses_venvs_outside_the_allowlist(params):
+    with pytest.raises(OpsCatalogError):
+        resolve_operation("venv_packages", params)
+
+
+def test_host_inspection_operations_are_all_read_class():
+    for op_id in ("host_path_stat", "host_listening_ports", "venv_packages"):
+        assert CATALOG[op_id].risk == RISK_READ
+        assert CATALOG[op_id].irreversible is None

@@ -13,8 +13,10 @@ from hermes_cli.ops_params import (
     OpsParamError,
     validate_branch,
     validate_container,
+    validate_host_path,
     validate_remote,
     validate_unit,
+    validate_venv_path,
 )
 
 # Классы риска описывают воздействие на СОСТОЯНИЕ, а не факт записи на диск.
@@ -132,6 +134,25 @@ def _gateway_restart_argv(_params: Mapping[str, object]) -> tuple[str, ...]:
     return ("hermes", "gateway", "restart")
 
 
+def _host_path_stat_argv(params: Mapping[str, object]) -> tuple[str, ...]:
+    # Только метаданные: имя, тип, владелец, режим, размер, время изменения.
+    # Содержимое не читается ни здесь, ни где-либо ещё в классе read.
+    return (
+        "stat",
+        "--format=%n type=%F owner=%U:%G mode=%a size=%s mtime=%y",
+        validate_host_path(params.get("path")),
+    )
+
+
+def _host_listening_ports_argv(_params: Mapping[str, object]) -> tuple[str, ...]:
+    return ("ss", "--listening", "--tcp", "--numeric", "--processes")
+
+
+def _venv_packages_argv(params: Mapping[str, object]) -> tuple[str, ...]:
+    venv = validate_venv_path(params.get("venv"))
+    return (f"{venv}/bin/python", "-m", "pip", "list", "--format=json")
+
+
 CATALOG: dict[str, OpsOperation] = {
     op.op_id: op
     for op in (
@@ -143,6 +164,12 @@ CATALOG: dict[str, OpsOperation] = {
         OpsOperation("journal_tail", RISK_READ, _journal_tail_argv, lambda p: f"последние логи {p.get('unit')}"),
         OpsOperation("docker_ps", RISK_READ, _docker_ps_argv, lambda p: "список контейнеров"),
         OpsOperation("docker_logs", RISK_READ, _docker_logs_argv, lambda p: f"логи контейнера {p.get('container')}"),
+        OpsOperation("host_path_stat", RISK_READ, _host_path_stat_argv,
+                     lambda p: f"метаданные пути {p.get('path')} на хосте"),
+        OpsOperation("host_listening_ports", RISK_READ, _host_listening_ports_argv,
+                     lambda p: "слушающие TCP-порты хоста"),
+        OpsOperation("venv_packages", RISK_READ, _venv_packages_argv,
+                     lambda p: f"состав пакетов venv {p.get('venv')}"),
         OpsOperation("git_push", RISK_MUTATE, _git_push_argv,
                      lambda p: f"опубликовать {p.get('branch')} в {p.get('remote') or 'origin'}"),
         OpsOperation("git_merge_ff_only", RISK_MUTATE, _git_merge_ff_only_argv,
