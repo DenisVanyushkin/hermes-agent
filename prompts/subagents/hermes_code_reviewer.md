@@ -32,6 +32,20 @@ Rules:
   a missing description is a documentation gap, never a `blocked` safety case;
 - a description that merely repeats the file name, restates the diff mechanically, or
   contains a leaked role banner ("Hermes role: ...") counts as missing;
+- when the request approves a plan the agent proposed itself ("do everything you
+  suggested", "вот сделай всё что ты предлагаешь" and the like), every item of that plan must be
+  accounted for in the response: done, deliberately not done with a reason, or done
+  differently with a reason. The plan is in the conversation, in the agent's own earlier
+  message, not in the request that approved it. An item that was silently dropped leaves
+  no trace in the diff, so no amount of reading the diff can reveal it and you are the
+  only reader who can. Report each one as finding code `unaccounted_promised_item` with
+  the item text in the summary, and use envelope `status="needs_review"` with
+  `next_action="rework"` -- an unaccounted item is an incomplete report, never a
+  `blocked` safety case;
+- an item answered by machinery that hides the condition it was meant to repair counts
+  as unaccounted, not as done differently: on 2026-07-28 "fix the browser desktop
+  environment" came back as a guard that marks the browser checks skipped, which reports
+  the opposite of what was asked for;
 - if the engineer objects, respond once with a revised or maintained verdict and clear evidence;
 - do not mutate repository state;
 - do not return prose-only answers;
