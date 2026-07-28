@@ -80,11 +80,13 @@ def _get_plan_by_uid(conn, external_uid):
 def _loc_block(text):
     """The exact machine-owned `notes` block `_merge_notes_with_location`
     produces for a bare (no pre-existing human text) row -- fix-round-2
-    finding N1. Tests that need to assert alongside PRESERVED human text
+    finding N1, marker redesigned in fix-round 3 (invisible Unicode
+    sentinels wrapping the raw text directly, no newlines, no visible
+    brackets). Tests that need to assert alongside PRESERVED human text
     build the expected string by hand instead (see
     test_event_update_location_change_preserves_human_notes below).
     """
-    return f"{extcal._LOC_BLOCK_BEGIN}\n{text}\n{extcal._LOC_BLOCK_END}"
+    return f"{extcal._LOC_BLOCK_BEGIN}{text}{extcal._LOC_BLOCK_END}"
 
 
 # ---------------------------------------------------------------------
@@ -860,6 +862,99 @@ def test_repeated_syncs_never_duplicate_the_location_block(db):
     after = cal.get(db, row["id"])
     assert after["notes"].count(extcal._LOC_BLOCK_BEGIN) == 1
     assert after["notes"] == _loc_block("Клиника А")
+
+
+# ---------------------------------------------------------------------
+# fix-round 3: the marker itself must be practically un-typable/
+# un-copyable, not just unlikely -- these three tests are the exact class
+# the reviewer's live repro targeted.
+# ---------------------------------------------------------------------
+
+def test_human_text_containing_literal_old_style_bracket_markers_survives(db):
+    # This is the reviewer's own repro, verbatim: round 2's marker was
+    # READABLE bracket text, so a human note containing that exact literal
+    # pair (typed on purpose, or quoted/duplicated after having seen it
+    # once -- ordinary human behavior) was silently parsed as "the
+    # machine's own block" and destroyed. Fix-round 3's marker is no
+    # longer readable text at all, so this string is now just ordinary,
+    # completely inert human content -- ANY of it, including a perfect
+    # copy of the retired format.
+    old_style_human_note = (
+        "заметка от Амины:\n[extcal:location]\n"
+        "это моя личная заметка, не место!\n[/extcal:location]\nконец"
+    )
+    entry = _event_insert("uid-708@icloud.com", "Стоматолог",
+                           "2037-07-20T13:00:00+00:00", location="Клиника А")
+    extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
+    row = _get_event_by_uid(db, entry["external_uid"])
+
+    # a human note that happens to contain the old, now-meaningless marker
+    # text -- written directly, standing in for however it got there
+    # (typed, quoted, pasted).
+    cal.update(db, row["id"], notes=old_style_human_note)
+    db.commit()
+
+    update_entry = {
+        "id": row["id"],
+        "changes": {"location": ("Клиника А", "Клиника Б")},
+    }
+    extcal.apply_changes(db, _changeset(events_update=[update_entry]), {})
+
+    after = cal.get(db, row["id"])
+    # completely untouched, byte for byte -- not partially stripped, not
+    # reinterpreted, not silently gone.
+    assert old_style_human_note in after["notes"]
+    assert _loc_block("Клиника Б") in after["notes"]
+
+
+def test_human_text_containing_an_unpaired_new_marker_is_left_untouched(db):
+    # A human note that happens to contain just ONE of the two invisible
+    # marker sequences (no matching partner to close a span) must never be
+    # misread as a block boundary -- _strip_location_block only removes a
+    # COMPLETE BEGIN...END span, never a lone marker character.
+    stray = f"заметка{extcal._LOC_BLOCK_BEGIN}без конца"
+    assert extcal._strip_location_block(stray) == stray.strip()
+
+    stray_end_only = f"начало{extcal._LOC_BLOCK_END}без начала"
+    assert extcal._strip_location_block(stray_end_only) == stray_end_only.strip()
+
+
+def test_human_text_containing_a_full_new_marker_span_is_treated_as_a_block(db):
+    # Documents the one remaining, DELIBERATE edge case (requirement 3 in
+    # the fix-round-3 dispatch is about ordinary human text surviving --
+    # this is the one scenario that is genuinely no longer "ordinary"): if
+    # a human's text contains a COMPLETE BEGIN-through-END span (both
+    # invisible marker sequences, in order, with something between them),
+    # it is structurally indistinguishable from a real location block and
+    # is treated as one. Reaching this state requires copying the
+    # INVISIBLE marker bytes themselves, not just the visible text between
+    # them -- a fundamentally different, far less likely action than
+    # quoting/retyping something you can see (round 2's actual failure
+    # mode). This test exists to PIN that this is well-defined,
+    # non-crashing behavior, not to claim it never happens.
+    quoted_whole_block = f"до{extcal._LOC_BLOCK_BEGIN}что-то{extcal._LOC_BLOCK_END}после"
+    stripped = extcal._strip_location_block(quoted_whole_block)
+    assert stripped == "допосле"
+
+
+def test_repeated_set_clear_set_cycle_does_not_accumulate_blank_lines(db):
+    entry = _event_insert("uid-709@icloud.com", "Стоматолог",
+                           "2037-07-20T13:00:00+00:00", location="Клиника А")
+    extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
+    row = _get_event_by_uid(db, entry["external_uid"])
+    cal.update(db, row["id"], notes=row["notes"] + "\n\nвзяла паспорт")
+    db.commit()
+
+    for _ in range(3):
+        clear_entry = {"id": row["id"], "changes": {"location": ("Клиника А", "")}}
+        extcal.apply_changes(db, _changeset(events_update=[clear_entry]), {})
+        set_entry = {"id": row["id"], "changes": {"location": ("", "Клиника А")}}
+        extcal.apply_changes(db, _changeset(events_update=[set_entry]), {})
+
+    after = cal.get(db, row["id"])
+    assert after["notes"] == "взяла паспорт\n\n" + _loc_block("Клиника А")
+    assert after["notes"].count(extcal._LOC_BLOCK_BEGIN) == 1
+    assert "\n\n\n" not in after["notes"]
 
 
 # ---------------------------------------------------------------------

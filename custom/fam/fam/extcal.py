@@ -1977,26 +1977,72 @@ def _resolve_place_ref(conn, raw_text):
 # column, using a delimited block neither `cal.py` nor `plans.py` needs to
 # know anything about (no edit to either module).
 #
-# The block is a fixed BEGIN/END marker pair wrapping the raw location text
-# on its own line(s) -- still fully visible to Amina in `fam cal day`/`fam
-# plan list` (the requirement: "сырой текст места по-прежнему виден Амине в
-# заметках"), just clearly delimited as machine-owned. Everything OUTSIDE
-# the block, in whatever position it was in, is human text and is never
-# touched.
-_LOC_BLOCK_BEGIN = "[extcal:location]"
-_LOC_BLOCK_END = "[/extcal:location]"
+# Fix-round-3 finding N1 (round 2's marker was rejected on re-review): round
+# 2 wrapped the location in READABLE bracket text, `[extcal:location]`/
+# `[/extcal:location]`, each on its own line. The reviewer reproduced the
+# exact failure this was supposed to prevent: a human note that happens to
+# CONTAIN that literal, readable marker pair (typed on purpose, or -- far
+# more realistically -- because she saw the marker in her own notes and
+# quoted/duplicated it, since quoting visible text is completely ordinary
+# human behavior) gets silently parsed as "the machine's own block" and
+# whatever sits between the markers is destroyed on the next sync, with the
+# SAME "no trace in audit_log" problem N1 was about in the first place.
+# Readable words in brackets fail requirement (1) below precisely BECAUSE
+# they are readable: a human can type them, and -- just as importantly --
+# can quote/copy them from having seen them once.
+#
+# The fix: the BEGIN/END markers are now sequences of Unicode FORMAT
+# characters (zero-width space, zero-width non-joiner, zero-width joiner,
+# word joiner, invisible separator/plus) -- each renders as NOTHING in any
+# text view, has NO key or standard input method on iOS (there is no way to
+# "type" U+200B), and is never produced by an ordinary copy of VISIBLE text
+# (a natural drag-select or "copy this line" only ever captures what is
+# actually rendered -- there is nothing rendered here to select). This
+# satisfies requirement (1) verbatim: not just unlikely to be typed/copied
+# "by meaning" -- there is no meaning to perceive at all, so there is
+# nothing for a human to intentionally reproduce. The raw location text
+# itself sits BETWEEN the two marker sequences with nothing else around it
+# (no brackets, no label) -- satisfies requirement (2): still fully,
+# plainly visible to Amina, now with LESS visual clutter than round 2's
+# bracket text, not more. Requirement (3): `_strip_location_block` only
+# ever removes a matched BEGIN-through-END span; anything else, including
+# ordinary human text that happens to contain a stray, unpaired marker
+# character (Unicode format characters can theoretically enter text some
+# other way, e.g. a stray paste), is left untouched -- there is no partial
+# or fuzzy matching. Requirement (4): the OLD (round 2) bracket format is
+# deliberately NOT recognized/migrated -- prod is still on v11 and has never
+# run this code, so there is no real data in that format to carry forward,
+# and re-adding recognition of readable bracket text would simply reopen
+# this exact finding for anyone who has since typed/quoted `[extcal:
+# location]` as ordinary text.
+# Deliberately written as explicit \uXXXX escapes, never as literal glyphs
+# in this source file: these are invisible/zero-width by definition, so a
+# literal glyph here would be silently unverifiable by reading the source
+# (and at real risk of mangling/normalization across editors, terminals,
+# or the scp transfer this file goes through to reach the VM). Each
+# constant is a short, fixed sequence of Unicode FORMAT characters (Cf
+# general category) with zero rendered width and no standard keyboard
+# input path on iOS: ZERO WIDTH SPACE, ZERO WIDTH NON-JOINER, ZERO WIDTH
+# JOINER, WORD JOINER, then a final code point that differs between BEGIN
+# (INVISIBLE SEPARATOR) and END (INVISIBLE PLUS) so the two are only ever
+# confused with each other, never with ordinary text.
+_LOC_BLOCK_BEGIN = "\u200b\u200c\u200d\u2060\u2063"
+_LOC_BLOCK_END = "\u200b\u200c\u200d\u2060\u2064"
 _LOC_BLOCK_RE = re.compile(
-    re.escape(_LOC_BLOCK_BEGIN) + r"\n.*?\n" + re.escape(_LOC_BLOCK_END), re.S)
+    re.escape(_LOC_BLOCK_BEGIN) + r".*?" + re.escape(_LOC_BLOCK_END), re.S)
 
 
 def _strip_location_block(notes):
     """Remove any existing extcal-owned location block from `notes`,
     returning whatever HUMAN text is left (blank-line runs the removed
     block leaves behind are collapsed, outer whitespace trimmed). Absent a
-    block, `notes` comes back unchanged (just trimmed) -- this is what
-    makes re-merging idempotent: the OLD block (if any) is always fully
-    removed before a new one is appended, so repeated syncs never leave
-    behind a growing stack of stale blocks.
+    block (no occurrence of the exact BEGIN...END marker span -- ordinary
+    text, including text that happens to contain the RETIRED round-2
+    bracket markers or an unpaired/stray marker character, never matches),
+    `notes` comes back unchanged (just trimmed). This is what makes
+    re-merging idempotent: the OLD block (if any) is always fully removed
+    before a new one is appended, so repeated syncs never leave behind a
+    growing stack of stale blocks.
     """
     if not notes:
         return ""
@@ -2007,23 +2053,25 @@ def _strip_location_block(notes):
 
 def _merge_notes_with_location(existing_notes, raw_location):
     """The ONLY place that decides a final `notes` string for the events/
-    plans insert/update paths (fix-round-2 finding N1). Always starts from
-    the row's CURRENT `notes` value (never from the changeset entry, which
-    only ever carries the latest `location`, never a full notes snapshot),
-    strips out whatever machine-owned block it already holds (see
-    `_strip_location_block`), and appends a FRESH block for the current
-    raw location -- or appends nothing at all when the location was
-    cleared on the phone (`raw_location` empty/None), so a deleted iCloud
-    location leaves no dangling empty block behind. The human text found
-    outside the old block is carried forward untouched either way -- it
-    survives any number of location changes, and survives the location
-    being removed entirely.
+    plans insert/update paths (fix-round-2 finding N1, marker redesigned in
+    fix-round 3). Always starts from the row's CURRENT `notes` value (never
+    from the changeset entry, which only ever carries the latest
+    `location`, never a full notes snapshot), strips out whatever
+    machine-owned block it already holds (see `_strip_location_block`), and
+    appends a FRESH block for the current raw location -- or appends
+    nothing at all when the location was cleared on the phone
+    (`raw_location` empty/None), so a deleted iCloud location leaves no
+    dangling empty block behind. The human text found outside the old block
+    is carried forward untouched either way -- it survives any number of
+    location changes, survives the location being removed entirely, and
+    (fix-round 3) survives even containing what LOOKS like an old-style
+    marker, since that text is no longer special to this function at all.
     """
     human = _strip_location_block(existing_notes)
     location = _pc_norm_text(raw_location)
     if not location:
         return human
-    block = f"{_LOC_BLOCK_BEGIN}\n{location}\n{_LOC_BLOCK_END}"
+    block = f"{_LOC_BLOCK_BEGIN}{location}{_LOC_BLOCK_END}"
     return f"{human}\n\n{block}" if human else block
 
 
