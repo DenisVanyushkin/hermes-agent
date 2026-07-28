@@ -210,3 +210,45 @@ def test_other_remote_operations_also_receive_credentials(tmp_path, monkeypatch,
     assert "credential.helper" in joined
     assert "ghp_" not in joined
     assert op_kwargs.get("env", {}).get("GITHUB_TOKEN") == "ghp_example"
+
+
+def test_missing_binary_becomes_a_result_not_an_exception(tmp_path):
+    # venv_packages -- первая операция каталога, у которой argv[0] это путь, а не
+    # имя в PATH: git/docker/ss/stat есть всегда, а интерпретатор venv может
+    # отсутствовать. На проде 2026-07-28 он и отсутствовал (bin/python -- висячий
+    # симлинк на /usr/local/bin/python3). "Интерпретатора нет" -- это диагностика,
+    # ради которой операция и заведена, поэтому она обязана вернуться результатом.
+    repo = _init_repo(tmp_path, "main")
+
+    def fake_runner(argv, **kwargs):
+        if argv[0] == "git":
+            return subprocess.CompletedProcess(argv, 0, "main\n", "")
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    result = execute_operation(
+        resolve_operation("venv_packages", {"venv": "/var/lib/browser-desktop/playwright-venv"}),
+        cwd=repo,
+        subprocess_runner=fake_runner,
+    )
+
+    assert result["status"] != 0
+    assert "/var/lib/browser-desktop/playwright-venv/bin/python" in result["output"]
+    assert result["op_id"] == "venv_packages"
+
+
+def test_unreadable_binary_also_becomes_a_result(tmp_path):
+    repo = _init_repo(tmp_path, "main")
+
+    def fake_runner(argv, **kwargs):
+        if argv[0] == "git":
+            return subprocess.CompletedProcess(argv, 0, "main\n", "")
+        raise PermissionError(13, "Permission denied", argv[0])
+
+    result = execute_operation(
+        resolve_operation("host_listening_ports", {}),
+        cwd=repo,
+        subprocess_runner=fake_runner,
+    )
+
+    assert result["status"] != 0
+    assert "Permission denied" in result["output"] or "ss" in result["output"]

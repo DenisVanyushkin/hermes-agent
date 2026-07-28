@@ -123,6 +123,18 @@ def execute_operation(
         )
     except subprocess.TimeoutExpired as exc:
         raise OpsExecutionError(f"timeout:{operation.op_id}") from exc
+    except OSError as exc:
+        # Отсутствующий или недоступный бинарник -- это факт об окружении, ровно
+        # тот, ради которого read-операции и заведены: venv_packages первой из
+        # каталога кладёт в argv[0] путь, а не имя в PATH, и на проде этот путь
+        # оказался висячим симлинком. Такой ответ обязан дойти до оператора
+        # результатом со статусом, а не голым исключением из финализатора.
+        return {
+            "op_id": operation.op_id,
+            "status": 127,
+            "output": f"{argv[0]}: {getattr(exc, 'strerror', None) or exc}",
+            "truncated": False,
+        }
 
     raw = ((getattr(completed, "stdout", "") or "") + (getattr(completed, "stderr", "") or "")).strip()
     truncated = len(raw) > _OUTPUT_LIMIT
