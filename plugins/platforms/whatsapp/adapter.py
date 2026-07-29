@@ -467,6 +467,11 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         # polled from nobody and this whole path stays dormant.
         # config.yaml: gateway.platforms.whatsapp.extra.reaction_hook_cmd
         self._reaction_hook_cmd = config.extra.get("reaction_hook_cmd") or None
+        # config.yaml: gateway.platforms.whatsapp.extra.reaction_dialogue
+        # When true, a reaction the ack hook did not consume becomes an
+        # ordinary agent turn. Independent of reaction_hook_cmd: either
+        # flag alone is enough to arm the reaction poll loop.
+        self._reaction_dialogue = bool(config.extra.get("reaction_dialogue", False))
         self._reaction_poll_task: Optional[asyncio.Task] = None
 
     def _coerce_float_extra(self, key: str, default: float) -> float:
@@ -1574,7 +1579,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         """Drain the bridge's reaction queue and apply each reaction via
         the configured hook command.
 
-        Only runs when ``extra.reaction_hook_cmd`` is set. The bridge only
+        Runs when either ``extra.reaction_hook_cmd`` (ack path) or
+        ``extra.reaction_dialogue`` (agent-turn path) is set. The bridge only
         queues reactions on messages Hermes itself sent, and its own
         allowlist (WHATSAPP_ALLOWED_USERS) already gated the sender, so
         this loop's job is transport, not policy.
@@ -1666,7 +1672,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
 
     def _start_reaction_polling(self) -> None:
         """Arm the reaction loop when configured (called from connect())."""
-        if not self._reaction_hook_cmd:
+        if not (self._reaction_hook_cmd or self._reaction_dialogue):
             return
         if self._reaction_poll_task and not self._reaction_poll_task.done():
             return
