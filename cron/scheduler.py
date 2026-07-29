@@ -314,7 +314,7 @@ def _send_cron_operator_alert(
             "deliver": alert_cfg["channel"],
             "origin": None,
         }
-        _deliver_result(synthetic_job, alert_text, adapters=adapters, loop=loop)
+        _deliver_result(synthetic_job, alert_text, adapters=adapters, loop=loop, wrap=False)
     except Exception as exc:  # noqa: BLE001 — best-effort by contract
         logger.warning("cron operator alert failed: %s", exc)
 
@@ -1664,7 +1664,9 @@ def _is_channel_dm_topic(
     return is_channel
 
 
-def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
+def _deliver_result(
+    job: dict, content: str, adapters=None, loop=None, wrap: Optional[bool] = None
+) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
 
@@ -1672,6 +1674,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     use the live adapter first — this supports E2EE rooms (e.g. Matrix) where
     the standalone HTTP path cannot encrypt.  Falls back to standalone send if
     the adapter path fails or is unavailable.
+
+    ``wrap`` overrides the ``cron.wrap_response`` config lookup for this one
+    call: ``None`` (default) keeps today's behaviour — consult config,
+    defaulting True — so every existing caller is unaffected. ``False`` skips
+    the header/footer unconditionally; used by synthetic, non-job deliveries
+    like the operator alert, where the "Cronjob Response: <job name>" header
+    and "stop reminder <job name>" footer would misidentify the message
+    (there is no such job to stop).
 
     Returns None on success, or an error string on failure.
     """
@@ -1702,14 +1712,18 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     # Optionally wrap the content with a header/footer so the user knows this
     # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
-    # in config.yaml for clean output.
-    wrap_response = True
+    # in config.yaml for clean output. An explicit `wrap` argument (used by
+    # synthetic, non-job deliveries) bypasses the config lookup entirely.
     user_cfg = None
-    try:
-        user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
-    except Exception:
-        pass
+    if wrap is not None:
+        wrap_response = wrap
+    else:
+        wrap_response = True
+        try:
+            user_cfg = load_config()
+            wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+        except Exception:
+            pass
 
     if wrap_response:
         task_name = job.get("name", job["id"])

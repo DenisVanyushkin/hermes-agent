@@ -119,7 +119,7 @@ def test_operator_alert_is_sent_to_the_configured_channel(monkeypatch) -> None:
     sent = []
     monkeypatch.setattr(
         scheduler, "_deliver_result",
-        lambda job, content, adapters=None, loop=None: sent.append((job, content)),
+        lambda job, content, adapters=None, loop=None, wrap=None: sent.append((job, content)),
     )
 
     scheduler._send_cron_operator_alert(
@@ -149,7 +149,7 @@ def test_no_alert_channel_configured_is_a_silent_no_op(monkeypatch) -> None:
 def test_alert_delivery_failure_never_raises(monkeypatch) -> None:
     from cron import scheduler
 
-    def boom(job, content, adapters=None, loop=None):
+    def boom(job, content, adapters=None, loop=None, wrap=None):
         raise RuntimeError("telegram is down")
 
     monkeypatch.setattr(scheduler, "_deliver_result", boom)
@@ -157,3 +157,41 @@ def test_alert_delivery_failure_never_raises(monkeypatch) -> None:
     scheduler._send_cron_operator_alert(
         "⚠️ Cron 'x' failed", cfg={"gateway": {"error_alerts": {"channel": "telegram:79564752"}}}
     )  # must not raise
+
+
+def test_operator_alert_delivers_unwrapped(monkeypatch) -> None:
+    """The alert must NOT go through _deliver_result's default cron-response
+    wrapper: that header/footer names a job ("cron operator alert") that
+    does not exist and tells the operator to "stop reminder cron operator
+    alert" — a dead instruction. _send_cron_operator_alert passes
+    wrap=False for exactly this reason; this test exercises the real
+    (unmocked) _deliver_result to prove the alert text survives intact."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from cron import scheduler
+    from gateway.config import Platform
+
+    pconfig = MagicMock()
+    pconfig.enabled = True
+    mock_gw_cfg = MagicMock()
+    mock_gw_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+    with patch("gateway.config.load_gateway_config", return_value=mock_gw_cfg), \
+         patch(
+             "tools.send_message_tool._send_to_platform",
+             new=AsyncMock(return_value={"success": True}),
+         ) as send_mock, \
+         patch(
+             "cron.scheduler.load_config",
+             return_value={"cron": {"wrap_response": True}},
+         ):
+        scheduler._send_cron_operator_alert(
+            "⚠️ Cron 'x' failed",
+            cfg={"gateway": {"error_alerts": {"channel": "telegram:79564752"}}},
+        )
+
+    send_mock.assert_called_once()
+    sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+    assert sent_content == "⚠️ Cron 'x' failed"
+    assert "Cronjob Response" not in sent_content
+    assert "stop reminder" not in sent_content
