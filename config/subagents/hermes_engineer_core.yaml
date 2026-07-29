@@ -130,6 +130,7 @@ output_schema:
     - final output must be exactly one StructuredOutputEnvelope JSON object with no prose or markdown outside the JSON object
     - if the task cannot be completed, return a blocked StructuredOutputEnvelope with blockers and findings instead of plain text
     - include at least one of findings or changes
+    - if you changed any file, changes is required: one entry per changed path with a non-empty summary. The operator is shown exactly these descriptions when asked to approve the commit, so a changed file nobody described means approving a change nobody explained, and the reviewer reports it as undescribed_changed_file
     - tests are optional and must not make pytest mandatory when the pipeline did not request tests
     - use find_files for filename discovery because it returns repo-relative workspace paths
     - use read_file only with repo-relative paths inside the controlled workspace

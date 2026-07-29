@@ -35,6 +35,11 @@ Return the final result as a JSON object with these required fields:
 - `requires_review`
 - `next_action`
 - at least one of `findings` or `changes`
+- if you changed any file, `changes` is REQUIRED: one entry per changed path with a
+  non-empty `summary`. The operator sees exactly these descriptions when asked to
+  approve the commit, so a changed file that none of them explains means approving a
+  change nobody described. The reviewer blocks on it as `undescribed_changed_file`,
+  and no amount of rework rounds will clear it until the entries are there.
 
 Optional fields allowed by the current validator:
 - `tests`
