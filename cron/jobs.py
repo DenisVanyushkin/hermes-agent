@@ -376,6 +376,33 @@ def _normalize_job_role(role: Optional[str]) -> Optional[str]:
     return normalized
 
 
+# Valid values for the per-job `audience` field. `end_user` marks a delivery
+# target that is a non-technical reader — a technical failure is withheld
+# from that chat entirely and reported to the operator alert channel instead
+# (see cron/scheduler.py plan_cron_failure_delivery).
+CRON_AUDIENCES = ("operator", "end_user")
+
+
+def normalize_audience(value) -> Optional[str]:
+    """Normalize the `audience` field; None when unset.
+
+    `end_user` marks a delivery target that is a non-technical reader — a
+    technical failure is withheld from that chat entirely and reported to
+    the operator alert channel instead (see cron/scheduler.py
+    plan_cron_failure_delivery).
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text not in CRON_AUDIENCES:
+        raise ValueError(
+            f"audience must be one of {CRON_AUDIENCES}, got {value!r}"
+        )
+    return text
+
+
 def _job_output_dir(job_id: str) -> Path:
     """Resolve a job's output directory, rejecting any path-escape attempt.
 
@@ -1233,6 +1260,7 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    audience: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1282,6 +1310,11 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        audience: Optional ``"operator"`` or ``"end_user"``. ``end_user`` marks
+                a delivery target that is a non-technical reader — a technical
+                failure is withheld from that chat and reported to the
+                operator alert channel instead. Unset (default) is treated as
+                ``"operator"`` and stores no key, matching historical records.
 
     Returns:
         The created job dict
@@ -1315,6 +1348,7 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
+    normalized_audience = normalize_audience(audience)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -1411,6 +1445,11 @@ def create_job(
     # global cron.mirror_delivery config, default off).
     if normalized_attach is not None:
         job["attach_to_session"] = normalized_attach
+
+    # Only persist audience when explicitly set, so existing jobs stay
+    # byte-identical (absent key => "operator", the historical behaviour).
+    if normalized_audience is not None:
+        job["audience"] = normalized_audience
 
     with _jobs_lock():
         jobs = load_jobs()
