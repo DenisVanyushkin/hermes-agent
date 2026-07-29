@@ -80,6 +80,23 @@ CONFIG_DEFAULTS = {
     # one delivered "take this" escalation and the next for the same
     # still-pending med_intake, regardless of gate.deliver's own outcome.
     "med_repeat_min": 45,
+    # Med gating (spec 2026-07-29). Оба гейта откладывают ПЕРЕПРОВЕРКУ,
+    # а не попытку доставки: удержанная доза получает
+    # series_next_utc = now + med_gate_recheck_min и НЕ считается
+    # отправленной. Это отделяет "попытку доставки" от "перепроверки
+    # условия" -- разделения, которого в _meds_series раньше не было.
+    "med_wake_gate_enabled": True,
+    # Утренние дозы (плановое время раньше этого) удерживаются, пока нет
+    # признака жизни. Тот же момент -- жёсткий бэкстоп: в med_wake_gate_until
+    # гейт сдаётся и отправляет независимо от сигналов.
+    "med_wake_gate_until": "12:00",
+    "med_away_gate_enabled": True,
+    # Away-гейт сдаётся здесь, чтобы доза не утекла молча в полуночный
+    # missed-closeout.
+    "med_away_gate_until": "21:00",
+    "med_gate_recheck_min": 10,
+    # ⏰-реакция на напоминании о лекарстве откладывает дозу на столько минут.
+    "med_snooze_min": 60,
     # Phase 6a: nightly maintenance tick (fam tick maintenance).
     "audit_retention_days": 90,   # prune audit_log rows older than this (§6.5)
     "backup_keep": 7,             # daily .backup copies to keep per DB (§8.4)

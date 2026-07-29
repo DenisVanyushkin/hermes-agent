@@ -198,6 +198,16 @@ CREATE TABLE IF NOT EXISTS sent_messages (
     CHECK (ack_status IN ('none','confirmed','skipped')),
   created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_sent_messages_kind_ref ON sent_messages(kind, ref_id);
+CREATE TABLE IF NOT EXISTS sent_message_refs (
+  id INTEGER PRIMARY KEY,
+  sent_message_id INTEGER NOT NULL
+    REFERENCES sent_messages(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('reminder','med')),
+  ref_id INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_sent_message_refs_msg
+  ON sent_message_refs(sent_message_id);
+CREATE INDEX IF NOT EXISTS idx_sent_message_refs_ref
+  ON sent_message_refs(kind, ref_id);
 CREATE TABLE IF NOT EXISTS ext_exports (
   event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
   href TEXT,
@@ -426,6 +436,12 @@ def init_db(conn):
     _ensure_column(conn, "events", "road_origin_lon", "road_origin_lon REAL")
     _ensure_column(conn, "events", "road_origin_source",
                    "road_origin_source TEXT")
+    # Med gating (spec 2026-07-29): why a still-pending dose is being
+    # held back by tick._meds_series. NULL = not held. Written only on
+    # transition into/out of a hold, never on the 10-minute recheck --
+    # audit_log already carries 22k+ tick.reminders rows and a
+    # per-recheck audit row per dose would swamp it.
+    _ensure_column(conn, "med_intakes", "gate_reason", "gate_reason TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','12')")
     conn.execute(
