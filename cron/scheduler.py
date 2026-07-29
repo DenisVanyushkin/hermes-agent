@@ -4219,8 +4219,28 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
             # Deliver the final response to the origin/target chat.
             # If the agent responded with [SILENT], skip delivery (but
-            # output is already saved above).  Failed jobs always deliver.
-            deliver_content = final_response if success else _summarize_cron_failure_for_delivery(job, error)
+            # output is already saved above).  Failed jobs always deliver
+            # -- to the operator alert channel when the job is end-user
+            # facing (2026-07-28/29 incident: an ImportError was delivered
+            # to Amina's WhatsApp), otherwise to the job's own chat target
+            # as before.
+            # _audience_cfg is initialized here (not only on the failure
+            # branch below) so the `if operator_alert:` check after the
+            # should_deliver block can reference it unconditionally --
+            # otherwise a future change to either branch risks a NameError.
+            operator_alert = None
+            _audience_cfg = None
+            if success:
+                deliver_content = final_response
+            else:
+                try:
+                    _audience_cfg = load_config()
+                except Exception:  # noqa: BLE001 — policy must not fail the run
+                    pass
+                deliver_content, operator_alert = plan_cron_failure_delivery(
+                    job, error, _audience_cfg
+                )
+                deliver_content = deliver_content or ""
             # Treat whitespace-only final responses the same as empty
             # responses: do not deliver a blank message, and let the
             # empty-response guard below mark the run as a soft failure.
@@ -4241,6 +4261,11 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
                 except Exception as de:
                     delivery_error = str(de)
                     logger.error("Delivery failed for job %s: %s", job["id"], de)
+
+            if operator_alert:
+                _send_cron_operator_alert(
+                    operator_alert, cfg=_audience_cfg, adapters=adapters, loop=loop
+                )
         finally:
             # Tear down the deferred agent(s) now that save + delivery have run
             # (or raised). Must happen on every path so cron agents never leak
