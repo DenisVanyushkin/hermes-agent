@@ -86,15 +86,24 @@ def _hook(adapter, stdout, returncode=0):
 
 
 def test_removal_never_reaches_the_dialogue_path():
-    """Un-reacting must not produce a second turn."""
-    adapter = _make_adapter(reaction_dialogue=True)
-    dispatch = _apply(adapter, _reaction(removal=True, emoji=""))
+    """Un-reacting must not produce a second turn, and must not even cost
+    a subprocess call -- the filter has to run before the hook, not just
+    before the dispatch."""
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    with patch("asyncio.create_subprocess_exec", AsyncMock()) as create_proc:
+        dispatch = _apply(adapter, _reaction(removal=True, emoji=""))
+    create_proc.assert_not_called()
     dispatch.assert_not_awaited()
 
 
 def test_emoji_outside_whitelist_never_reaches_the_dialogue_path():
-    adapter = _make_adapter(reaction_dialogue=True)
-    dispatch = _apply(adapter, _reaction(emoji="🦆"))
+    """An off-whitelist emoji must not cost a subprocess either."""
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    with patch("asyncio.create_subprocess_exec", AsyncMock()) as create_proc:
+        dispatch = _apply(adapter, _reaction(emoji="🦆"))
+    create_proc.assert_not_called()
     dispatch.assert_not_awaited()
 
 
@@ -114,11 +123,19 @@ def test_handled_ack_stops_before_the_dialogue_path():
 
 
 def test_unhandled_reaction_falls_through_to_the_dialogue_path():
+    """A 'react' key alone must not trigger the ack side-effect -- only
+    'handled: true' does. Paired with
+    test_handled_ack_stops_before_the_dialogue_path, this makes the
+    'handled' gate itself load-bearing: on the pre-Task-5 code (which
+    keyed the ack purely off presence of 'react') this stdout would still
+    call _send_reaction."""
     adapter = _make_adapter(reaction_dialogue=True,
                             reaction_hook_cmd=["/bin/true"])
-    with _hook(adapter, '{"handled": false, "result": "unknown_message"}'):
+    with _hook(adapter,
+               '{"handled": false, "react": "✅", "result": "unknown_message"}'):
         dispatch = _apply(adapter, _reaction())
     dispatch.assert_awaited_once()
+    adapter._send_reaction.assert_not_awaited()
 
 
 def test_hook_nonzero_exit_falls_through_instead_of_dropping():
@@ -136,6 +153,25 @@ def test_hook_non_json_output_falls_through():
     with _hook(adapter, "not json at all"):
         dispatch = _apply(adapter, _reaction())
     dispatch.assert_awaited_once()
+
+
+def test_hook_non_utf8_output_falls_through():
+    """Non-UTF-8 bytes on stdout must not escape as an uncaught
+    UnicodeDecodeError -- that would bubble past _apply_reaction_event
+    into the poll loop's generic handler, which sleeps 5s and drops every
+    remaining event in the batch (exactly the 'reaction vanished' outcome
+    the docstring promises not to produce)."""
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    proc = AsyncMock()
+    proc.communicate = AsyncMock(return_value=(b"\xff\xfe not utf-8", b""))
+    proc.returncode = 0
+    adapter._dispatch_reaction_dialogue = AsyncMock()
+    adapter._send_reaction = AsyncMock(return_value=True)
+    with patch("asyncio.create_subprocess_exec",
+               AsyncMock(return_value=proc)):
+        asyncio.run(adapter._apply_reaction_event(_reaction()))
+    adapter._dispatch_reaction_dialogue.assert_awaited_once()
 
 
 def test_hook_that_fails_to_start_falls_through():

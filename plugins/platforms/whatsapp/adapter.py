@@ -1664,7 +1664,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             return
         try:
             verdict = json.loads((stdout or b"").decode().strip() or "{}")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             print(f"[{self.name}] Reaction hook returned non-JSON output")
             await self._dispatch_reaction_dialogue(event)
             return
