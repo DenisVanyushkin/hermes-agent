@@ -223,6 +223,72 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     return f"⚠️ Cron '{job_name}' failed: {cleaned}"
 
 
+def resolve_cron_audience(job: dict, cfg: Optional[dict] = None) -> str:
+    """Who reads this job's deliveries: "operator" or "end_user".
+
+    Never raises — this runs inside failure handling, where a second
+    exception would compound the incident. Does not call
+    ``cron.jobs.normalize_audience``, which raises ``ValueError`` on an
+    unrecognized value; a job carrying a typo in a hand-edited
+    ``jobs.json`` (e.g. ``"enduser"``) must degrade to the config-based
+    check below rather than crash mid-delivery. The stored ``audience``
+    value is untrusted input (an operator may have written it directly
+    into ``jobs.json``, bypassing ``normalize_audience``), so it is
+    stripped and lowercased before the membership test.
+
+    An explicit ``audience`` field wins. Otherwise any resolved delivery
+    target listed in ``cron.end_user_targets`` marks the job as end-user
+    facing — a safety net so a job created later without the flag still
+    cannot deliver a technical failure to a non-technical reader.
+    """
+    explicit = str(job.get("audience") or "").strip().lower()
+    if explicit in CRON_AUDIENCES:
+        return explicit
+
+    configured = ((cfg or {}).get("cron", {}) or {}).get("end_user_targets") or []
+    if not configured:
+        return "operator"
+    marked = {str(t).strip().lower() for t in configured if str(t).strip()}
+    for target in _resolve_delivery_targets(job):
+        platform = str(target.get("platform", "")).lower()
+        chat_id = str(target.get("chat_id", ""))
+        if f"{platform}:{chat_id}".lower() in marked or chat_id.lower() in marked:
+            return "end_user"
+    return "operator"
+
+
+def plan_cron_failure_delivery(
+    job: dict, error: Optional[str], cfg: Optional[dict] = None
+) -> tuple[Optional[str], Optional[str]]:
+    """Decide what a failed run delivers, and to whom.
+
+    Returns ``(chat_text, operator_alert_text)``. ``chat_text is None``
+    means the job's own delivery target gets nothing at all — the policy
+    for ``end_user`` jobs, where a technical failure is noise the reader
+    cannot act on (2026-07-28/29: an ImportError reached Amina's
+    WhatsApp). ``operator_alert_text is None`` means no separate alert is
+    warranted because the chat target is already the operator.
+    """
+    summary = _summarize_cron_failure_for_delivery(job, error)
+    if resolve_cron_audience(job, cfg) == "operator":
+        return summary, None
+
+    job_name = job.get("name") or job.get("id") or "cron job"
+    targets = ", ".join(
+        f"{t.get('platform')}:{t.get('chat_id')}" for t in _resolve_delivery_targets(job)
+    ) or _normalize_deliver_value(job.get("deliver", "local"))
+    detail = _redact_technical_detail(str(error or "unknown error")[:2000])
+    if len(detail) > 600:
+        detail = detail[:597].rstrip() + "..."
+    alert = (
+        f"⚠️ Cron '{job_name}' failed and the failure was WITHHELD from the "
+        f"end-user target ({targets}) — nothing was delivered there.\n"
+        f"Reason: {detail}\n"
+        f"Job id: {job.get('id', '?')}. Full details saved in cron output."
+    )
+    return None, alert
+
+
 class CronPromptInjectionBlocked(Exception):
     """Raised by _build_job_prompt when the fully-assembled prompt trips the
     injection scanner. Caught in run_job so the operator sees a clean
@@ -360,7 +426,7 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim
+from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim, CRON_AUDIENCES
 from cron.executions import create_execution, finish_execution, mark_execution_running
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
