@@ -47,7 +47,7 @@ def _reasons(description: str, *, location: str = "Berlin, Germany") -> list[str
         (
             "linkedin tracking tag",
             'company events<br><span style="color: rgb(255, 255, 255);">#li-hybrid</span>',
-            "El Salvador (Remote)",
+            "El Salvador",
         ),
         (
             "linkedin tracking tags, onsite variant",
@@ -57,12 +57,12 @@ def _reasons(description: str, *, location: str = "Berlin, Germany") -> list[str
         (
             "onsites as a plural noun for company events",
             "manage team meetings, onsites, and events by handling scheduling and vendor coordination",
-            "Remote, Americas",
+            "New York, NY, United States",
         ),
         (
             "onsite interview logistics",
             "our process is a screen, a take-home and a final on-site interview with the leadership team",
-            "Remote, Europe",
+            "Berlin, Germany",
         ),
         (
             "hybrid modifying the discipline, not the workplace",
@@ -72,12 +72,12 @@ def _reasons(description: str, *, location: str = "Berlin, Germany") -> list[str
         (
             "hybrid as a technical architecture term",
             "you will take full ownership of our hybrid infrastructure, managing the lifecycle of our fleet",
-            "Remote, Europe",
+            "Amsterdam",
         ),
         (
             "hybrid as a commercial pricing term",
             "drive the transition across seat-based, usage-based, and hybrid pricing models",
-            "Remote, US",
+            "New York, NY, United States",
         ),
     ],
 )
@@ -85,6 +85,38 @@ def test_word_without_work_format_meaning_is_not_an_onsite_requirement(
     label: str, description: str, location: str
 ) -> None:
     assert REASON not in _reasons(description, location=location), label
+
+
+# --- a remote location settles the work format ------------------------------
+
+
+@pytest.mark.parametrize(
+    "label, description, location",
+    [
+        (
+            "company boilerplate about a hybrid workplace on a remote posting",
+            "we operate as a hybrid workplace to ensure our employees can create a work-life harmony",
+            "Remote, US",
+        ),
+        (
+            "remote offered alongside offices",
+            "this role can be offered in a hybrid approach, working from our london office and from home",
+            "Cardiff, London or Remote (UK)",
+        ),
+    ],
+)
+def test_remote_location_is_not_an_onsite_requirement(
+    label: str, description: str, location: str
+) -> None:
+    assert REASON not in _reasons(description, location=location), label
+
+
+def test_onsite_stated_in_the_location_wins_over_the_word_remote() -> None:
+    reasons = _reasons(
+        "we are looking for a product leader to own the roadmap.",
+        location="Remote or New York, NY (On-site)",
+    )
+    assert REASON in reasons
 
 
 # --- genuine work-format statements -----------------------------------------

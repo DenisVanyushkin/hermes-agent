@@ -303,8 +303,21 @@ _HYBRID_NON_WORK_SENSE = re.compile(
 )
 
 
-def has_onsite_requirement(text: str) -> bool:
-    """True when the text states a work format that requires office presence."""
+_REMOTE_LOCATION = re.compile(r"\bremote\b", re.I)
+
+
+def has_onsite_requirement(text: str, *, location: str = "") -> bool:
+    """True when the text states a work format that requires office presence.
+
+    A location that states remote settles the question: company boilerplate
+    about a hybrid workplace describes the employer, not this vacancy.
+    """
+    if (
+        _REMOTE_LOCATION.search(location)
+        and not _ONSITE_WORD.search(location)
+        and not _HYBRID_WORD.search(location)
+    ):
+        return False
     cleaned = _TRACKING_TAG.sub(" ", text)
     for match in _ONSITE_WORD.finditer(cleaned):
         if not _ONSITE_NON_WORK_SENSE.match(cleaned, match.start()):
@@ -376,7 +389,7 @@ def rejection_reasons_for(
 
     if not vacancy.description or len(vacancy.description.strip()) < 120:
         reasons.append("insufficient_data")
-    if has_onsite_requirement(text):
+    if has_onsite_requirement(text, location=vacancy.location or ""):
         reasons.append("onsite_requirement_mismatch")
     if any(term in text for term in ["english required", "native", "language requirement", "fluent in"]) and evaluation.score < 70:
         reasons.append("language_requirement_mismatch")
