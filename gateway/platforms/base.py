@@ -2197,18 +2197,29 @@ def _invalidate_pending_stt_cache(event: MessageEvent) -> None:
             delattr(event, attr)
 
 
-def _apply_reply_quote(target: MessageEvent, source: Optional[MessageEvent]) -> None:
-    """Move the reply-quote group onto *target* as one coherent unit.
+def _has_reply_quote(event) -> bool:
+    """Return True when *event* carries a quote that would actually render.
 
-    ``reply_to_message_id`` / ``reply_to_text`` / ``reply_to_is_own_message``
-    (plus the author fields describing the same quoted message) only mean
-    anything together: ``run.py`` renders the quote when the id AND the text
-    are both truthy, so an id from one message beside text from another yields
-    a confidently wrong quote instead of a visible failure.  Busy-session
-    merges must therefore take the whole group from a single event, or clear
-    it.
+    ``gateway/run.py`` renders the ``[Replying to: ...]`` pointer only when
+    BOTH ``reply_to_message_id`` and ``reply_to_text`` are truthy, so an id
+    without text is not a quote for merge purposes -- adopting one (a Telegram
+    reply to a caption-less media message, say) would replace a renderable
+    pending quote with a silent nothing.
+    """
+    return bool(getattr(event, "reply_to_message_id", None)) and bool(
+        getattr(event, "reply_to_text", None)
+    )
 
-    Passing ``source=None`` clears the group.
+
+def _adopt_reply_quote(target: MessageEvent, source: MessageEvent) -> None:
+    """Copy the whole reply-quote group from *source* onto *target*.
+
+    ``reply_to_message_id`` / ``reply_to_text`` / ``reply_to_author_id`` /
+    ``reply_to_author_name`` / ``reply_to_is_own_message`` describe one quoted
+    message and only mean anything together: an id from one message beside the
+    text of another renders a confidently wrong quote instead of failing
+    visibly.  Busy-session merges therefore take the group from a single event
+    or leave it alone; nothing clears it.
     """
     if not hasattr(target, "reply_to_message_id"):
         return
@@ -2251,8 +2262,8 @@ def merge_pending_message_event(
             existing.media_types.extend(event.media_types)
             if event.text:
                 existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
-            if getattr(event, "reply_to_message_id", None):
-                _apply_reply_quote(existing, event)
+            if _has_reply_quote(event):
+                _adopt_reply_quote(existing, event)
             _invalidate_pending_stt_cache(existing)
             return
 
@@ -2272,8 +2283,8 @@ def merge_pending_message_event(
                 and event.message_type != MessageType.TEXT
             ):
                 existing.message_type = event.message_type
-            if getattr(event, "reply_to_message_id", None):
-                _apply_reply_quote(existing, event)
+            if _has_reply_quote(event):
+                _adopt_reply_quote(existing, event)
             _invalidate_pending_stt_cache(existing)
             return
 
@@ -2284,8 +2295,8 @@ def merge_pending_message_event(
         ):
             if event.text:
                 existing.text = f"{existing.text}\n{event.text}" if existing.text else event.text
-            if getattr(event, "reply_to_message_id", None):
-                _apply_reply_quote(existing, event)
+            if _has_reply_quote(event):
+                _adopt_reply_quote(existing, event)
             return
 
     pending_messages[session_key] = event
@@ -4638,22 +4649,17 @@ class BasePlatformAdapter(ABC):
                     else event.text
                 )
             latest_message_id = getattr(event, "message_id", None)
-            latest_anchor = latest_message_id or getattr(event, "reply_to_message_id", None)
             if latest_message_id is not None:
+                # Reply anchoring rides on message_id (_reply_anchor_for_event),
+                # so keeping it fresh is what points the answer at the newest
+                # message of the burst.  reply_to_* is quote context, not an
+                # anchor, and is merged by the same rule as interrupt mode:
+                # take the incoming event's quote when it has one, otherwise
+                # leave the buffered quote alone.  Never derive reply_to_* from
+                # message_id -- that produced a real id beside a foreign quote.
                 state.event.message_id = str(latest_message_id)
-            if latest_anchor is not None and hasattr(state.event, "reply_to_message_id"):
-                # The anchor carries two different meanings and the rest of the
-                # quote group has to follow whichever one applies:
-                #   * the incoming event has no message id -> the anchor IS its
-                #     own quote, so adopt that event's whole quote group;
-                #   * the anchor is the incoming event's OWN message id -> the
-                #     merged turn quotes nothing, so the earlier event's quote
-                #     must be cleared rather than left beside a foreign id.
-                _apply_reply_quote(
-                    state.event,
-                    event if latest_message_id is None else None,
-                )
-                state.event.reply_to_message_id = str(latest_anchor)
+            if _has_reply_quote(event):
+                _adopt_reply_quote(state.event, event)
             state.last_ts = now
 
         if state.task is not None and not state.task.done():
