@@ -1,6 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
+from urllib.parse import urljoin
 from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, series, shopping, tick, whereami
 
 def cmd_init(args):
@@ -969,6 +970,443 @@ def cmd_tick_brevity(args):
         print(f"sent={result['sent']} reason={result['reason']}")
     return 0
 
+
+# ---- cal-ext tick (Task 6) ------------------------------------------------
+#
+# Wires extcal.py's already-landed, independently-tested layers (discover /
+# fetch_changes / parse_ics / expand / plan_changes / apply_changes -- see
+# that module's own docstring) into one periodic sync, exactly the way
+# cmd_tick_offsite above wires maint.offsite_backup in: extcal.py itself
+# never touches a clock, a CLI arg, or scheduling -- only this glue does.
+# This glue's own job, and nothing more:
+#   (a) turn cfg + "now" into the read/write window (design doc Sec.6);
+#   (b) fan discover()'s calendars out through fetch_changes()/parse_ics()/
+#       expand() per calendar, honoring extcal_read_calendars and the
+#       write-target anti-echo belt (probe() already does both; reproduced
+#       here since probe()'s own filtering is private to that function);
+#   (c) attach external_href/external_etag/external_seq onto plan_changes()'
+#       insert/update entries by uid -- documented as THIS task's job in
+#       extcal._apply_event_insert/_apply_event_update's own docstrings (a
+#       Changeset's insert/update entries never carry these on their own:
+#       one recurring master's single ICS resource fans out into MANY
+#       occurrences sharing one href/etag, so extcal.py leaves the fan-out
+#       to whoever has the raw fetch_changes() items alongside the expanded
+#       Occurrences -- that's here, not extcal.py);
+#   (d) persist meta sync-token/last_ok (only for calendars that actually
+#       synced this round -- see _cal_ext_sync's own docstring on WHY);
+#   (e) turn a total-sync failure into tick.error + exit 1 (cmd_tick_cal_ext
+#       itself, not the helper) -- a PARTIAL failure (one calendar down,
+#       another live) is not this path; see both docstrings below for the
+#       exact line between the two.
+
+# Anti-echo belt 2 (design doc invariant #4): an event whose UID matches
+# this convention was written BY hermes into her calendar in the first
+# place (mail.send_event_ics's `fam-<event_id>@hermes-home` convention) --
+# never treated as "her" data even if the write-target URL in config is
+# stale, missing, or renamed (belt 1 below is the other, independent leg).
+_EXTCAL_ECHO_UID_RE = re.compile(r"^fam-.*@hermes-home$")
+
+
+def _extcal_window(cfg, now):
+    """`(window_start, window_end)` = `[today-1d, today+horizon_weeks]`,
+    the same formula extcal._time_range uses for the real iCloud query
+    (design doc Sec.6) -- `horizon_weeks` always comes from cfg
+    (`extcal_horizon_weeks`, default 8), never hardcoded, so a config
+    change takes effect on the very next tick with no code change."""
+    horizon_weeks = cfg.get("extcal_horizon_weeks", 8)
+    return now - timedelta(days=1), now + timedelta(weeks=horizon_weeks)
+
+
+def _extcal_eligible_calendars(cfg, calendars):
+    """discover()'s full list -> the subset THIS tick actually reads: drops
+    the write-target echo collection (anti-echo belt 1, design doc
+    invariant #4) and applies `extcal_read_calendars` (empty = every
+    non-echo calendar) -- the same two rules extcal.probe() already
+    applies (by url OR by displayname, matching how Denis will actually
+    populate the config: calendar names, not URLs)."""
+    write_url = (cfg.get("extcal_write_calendar") or "").rstrip("/")
+    read_filter = set(cfg.get("extcal_read_calendars") or [])
+    out = []
+    for c in (calendars or []):
+        url = c.get("url") or ""
+        if write_url and url.rstrip("/") == write_url:
+            continue
+        if read_filter and url not in read_filter and c.get("name") not in read_filter:
+            continue
+        out.append(c)
+    return out
+
+
+def _extcal_iphone_rows(conn, table, date_field, start_iso, end_iso):
+    """Every `owner='iphone'` row (ANY status -- tombstones must stay
+    visible to plan_changes, see its own docstring on "one-way ratchet")
+    whose `date_field` falls inside this tick's window. `date_field` is
+    `start_utc` for events, `deadline` for plans -- callers pass the
+    matching bound (deadline is a plain YYYY-MM-DD Almaty-local date, not
+    a UTC timestamp, so it needs its own, differently-formatted bounds --
+    see _cal_ext_sync)."""
+    rows = conn.execute(
+        f"SELECT * FROM {table} WHERE owner='iphone' "
+        f"AND {date_field} IS NOT NULL AND {date_field} >= ? AND {date_field} <= ?",
+        (start_iso, end_iso),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _extcal_hermes_rows(conn, table, date_field, status, start_iso, end_iso):
+    """Every `owner='hermes'` row in its live status, inside this tick's
+    window -- fuzzy-match CANDIDATES ONLY (plan_changes' rule #2, "she
+    added the same thing in both places"). Never a write target: rule #3
+    is enforced structurally inside plan_changes itself (these rows are
+    only ever read there, never keyed into events_by_key/plans_by_key)."""
+    rows = conn.execute(
+        f"SELECT * FROM {table} WHERE owner='hermes' AND status=? "
+        f"AND {date_field} IS NOT NULL AND {date_field} >= ? AND {date_field} <= ?",
+        (status, start_iso, end_iso),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _extcal_row_calendar_url(row, eligible):
+    """Which eligible calendar's collection a local row's `external_href`
+    lives under, by URL-prefix match (a CalDAV resource href is always a
+    child of its own calendar collection's URL). None for a row with no
+    `external_href` (never externally synced) or one under none of THIS
+    tick's eligible calendars (e.g. dropped from extcal_read_calendars
+    since it was imported, or predates this task)."""
+    href = row.get("external_href")
+    if not href:
+        return None
+    for c in eligible:
+        url = c.get("url")
+        if url and href.startswith(url.rstrip("/") + "/"):
+            return url
+    return None
+
+
+def _cal_ext_sync(conn, cfg, now, dry_run):
+    """The whole read -> reconcile -> (write) pipeline for one `fam tick
+    cal-ext` run. Returns `{"error": str|None, "counts": dict|None,
+    "calendars": [{url,name,mode,reason}, ...], "changeset": Changeset,
+    "sync_errors": [str, ...], "tokens": {calendar_url: token|None}}`.
+
+    `error` is set ONLY when EVERY eligible calendar's fetch_changes call
+    came back mode="error" this round (missing credentials, iCloud
+    unreachable, ...) -- a real total failure. A MIX of one failed
+    calendar and one live one is explicitly NOT this case (task brief hard
+    requirement: "частичный отказ... не теряет данные живого") -- the live
+    calendar's changes are still computed/applied below; only the dead
+    calendar's own rows are left untouched (see the scoping note next).
+
+    Per-calendar incremental-safety scoping -- the reason this is not a
+    simple "merge every calendar's occurrences, call plan_changes() once
+    over ALL local rows": extcal.plan_changes decides "vanished on her
+    phone" by finding an owner='iphone' local row NOT present in
+    `remote_occurrences` THIS round (see its own docstring on
+    "Disappearance") -- correct ONLY when `remote_occurrences` is a FULL
+    current listing, exactly what calendar-query over the whole horizon
+    ("initial_full"/"fallback_full" mode) gives you. REPORT
+    sync-collection ("sync_collection" mode) is INCREMENTAL BY DESIGN
+    (RFC 6578): its `items` are only what changed (or was deleted) since
+    the last token, so an unchanged-since-last-sync row would look
+    "vanished" on every steady-state tick if it were judged against that
+    same batch unscoped -- a false, silently destructive cancel/drop of
+    something nobody touched, on every single 15-minute tick forever once
+    the sync-token exchange reaches steady state. The fix: an
+    owner='iphone' row is only ever offered to plan_changes THIS round if
+    EITHER (a) its own calendar ran in a full mode this round (an
+    exhaustive listing -- natural disappearance is correct), OR (b) its
+    own `external_href` is one this round's incremental batch actually
+    mentioned (changed OR deleted -- a sync-collection tombstone is an
+    explicit 404 response entry, see extcal._parse_multistatus_items, so a
+    real phone-side deletion IS visible here, just as a bare href with no
+    ICS to parse, never as a synthesized Occurrence). A row whose calendar
+    errored out this round, or whose href simply wasn't touched by an
+    incremental delta, is left OUT of local_snapshot entirely for this
+    tick -- untouched, never cancelled -- which is exactly the guarantee
+    both the partial-failure and steady-state-incremental-sync invariants
+    are on the hook for.
+
+    Sync-token seeding (live-probe finding, 2026-07-29): `fetch_changes`
+    with `sync_token=None` (first sync for a calendar) returns
+    mode="initial_full" with an EMPTY `new_token` -- sync-collection was
+    never even attempted, so there is nothing fresh to persist from that
+    call itself. The token to seed for NEXT time is `calendar["sync_token"]`
+    -- discover()'s OWN read of the calendar's current sync-token,
+    captured BEFORE this round's full read below runs. Seeding from
+    BEFORE (not after) the read matters: it guarantees the very next
+    incremental tick's sync-collection call re-covers any edit that lands
+    on her phone in the window between this discover() and this tick
+    finishing -- a token captured only after would silently miss exactly
+    that window. Re-delivery of an already-applied change on the next tick
+    is harmless (apply_changes' own idempotency guards, e.g.
+    _apply_event_insert's SELECT-before-insert). Only "sync_collection"
+    mode persists ITS OWN returned `new_token` (the normal incremental
+    chain from then on).
+    """
+    window_start, window_end = _extcal_window(cfg, now)
+    window_start_iso, window_end_iso = window_start.isoformat(), window_end.isoformat()
+    window_start_date = window_start.astimezone(extcal.ALMATY).date().isoformat()
+    window_end_date = window_end.astimezone(extcal.ALMATY).date().isoformat()
+    now_iso = now.isoformat()
+
+    calendars = extcal.discover(cfg)
+    eligible = _extcal_eligible_calendars(cfg, calendars)
+
+    per_calendar = []
+    combined_occurrences = []
+    sync_errors = []
+    key_meta = {}                  # bare ICS uid -> {"href", "etag"}
+    full_mode_urls = set()
+    incremental_hrefs = {}         # calendar url -> set of hrefs this batch touched
+    errored_urls = set()
+    tokens_to_persist = {}         # calendar url -> token (only calendars that synced)
+
+    for calendar in eligible:
+        url = calendar.get("url")
+        stored_token = famdb.meta_get(conn, f"extcal_sync_token:{url}")
+        # Captured BEFORE fetch_changes() below runs -- see this
+        # function's own docstring, "Sync-token seeding".
+        candidate_token = calendar.get("sync_token")
+
+        items, new_token, sync_info = extcal.fetch_changes(
+            cfg, calendar, sync_token=stored_token)
+        mode = sync_info.get("mode") if isinstance(sync_info, dict) else "error"
+        per_calendar.append({
+            "url": url, "name": calendar.get("name"),
+            "mode": mode,
+            "reason": sync_info.get("reason") if isinstance(sync_info, dict) else None,
+        })
+
+        if mode == "error":
+            errored_urls.add(url)
+            sync_errors.append(
+                f"{calendar.get('name') or url}: "
+                f"{sync_info.get('reason') if isinstance(sync_info, dict) else 'unknown'}")
+            continue
+
+        tokens_to_persist[url] = new_token if mode == "sync_collection" else candidate_token
+
+        batch_hrefs = set()
+        components = []
+        for item in (items or []):
+            href = item.get("href")
+            abs_href = urljoin(url, href) if (url and href) else href
+            if abs_href:
+                batch_hrefs.add(abs_href)
+            if item.get("deleted") or not item.get("ics"):
+                continue  # tombstone: no ICS to parse -- disappearance below handles it
+            for comp in extcal.parse_ics(item["ics"]):
+                uid = comp.get("uid")
+                if uid and _EXTCAL_ECHO_UID_RE.match(uid):
+                    continue  # anti-echo belt 2 (design doc invariant #4)
+                components.append(comp)
+                if uid:
+                    key_meta.setdefault(uid, {"href": abs_href, "etag": item.get("etag")})
+
+        expanded = extcal.expand(components, window_start, window_end)
+        combined_occurrences.extend(expanded["occurrences"])
+        sync_errors.extend(expanded["errors"])
+
+        if mode == "sync_collection":
+            incremental_hrefs[url] = batch_hrefs
+        else:
+            full_mode_urls.add(url)
+
+    total_failure = bool(eligible) and len(errored_urls) == len(eligible)
+    if total_failure:
+        return {
+            "error": "; ".join(sync_errors) or "cal-ext sync failed for every calendar",
+            "counts": None, "calendars": per_calendar, "changeset": None,
+            "sync_errors": sync_errors, "tokens": {},
+        }
+
+    # Fan bare-uid href/etag out to every concrete occurrence key it
+    # produced (extcal._occurrence_key -- the SAME length-prefixed
+    # encoding local rows' own external_uid column uses, see extcal.py's
+    # module note): one recurring master's single ICS resource expands
+    # into MANY occurrences sharing one href/etag.
+    occ_key_meta = {}
+    for occ in combined_occurrences:
+        uid = occ.get("uid")
+        if not uid or uid not in key_meta:
+            continue
+        key = extcal._occurrence_key(uid, occ.get("recurrence_id"))
+        meta = dict(key_meta[uid])
+        meta["seq"] = occ.get("seq") or 0
+        occ_key_meta[key] = meta
+
+    def _include_iphone_row(row):
+        calendar_url = _extcal_row_calendar_url(row, eligible)
+        if calendar_url is None:
+            return True  # never externally synced, or predates this task
+        if calendar_url in errored_urls:
+            return False  # no fresh data this round -- leave it exactly as-is
+        if calendar_url in full_mode_urls:
+            return True  # exhaustive listing -- natural disappearance is correct
+        return row.get("external_href") in incremental_hrefs.get(calendar_url, ())
+
+    iphone_events = [r for r in _extcal_iphone_rows(
+                        conn, "events", "start_utc", window_start_iso, window_end_iso)
+                     if _include_iphone_row(r)]
+    iphone_plans = [r for r in _extcal_iphone_rows(
+                        conn, "plans", "deadline", window_start_date, window_end_date)
+                    if _include_iphone_row(r)]
+    hermes_events = _extcal_hermes_rows(
+        conn, "events", "start_utc", "active", window_start_iso, window_end_iso)
+    hermes_plans = _extcal_hermes_rows(
+        conn, "plans", "deadline", "open", window_start_date, window_end_date)
+
+    events_id_to_key = {r["id"]: r.get("external_uid") for r in iphone_events}
+    plans_id_to_key = {r["id"]: r.get("external_uid") for r in iphone_plans}
+
+    local_snapshot = {
+        "events": iphone_events + hermes_events,
+        "plans": iphone_plans + hermes_plans,
+    }
+
+    changeset = extcal.plan_changes(combined_occurrences, local_snapshot, now_iso)
+
+    # T6's job (extcal._apply_event_insert/_apply_event_update's own
+    # docstrings): attach external_href/external_etag/external_seq -- a
+    # Changeset's insert/update entries never carry these on their own.
+    for entry in changeset["events"]["insert"]:
+        meta = occ_key_meta.get(entry.get("external_uid"))
+        if meta:
+            entry["external_href"] = meta["href"]
+            entry["external_etag"] = meta["etag"]
+    for entry in changeset["events"]["update"]:
+        meta = occ_key_meta.get(events_id_to_key.get(entry.get("id")))
+        if meta:
+            entry["external_href"] = meta["href"]
+            entry["external_etag"] = meta["etag"]
+            entry["external_seq"] = meta["seq"]
+    for entry in changeset["plans"]["insert"]:
+        meta = occ_key_meta.get(entry.get("external_uid"))
+        if meta:
+            entry["external_href"] = meta["href"]
+            entry["external_etag"] = meta["etag"]
+    for entry in changeset["plans"]["update"]:
+        meta = occ_key_meta.get(plans_id_to_key.get(entry.get("id")))
+        if meta:
+            entry["external_href"] = meta["href"]
+            entry["external_etag"] = meta["etag"]
+
+    if dry_run:
+        return {
+            "error": None, "counts": None, "calendars": per_calendar,
+            "changeset": changeset, "sync_errors": sync_errors, "tokens": {},
+        }
+
+    counts = extcal.apply_changes(conn, changeset, cfg)
+    return {
+        "error": None, "counts": counts, "calendars": per_calendar,
+        "changeset": changeset, "sync_errors": sync_errors,
+        "tokens": tokens_to_persist,
+    }
+
+
+def cmd_tick_cal_ext(args):
+    """`fam tick cal-ext [--dry-run] [--json]` -- Task 6: wires extcal.py's
+    discover/fetch_changes/parse_ics/expand/plan_changes/apply_changes
+    layers into one periodic sync (fam-cal-ext.timer, every 15 min).
+
+    `extcal_enabled=false` (the default) is a hard, zero-action no-op --
+    exit 0, discover()/fetch_changes() never even called (no network touch
+    at all), matching cmd_tick_offsite's own disabled-is-a-noop contract
+    above.
+
+    `--dry-run` runs the FULL read -> reconcile pipeline for real (it is
+    read-only/pure by construction: discover, fetch_changes, parse_ics,
+    expand, plan_changes) but returns BEFORE apply_changes/meta writes --
+    nothing lands in the DB or in iCloud, per the task brief's hard
+    requirement. The computed changeset is printed either way.
+
+    A TOTAL sync failure (every eligible calendar's fetch_changes call came
+    back mode="error" this round -- see _cal_ext_sync's own docstring) is
+    marked via `_audit_tick_error("cal-ext", ...)` and exit 1 -- same
+    contract cmd_tick_offsite already established (task brief, citing
+    offsite's own C1 lesson: without this the nightly problem_summary
+    sweep would never learn her calendar stopped syncing). A PARTIAL
+    failure (one calendar down, another live) is explicitly NOT this path:
+    it exits 0, the live calendar's changes are still applied, and every
+    calendar's own mode/reason still reaches `audit cal.ext.sync` so the
+    problem stays visible without waking Denis over something that isn't
+    blocking her actual data.
+
+    Success persists `meta["extcal_sync_token:<calendar-url>"]` per
+    calendar that actually synced this round (an errored calendar's token
+    -- and therefore every row it owns -- is left exactly as it was) and
+    `meta["extcal_last_ok"]`, then `audit cal.ext.sync` with
+    apply_changes' own counts PLUS every calendar's `{url, name, mode,
+    reason}` -- `sync_info.mode` reaching the audit log is a hard
+    requirement: without it, a sync-token exchange silently regressing to
+    "fallback_full"/"initial_full" every 15 minutes forever would be
+    completely invisible (the exact I1 finding extcal.fetch_changes'
+    own docstring was written to prevent).
+    """
+    cfg = gate.load_config()
+    if not cfg.get("extcal_enabled"):
+        out = {"ok": True, "enabled": False}
+        if getattr(args, "json", False):
+            print(json.dumps(out, ensure_ascii=False))
+        else:
+            print("cal-ext disabled; skipping")
+        return 0
+
+    now = None
+    if getattr(args, "now", None):
+        now = datetime.fromisoformat(args.now)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+
+    dry_run = getattr(args, "dry_run", False)
+    conn = famdb.connect()
+
+    try:
+        result = _cal_ext_sync(conn, cfg, now, dry_run)
+    except Exception as e:                        # noqa: BLE001
+        _audit_tick_error("cal-ext", e)
+        print(f"cal-ext failed: {e}")
+        return 1
+
+    if result["error"]:
+        _audit_tick_error("cal-ext", result["error"])
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": result["error"],
+                               "calendars": result["calendars"]}, ensure_ascii=False))
+        else:
+            print(f"cal-ext failed: {result['error']}")
+        return 1
+
+    if dry_run:
+        out = {"ok": True, "dry_run": True, "calendars": result["calendars"],
+               "sync_errors": result["sync_errors"], "changeset": result["changeset"]}
+        print(json.dumps(out, ensure_ascii=False))
+        return 0
+
+    counts = result["counts"]
+    audit_payload = dict(counts)
+    audit_payload["calendars"] = result["calendars"]
+    if result["sync_errors"]:
+        audit_payload["sync_errors"] = result["sync_errors"]
+    audit.log(conn, "cal.ext.sync", audit_payload)
+
+    for url, token in result["tokens"].items():
+        if token:
+            famdb.meta_set(conn, f"extcal_sync_token:{url}", token)
+    famdb.meta_set(conn, "extcal_last_ok", now.isoformat())
+    conn.commit()
+
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, **counts, "calendars": result["calendars"]},
+                          ensure_ascii=False))
+    else:
+        print(" ".join(f"{k}={v}" for k, v in counts.items() if k != "errors"))
+    return 0
+
+
 def cmd_mail_test(args):
     """`fam mail test EVENT_ID` -- manually trigger the .ics email for one
     event, unconditionally (no email_enabled/denis-participant gating --
@@ -1920,6 +2358,13 @@ def build_parser():
 
     spb = tick_sub.add_parser("brevity"); spb.set_defaults(func=cmd_tick_brevity)
     spb.add_argument("--now"); spb.add_argument("--json", action="store_true")
+
+    spce = tick_sub.add_parser("cal-ext"); spce.set_defaults(func=cmd_tick_cal_ext)
+    spce.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
+    spce.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS,
+                       help="compute and print the changeset without writing to DB or iCloud")
+    spce.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
 
     sp = sub.add_parser("mail")
     mail_sub = sp.add_subparsers(dest="mail_cmd", required=True)

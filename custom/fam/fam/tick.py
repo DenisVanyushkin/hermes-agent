@@ -196,9 +196,15 @@ def road_recompute(conn, now_utc=None, cfg=None):
     now_dt = _parse_utc(now)
     thresholds = sorted(cfg.get("road_recompute_min", [120, 60]), reverse=True)
 
+    # Task 6 (external calendar): owner='hermes' only -- her owner='iphone'
+    # imported events already ring from her phone and don't need a
+    # road/leave_at figure from us, and the daily TomTom call budget (100)
+    # is shared with everything else that hits road.compute_travel_min; a
+    # calendar full of her own iPhone events would otherwise silently
+    # crowd out real Hermes-owned trips for that budget.
     candidates = conn.execute(
         "SELECT e.id FROM events e JOIN places p ON p.id = e.place_id "
-        "WHERE e.status='active' AND e.start_utc > ? "
+        "WHERE e.status='active' AND e.owner='hermes' AND e.start_utc > ? "
         "AND p.lat IS NOT NULL AND p.lon IS NOT NULL",
         (now,),
     ).fetchall()
