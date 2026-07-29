@@ -87,6 +87,42 @@ def _set_cron_session_title(session_db, session_id, base_title):
         return deduped
 
 
+# Any dotted exception-like class name used as a leading wrapper, e.g.
+# "ImportError: ", "httpx.HTTPStatusError: ". Chained wrappers
+# ("RuntimeError: ValueError: ...") are stripped in a bounded loop.
+_EXC_WRAPPER_RE = re.compile(
+    r"^\s*[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Interrupt):\s*"
+)
+# Absolute POSIX paths (two or more segments) and Windows drive paths. Chat
+# messages must never disclose where the install lives on disk.
+_FS_PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\s'\"()]*|(?:/[\w.\-]+){2,}/?)")
+# Python traceback frame lines — dropped wholesale, never summarized.
+_TRACEBACK_LINE_RE = re.compile(
+    r"^\s*(?:Traceback \(most recent call last\):|File \".*|\s+\^+\s*)$"
+)
+
+
+def _redact_technical_detail(text: str) -> str:
+    """Strip exception wrappers, traceback frames and filesystem paths.
+
+    Whatever the audience, a chat delivery must not disclose Python
+    internals or install layout (2026-07-28/29 incident: an ImportError
+    naming an absolute path was delivered to a non-technical recipient).
+    """
+    lines = [
+        line for line in text.splitlines()
+        if not _TRACEBACK_LINE_RE.match(line)
+    ]
+    cleaned = " ".join(lines)
+    for _ in range(3):  # bounded: chained wrappers, never an unbounded loop
+        stripped = _EXC_WRAPPER_RE.sub("", cleaned, count=1)
+        if stripped == cleaned:
+            break
+        cleaned = stripped
+    cleaned = _FS_PATH_RE.sub("…", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     """Return a compact one-line failure message for chat delivery.
 
@@ -148,14 +184,12 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
             "Full details saved in cron output."
         )
 
-    # Strip common exception wrappers and collapse provider payloads. Bound
-    # the input first so a multi-KB provider blob cannot slow the
-    # substitutions.
-    cleaned = re.sub(
-        r"^(RuntimeError|Exception|ValueError|HTTPStatusError):\s*",
-        "", text[:2000],
-    )
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # Strip exception wrappers, traceback frames and filesystem paths, and
+    # collapse provider payloads. Bound the input first so a multi-KB
+    # provider blob cannot slow the substitutions.
+    cleaned = _redact_technical_detail(text[:2000])
+    if not cleaned:
+        cleaned = "no diagnostic detail available"
     if len(cleaned) > 180:
         cleaned = cleaned[:177].rstrip() + "..."
     return f"⚠️ Cron '{job_name}' failed: {cleaned}"
