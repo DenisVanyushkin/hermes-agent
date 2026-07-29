@@ -112,6 +112,31 @@ def _attached_via_latlons(conn, event):
     return plans_mod.attached_via_points(conn, event)
 
 
+def _origin_for(conn, event, cfg, depart_at=None):
+    """Откуда ехать. Local-import shim onto whereami.resolve_origin, for
+    the same reason as _attached_via_latlons above: whereami imports road
+    at module level (it reuses _haversine_km), so a module-level import
+    back would make the two load each other mid-import.
+
+    Returns (lat, lon), or (None, None) when even the home coordinate is
+    unconfigured -- the same "no origin" signal callers used to derive
+    themselves from cfg["road_home_lat"] being None, so their existing
+    guards keep working unchanged.
+
+    Two clocks, deliberately: `depart_at` is what this route is FOR and
+    becomes whereami's at_utc, while fix-freshness is judged against
+    _wall_now(). Passing the depart anchor as wall clock would call every
+    GPS fix for a future event hopelessly stale -- the same trap
+    _tomtom_calls_today documents just above.
+    """
+    from fam import whereami
+    origin = whereami.resolve_origin(
+        conn, cfg, now_utc=_wall_now(), event=event, at_utc=depart_at)
+    if not origin:
+        return None, None
+    return origin["lat"], origin["lon"]
+
+
 def compute_travel_min(conn, event, cfg, now_utc=None):
     """Fallback ladder for an event's travel time, guarded by TomTom's
     daily call cap. Never raises.
@@ -127,7 +152,9 @@ def compute_travel_min(conn, event, cfg, now_utc=None):
        already spent this event's one attempt against the shared daily
        counter and audited its own road.cap/road.error.
     1. No attached vias (or none resolvable): event["place"] has lat AND
-       lon, and cfg has road_home_lat/lon: try tomtom_route_minutes
+       lon, and _origin_for resolves a start point (whereami's ladder --
+       присланная точка / машина / текущее событие / дом; only "no home
+       configured either" yields none): try tomtom_route_minutes
        (source "tomtom"); if it returns None, fall back to
        straight_line_minutes (source "straight"). The cap check happens
        before the TomTom attempt -- when exhausted, the ladder skips
@@ -141,19 +168,18 @@ def compute_travel_min(conn, event, cfg, now_utc=None):
     now = now_utc or _now()
     event_id = event.get("id")
     place = event.get("place") or {}
-    home_lat = cfg.get("road_home_lat")
-    home_lon = cfg.get("road_home_lon")
+    from_lat, from_lon = _origin_for(conn, event, cfg, depart_at=now)
     to_lat = place.get("lat")
     to_lon = place.get("lon")
 
-    if to_lat is not None and to_lon is not None and home_lat is not None and home_lon is not None:
+    if to_lat is not None and to_lon is not None and from_lat is not None and from_lon is not None:
         vias = _attached_via_latlons(conn, event)
         if vias:
             minutes, _points, source = route_via(
-                conn, (home_lat, home_lon), vias, (to_lat, to_lon), cfg, now_utc=now)
+                conn, (from_lat, from_lon), vias, (to_lat, to_lon), cfg, now_utc=now)
             if source == "tomtom":
                 return minutes, "tomtom"
-            return straight_line_minutes(home_lat, home_lon, to_lat, to_lon, cfg), "straight"
+            return straight_line_minutes(from_lat, from_lon, to_lat, to_lon, cfg), "straight"
 
         # No key at all: skip the tomtom rung silently -- no road.call,
         # no road.cap, no road.error. Distinguishes "not configured" from
@@ -164,13 +190,13 @@ def compute_travel_min(conn, event, cfg, now_utc=None):
                 audit.log(conn, "road.cap", {"event_id": event_id})
             else:
                 depart_at = now if isinstance(now, str) else now.isoformat(timespec="seconds")
-                minutes = tomtom_route_minutes(home_lat, home_lon, to_lat, to_lon, depart_at, cfg)
+                minutes = tomtom_route_minutes(from_lat, from_lon, to_lat, to_lon, depart_at, cfg)
                 if minutes is not None:
                     audit.log(conn, "road.call",
                                {"event_id": event_id, "minutes": minutes, "source": "tomtom"})
                     return minutes, "tomtom"
                 audit.log(conn, "road.error", {"event_id": event_id})
-        return straight_line_minutes(home_lat, home_lon, to_lat, to_lon, cfg), "straight"
+        return straight_line_minutes(from_lat, from_lon, to_lat, to_lon, cfg), "straight"
 
     if event.get("travel_min") is not None:
         return event["travel_min"], "manual"
@@ -288,7 +314,7 @@ def route_for_event(conn, event, cfg, now_utc=None):
        as compute_travel_min above, since route_via already spent the
        shared daily counter's one attempt.
     1. No attached vias (or none resolvable): event["place"] has lat AND
-       lon, and cfg has road_home_lat/lon: try tomtom_route_points
+       lon, and _origin_for resolves a start point: try tomtom_route_points
        (source "tomtom"); if it returns None, fall back to the straight
        home->place pair (source "straight"). The cap check happens
        before the TomTom attempt -- when exhausted, the ladder skips
@@ -299,19 +325,18 @@ def route_for_event(conn, event, cfg, now_utc=None):
     now = now_utc or _now()
     event_id = event.get("id")
     place = event.get("place") or {}
-    home_lat = cfg.get("road_home_lat")
-    home_lon = cfg.get("road_home_lon")
+    from_lat, from_lon = _origin_for(conn, event, cfg, depart_at=now)
     to_lat = place.get("lat")
     to_lon = place.get("lon")
 
-    if to_lat is not None and to_lon is not None and home_lat is not None and home_lon is not None:
+    if to_lat is not None and to_lon is not None and from_lat is not None and from_lon is not None:
         vias = _attached_via_latlons(conn, event)
         if vias:
             minutes, points, source = route_via(
-                conn, (home_lat, home_lon), vias, (to_lat, to_lon), cfg, now_utc=now)
+                conn, (from_lat, from_lon), vias, (to_lat, to_lon), cfg, now_utc=now)
             if source == "tomtom":
                 return points, "tomtom"
-            return [(home_lat, home_lon), (to_lat, to_lon)], "straight"
+            return [(from_lat, from_lon), (to_lat, to_lon)], "straight"
 
         if os.environ.get("TOMTOM_API_KEY", "").strip():
             cap = cfg.get("road_daily_cap", 100)
@@ -319,13 +344,13 @@ def route_for_event(conn, event, cfg, now_utc=None):
                 audit.log(conn, "road.cap", {"event_id": event_id})
             else:
                 depart_at = now if isinstance(now, str) else now.isoformat(timespec="seconds")
-                points = tomtom_route_points(home_lat, home_lon, to_lat, to_lon, depart_at, cfg)
+                points = tomtom_route_points(from_lat, from_lon, to_lat, to_lon, depart_at, cfg)
                 if points is not None:
                     audit.log(conn, "road.call",
                                {"event_id": event_id, "points": len(points), "source": "tomtom"})
                     return points, "tomtom"
                 audit.log(conn, "road.error", {"event_id": event_id})
-        return [(home_lat, home_lon), (to_lat, to_lon)], "straight"
+        return [(from_lat, from_lon), (to_lat, to_lon)], "straight"
 
     return None, "none"
 
@@ -390,8 +415,9 @@ def route_via(conn, origin_latlon, via_latlons, dest_latlon, cfg, now_utc=None):
 
 
 def direct_leg_min(conn, event, cfg):
-    """Live TomTom minutes for the direct home->event leg (no waypoints) --
-    the shared baseline detour_min compares every candidate against.
+    """Live TomTom minutes for the direct origin->event leg (no waypoints)
+    -- the shared baseline detour_min compares every candidate against.
+    The origin is whereami's, not necessarily home (see _origin_for).
 
     Phase 7b, Task 3 (fam cal detours): iterating N candidate plans for
     the same event must NOT spend N+1 TomTom calls on the direct leg (one
@@ -404,16 +430,15 @@ def direct_leg_min(conn, event, cfg):
     detour_min: missing home/event coords or a non-tomtom route_via
     result -> None.
     """
-    home_lat = cfg.get("road_home_lat")
-    home_lon = cfg.get("road_home_lon")
+    from_lat, from_lon = _origin_for(conn, event, cfg)
     place = (event or {}).get("place") or {}
     dest_lat, dest_lon = place.get("lat"), place.get("lon")
 
-    if None in (home_lat, home_lon, dest_lat, dest_lon):
+    if None in (from_lat, from_lon, dest_lat, dest_lon):
         return None
 
     direct_min, _, direct_src = route_via(
-        conn, (home_lat, home_lon), [], (dest_lat, dest_lon), cfg)
+        conn, (from_lat, from_lon), [], (dest_lat, dest_lon), cfg)
     if direct_src != "tomtom":
         return None
     return direct_min
@@ -423,8 +448,9 @@ def detour_min(conn, event, plan_place, cfg, direct_min=None):
     """How many extra minutes a stop at plan_place would add to the trip
     to event's place, vs going there directly -- both legs measured live
     via route_via (never the straight-line/manual/place fallback rungs,
-    which aren't comparable traffic estimates). Requires home coords
-    (cfg), event's place coords, and plan_place's lat/lon; missing
+    which aren't comparable traffic estimates). Requires a resolvable
+    origin (_origin_for -- whereami's ladder, home at worst), event's
+    place coords, and plan_place's lat/lon; missing
     coordinates, a non-tomtom provider, or either live call failing ->
     None (a detour figure built from a stale/estimated leg would be
     misleading, not merely approximate). Negative deltas (via ends up
@@ -438,23 +464,22 @@ def detour_min(conn, event, plan_place, cfg, direct_min=None):
     (Phase 7b, Task 3 budget concern). When omitted, behaves exactly as
     before: fetches the direct leg itself via route_via.
     """
-    home_lat = cfg.get("road_home_lat")
-    home_lon = cfg.get("road_home_lon")
+    from_lat, from_lon = _origin_for(conn, event, cfg)
     place = (event or {}).get("place") or {}
     dest_lat, dest_lon = place.get("lat"), place.get("lon")
     via_lat, via_lon = (plan_place or {}).get("lat"), (plan_place or {}).get("lon")
 
-    if None in (home_lat, home_lon, dest_lat, dest_lon, via_lat, via_lon):
+    if None in (from_lat, from_lon, dest_lat, dest_lon, via_lat, via_lon):
         return None
 
     if direct_min is None:
         direct_min, _, direct_src = route_via(
-            conn, (home_lat, home_lon), [], (dest_lat, dest_lon), cfg)
+            conn, (from_lat, from_lon), [], (dest_lat, dest_lon), cfg)
         if direct_src != "tomtom":
             return None
 
     via_min, _, via_src = route_via(
-        conn, (home_lat, home_lon), [(via_lat, via_lon)], (dest_lat, dest_lon), cfg)
+        conn, (from_lat, from_lon), [(via_lat, via_lon)], (dest_lat, dest_lon), cfg)
     if via_src != "tomtom":
         return None
 

@@ -1,7 +1,7 @@
 """fam CLI router. Subcommands register via build_parser()."""
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
-from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, series, shopping, tick
+from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, series, shopping, tick, whereami
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -13,6 +13,79 @@ def cmd_init(args):
     out = {"ok": True, "db": famdb.resolve_db_path()}
     print(json.dumps(out, ensure_ascii=False) if args.json else f"initialized {out['db']}")
     return 0
+
+def cmd_whereami_show(args):
+    """Откуда Гермес сейчас считает дорогу и почему именно оттуда."""
+    conn = famdb.connect()
+    cfg = gate.load_config()
+    origin = whereami.resolve_origin(conn, cfg)
+    if origin is None:
+        out = {"source": None, "reason": "no_origin"}
+        print(json.dumps(out, ensure_ascii=False) if getattr(args, "json", False)
+              else "whereami: неоткуда считать -- дом не настроен и других "
+                   "источников нет")
+        return 0
+    if getattr(args, "json", False):
+        print(json.dumps(origin, ensure_ascii=False))
+    else:
+        age = origin.get("fix_age_min")
+        age_txt = f", фиксу {age} мин" if age is not None else ""
+        print(f"whereami: {origin['label']} ({origin['source']}, "
+              f"уверенность {origin['confidence']}{age_txt}) "
+              f"-- {origin['lat']}, {origin['lon']}")
+    return 0
+
+
+def cmd_whereami_set(args):
+    """Записать точку, от которой считать дорогу (присланную или ручную)."""
+    conn = famdb.connect()
+    cfg = gate.load_config()
+    try:
+        hint = whereami.set_hint(conn, args.lat, args.lon, source=args.source,
+                                 label=args.label, ttl_min=args.ttl_min, cfg=cfg)
+    except ValueError as e:
+        print(f"whereami: {e}", file=sys.stderr)
+        return 2
+    conn.commit()
+
+    # Пересчёт делается ВСЕГДА -- ради него точку и присылали.
+    changed = whereami.recompute_affected(conn, cfg)
+    hint["changed"] = changed
+
+    # А вот сообщение -- только по явному --notify. Обычно точка
+    # приходит внутри диалога, и агент отвечает сам; автоматическая
+    # отправка здесь дала бы Амине два сообщения об одном и том же.
+    # --notify нужен для неразговорного пути (например, Денис поставил
+    # override руками). Kind "whereami" освобождён от бюджета в
+    # gate.BUDGET_EXEMPT_KINDS, а force=True снимает блокировку -- нужны
+    # оба, см. комментарий там.
+    if getattr(args, "notify", False) and changed:
+        lines = [f"{c['title']}: теперь ≈{c['new']} мин" for c in changed]
+        text = "Пересчитал дорогу. " + "; ".join(lines)
+        hint["notified"] = gate.deliver(
+            conn, "whereami", {"changed": changed}, text, cfg, force=True)
+        conn.commit()
+
+    if getattr(args, "json", False):
+        print(json.dumps(hint, ensure_ascii=False))
+    else:
+        print(f"whereami: считаю от {hint['lat']}, {hint['lon']} "
+              f"(до {hint['expires_utc']})")
+        for c in changed:
+            print(f"  {c['title']}: {c['old']} -> {c['new']} мин")
+    return 0
+
+
+def cmd_whereami_clear(args):
+    conn = famdb.connect()
+    n = whereami.clear_hints(conn)
+    conn.commit()
+    if getattr(args, "json", False):
+        print(json.dumps({"cleared": n}, ensure_ascii=False))
+    else:
+        print(f"whereami: убрано подсказок: {n}")
+    return 0
+
 
 def cmd_react_hook(args):
     """Machine-to-machine entry: the WhatsApp adapter pipes ONE reaction
@@ -1957,6 +2030,28 @@ def build_parser():
     sp = sub.add_parser("road"); sp.set_defaults(func=cmd_road)
     sp.add_argument("event_id", type=int)
     sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                     help="machine-readable output")
+
+    sp = sub.add_parser("whereami")
+    wai_sub = sp.add_subparsers(dest="whereami_cmd", required=True)
+    spw = wai_sub.add_parser("show"); spw.set_defaults(func=cmd_whereami_show)
+    spw.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                     help="machine-readable output")
+    spw = wai_sub.add_parser("set"); spw.set_defaults(func=cmd_whereami_set)
+    spw.add_argument("--lat", type=float, required=True)
+    spw.add_argument("--lon", type=float, required=True)
+    spw.add_argument("--source", choices=("shared", "manual"), default="shared",
+                     help="shared = прислала Амина, manual = поставили руками")
+    spw.add_argument("--label", default="", help="как назвать точку в напоминании")
+    spw.add_argument("--ttl-min", type=int, default=None,
+                     help="сколько минут точка считается актуальной")
+    spw.add_argument("--notify", action="store_true",
+                     help="отправить Амине пересчитанное время (в диалоге не "
+                          "нужно -- агент отвечает сам)")
+    spw.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                     help="machine-readable output")
+    spw = wai_sub.add_parser("clear"); spw.set_defaults(func=cmd_whereami_clear)
+    spw.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                      help="machine-readable output")
 
     sp = sub.add_parser("cal-ext")

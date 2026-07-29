@@ -166,6 +166,16 @@ CREATE TABLE IF NOT EXISTS car_metrics (
   gps_lat REAL, gps_lon REAL,
   raw_json TEXT);
 CREATE INDEX IF NOT EXISTS idx_car_metrics_ts ON car_metrics(ts_utc);
+CREATE TABLE IF NOT EXISTS location_hints (
+  id INTEGER PRIMARY KEY,
+  source TEXT NOT NULL CHECK (source IN ('manual','shared')),
+  lat REAL NOT NULL,
+  lon REAL NOT NULL,
+  label TEXT NOT NULL DEFAULT '',        -- human-readable origin for reminders
+  ts_utc TEXT NOT NULL,                  -- when the hint was recorded
+  expires_utc TEXT NOT NULL);            -- TTL; whereami ignores expired rows
+CREATE INDEX IF NOT EXISTS idx_location_hints_expires
+  ON location_hints(expires_utc);
 CREATE TABLE IF NOT EXISTS goals (
   id INTEGER PRIMARY KEY,
   title TEXT NOT NULL,
@@ -385,6 +395,37 @@ def init_db(conn):
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_external_uid "
         "ON plans(external_uid) WHERE external_uid IS NOT NULL")
+    # Dynamic road origin (fam/whereami.py), widened into this same
+    # still-unmigrated v12 block for the third time -- prod is on v11
+    # (verified against assistant.db 2026-07-29), so there is no
+    # already-migrated v12 database anywhere for these columns to
+    # retroactively disagree with.
+    #
+    # car_metrics.gps_ts/gps_speed/gps_sat: StarLine's `position` dict
+    # already carries ts (unix seconds -- when the GPS FIX happened), s
+    # (km/h) and sat_qty on every poll, and car.normalize() already
+    # persists all three inside raw_json. They get real columns because
+    # whereami's "parked vs moving vs stale" decision needs the fix time,
+    # and ts_utc is NOT it: ts_utc is when fam polled, and the two were
+    # ~7 minutes apart in the live row this was designed against. Reading
+    # them out of raw_json per query would work but makes the hot path
+    # parse a JSON blob per row; a column is cheaper and indexable.
+    #
+    # events.road_origin_lat/lon/source: which point produced the cached
+    # travel_min_road. Until now the origin was the constant
+    # road_home_lat/lon, so road_checked_at alone was a complete cache
+    # key -- "when did we compute this" fully determined "is it still
+    # good". With a dynamic origin that stops being true: tick.py's
+    # `checked_dt >= window_open` guard would happily keep a figure
+    # computed from a point Amina has since driven away from. Storing the
+    # origin turns an implicit assumption into a checkable one.
+    _ensure_column(conn, "car_metrics", "gps_ts", "gps_ts INTEGER")
+    _ensure_column(conn, "car_metrics", "gps_speed", "gps_speed REAL")
+    _ensure_column(conn, "car_metrics", "gps_sat", "gps_sat INTEGER")
+    _ensure_column(conn, "events", "road_origin_lat", "road_origin_lat REAL")
+    _ensure_column(conn, "events", "road_origin_lon", "road_origin_lon REAL")
+    _ensure_column(conn, "events", "road_origin_source",
+                   "road_origin_source TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','12')")
     conn.execute(

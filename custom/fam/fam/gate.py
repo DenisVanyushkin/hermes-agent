@@ -315,6 +315,25 @@ def in_quiet_hours(now_utc, cfg):
     return local_time >= start or local_time < end
 
 
+# Виды сообщений, не расходующие дневной бюджет (daily_budget, 8).
+#
+# Осторожно, здесь асимметрия, на которой легко обжечься: force=True в
+# deliver() спасает только от БЛОКИРОВКИ на исчерпанном бюджете, но
+# отправленная строка всё равно ПОСЧИТАЕТСЯ здесь и съест слот у
+# следующего сообщения. Освобождение требует обоих изменений сразу --
+# именно поэтому digest и med в своё время получили и force=True на
+# месте вызова, и запись в этот набор.
+#
+# "whereami" -- пересчёт по присланной Аминой точке: это ответ на её
+# собственное действие, а не инициатива Гермеса, и наказывать её за
+# уточнение местоположения расходом бюджета было бы ровно наоборот.
+BUDGET_EXEMPT_KINDS = frozenset({"digest", "med", "whereami"})
+
+# Виды, которым разрешено приходить в тихие часы. Решение Дениса
+# 2026-07-12: «планы бывают и ночью, их не нужно замалчивать».
+QUIET_EXEMPT_KINDS = frozenset({"reminder"})
+
+
 def _almaty_day_utc_bounds(now_utc):
     local = _parse_utc(now_utc).astimezone(ALMATY)
     start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -359,9 +378,7 @@ def budget_spent_today(conn, now_utc=None):
     for r in rows:
         payload = json.loads(r["payload"])
         kind = payload.get("kind")
-        if kind == "digest":
-            continue
-        if kind == "med":
+        if kind in BUDGET_EXEMPT_KINDS:
             continue
         if kind == "reminder":
             eid = (payload.get("raw") or {}).get("event_id")
@@ -587,6 +604,29 @@ def _append_piggyback_if_missing(final_text, raw):
             if words and not _mentions_any(final_text, words):
                 final_text = f"{final_text} {car_text.strip()}"
 
+    # Точка отсчёта. С динамическим origin «≈25 минут» перестало быть
+    # самодостаточным: одно и то же число означает разное в зависимости
+    # от того, откуда считали, а ошибиться Гермес теперь может не только
+    # в минутах, но и в предпосылке. Поэтому напоминание всегда называет
+    # точку, а когда уверенность не полная -- зовёт прислать локацию.
+    #
+    # Приглашение сознательно едет ХВОСТОМ уже отправляемого сообщения,
+    # а не отдельным вопросом: отдельное сообщение стоило бы единицы
+    # дневного бюджета (8 штук) и требовало бы ответа, тогда как здесь
+    # цена нулевая, а Амина отвечает только если мы действительно
+    # ошиблись. _title_words здесь не годится -- он отбрасывает слова
+    # короче пяти букв, а «дома» ровно четыре.
+    origin = raw.get("origin")
+    if isinstance(origin, dict):
+        label = str(origin.get("label") or "").strip()
+        core = label[3:].strip("«»\"' ") if label.startswith("от ") else label
+        if core and core.casefold() not in final_text.casefold():
+            final_text = f"{final_text} Считаю {label}."
+        if (origin.get("confidence") != "high"
+                and "скинь точку" not in final_text.casefold()):
+            final_text = (f"{final_text} Если ты не там — скинь точку, "
+                          f"пересчитаю.")
+
     checklist = raw.get("departure_checklist")
     if isinstance(checklist, list) and checklist:
         titles = [item.get("title") for item in checklist
@@ -744,7 +784,7 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None,
     # 2026-07-12): «планы бывают и ночью, их не нужно замалчивать» —
     # цепочка события стреляет по расписанию в любое время суток.
     # Quiet-окно остаётся для будущих не-reminder проактивных видов.
-    if not force and kind != "reminder" and in_quiet_hours(now, cfg):
+    if not force and kind not in QUIET_EXEMPT_KINDS and in_quiet_hours(now, cfg):
         skip_payload = {"kind": kind, "reason": "quiet"}
         if isinstance(raw, dict) and raw.get("event_id") is not None:
             skip_payload["event_id"] = raw["event_id"]

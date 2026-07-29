@@ -10,7 +10,7 @@ convert through Asia/Almaty via zoneinfo.
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import audit, gate, people, places, rem, road
+from fam import audit, gate, people, places, rem, road, whereami
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -129,17 +129,35 @@ def recompute_road(conn, event_id):
         if not place or place.get("lat") is None or place.get("lon") is None:
             return {"minutes": None, "reason": "no_place_coords"}
         cfg = gate.load_config()
-        if cfg.get("road_home_lat") is None or cfg.get("road_home_lon") is None:
+        depart_at = event["start_utc"]
+        # Ask the resolver, not the config: since the origin became
+        # dynamic, "дом не настроен" is no longer the same thing as "не
+        # от чего считать" -- a location Amina shared, or the place of
+        # the event she is sitting in, is a perfectly good start point
+        # with road_home_lat unset. resolve_origin returns None only when
+        # every rung including home came up empty, which is exactly the
+        # condition this guard has always meant. The reason string keeps
+        # its old name: `fam road --json` prints it.
+        origin = whereami.resolve_origin(conn, cfg, event=event,
+                                         at_utc=depart_at)
+        if origin is None:
             return {"minutes": None, "reason": "no_home_config"}
 
-        depart_at = event["start_utc"]
         minutes, source = road.compute_travel_min(conn, event, cfg, now_utc=depart_at)
         if source in ("tomtom", "straight"):
             now = _now()
+            # road_origin_* travels with the figure: tick.road_recompute
+            # compares the next tick's origin against it to decide
+            # whether the cached minutes still describe the trip Amina
+            # is actually about to make. Storing the minutes without the
+            # point they were measured from would leave that check with
+            # nothing to compare to, and it would silently never fire.
             conn.execute(
-                "UPDATE events SET travel_min_road=?, road_checked_at=? "
+                "UPDATE events SET travel_min_road=?, road_checked_at=?, "
+                "road_origin_lat=?, road_origin_lon=?, road_origin_source=? "
                 "WHERE id=?",
-                (minutes, now, event_id),
+                (minutes, now, origin["lat"], origin["lon"],
+                 origin["source"], event_id),
             )
             audit.log(conn, "road.computed",
                       {"event_id": event_id, "minutes": minutes, "source": source})

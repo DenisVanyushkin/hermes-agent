@@ -200,6 +200,14 @@ def normalize(device_data, now=None):
         "gsm_online": (status == 1) if status is not None else None,
         "gps_lat": pos.get("x"),
         "gps_lon": pos.get("y"),
+        # Fix metadata, distinct from ts_utc above: ts_utc is when WE
+        # polled, gps_ts is when the FIX happened (observed ~7 min
+        # earlier in prod). whereami needs the latter to decide whether a
+        # position still describes where Amina is -- a stale fix on a
+        # stopped car is fine, the same staleness at 80 km/h is not.
+        "gps_ts": pos.get("ts"),
+        "gps_speed": pos.get("s"),
+        "gps_sat": pos.get("sat_qty"),
         "raw_json": json.dumps(d, ensure_ascii=False),
     }
 
@@ -250,9 +258,14 @@ def record_metrics(conn, metrics, now=None):
     """Insert one car_metrics row and audit the tick. Returns the new
     row id. Negative decisions (StarLine unavailable) are audited by the
     caller (tick.car), not here -- this fn only runs when there IS data."""
+    # Hand-maintained: adding a car_metrics column means editing the DDL
+    # (db.py), normalize()'s return dict AND this tuple. Miss this one and
+    # the column silently stays NULL forever -- see
+    # tests/test_car_position.py::test_record_metrics_persists_fix_columns.
     cols = ("ts_utc", "fuel_pct", "fuel_liters", "odometer_km", "engine_on",
             "ignition_on", "cabin_temp_c", "coolant_temp_c", "battery_v",
-            "gsm_online", "gps_lat", "gps_lon", "raw_json")
+            "gsm_online", "gps_lat", "gps_lon",
+            "gps_ts", "gps_speed", "gps_sat", "raw_json")
     cur = conn.execute(
         f"INSERT INTO car_metrics({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
         tuple(metrics.get(c) for c in cols))

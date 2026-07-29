@@ -772,6 +772,36 @@ remote-start the engine.
   This is the same underlying field as `fam cal update --transport`;
   use `set-transport` when transport is the only thing changing.
 
+## Where She Is Now
+
+Travel time is computed from where Amina actually is, not from home.
+`fam` works that out on its own (a location she shared → the car's GPS
+when it is away from home → the place of the event she is in → home as
+the fallback), so **normally you do nothing here**. Two cases need you:
+
+- **She sends a location pin.** The WhatsApp bridge delivers it as text
+  in the form `[Location: <название> <lat>,<lng>]` (a live location says
+  `[Live location: ...]`). When you see that shape, immediately run
+  `fam whereami set --lat <lat> --lon <lng> [--label "<название>"]`,
+  then re-check what it changed with `fam cal day` and tell her the
+  updated leave time — that is the whole point of her sending it. Read
+  the numbers straight out of the message; never invent or round them.
+  A non-zero exit means you misread the pair — say so, don't retry with
+  a guess.
+- **She says where she is in words** ("я на работе", "я у мамы") and the
+  place is one `fam places` already knows → `fam whereami set --lat
+  <lat> --lon <lon> --source manual --label "<имя места>"` using that
+  place's stored coordinates. If the place is unknown, apply the usual
+  unknown-place stop-and-ask protocol (rule 3) instead of guessing.
+
+`fam whereami show` reports where `fam` is currently computing from and
+how confident it is — useful when she asks "почему так долго ехать?".
+`fam whereami clear` drops the override and returns to automatic.
+
+A hint expires on its own (90 minutes for a shared pin, 180 for a manual
+one), so there is no need to clean it up afterwards, and no need to warn
+her that it is temporary.
+
 ## Place Category
 
 "это аптека" / "там продуктовый" categorizes a place for the restock

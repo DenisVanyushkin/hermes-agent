@@ -38,7 +38,8 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import audit, cal, db, gate, goals, meds, plans, rem, road, shopping, weather
+from fam import (audit, cal, db, gate, goals, meds, plans, rem, road, shopping,
+                 weather, whereami)
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -182,7 +183,13 @@ def road_recompute(conn, now_utc=None, cfg=None):
     as "road_recomputed".
     """
     cfg = cfg if cfg is not None else gate.load_config()
-    if cfg.get("road_home_lat") is None or cfg.get("road_home_lon") is None:
+    # Origin availability is no longer a pure config question (see
+    # cal.recompute_road's identical guard): with a dynamic origin a
+    # shared location or an in-progress event can supply a start point
+    # that road_home_lat/lon never had. Asking the resolver once here,
+    # with no event, answers "is there ANY origin at all today" -- the
+    # per-event resolution still happens inside road.compute_travel_min.
+    if whereami.resolve_origin(conn, cfg, now_utc=now_utc) is None:
         return 0
 
     now = now_utc or _now()
@@ -212,11 +219,43 @@ def road_recompute(conn, now_utc=None, cfg=None):
             checked_at = event.get("road_checked_at")
             checked_dt = _parse_utc(checked_at) if checked_at else None
 
+            # Has the START point moved since the stored figure was
+            # computed? road_checked_at answers "how old is this", which
+            # was a complete cache key only while the origin was the
+            # constant road_home_lat/lon. It no longer is: a figure can
+            # be minutes old and still describe a trip from a place
+            # Amina has left. Origin movement therefore overrides the
+            # freshness window below.
+            #
+            # Rate-limited on purpose. A moving car moves every tick, so
+            # an unguarded "origin changed -> recompute" would issue one
+            # TomTom call per minute per event and burn road_daily_cap
+            # (100) inside a single commute. whereami_origin_recheck_min
+            # is the floor between two origin-driven recomputes of the
+            # same event; the threshold windows still apply on top.
+            origin = whereami.resolve_origin(
+                conn, cfg, now_utc=now, event=event,
+                at_utc=leave_dt.isoformat(timespec="seconds"))
+            origin_moved = False
+            prev_lat = event.get("road_origin_lat")
+            prev_lon = event.get("road_origin_lon")
+            if origin is not None and prev_lat is not None and prev_lon is not None:
+                moved_km = road._haversine_km(
+                    prev_lat, prev_lon, origin["lat"], origin["lon"])
+                cooled_down = (
+                    checked_dt is None
+                    or (now_dt - checked_dt).total_seconds() / 60
+                    >= cfg.get("whereami_origin_recheck_min", 10))
+                origin_moved = (
+                    moved_km > cfg.get("whereami_origin_move_km", 1.0)
+                    and cooled_down)
+
             for threshold in thresholds:
                 if minutes_to_leave > threshold:
                     continue
                 window_open = leave_dt - timedelta(minutes=threshold)
-                if checked_dt is not None and checked_dt >= window_open:
+                if (checked_dt is not None and checked_dt >= window_open
+                        and not origin_moved):
                     continue
 
                 depart_at = leave_dt.isoformat(timespec="seconds")
@@ -277,6 +316,19 @@ def road_recompute(conn, now_utc=None, cfg=None):
                     conn.execute(
                         "UPDATE events SET road_checked_at=? WHERE id=?",
                         (now, event_id),
+                    )
+                # One statement for all three branches above: whatever
+                # they decided to store, THIS is the point it was
+                # measured from, and the next tick's origin_moved check
+                # compares against it. Written even on the manual/place/
+                # none rung, so that rung's checked_at bump does not
+                # leave a stale origin behind it.
+                if origin is not None:
+                    conn.execute(
+                        "UPDATE events SET road_origin_lat=?, "
+                        "road_origin_lon=?, road_origin_source=? WHERE id=?",
+                        (origin["lat"], origin["lon"], origin["source"],
+                         event_id),
                     )
                 conn.commit()
                 touched += 1
@@ -414,6 +466,20 @@ def reminders(conn, now_utc=None, cfg=None):
         }
         if event["place"]:
             raw["place_name"] = event["place"]["name"]
+        # Откуда считалась дорога -- только для стадий про выезд и только
+        # когда у события есть место (иначе дороги нет и говорить не о
+        # чем). gate._append_piggyback_if_missing превращает это в
+        # хвост сообщения; отдельного сообщения не возникает, поэтому
+        # дневной бюджет не тратится.
+        if reminder["kind"] in ("leave", "prepare") and event["place"]:
+            try:
+                origin = whereami.resolve_origin(conn, cfg, now_utc=now,
+                                                 event=event)
+            except Exception:
+                origin = None
+            if origin is not None:
+                raw["origin"] = {"label": origin["label"],
+                                 "confidence": origin["confidence"]}
         # Phase 2c, task 7: this event's already-sent reminder texts
         # today (if any) go into raw so the rewrite doesn't repeat
         # itself verbatim on a chain continuation -- see
