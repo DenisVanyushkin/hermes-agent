@@ -4237,9 +4237,25 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
                     _audience_cfg = load_config()
                 except Exception:  # noqa: BLE001 — policy must not fail the run
                     pass
-                deliver_content, operator_alert = plan_cron_failure_delivery(
-                    job, error, _audience_cfg
-                )
+                try:
+                    deliver_content, operator_alert = plan_cron_failure_delivery(
+                        job, error, _audience_cfg
+                    )
+                except Exception as pe:  # noqa: BLE001 — fall back toward the
+                    # historical behaviour (deliver the summary), never
+                    # toward silence: a malformed audience/cfg (e.g. a
+                    # hand-edited config.yaml with `cron:` set to a
+                    # non-dict) must not cost an operator-audience job its
+                    # failure notification. We don't know the audience
+                    # here, so we do NOT withhold -- withholding is only
+                    # safe when we've positively resolved end_user.
+                    logger.warning(
+                        "plan_cron_failure_delivery failed for job %s, "
+                        "falling back to the historical failure summary: %s",
+                        job["id"], pe,
+                    )
+                    deliver_content = _summarize_cron_failure_for_delivery(job, error)
+                    operator_alert = None
                 deliver_content = deliver_content or ""
             # Treat whitespace-only final responses the same as empty
             # responses: do not deliver a blank message, and let the

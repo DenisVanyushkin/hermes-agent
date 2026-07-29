@@ -17,7 +17,8 @@ from __future__ import annotations
 import cron.scheduler as s
 
 
-def _patch_pipeline(monkeypatch, *, success=True, final="final response", error=None):
+def _patch_pipeline(monkeypatch, *, success=True, final="final response", error=None,
+                     cfg=None):
     """Patch run_one_job's collaborators and capture what would have been
     delivered to the job's own target vs. alerted to the operator."""
     delivered = []
@@ -29,9 +30,10 @@ def _patch_pipeline(monkeypatch, *, success=True, final="final response", error=
     monkeypatch.setattr(s, "run_job", fake_run_job)
     monkeypatch.setattr(s, "save_job_output", lambda jid, out: f"/tmp/{jid}.txt")
     monkeypatch.setattr(s, "mark_job_run", lambda *a, **k: None)
-    # Deterministic: no end_user_targets config, so only the job's own
-    # explicit `audience` field decides resolve_cron_audience's outcome.
-    monkeypatch.setattr(s, "load_config", lambda: {})
+    # Deterministic: by default no end_user_targets config, so only the
+    # job's own explicit `audience` field decides resolve_cron_audience's
+    # outcome. Tests that need the config safety net pass cfg= explicitly.
+    monkeypatch.setattr(s, "load_config", lambda: {} if cfg is None else cfg)
     monkeypatch.setattr(
         s, "_deliver_result",
         lambda job, content, adapters=None, loop=None: delivered.append((job["id"], content)),
@@ -85,4 +87,45 @@ def test_run_one_job_successful_end_user_job_still_delivers(monkeypatch):
     assert len(delivered) == 1
     assert delivered[0][0] == "j3"
     assert "завтра" in delivered[0][1]
+    assert alerted == []
+
+
+def test_run_one_job_config_target_list_withholds_unflagged_end_user_job(monkeypatch):
+    """The config-based safety net (cron.end_user_targets) must be live at
+    the call site, not just reachable in principle: a job with NO explicit
+    `audience` key, whose delivery target matches the configured
+    end_user_targets list, must still be withheld with one operator alert.
+    This is exactly how the two incident jobs were created -- without the
+    flag -- so this net is what protects the next one. If the call site
+    stopped passing cfg to plan_cron_failure_delivery, this test would keep
+    passing the other three tests (they resolve audience purely from the
+    explicit `audience` key) but fail here."""
+    delivered, alerted = _patch_pipeline(
+        monkeypatch, success=False, final="", error="ImportError: boom",
+        cfg={"cron": {"end_user_targets": ["whatsapp:+77011102626"]}},
+    )
+
+    s.run_one_job({
+        "id": "j4", "name": "t", "deliver": "whatsapp:+77011102626",
+    })
+
+    assert delivered == []
+    assert len(alerted) == 1
+
+
+def test_run_one_job_malformed_cfg_falls_back_to_delivering_operator_summary(monkeypatch):
+    """A malformed config (e.g. a hand-edited config.yaml where `cron:` is
+    not a dict) must not silently cost an operator-audience job its failure
+    notification. plan_cron_failure_delivery raising must fall back toward
+    the historical behaviour -- deliver the summary -- never toward
+    silence."""
+    delivered, alerted = _patch_pipeline(
+        monkeypatch, success=False, final="", error="ImportError: boom",
+        cfg={"cron": "not-a-dict"},
+    )
+
+    s.run_one_job({"id": "j5", "name": "t"})  # default/operator audience
+
+    assert len(delivered) == 1
+    assert delivered[0][0] == "j5"
     assert alerted == []
