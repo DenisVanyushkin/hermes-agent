@@ -93,13 +93,32 @@ def _set_cron_session_title(session_db, session_id, base_title):
 _EXC_WRAPPER_RE = re.compile(
     r"^\s*[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Interrupt):\s*"
 )
-# Absolute POSIX paths (two or more segments) and Windows drive paths. Chat
-# messages must never disclose where the install lives on disk.
-_FS_PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\s'\"()]*|(?:/[\w.\-]+){2,}/?)")
-# Python traceback frame lines — dropped wholesale, never summarized.
+# Filesystem paths. Chat messages must never disclose where the install
+# lives on disk, including in the common FileNotFoundError/ModuleNotFoundError
+# shape where the path is relative (no leading slash). Three shapes:
+#   - Windows drive paths: C:\Users\...
+#   - absolute POSIX paths, 2+ segments: /home/denis
+#   - relative paths, 3+ segments: cron_output/2026-07-29/run.log
+#   - relative paths, 2 segments where the last has a file extension:
+#     config/settings.yaml, hermes_cli/review_gate.py
+# The narrower 2-segment relative case requires a file extension so that
+# ordinary prose with slashes ("and/or", "5/hour", "24/7",
+# "yr.no/Open-Meteo") is not mangled.
+_FS_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:\\[^\s'\"()]*"
+    r"|(?:/[\w.\-]+){2,}/?"
+    r"|[\w\-]+(?:/[\w\-]+){2,}"
+    r"|[\w\-]+/[\w\-]+\.[A-Za-z0-9]{1,6}\b)"
+)
+# Python traceback frame lines — dropped wholesale, never summarized. This
+# matches the header, "File ..." lines and caret markers, but NOT the
+# indented source-context line traceback.format_exc() prints under each
+# "File ..." line — that is handled statefully below, since it carries no
+# fixed marker of its own.
 _TRACEBACK_LINE_RE = re.compile(
     r"^\s*(?:Traceback \(most recent call last\):|File \".*|\s+\^+\s*)$"
 )
+_TRACEBACK_FILE_LINE_RE = re.compile(r'^\s*File "')
 
 
 def _redact_technical_detail(text: str) -> str:
@@ -109,10 +128,19 @@ def _redact_technical_detail(text: str) -> str:
     internals or install layout (2026-07-28/29 incident: an ImportError
     naming an absolute path was delivered to a non-technical recipient).
     """
-    lines = [
-        line for line in text.splitlines()
-        if not _TRACEBACK_LINE_RE.match(line)
-    ]
+    lines = []
+    drop_next_if_indented = False
+    for line in text.splitlines():
+        if _TRACEBACK_LINE_RE.match(line):
+            drop_next_if_indented = bool(_TRACEBACK_FILE_LINE_RE.match(line))
+            continue
+        if drop_next_if_indented:
+            drop_next_if_indented = False
+            if line[:1].isspace():
+                # The source-context line traceback.format_exc() prints
+                # under a "File ..." line — drop it too, never summarize it.
+                continue
+        lines.append(line)
     cleaned = " ".join(lines)
     for _ in range(3):  # bounded: chained wrappers, never an unbounded loop
         stripped = _EXC_WRAPPER_RE.sub("", cleaned, count=1)
