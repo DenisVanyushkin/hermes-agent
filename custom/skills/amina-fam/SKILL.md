@@ -446,28 +446,18 @@ user.
 
 ## Reminder Reactions
 
-**Emoji reactions that ACK a reminder or dose are NOT your job.** When
-Amina taps 👍 (or ❤️ 💪 ✅) on a reminder message itself, the ack is already
-applied by code before you ever see anything — 👍 acks the whole chain (or
-marks a dose taken), 👎/❌ cancels the chain (or skips that one dose), and
-Hermes puts a ✅ back on the message. For those specific emoji, that path
-never reaches you: there is no turn to answer, and there is nothing for
-you to call.
-
-That's true only for the emoji the ack path actually maps. A reaction on
-a reminder or a dose with any *other* whitelisted emoji (😂 😮 😢 🙏, for
-example) is NOT consumed by the hook — it falls through and reaches you
-as an ordinary dialogue turn, same as any other emoji reaction (see
-Реакции (эмодзи) в обычном диалоге below). In that case the
-reminder/dose stays exactly as pending as before; don't assume it was
-silently acked just because it arrived as a reaction.
+**Emoji reactions are NOT your job.** When Amina taps 👍 (or ❤️ 💪 ✅) on a
+reminder message itself, the ack is already applied by code before you ever
+see anything — 👍 acks the whole chain (or marks a dose taken), 👎/❌ cancels
+the chain (or skips that one dose), and Hermes puts a ✅ back on the message.
+That path never reaches you: there is no turn to answer, and there is nothing
+for you to call.
 
 What this means in practice:
 
-- Never run `fam rem ack` / `fam med taken` "just in case" after a 👍 /
-  ❤️ / 💪 / ✅ / 👎 / ❌ reaction. A second ack is refused as already-acked,
-  and claiming you silenced something you didn't is exactly the
-  confabulation rule 12 forbids.
+- Never run `fam rem ack` / `fam med taken` "just in case" after a reaction.
+  A second ack is refused as already-acked, and claiming you silenced
+  something you didn't is exactly the confabulation rule 12 forbids.
 - If Amina mentions a reaction in words ("я лайкнула", "поставила палец",
   "я же отреагировала") — treat it as ALREADY DONE. Confirm the state by
   reading it (`fam rem active --json`, `fam med list --pending --json`),
@@ -546,44 +536,6 @@ silenced; state that no preparation stages remained and preserve any
 still-pending departure reminder. If the user then says they are leaving,
 acknowledge the full chain with `rem ack EVENT_ID` and confirm that remaining
 reminders were stopped.
-
-## Реакции (эмодзи) в обычном диалоге
-
-Реакция приходит как ход вида:
-
-    [Replying to your previous message: "Купила молоко?"]
-
-    [Реакция 👍]
-
-Это **ответ на конкретное твоё сообщение** — читай его так же, как если бы
-Амина написала словами. Смысл определяется контекстом процитированного
-сообщения; таблица ниже — подсказка, не жёсткое правило.
-
-| Эмодзи | Обычное значение |
-|---|---|
-| 👍 | да / принято / согласна |
-| 👎 | нет / не согласна |
-| ❤️ | тепло, благодарность |
-| 😂 | шутка зашла |
-| 😮 | удивление |
-| 😢 | расстроилась / сочувствие |
-| 🙏 | спасибо / просьба |
-| ✅ | подтверждение, сделано |
-| ❌ | отказ, отмена |
-| 💪 | сделано, справилась |
-
-**Когда молчать.** Если реакция — это квитанция (👍 ❤️ 🙏 на сообщение,
-которое **не содержало вопроса**), прими к сведению и **не отвечай**.
-Иначе 👍 на «Хорошо, записала» породит ответ, на который снова захочется
-поставить 👍.
-
-**Когда отвечать.** Реакция отвечает на заданный тобой вопрос; меняет
-состояние (нужно вызвать `fam`); или явно требует реплики (😢, 😮).
-
-Реакции на напоминания и дозы лекарств до тебя не доходят — их закрывает
-`fam react-hook` без твоего участия. Если реакция на напоминание всё-таки
-пришла, значит она не была подтверждением (например 😂) — трактуй по
-контексту.
 
 ## Plan Verbs
 
