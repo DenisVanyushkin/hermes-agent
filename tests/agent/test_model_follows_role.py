@@ -10,6 +10,9 @@ simple lookup and terra for synthesis over conflicting sources, which a flat tie
 cannot say. Everywhere else the two must agree, and a test holds them to it.
 """
 from types import SimpleNamespace
+from unittest.mock import patch
+
+from agent import conversation_loop
 
 import pytest
 import yaml
@@ -150,3 +153,63 @@ def test_a_failing_switch_leaves_the_turn_on_its_current_model(monkeypatch):
         agent, preferred_model="gpt-5.6-terra", preferred_provider="openai-codex"
     )
     assert applied == "gpt-5.6-luna"
+
+
+# --- Контролируемый субагент не переключается по роли (инцидент 2026-07-29) ---
+#
+# У модели субагента два хозяина: спека (её стережёт гард
+# controlled_subagent_identity_mismatch) и политика роли. Пока переключение на
+# openai-codex молча падало, конфликта не было. Как только оно заработало,
+# apply_role_model стал переводить инженера на gpt-5.6-terra, спека разрешала
+# gpt-5.4-mini, и гард блокировал КАЖДЫЙ вызов. Инженер выжигал 120 итераций и
+# докладывал «tool-calling budget exhausted» -- мотивировка, не имеющая
+# отношения к причине.
+
+
+def test_a_controlled_subagent_keeps_the_model_its_spec_pinned():
+    agent = SimpleNamespace(model="gpt-5.4-mini", provider="openai-codex")
+    agent._skip_role_model_selection = True
+    switched = []
+
+    with patch.object(conversation_loop, "switch_model", side_effect=lambda *a, **k: switched.append(a)):
+        result = conversation_loop.apply_role_model(
+            agent, preferred_model="gpt-5.6-terra", preferred_provider="openai-codex"
+        )
+
+    assert switched == [], "спека субагента -- единственный хозяин его модели"
+    assert result == "gpt-5.4-mini"
+
+
+def test_an_ordinary_agent_still_follows_its_role():
+    # Регрессия наоборот: разговорный агент обязан продолжать слушаться роли,
+    # ради чего apply_role_model и заводился.
+    agent = SimpleNamespace(model="gpt-5.6-luna", provider="openai-codex")
+    switched = []
+
+    def _switch(a, target, provider, *rest, **kw):
+        switched.append(target)
+        a.model = target
+
+    with patch.object(conversation_loop, "switch_model", side_effect=_switch):
+        result = conversation_loop.apply_role_model(
+            agent, preferred_model="gpt-5.6-terra", preferred_provider="openai-codex"
+        )
+
+    assert switched == ["gpt-5.6-terra"]
+    assert result == "gpt-5.6-terra"
+
+
+def test_the_flag_being_absent_is_treated_as_an_ordinary_agent():
+    agent = SimpleNamespace(model="gpt-5.6-luna", provider="openai-codex")
+    switched = []
+
+    def _switch(a, target, provider, *rest, **kw):
+        switched.append(target)
+        a.model = target
+
+    with patch.object(conversation_loop, "switch_model", side_effect=_switch):
+        conversation_loop.apply_role_model(
+            agent, preferred_model="gpt-5.6-terra", preferred_provider="openai-codex"
+        )
+
+    assert switched == ["gpt-5.6-terra"]

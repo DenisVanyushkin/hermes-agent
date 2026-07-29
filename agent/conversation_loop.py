@@ -151,6 +151,16 @@ def apply_role_model(agent: Any, *, preferred_model: str, preferred_provider: st
     able to break a turn that would otherwise have worked.
     """
     current = str(getattr(agent, "model", "") or "")
+
+    if getattr(agent, "_skip_role_model_selection", False):
+        # Контролируемый субагент: его модель задана спекой, и гард
+        # controlled_subagent_identity_mismatch сверяет исходящую identity
+        # именно с ней (chat_completion_helpers). Переключить его здесь --
+        # значит гарантированно заблокировать каждый вызов. 2026-07-29 так и
+        # вышло: инженер выжег 120 итераций и отчитался «tool-calling budget
+        # exhausted», хотя причиной было расхождение спеки и политики роли.
+        return current
+
     target = str(preferred_model or "").strip()
     if not target or target == current or target not in _ROLE_SWITCHABLE_MODELS:
         return current
