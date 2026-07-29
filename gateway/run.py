@@ -3517,6 +3517,21 @@ def _reconnect_backoff(attempt: int) -> int:
     return min(30 * (2 ** (attempt - 1)), _RECONNECT_BACKOFF_CAP)
 
 
+#: Гейт-интерцепты обязаны разбирать то, что НАПЕЧАТАЛ оператор, а не текст,
+#: собранный для модели. При ответе реплаем гейтвей приклеивает спереди блок
+#: `[Replying to: "<до 500 символов цитаты>"]` -- это подсказка модели, на какое
+#: сообщение отвечают. Для парсеров гейтов она яд: три из четырёх сверяют
+#: сообщение целиком (лимит длины / точное равенство) и от склейки молча глохнут,
+#: а четвёртый (upstream-sync) сканирует текст регуляркой и вычитывает решения из
+#: самой цитаты -- то есть из отчёта, на который отвечают. Прогон 1947fc44
+#: (2026-07-29): апрув «коммить» не дошёл до гейта дважды, без исключения и без
+#: строки в логе, потому что возврат None здесь штатный и потому тихий.
+def _operator_reply_text(message: str, raw_message: str | None) -> str:
+    if isinstance(raw_message, str) and raw_message.strip():
+        return raw_message
+    return message
+
+
 class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
     """
     Main gateway controller.
@@ -14329,6 +14344,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 moa_config=getattr(event, "_moa_config", None),
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                raw_message=event.text,
             )
 
             # Stop persistent typing indicator now that the agent is done.
@@ -21127,6 +21143,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
+        raw_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around the agent run.
 
@@ -21145,6 +21162,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                raw_message=raw_message,
             )
 
         profile_home = self._resolve_profile_home_for_source(source)
@@ -21156,6 +21174,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                raw_message=raw_message,
             )
 
     def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
@@ -21277,6 +21296,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
+        raw_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -21317,12 +21337,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         else:
             logger.info("pipeline router skipped for platform=%s (not in pipelines.allowed_platforms)", platform_key)
 
+        # Гейты ниже разбирают текст оператора, а не склейку для модели.
+        _operator_text = _operator_reply_text(message, raw_message)
+
         # Upstream-sync operator decisions must reach the upstream-sync skill
         # (Mode B), not the pipeline orchestrator below - which runs observe-only
         # and terminally swallows the reply (_pipeline_autonomous_terminal_response).
         # Route a recognized decision reply (with a pending decision) to a one-shot
         # cron job that applies Mode B, and ack immediately.
-        _us_ack = self._build_upstream_sync_decision_ack(message, source)
+        _us_ack = self._build_upstream_sync_decision_ack(_operator_text, source)
         if _us_ack is not None:
             logger.info(
                 "upstream-sync decision intercept: queued Mode B one-shot: session=%s platform=%s",
@@ -21343,7 +21366,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "compression_exhausted": False,
             }
 
-        _doctor_ack = self._build_baseline_doctor_ack(message, source)
+        _doctor_ack = self._build_baseline_doctor_ack(_operator_text, source)
         if _doctor_ack is not None:
             logger.info(
                 "baseline-doctor command intercept: handled: session=%s platform=%s",
@@ -21376,7 +21399,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         #     коммитный путь не меняется.
         #  3) Слова отмены пересекаются; их разводит сам _build_ops_approval_ack,
         #     снимая оба маркера (см. комментарий в ветке cancel).
-        _ops_ack = self._build_ops_approval_ack(message, source)
+        _ops_ack = self._build_ops_approval_ack(_operator_text, source)
         if _ops_ack is not None:
             logger.info(
                 "ops-approval intercept: handled reply: session=%s platform=%s",
@@ -21397,7 +21420,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "compression_exhausted": False,
             }
 
-        _commit_ack = self._build_commit_approval_ack(message, source)
+        _commit_ack = self._build_commit_approval_ack(_operator_text, source)
         if _commit_ack is not None:
             logger.info(
                 "commit-approval intercept: handled reply: session=%s platform=%s",
