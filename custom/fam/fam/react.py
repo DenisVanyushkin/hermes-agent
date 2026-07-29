@@ -182,10 +182,13 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
 
 def run_hook(stdin=None, stdout=None, connect=None):
     """`fam react-hook` entry: read ONE reaction-event JSON object from
-    stdin, apply handle(), and print the adapter's feedback instruction:
+    stdin, apply handle(), and print the adapter's verdict:
 
-        {"react": "✅"}   -- put/keep the feedback reaction
-        {}                -- do nothing
+        {"handled": true,  "react": "✅", "result": "confirmed"}
+            -- consumed as an ack; put/keep the feedback reaction and do
+               NOT route this reaction to the agent
+        {"handled": false, "result": "unknown_message"}
+            -- not an ack; the adapter may route it to the dialogue path
 
     Event shape (produced by plugins/platforms/whatsapp/adapter.py):
       {"target_message_id": str, "emoji": str, "removal": bool,
@@ -212,9 +215,13 @@ def run_hook(stdin=None, stdout=None, connect=None):
     conn = (connect or famdb.connect)()
     out = handle(conn, wa_message_id, emoji,
                  removal=bool(event.get("removal")))
-    feedback = {}
-    if out["result"] in ("confirmed", "skipped", "already_acked"):
-        feedback = {"react": FEEDBACK_EMOJI}
-    print(json.dumps({**feedback, "result": out["result"]},
+    # `handled` is the adapter's routing signal, not a success flag: true
+    # means this reaction was consumed as an ack and must NOT become an
+    # agent turn. `ignored`/`unknown_message` are ordinary chat reactions
+    # and belong to the dialogue path (spec: reactions-dialogue,
+    # 2026-07-29).
+    handled = out["result"] in ("confirmed", "skipped", "already_acked")
+    feedback = {"react": FEEDBACK_EMOJI} if handled else {}
+    print(json.dumps({"handled": handled, **feedback, "result": out["result"]},
                      ensure_ascii=False), file=stdout)
     return 0

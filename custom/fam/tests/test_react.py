@@ -300,3 +300,45 @@ def test_parse_message_id_tolerates_garbage():
     assert gate._parse_message_id("not json") is None
     assert gate._parse_message_id('{"message_id": null}') is None
     assert gate._parse_message_id("") is None
+
+
+# ---- hook verdict: explicit `handled` field ----
+
+def test_hook_verdict_marks_confirmed_as_handled(db, pending_intake):
+    """A reaction that acked something must tell the adapter to stop."""
+    react.record_sent(db, "M1", "med", pending_intake["id"])
+    rc, payload = _run_hook(db, {"target_message_id": "M1", "emoji": "👍"})
+    assert rc == 0
+    assert payload["handled"] is True
+    assert payload["react"] == "✅"
+    assert payload["result"] == "confirmed"
+
+
+def test_hook_verdict_marks_unknown_message_as_not_handled(db):
+    """Nothing to ack -> the adapter is free to route it to the agent."""
+    rc, payload = _run_hook(db, {"target_message_id": "NOPE", "emoji": "👍"})
+    assert rc == 0
+    assert payload["handled"] is False
+    assert "react" not in payload
+    assert payload["result"] == "unknown_message"
+
+
+def test_hook_verdict_marks_ignored_as_not_handled(db, pending_intake):
+    """An unmapped emoji on a known reminder is dialogue material, not an ack."""
+    react.record_sent(db, "M2", "med", pending_intake["id"])
+    rc, payload = _run_hook(db, {"target_message_id": "M2", "emoji": "😂"})
+    assert rc == 0
+    assert payload["handled"] is False
+    assert payload["result"] == "ignored"
+
+
+def test_hook_verdict_marks_already_acked_as_handled(db, pending_intake):
+    """A repeat 👍 stays a fast-path success -- do not wake the agent twice."""
+    react.record_sent(db, "M3", "med", pending_intake["id"])
+    rc1, first = _run_hook(db, {"target_message_id": "M3", "emoji": "👍"})
+    assert rc1 == 0
+    assert first["handled"] is True
+    rc2, second = _run_hook(db, {"target_message_id": "M3", "emoji": "👍"})
+    assert rc2 == 0
+    assert second["handled"] is True
+    assert second["result"] == "already_acked"
