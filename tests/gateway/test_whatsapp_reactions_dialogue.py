@@ -265,6 +265,11 @@ def test_buffered_text_is_flushed_before_the_reaction_turn():
 
 
 def test_force_flush_cancels_the_pending_timer_task():
+    """Assert the cancellation INSIDE the running loop. asyncio.run() cancels
+    any leftover task at loop shutdown, so checking timer.cancelled() only
+    after the loop has closed would pass even with no cancel() call at all --
+    that false-positive shape is why this test previously asserted nothing
+    (review finding #2, 2026-07-29)."""
     adapter = _make_adapter(reaction_dialogue=True)
 
     async def scenario():
@@ -275,10 +280,12 @@ def test_force_flush_cancels_the_pending_timer_task():
         timer = asyncio.create_task(asyncio.sleep(30))
         adapter._pending_text_batch_tasks[key] = timer
         await adapter._force_flush_text_batch(key)
-        return timer
+        # Give the cancellation a chance to land while the loop is still
+        # running, before asyncio.run()'s own shutdown sweep could mask it.
+        await asyncio.sleep(0)
+        assert timer.cancelled()
 
-    timer = asyncio.run(scenario())
-    assert timer.cancelled() or timer.done()
+    asyncio.run(scenario())
 
 
 def test_force_flush_on_empty_buffer_is_a_no_op():
@@ -286,6 +293,44 @@ def test_force_flush_on_empty_buffer_is_a_no_op():
     adapter.handle_message = AsyncMock()
     asyncio.run(adapter._force_flush_text_batch("nothing-here"))
     adapter.handle_message.assert_not_awaited()
+
+
+def test_force_flush_does_not_lose_text_whose_timer_already_started_delivering_it():
+    """Review finding #1 (critical): if the real debounce timer
+    (_enqueue_text_event / _flush_text_batch) already popped the pending
+    event out of _pending_text_batches and is suspended inside
+    handle_message's own I/O, a force-flush racing in behind it must not
+    cancel that in-flight dispatch -- doing so silently drops the user's
+    text. Reproduced against the real timer machinery, not a stand-in."""
+    adapter = _make_adapter(reaction_dialogue=True)
+    adapter._text_batch_delay_seconds = 0
+    order = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_handle_message(event):
+        order.append(event.text)
+        started.set()
+        await release.wait()
+
+    adapter.handle_message = slow_handle_message
+
+    async def scenario():
+        pending = _pending_text_event(adapter, "я в магазине")
+        adapter._enqueue_text_event(pending)
+        key = adapter._text_batch_key(pending)
+        timer = adapter._pending_text_batch_tasks[key]
+
+        # Let the real timer fire, pop the pending event, and suspend
+        # inside handle_message before the reaction's force-flush runs.
+        await started.wait()
+
+        await adapter._force_flush_text_batch(key)
+        release.set()
+        await timer
+
+    asyncio.run(scenario())
+    assert order == ["я в магазине"]
 
 
 def _pending_text_event(adapter, text):

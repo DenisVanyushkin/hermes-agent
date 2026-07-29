@@ -1691,9 +1691,12 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         if not self._reaction_dialogue:
             return
         target_text = event.get("targetText")
-        if not target_text:
-            # Bridge restart emptied its message store. A turn with no
-            # context is worse than a dropped reaction.
+        target_message_id = event.get("targetMessageId")
+        if not target_text or not target_message_id:
+            # Bridge restart emptied its message store, or the bridge sent
+            # no id to quote. Either way run.py's reply-to rendering needs
+            # BOTH fields truthy, so a turn with only one is a contextless
+            # turn -- worse than a dropped reaction.
             print(f"[{self.name}] Reaction on unknown message "
                   f"{event.get('targetMessageId')}: no cached text, dropped")
             return
@@ -1711,7 +1714,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             source=source,
             raw_message=event,
             metadata={"whatsapp_reaction": emoji},
-            reply_to_message_id=str(event.get("targetMessageId") or ""),
+            reply_to_message_id=str(target_message_id),
             reply_to_text=str(target_text),
             reply_to_is_own_message=True,
         )
@@ -1722,12 +1725,23 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         await self.handle_message(message)
 
     async def _force_flush_text_batch(self, key: str) -> None:
-        """Dispatch any buffered text for ``key`` right now."""
-        task = self._pending_text_batch_tasks.pop(key, None)
-        if task and not task.done():
-            task.cancel()
+        """Dispatch any buffered text for ``key`` right now.
+
+        Pop the buffered event BEFORE touching the timer task. If the
+        timer already fired and is suspended inside ``handle_message``
+        (its ``asyncio.to_thread`` hop, the busy-session handler, or
+        session-store I/O), ``_pending_text_batches`` has already been
+        popped by that in-flight flush -- so ``pending`` here is ``None``
+        and we correctly skip both the cancel and the dispatch, letting
+        the in-flight call finish on its own. Cancelling the timer task in
+        that window would abort the in-flight dispatch and lose the
+        user's text outright; checking ``pending`` first avoids that race.
+        """
         pending = self._pending_text_batches.pop(key, None)
+        task = self._pending_text_batch_tasks.pop(key, None)
         if pending:
+            if task and not task.done():
+                task.cancel()
             await self.handle_message(pending)
 
     async def _send_reaction(self, chat_id: str, message_id: str,
