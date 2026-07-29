@@ -534,6 +534,23 @@ def _sync_turn_runtime_request_for_fallback(
     )
 
 
+def _note_blocking_wait() -> None:
+    """Сказать сторожу цикла, что мы ждём осознанно, а не зависли.
+
+    Вызывается из циклов опроса, которые держат поток вызывающего (в гейтвее --
+    поток цикла событий) на всё время обращения к провайдеру. Импорт ленивый:
+    agent/ не должен зависеть от gateway/, а в CLI гейтвея нет вовсе.
+    """
+    try:
+        from gateway.shutdown_watchdog import note_blocking_wait
+    except Exception:
+        return
+    try:
+        note_blocking_wait()
+    except Exception:
+        return
+
+
 def interruptible_api_call(agent, api_kwargs: dict):
     """
     Run the API call in a background thread so the main conversation loop
@@ -792,6 +809,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
     while t.is_alive():
         t.join(timeout=0.3)
         _poll_count += 1
+        _note_blocking_wait()
 
         # Every ~30s: touch activity for the gateway inactivity monitor AND
         # rewrite the live spinner/status line so CLI/TUI/Desktop users see
@@ -2620,6 +2638,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         t.start()
         while t.is_alive():
             t.join(timeout=0.3)
+            _note_blocking_wait()
             if agent._interrupt_requested:
                 raise InterruptedError("Agent interrupted during Bedrock API call")
             # Liveness watchdog: no Bedrock event for longer than the stale
@@ -3903,6 +3922,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     _HEARTBEAT_INTERVAL = 30.0  # seconds between gateway activity touches
     while t.is_alive():
         t.join(timeout=0.3)
+        _note_blocking_wait()
 
         # Periodic heartbeat: touch the agent's activity tracker so the
         # gateway's inactivity monitor knows we're alive while waiting

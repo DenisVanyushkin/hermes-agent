@@ -107,6 +107,81 @@ def _arm_loop_floor_timer(
     return _LoopFloorTimerHandle(loop, resolved_interval)
 
 
+# --- Известное блокирующее ожидание (issue: инцидент 2026-07-29) -------------
+#
+# Сторож не умеет отличить «цикл завис» от «цикл занят синхронным ходом агента»:
+# проба -- это настоящий call_soon_threadsafe, и заблокированный цикл не
+# выполнит её ни в том, ни в другом случае. 2026-07-29 инженерный пайплайн
+# держал цикл 107 секунд (он синхронен целиком и выполняется прямо на цикле), и
+# сторож убил здоровый процесс кодом 75, а systemd на уборке cgroup снёс заодно
+# браузерный стек.
+#
+# Отметка, а не флаг «я занят»: отмечается тот код, который ЗНАЕТ, что ждёт --
+# цикл опроса в interruptible_api_call, на каждой итерации. Свежая отметка
+# означает, что кто-то активно ждёт и прогресс есть. Если опрос прекратился по
+# любой причине -- поток умер, код упал, ожидание закончилось -- отметка
+# протухает сама и сторож возвращается к работе. Флаг так не умеет: он
+# остаётся поднятым ровно в том случае, ради которого сторож и заведён.
+#
+# Потолок нужен для второго случая: настоящий зависон ВНУТРИ ожидания
+# отмечался бы бесконечно. После него подавление снимается, даже если отметки
+# продолжают идти.
+DEFAULT_BLOCKING_NOTE_TTL_S = 5.0
+DEFAULT_BLOCKING_WAIT_CEILING_S = 900.0
+
+_blocking_wait_lock = threading.Lock()
+_blocking_wait_last: Optional[float] = None
+_blocking_wait_started: Optional[float] = None
+_blocking_wait_ttl: float = DEFAULT_BLOCKING_NOTE_TTL_S
+_blocking_wait_ceiling: float = DEFAULT_BLOCKING_WAIT_CEILING_S
+
+
+def note_blocking_wait(
+    *,
+    ttl: float = DEFAULT_BLOCKING_NOTE_TTL_S,
+    max_total: float = DEFAULT_BLOCKING_WAIT_CEILING_S,
+) -> None:
+    """Отметить, что цикл занят известным блокирующим ожиданием, а не завис."""
+    global _blocking_wait_last, _blocking_wait_started
+    global _blocking_wait_ttl, _blocking_wait_ceiling
+
+    now = time.monotonic()
+    with _blocking_wait_lock:
+        # Разрыв больше прежнего ttl означает, что прошлое ожидание кончилось и
+        # это уже новое -- потолок отсчитывается заново.
+        if _blocking_wait_last is None or (now - _blocking_wait_last) > _blocking_wait_ttl:
+            _blocking_wait_started = now
+        _blocking_wait_last = now
+        _blocking_wait_ttl = max(0.0, float(ttl))
+        _blocking_wait_ceiling = max(0.0, float(max_total))
+
+
+def blocking_wait_active() -> bool:
+    """Есть ли прямо сейчас свежая отметка о блокирующем ожидании."""
+    with _blocking_wait_lock:
+        last = _blocking_wait_last
+        started = _blocking_wait_started
+        ttl = _blocking_wait_ttl
+        ceiling = _blocking_wait_ceiling
+
+    # Часы не трогаем, пока отмечать нечего: сторож спрашивает это на каждой
+    # пропущенной пробе, а в норме отметок нет вовсе.
+    if last is None or started is None:
+        return False
+
+    now = time.monotonic()
+    if (now - last) > ttl:
+        return False
+    return (now - started) <= ceiling
+
+
+def _reset_blocking_wait_for_tests() -> None:
+    global _blocking_wait_last, _blocking_wait_started
+    with _blocking_wait_lock:
+        _blocking_wait_last = None
+        _blocking_wait_started = None
+
+
 def start_loop_liveness_watchdog(
     loop: asyncio.AbstractEventLoop,
     *,
@@ -163,6 +238,13 @@ def start_loop_liveness_watchdog(
 
             if stop_event.is_set():
                 return
+
+            if blocking_wait_active():
+                # Цикл занят известным ожиданием, а не завис. Засечку не
+                # ставим и накопленные не сбрасываем: отметка протухнет сама,
+                # если ожидание кончилось или сломалось.
+                continue
+
             strikes += 1
             if strikes < strikes_limit:
                 continue
