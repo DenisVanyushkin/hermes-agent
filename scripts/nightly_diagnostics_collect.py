@@ -176,14 +176,74 @@ def job_intel_summary(db_path: Path) -> dict:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
     try:
         conn.row_factory = sqlite3.Row
-        run = conn.execute(
-            "SELECT run_id, MAX(created_at) AS run_at, COUNT(*) AS found,"
-            " SUM(accepted) AS accepted, SUM(notified) AS notified"
-            " FROM vacancy_observability WHERE run_id = ("
-            "  SELECT run_id FROM vacancy_observability ORDER BY created_at DESC LIMIT 1)"
-        ).fetchone()
-        if run is None or run["run_id"] is None:
+        tables = {
+            str(row["name"])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        if "vacancy_observability" not in tables:
             return {"error": "no runs recorded"}
+
+        # `created_at` is sourced from the vacancy scrape timestamp, which can
+        # predate a later re-evaluation. Select the newest completed production
+        # daily run from the canonical run ledger instead of treating the newest
+        # scrape timestamp as the newest pipeline execution.
+        selection = "observability_timestamp_fallback"
+        run_id = None
+        run_at = None
+        run_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+        } if "runs" in tables else set()
+        if {"id", "mode", "status", "started_at", "finished_at"}.issubset(run_columns):
+            run_type_filter = (
+                "AND COALESCE(r.run_type, 'production') = 'production'"
+                if "run_type" in run_columns
+                else ""
+            )
+            run_row = conn.execute(
+                f"""
+                SELECT r.id AS run_id, COALESCE(r.finished_at, r.started_at) AS run_at
+                FROM runs r
+                WHERE r.mode = 'daily'
+                  AND r.status = 'ok'
+                  {run_type_filter}
+                  AND EXISTS (
+                      SELECT 1 FROM vacancy_observability v WHERE v.run_id = r.id
+                  )
+                ORDER BY COALESCE(r.finished_at, r.started_at) DESC, r.id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if run_row is not None:
+                run_id = run_row["run_id"]
+                run_at = run_row["run_at"]
+                selection = "daily_production_run"
+
+        if run_id is None:
+            run_row = conn.execute(
+                """
+                SELECT run_id, MAX(created_at) AS run_at
+                FROM vacancy_observability
+                GROUP BY run_id
+                ORDER BY run_at DESC, run_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if run_row is None or run_row["run_id"] is None:
+                return {"error": "no runs recorded"}
+            run_id = run_row["run_id"]
+            run_at = run_row["run_at"]
+
+        run = conn.execute(
+            """
+            SELECT ? AS run_id, ? AS run_at, COUNT(*) AS found,
+                   SUM(accepted) AS accepted, SUM(notified) AS notified
+            FROM vacancy_observability
+            WHERE run_id = ?
+            """,
+            (run_id, run_at, run_id),
+        ).fetchone()
+
         # Data gaps (salary_unknown, low_confidence, ...) are emitted per
         # vacancy no matter why it was rejected, so ranking every label
         # together buries the blockers that actually decided the outcome.
@@ -200,15 +260,54 @@ def job_intel_summary(db_path: Path) -> dict:
                     f" WHERE run_id = ? AND {predicate}"
                     " GROUP BY rejection_reason"
                     " ORDER BY COUNT(*) DESC, rejection_reason LIMIT 5",
-                    (run["run_id"],),
+                    (run_id,),
                 ).fetchall()
             ]
+
+        notification_diagnostics: dict[str, dict[str, int]] = {}
+        card_decision_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(vacancy_card_decisions)").fetchall()
+        } if "vacancy_card_decisions" in tables else set()
+        if {"run_id", "decision"}.issubset(card_decision_columns):
+            notification_diagnostics["card_decisions"] = {
+                str(row["decision"]): int(row["count"] or 0)
+                for row in conn.execute(
+                    """
+                    SELECT decision, COUNT(*) AS count
+                    FROM vacancy_card_decisions
+                    WHERE run_id = ?
+                    GROUP BY decision
+                    """,
+                    (run_id,),
+                ).fetchall()
+            }
+        notification_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(notifications)").fetchall()
+        } if "notifications" in tables else set()
+        if {"run_id", "vacancy_id", "delivery_status"}.issubset(notification_columns):
+            notification_diagnostics["delivery_statuses"] = {
+                str(row["delivery_status"]): int(row["count"] or 0)
+                for row in conn.execute(
+                    """
+                    SELECT delivery_status, COUNT(*) AS count
+                    FROM notifications
+                    WHERE run_id = ? AND vacancy_id IS NOT NULL
+                    GROUP BY delivery_status
+                    """,
+                    (run_id,),
+                ).fetchall()
+            }
+
         return {
             "run_id": run["run_id"],
             "run_at": run["run_at"],
+            "run_selection": selection,
             "found": run["found"],
             "accepted": run["accepted"] or 0,
             "notified": run["notified"] or 0,
+            "notification_diagnostics": notification_diagnostics,
             **top,
         }
     finally:

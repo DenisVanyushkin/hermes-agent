@@ -186,6 +186,66 @@ def test_job_intel_summary_keeps_data_gaps_out_of_the_blocker_list(tmp_path):
     ]
 
 
+def test_job_intel_summary_prefers_latest_completed_daily_run_over_scrape_timestamp_and_id(tmp_path):
+    db = tmp_path / "job_intel.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE runs (id INTEGER PRIMARY KEY, mode TEXT, status TEXT, run_type TEXT,"
+        " started_at TEXT, finished_at TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT,"
+        " accepted INTEGER, notified INTEGER, created_at TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE vacancy_rejection_events (run_id INTEGER, rejection_reason TEXT,"
+        " reason_type TEXT, severity TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE vacancy_card_decisions (run_id INTEGER, decision TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE notifications (run_id INTEGER, vacancy_id INTEGER, delivery_status TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO runs VALUES (?,?,?,?,?,?)",
+        [
+            (1, "daily", "ok", "production", "2026-07-05T09:00:00", "2026-07-05T09:10:00"),
+            (2, "daily", "ok", "production", "2026-07-04T09:00:00", "2026-07-04T09:10:00"),
+        ],
+    )
+    # Reused vacancy data can retain an older scrape timestamp. The higher-ID
+    # run 2 also completed earlier, so neither value can select it over run 1.
+    conn.executemany(
+        "INSERT INTO vacancy_observability VALUES (?,?,?,?,?)",
+        [
+            (1, "new-accepted", 1, 0, "2026-06-01T09:00:00"),
+            (1, "new-rejected", 0, 0, "2026-06-01T09:00:00"),
+            (2, "old", 1, 1, "2026-07-06T09:00:00"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO vacancy_card_decisions VALUES (?,?)",
+        [(1, "suppressed_recently_sent"), (1, "suppressed_recently_sent")],
+    )
+    conn.execute("INSERT INTO notifications VALUES (?,?,?)", (1, 42, "failed"))
+    conn.commit()
+    conn.close()
+
+    summary = collect.job_intel_summary(db)
+
+    assert summary["run_id"] == 1
+    assert summary["run_at"] == "2026-07-05T09:10:00"
+    assert summary["run_selection"] == "daily_production_run"
+    assert summary["found"] == 2
+    assert summary["accepted"] == 1
+    assert summary["notified"] == 0
+    assert summary["notification_diagnostics"] == {
+        "card_decisions": {"suppressed_recently_sent": 2},
+        "delivery_statuses": {"failed": 1},
+    }
+
+
 def test_job_intel_summary_missing_db_reports_error(tmp_path):
     summary = collect.job_intel_summary(tmp_path / "absent.sqlite3")
     assert "error" in summary
