@@ -281,6 +281,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.whatsapp_common import WhatsAppBehaviorMixin
 from gateway.whatsapp_identity import to_whatsapp_jid
+from plugins.platforms.whatsapp.reactions import is_dialogue_emoji
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -1612,7 +1613,30 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             await asyncio.sleep(1)
 
     async def _apply_reaction_event(self, event: Dict[str, Any]) -> None:
-        """Run the reaction hook for one event and honour its verdict."""
+        """Route one reaction: ack fast path first, agent turn second.
+
+        Order matters. The ack hook is deterministic, idempotent and costs
+        no tokens, so a reaction that acks a reminder or a med dose must
+        never also spend a model turn. Everything the hook did not consume
+        -- including an unmapped emoji on a reminder -- is ordinary chat
+        and belongs to the agent (spec: reactions-dialogue, 2026-07-29).
+
+        Both filters run BEFORE the hook: un-reacting has no semantics on
+        either path, and an off-whitelist emoji is not worth a subprocess.
+
+        Every hook failure mode falls through to the dialogue path rather
+        than returning. A broken ack hook should degrade to "the agent
+        sees it", not to "the reaction vanished".
+        """
+        if bool(event.get("removal")):
+            return
+        if not is_dialogue_emoji(event.get("emoji") or ""):
+            return
+
+        if not self._reaction_hook_cmd:
+            await self._dispatch_reaction_dialogue(event)
+            return
+
         payload = json.dumps({
             "target_message_id": event.get("targetMessageId"),
             "emoji": event.get("emoji") or "",
@@ -1631,21 +1655,34 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 proc.communicate(payload.encode()), timeout=30)
         except Exception as e:
             print(f"[{self.name}] Reaction hook failed to run: {e}")
+            await self._dispatch_reaction_dialogue(event)
             return
         if proc.returncode != 0:
             print(f"[{self.name}] Reaction hook exit {proc.returncode}: "
                   f"{(stderr or b'').decode(errors='replace')[:200]}")
+            await self._dispatch_reaction_dialogue(event)
             return
         try:
             verdict = json.loads((stdout or b"").decode().strip() or "{}")
         except json.JSONDecodeError:
             print(f"[{self.name}] Reaction hook returned non-JSON output")
+            await self._dispatch_reaction_dialogue(event)
             return
-        feedback = verdict.get("react")
-        if feedback:
-            await self._send_reaction(
-                event.get("chatId") or "", event.get("targetMessageId") or "",
-                feedback)
+
+        if verdict.get("handled"):
+            feedback = verdict.get("react")
+            if feedback:
+                await self._send_reaction(
+                    event.get("chatId") or "",
+                    event.get("targetMessageId") or "", feedback)
+            return
+
+        await self._dispatch_reaction_dialogue(event)
+
+    async def _dispatch_reaction_dialogue(self, event: Dict[str, Any]) -> None:
+        """Turn an unacked reaction into an ordinary agent turn."""
+        if not self._reaction_dialogue:
+            return
 
     async def _send_reaction(self, chat_id: str, message_id: str,
                              emoji: str) -> bool:

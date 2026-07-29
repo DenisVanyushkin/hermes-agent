@@ -52,3 +52,98 @@ async def _arm(adapter):
     adapter._running = False          # the loop exits immediately
     adapter._http_session = None
     adapter._start_reaction_polling()
+
+
+from unittest.mock import patch
+
+
+def _reaction(**overrides):
+    event = {
+        "targetMessageId": "M1",
+        "targetText": "Купила молоко?",
+        "emoji": "👍",
+        "removal": False,
+        "chatId": "77011102626@s.whatsapp.net",
+        "senderId": "77011102626@s.whatsapp.net",
+    }
+    event.update(overrides)
+    return event
+
+
+def _apply(adapter, event):
+    adapter._dispatch_reaction_dialogue = AsyncMock()
+    adapter._send_reaction = AsyncMock(return_value=True)
+    asyncio.run(adapter._apply_reaction_event(event))
+    return adapter._dispatch_reaction_dialogue
+
+
+def _hook(adapter, stdout, returncode=0):
+    """Patch the subprocess call so the hook returns `stdout`."""
+    proc = AsyncMock()
+    proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
+    proc.returncode = returncode
+    return patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc))
+
+
+def test_removal_never_reaches_the_dialogue_path():
+    """Un-reacting must not produce a second turn."""
+    adapter = _make_adapter(reaction_dialogue=True)
+    dispatch = _apply(adapter, _reaction(removal=True, emoji=""))
+    dispatch.assert_not_awaited()
+
+
+def test_emoji_outside_whitelist_never_reaches_the_dialogue_path():
+    adapter = _make_adapter(reaction_dialogue=True)
+    dispatch = _apply(adapter, _reaction(emoji="🦆"))
+    dispatch.assert_not_awaited()
+
+
+def test_dialogue_path_runs_when_no_hook_is_configured():
+    adapter = _make_adapter(reaction_dialogue=True)
+    dispatch = _apply(adapter, _reaction())
+    dispatch.assert_awaited_once()
+
+
+def test_handled_ack_stops_before_the_dialogue_path():
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    with _hook(adapter, '{"handled": true, "react": "✅", "result": "confirmed"}'):
+        dispatch = _apply(adapter, _reaction())
+    dispatch.assert_not_awaited()
+    adapter._send_reaction.assert_awaited_once()
+
+
+def test_unhandled_reaction_falls_through_to_the_dialogue_path():
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    with _hook(adapter, '{"handled": false, "result": "unknown_message"}'):
+        dispatch = _apply(adapter, _reaction())
+    dispatch.assert_awaited_once()
+
+
+def test_hook_nonzero_exit_falls_through_instead_of_dropping():
+    """A broken ack hook must not swallow the reaction."""
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/false"])
+    with _hook(adapter, "", returncode=1):
+        dispatch = _apply(adapter, _reaction())
+    dispatch.assert_awaited_once()
+
+
+def test_hook_non_json_output_falls_through():
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    with _hook(adapter, "not json at all"):
+        dispatch = _apply(adapter, _reaction())
+    dispatch.assert_awaited_once()
+
+
+def test_hook_that_fails_to_start_falls_through():
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/nope"])
+    adapter._dispatch_reaction_dialogue = AsyncMock()
+    adapter._send_reaction = AsyncMock()
+    with patch("asyncio.create_subprocess_exec",
+               AsyncMock(side_effect=FileNotFoundError("/nope"))):
+        asyncio.run(adapter._apply_reaction_event(_reaction()))
+    adapter._dispatch_reaction_dialogue.assert_awaited_once()
