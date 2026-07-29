@@ -1,9 +1,13 @@
 """Task 3 (external calendar sync, schema v12): config surface only --
 transport/parser/tick/CLI wiring land in later tasks. These tests just
-pin the 7 extcal_* CONFIG_DEFAULTS keys, their default values, the
+pin the 6 extcal_* CONFIG_DEFAULTS keys, their default values, the
 default-merge-doesn't-clobber-prod-keys behavior (pattern 6a, see
 test_car_config.py), and that the iCloud app password never becomes a
-config key (controller decision #5 -- it's env-only, ICLOUD_APP_PASSWORD)."""
+config key (controller decision #5 -- it's env-only, ICLOUD_APP_PASSWORD).
+
+(Task 6 fix-round 2: `extcal_all_day_as` was removed -- dead config,
+all-day -> `plans` is a fixed design decision, not a runtime switch
+anything ever read; the key count below dropped from 7 to 6.)"""
 from fam import gate
 
 
@@ -17,7 +21,6 @@ def test_extcal_defaults_merged_into_old_config(tmp_path):
     assert cfg["extcal_read_calendars"] == []
     assert cfg["extcal_write_calendar"] == ""
     assert cfg["extcal_horizon_weeks"] == 8
-    assert cfg["extcal_all_day_as"] == "plan"
     assert cfg["extcal_stale_hours"] == 6
 
 
@@ -39,7 +42,6 @@ def test_extcal_defaults_do_not_clobber_existing_prod_keys(tmp_path):
     # sibling keys the prod config never set are still default-merged
     assert cfg["extcal_read_calendars"] == []
     assert cfg["extcal_horizon_weeks"] == 8
-    assert cfg["extcal_all_day_as"] == "plan"
     assert cfg["extcal_stale_hours"] == 6
     # and unrelated prod keys from other phases survive untouched
     assert cfg["target"] == "whatsapp:+1"
@@ -51,8 +53,8 @@ def test_extcal_config_defaults_shape():
     assert gate.CONFIG_DEFAULTS["extcal_read_calendars"] == []
     assert gate.CONFIG_DEFAULTS["extcal_write_calendar"] == ""
     assert gate.CONFIG_DEFAULTS["extcal_horizon_weeks"] == 8
-    assert gate.CONFIG_DEFAULTS["extcal_all_day_as"] == "plan"
     assert gate.CONFIG_DEFAULTS["extcal_stale_hours"] == 6
+    assert "extcal_all_day_as" not in gate.CONFIG_DEFAULTS  # removed, fix-round 2
 
 
 def test_extcal_app_password_is_not_a_config_key():
@@ -69,10 +71,11 @@ def test_extcal_app_password_not_in_example_config():
     assert "ICLOUD_APP_PASSWORD" not in example
 
 
-def test_extcal_example_config_has_all_seven_keys():
+def test_extcal_example_config_has_all_six_keys():
     import json
     cfg = json.loads(gate.CONFIG_EXAMPLE_PATH.read_text(encoding="utf-8"))
     for key in ("extcal_enabled", "extcal_username", "extcal_read_calendars",
                 "extcal_write_calendar", "extcal_horizon_weeks",
-                "extcal_all_day_as", "extcal_stale_hours"):
+                "extcal_stale_hours"):
         assert key in cfg, key
+    assert "extcal_all_day_as" not in cfg  # removed, fix-round 2

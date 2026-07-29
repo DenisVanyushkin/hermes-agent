@@ -1026,6 +1026,31 @@ def cmd_tick_brevity(args):
 # stale, missing, or renamed (belt 1 below is the other, independent leg).
 _EXTCAL_ECHO_UID_RE = re.compile(r"^fam-.*@hermes-home$")
 
+# Fix-round 2 (finding N1): `extcal.parse_ics`/`_finalize_component`
+# ALREADY guarantee every returned Component carries a usable
+# uid/dtstart_utc -- a per-component check for that AFTER parse_ics
+# returns can never fire; the real silent loss happens ONE LEVEL BELOW,
+# INSIDE parse_ics itself (a resource holding a recurring master AND its
+# RECURRENCE-ID overrides together: an override with a broken/missing
+# DTSTART is dropped there, invisibly, while a healthy sibling in the
+# SAME resource survives). The only externally-observable signal is a
+# component COUNT mismatch against the raw `BEGIN:VEVENT` blocks actually
+# present in the resource text -- counted with this regex, never folded
+# (RFC 5545 line-folding only ever applies to lines long enough to need
+# it, and "BEGIN:VEVENT" never is).
+_VEVENT_BEGIN_RE = re.compile(r"^BEGIN:VEVENT", re.M)
+
+# Fix-round 2 (finding N2): `extcal.expand()`'s own per-master RRULE
+# failure message embeds the master's uid via `repr()`
+# (`_expand_master`: f"... for uid={master.get('uid')!r} ...") -- this
+# lets a broken-RRULE error be attributed back to the ONE resource it
+# came from (via `key_meta`) instead of degrading the whole calendar.
+# Messages with no uid at all (e.g. "python-dateutil not installed",
+# which zeroes out EVERY RRULE master in the batch at once) don't match,
+# and stay a whole-calendar concern -- see `_cal_ext_sync`'s own
+# docstring for why that ONE class can't be narrowed further.
+_EXPAND_ERROR_UID_RE = re.compile(r"uid=['\"]([^'\"]*)['\"]")
+
 
 def _extcal_window(cfg, now):
     """`(window_start, window_end)` = `[today-1d, today+horizon_weeks]`,
@@ -1159,6 +1184,19 @@ def _dry_run_summary(changeset):
     }
 
 
+_HREF_IN_TEXT_RE = re.compile(r"https?://\S+")
+
+
+def _redact_sync_errors_for_dry_run(sync_errors):
+    """`--dry-run`'s `sync_errors` list otherwise embeds a full CalDAV
+    resource href (built from her own iCloud account's collection URL)
+    in plain text -- fix-round 2, minor #4. The calendar name/mode/counts
+    around it stay (that's the whole diagnostic point of printing these
+    at all); any `http(s)://...` substring is replaced with a
+    placeholder."""
+    return [_HREF_IN_TEXT_RE.sub("<href>", e) for e in (sync_errors or [])]
+
+
 def _cal_ext_sync(conn, cfg, now, dry_run):
     """The whole read -> reconcile -> (write) pipeline for one `fam tick
     cal-ext` run. Returns `{"counts": dict|None (None on --dry-run),
@@ -1175,11 +1213,30 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     `cmd_tick_cal_ext` (not this function) is solely responsible for
     deciding pass/fail from `calendars`/`sync_errors`/`counts["errors"]`.
 
-    Per-row snapshot-inclusion rule (fix-round Critical findings C1/C3,
-    replacing the first cut's "default to including a row unless we know
-    better"): an owner='iphone' row is only ever offered to plan_changes
-    THIS round -- i.e. only ever a disappearance CANDIDATE -- when ALL of
-    the following hold, checked in `_include_iphone_row` below:
+    Per-row snapshot-inclusion rule (fix-round 1 Critical findings C1/C3,
+    NARROWED in fix-round 2 findings N1/N2 -- see below), replacing the
+    first cut's "default to including a row unless we know better": an
+    owner='iphone' row is only ever offered to plan_changes THIS round --
+    i.e. only ever a disappearance CANDIDATE -- when ALL of the following
+    hold, checked in `_include_iphone_row` below:
+      0. its own `external_href` is not in `bad_hrefs` (fix-round 2,
+         findings N1/N2): a specific RESOURCE this round could not fully
+         trust -- either `parse_ics` returned FEWER components than the
+         resource's own raw `BEGIN:VEVENT` block count (fix-round 1's
+         per-component uid/dtstart_utc re-check after parse_ics returns
+         could never actually fire -- parse_ics/`_finalize_component`
+         already guarantee every returned Component has both; the real
+         silent loss happens INSIDE parse_ics, e.g. a resource holding a
+         recurring master together with its RECURRENCE-ID overrides,
+         where one override's broken DTSTART is dropped there while a
+         healthy master in the SAME resource survives -- a block-count
+         mismatch is the only externally-observable signal), or one
+         `expand()` error was attributable to this specific resource (a
+         broken RRULE on ONE master, via the uid `_expand_master`'s own
+         error message embeds). Scoped to the ONE resource, not its
+         whole calendar (N2): a healthy sibling resource -- or a healthy
+         master sharing this SAME resource with a lost override -- must
+         not be held hostage by it;
       1. its own calendar is identifiable at all (`external_href` matches
          one of THIS round's `eligible` calendars by URL prefix) -- a row
          under NO eligible calendar is EXCLUDED, not included by default
@@ -1190,17 +1247,18 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
          credentials, timeout, 5xx, a renamed calendar no longer matching
          the config filter -- unconditionally, per its own docstring);
       2. that calendar's fetch succeeded this round (not in `errored_urls`)
-         AND its ICS/expand pass came back clean (not in `degraded_urls`,
-         fix-round C3: a component `parse_ics` failed to produce at all,
-         one missing `uid`/`dtstart_utc` that `expand()` would otherwise
-         silently drop with no error entry of its own, or a genuine
-         `expand()` error -- e.g. a broken RRULE, or `python-dateutil`
-         simply not installed in whatever environment this tick actually
-         runs in, which zeroes out EVERY RRULE master at once -- all mark
-         that calendar's own batch degraded for THIS round only, so a row
-         belonging to it is excluded from the disappearance sweep instead
-         of silently cancelled for a reason that was never really "she
-         deleted it");
+         AND its ICS/expand pass had no BATCH-WIDE problem (not in
+         `degraded_urls`) -- narrowed in fix-round 2 to ONLY the class of
+         `expand()` error that genuinely cannot be attributed to one
+         resource: `python-dateutil` not installed (zeroes out EVERY
+         RRULE master in the batch at once), or a malformed-window/
+         unexpected failure carrying no uid at all. Unlike `bad_hrefs`
+         above, this is NOT a "this round only" state (fix-round 2,
+         finding N2): nothing about a missing dependency or a genuinely
+         malformed request self-heals between ticks, so a calendar
+         marked here stays excluded -- and its token frozen (see the
+         token-seeding note below) -- until an operator actually fixes
+         the underlying problem;
       3. if that calendar ran in a FULL mode this round (calendar-query
          over the whole horizon -- exhaustive listing, so `plan_changes`'
          own "not seen in this batch -> vanished" logic is correct on its
@@ -1253,7 +1311,10 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     full_mode_urls = set()
     incremental_hrefs = {}         # calendar url -> set of hrefs this batch touched
     errored_urls = set()
-    degraded_urls = set()          # fetch OK, but parse/expand had a problem
+    degraded_urls = set()          # a BATCH-WIDE problem (fix-round 2: NOT attributable
+                                    # to one resource -- see the per-calendar loop below)
+    bad_hrefs = set()              # ONE resource's data is untrustworthy this round
+                                    # (fix-round 2, findings N1/N2)
     tokens_to_persist = {}         # calendar url -> token (only clean, successful calendars)
 
     # C1(a): extcal_read_calendars configured but nothing eligible survived
@@ -1290,7 +1351,7 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         base = _extcal_url_base(url)
         batch_hrefs = set()
         components = []
-        degraded = False
+        batch_wide_degraded = False
         for item in (items or []):
             href = item.get("href")
             abs_href = urljoin(base, href) if (base and href) else href
@@ -1302,38 +1363,62 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             if not ics_text:
                 continue
             parsed = extcal.parse_ics(ics_text)
-            if not parsed:
-                degraded = True
+            # Fix-round 2, finding N1: a per-component uid/dtstart_utc
+            # check AFTER parse_ics returns can never fire -- parse_ics/
+            # _finalize_component already guarantee every returned
+            # Component has both. The real silent loss happens INSIDE
+            # parse_ics (a resource holding a recurring master together
+            # with its RECURRENCE-ID overrides: an override with a
+            # broken/missing DTSTART is dropped there while a healthy
+            # master in the SAME resource survives) -- the only
+            # externally-observable signal is a component COUNT mismatch
+            # against this resource's own raw BEGIN:VEVENT blocks.
+            begin_count = len(_VEVENT_BEGIN_RE.findall(ics_text))
+            if not parsed or len(parsed) < begin_count:
+                # Excluded BY HREF (finding N2), not the whole calendar --
+                # a healthy SIBLING resource in the same calendar (or,
+                # within THIS resource, a healthy master alongside a lost
+                # override) must not be held hostage by one bad one.
+                bad_hrefs.add(abs_href)
                 sync_errors.append(
-                    f"{calendar.get('name') or url}: parse_ics produced no "
-                    f"usable component for {abs_href}")
-                continue
+                    f"{calendar.get('name') or url}: parse_ics returned "
+                    f"{len(parsed)} of {begin_count} VEVENT block(s) "
+                    f"(dropped {begin_count - len(parsed)}) for {abs_href}")
+                if not parsed:
+                    continue
             for comp in parsed:
                 uid = comp.get("uid")
                 if uid and _EXTCAL_ECHO_UID_RE.match(uid):
                     continue  # anti-echo belt 2 (design doc invariant #4)
-                if not uid or comp.get("dtstart_utc") is None:
-                    # expand() would silently drop this with NO error
-                    # entry of its own (extcal.py's own expand() docstring)
-                    # -- recorded here instead, and this calendar's batch
-                    # is degraded so its rows are excluded from
-                    # disappearance below (fix-round finding C3).
-                    degraded = True
-                    sync_errors.append(
-                        f"{calendar.get('name') or url}: component missing "
-                        f"uid/dtstart for {abs_href}")
-                    continue
                 components.append(comp)
                 key_meta.setdefault(uid, {"href": abs_href, "etag": item.get("etag")})
 
         expanded = extcal.expand(components, window_start, window_end)
         combined_occurrences.extend(expanded["occurrences"])
-        if expanded["errors"]:
-            degraded = True
-            sync_errors.extend(f"{calendar.get('name') or url}: {e}"
-                                for e in expanded["errors"])
+        for err in expanded["errors"]:
+            sync_errors.append(f"{calendar.get('name') or url}: {err}")
+            m = _EXPAND_ERROR_UID_RE.search(err)
+            meta = key_meta.get(m.group(1)) if m else None
+            if meta and meta.get("href"):
+                # Attributable to ONE specific resource (a broken RRULE
+                # on ONE master, per _expand_master's own error format) --
+                # excluded by href, same granularity as the parse_ics
+                # drop above (finding N2).
+                bad_hrefs.add(meta["href"])
+            else:
+                # NOT attributable to any one resource -- e.g. "python-
+                # dateutil not installed" zeroes out EVERY RRULE master in
+                # this calendar's batch at once, or a malformed-window
+                # failure carrying no uid at all. This is the one class
+                # of failure this per-href granularity genuinely cannot
+                # narrow further -- the WHOLE calendar is marked degraded,
+                # and (finding N2) stays that way UNTIL SOMEONE FIXES THE
+                # UNDERLYING PROBLEM (installs dateutil, etc.) -- NOT
+                # merely "this round": nothing about the environment or
+                # the malformed data self-heals on its own between ticks.
+                batch_wide_degraded = True
 
-        if degraded:
+        if batch_wide_degraded:
             degraded_urls.add(url)
         else:
             tokens_to_persist[url] = (
@@ -1360,6 +1445,9 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         occ_key_meta[key] = meta
 
     def _include_iphone_row(row):
+        href = row.get("external_href")
+        if href and href in bad_hrefs:
+            return False  # THIS resource's data was untrustworthy this round (N1/N2)
         calendar_url = _extcal_row_calendar_url(row, eligible)
         if calendar_url is None:
             return False  # no eligible calendar claims this row this round
@@ -1367,7 +1455,7 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             return False  # no TRUSTWORTHY data this round -- leave it alone
         if calendar_url in full_mode_urls:
             return True  # exhaustive listing -- natural disappearance is correct
-        return row.get("external_href") in incremental_hrefs.get(calendar_url, ())
+        return href in incremental_hrefs.get(calendar_url, ())
 
     iphone_events = [r for r in _extcal_iphone_rows(
                         conn, "events", "start_utc", window_start_iso, window_end_iso)
@@ -1445,7 +1533,14 @@ def cmd_tick_cal_ext(args):
     expand, plan_changes) but returns BEFORE apply_changes/meta writes --
     nothing lands in the DB or in iCloud. The printed changeset is
     REDACTED (`_dry_run_summary`, fix-round finding m3): external_uid/id
-    and counts only, never her event titles or raw LOCATION text.
+    and counts only, never her event titles or raw LOCATION text; the
+    printed `sync_errors` are ALSO redacted (`_redact_sync_errors_for_
+    dry_run`, fix-round 2 minor #4) -- a full CalDAV resource href would
+    otherwise leak in plain text. `--dry-run` ALWAYS exits 0, deliberately,
+    even when `sync_errors` is non-empty (fix-round 2, minor #4): it is a
+    diagnostic preview, nothing was written either way, so there is
+    nothing an exit code needs to protect here -- a human reads the
+    printed output instead.
 
     Fix-round 1 (Opus review finding I1): ANY error this tick -- one
     calendar's fetch failing (partial) or every calendar's (total), a
@@ -1508,9 +1603,15 @@ def cmd_tick_cal_ext(args):
 
     if dry_run:
         out = {"ok": True, "dry_run": True, "calendars": result["calendars"],
-               "sync_errors": result["sync_errors"],
+               "sync_errors": _redact_sync_errors_for_dry_run(result["sync_errors"]),
                "changeset": _dry_run_summary(result["changeset"])}
         print(json.dumps(out, ensure_ascii=False))
+        # Fix-round 2, minor #4: --dry-run ALWAYS returns 0 here,
+        # deliberately, even when sync_errors is non-empty -- it is a
+        # diagnostic preview only, nothing was written either way (no DB
+        # row, no meta key, no iCloud write), so there is nothing an exit
+        # code needs to protect; a human reads the printed sync_errors
+        # instead of the tick being paged over it.
         return 0
 
     counts = result["counts"]
@@ -1518,15 +1619,18 @@ def cmd_tick_cal_ext(args):
     apply_errors = counts.get("errors") or []
     has_error = bool(calendar_errors) or bool(result["sync_errors"]) or bool(apply_errors)
 
-    # extcal_last_mode: pure telemetry, updated every run regardless of
-    # error -- also the "mode changed" trigger for the audit below
-    # (fix-round finding I5).
+    # extcal_last_mode: pure telemetry, but (fix-round 2, minor #6) only
+    # WRITTEN when it actually changes -- this key lands in the SAME WAL
+    # sqlite file fam-reminders touches every minute, and an unconditional
+    # write here would add another 96/day to the very contention m6's
+    # RandomizedDelaySec was trying to reduce. Also the "mode changed"
+    # trigger for the audit below (fix-round finding I5).
     mode_changed = False
     for c in result["calendars"]:
         prev_mode = famdb.meta_get(conn, f"extcal_last_mode:{c['url']}")
         if prev_mode != c["mode"]:
             mode_changed = True
-        famdb.meta_set(conn, f"extcal_last_mode:{c['url']}", c["mode"])
+            famdb.meta_set(conn, f"extcal_last_mode:{c['url']}", c["mode"])
 
     nonzero_counts = any(v for k, v in counts.items() if k != "errors")
     if has_error or nonzero_counts or mode_changed:
@@ -1558,8 +1662,12 @@ def cmd_tick_cal_ext(args):
     conn.commit()
 
     if has_error:
+        # `sync_errors` already includes each errored calendar's own
+        # "<name>: <reason>" message (see _cal_ext_sync's fetch loop) --
+        # fix-round 2, minor #5: this used to ALSO append `calendar_errors`
+        # here, duplicating the identical text and wasting roughly half of
+        # `_audit_tick_error`'s own 200-char slice on a verbatim repeat.
         reasons = list(result["sync_errors"])
-        reasons += [f"{c['name'] or c['url']}: {c['reason']}" for c in calendar_errors]
         reasons += [f"{e.get('branch')}.{e.get('action')} id={e.get('id')}: {e.get('error')}"
                     for e in apply_errors]
         _audit_tick_error("cal-ext", "; ".join(reasons) or "cal-ext sync had errors")
@@ -1578,6 +1686,7 @@ def cmd_tick_cal_ext(args):
     else:
         print(" ".join(f"{k}={v}" for k, v in counts.items() if k != "errors"))
     return 0
+
 
 def cmd_mail_test(args):
     """`fam mail test EVENT_ID` -- manually trigger the .ics email for one

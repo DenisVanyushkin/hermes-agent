@@ -63,7 +63,6 @@ CFG = {
     "extcal_read_calendars": [],
     "extcal_write_calendar": "",
     "extcal_horizon_weeks": 8,
-    "extcal_all_day_as": "plan",
     "extcal_stale_hours": 6,
 }
 

@@ -152,15 +152,15 @@ CONFIG_DEFAULTS = {
     # calendar except the write target"; `extcal_write_calendar` is the
     # URL of the "Гермес" collection events get exported to.
     # `extcal_horizon_weeks` bounds both the read and write window.
-    # `extcal_all_day_as` controls whether an imported all-day VEVENT
-    # becomes a `plan` or an `event`. `extcal_stale_hours` is the
-    # threshold for the staleness health probe.
+    # `extcal_stale_hours` is the threshold for the staleness health
+    # probe. (`extcal_all_day_as` was removed in Task 6's fix-round 2 --
+    # dead config: all-day -> `plans` is a fixed design decision, not a
+    # runtime switch anything ever read.)
     "extcal_enabled": False,
     "extcal_username": "",
     "extcal_read_calendars": [],
     "extcal_write_calendar": "",
     "extcal_horizon_weeks": 8,
-    "extcal_all_day_as": "plan",
     "extcal_stale_hours": 6,
 }
 

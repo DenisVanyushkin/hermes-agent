@@ -241,6 +241,37 @@ def test_dry_run_changeset_is_redacted(db, monkeypatch, capsys):
     assert set(cs["events"]["insert"][0].keys()) == {"external_uid"}
 
 
+def test_dry_run_sync_errors_redact_hrefs(db, monkeypatch, capsys):
+    """Fix-round 2, minor #4: `sync_errors` messages embed a full CalDAV
+    RESOURCE href (the specific event's own path under her account, e.g.
+    `.../home/broken.ics`) -- `--dry-run`'s printed output must not leak
+    THAT in plain text, same redaction principle as the changeset itself
+    (m3). This is narrower than "no URL anywhere in the output" -- the
+    `calendars` list legitimately still shows each CALENDAR's own
+    collection URL (that's not a specific resource path, and is already
+    shown in every `audit cal.ext.sync` entry regardless of dry-run)."""
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    resource_href = CAL_URL + "broken.ics"
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    item = {"href": resource_href, "deleted": False, "etag": "e1",
+            "ics": "this is not ICS at all\r\n"}
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], None, {"mode": "initial_full", "reason": None}))
+
+    rc = cli.cmd_tick_cal_ext(_args(dry_run=True))
+    assert rc == 0  # dry-run always exits 0 (m4), even with sync_errors present
+    out = capsys.readouterr().out
+    assert "broken.ics" not in out
+    assert resource_href not in out
+
+    printed = json.loads(out)
+    assert printed["sync_errors"]
+    assert any("<href>" in e for e in printed["sync_errors"])
+    assert not any("broken.ics" in e for e in printed["sync_errors"])
+
+
 # ---------------------------------------------------------------------
 # success: audit cal.ext.sync with counts AND sync_info.mode
 # ---------------------------------------------------------------------
@@ -381,7 +412,7 @@ def test_road_recompute_excludes_owner_iphone(db, monkeypatch):
     # _add_event_neutral_road helper uses) so both events start at
     # travel_min_road=None regardless of the host's live fam-config.json.
     monkeypatch.setattr(tick.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (None, "none"))
     hermes_evt = cal.add(db, "Тренировка (Гермес)", start, place="Invictus")
     iphone_evt = cal.add(db, "Йога (iPhone)", start, place="Invictus")
     db.execute("UPDATE events SET owner='iphone' WHERE id=?", (iphone_evt["id"],))
@@ -389,7 +420,7 @@ def test_road_recompute_excludes_owner_iphone(db, monkeypatch):
 
     recomputed_ids = []
     monkeypatch.setattr(tick.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None:
+                         lambda conn, event, cfg, now_utc=None, **kw:
                          recomputed_ids.append(event["id"]) or (5, "tomtom"))
 
     cfg = dict(gate.CONFIG_DEFAULTS)
@@ -622,8 +653,9 @@ def test_row_from_a_now_ineligible_calendar_is_not_cancelled(db, monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# C3: an unparsed/malformed event is excluded from the disappearance
-# sweep, not cancelled outright.
+# C3 / N1 / N2: an unparsed/malformed event is excluded from the
+# disappearance sweep BY HREF, not cancelled outright and not by taking
+# its whole calendar down with it.
 # ---------------------------------------------------------------------
 
 def test_broken_ics_excludes_its_href_from_disappearance_instead_of_cancelling(db, monkeypatch):
@@ -656,7 +688,76 @@ def test_broken_ics_excludes_its_href_from_disappearance_instead_of_cancelling(d
     assert row["status"] == "active"  # NOT cancelled -- excluded from the sweep instead
 
     rows = _audit_rows(db, "cal.ext.sync")
-    assert any("parse_ics produced no usable component" in e
+    assert any("VEVENT block" in e for e in rows[0]["sync_errors"])
+
+
+def test_component_count_mismatch_excludes_only_that_href_not_the_whole_calendar(db, monkeypatch):
+    """Fix-round 2, finding N1: the REAL silent-loss scenario is a single
+    ICS RESOURCE holding a recurring master together with its
+    RECURRENCE-ID override, where the override's own DTSTART is broken/
+    missing -- parse_ics/_finalize_component drop that ONE component
+    while the master survives, with no error of its own. This is only
+    observable from the OUTSIDE as a component-count mismatch against the
+    resource's own raw BEGIN:VEVENT blocks. A pre-existing local row tied
+    to the SAME href must be excluded from disappearance (N1), but a
+    HEALTHY event from a DIFFERENT resource in the SAME calendar must
+    still be inserted -- the granularity is per-HREF, not per-calendar
+    (N2)."""
+    broken_href = CAL_URL + "recurring-with-broken-override.ics"
+    existing = cal.add(db, "Перенос был здесь", "2037-07-27T13:00:00+00:00",
+                        end_utc="2037-07-27T14:00:00+00:00")
+    db.execute(
+        "UPDATE events SET owner='iphone', external_uid=?, external_href=? "
+        "WHERE id=?",
+        (extcal._occurrence_key("recur@icloud.com", "2037-07-27T13:00:00+00:00"),
+         broken_href, existing["id"]),
+    )
+    db.commit()
+
+    # ONE resource, TWO BEGIN:VEVENT blocks: a healthy master (no RRULE,
+    # for simplicity -- what matters here is the COUNT, not recurrence)
+    # and an override with NO DTSTART at all -- _finalize_component drops
+    # the second one silently; parse_ics returns only 1 component for 2
+    # raw blocks.
+    broken_resource_ics = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"
+        "BEGIN:VEVENT\r\nUID:recur@icloud.com\r\nSUMMARY:Мастер\r\n"
+        "DTSTART:20370720T130000Z\r\nDTEND:20370720T140000Z\r\nEND:VEVENT\r\n"
+        "BEGIN:VEVENT\r\nUID:recur@icloud.com\r\n"
+        "RECURRENCE-ID:20370727T130000Z\r\nSUMMARY:Сломанный перенос\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    healthy_item = {"href": CAL_URL + "healthy.ics", "deleted": False, "etag": "eH",
+                    "ics": _ics_vevent("evt-healthy@icloud.com", "Здоровое событие",
+                                       "20370721T090000Z", "20370721T100000Z")}
+    broken_item = {"href": broken_href, "deleted": False, "etag": "eB",
+                   "ics": broken_resource_ics}
+
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([healthy_item, broken_item], None,
+                          {"mode": "fallback_full", "reason": "http_403"}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1  # the count mismatch is a real, flagged error (I1)
+
+    # The pre-existing row tied to the BROKEN resource's href survives --
+    # excluded from disappearance, not cancelled.
+    row = db.execute("SELECT * FROM events WHERE id=?", (existing["id"],)).fetchone()
+    assert row["status"] == "active"
+
+    # The HEALTHY resource -- a DIFFERENT href in the SAME calendar --
+    # was NOT held hostage by its sibling's problem: it still landed.
+    healthy_row = db.execute(
+        "SELECT * FROM events WHERE title=?", ("Здоровое событие",)).fetchone()
+    assert healthy_row is not None
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert any("VEVENT block" in e and "dropped 1" in e
                for e in rows[0]["sync_errors"])
 
 
@@ -742,6 +843,65 @@ def test_read_calendars_filter_is_honored(db, monkeypatch):
     rc = cli.cmd_tick_cal_ext(_args())
     assert rc == 0
     assert fetched_urls == [url_allowed]  # neither the blocked nor write-target
+
+
+# ---------------------------------------------------------------------
+# m5 (fix-round 2): tick.error text does not duplicate the same calendar
+# reason twice.
+# ---------------------------------------------------------------------
+
+def test_tick_error_message_does_not_duplicate_calendar_reason(db, monkeypatch):
+    """The first cut of fix-round 1 appended a calendar's own fetch
+    error TWICE -- once via `sync_errors` (built inside `_cal_ext_sync`),
+    once more via a separate `calendar_errors` pass in `cmd_tick_cal_ext`
+    -- wasting roughly half of `_audit_tick_error`'s own 200-char slice
+    on a verbatim repeat (fix-round 2, minor #5)."""
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         (None, None, {"mode": "error",
+                                        "reason": "a_very_specific_reason_xyz"}))
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1
+    assert len(calls) == 1
+    assert calls[0].count("a_very_specific_reason_xyz") == 1
+
+
+# ---------------------------------------------------------------------
+# m6 (fix-round 2): extcal_last_mode is only WRITTEN when it changes.
+# ---------------------------------------------------------------------
+
+def test_last_mode_meta_only_written_when_it_changes(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([], "SAME-TOKEN", {"mode": "sync_collection", "reason": None}))
+
+    # First tick: mode transitions from "no prior record" -- writes once.
+    cli.cmd_tick_cal_ext(_args())
+
+    last_mode_writes = []
+    real_meta_set = famdb.meta_set
+
+    def _spy(conn, key, value):
+        if key.startswith("extcal_last_mode:"):
+            last_mode_writes.append(value)
+        return real_meta_set(conn, key, value)
+    monkeypatch.setattr(cli.famdb, "meta_set", _spy)
+
+    # Second tick: SAME mode as last time -- must NOT write again (this
+    # meta key lands in the same WAL sqlite file fam-reminders touches
+    # every minute; an unconditional write here would add 96/day to the
+    # very contention m6's own RandomizedDelaySec was trying to reduce).
+    cli.cmd_tick_cal_ext(_args())
+    assert last_mode_writes == []
 
 
 # ---------------------------------------------------------------------
