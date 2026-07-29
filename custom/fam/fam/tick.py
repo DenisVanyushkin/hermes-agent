@@ -38,8 +38,8 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import (audit, cal, db, gate, goals, meds, plans, rem, road, shopping,
-                 weather, whereami)
+from fam import (audit, cal, db, gate, goals, meds, plans, presence, rem, road,
+                 shopping, weather, whereami)
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -986,6 +986,36 @@ def _meds_series(conn, now_utc, cfg):
                           {"intake_id": intake_id, "mode": "out_of_stock",
                            "deduped": already is not None})
             else:
+                prev_reason = row["gate_reason"]
+                hold_reason = None
+
+                # Sleep-гейт: утренняя доза ждёт признака жизни, но не
+                # дольше med_wake_gate_until -- это одновременно граница
+                # "утренних" доз и жёсткий бэкстоп, чтобы доза не утекла
+                # молча в полуночный missed-closeout.
+                if (cfg.get("med_wake_gate_enabled", True)
+                        and _local_hhmm_before(row["plan_ts_utc"],
+                                               cfg.get("med_wake_gate_until",
+                                                       "12:00"))
+                        and _local_hhmm_before(now_utc,
+                                               cfg.get("med_wake_gate_until",
+                                                       "12:00"))
+                        and presence.awake_since(conn, cfg, now_utc) is None):
+                    hold_reason = "asleep"
+
+                if hold_reason is not None:
+                    _gate_hold(conn, intake_id, hold_reason, now_dt, cfg,
+                               prev_reason)
+                    conn.commit()
+                    continue
+
+                if prev_reason is not None:
+                    conn.execute(
+                        "UPDATE med_intakes SET gate_reason=NULL WHERE id=?",
+                        (intake_id,))
+                    audit.log(conn, "med.gate_release",
+                              {"intake_id": intake_id, "was": prev_reason})
+
                 raw = {"mode": "take", "name": name, "dose": dose}
                 human_fallback = f"Пора принять {name}" + (
                     f" ({dose})" if dose else "")
@@ -1025,6 +1055,38 @@ def _meds_series(conn, now_utc, cfg):
 
 def _today_almaty(now_utc):
     return _parse_utc(now_utc).astimezone(ALMATY).date().isoformat()
+
+
+def _local_hhmm_before(ts_utc, hhmm):
+    """True, если локальное время Алматы у ts_utc строго раньше "HH:MM"."""
+    local = _parse_utc(ts_utc).astimezone(ALMATY)
+    hh, mm = (int(p) for p in hhmm.split(":"))
+    return (local.hour, local.minute) < (hh, mm)
+
+
+def _gate_hold(conn, intake_id, reason, now_dt, cfg, prev_reason):
+    """Удержать дозу: перепроверить через med_gate_recheck_min, НЕ отправляя.
+
+    Это ключевое отличие от обычного цикла: 45-минутный шаг означает
+    "мы отправили и ждём"; здесь мы не отправляли, поэтому шаг короткий
+    -- иначе доза, отпущенная в 12:00:01, ждала бы до 12:45.
+
+    med.gate_hold аудитится ТОЛЬКО при смене причины. audit_log уже
+    несёт 22k+ строк tick.reminders; запись на каждой десятиминутной
+    перепроверке по каждой дозе утопила бы его.
+    """
+    recheck = int(cfg.get("med_gate_recheck_min", 10))
+    next_utc = (now_dt + timedelta(minutes=recheck)).isoformat(
+        timespec="seconds")
+    conn.execute(
+        "UPDATE med_intakes SET series_next_utc=?, gate_reason=? "
+        "WHERE id=? AND status='pending'",
+        (next_utc, reason, intake_id))
+    if prev_reason != reason:
+        audit.log(conn, "med.gate_hold",
+                  {"intake_id": intake_id, "reason": reason,
+                   "recheck_at": next_utc})
+    return next_utc
 
 
 def _followup_related_plans(conn, event, open_plans):

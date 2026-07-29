@@ -323,3 +323,112 @@ def test_away_false_on_expired_shared_location(db):
          "2026-07-20T09:00:00+00:00"))
     db.commit()
     assert presence.is_away(db, CFG, NOW)[0] is False
+
+
+from fam import meds, tick
+
+
+class FakeDeliver:
+    def __init__(self):
+        self.calls = []
+        self.responses = []
+
+    def __call__(self, conn, kind, raw, human_fallback, cfg, force=False,
+                 now_utc=None, sent_ref=None):
+        self.calls.append({"kind": kind, "raw": raw,
+                           "human_fallback": human_fallback,
+                           "sent_ref": sent_ref})
+        return self.responses.pop(0) if self.responses else "sent"
+
+
+@pytest.fixture()
+def fake_deliver(monkeypatch):
+    fd = FakeDeliver()
+    monkeypatch.setattr(gate, "deliver", fd)
+    return fd
+
+
+def _pending_intake(db, name="Эутирокс", plan="2026-07-20T04:00:00+00:00",
+                    times=("09:00",)):
+    """Доза на 09:00 Алматы = 04:00 UTC, готовая к отправке."""
+    med_id = meds.add(db, name, list(times), remaining=10)
+    cur = db.execute(
+        "INSERT INTO med_intakes(med_id, plan_ts_utc, status, "
+        "series_next_utc, created_at) VALUES(?,?,'pending',?,?)",
+        (med_id, plan, plan, plan))
+    db.commit()
+    return cur.lastrowid
+
+
+def _intake(db, intake_id):
+    return db.execute("SELECT * FROM med_intakes WHERE id=?",
+                      (intake_id,)).fetchone()
+
+
+# 05:00 UTC = 10:00 Алматы -- утро, доза на 09:00 уже просрочена.
+MORNING = "2026-07-20T05:00:00+00:00"
+# 07:00 UTC = 12:00 Алматы ровно -- момент сдачи sleep-гейта.
+NOON = "2026-07-20T07:00:00+00:00"
+
+
+def test_sleep_gate_holds_morning_dose_without_signal(db, fake_deliver):
+    intake_id = _pending_intake(db)
+    tick._meds_series(db, MORNING, CFG)
+
+    assert fake_deliver.calls == []
+    row = _intake(db, intake_id)
+    assert row["status"] == "pending"
+    assert row["gate_reason"] == "asleep"
+    # перепроверка через 10 минут, а не через 45
+    assert row["series_next_utc"] == "2026-07-20T05:10:00+00:00"
+
+
+def test_sleep_gate_releases_after_signal(db, fake_deliver):
+    intake_id = _pending_intake(db)
+    tick._meds_series(db, MORNING, CFG)
+    assert fake_deliver.calls == []
+
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", CFG)
+
+    assert len(fake_deliver.calls) == 1
+    row = _intake(db, intake_id)
+    assert row["gate_reason"] is None
+    # после реальной отправки -- обычные 45 минут
+    assert row["series_next_utc"] == "2026-07-20T05:55:00+00:00"
+
+
+def test_sleep_gate_gives_up_at_med_wake_gate_until(db, fake_deliver):
+    _pending_intake(db)
+    tick._meds_series(db, NOON, CFG)
+    assert len(fake_deliver.calls) == 1
+
+
+def test_sleep_gate_ignores_afternoon_dose(db, fake_deliver):
+    # Доза на 14:00 Алматы = 09:00 UTC; гейт её не касается.
+    _pending_intake(db, name="Магний", plan="2026-07-20T09:00:00+00:00",
+                    times=("14:00",))
+    tick._meds_series(db, "2026-07-20T09:00:00+00:00", CFG)
+    assert len(fake_deliver.calls) == 1
+
+
+def test_sleep_gate_disabled_by_config(db, fake_deliver):
+    cfg = {**CFG, "med_wake_gate_enabled": False}
+    _pending_intake(db)
+    tick._meds_series(db, MORNING, cfg)
+    assert len(fake_deliver.calls) == 1
+
+
+def test_hold_does_not_spend_budget_or_audit_twice(db, fake_deliver):
+    _pending_intake(db)
+    tick._meds_series(db, MORNING, CFG)
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", CFG)
+    tick._meds_series(db, "2026-07-20T05:20:00+00:00", CFG)
+
+    holds = db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='med.gate_hold'"
+    ).fetchone()[0]
+    assert holds == 1, "аудит только на переходе, не на каждой перепроверке"
+    sent = db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='gate.sent'").fetchone()[0]
+    assert sent == 0
