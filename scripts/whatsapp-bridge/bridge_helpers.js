@@ -65,6 +65,24 @@ export function createBoundedMessageStore(limit = 512) {
   return { remember, get };
 }
 
+/**
+ * Text of one of our own outbound messages, for correlating an emoji
+ * reaction back to what it reacts to.
+ *
+ * The store is in-memory: after a bridge restart every pre-restart id
+ * misses and this returns null. That is deliberate — a reaction is about
+ * something recent, and waking the agent with no context is worse than
+ * dropping the event (spec: reactions-dialogue, 2026-07-29).
+ */
+export function reactionTargetText(messageStore, targetId, maxLen = 500) {
+  if (!messageStore || !targetId) return null;
+  const stored = messageStore.get(targetId);
+  if (!stored) return null;
+  const text = String(textFromMessageContent(stored.message) || '').trim();
+  if (!text) return null;
+  return text.length > maxLen ? text.slice(0, maxLen) : text;
+}
+
 export function pollCreationMessageSecret(pollCreation) {
   return pollCreation?.message?.messageContextInfo?.messageSecret
     || pollCreation?.messageContextInfo?.messageSecret
@@ -189,17 +207,17 @@ export function buildLocationPayload({ latitude, longitude, name, address } = {}
   return { location };
 }
 
-function textFromQuotedMessage(quotedMessage) {
-  if (!quotedMessage) return '';
-  if (quotedMessage.conversation) return quotedMessage.conversation;
-  if (quotedMessage.extendedTextMessage?.text) return quotedMessage.extendedTextMessage.text;
-  if (quotedMessage.imageMessage?.caption) return quotedMessage.imageMessage.caption;
-  if (quotedMessage.videoMessage?.caption) return quotedMessage.videoMessage.caption;
-  if (quotedMessage.documentMessage?.caption) return quotedMessage.documentMessage.caption;
-  if (quotedMessage.documentMessage?.fileName) return `[Document: ${quotedMessage.documentMessage.fileName}]`;
-  if (quotedMessage.locationMessage) return formatLocationText(quotedMessage.locationMessage, false);
-  if (quotedMessage.contactMessage) return formatContactText(quotedMessage.contactMessage);
-  if (quotedMessage.pollCreationMessage) return formatPollText(quotedMessage.pollCreationMessage);
+export function textFromMessageContent(content) {
+  if (!content) return '';
+  if (content.conversation) return content.conversation;
+  if (content.extendedTextMessage?.text) return content.extendedTextMessage.text;
+  if (content.imageMessage?.caption) return content.imageMessage.caption;
+  if (content.videoMessage?.caption) return content.videoMessage.caption;
+  if (content.documentMessage?.caption) return content.documentMessage.caption;
+  if (content.documentMessage?.fileName) return `[Document: ${content.documentMessage.fileName}]`;
+  if (content.locationMessage) return formatLocationText(content.locationMessage, false);
+  if (content.contactMessage) return formatContactText(content.contactMessage);
+  if (content.pollCreationMessage) return formatPollText(content.pollCreationMessage);
   return '';
 }
 
@@ -314,7 +332,7 @@ export async function extractBridgeEvent({
   const quotedParticipant = normalizeWhatsAppId(contextInfo?.participant || '') || null;
   const quotedRemoteJid = normalizeWhatsAppId(contextInfo?.remoteJid || '') || null;
   const hasQuotedMessage = !!contextInfo?.quotedMessage;
-  const quotedText = textFromQuotedMessage(contextInfo?.quotedMessage);
+  const quotedText = textFromMessageContent(contextInfo?.quotedMessage);
 
   let body = '';
   let hasMedia = false;

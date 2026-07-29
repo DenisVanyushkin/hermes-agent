@@ -43,6 +43,7 @@ import {
   mediaPayloadForFile,
   pollCreationMessageFromPayload,
   pollUpdateForAggregation,
+  reactionTargetText,
 } from './bridge_helpers.js';
 
 // Parse CLI args
@@ -730,6 +731,7 @@ async function startSocket() {
         if (target.fromMe && target.id) {
           enqueueReactionEvent({
             targetMessageId: target.id,
+            targetText: reactionTargetText(messageStore, target.id),
             emoji: reaction.text || '',
             removal: !reaction.text,
             chatId,
