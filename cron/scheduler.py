@@ -289,6 +289,36 @@ def plan_cron_failure_delivery(
     return None, alert
 
 
+def _send_cron_operator_alert(
+    alert_text: str, cfg: Optional[dict] = None, adapters=None, loop=None
+) -> None:
+    """Best-effort delivery of a cron failure to the operator alert channel.
+
+    Reuses ``gateway.error_alerts.channel`` (the same channel turn-error
+    alerts use) via a synthetic job, so target resolution, adapter reuse
+    and the standalone fallback all stay in ``_deliver_result``. Never
+    raises: an alert that cannot be delivered must not fail the run.
+    """
+    try:
+        from gateway.turn_error_alerts import get_alert_config
+
+        if cfg is None:
+            cfg = load_config()
+        alert_cfg = get_alert_config(cfg)
+        if not alert_cfg:
+            return  # feature off — VPS-safe default
+
+        synthetic_job = {
+            "id": "cron-operator-alert",
+            "name": "cron operator alert",
+            "deliver": alert_cfg["channel"],
+            "origin": None,
+        }
+        _deliver_result(synthetic_job, alert_text, adapters=adapters, loop=loop)
+    except Exception as exc:  # noqa: BLE001 — best-effort by contract
+        logger.warning("cron operator alert failed: %s", exc)
+
+
 class CronPromptInjectionBlocked(Exception):
     """Raised by _build_job_prompt when the fully-assembled prompt trips the
     injection scanner. Caught in run_job so the operator sees a clean

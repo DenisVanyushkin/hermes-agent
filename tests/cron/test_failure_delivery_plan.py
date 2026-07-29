@@ -111,3 +111,49 @@ def test_unnormalized_valid_audience_withholds_chat_delivery_end_to_end() -> Non
 
     assert chat_text is None
     assert alert_text is not None
+
+
+def test_operator_alert_is_sent_to_the_configured_channel(monkeypatch) -> None:
+    from cron import scheduler
+
+    sent = []
+    monkeypatch.setattr(
+        scheduler, "_deliver_result",
+        lambda job, content, adapters=None, loop=None: sent.append((job, content)),
+    )
+
+    scheduler._send_cron_operator_alert(
+        "⚠️ Cron 'x' failed", cfg={"gateway": {"error_alerts": {"channel": "telegram:79564752"}}}
+    )
+
+    assert len(sent) == 1
+    synthetic_job, content = sent[0]
+    assert synthetic_job["deliver"] == "telegram:79564752"
+    assert content == "⚠️ Cron 'x' failed"
+
+
+def test_no_alert_channel_configured_is_a_silent_no_op(monkeypatch) -> None:
+    from cron import scheduler
+
+    sent = []
+    monkeypatch.setattr(
+        scheduler, "_deliver_result",
+        lambda job, content, adapters=None, loop=None: sent.append(content),
+    )
+
+    scheduler._send_cron_operator_alert("⚠️ Cron 'x' failed", cfg={})
+
+    assert sent == []
+
+
+def test_alert_delivery_failure_never_raises(monkeypatch) -> None:
+    from cron import scheduler
+
+    def boom(job, content, adapters=None, loop=None):
+        raise RuntimeError("telegram is down")
+
+    monkeypatch.setattr(scheduler, "_deliver_result", boom)
+
+    scheduler._send_cron_operator_alert(
+        "⚠️ Cron 'x' failed", cfg={"gateway": {"error_alerts": {"channel": "telegram:79564752"}}}
+    )  # must not raise
