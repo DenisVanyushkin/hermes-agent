@@ -432,3 +432,71 @@ def test_hold_does_not_spend_budget_or_audit_twice(db, fake_deliver):
     sent = db.execute(
         "SELECT COUNT(*) FROM audit_log WHERE kind='gate.sent'").fetchone()[0]
     assert sent == 0
+
+
+# 16:00 UTC = 21:00 Алматы ровно -- момент сдачи away-гейта.
+AWAY_GIVEUP = "2026-07-20T16:00:00+00:00"
+# 11:00 UTC = 16:00 Алматы -- день, sleep-гейт неприменим.
+AFTERNOON = "2026-07-20T11:00:00+00:00"
+
+
+def test_away_gate_holds_during_remote_event(db, fake_deliver):
+    pid = _add_place(db, "Зал", AWAY_LAT, AWAY_LON)
+    _add_event(db, "Тренировка", "2026-07-20T10:30:00+00:00",
+               "2026-07-20T11:30:00+00:00", place_id=pid, travel_min=20)
+    intake_id = _pending_intake(db, name="Магний",
+                                plan="2026-07-20T11:00:00+00:00",
+                                times=("16:00",))
+    tick._meds_series(db, AFTERNOON, CFG)
+
+    assert fake_deliver.calls == []
+    row = _intake(db, intake_id)
+    assert row["gate_reason"] == "away"
+    assert row["series_next_utc"] == "2026-07-20T11:10:00+00:00"
+
+
+def test_away_gate_releases_when_event_over(db, fake_deliver):
+    pid = _add_place(db, "Зал", AWAY_LAT, AWAY_LON)
+    _add_event(db, "Тренировка", "2026-07-20T10:30:00+00:00",
+               "2026-07-20T11:30:00+00:00", place_id=pid, travel_min=20)
+    _pending_intake(db, name="Магний", plan="2026-07-20T11:00:00+00:00",
+                    times=("16:00",))
+    tick._meds_series(db, AFTERNOON, CFG)
+    assert fake_deliver.calls == []
+
+    # 11:40 UTC -- событие кончилось в 11:30
+    tick._meds_series(db, "2026-07-20T11:40:00+00:00", CFG)
+    assert len(fake_deliver.calls) == 1
+
+
+def test_away_gate_releases_when_car_returns_home(db, fake_deliver):
+    _add_car_metric(db, "2026-07-20T10:55:00+00:00", AWAY_LAT, AWAY_LON)
+    _pending_intake(db, name="Магний", plan="2026-07-20T11:00:00+00:00",
+                    times=("16:00",))
+    tick._meds_series(db, AFTERNOON, CFG)
+    assert fake_deliver.calls == []
+
+    _add_car_metric(db, "2026-07-20T11:05:00+00:00", HOME_LAT, HOME_LON)
+    tick._meds_series(db, "2026-07-20T11:10:00+00:00", CFG)
+    assert len(fake_deliver.calls) == 1
+
+
+def test_away_gate_gives_up_at_med_away_gate_until(db, fake_deliver):
+    pid = _add_place(db, "Зал", AWAY_LAT, AWAY_LON)
+    _add_event(db, "Долгая встреча", "2026-07-20T10:00:00+00:00",
+               "2026-07-20T18:00:00+00:00", place_id=pid)
+    _pending_intake(db, name="Магний", plan="2026-07-20T11:00:00+00:00",
+                    times=("16:00",))
+    tick._meds_series(db, AWAY_GIVEUP, CFG)
+    assert len(fake_deliver.calls) == 1, "в 21:00 гейт обязан сдаться"
+
+
+def test_away_gate_disabled_by_config(db, fake_deliver):
+    cfg = {**CFG, "med_away_gate_enabled": False}
+    pid = _add_place(db, "Зал", AWAY_LAT, AWAY_LON)
+    _add_event(db, "Тренировка", "2026-07-20T10:30:00+00:00",
+               "2026-07-20T11:30:00+00:00", place_id=pid)
+    _pending_intake(db, name="Магний", plan="2026-07-20T11:00:00+00:00",
+                    times=("16:00",))
+    tick._meds_series(db, AFTERNOON, cfg)
+    assert len(fake_deliver.calls) == 1

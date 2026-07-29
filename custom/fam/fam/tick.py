@@ -1003,6 +1003,17 @@ def _meds_series(conn, now_utc, cfg):
                         and presence.awake_since(conn, cfg, now_utc) is None):
                     hold_reason = "asleep"
 
+                # Away-гейт: все лекарства дома, поэтому напоминание в
+                # чужом месте -- чистый шум. Сдаётся в med_away_gate_until,
+                # чтобы доза не утекла молча в полуночный closeout.
+                if (hold_reason is None
+                        and cfg.get("med_away_gate_enabled", True)
+                        and _local_hhmm_before(now_utc,
+                                               cfg.get("med_away_gate_until",
+                                                       "21:00"))
+                        and presence.is_away(conn, cfg, now_utc)[0]):
+                    hold_reason = "away"
+
                 if hold_reason is not None:
                     _gate_hold(conn, intake_id, hold_reason, now_dt, cfg,
                                prev_reason)
