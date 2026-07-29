@@ -2080,11 +2080,30 @@ def _apply_event_insert(conn, entry):
 
     `place` is resolved via `_resolve_place_ref` (fix-round finding C1 --
     see the module note above): a known `places` match is used, an
-    unmatched free-text location leaves `place` None/NULL. Either way the
-    raw text ALSO goes into the `external_location` column, via the same
-    raw UPDATE that attaches the rest of the external identity (fix-round
-    4). `notes` is never passed at all -- a fresh imported row starts with
-    an EMPTY, entirely human-owned notes column.
+    unmatched free-text location leaves `place_id` None/NULL. Either way
+    the raw text ALSO goes into the `external_location` column, via the
+    same raw UPDATE that attaches the rest of the external identity
+    (fix-round 4). `notes` is never passed at all -- a fresh imported row
+    starts with an EMPTY, entirely human-owned notes column.
+
+    Fix-round 5 (review finding I2, T6): `cal.add()` is called with
+    `place=None` UNCONDITIONALLY here, even when `entry["location"]`
+    resolves to a known `places` row with coordinates -- `place_id` is
+    set SEPARATELY, by the SAME raw UPDATE that already attaches
+    owner/external_*/external_location below, never through `cal.add`'s
+    own `place` kwarg. This matters because `cal.add()` calls
+    `recompute_road()` as an unconditional step of its own (BEFORE this
+    function's raw UPDATE ever runs) -- with a real place attached at
+    add-time, that hook would fire a live TomTom call for every single
+    imported timed event, competing with Hermes-owned trips for the same
+    shared 100/day budget on the very first full import (dozens of
+    events at once). An `owner='iphone'` event never needs Hermes'
+    road/leave_at figure in the first place (the same reasoning behind
+    `tick.road_recompute`'s own `owner='hermes'` guard) -- so skipping
+    `recompute_road` entirely for the insert path, by never giving
+    `cal.add()` a place to compute FROM, is strictly correct, not just
+    cheaper. `place_id` itself is still fully resolved and stored (needed
+    for display / future fuzzy-matching), only the road hook is avoided.
 
     Idempotency guard (fix-round finding I3 for plans; extended here to
     events in fix-round 2, finding N3): `events.external_uid` already has
@@ -2111,16 +2130,17 @@ def _apply_event_insert(conn, entry):
         })
         return _SKIPPED
 
+    place_id = _resolve_place_ref(conn, entry.get("location"))
     added = cal.add(conn, entry.get("title") or "", entry["start_utc"],
-                     end_utc=entry.get("end_utc"),
-                     place=_resolve_place_ref(conn, entry.get("location")))
+                     end_utc=entry.get("end_utc"), place=None)
     event_id = added["id"]
     conn.execute(
         "UPDATE events SET owner='iphone', external_uid=?, external_href=?, "
-        "external_etag=?, external_seq=?, external_location=? WHERE id=?",
+        "external_etag=?, external_seq=?, external_location=?, place_id=? "
+        "WHERE id=?",
         (entry.get("external_uid"), entry.get("external_href"),
          entry.get("external_etag"), entry.get("external_seq"),
-         _external_location_value(entry.get("location")), event_id),
+         _external_location_value(entry.get("location")), place_id, event_id),
     )
     rem.regenerate(conn, event_id)
     audit.log(conn, "cal.ext.apply", {

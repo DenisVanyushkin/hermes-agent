@@ -256,6 +256,37 @@ def test_insert_event_with_resolvable_location_sets_place_and_external_location(
     assert row["notes"] == ""
 
 
+def test_insert_with_real_place_coords_never_calls_compute_travel_min(db, monkeypatch):
+    """Task 6 review fix-round finding I2: a resolvable LOCATION with REAL
+    coordinates must not spend a live TomTom call at import time --
+    `cal.add()`'s own add-time `recompute_road` hook would otherwise fire
+    for every imported timed event (dozens at once on a first full
+    import), competing with Hermes-owned trips for the shared 100/day
+    budget. `cal.add()` is now given `place=None` unconditionally here;
+    `place_id` is set separately, by the SAME raw UPDATE that already
+    attaches owner/external_*/external_location, so `recompute_road`
+    never even sees a place to compute a route FROM. `place_id` itself is
+    still fully resolved and stored -- only the road hook is skipped."""
+    from fam import road
+    invictus = places.add(db, "Invictus", lat=43.2298, lon=76.8823)
+    db.commit()
+
+    def _boom(*a, **k):
+        raise AssertionError(
+            "road.compute_travel_min must never run on a cal-ext insert")
+    monkeypatch.setattr(road, "compute_travel_min", _boom)
+
+    entry = _event_insert("uid-950@icloud.com", "Тренировка",
+                           "2037-07-20T13:00:00+00:00", location="Invictus")
+    counts = extcal.apply_changes(db, _changeset(events_insert=[entry]), {})
+    assert counts["events_inserted"] == 1
+    assert counts["errors"] == []
+
+    row = _get_event_by_uid(db, entry["external_uid"])
+    assert row["place_id"] == invictus["id"]
+    assert row["travel_min_road"] is None
+
+
 def test_insert_event_without_location_leaves_external_location_null(db):
     # "no location on the phone" is ONE state in the DB, not two: NULL,
     # never an empty string (see _external_location_value).
