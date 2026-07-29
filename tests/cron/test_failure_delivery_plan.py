@@ -78,3 +78,36 @@ def test_missing_error_still_yields_an_alert() -> None:
 
     assert chat_text is None
     assert alert_text is not None
+
+
+def test_typo_audience_with_matching_config_degrades_to_end_user() -> None:
+    job = {**UNFLAGGED_AMINA_JOB, "audience": "enduser"}
+
+    assert resolve_cron_audience(job, CFG) == "end_user"
+
+
+def test_typo_audience_without_config_falls_back_to_operator() -> None:
+    job = {**UNFLAGGED_AMINA_JOB, "audience": "enduser"}
+
+    assert resolve_cron_audience(job) == "operator"
+
+
+def test_non_string_audience_does_not_raise_and_falls_back_to_operator() -> None:
+    for bogus in (123, []):
+        job = {**UNFLAGGED_AMINA_JOB, "audience": bogus}
+
+        assert resolve_cron_audience(job) == "operator"
+
+
+def test_unnormalized_valid_audience_is_stripped_and_lowercased() -> None:
+    job = {**UNFLAGGED_AMINA_JOB, "audience": " END_USER "}
+
+    assert resolve_cron_audience(job) == "end_user"
+
+
+def test_unnormalized_valid_audience_withholds_chat_delivery_end_to_end() -> None:
+    job = {**AMINA_JOB, "audience": " END_USER "}
+    chat_text, alert_text = plan_cron_failure_delivery(job, ERROR)
+
+    assert chat_text is None
+    assert alert_text is not None
