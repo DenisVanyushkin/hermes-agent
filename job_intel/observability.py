@@ -271,6 +271,50 @@ def _clean_reason_text(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip().lower()
 
 
+# onsite_requirement_mismatch is classified as a high-severity blocker, so it
+# must describe the work format rather than the presence of the word. Measured
+# over the 5779 stored descriptions, the work-format sense dominates (`hybrid`
+# next to work/workplace/environment/... 530 docs, bare `hybrid role` 91 docs),
+# so work format is the default and only the countable noise senses are
+# excluded: LinkedIn tracking tags (`#li-hybrid`, 143 docs), "onsites" as a noun
+# for company events, interview and client-visit logistics, `hybrid <discipline>
+# role` (3 docs) and `hybrid` as a technical or commercial term (14 docs).
+_TRACKING_TAG = re.compile(r"#li-[a-z0-9_-]+", re.I)
+# \b after "site" also rules out the plural noun "onsites".
+_ONSITE_WORD = re.compile(r"\bon-?site\b", re.I)
+_ONSITE_NON_WORK_SENSE = re.compile(
+    r"on-?site\s+(interview|interviews|loop|loops|visit|visits|day|days|round|rounds)\b",
+    re.I,
+)
+# German postings state the work format as "hybrides Arbeiten"; the inflected
+# adjective would not survive the \b-anchored English form.
+_HYBRID_WORD = re.compile(r"\bhybrid\b|\bhybride[nmrs]?\s+arbeit\w*\b", re.I)
+_HYBRID_NON_WORK_SENSE = re.compile(
+    r"hybrid[\s-]+("
+    r"multi-?cloud|cloud|network|networks|infrastructure|architecture|deployment|"
+    r"storage|encryption|integration|mesh|motion|motions|pricing|"
+    r"app|apps|application|applications"
+    r")\b"
+    # "a hybrid analytical role" — hybrid modifies the discipline. Bare "hybrid
+    # role" carries no such modifier and stays a work-format statement, and the
+    # space keeps compounds such as "hybrid-anywhere role" out of this branch.
+    r"|hybrid\s+\w+\s+roles?\b",
+    re.I,
+)
+
+
+def has_onsite_requirement(text: str) -> bool:
+    """True when the text states a work format that requires office presence."""
+    cleaned = _TRACKING_TAG.sub(" ", text)
+    for match in _ONSITE_WORD.finditer(cleaned):
+        if not _ONSITE_NON_WORK_SENSE.match(cleaned, match.start()):
+            return True
+    for match in _HYBRID_WORD.finditer(cleaned):
+        if not _HYBRID_NON_WORK_SENSE.match(cleaned, match.start()):
+            return True
+    return False
+
+
 def rejection_reasons_for(
     vacancy: Vacancy,
     evaluation: Evaluation,
@@ -332,7 +376,7 @@ def rejection_reasons_for(
 
     if not vacancy.description or len(vacancy.description.strip()) < 120:
         reasons.append("insufficient_data")
-    if "onsite" in text or "on-site" in text or "hybrid" in text:
+    if has_onsite_requirement(text):
         reasons.append("onsite_requirement_mismatch")
     if any(term in text for term in ["english required", "native", "language requirement", "fluent in"]) and evaluation.score < 70:
         reasons.append("language_requirement_mismatch")
