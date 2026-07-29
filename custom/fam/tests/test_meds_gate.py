@@ -212,3 +212,114 @@ def test_awake_survives_non_object_entry_json(tmp_path, db):
         messages=[(SESSION_ID, "user", _epoch(EARLY))])
     cfg = dict(CFG, state_db_path=path)
     assert presence.awake_since(db, cfg, NOW) is None
+
+
+HOME_LAT, HOME_LON = 43.197391, 76.872737
+# ~6 км от дома.
+AWAY_LAT, AWAY_LON = 43.250000, 76.900000
+
+
+def _add_place(db, name, lat, lon):
+    cur = db.execute(
+        "INSERT INTO places(name, address, lat, lon, created_at) "
+        "VALUES(?,?,?,?,?)", (name, "", lat, lon, NOW))
+    return cur.lastrowid
+
+
+def _add_event(db, title, start_utc, end_utc, place_id=None, travel_min=None):
+    cur = db.execute(
+        "INSERT INTO events(title, start_utc, end_utc, place_id, status, "
+        "travel_min, created_at, updated_at) VALUES(?,?,?,?,'active',?,?,?)",
+        (title, start_utc, end_utc, place_id, travel_min, NOW, NOW))
+    return cur.lastrowid
+
+
+def _add_car_metric(db, ts_utc, lat, lon, gps_ts=None):
+    db.execute(
+        "INSERT INTO car_metrics(ts_utc, gps_lat, gps_lon, gps_ts) "
+        "VALUES(?,?,?,?)", (ts_utc, lat, lon, gps_ts or ts_utc))
+    db.commit()
+
+
+def test_away_false_with_no_evidence(db):
+    away, reason, _ = presence.is_away(db, CFG, NOW)
+    assert away is False
+    assert reason == "home_or_unknown"
+
+
+def test_away_true_during_event_at_remote_place(db):
+    pid = _add_place(db, "Зал", AWAY_LAT, AWAY_LON)
+    _add_event(db, "Тренировка", "2026-07-20T09:30:00+00:00",
+               "2026-07-20T10:30:00+00:00", place_id=pid, travel_min=20)
+    db.commit()
+
+    away, reason, expected_home = presence.is_away(db, CFG, NOW)
+    assert away is True
+    assert reason == "event"
+    # конец 10:30 UTC + 20 минут дороги
+    assert expected_home == "2026-07-20T10:50:00+00:00"
+
+
+def test_away_false_during_event_at_home_place(db):
+    pid = _add_place(db, "Дом", HOME_LAT, HOME_LON)
+    _add_event(db, "Уборка", "2026-07-20T09:30:00+00:00",
+               "2026-07-20T10:30:00+00:00", place_id=pid)
+    db.commit()
+    assert presence.is_away(db, CFG, NOW)[0] is False
+
+
+def test_away_false_for_event_without_place(db):
+    # Событие без места отлучкой не считается -- выбор Дениса 2026-07-29.
+    _add_event(db, "Созвон", "2026-07-20T09:30:00+00:00",
+               "2026-07-20T10:30:00+00:00", place_id=None)
+    db.commit()
+    assert presence.is_away(db, CFG, NOW)[0] is False
+
+
+def test_away_false_for_event_already_over(db):
+    pid = _add_place(db, "Зал", AWAY_LAT, AWAY_LON)
+    _add_event(db, "Тренировка", "2026-07-20T07:00:00+00:00",
+               "2026-07-20T08:00:00+00:00", place_id=pid)
+    db.commit()
+    assert presence.is_away(db, CFG, NOW)[0] is False
+
+
+def test_away_true_on_fresh_car_gps_far_from_home(db):
+    _add_car_metric(db, "2026-07-20T09:55:00+00:00", AWAY_LAT, AWAY_LON)
+    away, reason, expected_home = presence.is_away(db, CFG, NOW)
+    assert away is True
+    assert reason == "car_gps"
+    assert expected_home is None
+
+
+def test_away_false_on_stale_car_gps(db):
+    # 09:00 при NOW=10:00 -- старше whereami_car_fresh_min (20 мин).
+    _add_car_metric(db, "2026-07-20T09:00:00+00:00", AWAY_LAT, AWAY_LON)
+    assert presence.is_away(db, CFG, NOW)[0] is False
+
+
+def test_away_false_when_car_is_at_home(db):
+    _add_car_metric(db, "2026-07-20T09:55:00+00:00", HOME_LAT, HOME_LON)
+    assert presence.is_away(db, CFG, NOW)[0] is False
+
+
+def test_away_true_on_unexpired_shared_location(db):
+    db.execute(
+        "INSERT INTO location_hints(source, lat, lon, label, ts_utc, "
+        "expires_utc) VALUES('shared',?,?,'',?,?)",
+        (AWAY_LAT, AWAY_LON, "2026-07-20T09:30:00+00:00",
+         "2026-07-20T11:00:00+00:00"))
+    db.commit()
+    away, reason, _ = presence.is_away(db, CFG, NOW)
+    assert away is True
+    assert reason == "shared_location"
+
+
+def test_away_false_on_expired_shared_location(db):
+    db.execute(
+        "INSERT INTO location_hints(source, lat, lon, label, ts_utc, "
+        "expires_utc) VALUES('shared',?,?,'',?,?)",
+        (AWAY_LAT, AWAY_LON, "2026-07-20T07:00:00+00:00",
+         "2026-07-20T09:00:00+00:00"))
+    db.commit()
+    assert presence.is_away(db, CFG, NOW)[0] is False

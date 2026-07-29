@@ -128,3 +128,75 @@ def awake_since(conn, cfg, now_utc):
         candidates.append(inbound)
 
     return min(candidates) if candidates else None
+
+
+def _far_from_home(cfg, lat, lon):
+    """True, если точка дальше whereami_home_radius_km от дома.
+
+    Отсутствующие координаты (None) -- не доказательство отлучки.
+    """
+    if lat is None or lon is None:
+        return False
+    home_lat = cfg.get("road_home_lat")
+    home_lon = cfg.get("road_home_lon")
+    if home_lat is None or home_lon is None:
+        return False
+    radius = float(cfg.get("whereami_home_radius_km", 0.3))
+    return _haversine_km(lat, lon, home_lat, home_lon) > radius
+
+
+def is_away(conn, cfg, now_utc):
+    """(away, reason, expected_home_utc) -- уверенно ли Амина не дома.
+
+    Только уверенные признаки, в порядке проверки:
+      1. "event" -- идёт событие с place_id, чьи координаты дальше
+         радиуса. expected_home = end_utc + travel_min.
+      2. "car_gps" -- свежая (не старше whereami_car_fresh_min) строка
+         car_metrics с координатами дальше радиуса. expected_home
+         неизвестен.
+      3. "shared_location" -- неистёкшая строка location_hints дальше
+         радиуса.
+    Иначе (False, "home_or_unknown", None).
+
+    Событие БЕЗ места отлучкой не считается: слишком много домашних дел
+    попадает в календарь, а ложное "вне дома" стоит дороже лишнего
+    сообщения (все лекарства дома).
+    """
+    now = _parse(now_utc)
+
+    row = conn.execute(
+        "SELECT e.end_utc AS end_utc, e.travel_min AS travel_min, "
+        "       p.lat AS lat, p.lon AS lon "
+        "FROM events e JOIN places p ON p.id = e.place_id "
+        "WHERE e.status='active' AND e.place_id IS NOT NULL "
+        "  AND e.start_utc <= ? AND e.end_utc >= ? "
+        "ORDER BY e.start_utc LIMIT 1",
+        (now_utc, now_utc)).fetchone()
+    if row is not None and _far_from_home(cfg, row["lat"], row["lon"]):
+        expected = None
+        if row["end_utc"]:
+            back = _parse(row["end_utc"]) + timedelta(
+                minutes=int(row["travel_min"] or 0))
+            expected = back.astimezone(timezone.utc).isoformat(
+                timespec="seconds")
+        return (True, "event", expected)
+
+    fresh_min = int(cfg.get("whereami_car_fresh_min", 20))
+    cutoff = (now - timedelta(minutes=fresh_min)).isoformat(timespec="seconds")
+    car = conn.execute(
+        "SELECT gps_lat, gps_lon FROM car_metrics "
+        "WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL "
+        "  AND COALESCE(gps_ts, ts_utc) >= ? "
+        "ORDER BY COALESCE(gps_ts, ts_utc) DESC LIMIT 1",
+        (cutoff,)).fetchone()
+    if car is not None and _far_from_home(cfg, car["gps_lat"], car["gps_lon"]):
+        return (True, "car_gps", None)
+
+    hint = conn.execute(
+        "SELECT lat, lon FROM location_hints "
+        "WHERE expires_utc > ? ORDER BY ts_utc DESC LIMIT 1",
+        (now_utc,)).fetchone()
+    if hint is not None and _far_from_home(cfg, hint["lat"], hint["lon"]):
+        return (True, "shared_location", None)
+
+    return (False, "home_or_unknown", None)
