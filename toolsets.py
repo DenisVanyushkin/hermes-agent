@@ -33,6 +33,9 @@ _HERMES_CORE_TOOLS = [
     "web_search", "web_extract",
     # Terminal + process management
     "terminal", "process",
+    # Правда о хосте: терминал исполняется в песочнице, и наблюдения оттуда
+    # не описывают сервер. host_inspect -- способ спросить сам хост.
+    "host_inspect",
     # Desktop GUI affordances: read the embedded terminal pane, close an agent's
     # read-only terminal tab, open a URL/file in the preview pane, and focus a
     # pane (all gated on HERMES_DESKTOP via check_fn — hidden outside the GUI).
