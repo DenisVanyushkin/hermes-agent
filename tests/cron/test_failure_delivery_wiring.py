@@ -115,10 +115,15 @@ def test_run_one_job_config_target_list_withholds_unflagged_end_user_job(monkeyp
 
 def test_run_one_job_malformed_cfg_falls_back_to_delivering_operator_summary(monkeypatch):
     """A malformed config (e.g. a hand-edited config.yaml where `cron:` is
-    not a dict) must not silently cost an operator-audience job its failure
-    notification. plan_cron_failure_delivery raising must fall back toward
-    the historical behaviour -- deliver the summary -- never toward
-    silence."""
+    not a dict) must not silently cost a genuinely operator-audience job
+    its failure notification. After the resolve_cron_audience source fix
+    (isinstance guard), this particular malformed shape no longer raises
+    at all -- resolve_cron_audience degrades it to "no config-based targets
+    known" and returns "operator" directly, so this test now exercises
+    that clean degraded path rather than the run_one_job-level try/except.
+    The try/except stays as defense in depth for any other exception
+    plan_cron_failure_delivery might raise; it is not what makes this
+    particular test pass."""
     delivered, alerted = _patch_pipeline(
         monkeypatch, success=False, final="", error="ImportError: boom",
         cfg={"cron": "not-a-dict"},
@@ -129,3 +134,30 @@ def test_run_one_job_malformed_cfg_falls_back_to_delivering_operator_summary(mon
     assert len(delivered) == 1
     assert delivered[0][0] == "j5"
     assert alerted == []
+
+
+def test_run_one_job_bare_string_end_user_targets_withholds_end_to_end(monkeypatch):
+    """The exposure a re-review caught, pinned end-to-end: a hand-edited
+    config.yaml can easily drop the list dash, leaving
+    `end_user_targets: whatsapp:+77011102626` as a bare string instead of a
+    one-item list. A job with NO explicit `audience` key that relies
+    entirely on this config-based net (a "config-net-only" job) must still
+    be withheld and alerted through the full run_one_job path -- not just
+    at the resolve_cron_audience unit level (see
+    test_bare_string_end_user_targets_still_protects in
+    test_failure_delivery_plan.py). If the bare string were treated as an
+    iterable of characters instead of coerced to a single-element list,
+    this job would match nothing and its raw failure summary would be
+    delivered straight to the end user's WhatsApp -- silently, with no
+    error and no alert."""
+    delivered, alerted = _patch_pipeline(
+        monkeypatch, success=False, final="", error="ImportError: boom",
+        cfg={"cron": {"end_user_targets": "whatsapp:+77011102626"}},
+    )
+
+    s.run_one_job({
+        "id": "j6", "name": "погода", "deliver": "whatsapp:+77011102626",
+    })
+
+    assert delivered == []
+    assert len(alerted) == 1

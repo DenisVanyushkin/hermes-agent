@@ -245,7 +245,18 @@ def resolve_cron_audience(job: dict, cfg: Optional[dict] = None) -> str:
     if explicit in CRON_AUDIENCES:
         return explicit
 
-    configured = ((cfg or {}).get("cron", {}) or {}).get("end_user_targets") or []
+    cron_cfg = (cfg or {}).get("cron")
+    configured = (cron_cfg if isinstance(cron_cfg, dict) else {}).get("end_user_targets") or []
+    # A hand-edited config.yaml can easily drop the list dash (`end_user_targets:
+    # whatsapp:+123` instead of a `- whatsapp:+123` list) and leave a bare
+    # string. A string is iterable, so treating it as a list of targets below
+    # would silently iterate its characters and match nothing -- disabling
+    # the safety net without any error. Normalize a bare string to a
+    # single-element list so the scalar hand-edit still protects.
+    if isinstance(configured, str):
+        configured = [configured]
+    elif not isinstance(configured, (list, tuple, set, frozenset)):
+        configured = []
     if not configured:
         return "operator"
     marked = {str(t).strip().lower() for t in configured if str(t).strip()}

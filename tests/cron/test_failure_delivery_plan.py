@@ -99,6 +99,30 @@ def test_non_string_audience_does_not_raise_and_falls_back_to_operator() -> None
         assert resolve_cron_audience(job) == "operator"
 
 
+def test_malformed_cron_config_does_not_raise_and_falls_back_to_operator() -> None:
+    """A hand-edited config.yaml can make `cron:` a non-dict (a string, a
+    list). resolve_cron_audience's docstring promises it never raises;
+    previously `((cfg or {}).get("cron", {}) or {}).get(...)` raised
+    AttributeError here, which escaped past this function's promise and
+    (before the caller wrapped it) reached an operator job's failure
+    delivery, silently dropping it."""
+    job = {**UNFLAGGED_AMINA_JOB}  # no explicit audience field
+
+    assert resolve_cron_audience(job, {"cron": "not-a-dict"}) == "operator"
+
+
+def test_bare_string_end_user_targets_still_protects() -> None:
+    """A hand-edited config.yaml can easily drop the list dash, leaving
+    `end_user_targets: whatsapp:+77011102626` as a bare string instead of a
+    one-item list. A string is iterable, so treating it as the target list
+    without normalizing would silently iterate its characters and match
+    nothing -- disabling the safety net without any error. It must instead
+    be treated as a single target."""
+    cfg = {"cron": {"end_user_targets": "whatsapp:+77011102626"}}
+
+    assert resolve_cron_audience(UNFLAGGED_AMINA_JOB, cfg) == "end_user"
+
+
 def test_unnormalized_valid_audience_is_stripped_and_lowercased() -> None:
     job = {**UNFLAGGED_AMINA_JOB, "audience": " END_USER "}
 
