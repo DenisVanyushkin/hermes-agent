@@ -95,7 +95,7 @@ def _inbound_message_ts(cfg, day_start, day_end):
             return None
         return datetime.fromtimestamp(got[0], timezone.utc).isoformat(
             timespec="seconds")
-    except (sqlite3.Error, ValueError, TypeError, OSError):
+    except (sqlite3.Error, ValueError, TypeError, OSError, AttributeError):
         return None
     finally:
         if conn is not None:

@@ -7,6 +7,7 @@
 трогается.
 """
 import json
+import sqlite3
 
 import pytest
 
@@ -112,3 +113,102 @@ def test_awake_survives_missing_state_db(db):
     # state_db_path указывает в никуда -- источник "входящее сообщение"
     # обязан деградировать в "нет сигнала", а не бросить.
     assert presence.awake_since(db, CFG, NOW) is None
+
+
+# --- Fix round 1: cover the state.db inbound-message success path. ---
+#
+# The tests above only exercise `_inbound_message_ts`'s "file absent"
+# branch. These cover the real read: gateway_routing lookup + entry_json
+# JSON parse, the epoch(messages.timestamp)-vs-ISO(audit_log.ts_utc)
+# comparison inside the cross-source min(), and the epoch->ISO
+# conversion at the end. Schema below mirrors the columns
+# presence._inbound_message_ts actually queries, verified against
+# `PRAGMA table_info(gateway_routing|messages)` on the real
+# /home/denis/.hermes/state.db on the host.
+
+SESSION_KEY = "agent:main:whatsapp:dm:77782110625"
+SESSION_ID = "20260720_010000_test0001"
+
+
+def _build_state_db(tmp_path, entry_json_by_key=None, messages=()):
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE gateway_routing ("
+        "scope TEXT NOT NULL DEFAULT '', session_key TEXT NOT NULL, "
+        "entry_json TEXT NOT NULL, updated_at REAL NOT NULL)")
+    conn.execute(
+        "CREATE TABLE messages ("
+        "id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, "
+        "role TEXT NOT NULL, timestamp REAL NOT NULL)")
+    for key, entry_json in (entry_json_by_key or {}).items():
+        conn.execute(
+            "INSERT INTO gateway_routing(session_key, entry_json, updated_at) "
+            "VALUES(?,?,0)", (key, entry_json))
+    for session_id, role, ts in messages:
+        conn.execute(
+            "INSERT INTO messages(session_id, role, timestamp) VALUES(?,?,?)",
+            (session_id, role, ts))
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def _epoch(iso):
+    from datetime import datetime
+    return datetime.fromisoformat(iso).timestamp()
+
+
+def test_awake_from_inbound_message_today(tmp_path, db):
+    path = _build_state_db(
+        tmp_path,
+        entry_json_by_key={SESSION_KEY: json.dumps({"session_id": SESSION_ID})},
+        messages=[(SESSION_ID, "user", _epoch(EARLY))])
+    cfg = dict(CFG, state_db_path=path)
+    assert presence.awake_since(db, cfg, NOW) == EARLY
+
+
+def test_awake_ignores_inbound_message_from_yesterday(tmp_path, db):
+    path = _build_state_db(
+        tmp_path,
+        entry_json_by_key={SESSION_KEY: json.dumps({"session_id": SESSION_ID})},
+        messages=[(SESSION_ID, "user", _epoch(YESTERDAY))])
+    cfg = dict(CFG, state_db_path=path)
+    assert presence.awake_since(db, cfg, NOW) is None
+
+
+def test_awake_cross_source_min_picks_earlier_inbound(tmp_path, db):
+    # Inbound message (epoch) earlier than an audit-log signal (ISO
+    # string). If the comparison ever regressed to comparing the raw
+    # epoch float against the ISO string, this would break -- either by
+    # raising or by silently picking the wrong one.
+    inbound_iso = "2026-07-20T01:00:00+00:00"
+    _audit_at(db, "meds.take", EARLY)  # 02:00 UTC -- later than inbound
+    path = _build_state_db(
+        tmp_path,
+        entry_json_by_key={SESSION_KEY: json.dumps({"session_id": SESSION_ID})},
+        messages=[(SESSION_ID, "user", _epoch(inbound_iso))])
+    cfg = dict(CFG, state_db_path=path)
+    assert presence.awake_since(db, cfg, NOW) == inbound_iso
+
+
+def test_awake_none_when_no_matching_routing_row(tmp_path, db):
+    path = _build_state_db(
+        tmp_path,
+        entry_json_by_key={"agent:main:whatsapp:dm:00000000000":
+                            json.dumps({"session_id": "other"})},
+        messages=[("other", "user", _epoch(EARLY))])
+    cfg = dict(CFG, state_db_path=path)
+    assert presence.awake_since(db, cfg, NOW) is None
+
+
+def test_awake_survives_non_object_entry_json(tmp_path, db):
+    # entry_json is valid JSON but not an object -- json.loads(...).get(...)
+    # would raise AttributeError. Must degrade to "no signal", never raise:
+    # this runs inside a minute-tick that must not die.
+    path = _build_state_db(
+        tmp_path,
+        entry_json_by_key={SESSION_KEY: json.dumps([1, 2, 3])},
+        messages=[(SESSION_ID, "user", _epoch(EARLY))])
+    cfg = dict(CFG, state_db_path=path)
+    assert presence.awake_since(db, cfg, NOW) is None
