@@ -1210,6 +1210,17 @@ _OBSERVED_GROUP_CONTEXT_HEADER = "[Observed Telegram group context - context onl
 _CURRENT_ADDRESSED_MESSAGE_HEADER = "[Current addressed message - answer only this unless it explicitly asks you to use the observed context]"
 
 
+#: Сколько символов одного сообщения доезжает до пайплайна и сколько весь контекст.
+#: Обрезка тут была молчаливой, и это стоило прогона d61985bf (2026-07-29): утренний
+#: отчёт обрубило на 1500 символах ровно посреди строки «Память:», инженер догадался
+#: о неполноте по оборванному тексту, заблокировался и попросил недостающее. Догадка
+#: оказалась верной, но она была догадкой -- в переданном тексте ничто не сообщало,
+#: что он неполон. Теперь обе обрезки называют себя, а на сообщение отведено столько,
+#: чтобы типичный отчёт доезжал целиком.
+_PIPELINE_CONTEXT_MESSAGE_CHARS = 4000
+_PIPELINE_CONTEXT_TOTAL_CHARS = 6000
+
+
 def _pipeline_conversation_context(history):
     """Compact recent-thread context for pipeline execution helpers.
 
@@ -1228,9 +1239,22 @@ def _pipeline_conversation_context(history):
             )
         text = str(content or "").strip()
         if text:
-            parts.append(f"{role}: {text[:1500]}")
+            if len(text) > _PIPELINE_CONTEXT_MESSAGE_CHARS:
+                dropped = len(text) - _PIPELINE_CONTEXT_MESSAGE_CHARS
+                text = (
+                    text[:_PIPELINE_CONTEXT_MESSAGE_CHARS]
+                    + f"\n[... truncated {dropped} characters of this message]"
+                )
+            parts.append(f"{role}: {text}")
     joined = "\n".join(parts).strip()
-    return joined[-6000:] or None if joined else None
+    if not joined:
+        return None
+    if len(joined) > _PIPELINE_CONTEXT_TOTAL_CHARS:
+        joined = (
+            "[... earlier messages omitted]\n"
+            + joined[-_PIPELINE_CONTEXT_TOTAL_CHARS:]
+        )
+    return joined
 
 
 def _uses_telegram_observed_group_context(channel_prompt: Optional[str]) -> bool:
