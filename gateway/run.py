@@ -25029,6 +25029,31 @@ async def _await_thread_exit(
     return not thread.is_alive()
 
 
+# Modules the turn-completion path imports lazily. Importing them at startup
+# keeps sys.modules coherent with the source that was on disk when the
+# process began: a deploy under a live gateway then changes nothing until
+# the next restart, instead of half-loading new code into an old process
+# (2026-07-27 incident — see docs/superpowers/plans/2026-07-29-cron-failure-audience.md).
+_TURN_PATH_PRELOAD = (
+    "agent.turn_finalizer",
+    "hermes_cli.review_gate",
+)
+
+
+def preload_turn_path_modules() -> list[str]:
+    """Import the lazily-loaded turn-path modules. Best-effort, never raises."""
+    import importlib
+
+    loaded = []
+    for name in _TURN_PATH_PRELOAD:
+        try:
+            importlib.import_module(name)
+            loaded.append(name)
+        except Exception as exc:  # noqa: BLE001 — a preload miss must not block startup
+            logger.warning("turn-path preload failed for %s: %s", name, exc)
+    return loaded
+
+
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
     """
     Start the gateway and run until interrupted.
@@ -25501,6 +25526,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         await _loop.run_in_executor(None, discover_mcp_tools)
     except Exception as e:
         logger.debug("MCP tool discovery failed: %s", e)
+
+    # Preload turn-path modules that are otherwise imported lazily on first
+    # turn finalization, so the process's module graph is coherent with the
+    # code on disk at startup — see preload_turn_path_modules() docstring.
+    logger.info("Turn-path preload: %s", ", ".join(preload_turn_path_modules()) or "none")
 
     # Start the gateway
     success = await runner.start()
