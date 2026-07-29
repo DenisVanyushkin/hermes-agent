@@ -184,19 +184,32 @@ def job_intel_summary(db_path: Path) -> dict:
         ).fetchone()
         if run is None or run["run_id"] is None:
             return {"error": "no runs recorded"}
-        reasons = conn.execute(
-            "SELECT rejection_reason AS reason, COUNT(*) AS count"
-            " FROM vacancy_rejection_events WHERE run_id = ?"
-            " GROUP BY rejection_reason ORDER BY count DESC LIMIT 5",
-            (run["run_id"],),
-        ).fetchall()
+        # Data gaps (salary_unknown, low_confidence, ...) are emitted per
+        # vacancy no matter why it was rejected, so ranking every label
+        # together buries the blockers that actually decided the outcome.
+        top = {}
+        for key, predicate in (
+            ("top_blockers", "reason_type = 'blocker'"),
+            ("top_data_gaps", "(reason_type IS NULL OR reason_type != 'blocker')"),
+        ):
+            top[key] = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT rejection_reason AS reason, COUNT(*) AS count"
+                    " FROM vacancy_rejection_events"
+                    f" WHERE run_id = ? AND {predicate}"
+                    " GROUP BY rejection_reason"
+                    " ORDER BY COUNT(*) DESC, rejection_reason LIMIT 5",
+                    (run["run_id"],),
+                ).fetchall()
+            ]
         return {
             "run_id": run["run_id"],
             "run_at": run["run_at"],
             "found": run["found"],
             "accepted": run["accepted"] or 0,
             "notified": run["notified"] or 0,
-            "top_rejections": [dict(r) for r in reasons],
+            **top,
         }
     finally:
         conn.close()

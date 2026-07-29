@@ -142,7 +142,16 @@ def _make_job_intel_db(path):
         [
             ("run-new", "low_seniority", "blocker", "high"),
             ("run-new", "low_seniority", "blocker", "high"),
+            ("run-new", "onsite_requirement_mismatch", "blocker", "high"),
+            # Data gaps outnumber every blocker in every real run: they are
+            # emitted per vacancy regardless of why it was rejected.
             ("run-new", "salary_unknown", "unknown", "low"),
+            ("run-new", "salary_unknown", "unknown", "low"),
+            ("run-new", "salary_unknown", "unknown", "low"),
+            ("run-new", "low_confidence", "warning", "low"),
+            ("run-new", "low_confidence", "warning", "low"),
+            ("run-new", "low_confidence", "warning", "low"),
+            ("run-new", "low_confidence", "warning", "low"),
         ],
     )
     conn.commit()
@@ -157,7 +166,24 @@ def test_job_intel_summary_reads_latest_run(tmp_path):
     assert summary["found"] == 3
     assert summary["accepted"] == 1
     assert summary["notified"] == 0
-    assert summary["top_rejections"][0] == {"reason": "low_seniority", "count": 2}
+    assert summary["top_blockers"] == [
+        {"reason": "low_seniority", "count": 2},
+        {"reason": "onsite_requirement_mismatch", "count": 1},
+    ]
+
+
+def test_job_intel_summary_keeps_data_gaps_out_of_the_blocker_list(tmp_path):
+    """salary_unknown outnumbers every blocker but is not why a vacancy was rejected."""
+    db = tmp_path / "job_intel.sqlite3"
+    _make_job_intel_db(db)
+    summary = collect.job_intel_summary(db)
+    blockers = {row["reason"] for row in summary["top_blockers"]}
+    assert "salary_unknown" not in blockers
+    assert "low_confidence" not in blockers
+    assert summary["top_data_gaps"] == [
+        {"reason": "low_confidence", "count": 4},
+        {"reason": "salary_unknown", "count": 3},
+    ]
 
 
 def test_job_intel_summary_missing_db_reports_error(tmp_path):
