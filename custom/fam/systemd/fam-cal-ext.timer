@@ -4,6 +4,7 @@ Description=Amina fam: external calendar sync schedule (every 15 min)
 [Timer]
 OnCalendar=*:0/15
 AccuracySec=30s
+RandomizedDelaySec=90s
 Persistent=true
 
 [Install]

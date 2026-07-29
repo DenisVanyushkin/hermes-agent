@@ -9,6 +9,16 @@ task's own injectable seam -- "весь ввод-вывод через инъе�
 `db` fixture's tmp sqlite file, so these are integration tests of the whole
 pipeline, not just cli.py's own glue in isolation. No test here ever touches
 the real network.
+
+Fix-round 1 (Opus review): three Critical findings (C1 empty-eligible
+silently reads as "she deleted everything", C2 a sync-token advancing past
+a delta this tick failed to fully apply, C3 an unparsed/malformed event
+cancelled instead of skipped) plus I1 (partial failure invisible), I4
+(dropping a calendar from config silently cancels its imports), I5 (audit
+spam on a healthy no-op tick), and minors m1/m3/m4 all get a dedicated test
+below, in addition to the pre-existing coverage (some of which had to be
+UPDATED for I1's stricter "any error -> exit 1" policy -- see the comments
+at each changed test).
 """
 import json
 import types
@@ -130,6 +140,8 @@ def test_disabled_is_zero_action_noop(db, monkeypatch, capsys):
 
 # ---------------------------------------------------------------------
 # sync error -> audit tick.error{where:'cal-ext'} + exit 1
+# (fix-round I1: this is now true for ANY error, not just a total wipeout
+# -- see test_partial_failure_* below for the mixed case)
 # ---------------------------------------------------------------------
 
 def test_total_sync_failure_audits_tick_error_and_exits_1(db, monkeypatch):
@@ -148,7 +160,16 @@ def test_total_sync_failure_audits_tick_error_and_exits_1(db, monkeypatch):
     assert calls[0][0] == "cal-ext"
 
 
-def test_total_sync_failure_writes_no_cal_ext_sync_audit(db, monkeypatch):
+def test_total_sync_failure_still_audits_cal_ext_sync_with_calendar_error(db, monkeypatch):
+    """UPDATED for fix-round finding I5: the first cut of this test
+    asserted NO cal.ext.sync audit on a total failure. That was wrong in
+    the other direction from the spam problem I5 actually flags -- a
+    failing calendar's mode/reason is exactly the kind of thing worth
+    telling the audit log about, and I5's "don't spam" rule only ever
+    meant "don't log an uneventful, unchanged, healthy tick". `has_error`
+    is one of the three independent triggers for writing this audit,
+    alongside nonzero counts and a calendar's mode changing since last
+    time."""
     monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
     monkeypatch.setattr(cli.extcal, "discover",
                          lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
@@ -157,11 +178,17 @@ def test_total_sync_failure_writes_no_cal_ext_sync_audit(db, monkeypatch):
                          (None, None, {"mode": "error", "reason": "http_500"}))
     rc = cli.cmd_tick_cal_ext(_args())
     assert rc == 1
-    assert _audit_rows(db, "cal.ext.sync") == []
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert len(rows) == 1
+    assert rows[0]["calendars"][0]["mode"] == "error"
+    assert rows[0]["calendars"][0]["reason"] == "http_500"
 
 
 # ---------------------------------------------------------------------
-# --dry-run: nothing written to DB or iCloud
+# --dry-run: nothing written to DB or iCloud, and the printed changeset is
+# redacted (fix-round finding m3: UID/id/counts only, never her titles or
+# raw LOCATION text)
 # ---------------------------------------------------------------------
 
 def test_dry_run_writes_nothing(db, monkeypatch):
@@ -186,6 +213,32 @@ def test_dry_run_writes_nothing(db, monkeypatch):
     assert rc == 0
     assert db.execute("SELECT COUNT(*) AS n FROM events WHERE owner='iphone'").fetchone()["n"] == 0
     assert _audit_rows(db, "cal.ext.sync") == []
+
+
+def test_dry_run_changeset_is_redacted(db, monkeypatch, capsys):
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    item = {"href": CAL_URL + "evt1.ics", "deleted": False, "etag": "e1",
+            "ics": _ics_vevent("evt1@icloud.com", "Секретный визит к врачу",
+                                "20370720T130000Z", "20370720T140000Z",
+                                location="Тайная клиника, ул. Скрытая 1")}
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], None, {"mode": "initial_full", "reason": None}))
+
+    rc = cli.cmd_tick_cal_ext(_args(dry_run=True))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Секретный визит" not in out
+    assert "Тайная клиника" not in out
+    assert "Скрытая" not in out
+
+    printed = json.loads(out)
+    cs = printed["changeset"]
+    assert cs["counts"]["events_insert"] == 1
+    assert len(cs["events"]["insert"]) == 1
+    assert set(cs["events"]["insert"][0].keys()) == {"external_uid"}
 
 
 # ---------------------------------------------------------------------
@@ -360,10 +413,19 @@ def test_road_recompute_excludes_owner_iphone(db, monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# partial failure: one calendar down, the other live -- no data loss
+# partial failure: one calendar down, the other live -- no data loss, but
+# (fix-round I1) the tick now DOES flag it: exit 1 + tick.error, not a
+# silent exit 0. The live calendar's own progress (data applied, its OWN
+# token advanced) is unaffected -- only the exit code/alerting changed.
 # ---------------------------------------------------------------------
 
-def test_partial_failure_keeps_live_calendars_data(db, monkeypatch):
+def test_partial_failure_applies_live_calendar_but_flags_the_tick(db, monkeypatch):
+    """UPDATED for fix-round finding I1: the first cut of this test
+    asserted exit 0 on a partial failure -- that was exactly the
+    "частичный отказ никого не будит" gap the review flagged. A calendar
+    stuck on a permanently-403ing app-password must eventually wake
+    someone up, the same way cmd_tick_offsite already treats ANY non-empty
+    errors list as a failing run even when SOME backups succeeded."""
     url_live = "https://caldav.icloud.com/1/calendars/live/"
     url_down = "https://caldav.icloud.com/1/calendars/down/"
     monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
@@ -384,8 +446,9 @@ def test_partial_failure_keeps_live_calendars_data(db, monkeypatch):
     monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch)
 
     rc = cli.cmd_tick_cal_ext(_args())
-    assert rc == 0  # partial failure is NOT a total failure -- exit 0
+    assert rc == 1  # fix-round I1: partial failure now DOES flag the tick
 
+    # ... but the live calendar's data still landed.
     row = db.execute("SELECT * FROM events WHERE owner='iphone'").fetchone()
     assert row is not None and row["title"] == "Стоматолог"
 
@@ -394,8 +457,12 @@ def test_partial_failure_keeps_live_calendars_data(db, monkeypatch):
     assert modes[url_live] == "initial_full"
     assert modes[url_down] == "error"
 
-    # the down calendar's token must NOT have been touched/seeded
+    # the down calendar's token must NOT have been touched/seeded ...
     assert famdb.meta_get(db, f"extcal_sync_token:{url_down}") is None
+    # ... but the LIVE calendar's own progress is not held hostage by the
+    # unrelated calendar being down (fix-round C2 is scoped to APPLY
+    # errors specifically, not to a sibling calendar's fetch failure).
+    assert famdb.meta_get(db, f"extcal_sync_token:{url_live}") == "T1"
 
 
 def test_partial_failure_does_not_spuriously_cancel_unrelated_synced_rows(db, monkeypatch):
@@ -433,10 +500,217 @@ def test_partial_failure_does_not_spuriously_cancel_unrelated_synced_rows(db, mo
     monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch)
 
     rc = cli.cmd_tick_cal_ext(_args())
-    assert rc == 0
+    assert rc == 1  # fix-round I1: calendar B's failure still flags the tick
 
     row = db.execute("SELECT * FROM events WHERE id=?", (existing["id"],)).fetchone()
     assert row["status"] == "active"  # NOT cancelled
+
+    # Calendar A itself was clean (no apply errors anywhere this tick) --
+    # its own incremental progress still advances.
+    assert famdb.meta_get(db, f"extcal_sync_token:{url_a}") == "TA-NEXT"
+
+
+# ---------------------------------------------------------------------
+# C2: a calendar's token never advances past a round with an apply error
+# -- ANYWHERE this tick, not just for the affected calendar (the simpler,
+# safer blanket the review explicitly asked for).
+# ---------------------------------------------------------------------
+
+def test_apply_error_blocks_every_calendars_token_this_tick(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    item = {"href": CAL_URL + "evt1.ics", "deleted": False, "etag": "e1",
+            "ics": _ics_vevent("evt1@icloud.com", "Йога",
+                                "20370720T130000Z", "20370720T140000Z")}
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None}))
+
+    # Simulate apply_changes reporting a real per-row failure (e.g. "database
+    # is locked", per extcal._apply_one's own docstring) -- everything else
+    # about the plumbing (plan_changes/apply_changes contract) is exercised
+    # for real elsewhere; here only the CLI's own reaction to a nonzero
+    # counts["errors"] is under test, so apply_changes itself is stubbed.
+    monkeypatch.setattr(cli.extcal, "apply_changes", lambda conn, changeset, cfg:
+                         {"events_inserted": 0, "events_updated": 0,
+                          "events_cancelled": 0, "plans_inserted": 0,
+                          "plans_updated": 0, "plans_dropped": 0, "collisions": 0,
+                          "errors": [{"branch": "events", "action": "insert",
+                                      "id": None, "external_uid": "u1:x",
+                                      "error": "OperationalError: database is locked"}]})
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1
+    assert famdb.meta_get(db, f"extcal_sync_token:{CAL_URL}") is None
+    assert famdb.meta_get(db, "extcal_last_ok") is None  # not a full success either
+
+
+# ---------------------------------------------------------------------
+# C1(a): extcal_read_calendars configured but nothing eligible survived
+# -- treated as a real error, not "nothing to do".
+# ---------------------------------------------------------------------
+
+def test_empty_eligible_with_configured_filter_is_an_error(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg(
+        extcal_read_calendars=["Cycle"]))
+    # discover() itself degrades to [] on ANY failure (missing
+    # credentials, timeout, 5xx, malformed XML) -- indistinguishable, at
+    # this layer, from "her calendar really was renamed"; either way, a
+    # configured filter matching literally nothing is suspicious.
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [])
+    fetch_called = []
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda *a, **k: fetch_called.append(1) or ([], None, {"mode": "error"}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1
+    assert fetch_called == []  # nothing to fetch -- the error is purely "0 eligible"
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert len(rows) == 1
+    assert any("extcal_read_calendars" in e for e in rows[0]["sync_errors"])
+
+
+def test_empty_eligible_without_a_configured_filter_is_not_an_error(db, monkeypatch):
+    """The narrower counterpart: if NO filter is configured at all (read
+    everything), a genuinely-empty discover() result is treated as
+    "nothing to do yet" (e.g. before the app-specific password is even
+    configured) -- not flagged, matching the pre-fix-round no-op
+    behavior for this specific sub-case, which the review did not ask to
+    change."""
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg(
+        extcal_read_calendars=[]))
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [])
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0
+    assert _audit_rows(db, "cal.ext.sync") == []
+
+
+# ---------------------------------------------------------------------
+# C1(b) / I4: a row whose calendar is no longer eligible this round
+# (dropped from extcal_read_calendars, or its calendar wasn't rediscovered
+# at all) is EXCLUDED from the snapshot, not defaulted in -- it survives
+# untouched rather than being read as "she deleted it".
+# ---------------------------------------------------------------------
+
+def test_row_from_a_now_ineligible_calendar_is_not_cancelled(db, monkeypatch):
+    url_dropped = "https://caldav.icloud.com/1/calendars/dropped-from-config/"
+    existing = cal.add(db, "Импортировано раньше", "2037-07-20T08:00:00+00:00",
+                        end_utc="2037-07-20T09:00:00+00:00")
+    db.execute(
+        "UPDATE events SET owner='iphone', external_uid=?, external_href=? "
+        "WHERE id=?",
+        (extcal._occurrence_key("evt-old@icloud.com", None), url_dropped + "evt-old.ics",
+         existing["id"]),
+    )
+    db.commit()
+
+    # This round's config no longer includes that calendar at all -- e.g.
+    # Denis narrowed extcal_read_calendars, or discover() simply didn't
+    # return it this time. `eligible` below is built from a discover()
+    # result that omits it entirely.
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [])
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0
+
+    row = db.execute("SELECT * FROM events WHERE id=?", (existing["id"],)).fetchone()
+    assert row["status"] == "active"  # NOT cancelled just because we can't see its calendar
+
+
+# ---------------------------------------------------------------------
+# C3: an unparsed/malformed event is excluded from the disappearance
+# sweep, not cancelled outright.
+# ---------------------------------------------------------------------
+
+def test_broken_ics_excludes_its_href_from_disappearance_instead_of_cancelling(db, monkeypatch):
+    existing = cal.add(db, "Уже была", "2037-07-20T08:00:00+00:00",
+                        end_utc="2037-07-20T09:00:00+00:00")
+    db.execute(
+        "UPDATE events SET owner='iphone', external_uid=?, external_href=? "
+        "WHERE id=?",
+        (extcal._occurrence_key("evt-broken@icloud.com", None), CAL_URL + "evt-broken.ics",
+         existing["id"]),
+    )
+    db.commit()
+
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    # A genuinely-full listing (fallback_full) that returns this href
+    # with GARBAGE ics text -- parse_ics() degrades to [] on this per its
+    # own "never raises" contract, NOT a real "the event is gone" signal.
+    item = {"href": CAL_URL + "evt-broken.ics", "deleted": False, "etag": "e9",
+            "ics": "this is not ICS at all\r\nno BEGIN:VEVENT anywhere\r\n"}
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], None, {"mode": "fallback_full", "reason": "http_403"}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1  # the parse problem itself is a real error (I1)
+
+    row = db.execute("SELECT * FROM events WHERE id=?", (existing["id"],)).fetchone()
+    assert row["status"] == "active"  # NOT cancelled -- excluded from the sweep instead
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert any("parse_ics produced no usable component" in e
+               for e in rows[0]["sync_errors"])
+
+
+# ---------------------------------------------------------------------
+# I5: a truly steady-state tick (mode unchanged, zero counts) does not
+# spam a fresh cal.ext.sync audit row every single run.
+# ---------------------------------------------------------------------
+
+def test_steady_state_noop_tick_does_not_spam_the_audit_log(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([], "SAME-MODE-TOKEN", {"mode": "sync_collection", "reason": None}))
+
+    rc1 = cli.cmd_tick_cal_ext(_args())
+    assert rc1 == 0
+    first_rows = _audit_rows(db, "cal.ext.sync")
+    assert len(first_rows) == 1  # first-ever observation of this mode -- logged
+
+    rc2 = cli.cmd_tick_cal_ext(_args())
+    assert rc2 == 0
+    second_rows = _audit_rows(db, "cal.ext.sync")
+    # Same mode, zero counts, no errors -- steady state, no second row.
+    assert len(second_rows) == 1
+
+    # extcal_last_ok still advances on every clean run regardless (the
+    # heartbeat this audit's own silence relies on).
+    assert famdb.meta_get(db, "extcal_last_ok") is not None
+
+
+# ---------------------------------------------------------------------
+# m1: write-URL and read-filter matching both go through the SAME
+# normalized (trailing-slash-insensitive) comparison.
+# ---------------------------------------------------------------------
+
+def test_read_filter_trailing_slash_mismatch_still_matches(db, monkeypatch):
+    url_allowed = "https://caldav.icloud.com/1/calendars/allowed/"
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg(
+        # Config has the URL WITHOUT the trailing slash the discovered
+        # calendar itself carries -- must still match (fix-round m1).
+        extcal_read_calendars=[url_allowed.rstrip("/")]))
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [_calendar(url_allowed, "Calendar")])
+    fetched = []
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         (fetched.append(calendar["url"]) or ([], None,
+                          {"mode": "initial_full", "reason": None})))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0
+    assert fetched == [url_allowed]
 
 
 # ---------------------------------------------------------------------
@@ -468,6 +742,20 @@ def test_read_calendars_filter_is_honored(db, monkeypatch):
     rc = cli.cmd_tick_cal_ext(_args())
     assert rc == 0
     assert fetched_urls == [url_allowed]  # neither the blocked nor write-target
+
+
+# ---------------------------------------------------------------------
+# m4: a malformed --now is a graceful tick.error, not an uncaught traceback
+# ---------------------------------------------------------------------
+
+def test_invalid_now_argument_is_a_graceful_error(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(where))
+
+    rc = cli.cmd_tick_cal_ext(_args(now="not-a-real-timestamp"))
+    assert rc == 1
+    assert calls == ["cal-ext"]
 
 
 # ---------------------------------------------------------------------

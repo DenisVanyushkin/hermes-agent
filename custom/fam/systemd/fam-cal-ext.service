@@ -1,5 +1,7 @@
 [Unit]
 Description=Amina fam: external calendar (iCloud CalDAV) sync tick
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
