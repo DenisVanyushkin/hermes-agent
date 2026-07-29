@@ -281,7 +281,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.whatsapp_common import WhatsAppBehaviorMixin
 from gateway.whatsapp_identity import to_whatsapp_jid
-from plugins.platforms.whatsapp.reactions import is_dialogue_emoji
+from plugins.platforms.whatsapp.reactions import is_dialogue_emoji, normalize_emoji
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -1680,9 +1680,55 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         await self._dispatch_reaction_dialogue(event)
 
     async def _dispatch_reaction_dialogue(self, event: Dict[str, Any]) -> None:
-        """Turn an unacked reaction into an ordinary agent turn."""
+        """Turn an unacked reaction into an ordinary agent turn.
+
+        The reaction is shaped as a reply-with-quote, not as a bespoke
+        event type: GatewayRunner._prepare_inbound_message_text already
+        renders reply_to_* into the prompt for every platform, so a
+        reaction arrives structurally identical to a quoted reply and no
+        new branch appears in run.py.
+        """
         if not self._reaction_dialogue:
             return
+        target_text = event.get("targetText")
+        if not target_text:
+            # Bridge restart emptied its message store. A turn with no
+            # context is worse than a dropped reaction.
+            print(f"[{self.name}] Reaction on unknown message "
+                  f"{event.get('targetMessageId')}: no cached text, dropped")
+            return
+
+        emoji = normalize_emoji(event.get("emoji") or "")
+        chat_id = event.get("chatId") or ""
+        source = self.build_source(
+            chat_id=chat_id,
+            chat_type="group" if chat_id.endswith("@g.us") else "dm",
+            user_id=event.get("senderId") or "",
+        )
+        message = MessageEvent(
+            text=f"[Реакция {emoji}]",
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=event,
+            metadata={"whatsapp_reaction": emoji},
+            reply_to_message_id=str(event.get("targetMessageId") or ""),
+            reply_to_text=str(target_text),
+            reply_to_is_own_message=True,
+        )
+        # Text events sit in the debounce buffer while reactions dispatch
+        # immediately, so without this flush a reaction would overtake a
+        # message typed a second earlier.
+        await self._force_flush_text_batch(self._text_batch_key(message))
+        await self.handle_message(message)
+
+    async def _force_flush_text_batch(self, key: str) -> None:
+        """Dispatch any buffered text for ``key`` right now."""
+        task = self._pending_text_batch_tasks.pop(key, None)
+        if task and not task.done():
+            task.cancel()
+        pending = self._pending_text_batches.pop(key, None)
+        if pending:
+            await self.handle_message(pending)
 
     async def _send_reaction(self, chat_id: str, message_id: str,
                              emoji: str) -> bool:
