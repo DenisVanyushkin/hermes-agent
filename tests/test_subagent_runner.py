@@ -97,6 +97,25 @@ def _valid_envelope_payload(**overrides):
     return payload
 
 
+def _spec_model(subagent_id: str, *, fallback: bool = False) -> str:
+    """Модель из спеки субагента, а не литерал.
+
+    Литералы здесь пережили миграцию на 5.6 незамеченными: набор читает спеки
+    из главного чекаута, поэтому прогон в worktree видел их старое содержимое и
+    был зелёным. Упало только после влития.
+    """
+    import yaml
+
+    path = Path(__file__).resolve().parents[1] / "config" / "subagents" / f"{subagent_id}.yaml"
+    models = yaml.safe_load(path.read_text(encoding="utf-8"))["models"]
+    return models["fallback"]["model"] if fallback else models["default"]["model"]
+
+
+ENGINEER_MODEL = _spec_model("hermes_engineer_core")
+ENGINEER_FALLBACK_MODEL = _spec_model("hermes_engineer_core", fallback=True)
+GENERAL_MODEL = _spec_model("general_operator")
+REVIEWER_MODEL = _spec_model("hermes_code_reviewer")
+
 def test_runs_general_operator_with_fake_executor(tmp_path: Path) -> None:
     _, runtime_result = _build_runtime_result(tmp_path, "general_operator")
 
@@ -125,7 +144,7 @@ def test_runs_general_operator_with_fake_executor(tmp_path: Path) -> None:
     assert result.ok is True
     assert result.execution_status == "completed"
     assert result.record.constructor_provider == "openai-codex"
-    assert result.record.constructor_model == "gpt-5.4-mini"
+    assert result.record.constructor_model == GENERAL_MODEL
     assert result.record.selected_model_class == "general"
     assert result.output_text == "handled general_operator"
     assert result.token_usage["input_tokens"] == 11
@@ -158,7 +177,7 @@ def test_runs_engineer_subagent_with_fake_executor(tmp_path: Path) -> None:
 
     assert result.ok is True
     assert result.record.constructor_provider == "openai-codex"
-    assert result.record.constructor_model == "gpt-5.4"
+    assert result.record.constructor_model == ENGINEER_MODEL
     assert result.record.selected_model_class == "base_coding"
 
 
@@ -678,7 +697,7 @@ def test_controlled_runtime_runner_returns_structured_telemetry(tmp_path: Path) 
 
     assert result.status.value == "succeeded"
     assert result.actual_provider == "openai-codex"
-    assert result.actual_model == "gpt-5.4"
+    assert result.actual_model == ENGINEER_MODEL
     assert result.input_hash
     assert result.prompt_hash
     assert result.response_output_hash
@@ -737,7 +756,7 @@ def test_controlled_runtime_runner_fails_closed_on_provider_model_mismatch(tmp_p
         plan=plan,
         invocation_client=lambda _runtime, _payload: {
             "provider": "openai-codex",
-            "model": "gpt-5.4-mini",
+            "model": ENGINEER_FALLBACK_MODEL,
             "structured_output": {"summary": "wrong runtime", "status": "succeeded"},
         },
     )
@@ -791,7 +810,7 @@ def test_controlled_runtime_runner_executes_real_provider_only_when_explicitly_a
             client_calls["count"] += 1
             assert request.runtime.subagent_id == runtime.subagent_id
             assert request.provider == "openai-codex"
-            assert request.model == "gpt-5.4"
+            assert request.model == ENGINEER_MODEL
             return {
                 "provider": request.provider,
                 "model": request.model,
@@ -821,7 +840,7 @@ def test_controlled_runtime_runner_executes_real_provider_only_when_explicitly_a
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
         allowed_real_providers=("openai-codex",),
-        allowed_real_models=("gpt-5.4",),
+        allowed_real_models=(ENGINEER_MODEL,),
         real_provider_client_factory=_factory,
     )
     result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Implement change"}])
@@ -833,7 +852,7 @@ def test_controlled_runtime_runner_executes_real_provider_only_when_explicitly_a
     assert result.real_provider_allowed is True
     assert result.provider_policy_status == "allowed"
     assert result.actual_provider == "openai-codex"
-    assert result.actual_model == "gpt-5.4"
+    assert result.actual_model == ENGINEER_MODEL
     assert result.usage_summary.total_tokens == 20
 
 
@@ -855,7 +874,7 @@ def test_controlled_runtime_runner_real_provider_allowlist_mismatch_fails_closed
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
         allowed_real_providers=("openai-codex",),
-        allowed_real_models=("gpt-5.4",),
+        allowed_real_models=(ENGINEER_MODEL,),
         real_provider_client_factory=lambda _runtime: factory_calls.__setitem__("count", factory_calls["count"] + 1),
     )
     result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Review"}])
@@ -886,7 +905,7 @@ def test_controlled_runtime_runner_real_provider_invalid_input_messages_fail_clo
 
         def _client(_request):
             client_calls["count"] += 1
-            return {"provider": "openai-codex", "model": "gpt-5.4"}
+            return {"provider": "openai-codex", "model": ENGINEER_MODEL}
 
         return _client
 
@@ -896,9 +915,9 @@ def test_controlled_runtime_runner_real_provider_invalid_input_messages_fail_clo
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
         allowed_real_providers=("openai-codex",),
-        allowed_real_models=("gpt-5.4",),
+        allowed_real_models=(ENGINEER_MODEL,),
         allowed_real_providers_by_role={"engineer": ("openai-codex",)},
-        allowed_real_models_by_role={"engineer": ("gpt-5.4",)},
+        allowed_real_models_by_role={"engineer": (ENGINEER_MODEL,)},
         real_provider_client_factory=_factory,
     )
     result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "ok"}, "bad-message"])
@@ -951,9 +970,9 @@ def test_controlled_runtime_runner_real_provider_reviewer_allowed_separately(tmp
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
         allowed_real_providers=("openai-codex",),
-        allowed_real_models=("gpt-5.4", "gpt-5.5"),
+        allowed_real_models=(ENGINEER_MODEL, REVIEWER_MODEL),
         allowed_real_providers_by_role={"reviewer": ("openai-codex",)},
-        allowed_real_models_by_role={"reviewer": ("gpt-5.5",)},
+        allowed_real_models_by_role={"reviewer": (REVIEWER_MODEL,)},
         real_provider_client_factory=_factory,
     )
     result = ControlledRuntimeRunner().run(runtime, input_messages=[{"role": "user", "content": "Review"}])
@@ -961,4 +980,4 @@ def test_controlled_runtime_runner_real_provider_reviewer_allowed_separately(tmp
     assert client_calls["count"] == 1
     assert result.status.value == "succeeded"
     assert result.actual_provider == "openai-codex"
-    assert result.actual_model == "gpt-5.5"
+    assert result.actual_model == REVIEWER_MODEL

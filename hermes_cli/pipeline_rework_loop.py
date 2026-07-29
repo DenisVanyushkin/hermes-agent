@@ -3045,9 +3045,26 @@ def _preserve_requested_test_summary(
 
 
 def _machine_captured_test_summary(runner_result: Any) -> dict[str, Any] | None:
+    """Итог тестов шага: последний результат по каждой запускавшейся команде.
+
+    Прогон 7fd2db56 (2026-07-29): pytest упёрся в 120-секундный бюджет свежего
+    worktree и вернулся таймаутом, хотя в stdout лежало `18 passed in 2.94s`.
+    Инженер повторил ТУ ЖЕ команду, она прошла с exit_code 0. Оба результата
+    записаны -- а пайплайн отчитался blocked по первому, потому что этот цикл
+    возвращал первый же pytest и дальше не смотрел. Ревьюер не вызывался,
+    оператор получил заглушку вместо работы, которая на самом деле прошла.
+
+    Ключ -- команда, а не порядок вызовов. Повтор той же команды перекрывает её
+    прошлый результат; запуск другой, более узкой, ничего не перекрывает --
+    иначе провал широкого прогона прятался бы следующим узким. Блокирует любая
+    команда, чей ПОСЛЕДНИЙ прогон не зелёный.
+    """
     if not isinstance(runner_result, dict):
         return None
-    for tool_call in _mapping_list(runner_result.get("tool_call_summaries")):
+
+    latest: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for index, tool_call in enumerate(_mapping_list(runner_result.get("tool_call_summaries"))):
         if str(tool_call.get("tool_name") or "") != "pytest":
             continue
         payload = tool_call.get("result_payload")
@@ -3066,8 +3083,20 @@ def _machine_captured_test_summary(runner_result: Any) -> dict[str, Any] | None:
         normalized["exit_code"] = first_result.get("exit_code")
         normalized["source"] = str(payload.get("source") or "allowed_tool")
         normalized["results"] = results
-        return normalized
-    return None
+        # Вызов без распознанной команды нельзя ни с чем отождествить, поэтому
+        # он остаётся сам по себе и перекрыт быть не может.
+        key = command if command is not None else f"__unkeyed_{index}"
+        if key not in latest:
+            order.append(key)
+        latest[key] = normalized
+
+    if not latest:
+        return None
+
+    for key in order:
+        if str(latest[key].get("status") or "").strip() != "passed":
+            return latest[key]
+    return latest[order[-1]]
 
 
 def _candidate_test_commands(

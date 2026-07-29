@@ -147,6 +147,28 @@ class _DispatchingFakeAgent(_FakeAgent):
         }
 
 
+def _spec_models(subagent_id: str) -> dict:
+    """Что спека субагента объявляет на самом деле.
+
+    Литералы здесь пережили миграцию на 5.6 и упали только после того, как
+    правка спек попала в главный чекаут: часть тестов этого набора читает
+    `/home/hermes/.hermes/hermes-agent` абсолютным путём, поэтому прогон в
+    worktree их старое содержимое и видел. Проверка «зелено в worktree» такое
+    не ловит по построению.
+    """
+    import yaml
+
+    path = Path(__file__).resolve().parents[1] / "config" / "subagents" / f"{subagent_id}.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["models"]
+
+
+_ENGINEER = _spec_models("hermes_engineer_core")
+_REVIEWER = _spec_models("hermes_code_reviewer")
+
+ENGINEER_MODEL = _ENGINEER["default"]["model"]
+ENGINEER_FALLBACK_MODEL = _ENGINEER["fallback"]["model"]
+REVIEWER_MODEL = _REVIEWER["default"]["model"]
+
 def test_bridge_constructs_aiagent_from_runtime_kwargs(tmp_path: Path) -> None:
     repo_root, runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)
@@ -177,10 +199,10 @@ def test_bridge_constructs_aiagent_from_runtime_kwargs(tmp_path: Path) -> None:
     )
 
     assert captured["provider"] == "openai-codex"
-    assert captured["model"] == "gpt-5.4"
+    assert captured["model"] == ENGINEER_MODEL
     assert captured["fallback_model"] == {
         "provider": "openai-codex",
-        "model": "gpt-5.4-mini",
+        "model": ENGINEER_FALLBACK_MODEL,
     }
     assert captured["api_mode"] == runtime_result.constructor_api_mode
     assert captured["quiet_mode"] is True
@@ -724,7 +746,7 @@ def test_bridge_exposes_effective_fallback_metadata_when_fallback_activates(tmp_
         conversation_runner=lambda _bridge, _agent, _request, _runtime: {
             "output_text": "fallback ok",
             "provider": "openai-codex",
-            "model": "gpt-5.4-mini",
+            "model": ENGINEER_FALLBACK_MODEL,
             "base_url": "https://chatgpt.com/backend-api/codex/",
             "raw_metadata": {
                 "fallback_activated": True,
@@ -760,13 +782,13 @@ def test_bridge_exposes_effective_fallback_metadata_when_fallback_activates(tmp_
 
     raw_metadata = result["raw_metadata"]
     assert raw_metadata["initial_provider"] == "openai-codex"
-    assert raw_metadata["initial_model"] == "gpt-5.4"
+    assert raw_metadata["initial_model"] == ENGINEER_MODEL
     assert raw_metadata["effective_provider"] == "openai-codex"
-    assert raw_metadata["effective_model"] == "gpt-5.4-mini"
+    assert raw_metadata["effective_model"] == ENGINEER_FALLBACK_MODEL
     assert raw_metadata["fallback_attempted"] is True
     assert raw_metadata["fallback_activated"] is True
     assert raw_metadata["fallback_provider"] == "openai-codex"
-    assert raw_metadata["fallback_model"] == "gpt-5.4-mini"
+    assert raw_metadata["fallback_model"] == ENGINEER_FALLBACK_MODEL
     assert raw_metadata["fallback_base_url"] == "https://chatgpt.com/backend-api/codex/"
     assert raw_metadata["providers_used_effective"] == ["openai-codex"]
 
@@ -782,7 +804,7 @@ def test_bridge_ignores_non_string_providers_used_effective_entries(tmp_path: Pa
         conversation_runner=lambda _bridge, _agent, _request, _runtime: {
             "output_text": "fallback ok",
             "provider": "openai-codex",
-            "model": "gpt-5.4",
+            "model": ENGINEER_MODEL,
             "raw_metadata": {
                 "fallback_activated": True,
                 "providers_used_effective": [
@@ -834,7 +856,7 @@ def test_bridge_exposes_fallback_failure_metadata_without_masquerading_construct
         conversation_runner=lambda _bridge, _agent, _request, _runtime: {
             "turn_exit_reason": "fallback_exhausted",
             "provider": "openai-codex",
-            "model": "gpt-5.4",
+            "model": ENGINEER_MODEL,
             "raw_metadata": {
                 "real_provider_bridge_invoked": True,
                 "fallback_status": "exhausted",
@@ -1524,7 +1546,7 @@ def test_build_agent_sets_controlled_subagent_flags(tmp_path: Path) -> None:
     agent = captured_agents[0]
     assert getattr(agent, "_skip_role_model_selection", False) is True
     assert getattr(agent, "_constructor_provider", None) == "openai-codex"
-    assert getattr(agent, "_constructor_model", None) == "gpt-5.5"
+    assert getattr(agent, "_constructor_model", None) == REVIEWER_MODEL
     assert getattr(agent, "_constructor_api_mode", None) == "codex_responses"
 
 
@@ -1551,7 +1573,7 @@ def test_build_agent_sets_controlled_flags_for_engineer(tmp_path: Path) -> None:
     agent = captured_agents[0]
     assert getattr(agent, "_skip_role_model_selection", False) is True
     assert getattr(agent, "_constructor_provider", None) == "openai-codex"
-    assert getattr(agent, "_constructor_model", None) == "gpt-5.4"
+    assert getattr(agent, "_constructor_model", None) == ENGINEER_MODEL
 
 
 # --- F: mismatch fail-closed ---
@@ -1566,7 +1588,7 @@ def test_build_api_kwargs_blocks_when_turn_runtime_request_has_wrong_model(tmp_p
         tools=[],
         api_mode="codex_responses",
         provider="openai-codex",
-        model="gpt-5.5",
+        model=REVIEWER_MODEL,
         base_url="https://chatgpt.com/backend-api/codex",
         reasoning_config=None,
         request_overrides=None,
@@ -1574,7 +1596,7 @@ def test_build_api_kwargs_blocks_when_turn_runtime_request_has_wrong_model(tmp_p
         _is_anthropic_oauth=False,
         _skip_role_model_selection=True,
         _constructor_provider="openai-codex",
-        _constructor_model="gpt-5.5",
+        _constructor_model=REVIEWER_MODEL,
         _constructor_api_mode="codex_responses",
         _constructor_base_url="https://chatgpt.com/backend-api/codex",
         _turn_runtime_request=_turn_runtime_request_from_openrouter(),
@@ -1593,7 +1615,7 @@ def test_build_api_kwargs_allows_matching_constructor_identity(tmp_path: Path) -
         tools=[],
         api_mode="codex_responses",
         provider="openai-codex",
-        model="gpt-5.5",
+        model=REVIEWER_MODEL,
         base_url="https://chatgpt.com/backend-api/codex",
         reasoning_config=None,
         request_overrides=None,
@@ -1601,7 +1623,7 @@ def test_build_api_kwargs_allows_matching_constructor_identity(tmp_path: Path) -
         _is_anthropic_oauth=False,
         _skip_role_model_selection=True,
         _constructor_provider="openai-codex",
-        _constructor_model="gpt-5.5",
+        _constructor_model=REVIEWER_MODEL,
         _constructor_api_mode="codex_responses",
         _constructor_base_url="https://chatgpt.com/backend-api/codex",
         _turn_runtime_request=None,
@@ -1666,9 +1688,9 @@ def test_reviewer_bridge_agent_has_independent_constructor_identity(tmp_path: Pa
     rev_agent = captured["agents"][1]
 
     assert eng_agent._constructor_provider == "openai-codex"
-    assert eng_agent._constructor_model == "gpt-5.4"
+    assert eng_agent._constructor_model == ENGINEER_MODEL
     assert rev_agent._constructor_provider == "openai-codex"
-    assert rev_agent._constructor_model == "gpt-5.5"
+    assert rev_agent._constructor_model == REVIEWER_MODEL
     assert rev_agent._constructor_model != eng_agent._constructor_model
 
 
@@ -1693,7 +1715,7 @@ def test_reviewer_identity_independent_of_engineer_fallback_model(tmp_path: Path
     def _eng_factory(**kwargs):
         agent = _FakeAgent(**kwargs)
         agent.provider = "openai-codex"
-        agent.model = "gpt-5.4-mini"
+        agent.model = ENGINEER_FALLBACK_MODEL
         return agent
 
     captured_rev: dict[str, object] = {"kwargs_model": None, "kwargs_provider": None, "agent": None}
@@ -1725,11 +1747,11 @@ def test_reviewer_identity_independent_of_engineer_fallback_model(tmp_path: Path
     # _constructor_* attrs are set by _build_agent AFTER the factory call
     rev_agent = captured_rev["agent"]
     assert captured_rev["kwargs_provider"] == "openai-codex"
-    assert captured_rev["kwargs_model"] == "gpt-5.5"
+    assert captured_rev["kwargs_model"] == REVIEWER_MODEL
     assert getattr(rev_agent, "_constructor_provider", None) == "openai-codex"
-    assert getattr(rev_agent, "_constructor_model", None) == "gpt-5.5"
-    assert getattr(rev_agent, "_constructor_model", None) != "gpt-5.4-mini"
-    assert captured_rev["kwargs_model"] != "gpt-5.4"
+    assert getattr(rev_agent, "_constructor_model", None) == REVIEWER_MODEL
+    assert getattr(rev_agent, "_constructor_model", None) != ENGINEER_FALLBACK_MODEL
+    assert captured_rev["kwargs_model"] != ENGINEER_MODEL
 
 
 # --- E: request dump truth via build_api_kwargs model field ---
@@ -1764,7 +1786,7 @@ def test_build_api_kwargs_model_matches_constructor_model_when_no_turn_runtime_r
         tools=[],
         api_mode="codex_responses",
         provider="openai-codex",
-        model="gpt-5.5",
+        model=REVIEWER_MODEL,
         base_url="https://chatgpt.com/backend-api/codex",
         reasoning_config=None,
         request_overrides=None,
@@ -1772,7 +1794,7 @@ def test_build_api_kwargs_model_matches_constructor_model_when_no_turn_runtime_r
         _is_anthropic_oauth=False,
         _skip_role_model_selection=True,
         _constructor_provider="openai-codex",
-        _constructor_model="gpt-5.5",
+        _constructor_model=REVIEWER_MODEL,
         _constructor_api_mode="codex_responses",
         _constructor_base_url="https://chatgpt.com/backend-api/codex",
         _turn_runtime_request=None,
@@ -1781,7 +1803,7 @@ def test_build_api_kwargs_model_matches_constructor_model_when_no_turn_runtime_r
 
     try:
         result = build_api_kwargs(agent, [])
-        assert result.get("model") == "gpt-5.5", f"Expected gpt-5.5 but got {result.get('model')!r}"
+        assert result.get("model") == REVIEWER_MODEL, f"Expected gpt-5.5 but got {result.get('model')!r}"
     except Exception as exc:
         if "controlled_subagent_identity_mismatch" in str(exc):
             raise AssertionError(f"Mismatch guard must not fire for matching identity: {exc}") from exc
@@ -1799,7 +1821,7 @@ def test_mismatch_guard_error_does_not_leak_api_key(tmp_path: Path) -> None:
         tools=[],
         api_mode="codex_responses",
         provider="openai-codex",
-        model="gpt-5.5",
+        model=REVIEWER_MODEL,
         base_url="https://chatgpt.com/backend-api/codex",
         reasoning_config=None,
         request_overrides=None,
@@ -1807,7 +1829,7 @@ def test_mismatch_guard_error_does_not_leak_api_key(tmp_path: Path) -> None:
         _is_anthropic_oauth=False,
         _skip_role_model_selection=True,
         _constructor_provider="openai-codex",
-        _constructor_model="gpt-5.5",
+        _constructor_model=REVIEWER_MODEL,
         _constructor_api_mode="codex_responses",
         _constructor_base_url="https://chatgpt.com/backend-api/codex",
         _turn_runtime_request={
@@ -1860,10 +1882,10 @@ def test_reviewer_bridge_identity_per_invocation(tmp_path: Path) -> None:
     assert len(built_agents) == 2
     for entry in built_agents:
         assert entry["provider"] == "openai-codex"
-        assert entry["model"] == "gpt-5.5"
+        assert entry["model"] == REVIEWER_MODEL
         agent = entry["agent"]
         assert getattr(agent, "_constructor_provider", None) == "openai-codex"
-        assert getattr(agent, "_constructor_model", None) == "gpt-5.5"
+        assert getattr(agent, "_constructor_model", None) == REVIEWER_MODEL
         assert getattr(agent, "_skip_role_model_selection", False) is True
 
 
@@ -1878,7 +1900,7 @@ def _make_reviewer_agent_namespace(*, turn_runtime_request=None, allowed_ids=Non
         tools=[],
         api_mode="codex_responses",
         provider="openai-codex",
-        model="gpt-5.5",
+        model=REVIEWER_MODEL,
         base_url="https://chatgpt.com/backend-api/codex",
         reasoning_config=None,
         request_overrides=None,
@@ -1994,8 +2016,8 @@ def test_build_agent_allowed_ids_includes_fallback_identity(tmp_path: Path) -> N
 
     models = {_id["model"] for _id in allowed}
     api_modes = {_id["api_mode"] for _id in allowed}
-    assert "gpt-5.4" in models, f"Primary model missing from allowed: {allowed}"
-    assert "gpt-5.4-mini" in models, f"Fallback model missing from allowed: {allowed}"
+    assert ENGINEER_MODEL in models, f"Primary model missing from allowed: {allowed}"
+    assert ENGINEER_FALLBACK_MODEL in models, f"Fallback model missing from allowed: {allowed}"
     assert api_modes == {"codex_responses"}
 
     # Each entry must have provider and base_url_family
