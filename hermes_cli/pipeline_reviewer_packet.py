@@ -438,6 +438,22 @@ def _sanitize_findings(value: Any) -> list[dict[str, str]]:
 
 
 def _sanitize_changes(value: Any) -> list[dict[str, str]]:
+    """Записи об изменённых файлах в том виде, в каком их увидит ревьюер.
+
+    `summary` обязан сюда доживать. Правило `undescribed_changed_file` требует у
+    каждого изменённого файла непустое описание, и оператор видит именно эти
+    строки в запросе на одобрение коммита. Прежняя версия собирала запись из
+    `path` и `kind`, отбрасывая `summary`, поэтому требование было невыполнимо
+    по построению: 2026-07-29 два прогона подряд меняли файлы, проходили тесты и
+    упирались в исчерпание раундов доработки -- ревьюер не мог увидеть описание,
+    что бы инженер ни написал.
+
+    Запись без `kind` теперь сохраняется: вид изменения полезен, но его
+    отсутствие -- не повод спрятать от ревьюера объяснение. Запись без `path`
+    выбрасывается: её не с чем сопоставить. Запись без `summary` доходит как
+    есть, чтобы ревьюер сказал о ней прямо, а не принял молчание за отсутствие
+    изменения.
+    """
     if not isinstance(value, list):
         return []
     sanitized: list[dict[str, str]] = []
@@ -445,9 +461,16 @@ def _sanitize_changes(value: Any) -> list[dict[str, str]]:
         if not isinstance(item, Mapping):
             continue
         path = _clean_optional_text(item.get("path"), max_length=256)
+        if not path:
+            continue
+        entry: dict[str, str] = {"path": path}
         kind = _clean_optional_text(item.get("kind"), max_length=64)
-        if path and kind:
-            sanitized.append({"path": path, "kind": kind})
+        if kind:
+            entry["kind"] = kind
+        summary = _clean_optional_text(item.get("summary"))
+        if summary:
+            entry["summary"] = summary
+        sanitized.append(entry)
     return sanitized
 
 
