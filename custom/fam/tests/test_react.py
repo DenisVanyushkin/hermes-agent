@@ -286,6 +286,15 @@ def test_med_tick_passes_a_sent_ref(db, pending_intake, monkeypatch):
     monkeypatch.setattr(tick.gate, "deliver", fake_deliver)
     db.execute("UPDATE med_intakes SET series_next_utc=plan_ts_utc WHERE id=?",
                (pending_intake["id"],))
+    # The dose is at 09:00 Almaty, still inside med_wake_gate_until (12:00
+    # by default), so the sleep gate added in Task 4 would otherwise hold
+    # it silently -- gate.deliver would never be called and `seen` would
+    # stay empty. A sign-of-life audit row earlier the same Almaty day
+    # makes presence.awake_since non-None so the dose is actually
+    # deliverable, which is the precondition this test now depends on.
+    db.execute(
+        "INSERT INTO audit_log(ts_utc, kind, actor, payload) VALUES(?,?,?,?)",
+        ("2026-07-22T03:50:00+00:00", "cal.add", "agent", "{}"))
     db.commit()
 
     tick.reminders(db, now_utc="2026-07-22T04:00:00+00:00",
