@@ -16,6 +16,28 @@ def _copy_spec_tree(tmp_path: Path) -> Path:
     return repo_root
 
 
+def _engineer_models(repo_root: Path) -> dict[str, Any]:
+    """Что спека инженера объявляет на самом деле.
+
+    Здесь стояли литералы. 2026-07-04 коммит 2d23eb25ad перевёл спеку с
+    openrouter/xiaomi/mimo-v2.5-pro на openai-codex/gpt-5.4, тест не тронули --
+    и три проверки в этом файле падали 25 дней. Пока они лежали, разъезд
+    моделей субагентов (5.4 в спеках, 5.5 у ревьюера и аудитора, 5.6 в
+    политике) стало нечем заметить: это единственное место, которое на него
+    ругалось бы.
+
+    Проверяемое утверждение -- инвариант ФАБРИКИ: она строит ровно то, что
+    объявлено в спеке, и ничего не подставляет от себя. Каким моделям там быть
+    -- отдельное решение, и пинить его литералами отсюда значит ломать тест на
+    каждой смене модели, что и произошло.
+    """
+    import yaml
+
+    spec_path = repo_root / "config" / "subagents" / "hermes_engineer_core.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    return spec["models"]
+
+
 def test_runtime_factory_exposes_explicit_engineering_fallback_metadata(tmp_path: Path) -> None:
     specs_module = importlib.import_module("hermes_cli.pipeline_specs")
     runtime_factory_module = importlib.import_module("hermes_cli.runtime_factory")
@@ -32,14 +54,18 @@ def test_runtime_factory_exposes_explicit_engineering_fallback_metadata(tmp_path
         )
     )
 
-    assert result.constructor_provider == "openrouter"
-    assert result.constructor_model == "xiaomi/mimo-v2.5-pro"
+    models = _engineer_models(repo_root)
+    default = models["default"]
+    fallback = models["fallback"]
+
+    assert result.constructor_provider == default["provider"]
+    assert result.constructor_model == default["model"]
     assert result.fallback_policy is not None
-    assert result.fallback_policy.mode == "explicit_model"
-    assert result.fallback_policy.reason == "preserve engineering capability without using a global free fallback"
-    assert result.fallback_policy.provider == "openai-codex"
-    assert result.fallback_policy.model == "gpt-5.4"
-    assert result.fallback_policy.max_tokens == 16384
+    assert result.fallback_policy.mode == fallback["mode"]
+    assert result.fallback_policy.reason == fallback["reason"]
+    assert result.fallback_policy.provider == fallback["provider"]
+    assert result.fallback_policy.model == fallback["model"]
+    assert result.fallback_policy.max_tokens == fallback["max_tokens"]
 
 
 def test_runtime_factory_to_aiagent_kwargs_preserves_primary_and_explicit_fallback(tmp_path: Path) -> None:
@@ -60,12 +86,18 @@ def test_runtime_factory_to_aiagent_kwargs_preserves_primary_and_explicit_fallba
 
     kwargs = result.to_aiagent_kwargs()
 
-    assert kwargs["provider"] == "openrouter"
-    assert kwargs["model"] == "xiaomi/mimo-v2.5-pro"
+    models = _engineer_models(repo_root)
+    default = models["default"]
+    fallback = models["fallback"]
+
+    assert kwargs["provider"] == default["provider"]
+    assert kwargs["model"] == default["model"]
     assert kwargs["fallback_model"] == {
-        "provider": "openai-codex",
-        "model": "gpt-5.4",
+        "provider": fallback["provider"],
+        "model": fallback["model"],
     }
+    # Фолбэк едет одним словарём, а не россыпью ключей: строгая подпись
+    # конструктора агента других не принимает.
     assert "fallback_provider" not in kwargs
     assert "fallback_max_tokens" not in kwargs
 
@@ -108,9 +140,13 @@ def test_runtime_factory_kwargs_fit_strict_aiagent_subset_signature(tmp_path: Pa
     kwargs = result.to_aiagent_kwargs()
     constructed = _StrictAgentFactory()(**kwargs)
 
-    assert constructed["provider"] == "openrouter"
-    assert constructed["model"] == "xiaomi/mimo-v2.5-pro"
+    models = _engineer_models(repo_root)
+    default = models["default"]
+    fallback = models["fallback"]
+
+    assert constructed["provider"] == default["provider"]
+    assert constructed["model"] == default["model"]
     assert constructed["fallback_model"] == {
-        "provider": "openai-codex",
-        "model": "gpt-5.4",
+        "provider": fallback["provider"],
+        "model": fallback["model"],
     }
