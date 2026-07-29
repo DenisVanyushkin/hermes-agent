@@ -28,6 +28,7 @@ import asyncio
 import concurrent.futures
 import dataclasses
 import faulthandler
+import functools
 import inspect
 import json
 import logging
@@ -21399,21 +21400,51 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             try:
                 from hermes_cli.orchestrator import observe_gateway_turn
 
-                pipeline_orchestrator_report = observe_gateway_turn(
-                    config=user_config,
-                    user_message=message,
-                    conversation_context=_pipeline_conversation_context(history),
-                    session_id=session_id,
-                    session_key=session_key,
-                    platform=platform_key,
-                    chat_id=str(getattr(source, "chat_id", "") or "") or None,
-                    thread_id=str(getattr(source, "thread_id", "") or "") or None,
-                    user_id=str(getattr(source, "user_id", "") or "") or None,
-                    router_decision=router_decision,
-                    selected_provider=str(cfg_get(user_config, "model", "provider", default="") or "").strip() or None,
-                    selected_model=_resolve_gateway_model(user_config) or None,
-                    logger=logger,
-                    db=getattr(self, "_session_db", None),
+                # observe_gateway_turn -- граница async/sync: всё ниже неё
+                # синхронно, вплоть до interruptible_api_call, который join'ит
+                # поток, ни разу не отдавая управление. Прямой вызов держал
+                # поток цикла на всю длительность хода -- Slack и Telegram не
+                # обслуживались, typing стоял, входящие копились, а
+                # достаточно долгий ход добивался сторожем как «замёрзший
+                # цикл» (exit 75), и systemd уносил браузерный стек из cgroup.
+                # Разговорный маршрут этим не болел ровно потому, что
+                # run_conversation уже уходит в этот же пул (см. ниже по
+                # файлу): 2026-07-29 ход на 106 с выжил, ход на 107 с -- нет.
+                #
+                # Пул -- гейтвейный self._executor, а не default цикла: ход
+                # занимает поток на минуты и не должен конкурировать с
+                # короткими run_in_executor(None, ...). ContextVars переезжают
+                # через copy_context() внутри хелпера -- на них держится
+                # апрув опасных команд, голый поток провалился бы в
+                # неинтерактивную ветку автоаппрува.
+                #
+                # Сериализацию по чату держат вышестоящие слои, и все они
+                # переживают этот await: _active_sessions с FIFO
+                # _pending_messages, _running_agents по routing-key и
+                # SessionTurnLeaseRegistry (взята выше, отпускается в finally
+                # _handle_message). Порядок больше не побочный эффект
+                # блокировки цикла, но и не потерян.
+                #
+                # note_blocking_wait (34b1e91a1b) не снимаем -- она остаётся
+                # защитой в глубину для путей, о которых мы не знаем.
+                pipeline_orchestrator_report = await self._run_in_executor_with_context(
+                    functools.partial(
+                        observe_gateway_turn,
+                        config=user_config,
+                        user_message=message,
+                        conversation_context=_pipeline_conversation_context(history),
+                        session_id=session_id,
+                        session_key=session_key,
+                        platform=platform_key,
+                        chat_id=str(getattr(source, "chat_id", "") or "") or None,
+                        thread_id=str(getattr(source, "thread_id", "") or "") or None,
+                        user_id=str(getattr(source, "user_id", "") or "") or None,
+                        router_decision=router_decision,
+                        selected_provider=str(cfg_get(user_config, "model", "provider", default="") or "").strip() or None,
+                        selected_model=_resolve_gateway_model(user_config) or None,
+                        logger=logger,
+                        db=getattr(self, "_session_db", None),
+                    )
                 )
             except Exception:
                 logger.warning("pipeline orchestrator observe hook import/invocation failed", exc_info=True)
