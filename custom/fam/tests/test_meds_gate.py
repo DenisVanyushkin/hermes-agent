@@ -500,3 +500,197 @@ def test_away_gate_disabled_by_config(db, fake_deliver):
                     times=("16:00",))
     tick._meds_series(db, AFTERNOON, cfg)
     assert len(fake_deliver.calls) == 1
+
+
+# --- Task 6: склейка доз, освобождённых одним тиком, и групповой ack ---
+
+
+def test_released_doses_merge_into_one_message(db, fake_deliver):
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    tick._meds_series(db, MORNING, CFG)
+    assert fake_deliver.calls == []
+
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", CFG)
+
+    assert len(fake_deliver.calls) == 1
+    call = fake_deliver.calls[0]
+    assert call["raw"]["mode"] == "take_group"
+    assert {i["name"] for i in call["raw"]["items"]} == {"Эутирокс", "Магний"}
+    assert sorted(call["sent_ref"]["ref_ids"]) == sorted([a, b])
+    assert "Эутирокс" in call["human_fallback"]
+    assert "Магний" in call["human_fallback"]
+
+
+def test_released_doses_advance_series_and_clear_gate_reason(db, fake_deliver):
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    tick._meds_series(db, MORNING, CFG)
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", CFG)
+
+    for iid in (a, b):
+        row = _intake(db, iid)
+        assert row["gate_reason"] is None, iid
+        assert row["status"] == "pending", iid
+        # после реальной отправки -- обычные 45 минут
+        assert row["series_next_utc"] == "2026-07-20T05:55:00+00:00", iid
+
+
+def test_single_released_dose_stays_a_take_message(db, fake_deliver):
+    a = _pending_intake(db, name="Эутирокс")
+    tick._meds_series(db, MORNING, CFG)
+    assert fake_deliver.calls == []
+
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", CFG)
+
+    assert len(fake_deliver.calls) == 1
+    call = fake_deliver.calls[0]
+    assert call["raw"]["mode"] == "take"
+    assert call["raw"]["name"] == "Эутирокс"
+    assert call["sent_ref"]["ref_id"] == a
+    # одиночная доза не порождает групповых ссылок
+    assert not call["sent_ref"].get("ref_ids") or \
+        call["sent_ref"]["ref_ids"] == [a]
+    assert db.execute(
+        "SELECT COUNT(*) FROM sent_message_refs").fetchone()[0] == 0
+
+
+def test_ordinary_repeats_stay_separate(db, fake_deliver):
+    _pending_intake(db, name="Эутирокс", plan="2026-07-20T11:00:00+00:00",
+                    times=("16:00",))
+    _pending_intake(db, name="Магний", plan="2026-07-20T11:00:00+00:00",
+                    times=("16:00",))
+    tick._meds_series(db, AFTERNOON, CFG)
+    # обе дозы не удерживались -- значит два отдельных сообщения
+    assert len(fake_deliver.calls) == 2
+    assert all(c["raw"]["mode"] == "take" for c in fake_deliver.calls)
+
+
+def test_failed_group_send_leaves_doses_held(db, fake_deliver):
+    """Инвариант: если групповая отправка упала, ни одна доза не должна
+    остаться с очищенным gate_reason -- иначе она «отпущена», хотя ничего
+    не ушло. Откат делает отпускание атомарным с отправкой."""
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    tick._meds_series(db, MORNING, CFG)
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("bridge down")
+
+    fake_deliver.calls = []
+    import fam.gate as _gate
+    orig = _gate.deliver
+    _gate.deliver = boom
+    try:
+        tick._meds_series(db, "2026-07-20T05:10:00+00:00", CFG)
+    finally:
+        _gate.deliver = orig
+
+    for iid in (a, b):
+        row = _intake(db, iid)
+        assert row["gate_reason"] == "asleep", iid
+        assert row["series_next_utc"] == "2026-07-20T05:10:00+00:00", iid
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='med.gate_release'"
+    ).fetchone()[0] == 0
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='tick.error'"
+    ).fetchone()[0] == 1
+
+
+def test_group_reaction_acks_every_dose(db):
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    react.record_sent(db, "wa1", "med", a, ref_ids=[a, b])
+    db.commit()
+
+    out = react.handle(db, "wa1", "\U0001F44D")
+
+    assert out["result"] == "confirmed"
+    assert _intake(db, a)["status"] == "taken"
+    assert _intake(db, b)["status"] == "taken"
+
+
+def test_group_reaction_skips_already_acked_member(db):
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    meds.take(db, a, now_utc=MORNING)
+    react.record_sent(db, "wa1", "med", a, ref_ids=[a, b])
+    db.commit()
+
+    out = react.handle(db, "wa1", "\U0001F44D")
+
+    assert out["result"] == "confirmed"
+    assert _intake(db, b)["status"] == "taken"
+
+
+def test_group_reaction_skip_emoji_skips_every_dose(db):
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    react.record_sent(db, "wa1", "med", a, ref_ids=[a, b])
+    db.commit()
+
+    out = react.handle(db, "wa1", "\U0001F44E")
+
+    assert out["result"] == "skipped"
+    assert _intake(db, a)["status"] == "skipped"
+    assert _intake(db, b)["status"] == "skipped"
+
+
+def test_group_reaction_all_members_not_pending_is_already_acked(db):
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    meds.take(db, a, now_utc=MORNING)
+    meds.take(db, b, now_utc=MORNING)
+    react.record_sent(db, "wa1", "med", a, ref_ids=[a, b])
+    db.commit()
+
+    out = react.handle(db, "wa1", "\U0001F44D")
+
+    assert out["result"] == "already_acked"
+    assert out["reason"] == "not_pending"
+
+
+def test_group_reaction_is_idempotent_on_repeat(db):
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    react.record_sent(db, "wa1", "med", a, ref_ids=[a, b])
+    db.commit()
+
+    assert react.handle(db, "wa1", "\U0001F44D")["result"] == "confirmed"
+    assert react.handle(db, "wa1", "\U0001F44D")["result"] == "already_acked"
+
+
+def test_record_sent_single_ref_writes_no_refs_rows(db):
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    react.record_sent(db, "wa1", "med", a)
+    react.record_sent(db, "wa2", "med", a, ref_ids=[a])
+    db.commit()
+    assert db.execute(
+        "SELECT COUNT(*) FROM sent_message_refs").fetchone()[0] == 0
+
+
+def test_group_send_marks_every_member_acked_in_sent_messages(db):
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    # отдельное более раннее сообщение по дозе b (обычный +45 повтор)
+    react.record_sent(db, "wa0", "med", b)
+    react.record_sent(db, "wa1", "med", a, ref_ids=[a, b])
+    db.commit()
+
+    react.handle(db, "wa1", "\U0001F44D")
+
+    statuses = {r["wa_message_id"]: r["ack_status"] for r in db.execute(
+        "SELECT wa_message_id, ack_status FROM sent_messages")}
+    assert statuses == {"wa0": "confirmed", "wa1": "confirmed"}

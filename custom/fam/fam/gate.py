@@ -790,10 +790,15 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None,
          return "sent".
 
     sent_ref (optional) = {"kind": "reminder"|"med", "ref_id": int,
-    "event_id": int|None}: on a successful send, records the platform
-    message id in `sent_messages` so an emoji reaction on that very
-    message can be resolved back to this reminder/intake (fam/react.py).
-    Writes into the caller's transaction like every other audit here.
+    "event_id": int|None, "ref_ids": [int, ...]|None}: on a successful
+    send, records the platform message id in `sent_messages` so an emoji
+    reaction on that very message can be resolved back to this
+    reminder/intake (fam/react.py). Writes into the caller's transaction
+    like every other audit here. "ref_ids" is for ONE message covering
+    several targets (same-tick med gate release): it is passed straight
+    through to react.record_sent, which fans it out into
+    sent_message_refs; omitting it (or passing a 1-element list) keeps
+    the single-target behaviour byte-for-byte.
     """
     now = now_utc or _now()
 
@@ -876,7 +881,8 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None,
             react.record_sent(
                 conn, message_id, sent_ref["kind"], sent_ref["ref_id"],
                 event_id=sent_ref.get("event_id"),
-                chat_jid=cfg.get("target", ""), now_utc=now)
+                chat_jid=cfg.get("target", ""), now_utc=now,
+                ref_ids=sent_ref.get("ref_ids"))
         else:
             # Delivered, but unreactable: worth seeing in the nightly
             # problem summary's audit sweep if it ever becomes chronic.

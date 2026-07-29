@@ -905,6 +905,28 @@ def _meds_series(conn, now_utc, cfg):
     effect, so each row's outcome is narrowed to its own transaction).
     The out_of_stock quiet-hours defer commits nothing either -- there is
     nothing to persist, since the row was left exactly as SELECTed.
+
+    ONE EXCEPTION to "one row, one message" (Task 6): doses that a gate
+    (sleep/away) had been holding and that this SAME tick releases do not
+    send from inside the loop. They are collected in `released` and go out
+    as a SINGLE message after the loop. Releasing the sleep gate at 12:00
+    with three medications would otherwise produce three back-to-back
+    messages -- exactly the pile of reminders the gate exists to prevent.
+    Ordinary +45min repeats are untouched by this and stay separate
+    messages: only a same-tick gate RELEASE (prev_reason is not None)
+    coalesces, and a release of a single dose keeps the ordinary
+    mode="take" shape, so nothing about the one-dose case changes.
+
+    The release group has its own try/except with the same discipline as
+    the per-row one, and -- unlike the per-row branches -- it holds ALL of
+    its writes (gate_reason=NULL, med.gate_release audit, series_next_utc)
+    until after gate.deliver returns. Clearing gate_reason inside the loop
+    and committing it there would survive a later failure of the group
+    send, leaving a dose that claims it was released while nothing was
+    ever sent. Keeping the writes in the group's own transaction makes
+    release and send atomic: on failure everything rolls back, the doses
+    stay held with their old (already-due) series_next_utc, and the next
+    tick retries the identical release.
     """
     now_dt = _parse_utc(now_utc)
     due = conn.execute(
@@ -913,6 +935,10 @@ def _meds_series(conn, now_utc, cfg):
         "ORDER BY series_next_utc",
         (now_utc,),
     ).fetchall()
+
+    # Doses whose gate this very tick released. Filled by the "take"
+    # branch below, drained by the single group send after the loop.
+    released = []
 
     for row in due:
         intake_id = row["id"]
@@ -1021,11 +1047,19 @@ def _meds_series(conn, now_utc, cfg):
                     continue
 
                 if prev_reason is not None:
-                    conn.execute(
-                        "UPDATE med_intakes SET gate_reason=NULL WHERE id=?",
-                        (intake_id,))
-                    audit.log(conn, "med.gate_release",
-                              {"intake_id": intake_id, "was": prev_reason})
+                    # Held until a moment ago -> hand this dose to the
+                    # post-loop group send instead of sending it here, so
+                    # every dose released by THIS tick shares one message.
+                    # Nothing is written for it yet (not even
+                    # gate_reason=NULL): the release must be atomic with
+                    # the send -- see this function's docstring.
+                    released.append({
+                        "intake_id": intake_id, "name": name, "dose": dose,
+                        "was": prev_reason,
+                        "plan_local": _parse_utc(
+                            row["plan_ts_utc"]).astimezone(
+                                ALMATY).strftime("%H:%M")})
+                    continue
 
                 raw = {"mode": "take", "name": name, "dose": dose}
                 human_fallback = f"Пора принять {name}" + (
@@ -1061,6 +1095,64 @@ def _meds_series(conn, now_utc, cfg):
             audit.log(conn, "tick.error",
                       {"where": "meds_row", "intake_id": intake_id,
                        "error": str(e)[:200]})
+            conn.commit()
+
+    if released:
+        # Doses released by ONE tick leave as ONE message: otherwise
+        # releasing the sleep gate at 12:00 with three medications
+        # reproduces exactly the "pile of reminders" the gate was built to
+        # remove. Ordinary 45-minute repeats stay separate.
+        #
+        # Own try/except with the per-row discipline: on failure NOTHING
+        # of this block persists (rollback), so no dose is left claiming a
+        # release that never went out -- gate_reason stays set and
+        # series_next_utc stays where the last hold put it (already due),
+        # so the next tick retries the same release.
+        try:
+            items = [{"name": r["name"], "dose": r["dose"],
+                      "plan_local": r["plan_local"]} for r in released]
+            ids = [r["intake_id"] for r in released]
+            for r in released:
+                conn.execute(
+                    "UPDATE med_intakes SET gate_reason=NULL WHERE id=?",
+                    (r["intake_id"],))
+                audit.log(conn, "med.gate_release",
+                          {"intake_id": r["intake_id"], "was": r["was"]})
+            if len(items) == 1:
+                # A single released dose must NOT become a group message:
+                # one dose, one name -> the ordinary "take" shape, so
+                # every downstream reader (gate prompt, react ack) sees
+                # exactly what a non-gated dose produces.
+                raw = {"mode": "take", "name": items[0]["name"],
+                       "dose": items[0]["dose"], "intake_id": ids[0],
+                       "plan_local": items[0]["plan_local"], "late": True}
+                human_fallback = (
+                    f"{items[0]['name']} за {items[0]['plan_local']} "
+                    f"ещё не отмечено.")
+            else:
+                raw = {"mode": "take_group", "items": items, "late": True}
+                listed = ", ".join(
+                    f"{i['name']} ({i['plan_local']})" for i in items)
+                human_fallback = f"Ещё не отмечено: {listed}."
+            status = gate.deliver(conn, "med", raw, human_fallback, cfg,
+                                  force=True, now_utc=now_utc,
+                                  sent_ref={"kind": "med", "ref_id": ids[0],
+                                            "ref_ids": ids})
+            repeat_min = cfg.get("med_repeat_min", 45)
+            next_utc = (now_dt + timedelta(minutes=repeat_min)).isoformat(
+                timespec="seconds")
+            for iid in ids:
+                conn.execute(
+                    "UPDATE med_intakes SET series_next_utc=? "
+                    "WHERE id=? AND status='pending'", (next_utc, iid))
+            audit.log(conn, "tick.med",
+                      {"mode": "release_group", "intake_ids": ids,
+                       "status": status})
+            conn.commit()
+        except Exception as e:                        # noqa: BLE001
+            conn.rollback()
+            audit.log(conn, "tick.error",
+                      {"where": "meds_release", "error": str(e)[:200]})
             conn.commit()
 
 

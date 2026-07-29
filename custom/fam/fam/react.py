@@ -69,7 +69,7 @@ def _normalize_emoji(emoji):
 
 
 def record_sent(conn, wa_message_id, kind, ref_id, event_id=None,
-                chat_jid="", now_utc=None):
+                chat_jid="", now_utc=None, ref_ids=None):
     """Persist one outbound message id -> reminder/med mapping.
 
     Called from gate.deliver (via its sent_ref parameter) right after a
@@ -79,6 +79,19 @@ def record_sent(conn, wa_message_id, kind, ref_id, event_id=None,
     same id -- silently keeping the first row is correct either way.
     Does NOT commit -- runs inside the caller's transaction so the
     mapping and the reminder's own status='sent' UPDATE land atomically.
+
+    ref_ids: the FULL list of targets when this is ONE message covering
+    several doses (same-tick gate release, tick._meds_series). Such a
+    message cannot be represented by sent_messages alone:
+    wa_message_id is UNIQUE (so one row per message, not per dose) and
+    ref_id is a scalar. sent_messages.ref_id keeps the first target for
+    compatibility with every existing reader; the full list goes into
+    sent_message_refs, which handle() consults.
+
+    A single-target send writes NOTHING extra: with 0 or 1 entries in
+    ref_ids the fan-out table stays empty, so the pre-Task-6 shape of a
+    recorded message (and of handle()'s resolution) is bit-for-bit
+    unchanged for every existing call site.
     """
     from fam.gate import _now  # local import: gate imports this module too
     conn.execute(
@@ -87,6 +100,16 @@ def record_sent(conn, wa_message_id, kind, ref_id, event_id=None,
         " VALUES (?,?,?,?,?,?)",
         (wa_message_id, chat_jid or "", kind, ref_id, event_id,
          now_utc or _now()))
+    if not ref_ids or len(ref_ids) <= 1:
+        return
+    row = conn.execute("SELECT id FROM sent_messages WHERE wa_message_id=?",
+                       (wa_message_id,)).fetchone()
+    if row is None:
+        return
+    for rid in ref_ids:
+        conn.execute(
+            "INSERT INTO sent_message_refs(sent_message_id, kind, ref_id) "
+            "VALUES(?,?,?)", (row["id"], kind, rid))
 
 
 def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
@@ -141,21 +164,41 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
             detail["cancelled"] = rem.cancel_chain(conn, row["event_id"])
             result, new_status = "skipped", "skipped"
     else:  # med
-        try:
-            if action == "confirm":
-                take_out = meds.take(conn, row["ref_id"], now_utc=now_utc)
-                detail.update({k: take_out[k]
-                               for k in ("remaining", "restock")
-                               if isinstance(take_out, dict) and k in take_out})
-                result, new_status = "confirmed", "confirmed"
-            else:
-                meds.skip(conn, row["ref_id"])
-                result, new_status = "skipped", "skipped"
-        except ValueError:
-            # The intake already left 'pending' through another door (a
-            # verbal "выпила", midnight missed-closeout, ...). The
-            # reaction's intent is satisfied or moot -- idempotent
-            # success, and mark the mapping so repeats short-circuit.
+        # One message may cover several doses (same-tick gate release,
+        # tick._meds_series): sent_message_refs carries the full target
+        # list, and its absence means the pre-Task-6 single-dose shape --
+        # exactly one target, row["ref_id"], handled below by the same
+        # code path with the same idempotency semantics.
+        targets = [r["ref_id"] for r in conn.execute(
+            "SELECT ref_id FROM sent_message_refs "
+            "WHERE sent_message_id=? AND kind='med' ORDER BY ref_id",
+            (row["id"],))] or [row["ref_id"]]
+
+        applied = 0
+        for rid in targets:
+            try:
+                if action == "confirm":
+                    take_out = meds.take(conn, rid, now_utc=now_utc)
+                    detail.update({k: take_out[k]
+                                   for k in ("remaining", "restock")
+                                   if isinstance(take_out, dict)
+                                   and k in take_out})
+                else:
+                    meds.skip(conn, rid)
+                applied += 1
+            except ValueError:
+                # This dose already left 'pending' through another door (a
+                # verbal "выпила", midnight missed-closeout, ...).
+                # For a group that is normal -- its other members are
+                # still waiting, so keep going and only fall back to
+                # "already_acked" if NOTHING was applicable.
+                continue
+
+        if applied == 0:
+            # Single-dose case: byte-for-byte the pre-Task-6 not_pending
+            # path -- the reaction's intent is satisfied or moot, so it is
+            # an idempotent success, and the mapping is marked so repeats
+            # short-circuit at the ack_status check above.
             conn.execute(
                 "UPDATE sent_messages SET ack_status='confirmed' "
                 "WHERE kind=? AND ref_id=? AND ack_status='none'",
@@ -165,6 +208,11 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
             audit.log(conn, "react.handle", out)
             conn.commit()
             return out
+
+        if len(targets) > 1:
+            detail["applied"] = applied
+        result = "confirmed" if action == "confirm" else "skipped"
+        new_status = result
 
     # Mark every recorded message of this reminder chain / med intake
     # (multi-stage chains and +45min med resends each have their own
@@ -176,10 +224,11 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
             "WHERE kind='reminder' AND event_id=? AND ack_status='none'",
             (new_status, row["event_id"]))
     else:
-        conn.execute(
-            "UPDATE sent_messages SET ack_status=? "
-            "WHERE kind='med' AND ref_id=? AND ack_status='none'",
-            (new_status, row["ref_id"]))
+        for rid in targets:
+            conn.execute(
+                "UPDATE sent_messages SET ack_status=? "
+                "WHERE kind='med' AND ref_id=? AND ack_status='none'",
+                (new_status, rid))
 
     out = {**base, "result": result, **detail}
     audit.log(conn, "react.handle", out)
