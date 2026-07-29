@@ -6,6 +6,9 @@ tests pin the same case table that custom/fam/fam/react.py is held to —
 the two copies must not drift.
 """
 
+import sys
+from pathlib import Path
+
 import pytest
 
 from plugins.platforms.whatsapp.reactions import (
@@ -13,6 +16,16 @@ from plugins.platforms.whatsapp.reactions import (
     is_dialogue_emoji,
     normalize_emoji,
 )
+
+# custom/fam is the operator's own package (see reactions.py's module
+# docstring for why it isn't on the gateway's sys.path by default) --
+# reach into it the same way custom/fam/tests do (`from fam import ...`),
+# just with the path inserted explicitly since we're outside that package.
+_CUSTOM_FAM = Path(__file__).resolve().parents[2] / "custom" / "fam"
+if str(_CUSTOM_FAM) not in sys.path:
+    sys.path.insert(0, str(_CUSTOM_FAM))
+
+from fam.react import EMOJI_CONFIRM, EMOJI_SKIP  # noqa: E402
 
 
 def test_whitelist_has_exactly_ten_entries():
@@ -46,3 +59,22 @@ def test_emoji_outside_the_whitelist_is_rejected(emoji):
 
 def test_normalize_emoji_tolerates_none_like_input():
     assert normalize_emoji("") == ""
+
+
+def test_ack_emoji_maps_are_a_subset_of_the_dialogue_whitelist():
+    """custom/fam/fam/react.py's EMOJI_CONFIRM | EMOJI_SKIP must stay a
+    subset of DIALOGUE_EMOJI here.
+
+    The removal filter and this whitelist now run BEFORE the ack hook
+    (fam react-hook) is ever invoked, so an ack emoji outside
+    DIALOGUE_EMOJI would silently never reach the hook -- no error,
+    just a dropped ack. Nothing else enforces this relationship; this
+    test is it.
+    """
+    ack_emoji = EMOJI_CONFIRM | EMOJI_SKIP
+    missing = ack_emoji - DIALOGUE_EMOJI
+    assert not missing, (
+        f"{missing} are in EMOJI_CONFIRM/EMOJI_SKIP but not in "
+        "DIALOGUE_EMOJI -- reactions with these emoji would silently "
+        "never reach fam react-hook"
+    )

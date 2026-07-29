@@ -37,6 +37,13 @@ from fam import db as famdb
 
 # Base emoji AFTER _normalize_emoji (variation selectors and skin-tone
 # modifiers stripped), so 👍🏽 and ❤️ match their bare forms.
+#
+# INVARIANT: EMOJI_CONFIRM | EMOJI_SKIP must remain a subset of
+# DIALOGUE_EMOJI in plugins/platforms/whatsapp/reactions.py. The
+# whitelist filter there runs BEFORE this hook is ever invoked, so any
+# emoji added here without also adding it to DIALOGUE_EMOJI would
+# silently never reach react-hook -- no error, just a dropped ack.
+# Enforced by tests/gateway/test_whatsapp_reactions_normalize.py.
 EMOJI_CONFIRM = {"\U0001F44D", "❤", "\U0001F4AA", "✅"}  # 👍 ❤ 💪 ✅
 EMOJI_SKIP = {"\U0001F44E", "❌"}                              # 👎 ❌
 
@@ -194,9 +201,14 @@ def run_hook(stdin=None, stdout=None, connect=None):
       {"target_message_id": str, "emoji": str, "removal": bool,
        "chat_jid": str, "sender": str}
 
-    The adapter allowlists senders before invoking us (bridge-level
-    WHATSAPP_ALLOWED_USERS plus the adapter's own DM gate) -- this
-    process trusts its caller, same as every other fam entry point.
+    Sender gating here is thinner than it looks: bridge-level
+    WHATSAPP_ALLOWED_USERS is skipped entirely under
+    WHATSAPP_DM_POLICY=pairing, and the adapter's reaction path never
+    calls its own DM/group gates (_should_process_message and friends)
+    before invoking us. With reaction_dialogue enabled, a sender those
+    gates would otherwise reject can still reach us via a reaction --
+    a known, accepted gap. This process trusts its caller regardless,
+    same as every other fam entry point.
 
     Exit codes: 0 handled (including unknown_message/ignored);
     2 malformed event. Internal failures propagate to cli.main's

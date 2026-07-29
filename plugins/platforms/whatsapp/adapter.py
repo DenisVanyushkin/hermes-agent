@@ -1581,16 +1581,29 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         the configured hook command.
 
         Runs when either ``extra.reaction_hook_cmd`` (ack path) or
-        ``extra.reaction_dialogue`` (agent-turn path) is set. The bridge only
-        queues reactions on messages Hermes itself sent, and its own
-        allowlist (WHATSAPP_ALLOWED_USERS) already gated the sender, so
-        this loop's job is transport, not policy.
+        ``extra.reaction_dialogue`` (agent-turn path) is set. The bridge
+        only queues reactions on messages Hermes itself sent, but sender
+        gating here is much thinner than for an ordinary inbound message:
+        WHATSAPP_ALLOWED_USERS is skipped entirely when
+        WHATSAPP_DM_POLICY=pairing, and this loop never calls
+        ``_should_process_message``, so none of the adapter's normal
+        gates (``_is_group_allowed``, ``require_mention``,
+        ``_is_broadcast_chat``) apply to reactions either. With
+        ``reaction_dialogue`` enabled, under a pairing DM policy or in a
+        group chat, a sender the adapter's normal message gates would
+        reject can still produce an agent turn via a reaction -- a known,
+        accepted gap (not fixed here).
 
-        The hook reads one JSON event on stdin and prints a JSON verdict:
-        ``{"react": "✅"}`` asks us to acknowledge the reaction visibly on
-        the original message; anything else means stay silent. A failing
-        hook must never take down the adapter -- it is logged and, when a
-        notify command is configured, reported to the operator.
+        The hook reads one JSON event on stdin and prints a JSON verdict
+        shaped like ``{"handled": bool, "react": str, ...}``. When
+        ``handled`` is truthy the reaction is consumed by the
+        deterministic ack path (and ``react``, if present, is applied as
+        a visible feedback reaction on the original message) and does
+        NOT reach the agent. When ``handled`` is falsy -- including any
+        failure of the hook itself -- the reaction falls through to the
+        agent-turn path. A failing hook must never take down the
+        adapter -- it is logged and, when a notify command is
+        configured, reported to the operator.
         """
         import aiohttp
 
