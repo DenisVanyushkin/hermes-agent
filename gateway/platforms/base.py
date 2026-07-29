@@ -2197,6 +2197,30 @@ def _invalidate_pending_stt_cache(event: MessageEvent) -> None:
             delattr(event, attr)
 
 
+def _apply_reply_quote(target: MessageEvent, source: Optional[MessageEvent]) -> None:
+    """Move the reply-quote group onto *target* as one coherent unit.
+
+    ``reply_to_message_id`` / ``reply_to_text`` / ``reply_to_is_own_message``
+    (plus the author fields describing the same quoted message) only mean
+    anything together: ``run.py`` renders the quote when the id AND the text
+    are both truthy, so an id from one message beside text from another yields
+    a confidently wrong quote instead of a visible failure.  Busy-session
+    merges must therefore take the whole group from a single event, or clear
+    it.
+
+    Passing ``source=None`` clears the group.
+    """
+    if not hasattr(target, "reply_to_message_id"):
+        return
+    target.reply_to_message_id = getattr(source, "reply_to_message_id", None)
+    target.reply_to_text = getattr(source, "reply_to_text", None)
+    target.reply_to_author_id = getattr(source, "reply_to_author_id", None)
+    target.reply_to_author_name = getattr(source, "reply_to_author_name", None)
+    target.reply_to_is_own_message = bool(
+        getattr(source, "reply_to_is_own_message", False)
+    )
+
+
 def merge_pending_message_event(
     pending_messages: Dict[str, MessageEvent],
     session_key: str,
@@ -2227,6 +2251,8 @@ def merge_pending_message_event(
             existing.media_types.extend(event.media_types)
             if event.text:
                 existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
+            if getattr(event, "reply_to_message_id", None):
+                _apply_reply_quote(existing, event)
             _invalidate_pending_stt_cache(existing)
             return
 
@@ -2246,6 +2272,8 @@ def merge_pending_message_event(
                 and event.message_type != MessageType.TEXT
             ):
                 existing.message_type = event.message_type
+            if getattr(event, "reply_to_message_id", None):
+                _apply_reply_quote(existing, event)
             _invalidate_pending_stt_cache(existing)
             return
 
@@ -2256,6 +2284,8 @@ def merge_pending_message_event(
         ):
             if event.text:
                 existing.text = f"{existing.text}\n{event.text}" if existing.text else event.text
+            if getattr(event, "reply_to_message_id", None):
+                _apply_reply_quote(existing, event)
             return
 
     pending_messages[session_key] = event
@@ -4612,6 +4642,17 @@ class BasePlatformAdapter(ABC):
             if latest_message_id is not None:
                 state.event.message_id = str(latest_message_id)
             if latest_anchor is not None and hasattr(state.event, "reply_to_message_id"):
+                # The anchor carries two different meanings and the rest of the
+                # quote group has to follow whichever one applies:
+                #   * the incoming event has no message id -> the anchor IS its
+                #     own quote, so adopt that event's whole quote group;
+                #   * the anchor is the incoming event's OWN message id -> the
+                #     merged turn quotes nothing, so the earlier event's quote
+                #     must be cleared rather than left beside a foreign id.
+                _apply_reply_quote(
+                    state.event,
+                    event if latest_message_id is None else None,
+                )
                 state.event.reply_to_message_id = str(latest_anchor)
             state.last_ts = now
 

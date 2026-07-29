@@ -35,6 +35,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    merge_pending_message_event,
 )
 from gateway.session import SessionSource, build_session_key
 
@@ -376,3 +377,344 @@ def test_busy_text_mode_respects_env_var_override(monkeypatch):
     adapter = _make_initialized_adapter()
     assert adapter._busy_text_mode == "interrupt"
     assert not adapter._is_queue_text_debounce_candidate(_make_event("test"))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Task 6.5: reply-quote coherence through busy-session merges.
+#
+# ``reply_to_message_id`` / ``reply_to_text`` / ``reply_to_is_own_message``
+# are one coherent triple: they move together or not at all. A merged turn
+# must never carry the id of one message beside the quoted text of another
+# (run.py renders the quote only when id AND text are truthy, so an
+# incoherent pair degrades quietly into a confidently wrong quote).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _quote_triple(event: MessageEvent) -> tuple[str | None, str | None, bool]:
+    return (
+        event.reply_to_message_id,
+        event.reply_to_text,
+        event.reply_to_is_own_message,
+    )
+
+
+def _make_quoted_event(
+    text: str,
+    *,
+    reply_to_message_id: str | None = None,
+    reply_to_text: str | None = None,
+    reply_to_is_own_message: bool = False,
+    message_id: str | None = "auto",
+    message_type: MessageType = MessageType.TEXT,
+    media_urls: list[str] | None = None,
+    media_types: list[str] | None = None,
+    chat_id: str = "12345",
+    user_id: str = "u1",
+) -> MessageEvent:
+    """Build a MessageEvent with an explicit (possibly absent) reply quote."""
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id=chat_id,
+        chat_type="dm",
+        user_id=user_id,
+    )
+    return MessageEvent(
+        text=text,
+        message_type=message_type,
+        source=source,
+        message_id=f"msg-{text[:8]}" if message_id == "auto" else message_id,
+        media_urls=list(media_urls or []),
+        media_types=list(media_types or []),
+        reply_to_message_id=reply_to_message_id,
+        reply_to_text=reply_to_text,
+        reply_to_is_own_message=reply_to_is_own_message,
+    )
+
+
+def test_text_merge_adopts_incoming_reply_quote():
+    """Pending without a quote + incoming with one -> incoming triple wins."""
+    pending = {}
+    existing = _make_quoted_event("part one")
+    incoming = _make_quoted_event(
+        "part two",
+        reply_to_message_id="tgt-1",
+        reply_to_text="quoted target one",
+        reply_to_is_own_message=True,
+    )
+    merge_pending_message_event(pending, "s", existing, merge_text=True)
+    merge_pending_message_event(pending, "s", incoming, merge_text=True)
+
+    merged = pending["s"]
+    assert merged.text == "part one\npart two"
+    assert _quote_triple(merged) == ("tgt-1", "quoted target one", True)
+
+
+def test_text_merge_keeps_existing_quote_when_incoming_has_none():
+    """An unquoted follow-up must not erase the pending event's quote."""
+    pending = {}
+    existing = _make_quoted_event(
+        "part one",
+        reply_to_message_id="tgt-1",
+        reply_to_text="quoted target one",
+        reply_to_is_own_message=True,
+    )
+    incoming = _make_quoted_event("part two")
+    merge_pending_message_event(pending, "s", existing, merge_text=True)
+    merge_pending_message_event(pending, "s", incoming, merge_text=True)
+
+    merged = pending["s"]
+    assert merged.text == "part one\npart two"
+    assert _quote_triple(merged) == ("tgt-1", "quoted target one", True)
+
+
+def test_text_merge_prefers_latest_quote_when_both_quoted():
+    """Two different quoted targets -> the later (incoming) triple wins whole."""
+    pending = {}
+    existing = _make_quoted_event(
+        "part one",
+        reply_to_message_id="tgt-1",
+        reply_to_text="quoted target one",
+        reply_to_is_own_message=True,
+    )
+    incoming = _make_quoted_event(
+        "part two",
+        reply_to_message_id="tgt-2",
+        reply_to_text="quoted target two",
+        reply_to_is_own_message=False,
+    )
+    merge_pending_message_event(pending, "s", existing, merge_text=True)
+    merge_pending_message_event(pending, "s", incoming, merge_text=True)
+
+    merged = pending["s"]
+    assert _quote_triple(merged) == ("tgt-2", "quoted target two", False)
+
+
+def test_photo_burst_merge_adopts_incoming_reply_quote():
+    """PHOTO+PHOTO burst branch obeys the same adoption rule."""
+    pending = {}
+    existing = _make_quoted_event(
+        "first shot",
+        message_type=MessageType.PHOTO,
+        media_urls=["/tmp/a.jpg"],
+        media_types=["image"],
+    )
+    incoming = _make_quoted_event(
+        "second shot",
+        message_type=MessageType.PHOTO,
+        media_urls=["/tmp/b.jpg"],
+        media_types=["image"],
+        reply_to_message_id="tgt-photo",
+        reply_to_text="quoted photo target",
+        reply_to_is_own_message=True,
+    )
+    merge_pending_message_event(pending, "s", existing)
+    merge_pending_message_event(pending, "s", incoming)
+
+    merged = pending["s"]
+    assert merged.media_urls == ["/tmp/a.jpg", "/tmp/b.jpg"]
+    assert _quote_triple(merged) == ("tgt-photo", "quoted photo target", True)
+
+
+def test_media_merge_adopts_incoming_reply_quote():
+    """The mixed media branch obeys the same adoption rule."""
+    pending = {}
+    existing = _make_quoted_event(
+        "voice note",
+        message_type=MessageType.VOICE,
+        media_urls=["/tmp/a.ogg"],
+        media_types=["audio"],
+    )
+    incoming = _make_quoted_event(
+        "and a caption",
+        reply_to_message_id="tgt-media",
+        reply_to_text="quoted media target",
+        reply_to_is_own_message=True,
+    )
+    merge_pending_message_event(pending, "s", existing)
+    merge_pending_message_event(pending, "s", incoming)
+
+    merged = pending["s"]
+    assert merged.media_urls == ["/tmp/a.ogg"]
+    assert _quote_triple(merged) == ("tgt-media", "quoted media target", True)
+
+
+def test_media_merge_keeps_existing_quote_when_incoming_has_none():
+    pending = {}
+    existing = _make_quoted_event(
+        "voice note",
+        message_type=MessageType.VOICE,
+        media_urls=["/tmp/a.ogg"],
+        media_types=["audio"],
+        reply_to_message_id="tgt-media",
+        reply_to_text="quoted media target",
+        reply_to_is_own_message=True,
+    )
+    incoming = _make_quoted_event("and a caption")
+    merge_pending_message_event(pending, "s", existing)
+    merge_pending_message_event(pending, "s", incoming)
+
+    assert _quote_triple(pending["s"]) == ("tgt-media", "quoted media target", True)
+
+
+@pytest.mark.parametrize(
+    "existing_kwargs,incoming_kwargs",
+    [
+        ({}, {}),
+        (
+            {},
+            {
+                "reply_to_message_id": "tgt-2",
+                "reply_to_text": "quoted two",
+                "reply_to_is_own_message": True,
+            },
+        ),
+        (
+            {
+                "reply_to_message_id": "tgt-1",
+                "reply_to_text": "quoted one",
+                "reply_to_is_own_message": True,
+            },
+            {},
+        ),
+        (
+            {
+                "reply_to_message_id": "tgt-1",
+                "reply_to_text": "quoted one",
+                "reply_to_is_own_message": True,
+            },
+            {
+                "reply_to_message_id": "tgt-2",
+                "reply_to_text": "quoted two",
+                "reply_to_is_own_message": False,
+            },
+        ),
+    ],
+)
+def test_merge_never_mixes_quote_fields_from_different_events(
+    existing_kwargs, incoming_kwargs
+):
+    """Coherence invariant: the merged triple always comes from ONE event.
+
+    Whatever the merge decides, the resulting (id, text, is_own) tuple must be
+    byte-for-byte one of the two input triples -- never a hybrid.
+    """
+    pending = {}
+    existing = _make_quoted_event("part one", **existing_kwargs)
+    incoming = _make_quoted_event("part two", **incoming_kwargs)
+    existing_triple = _quote_triple(existing)
+    incoming_triple = _quote_triple(incoming)
+
+    merge_pending_message_event(pending, "s", existing, merge_text=True)
+    merge_pending_message_event(pending, "s", incoming, merge_text=True)
+
+    assert _quote_triple(pending["s"]) in (existing_triple, incoming_triple)
+
+
+@pytest.mark.asyncio
+async def test_queue_debounce_carries_whole_quote_triple_from_incoming():
+    """Anchor derived from the incoming event's quote -> text+flag follow it.
+
+    This is the WhatsApp-reaction shape: a synthetic event with no message_id
+    of its own whose entire meaning lives in the reply quote.
+    """
+    adapter = _make_adapter()
+    adapter._busy_text_debounce_seconds = 1.0
+
+    first = _make_quoted_event("plain follow-up")
+    session_key = build_session_key(first.source)
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    await adapter.handle_message(first)
+    reaction = _make_quoted_event(
+        "[Реакция 👍]",
+        message_id=None,
+        reply_to_message_id="tgt-reaction",
+        reply_to_text="the message that was reacted to",
+        reply_to_is_own_message=True,
+    )
+    await adapter.handle_message(reaction)
+
+    buffered = _debounced_event(adapter, session_key)
+    assert buffered.text == "plain follow-up\n[Реакция 👍]"
+    assert _quote_triple(buffered) == (
+        "tgt-reaction",
+        "the message that was reacted to",
+        True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_queue_debounce_clears_stale_quote_when_anchor_is_own_message_id():
+    """Anchor derived from the incoming event's OWN id -> no quote survives.
+
+    The first buffered event's quote must be cleared, not left beside an id
+    that points at a different message.
+    """
+    adapter = _make_adapter()
+    adapter._busy_text_debounce_seconds = 1.0
+
+    first = _make_quoted_event(
+        "quoted follow-up",
+        reply_to_message_id="tgt-1",
+        reply_to_text="stale quoted text",
+        reply_to_is_own_message=True,
+    )
+    session_key = build_session_key(first.source)
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    await adapter.handle_message(first)
+    second = _make_quoted_event("unquoted follow-up", message_id="msg-second")
+    await adapter.handle_message(second)
+
+    buffered = _debounced_event(adapter, session_key)
+    assert buffered.message_id == "msg-second"
+    assert buffered.reply_to_message_id == "msg-second"
+    assert buffered.reply_to_text is None
+    assert buffered.reply_to_is_own_message is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "second_kwargs",
+    [
+        # Anchor comes from the second event own message id.
+        {"message_id": "msg-second"},
+        # Anchor comes from the second event own quote.
+        {
+            "message_id": None,
+            "reply_to_message_id": "tgt-2",
+            "reply_to_text": "quoted two",
+            "reply_to_is_own_message": False,
+        },
+    ],
+)
+async def test_queue_debounce_never_mixes_quote_fields_from_different_events(
+    second_kwargs,
+):
+    """Coherence invariant on the debounce path.
+
+    Whenever the buffered turn ends up carrying quoted text at all, the whole
+    (id, text, is_own) triple must be exactly one input event triple -- an id
+    from one message beside text from another is the bug this guards.
+    """
+    adapter = _make_adapter()
+    adapter._busy_text_debounce_seconds = 1.0
+
+    first = _make_quoted_event(
+        "quoted follow-up",
+        reply_to_message_id="tgt-1",
+        reply_to_text="quoted one",
+        reply_to_is_own_message=True,
+    )
+    session_key = build_session_key(first.source)
+    adapter._active_sessions[session_key] = asyncio.Event()
+    await adapter.handle_message(first)
+
+    second = _make_quoted_event("second follow-up", **second_kwargs)
+    first_triple = _quote_triple(first)
+    second_triple = _quote_triple(second)
+    await adapter.handle_message(second)
+
+    buffered = _debounced_event(adapter, session_key)
+    if buffered.reply_to_text is not None:
+        assert _quote_triple(buffered) in (first_triple, second_triple)
