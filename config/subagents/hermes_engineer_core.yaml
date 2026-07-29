@@ -15,34 +15,40 @@ selection:
 models:
   default:
     provider: openai-codex
-    model: gpt-5.4
+    model: gpt-5.6-terra
     class: base_coding
+    tier: coding
   allowed:
     - provider: openai-codex
-      model: gpt-5.4
+      model: gpt-5.6-terra
       class: base_coding
+      tier: coding
     - provider: openai-codex
-      model: gpt-5.5
+      model: gpt-5.6-sol
       class: senior_coding
+      tier: critical
   escalation:
     allowed: true
     rules:
       - condition: reviewer_blockers_persist_after_2_iterations
         escalate_to:
           provider: openai-codex
-          model: gpt-5.5
+          model: gpt-5.6-sol
           class: senior_coding
+          tier: critical
       - condition: disagreement_unresolved_after_peer_discussion
         escalate_to:
           provider: openai-codex
-          model: gpt-5.5
+          model: gpt-5.6-sol
           class: senior_coding
+          tier: critical
   fallback:
     mode: explicit_model
     reason: preserve engineering capability without using a global free fallback
     provider: openai-codex
-    model: gpt-5.4-mini
+    model: gpt-5.6-luna
     class: coding_fallback
+    tier: cheap
     max_tokens: 16384
 tools:
   read:

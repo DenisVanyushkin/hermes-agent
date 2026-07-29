@@ -4,6 +4,10 @@ tiers:
     provider: openai-codex
     model: gpt-5.6-luna
     fallback_behavior: fallback_allowed
+  cheap:
+    provider: openai-codex
+    model: gpt-5.6-luna
+    fallback_behavior: fallback_allowed
   reasoning:
     provider: openai-codex
     model: gpt-5.6-terra

@@ -11,23 +11,27 @@ selection:
 models:
   default:
     provider: openai-codex
-    model: gpt-5.4-mini
+    model: gpt-5.6-luna
     class: routing
+    tier: cheap
   allowed:
     - provider: openai-codex
-      model: gpt-5.4-mini
+      model: gpt-5.6-luna
       class: routing
+      tier: cheap
     - provider: openai-codex
-      model: gpt-5.5
+      model: gpt-5.6-sol
       class: senior_reasoning
+      tier: critical
   escalation:
     allowed: true
     rules:
       - condition: low_confidence_or_ambiguous_pipeline_selection
         escalate_to:
           provider: openai-codex
-          model: gpt-5.5
+          model: gpt-5.6-sol
           class: senior_reasoning
+          tier: critical
   fallback:
     mode: fail_closed
     reason: no approved routing model available

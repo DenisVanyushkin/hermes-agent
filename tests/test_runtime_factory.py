@@ -64,6 +64,35 @@ def _engineering_session():
     )
 
 
+def _spec_models(subagent_id: str) -> dict:
+    """Что спека субагента объявляет на самом деле.
+
+    Литералы здесь уже разъезжались: 2026-07-04 спеку инженера перевели на
+    другую модель, а соседний файл тестов не тронули, и три проверки падали 25
+    дней. Пока они лежали, миграция на 5.6 обошла спеки стороной и заметить это
+    было нечем.
+
+    Тесты ниже проверяют поведение фабрики, а не содержимое конфига. Какая
+    модель за каким классом -- предмет `config/hermes-model-policy.yaml` и
+    отдельной проверки в test_subagent_specs_match_model_policy.py.
+    """
+    import yaml
+
+    path = Path(__file__).resolve().parents[1] / "config" / "subagents" / f"{subagent_id}.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["models"]
+
+
+_ENGINEER = _spec_models("hermes_engineer_core")
+_REVIEWER = _spec_models("hermes_code_reviewer")
+_GENERAL = _spec_models("general_operator")
+
+ENGINEER_MODEL = _ENGINEER["default"]["model"]
+REVIEWER_MODEL = _REVIEWER["default"]["model"]
+GENERAL_MODEL = _GENERAL["default"]["model"]
+SENIOR_CODING_MODEL = next(
+    entry["model"] for entry in _ENGINEER["allowed"] if entry.get("class") == "senior_coding"
+)
+
 def test_builds_planned_runtime_for_general_operator(tmp_path: Path) -> None:
     repo_root = _copy_spec_tree(tmp_path)
     RuntimeBuildRequest, factory, loaded_specs = _build_factory(repo_root)
@@ -80,7 +109,7 @@ def test_builds_planned_runtime_for_general_operator(tmp_path: Path) -> None:
     assert result.subagent_id == "general_operator"
     assert result.actual_runtime_status == "ready_to_construct"
     assert result.selection.selected_provider == "openai-codex"
-    assert result.selection.selected_model == "gpt-5.4-mini"
+    assert result.selection.selected_model == GENERAL_MODEL
     assert result.selection.selected_model_class == "general"
     assert result.constructor_provider == result.selection.selected_provider
     assert result.constructor_model == result.selection.selected_model
@@ -89,8 +118,8 @@ def test_builds_planned_runtime_for_general_operator(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("step_kind", "subagent_id", "provider", "model", "can_mutate"),
     [
-        ("engineer", "hermes_engineer_core", "openai-codex", "gpt-5.4", True),
-        ("reviewer", "hermes_code_reviewer", "openai-codex", "gpt-5.5", False),
+        ("engineer", "hermes_engineer_core", "openai-codex", ENGINEER_MODEL, True),
+        ("reviewer", "hermes_code_reviewer", "openai-codex", REVIEWER_MODEL, False),
     ],
 )
 def test_build_runtime_factory_plan_is_metadata_only_contract(
@@ -204,8 +233,8 @@ def test_runtime_factory_plan_missing_provider_or_model_fails_closed(
 @pytest.mark.parametrize(
     ("subagent_id", "provider", "model"),
     [
-        ("hermes_engineer_core", "openai-codex", "gpt-5.4"),
-        ("hermes_code_reviewer", "openai-codex", "gpt-5.5"),
+        ("hermes_engineer_core", "openai-codex", ENGINEER_MODEL),
+        ("hermes_code_reviewer", "openai-codex", REVIEWER_MODEL),
     ],
 )
 def test_builds_planned_runtime_for_specialized_subagents(
@@ -289,7 +318,7 @@ def test_safe_dict_omits_full_prompt_text_and_sensitive_runtime_fields(tmp_path:
     payload = result.to_safe_dict()
 
     assert payload["constructor_provider"] == "openai-codex"
-    assert payload["constructor_model"] == "gpt-5.4"
+    assert payload["constructor_model"] == ENGINEER_MODEL
     assert "prompt_text" not in payload
     assert payload["prompt"]["full_text_loaded"] is False
     assert payload["constructor_base_url"] is None
@@ -432,7 +461,7 @@ def test_requested_escalation_model_class_must_be_allowed(tmp_path: Path) -> Non
 
     assert allowed.actual_runtime_status == "ready_to_construct"
     assert allowed.selection.selected_model_class == "senior_coding"
-    assert allowed.selection.selected_model == "gpt-5.5"
+    assert allowed.selection.selected_model == SENIOR_CODING_MODEL
     assert blocked.actual_runtime_status == "blocked"
     assert any("not allowed" in error.message for error in blocked.errors)
     assert any("general_operator" in error.message for error in blocked.errors)
@@ -499,7 +528,7 @@ def test_build_controlled_runtime_preserves_runtime_contract_metadata(tmp_path: 
     assert runtime.subagent_id == "hermes_engineer_core"
     assert runtime.role_id == "engineer"
     assert runtime.provider == "openai-codex"
-    assert runtime.model == "gpt-5.4"
+    assert runtime.model == ENGINEER_MODEL
     assert runtime.system_prompt_path == "prompts/subagents/hermes_engineer_core.md"
     assert runtime.tool_policy.write == ["patch", "write_file"]
     assert runtime.environment_policy.can_mutate_files is True
@@ -509,7 +538,7 @@ def test_build_controlled_runtime_preserves_runtime_contract_metadata(tmp_path: 
 
     payload = runtime.to_safe_dict()
     assert payload["provider"] == "openai-codex"
-    assert payload["model"] == "gpt-5.4"
+    assert payload["model"] == ENGINEER_MODEL
     assert payload["working_directory"] == str(repo_root)
     assert "invocation_client" not in json.dumps(payload, sort_keys=True)
     assert payload["environment_policy"]["secrets_env_access"] == "not_granted"
@@ -603,7 +632,7 @@ def test_build_controlled_runtime_real_provider_ready_when_gate_and_allowlist_ma
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
         allowed_real_providers=("openai-codex",),
-        allowed_real_models=("gpt-5.5",),
+        allowed_real_models=(SENIOR_CODING_MODEL,),
         real_provider_client_factory=lambda _runtime: (
             lambda _request: {
                 "provider": "openai-codex",
@@ -618,7 +647,7 @@ def test_build_controlled_runtime_real_provider_ready_when_gate_and_allowlist_ma
     assert runtime.real_provider_allowed is True
     assert runtime.provider_policy_status == "allowed"
     assert runtime.provider == "openai-codex"
-    assert runtime.model == "gpt-5.5"
+    assert runtime.model == SENIOR_CODING_MODEL
 
 
 def test_build_controlled_runtime_missing_fake_invocation_client_has_diagnostic_error(tmp_path: Path) -> None:
@@ -665,7 +694,7 @@ def test_build_controlled_runtime_real_provider_role_policy_blocks_reviewer_with
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
         allowed_real_providers=("openrouter", "openai-codex"),
-        allowed_real_models=("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
+        allowed_real_models=("xiaomi/mimo-v2.5-pro", REVIEWER_MODEL),
         allowed_real_providers_by_role={"engineer": ("openrouter",)},
         allowed_real_models_by_role={"engineer": ("xiaomi/mimo-v2.5-pro",)},
         real_provider_client_factory=lambda _runtime: factory_calls.__setitem__("count", factory_calls["count"] + 1),
@@ -699,9 +728,9 @@ def test_build_controlled_runtime_real_provider_rejects_non_callable_factory(tmp
         request_real_provider_execution=True,
         allow_real_provider_execution=True,
         allowed_real_providers=("openai-codex",),
-        allowed_real_models=("gpt-5.4",),
+        allowed_real_models=(ENGINEER_MODEL,),
         allowed_real_providers_by_role={"engineer": ("openai-codex",)},
-        allowed_real_models_by_role={"engineer": ("gpt-5.4",)},
+        allowed_real_models_by_role={"engineer": (ENGINEER_MODEL,)},
         real_provider_client_factory="not-callable",
     )
 

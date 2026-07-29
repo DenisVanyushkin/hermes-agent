@@ -13,25 +13,29 @@ selection:
 models:
   default:
     provider: openai-codex
-    model: gpt-5.5
+    model: gpt-5.6-sol
     class: senior_review
+    tier: code_review
   allowed:
     - provider: openai-codex
-      model: gpt-5.5
+      model: gpt-5.6-sol
       class: senior_review
+      tier: code_review
   escalation:
     allowed: true
     rules:
       - condition: reviewer_output_invalid_twice
         escalate_to:
           provider: openai-codex
-          model: gpt-5.5
+          model: gpt-5.6-sol
           class: senior_review
+          tier: code_review
       - condition: disagreement_unresolved_after_allowed_peer_discussion
         escalate_to:
           provider: openai-codex
-          model: gpt-5.5
+          model: gpt-5.6-sol
           class: senior_review
+          tier: code_review
   fallback:
     mode: fail_closed
     reason: no approved review model available

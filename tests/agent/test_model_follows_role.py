@@ -12,8 +12,6 @@ cannot say. Everywhere else the two must agree, and a test holds them to it.
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent import conversation_loop
-
 import pytest
 import yaml
 from pathlib import Path
@@ -167,6 +165,8 @@ def test_a_failing_switch_leaves_the_turn_on_its_current_model(monkeypatch):
 
 
 def test_a_controlled_subagent_keeps_the_model_its_spec_pinned():
+    from agent import conversation_loop
+
     agent = SimpleNamespace(model="gpt-5.4-mini", provider="openai-codex")
     agent._skip_role_model_selection = True
     switched = []
@@ -181,6 +181,8 @@ def test_a_controlled_subagent_keeps_the_model_its_spec_pinned():
 
 
 def test_an_ordinary_agent_still_follows_its_role():
+    from agent import conversation_loop
+
     # Регрессия наоборот: разговорный агент обязан продолжать слушаться роли,
     # ради чего apply_role_model и заводился.
     agent = SimpleNamespace(model="gpt-5.6-luna", provider="openai-codex")
@@ -200,6 +202,8 @@ def test_an_ordinary_agent_still_follows_its_role():
 
 
 def test_the_flag_being_absent_is_treated_as_an_ordinary_agent():
+    from agent import conversation_loop
+
     agent = SimpleNamespace(model="gpt-5.6-luna", provider="openai-codex")
     switched = []
 

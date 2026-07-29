@@ -13,12 +13,14 @@ selection:
 models:
   default:
     provider: openai-codex
-    model: gpt-5.5
+    model: gpt-5.6-sol
     class: senior_reasoning
+    tier: critical
   allowed:
     - provider: openai-codex
-      model: gpt-5.5
+      model: gpt-5.6-sol
       class: senior_reasoning
+      tier: critical
   fallback:
     mode: fail_closed
     reason: no approved security review model available
