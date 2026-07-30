@@ -166,11 +166,47 @@ def test_participants_are_exported_matching_mail_convention(db, monkeypatch):
 
     body = captured["body"]
     # mail.py::build_ics's OWN convention for the SAME event/UID: property
-    # name, "Участники: " prefix, and comma-join, all identical -- see
-    # _export_participant_names. The comma in the join is itself RFC5545
-    # TEXT-escaped (`\,`) by `_export_escape_text`, same as mail.py's own
-    # `_escape_ics_text` would do for the identical string.
+    # name, "Участники: " prefix, and comma-join, all identical -- since
+    # fix-round 2, both call the ONE shared `mail.participant_names`. The
+    # comma in the join is itself RFC5545 TEXT-escaped (`\,`) by
+    # `_export_escape_text`, same as mail.py's own `_escape_ics_text`
+    # would do for the identical string.
     assert "DESCRIPTION:Участники: Денис\\, Таня" in body
+
+
+def test_export_delegates_participant_join_to_shared_mail_function(db, monkeypatch):
+    """Fix-round 2, finding R1: extcal.py must not keep its own
+    independent copy of the participant-name join -- it has to call the
+    ONE shared `mail.participant_names`. Monkeypatching that function and
+    checking it is actually invoked (not just checking the output text,
+    which a second, textually-identical implementation would also
+    satisfy) pins the DELEGATION itself, not merely today's result."""
+    from fam import mail
+    calls = []
+
+    def fake_join(participants):
+        calls.append(list(participants or []))
+        return "FAKE-JOIN-MARKER"
+    monkeypatch.setattr(mail, "participant_names", fake_join)
+
+    captured = {}
+
+    def fake_open(req, timeout):
+        if req.get_method() == "PUT":
+            captured["body"] = req.data.decode("utf-8")
+        return extcal.Response(201, b"", {})
+    monkeypatch.setattr(extcal, "_default_open", fake_open)
+
+    people.add(db, "Таня")
+    db.commit()
+    _hermes_event(db, title="Ужин", start="2037-07-20T18:00:00+00:00",
+                   participants=("Таня",))
+    db.commit()
+
+    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    assert counts["exported"] == 1
+    assert len(calls) >= 1  # invoked at least once (body build + body_hash)
+    assert "FAKE-JOIN-MARKER" in captured["body"]
 
 
 def test_event_with_no_participants_has_no_description_line(db, monkeypatch):
@@ -187,6 +223,47 @@ def test_event_with_no_participants_has_no_description_line(db, monkeypatch):
     extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
 
     assert "DESCRIPTION" not in captured["body"]
+
+
+def test_export_participants_delegates_to_cal_get_not_a_raw_query(db, monkeypatch):
+    """Fix-round 2, finding R2: `_export_participants` must not keep its
+    own hand-copied `event_participants JOIN people` SQL -- it has to call
+    `cal.get()`, the module already imports `cal` for exactly this kind of
+    reuse. Monkeypatching `cal.get` and checking it is actually invoked
+    (with the right event_id, and that ITS OWN "participants" list -- not
+    a second, independently-queried one -- ends up in the exported body)
+    pins the delegation, not just today's matching output."""
+    # Create the event BEFORE monkeypatching cal.get -- cal.add() itself
+    # calls the real get() internally to build its own return value, and
+    # that internal call must not be confused with the one this test
+    # actually wants to observe (export_own's own use of cal.get).
+    event = _hermes_event(db, title="Ужин", start="2037-07-20T18:00:00+00:00")
+    db.commit()
+
+    calls = []
+    real_get = cal.get
+
+    def spy_get(conn, event_id):
+        calls.append(event_id)
+        result = real_get(conn, event_id)
+        if result is not None:
+            result = dict(result)
+            result["participants"] = [{"name": "ПОДСТАВНОЙ УЧАСТНИК"}]
+        return result
+    monkeypatch.setattr(cal, "get", spy_get)
+
+    captured = {}
+
+    def fake_open(req, timeout):
+        if req.get_method() == "PUT":
+            captured["body"] = req.data.decode("utf-8")
+        return extcal.Response(201, b"", {})
+    monkeypatch.setattr(extcal, "_default_open", fake_open)
+
+    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    assert counts["exported"] == 1
+    assert event["id"] in calls
+    assert "ПОДСТАВНОЙ УЧАСТНИК" in captured["body"]
 
 
 def test_participant_set_change_triggers_a_fresh_put_via_body_hash(db, monkeypatch):

@@ -108,6 +108,23 @@ def _fold_ics_line(line, limit=_ICS_LINE_LIMIT):
     return "\r\n ".join(chunks)
 
 
+def participant_names(participants):
+    """`[{"name": ...}, ...]` (the shape `cal.get()`'s own `participants`
+    list -- and `extcal._export_participants` below it -- both already
+    carry) -> the comma-joined names string used in a VEVENT's
+    `DESCRIPTION:Участники: <names>` line.
+
+    The ONE place this join lives (fix-round 2, finding R1): `build_ics`
+    below and `extcal.py`'s reverse-write VEVENT builder both need this
+    exact string, and used to each carry their own independent
+    `", ".join(...)` one-liner -- textually identical today, but two
+    copies of one decision with nothing forcing them to stay that way.
+    `extcal.py` imports and calls this function rather than keeping its
+    own; there is now exactly one join to ever change.
+    """
+    return ", ".join(p["name"] for p in (participants or []))
+
+
 def build_ics(event):
     """Build an RFC5545 VCALENDAR/VEVENT text for `event` (the dict shape
     cal.get() returns: id, title, start_utc, end_utc, place, participants).
@@ -145,7 +162,7 @@ def build_ics(event):
 
     participants = event.get("participants") or []
     if participants:
-        names = ", ".join(p["name"] for p in participants)
+        names = participant_names(participants)
         lines.append(f"DESCRIPTION:{_escape_ics_text('Участники: ' + names)}")
 
     lines += ["END:VEVENT", "END:VCALENDAR"]

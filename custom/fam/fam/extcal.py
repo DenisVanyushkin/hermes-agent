@@ -78,8 +78,12 @@ from zoneinfo import ZoneInfo
 # present fam submodules (unlike `dateutil`, there is no missing-package
 # concern here), and none of them import `extcal` back (only cli.py does,
 # module-level) -- so a plain top-level import is safe, no deferred-import
-# seam needed.
-from fam import audit, cal, places, plans, rem
+# seam needed. `mail` (Task 7, fix-round 2) is the same story: its own
+# google-auth/googleapiclient dependency is lazy-imported INSIDE
+# send_event_email, never at module level (test_no_google_import.py pins
+# this), so importing it here costs nothing and creates no cycle -- `mail`
+# does not import `extcal` either.
+from fam import audit, cal, mail, places, plans, rem
 
 # ---- constants -------------------------------------------------------
 
@@ -2750,20 +2754,6 @@ def _export_to_ics_utc(value):
     return dt.strftime("%Y%m%dT%H%M%SZ") if dt is not None else None
 
 
-def _export_participant_names(participants):
-    """`[{"name": ...}, ...]` (the SAME shape `cal.get()`'s own
-    `participants` list already carries, see `_export_participants` below)
-    -> the comma-joined names string, `mail.py::build_ics`'s OWN join
-    (`", ".join(p["name"] for p in participants)`) -- read, not
-    reimplemented independently, per fix-round finding N1: this project
-    already paid for two independent implementations of one decision
-    drifting apart once (Task 6, four fix rounds); this is the same join
-    `mail.build_ics` performs before wrapping it in `'Участники: ' + names`,
-    used here for BOTH the DESCRIPTION line and the body_hash input, so
-    there is exactly one join, not two."""
-    return ", ".join(p["name"] for p in (participants or []))
-
-
 def _export_body_hash(event, location, participants):
     """sha256 over EXACTLY (title, start_utc, end_utc, location,
     participant names) -- the fields that matter to what her phone
@@ -2775,14 +2765,18 @@ def _export_body_hash(event, location, participants):
     mistaken for a real change -- exactly the "лишний PUT" this hash
     exists to gate (requirement #4).
 
-    Participants (fix-round finding N1) are folded in via
-    `_export_participant_names` -- already ORDER BY name COLLATE NOCASE
-    from `_export_participants`'s own query, so the join is stable across
-    ticks regardless of INSERT order, and a participant-set edit (add/
+    Participants (fix-round 1, finding N1) are folded in via
+    `mail.participant_names` -- fix-round 2, finding R1: this is now the
+    ONLY place that join is implemented (this module used to keep its own
+    copy of the identical one-liner; see `mail.participant_names`'s own
+    docstring for why that was worth removing rather than leaving as a
+    harmless-looking duplicate). `_export_participants`' own query is
+    already `ORDER BY name COLLATE NOCASE`, so the join is stable across
+    ticks regardless of insert order, and a participant-set edit (add/
     remove/rename) changes this hash and therefore DOES trigger a fresh
     PUT -- unlike a location edit that resolves to the same place name,
-    there is no "same meaning, different spelling" case to normalize
-    away here beyond the ordering already handled by the query itself.
+    there is no "same meaning, different spelling" case to normalize away
+    here beyond the ordering already handled by the query itself.
 
     Deliberately EXCLUDED from the hash:
       - `id`/the UID: constant per event for as long as it is exported at
@@ -2806,7 +2800,7 @@ def _export_body_hash(event, location, participants):
         _iso(start_dt) or "",
         _iso(end_dt) or "",
         _pc_norm_text(location),
-        _export_participant_names(participants),
+        mail.participant_names(participants),
     )
     raw = "\x1f".join(fields)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -2831,14 +2825,18 @@ def _build_export_vevent(event, location, participants, now_dt):
     `extcal._finalize_component`'s identical no-DTEND default on the
     import side).
 
-    DESCRIPTION (fix-round finding N1): when `participants` is non-empty,
-    a `DESCRIPTION:Участники: <names>` line is appended -- the EXACT same
-    property name, prefix text, and join `mail.py::build_ics` already uses
-    for the emailed .ics of the same event (`event.get("participants")`
-    there, `_export_participants` here -- same underlying query). Before
-    this fix, the SAME `UID` carried different content in the two
-    representations (the emailed .ics had participants, the iCloud copy
-    never did) -- now both agree.
+    DESCRIPTION (fix-round 1, finding N1; join centralized in fix-round 2,
+    finding R1): when `participants` is non-empty, a `DESCRIPTION:
+    Участники: <names>` line is appended -- the EXACT same property name,
+    prefix text, and join `mail.py::build_ics` already uses for the
+    emailed .ics of the same event, via the ONE shared
+    `mail.participant_names` (`event.get("participants")` there,
+    `_export_participants` here -- same underlying query, see that
+    function's own docstring). Before fix-round 1, the SAME `UID` carried
+    different content in the two representations (the emailed .ics had
+    participants, the iCloud copy never did) -- now both agree, and now
+    (fix-round 2) there is exactly one join computing the shared string,
+    not two independently-typed copies of it.
     """
     start_utc = event["start_utc"]
     end_dt = _coerce_utc_dt(event.get("end_utc"))
@@ -2857,7 +2855,7 @@ def _build_export_vevent(event, location, participants, now_dt):
     ]
     if location:
         lines.append(f"LOCATION:{_export_escape_text(location)}")
-    names = _export_participant_names(participants)
+    names = mail.participant_names(participants)
     if names:
         lines.append(f"DESCRIPTION:{_export_escape_text('Участники: ' + names)}")
     lines += ["END:VEVENT", "END:VCALENDAR"]
@@ -2965,27 +2963,30 @@ def _export_location(conn, event):
 
 
 def _export_participants(conn, event_id):
-    """An owner='hermes' event's participants, as `[{"name": ...}, ...]`
-    -- the EXACT same query `cal.get()` itself runs (fix-round finding N1:
-    `export_own`'s own `SELECT * FROM events` does not join
-    `event_participants` the way `cal.get()`'s richer shape does, so this
-    module needs its own read of that join; reusing `cal.get()`'s own SQL
-    verbatim rather than inventing a second version of the same query --
-    same ORDER BY, same result shape -- keeps `mail.py::build_ics`'s
-    participants line and this module's DESCRIPTION/body_hash input
-    trivially in agreement, both being downstream of the identical
-    ordered list). A plain `conn.execute` of `cal.get()`'s own query,
-    rather than calling `cal.get()` itself, which would also re-resolve
-    `place`/`start_local`/`end_local` -- work this function has no use
-    for."""
-    rows = conn.execute(
-        "SELECT pe.* FROM event_participants ep "
-        "JOIN people pe ON pe.id = ep.person_id "
-        "WHERE ep.event_id = ? "
-        "ORDER BY pe.name COLLATE NOCASE",
-        (event_id,),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    """An owner='hermes' event's participants, as `[{"name": ...}, ...]`,
+    ORDER BY name COLLATE NOCASE.
+
+    Fix-round 2, finding R2: this used to run its own `conn.execute` of a
+    hand-copied version of `cal.get()`'s own `event_participants JOIN
+    people ... ORDER BY pe.name COLLATE NOCASE` query -- textually
+    identical today, but a second, independent copy of one decision with
+    nothing forcing it to stay that way (this project already paid for
+    exactly that class of drift once, Task 6, four fix rounds). `cal` is
+    already imported by this module; calling `cal.get()` (which this
+    module's own `apply_changes` section already reads, e.g.
+    `cal.recompute_road`/`cal.cancel`) reuses its ENTIRE participants
+    query instead of re-typing it, at the cost of also re-fetching the
+    event row and resolving its place/start_local/end_local inside
+    `cal.get()` -- work this call doesn't otherwise need. That extra cost
+    is one cheap, indexed `SELECT ... WHERE id=?` plus a `places.get()`
+    per eligible hermes event per 15-minute tick; the event counts in
+    scope here (an active window of `[today-1d, +extcal_horizon_weeks]`
+    on a personal calendar) are small enough that this is not worth a
+    special-cased leaner path -- reuse over reinventing, per default.
+    Returns `[]` for an unknown/deleted event_id rather than raising
+    (`cal.get()` itself returns `None` for that case)."""
+    fetched = cal.get(conn, event_id)
+    return fetched["participants"] if fetched else []
 
 
 def _export_record(conn, event_id, href, etag, body_hash, synced_at):
