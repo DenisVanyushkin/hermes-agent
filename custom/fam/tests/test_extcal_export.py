@@ -13,7 +13,7 @@ fixture's tmp sqlite file.
 import json
 import types
 
-from fam import cal, cli, extcal, gate, places
+from fam import cal, cli, extcal, gate, people, places
 from fam import db as famdb
 
 
@@ -137,6 +137,87 @@ def test_exported_vevent_includes_resolved_place_name_as_location(db, monkeypatc
     extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
 
     assert "LOCATION:Invictus" in captured["body"]
+
+
+# ---------------------------------------------------------------------
+# fix-round finding N1: participants -- exported (matching mail.py's own
+# convention for the SAME event/UID), and folded into body_hash so a
+# participant-set edit is not a permanent, undetected divergence
+# ---------------------------------------------------------------------
+
+def test_participants_are_exported_matching_mail_convention(db, monkeypatch):
+    captured = {}
+
+    def fake_open(req, timeout):
+        if req.get_method() == "PUT":
+            captured["body"] = req.data.decode("utf-8")
+        return extcal.Response(201, b"", {})
+    monkeypatch.setattr(extcal, "_default_open", fake_open)
+
+    taya = people.add(db, "Таня")
+    denis = people.add(db, "Денис")
+    db.commit()
+    event = _hermes_event(db, title="Ужин", start="2037-07-20T18:00:00+00:00",
+                           participants=("Таня", "Денис"))
+    db.commit()
+
+    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    assert counts["exported"] == 1
+
+    body = captured["body"]
+    # mail.py::build_ics's OWN convention for the SAME event/UID: property
+    # name, "Участники: " prefix, and comma-join, all identical -- see
+    # _export_participant_names. The comma in the join is itself RFC5545
+    # TEXT-escaped (`\,`) by `_export_escape_text`, same as mail.py's own
+    # `_escape_ics_text` would do for the identical string.
+    assert "DESCRIPTION:Участники: Денис\\, Таня" in body
+
+
+def test_event_with_no_participants_has_no_description_line(db, monkeypatch):
+    captured = {}
+
+    def fake_open(req, timeout):
+        if req.get_method() == "PUT":
+            captured["body"] = req.data.decode("utf-8")
+        return extcal.Response(201, b"", {})
+    monkeypatch.setattr(extcal, "_default_open", fake_open)
+
+    _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
+    db.commit()
+    extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+
+    assert "DESCRIPTION" not in captured["body"]
+
+
+def test_participant_set_change_triggers_a_fresh_put_via_body_hash(db, monkeypatch):
+    """Before this fix, participants were absent from BOTH the VEVENT body
+    AND body_hash -- a participant-set edit would never re-PUT at all,
+    leaving the iCloud copy permanently stale. Now it's part of the hash:
+    adding a participant to an already-exported event must trigger an
+    UPDATE PUT on the very next tick."""
+    calls = []
+
+    def fake_open(req, timeout):
+        calls.append(req.get_method())
+        return extcal.Response(201, b"", {"ETag": '"e1"'})
+    monkeypatch.setattr(extcal, "_default_open", fake_open)
+
+    event = _hermes_event(db, title="Ужин", start="2037-07-20T18:00:00+00:00")
+    db.commit()
+    cfg = _cfg(extcal_write_calendar=WRITE_URL)
+
+    c1 = extcal.export_own(db, cfg, now_utc=TEST_NOW)
+    assert c1["exported"] == 1
+    assert calls == ["PUT"]
+
+    taya = people.add(db, "Таня")
+    db.execute("INSERT INTO event_participants(event_id, person_id) VALUES (?,?)",
+               (event["id"], taya["id"]))
+    db.commit()
+
+    c2 = extcal.export_own(db, cfg, now_utc="2037-07-15T00:10:00+00:00")
+    assert c2 == {"exported": 0, "updated": 1, "unchanged": 0, "deleted": 0, "errors": []}
+    assert calls == ["PUT", "PUT"]
 
 
 # ---------------------------------------------------------------------
@@ -294,6 +375,60 @@ def test_done_event_previously_exported_is_also_deleted(db, monkeypatch):
     assert calls == ["DELETE"]
 
 
+def test_owner_flipped_away_from_hermes_after_export_is_also_deleted(db, monkeypatch):
+    """N2(a): the same broader removal-pass scoping (see the 'done' test
+    above) applied to a re-owned row -- a previously-exported event whose
+    owner later flips to 'iphone' (e.g. a future `cal disown`) is exactly
+    as wrong to leave on her phone under Hermes' own write as an explicit
+    cancellation would be."""
+    calls = []
+
+    def fake_open(req, timeout):
+        calls.append(req.get_method())
+        return extcal.Response(204, b"", {})
+    monkeypatch.setattr(extcal, "_default_open", fake_open)
+
+    event = _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
+    _seed_export_row(db, event["id"])
+    db.execute("UPDATE events SET owner='iphone' WHERE id=?", (event["id"],))
+    db.commit()
+
+    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    assert counts["deleted"] == 1
+    assert calls == ["DELETE"]
+    assert db.execute(
+        "SELECT * FROM ext_exports WHERE event_id=?", (event["id"],)
+    ).fetchone() is None
+
+
+def test_start_moved_beyond_horizon_after_export_is_also_deleted(db, monkeypatch):
+    """N2(b): same scoping again, for the window-aged-out case -- a
+    previously-exported event whose start_utc is later pushed past
+    [today-1d, +extcal_horizon_weeks] is cleaned up the same way, not left
+    behind as a permanent ghost on her phone."""
+    calls = []
+
+    def fake_open(req, timeout):
+        calls.append(req.get_method())
+        return extcal.Response(204, b"", {})
+    monkeypatch.setattr(extcal, "_default_open", fake_open)
+
+    event = _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
+    _seed_export_row(db, event["id"])
+    # TEST_NOW is 2037-07-15; default extcal_horizon_weeks=8 -> window ends
+    # ~2037-09-09. Push start_utc well past that.
+    db.execute("UPDATE events SET start_utc=? WHERE id=?",
+               ("2038-01-01T00:00:00+00:00", event["id"]))
+    db.commit()
+
+    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    assert counts["deleted"] == 1
+    assert calls == ["DELETE"]
+    assert db.execute(
+        "SELECT * FROM ext_exports WHERE event_id=?", (event["id"],)
+    ).fetchone() is None
+
+
 def test_deleted_href_is_treated_as_already_gone_success(db, monkeypatch):
     """A previous tick's DELETE may have actually succeeded on the server
     even if this module never got to record that (crash, timeout on the
@@ -400,6 +535,50 @@ def test_belt2_filters_our_own_exported_event_even_with_write_url_blank(db, monk
     other_url = "https://caldav.icloud.com/1/calendars/personal/"
     monkeypatch.setattr(cli.gate, "load_config",
                          lambda *a, **k: _cfg(extcal_write_calendar=""))
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [
+                             {"url": other_url, "name": "Personal", "ctag": "c1",
+                              "sync_token": None, "supports_sync_token": True,
+                              "components": ["VEVENT"]}])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([{"href": other_url + "echo.ics", "deleted": False,
+                            "etag": "e9", "ics": exported_ics}],
+                          None, {"mode": "initial_full", "reason": None}))
+
+    rc = cli.cmd_tick_cal_ext(types.SimpleNamespace(now=TEST_NOW, json=False))
+    assert rc == 0
+    assert db.execute(
+        "SELECT COUNT(*) AS n FROM events WHERE owner='iphone'"
+    ).fetchone()["n"] == 0
+
+
+def test_belt2_filters_our_own_exported_event_even_with_write_url_pointing_elsewhere(db, monkeypatch):
+    """N3: the brief's literal "even with a WRONG URL in config" case, not
+    just blank -- extcal_write_calendar at IMPORT time is set to a
+    DIFFERENT, unrelated calendar than either the one export_own actually
+    wrote to or the one the remote item is read from. Belt 1 is therefore
+    inactive for a different reason than the blank case above (it matches
+    the wrong thing, rather than nothing) -- belt 2 (UID pattern) must
+    still independently keep this out."""
+    captured = {}
+
+    def fake_open(req, timeout):
+        if req.get_method() == "PUT":
+            captured["body"] = req.data.decode("utf-8")
+        return extcal.Response(201, b"", {"ETag": '"e1"'})
+    monkeypatch.setattr(extcal, "_default_open", fake_open)
+
+    _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
+    db.commit()
+    export_counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    assert export_counts["exported"] == 1
+    exported_ics = captured["body"]
+
+    other_url = "https://caldav.icloud.com/1/calendars/personal/"
+    wrong_write_url = "https://caldav.icloud.com/1/calendars/some-unrelated-one/"
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_write_calendar=wrong_write_url))
     monkeypatch.setattr(cli.extcal, "discover",
                          lambda cfg, request=None: [
                              {"url": other_url, "name": "Personal", "ctag": "c1",

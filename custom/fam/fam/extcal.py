@@ -2750,15 +2750,39 @@ def _export_to_ics_utc(value):
     return dt.strftime("%Y%m%dT%H%M%SZ") if dt is not None else None
 
 
-def _export_body_hash(event, location):
-    """sha256 over EXACTLY (title, start_utc, end_utc, location) -- the
-    fields that matter to what her phone actually displays. Text is
-    normalized via `_pc_norm_text` and datetimes via `_coerce_utc_dt`/
-    `_iso` (the SAME normalization `_event_diff` applies to both sides of
-    its own comparison), so a harmless formatting difference in the
-    STORED start_utc/end_utc string (`+00:00` vs `Z`, a dropped `:00`
-    seconds field, ...) is never mistaken for a real change -- exactly the
-    "лишний PUT" this hash exists to gate (requirement #4).
+def _export_participant_names(participants):
+    """`[{"name": ...}, ...]` (the SAME shape `cal.get()`'s own
+    `participants` list already carries, see `_export_participants` below)
+    -> the comma-joined names string, `mail.py::build_ics`'s OWN join
+    (`", ".join(p["name"] for p in participants)`) -- read, not
+    reimplemented independently, per fix-round finding N1: this project
+    already paid for two independent implementations of one decision
+    drifting apart once (Task 6, four fix rounds); this is the same join
+    `mail.build_ics` performs before wrapping it in `'Участники: ' + names`,
+    used here for BOTH the DESCRIPTION line and the body_hash input, so
+    there is exactly one join, not two."""
+    return ", ".join(p["name"] for p in (participants or []))
+
+
+def _export_body_hash(event, location, participants):
+    """sha256 over EXACTLY (title, start_utc, end_utc, location,
+    participant names) -- the fields that matter to what her phone
+    actually displays. Text is normalized via `_pc_norm_text` and
+    datetimes via `_coerce_utc_dt`/`_iso` (the SAME normalization
+    `_event_diff` applies to both sides of its own comparison), so a
+    harmless formatting difference in the STORED start_utc/end_utc string
+    (`+00:00` vs `Z`, a dropped `:00` seconds field, ...) is never
+    mistaken for a real change -- exactly the "лишний PUT" this hash
+    exists to gate (requirement #4).
+
+    Participants (fix-round finding N1) are folded in via
+    `_export_participant_names` -- already ORDER BY name COLLATE NOCASE
+    from `_export_participants`'s own query, so the join is stable across
+    ticks regardless of INSERT order, and a participant-set edit (add/
+    remove/rename) changes this hash and therefore DOES trigger a fresh
+    PUT -- unlike a location edit that resolves to the same place name,
+    there is no "same meaning, different spelling" case to normalize
+    away here beyond the ordering already handled by the query itself.
 
     Deliberately EXCLUDED from the hash:
       - `id`/the UID: constant per event for as long as it is exported at
@@ -2782,13 +2806,15 @@ def _export_body_hash(event, location):
         _iso(start_dt) or "",
         _iso(end_dt) or "",
         _pc_norm_text(location),
+        _export_participant_names(participants),
     )
     raw = "\x1f".join(fields)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _build_export_vevent(event, location, now_dt):
-    """title/start/end/location -> a full PUT-ready VCALENDAR/VEVENT text.
+def _build_export_vevent(event, location, participants, now_dt):
+    """title/start/end/location/participants -> a full PUT-ready
+    VCALENDAR/VEVENT text.
 
     NO VALARM, ever -- this is the module's central requirement for this
     whole section (design doc Sec.5): an owner='hermes' event's alarm
@@ -2804,6 +2830,15 @@ def _build_export_vevent(event, location, now_dt):
     end_utc (fam's own convention, matching both `mail.build_ics` and
     `extcal._finalize_component`'s identical no-DTEND default on the
     import side).
+
+    DESCRIPTION (fix-round finding N1): when `participants` is non-empty,
+    a `DESCRIPTION:Участники: <names>` line is appended -- the EXACT same
+    property name, prefix text, and join `mail.py::build_ics` already uses
+    for the emailed .ics of the same event (`event.get("participants")`
+    there, `_export_participants` here -- same underlying query). Before
+    this fix, the SAME `UID` carried different content in the two
+    representations (the emailed .ics had participants, the iCloud copy
+    never did) -- now both agree.
     """
     start_utc = event["start_utc"]
     end_dt = _coerce_utc_dt(event.get("end_utc"))
@@ -2822,6 +2857,9 @@ def _build_export_vevent(event, location, now_dt):
     ]
     if location:
         lines.append(f"LOCATION:{_export_escape_text(location)}")
+    names = _export_participant_names(participants)
+    if names:
+        lines.append(f"DESCRIPTION:{_export_escape_text('Участники: ' + names)}")
     lines += ["END:VEVENT", "END:VCALENDAR"]
     folded = [_export_fold_line(l) for l in lines]
     return "\r\n".join(folded) + "\r\n"
@@ -2926,6 +2964,30 @@ def _export_location(conn, event):
     return place["name"] if place else ""
 
 
+def _export_participants(conn, event_id):
+    """An owner='hermes' event's participants, as `[{"name": ...}, ...]`
+    -- the EXACT same query `cal.get()` itself runs (fix-round finding N1:
+    `export_own`'s own `SELECT * FROM events` does not join
+    `event_participants` the way `cal.get()`'s richer shape does, so this
+    module needs its own read of that join; reusing `cal.get()`'s own SQL
+    verbatim rather than inventing a second version of the same query --
+    same ORDER BY, same result shape -- keeps `mail.py::build_ics`'s
+    participants line and this module's DESCRIPTION/body_hash input
+    trivially in agreement, both being downstream of the identical
+    ordered list). A plain `conn.execute` of `cal.get()`'s own query,
+    rather than calling `cal.get()` itself, which would also re-resolve
+    `place`/`start_local`/`end_local` -- work this function has no use
+    for."""
+    rows = conn.execute(
+        "SELECT pe.* FROM event_participants ep "
+        "JOIN people pe ON pe.id = ep.person_id "
+        "WHERE ep.event_id = ? "
+        "ORDER BY pe.name COLLATE NOCASE",
+        (event_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _export_record(conn, event_id, href, etag, body_hash, synced_at):
     """INSERT-or-UPDATE the one `ext_exports` row for `event_id` (its
     schema is `event_id INTEGER PRIMARY KEY`, one row per exported event,
@@ -2958,7 +3020,7 @@ class _ExportFailure(Exception):
     bare exception type name."""
 
 
-def _export_put_event(conn, cfg, request, event, exp, location, new_hash, now_dt):
+def _export_put_event(conn, cfg, request, event, exp, location, participants, new_hash, now_dt):
     """One event -> PUT (fresh insert when `exp` is None, update -- same
     href/etag -- otherwise). Raises `_ExportFailure` on any non-2xx
     outcome after the one 412 retry (requirement #5); writes the
@@ -2969,7 +3031,7 @@ def _export_put_event(conn, cfg, request, event, exp, location, new_hash, now_dt
     href = exp["href"] if is_update else _export_href(
         cfg.get("extcal_write_calendar"), event["id"])
     etag = exp.get("etag") if is_update else None
-    body = _build_export_vevent(event, location, now_dt)
+    body = _build_export_vevent(event, location, participants, now_dt)
 
     ok, new_etag, status, conflict = _export_put(cfg, href, body, etag, request)
     if conflict:
@@ -3124,7 +3186,8 @@ def export_own(conn, cfg, request=None, now_utc=None):
     for event_id, event in eligible.items():
         exp = exported.get(event_id)
         location = _export_location(conn, event)
-        new_hash = _export_body_hash(event, location)
+        participants = _export_participants(conn, event_id)
+        new_hash = _export_body_hash(event, location, participants)
         if exp is not None and exp.get("body_hash") == new_hash:
             counts["unchanged"] += 1
             continue
@@ -3133,7 +3196,7 @@ def export_own(conn, cfg, request=None, now_utc=None):
         count_key = "updated" if is_update else "exported"
         _export_commit_one(
             conn, event_id, action, count_key, counts,
-            lambda event=event, exp=exp, location=location, new_hash=new_hash:
-                _export_put_event(conn, cfg, request, event, exp, location, new_hash, now_dt))
+            lambda event=event, exp=exp, location=location, participants=participants, new_hash=new_hash:
+                _export_put_event(conn, cfg, request, event, exp, location, participants, new_hash, now_dt))
 
     return counts
