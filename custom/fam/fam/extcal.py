@@ -60,6 +60,7 @@ separately rebuilt (a later, production-rollout step -- not this task). So:
     calendar genuinely has no recurring events".
 """
 import base64
+import hashlib
 import os
 import re
 import sys
@@ -2644,5 +2645,495 @@ def apply_changes(conn, changeset, cfg=None):
             if not isinstance(entry, dict):
                 continue
             _apply_one(conn, branch, action, fn, entry, counts, count_key)
+
+    return counts
+
+
+# ---- export (Task 7) --------------------------------------------------
+#
+# `export_own(conn, cfg, request=None, now_utc=None)` is the reverse
+# direction of `apply_changes` above -- it is the OTHER (and last) place in
+# this module that writes anything: instead of iCloud -> local DB, this
+# writes owner='hermes' events -> the "Гермес" collection in her iCloud
+# (`extcal_write_calendar`), plus the `ext_exports` bookkeeping row that
+# lets the NEXT tick tell "unchanged" apart from "needs a fresh PUT"
+# without re-touching the network for events nothing happened to.
+#
+# Design doc Sec.5's central requirement: this is what makes a Hermes-
+# created event VISIBLE on her phone without making her phone RING for it
+# -- the VEVENT this writes carries NO VALARM, ever. The alarm for a
+# owner='hermes' event stays exactly where it already is: Hermes' own
+# `reminders`/`rem.regenerate` chain. This module's own anti-echo belts
+# (module docstring; `_HERMES_UID_RE` above and cli.py's `_EXTCAL_ECHO_
+# UID_RE`) are written to recognize precisely the UID convention used
+# here (`_export_uid`, `fam-<event_id>@hermes-home` -- verbatim the same
+# convention `mail.py::build_ics`/`send_event_email` already use for the
+# .ics Denis gets by email, so both representations of the same Hermes
+# event always carry the identical UID) -- so nothing this function PUTs
+# can ever be read back in as a NEW "her" occurrence by the import side
+# (T6), regardless of whether `extcal_write_calendar` happens to be
+# configured correctly at read time (belt 1) or not (belt 2 alone still
+# saves it). See test_extcal_export.py's own anti-echo tests, which
+# exercise both belts against exactly what this function produces/writes
+# to, rather than re-asserting the belts' logic in the abstract.
+#
+# Scope is deliberately EVENTS only, never `plans` -- design doc Sec.5 and
+# the DoD both only ever mention "события Гермеса" for reverse-write;
+# an all-day `plans` row has no VEVENT-shaped time of its own to PUT
+# (it is deadline-only), and nothing in the brief asks for it.
+
+_EXPORT_UID_TMPL = "fam-{id}@hermes-home"
+
+
+def _export_uid(event_id):
+    """The exact same UID convention `mail.py::build_ics` already uses
+    (`fam-<event_id>@hermes-home`) -- reused verbatim, not re-derived, so
+    an event's outbound iCloud export and its emailed .ics always carry
+    byte-identical UIDs. This is also EXACTLY the pattern this module's
+    own `_HERMES_UID_RE` (anti-echo belt 2) is written to recognize."""
+    return _EXPORT_UID_TMPL.format(id=event_id)
+
+
+def _export_escape_text(value):
+    """RFC5545 TEXT escaping -- the same rules as mail.py's
+    `_escape_ics_text` (backslash first, then comma/semicolon, then
+    newlines -> literal `\\n`), kept as an independent copy here rather
+    than an import: this task's boundary is "read mail.py's UID
+    convention", not "import mail.py's private helpers" (mail.py also
+    lazy-imports google-auth/googleapiclient on a different code path,
+    and `test_no_google_import.py` pins that fam.cli/fam.mail import
+    stays google-free at module level -- extcal.py owes that same
+    guarantee independently, not by relying on mail.py's own care)."""
+    value = value or ""
+    return (
+        value.replace("\\", "\\\\")
+        .replace(",", "\\,")
+        .replace(";", "\\;")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+_EXPORT_LINE_LIMIT = 75
+
+
+def _export_fold_line(line, limit=_EXPORT_LINE_LIMIT):
+    """Byte-safe RFC5545 3.1 line folding -- same algorithm as mail.py's
+    `_fold_ics_line` (independent copy, see `_export_escape_text`'s own
+    docstring for why): counts UTF-8 octets, never splits a multi-byte
+    character across a fold boundary, continuation lines reserve 1 octet
+    for their leading space."""
+    encoded = line.encode("utf-8")
+    if len(encoded) <= limit:
+        return line
+    chunks = []
+    start = 0
+    n = len(encoded)
+    first = True
+    while start < n:
+        budget = limit if first else limit - 1
+        end = min(start + budget, n)
+        while end > start and end < n and (encoded[end] & 0xC0) == 0x80:
+            end -= 1
+        chunks.append(encoded[start:end].decode("utf-8"))
+        start = end
+        first = False
+    return "\r\n ".join(chunks)
+
+
+def _export_to_ics_utc(value):
+    """An aware/naive datetime OR ISO-8601 string -> RFC5545 UTC
+    DATE-TIME (`YYYYMMDDTHHMMSSZ`), via the same forgiving `_coerce_utc_dt`
+    every other window/diff helper in this module already uses. None on
+    anything unparseable (never raises)."""
+    dt = _coerce_utc_dt(value)
+    return dt.strftime("%Y%m%dT%H%M%SZ") if dt is not None else None
+
+
+def _export_body_hash(event, location):
+    """sha256 over EXACTLY (title, start_utc, end_utc, location) -- the
+    fields that matter to what her phone actually displays. Text is
+    normalized via `_pc_norm_text` and datetimes via `_coerce_utc_dt`/
+    `_iso` (the SAME normalization `_event_diff` applies to both sides of
+    its own comparison), so a harmless formatting difference in the
+    STORED start_utc/end_utc string (`+00:00` vs `Z`, a dropped `:00`
+    seconds field, ...) is never mistaken for a real change -- exactly the
+    "лишний PUT" this hash exists to gate (requirement #4).
+
+    Deliberately EXCLUDED from the hash:
+      - `id`/the UID: constant per event for as long as it is exported at
+        all -- it is already the `ext_exports` row's own primary key, not
+        something that needs to also be inside the hash of its BODY;
+      - DTSTAMP: a fresh wall-clock value every single time this function
+        would be called to build a NEW body -- including it would force a
+        PUT on literally every tick, defeating the whole point of this
+        hash;
+      - status: only `status='active'` events ever reach this function at
+        all (`export_own`'s own eligibility query) -- a transition to
+        cancelled/done routes through the DELETE path instead (see
+        `_export_delete_event`), never through a PUT whose hash this
+        gates, so status never actually varies among the rows that call
+        this.
+    """
+    start_dt = _coerce_utc_dt(event.get("start_utc"))
+    end_dt = _coerce_utc_dt(event.get("end_utc"))
+    fields = (
+        _pc_norm_text(event.get("title")),
+        _iso(start_dt) or "",
+        _iso(end_dt) or "",
+        _pc_norm_text(location),
+    )
+    raw = "\x1f".join(fields)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _build_export_vevent(event, location, now_dt):
+    """title/start/end/location -> a full PUT-ready VCALENDAR/VEVENT text.
+
+    NO VALARM, ever -- this is the module's central requirement for this
+    whole section (design doc Sec.5): an owner='hermes' event's alarm
+    stays Hermes' own reminder chain (`reminders`/`rem.regenerate`); her
+    phone must only ever SHOW this event (so she can see her day is full
+    at 10:00), never ring for it a second time. There is structurally no
+    VALARM-emitting code anywhere in this function -- not a filter that
+    strips one out, there is simply nothing here that could ever add one.
+
+    UID is `_export_uid(event["id"])` -- the SAME `fam-<id>@hermes-home`
+    convention `mail.py::build_ics` uses for the emailed .ics of the same
+    event. DTEND falls back to DTSTART+1h when the event carries no
+    end_utc (fam's own convention, matching both `mail.build_ics` and
+    `extcal._finalize_component`'s identical no-DTEND default on the
+    import side).
+    """
+    start_utc = event["start_utc"]
+    end_dt = _coerce_utc_dt(event.get("end_utc"))
+    if end_dt is None:
+        end_dt = _coerce_utc_dt(start_utc) + timedelta(hours=1)
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//hermes-agent//fam//RU",
+        "BEGIN:VEVENT",
+        f"UID:{_export_uid(event['id'])}",
+        f"DTSTAMP:{_export_to_ics_utc(now_dt)}",
+        f"DTSTART:{_export_to_ics_utc(start_utc)}",
+        f"DTEND:{_export_to_ics_utc(end_dt)}",
+        f"SUMMARY:{_export_escape_text(event.get('title') or '')}",
+    ]
+    if location:
+        lines.append(f"LOCATION:{_export_escape_text(location)}")
+    lines += ["END:VEVENT", "END:VCALENDAR"]
+    folded = [_export_fold_line(l) for l in lines]
+    return "\r\n".join(folded) + "\r\n"
+
+
+def _export_href(write_url, event_id):
+    """Where a BRAND-NEW export PUTs its resource: `<uid>.ics` under the
+    write-target collection -- an ordinary CalDAV convention (Apple's own
+    servers accept a client-chosen resource name on initial PUT). An
+    UPDATE never calls this: it reuses the href `ext_exports` already
+    recorded from the original insert."""
+    base = (write_url or "").rstrip("/") + "/"
+    return urljoin(base, f"{_export_uid(event_id)}.ics")
+
+
+def _export_headers(cfg, extra=None):
+    headers = {}
+    auth = _auth_header(cfg)
+    if auth:
+        headers.update(auth)
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _export_put(cfg, url, body, etag, request):
+    """One PUT attempt. Returns `(ok, new_etag, status, conflict)` --
+    `conflict` is True ONLY on an HTTP 412 (etag precondition failed, RFC
+    4791/RFC 7232) -- the ONE status `_export_put_event` retries, exactly
+    once (requirement #5). `new_etag` is read off the response when
+    present (iCloud returns it on both 201 Created and 204/200); it is
+    None when absent (some servers only return it on a follow-up GET) --
+    the caller handles a None etag exactly like any other value (a later
+    update simply omits If-Match, an unconditional overwrite of OUR OWN
+    resource, never a risk to her data since this collection holds nothing
+    but this module's own writes).
+
+    Never raises: `request(...)` (the injected seam, `_request` by
+    default) already never raises; a None response (network/timeout/
+    host-guard) is reported as `(False, None, None, False)`, indistinguishable
+    from the caller's point of view from ordinary HTTP failure paths --
+    only the (status is None) detail differs, folded into the same
+    `_ExportFailure` message either way.
+    """
+    headers = _export_headers(cfg, {"Content-Type": "text/calendar; charset=utf-8"})
+    if etag:
+        headers["If-Match"] = etag
+    resp = request("PUT", url, headers=headers, body=body, timeout=DEFAULT_TIMEOUT)
+    if resp is None:
+        return False, None, None, False
+    if resp.status == 412:
+        return False, None, 412, True
+    if resp.status not in (200, 201, 204):
+        return False, None, resp.status, False
+    new_etag = resp.headers.get("ETag") or resp.headers.get("Etag") or resp.headers.get("etag")
+    return True, new_etag, resp.status, False
+
+
+def _export_reread_etag(cfg, url, request):
+    """Requirement #5's "перечитать" half of "перечитать и повторить один
+    раз": a plain GET of the resource we just failed to PUT (412), to pick
+    up whatever etag it actually holds right now. Returns None (never
+    raises) on any failure -- the caller (`_export_put_event`) treats a
+    None fresh etag as "retry unconditionally, no If-Match at all", which
+    is safe here specifically because this collection holds nothing but
+    our own prior writes -- there is no THIRD PARTY's concurrent edit this
+    unconditional retry could ever clobber."""
+    resp = request("GET", url, headers=_export_headers(cfg), timeout=DEFAULT_TIMEOUT)
+    if resp is None or resp.status not in (200, 207):
+        return None
+    return resp.headers.get("ETag") or resp.headers.get("Etag") or resp.headers.get("etag")
+
+
+def _export_delete(cfg, url, etag, request):
+    """One DELETE attempt. `(ok, status)`. A 404/410 (already gone on the
+    server -- e.g. a previous tick's DELETE actually succeeded but this
+    module never got to record that before crashing) is treated as
+    SUCCESS, not a failure: either way, the end state ("nothing there")
+    is exactly what this call wanted. Never raises."""
+    headers = _export_headers(cfg)
+    if etag:
+        headers["If-Match"] = etag
+    resp = request("DELETE", url, headers=headers, timeout=DEFAULT_TIMEOUT)
+    if resp is None:
+        return False, None
+    if resp.status in (200, 202, 204, 404, 410):
+        return True, resp.status
+    return False, resp.status
+
+
+def _export_location(conn, event):
+    """An owner='hermes' event's LOCATION text for the exported VEVENT:
+    its resolved `places` row's name, or "" when it has no place_id at
+    all. Unlike the import side's `external_location` column (free text
+    that may not match any known place), a Hermes event's place is always
+    either a real `places` row or nothing -- there is no free-text
+    location concept on this side to fall back to."""
+    place_id = event.get("place_id")
+    if place_id is None:
+        return ""
+    place = places.get(conn, place_id)
+    return place["name"] if place else ""
+
+
+def _export_record(conn, event_id, href, etag, body_hash, synced_at):
+    """INSERT-or-UPDATE the one `ext_exports` row for `event_id` (its
+    schema is `event_id INTEGER PRIMARY KEY`, one row per exported event,
+    see db.py's v12 migration). Plain SELECT-then-branch rather than an
+    `ON CONFLICT` upsert -- matches this module's own established style
+    elsewhere (`_existing_id_by_external_uid`'s SELECT-before-write, the
+    same reasoning: explicit and portable rather than relying on a SQLite
+    upsert-syntax version floor)."""
+    existing = conn.execute(
+        "SELECT event_id FROM ext_exports WHERE event_id=?", (event_id,)).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE ext_exports SET href=?, etag=?, body_hash=?, synced_at=? "
+            "WHERE event_id=?",
+            (href, etag, body_hash, synced_at, event_id))
+    else:
+        conn.execute(
+            "INSERT INTO ext_exports(event_id, href, etag, body_hash, synced_at) "
+            "VALUES(?,?,?,?,?)",
+            (event_id, href, etag, body_hash, synced_at))
+
+
+class _ExportFailure(Exception):
+    """Raised by `_export_put_event`/`_export_delete_event` for a
+    recognized (non-crash) PUT/DELETE failure -- every attempt (including
+    the one 412 retry, for PUT) came back a non-2xx/non-404 status, or no
+    response at all. Caught by `_export_commit_one` exactly like any other
+    exception (same per-row isolation contract as `apply_changes`' own
+    `_apply_one`), but carries a clean, pre-formatted message instead of a
+    bare exception type name."""
+
+
+def _export_put_event(conn, cfg, request, event, exp, location, new_hash, now_dt):
+    """One event -> PUT (fresh insert when `exp` is None, update -- same
+    href/etag -- otherwise). Raises `_ExportFailure` on any non-2xx
+    outcome after the one 412 retry (requirement #5); writes the
+    `ext_exports` bookkeeping row itself on success, but does NOT commit
+    (that is `_export_commit_one`'s job, same contract as `apply_changes`'
+    own `_apply_*` helpers)."""
+    is_update = exp is not None
+    href = exp["href"] if is_update else _export_href(
+        cfg.get("extcal_write_calendar"), event["id"])
+    etag = exp.get("etag") if is_update else None
+    body = _build_export_vevent(event, location, now_dt)
+
+    ok, new_etag, status, conflict = _export_put(cfg, href, body, etag, request)
+    if conflict:
+        # Requirement #5: exactly one re-read-and-retry on a 412 ETag
+        # conflict -- never a second retry, regardless of THIS attempt's
+        # own outcome.
+        fresh_etag = _export_reread_etag(cfg, href, request)
+        ok, new_etag, status, _conflict2 = _export_put(cfg, href, body, fresh_etag, request)
+    if not ok:
+        raise _ExportFailure(f"PUT {href} failed (status={status})")
+    _export_record(conn, event["id"], href, new_etag, new_hash, _iso(now_dt))
+
+
+def _export_delete_event(conn, cfg, request, event_id, exp):
+    """One previously-exported event that is no longer eligible (design
+    doc requirement #6: cancelled/deleted -- and, by this function's own
+    scoping in `export_own`, also 'done', re-owned away from 'hermes', or
+    scrolled outside the window, which are exactly as wrong to leave
+    behind on her phone as a plain cancellation) -> DELETE its iCloud
+    resource and drop its `ext_exports` row. Raises `_ExportFailure` on a
+    non-2xx/non-404 DELETE outcome; does NOT commit (see
+    `_export_put_event`'s own docstring for the shared contract).
+
+    `exp.get("href")` missing (should not happen in practice -- see
+    `_export_record`, which always writes href together with body_hash --
+    but defensive regardless) skips the network call entirely: there is
+    nothing on the server this row could even point at, so the only
+    correct action is dropping the local bookkeeping row.
+    """
+    href = exp.get("href")
+    if href:
+        ok, status = _export_delete(cfg, href, exp.get("etag"), request)
+        if not ok:
+            raise _ExportFailure(f"DELETE {href} failed (status={status})")
+    conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
+
+
+def _export_commit_one(conn, event_id, action, count_key, counts, fn):
+    """Per-event commit/rollback isolation -- the export-side analogue of
+    `apply_changes`' own `_apply_one` (same reasoning: one event's
+    transport hiccup, malformed row, or unexpected exception must not sink
+    the rest of THIS tick's export batch, and each event gets its own
+    commit so a failure only rolls back its own uncommitted work).
+    `fn` performs the actual PUT/DELETE + `ext_exports` write and raises
+    (`_ExportFailure` or anything else) on failure; it never commits
+    itself."""
+    try:
+        fn()
+    except Exception as e:
+        error = str(e) if isinstance(e, _ExportFailure) else f"{type(e).__name__}: {e}"[:300]
+        counts["errors"].append({"event_id": event_id, "action": action, "error": error})
+        try:
+            conn.rollback()
+            audit.log(conn, "cal.ext.export_error", {
+                "event_id": event_id, "action": action, "error": error})
+            conn.commit()
+        except Exception:
+            pass  # see _apply_one's identical reasoning: already in counts["errors"]
+        return
+    counts[count_key] += 1
+    audit.log(conn, "cal.ext.export", {"event_id": event_id, "action": action})
+    conn.commit()
+
+
+def export_own(conn, cfg, request=None, now_utc=None):
+    """Reverse write (Task 7): PUT every `owner='hermes'` event inside
+    `[today-1d, today+extcal_horizon_weeks]` (recurring series' individual
+    occurrences included automatically -- they are ordinary materialized
+    `events` rows with `owner='hermes'` by default, same query, no special
+    casing needed) into the "Гермес" collection (`extcal_write_calendar`),
+    without VALARM -- so her iPhone shows them without ringing for them.
+    `owner='iphone'` rows are NEVER touched here (the query's own `WHERE
+    owner='hermes'` makes them structurally unreachable, the same
+    guarantee `plan_changes`' rule #3 gives the import direction).
+
+    Returns counts: `{exported, updated, unchanged, deleted, errors}`.
+      - `exported`: a brand-new PUT (no prior `ext_exports` row).
+      - `updated`: a PUT for an event whose `body_hash` changed since its
+        last export (time/title/location edit).
+      - `unchanged`: `body_hash` matched -- ZERO network calls for this
+        event (requirement #4).
+      - `deleted`: a DELETE for a previously-exported event that is no
+        longer eligible (cancelled, done, deleted outright, re-owned away
+        from 'hermes', or aged out of the window either direction).
+      - `errors`: a list of `{event_id, action, error}` dicts, one per
+        event whose PUT/DELETE ultimately failed -- mirrors
+        `apply_changes`' own `errors` shape closely enough that a caller
+        (T7's `cli.py` tick wiring) can fold both into one `tick.error`
+        message the same way (requirement #10).
+
+    `extcal_write_calendar` unset/blank -> hard no-op (requirement #8):
+    returns the all-zero counts above IMMEDIATELY -- this is the ONLY
+    early-return branch in this function, and it comes before even a
+    single `conn.execute()`, let alone a network call. This matters for a
+    fresh install: T10 (a separate, later task) is what actually creates
+    the "Гермес" collection in her iCloud and fills in this config key;
+    until then, this function must be provably inert.
+
+    Never calls `gate.deliver` (invariant #1, same as every other extcal
+    entry point) -- this module does not even import `gate`, so there is
+    structurally nothing on any path here that could reach it.
+
+    Never raises: every per-event PUT/DELETE goes through
+    `_export_commit_one`'s per-row try/except (same isolation contract as
+    `apply_changes`' own `_apply_one`) -- one event's transport failure,
+    malformed row, or unexpected exception is recorded in `errors` and
+    every OTHER event in this same batch still gets processed.
+    """
+    cfg = cfg or {}
+    write_url = (cfg.get("extcal_write_calendar") or "").strip()
+    counts = {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 0, "errors": []}
+    if not write_url:
+        return counts
+    request = request or _request
+
+    now_dt = _coerce_utc_dt(now_utc) or datetime.now(timezone.utc)
+    horizon_weeks = cfg.get("extcal_horizon_weeks", 8)
+    window_start = _iso(now_dt - timedelta(days=1))
+    window_end = _iso(now_dt + timedelta(weeks=horizon_weeks))
+
+    eligible_rows = conn.execute(
+        "SELECT * FROM events WHERE owner='hermes' AND status='active' "
+        "AND start_utc >= ? AND start_utc <= ?",
+        (window_start, window_end)).fetchall()
+    eligible = {r["id"]: dict(r) for r in eligible_rows}
+
+    exported_rows = conn.execute("SELECT * FROM ext_exports").fetchall()
+    exported = {r["event_id"]: dict(r) for r in exported_rows}
+
+    # Removal pass FIRST (same ordering `apply_changes` uses across its own
+    # branches -- insert/update before cancel/drop is irrelevant there since
+    # every entry targets a DIFFERENT row; here it is similarly harmless,
+    # kept simply because "clean up what's gone" reads naturally before
+    # "write what's current"): anything previously exported that is no
+    # longer among THIS round's eligible candidates -- cancelled, done,
+    # deleted outright, re-owned away from 'hermes', or aged out of the
+    # window in either direction -- gets DELETEd from iCloud and dropped
+    # from `ext_exports`. Deliberately broader than "cancelled" alone
+    # (requirement #6's literal wording): every one of those other cases is
+    # exactly as wrong to leave visible on her phone.
+    for event_id, exp in exported.items():
+        if event_id in eligible:
+            continue
+        _export_commit_one(
+            conn, event_id, "delete", "deleted", counts,
+            lambda exp=exp, event_id=event_id:
+                _export_delete_event(conn, cfg, request, event_id, exp))
+
+    # Export pass: PUT every eligible event whose content actually changed
+    # since its last export. `body_hash` match -> zero network calls at all
+    # for that event (requirement #4).
+    for event_id, event in eligible.items():
+        exp = exported.get(event_id)
+        location = _export_location(conn, event)
+        new_hash = _export_body_hash(event, location)
+        if exp is not None and exp.get("body_hash") == new_hash:
+            counts["unchanged"] += 1
+            continue
+        is_update = exp is not None
+        action = "update" if is_update else "insert"
+        count_key = "updated" if is_update else "exported"
+        _export_commit_one(
+            conn, event_id, action, count_key, counts,
+            lambda event=event, exp=exp, location=location, new_hash=new_hash:
+                _export_put_event(conn, cfg, request, event, exp, location, new_hash, now_dt))
 
     return counts

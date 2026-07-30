@@ -1616,13 +1616,26 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         return {
             "counts": None, "calendars": per_calendar,
             "changeset": changeset, "sync_errors": sync_errors, "tokens": {},
+            "export_counts": None,
         }
 
     counts = extcal.apply_changes(conn, changeset, cfg)
+    # Task 7: reverse write. Runs AFTER the import-side apply_changes above
+    # (both share this same `conn` -- apply_changes already committed every
+    # one of its own entries by the time this starts, so there is no
+    # pending-transaction interaction between the two directions) and
+    # regardless of whether apply_changes itself hit any errors: import and
+    # export are independent directions over independent row sets
+    # (owner='iphone' vs owner='hermes'), so a problem in one must not
+    # withhold the other. `extcal.export_own` is itself a hard no-op (zero
+    # DB reads, zero network calls) whenever `extcal_write_calendar` is
+    # unset -- which it is on every VM until T10 (a separate, later task)
+    # actually creates the "Гермес" collection and fills in the config key.
+    export_counts = extcal.export_own(conn, cfg, now_utc=now)
     return {
         "counts": counts, "calendars": per_calendar,
         "changeset": changeset, "sync_errors": sync_errors,
-        "tokens": tokens_to_persist,
+        "tokens": tokens_to_persist, "export_counts": export_counts,
     }
 
 
@@ -1728,9 +1741,19 @@ def cmd_tick_cal_ext(args):
         return 0
 
     counts = result["counts"]
+    export_counts = result.get("export_counts") or {}
     calendar_errors = [c for c in result["calendars"] if c["mode"] == "error"]
     apply_errors = counts.get("errors") or []
-    has_error = bool(calendar_errors) or bool(result["sync_errors"]) or bool(apply_errors)
+    # Task 7: export_own's own errors (`{event_id, action, error}` --
+    # shaped like apply_errors' entries but keyed by event_id instead of
+    # branch/id/external_uid, since export has no branch of its own and no
+    # remote identity to report) fold into the SAME has_error/tick.error
+    # path apply_errors already uses (requirement #10: an export failure
+    # must reach the nightly problem_summary exactly like an import
+    # failure does, not silently only via journald).
+    export_errors = export_counts.get("errors") or []
+    has_error = (bool(calendar_errors) or bool(result["sync_errors"])
+                 or bool(apply_errors) or bool(export_errors))
 
     # extcal_last_mode: pure telemetry, but (fix-round 2, minor #6) only
     # WRITTEN when it actually changes -- this key lands in the SAME WAL
@@ -1745,12 +1768,19 @@ def cmd_tick_cal_ext(args):
             mode_changed = True
             famdb.meta_set(conn, f"extcal_last_mode:{c['url']}", c["mode"])
 
-    nonzero_counts = any(v for k, v in counts.items() if k != "errors")
+    nonzero_counts = (any(v for k, v in counts.items() if k != "errors")
+                       or any(v for k, v in export_counts.items()
+                              if k not in ("errors", "unchanged")))
     if has_error or nonzero_counts or mode_changed:
         audit_payload = dict(counts)
         audit_payload["calendars"] = result["calendars"]
         if result["sync_errors"]:
             audit_payload["sync_errors"] = result["sync_errors"]
+        # Task 7: export counts ride along in the SAME audit row rather
+        # than a second, separate `cal.ext.export` summary row per tick --
+        # one sync, one row, matching how import/export are already one
+        # combined tick (fam-cal-ext.timer), not two.
+        audit_payload["export"] = export_counts
         audit.log(conn, "cal.ext.sync", audit_payload)
 
     # Fix-round finding C2: token persistence is gated ONLY on apply-time
@@ -1783,21 +1813,31 @@ def cmd_tick_cal_ext(args):
         reasons = list(result["sync_errors"])
         reasons += [f"{e.get('branch')}.{e.get('action')} id={e.get('id')}: {e.get('error')}"
                     for e in apply_errors]
+        # Task 7: export_own's errors have no "branch" (there is only one
+        # kind of row on this side, events) -- reported as "export.<action>
+        # event_id=<id>: <error>" instead, same overall shape.
+        reasons += [f"export.{e.get('action')} event_id={e.get('event_id')}: {e.get('error')}"
+                    for e in export_errors]
         _audit_tick_error("cal-ext", "; ".join(reasons) or "cal-ext sync had errors")
         if getattr(args, "json", False):
-            print(json.dumps({"ok": False, **counts, "calendars": result["calendars"]},
+            print(json.dumps({"ok": False, **counts, "export": export_counts,
+                               "calendars": result["calendars"]},
                               ensure_ascii=False))
         else:
             print(f"cal-ext failed: {len(calendar_errors)} calendar error(s), "
                   f"{len(result['sync_errors'])} sync issue(s), "
-                  f"{len(apply_errors)} apply error(s)")
+                  f"{len(apply_errors)} apply error(s), "
+                  f"{len(export_errors)} export error(s)")
         return 1
 
     if getattr(args, "json", False):
-        print(json.dumps({"ok": True, **counts, "calendars": result["calendars"]},
+        print(json.dumps({"ok": True, **counts, "export": export_counts,
+                           "calendars": result["calendars"]},
                           ensure_ascii=False))
     else:
-        print(" ".join(f"{k}={v}" for k, v in counts.items() if k != "errors"))
+        print(" ".join(f"{k}={v}" for k, v in counts.items() if k != "errors")
+              + " " + " ".join(f"export_{k}={v}" for k, v in export_counts.items()
+                                if k != "errors"))
     return 0
 
 
