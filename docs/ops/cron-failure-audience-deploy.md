@@ -12,6 +12,20 @@ All commands run against the live host through the jump proxy:
 ssh -J proxmox denis@192.168.20.10
 ```
 
+**Shell note:** the operator's local shell is fish, not bash. Every
+command below is a single `ssh ... '<remote command>'` invocation — the
+remote command text is one quoted argument, opaque to the local shell, so
+fish never has to parse the `&&`, `<<`, or `\` inside it; only the
+*remote* host's shell (confirmed `/bin/bash`, checked via `echo $SHELL`)
+interprets that text. That holds for every command in this runbook,
+including the multi-line backslash-continued and heredoc ones — paste
+them into fish as shown. The one thing that does NOT tolerate arbitrary
+reformatting is a heredoc terminator (`PY`, `SH`) — it must be flush at
+column 0 with no leading whitespace, or the remote bash will not
+recognize it and will keep consuming the rest of the runbook as heredoc
+body. Every heredoc below has been written that way; if you retype one by
+hand, preserve that.
+
 Host facts this runbook depends on, verified at authoring time
 (2026-07-30) by inspecting the host read-only — **re-check anything
 timestamped, since state may have moved on by execution time**:
@@ -168,12 +182,19 @@ of the feature branch needed.
    ssh -J proxmox denis@192.168.20.10 'cd /home/denis/.hermes/hermes-agent && git status --short'
    ```
 
-   At authoring time this showed two modified files unrelated to this
-   work (`custom/fam/fam/cal.py`, `custom/fam/fam/road.py`). **Do not
-   assume this is still the state at execution time** — re-check. If
+   At authoring time this was checked twice, at different moments, with
+   different results — both from the *same* pre-existing, unrelated `fam`
+   work, just caught mid-edit at different points: first as two modified
+   files (`custom/fam/fam/cal.py`, `custom/fam/fam/road.py`), later in the
+   same session as four (`custom/fam/fam/cal.py`, `custom/fam/fam/road.py`,
+   `custom/fam/fam/whereami.py`, `custom/fam/tests/test_cal.py`). **Treat
+   neither list as current — re-check at execution time.** If
    `git status --short` is non-empty, stash before merging
    (`git stash push -u -m "pre-cron-audience-merge"`) and restore
-   afterwards (`git stash pop`) rather than merging over a dirty tree.
+   afterwards (`git stash pop`) rather than merging over a dirty tree. If
+   the dirty files look like someone else's active work-in-progress rather
+   than harmless drift, confirm with them before stashing it out from
+   under them.
 
 2. Merge:
 
@@ -197,6 +218,13 @@ of the feature branch needed.
    autopush failed and needs `git pull --rebase && git push` by hand —
    see the hook's own error message if it printed one).
 
+   **Record the merge commit SHA now**, somewhere durable outside your
+   terminal scrollback (this runbook file's own margin, a chat message to
+   yourself, whatever survives an SSH session dying) — it's the short hash
+   printed by the `git log --oneline -1` above, e.g. `8f3c1a2`. Rollback's
+   `git revert` step below needs it, and rollback is exactly the situation
+   where scrollback may already be gone.
+
 3. Restart the gateway:
 
    ```bash
@@ -214,60 +242,103 @@ Use a deterministic, non-agent scratch job (a script that always exits
 non-zero) rather than an LLM prompt, so the failure is guaranteed and
 reproducible rather than depending on what the model decides to do.
 
-**Deviation from the original plan sketch:** the plan's draft command used
-`--schedule "manual"`. That is not a valid schedule string —
-`cron/jobs.py`'s `parse_schedule()` recognizes durations (`"30m"`,
-`"2h"`), `"every ..."` intervals, 5/6-field cron expressions, and ISO
-timestamps only; `"manual"` falls through to `parse_duration` and then
-raises `ValueError: Invalid schedule 'manual'. Use: ...`. Use a one-shot
-schedule far enough out that it cannot fire on its own before you delete
-it — `"24h"` — and trigger it explicitly with `cron run` instead, which
-executes immediately regardless of `next_run_at`.
+**Deviation from the original plan sketch — verified, not just corrected:**
+the plan's draft command used `--schedule "manual"`. That is not a valid
+schedule string — `cron/jobs.py`'s `parse_schedule()` recognizes durations
+(`"30m"`, `"2h"`), `"every ..."` intervals, 5/6-field cron expressions,
+and ISO timestamps only; `"manual"` falls through to `parse_duration` and
+raises `ValueError: Invalid schedule 'manual'. Use: ...`. The deeper bug,
+caught on review, was that `--schedule` is not a flag at all —
+`hermes_cli/subcommands/cron.py:64-66` declares `schedule` as a
+**required positional** (`cron create [options] schedule [prompt]`, per
+`cron create --help`), so `--schedule "24h"` fails with `unrecognized
+arguments` regardless of the value. The command below passes it
+positionally instead: `cron create "24h" --name ... --no-agent`.
 
-1. Create the scratch script:
+This whole sequence — the corrected `cron create` invocation, the
+`--no-agent`/`--script` shape, and the resulting failure — was run
+end-to-end against a throwaway `HERMES_HOME` on this host (not
+`~/.hermes`, no live config/jobs.json/gateway touched) before being put in
+this runbook, using the exact command shapes shown below:
+
+- `cron create "24h" --name "scratch-audience-check" --deliver
+  "telegram:79564752" --script "scratch-audience-check.sh" --no-agent`
+  succeeded and printed a job id.
+- Flagging `audience: end_user` directly on that job (bypassing the CLI,
+  same as the live steps below) and then `cron run scratch-audience-check`
+  triggered the job immediately.
+- The script ran, exited 1, and the job's saved output recorded exactly:
+  `Script exited with code 1\nstderr:\nscratch-audience-check: deliberately
+  failing for live verification` — the same text this runbook's Step 5.5
+  predicts inside the alert.
+- Calling `resolve_cron_audience(job, cfg)` directly beforehand (with a
+  scratch `config.yaml` carrying `cron.end_user_targets:
+  ["telegram:79564752"]`, no explicit `audience` field on the job) also
+  returned `"end_user"` — confirming the config-net path independently of
+  the explicit-flag path.
+- With logging enabled, the failure path reached
+  `_send_cron_operator_alert` → `_deliver_result`, which attempted a real
+  Telegram send and failed only because the scratch environment's bot
+  token was a deliberate placeholder (`Telegram send failed: You must pass
+  the token you received from https://t.me/Botfather!`) — i.e. the policy
+  and delivery machinery ran to completion; the only thing that didn't
+  happen was the network send, which requires the real bot token that only
+  exists in the live config.
+- **One-shot jobs remove themselves from `jobs.json` after their run
+  completes** (`cron/jobs.py`, the `repeat.completed >= repeat.times`
+  cleanup) — confirmed directly: after `cron run`, the job was gone from
+  `jobs.json`. `create_job()` auto-sets `repeat.times = 1` for a one-shot
+  schedule (any bare duration like `"24h"`) when `--repeat` isn't given, so
+  this scratch job self-deletes on its own after the one run you trigger
+  in Step 5.4 — see the cleanup note at the end of this section.
+
+1. Create the scratch script (a single `printf`, not a heredoc — see the
+   shell note at the top of this file for why heredocs inside a numbered
+   list are risky to hand-copy; this sidesteps the issue entirely):
 
    ```bash
-   ssh -J proxmox denis@192.168.20.10 'mkdir -p ~/.hermes/scripts && cat > ~/.hermes/scripts/scratch-audience-check.sh <<'"'"'SH'"'"'
-   #!/bin/bash
-   echo "scratch-audience-check: deliberately failing for live verification" >&2
-   exit 1
-   SH'
+   ssh -J proxmox denis@192.168.20.10 'mkdir -p ~/.hermes/scripts && printf "%s\n" "#!/bin/bash" "echo \"scratch-audience-check: deliberately failing for live verification\" >&2" "exit 1" > ~/.hermes/scripts/scratch-audience-check.sh'
    ```
+
+   Verify it was written correctly and fails as expected before wiring it
+   into a job:
+
+   ```bash
+   ssh -J proxmox denis@192.168.20.10 'cat ~/.hermes/scripts/scratch-audience-check.sh; bash ~/.hermes/scripts/scratch-audience-check.sh; echo "exit code: $?"'
+   ```
+
+   Expected: the three-line script printed back, then the stderr line, then
+   `exit code: 1`.
 
    (`.sh` scripts run via `bash <path>`, invoked directly rather than
    executed — no `chmod +x` needed, per `_run_job_script_with_claim_heartbeat`
    in `cron/scheduler.py`.)
 
-2. Create the job, `--no-agent` so the script's exit code is the failure
-   with no LLM involved, delivering to **your own Telegram**
-   (`telegram:79564752` — the same channel as `gateway.error_alerts.channel`,
-   so a policy bug surfaces where you're already watching):
+2. Create the job. `schedule` is a **required positional**, not a flag —
+   put `"24h"` right after `cron create`, before the options. `--no-agent`
+   so the script's exit code is the failure with no LLM involved,
+   delivering to **your own Telegram** (`telegram:79564752` — the same
+   channel as `gateway.error_alerts.channel`, so a policy bug surfaces
+   where you're already watching):
 
    ```bash
-   ssh -J proxmox denis@192.168.20.10 'cd /home/denis/.hermes/hermes-agent && venv/bin/python -m hermes_cli.main cron create \
+   ssh -J proxmox denis@192.168.20.10 'cd /home/denis/.hermes/hermes-agent && venv/bin/python -m hermes_cli.main cron create "24h" \
      --name "scratch-audience-check" \
-     --schedule "24h" \
      --deliver "telegram:79564752" \
      --script "scratch-audience-check.sh" \
      --no-agent'
    ```
 
    Note the job id printed (`Created job: <id>`) — you need it for the
-   next steps.
+   next steps. Record it the same way you recorded the merge SHA in Step
+   4.
 
-3. Flag it `end_user` the same way as Step 3 (substitute the real job id):
+3. Flag it `end_user` (substitute the real job id for `<JOB_ID>`; this is a
+   single-line command, not a heredoc, so there's no terminator-indentation
+   risk):
 
    ```bash
-   ssh -J proxmox denis@192.168.20.10 'python3 - <<PY
-   import json
-   p = "/home/denis/.hermes/cron/jobs.json"
-   data = json.load(open(p))
-   for job in data["jobs"]:
-       if job["name"] == "scratch-audience-check":
-           job["audience"] = "end_user"
-           print("flagged:", job["id"])
-   json.dump(data, open(p, "w"), ensure_ascii=False, indent=2)
-   PY'
+   ssh -J proxmox denis@192.168.20.10 'python3 -c "import json; p=\"/home/denis/.hermes/cron/jobs.json\"; d=json.load(open(p)); [j.update(audience=\"end_user\") for j in d[\"jobs\"] if j[\"id\"]==\"<JOB_ID>\"]; json.dump(d, open(p,\"w\"), ensure_ascii=False, indent=2); print(\"flagged\")"'
    ```
 
 4. Run it:
@@ -276,9 +347,15 @@ executes immediately regardless of `next_run_at`.
    ssh -J proxmox denis@192.168.20.10 'cd /home/denis/.hermes/hermes-agent && venv/bin/python -m hermes_cli.main cron run scratch-audience-check'
    ```
 
+   Expected CLI output: `Triggered job: <id> (scratch-audience-check)` then
+   `Ran now: failed.` — that second line confirms the script's non-zero
+   exit was recognized as a failed run, which is the trigger for the
+   whole policy path under test.
+
 5. Verify: check the Telegram chat (`telegram:79564752`) directly — that
    is the authoritative check. Expected message text (composed by
-   `plan_cron_failure_delivery` in `cron/scheduler.py`):
+   `plan_cron_failure_delivery` in `cron/scheduler.py`, confirmed
+   byte-for-byte against a scratch run):
 
    ```
    ⚠️ Cron 'scratch-audience-check' failed and the failure was WITHHELD from the
@@ -314,18 +391,35 @@ executes immediately regardless of `next_run_at`.
    show up as a *second*, wrongly-delivered message on the job's own
    target — you'd want to see that happen in your own chat, not hers.)
 
-7. Clean up — remove the scratch job and script:
+7. Clean up. **The job record itself does not need removing in the normal
+   case** — `create_job()` auto-sets `repeat.times = 1` for a bare-duration
+   schedule like `"24h"`, and `cron/jobs.py` removes a job from `jobs.json`
+   as soon as its completed-run count reaches `repeat.times`. This was
+   confirmed directly: after Step 5.4's single `cron run`, the job was
+   already gone from `jobs.json` — no separate delete needed. Only the
+   script file is left behind:
 
    ```bash
-   ssh -J proxmox denis@192.168.20.10 'cd /home/denis/.hermes/hermes-agent && venv/bin/python -m hermes_cli.main cron remove scratch-audience-check'
    ssh -J proxmox denis@192.168.20.10 'rm -f ~/.hermes/scripts/scratch-audience-check.sh'
    ```
 
-   Verify removal:
+   Confirm the job is really gone (it should be, per the above):
 
    ```bash
    ssh -J proxmox denis@192.168.20.10 'cd /home/denis/.hermes/hermes-agent && venv/bin/python -m hermes_cli.main cron list --all | grep -i scratch || echo "gone"'
    ```
+
+   **Only if you abort before running it** (created the job in Step 5.2
+   but never got to Step 5.4) does a job record remain, and only then is
+   an explicit remove needed:
+
+   ```bash
+   ssh -J proxmox denis@192.168.20.10 'cd /home/denis/.hermes/hermes-agent && venv/bin/python -m hermes_cli.main cron remove scratch-audience-check'
+   ```
+
+   Running `cron remove` on a job that has already self-deleted is
+   harmless — it just prints "Job not found" and exits 1; nothing to worry
+   about if you run it defensively anyway.
 
 ## Rollback
 
