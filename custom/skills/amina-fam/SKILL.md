@@ -13,7 +13,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v20 (final-review fixes: `cal adopt` on a whole recurring series, never edit/cancel an `owner='iphone'` row)._
+_Body version: v21 (`cal adopt` covers the whole series forever, including occurrences that sync in later; `disown` mirrors the same series-wide widening)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -407,15 +407,25 @@ show after cancel), make a second, separate terminal call.
     напоминай про это" about an ordinary Hermes event is `fam rem cancel
     <event_id>` (Reminder Reactions above — stops the chain, keeps the
     event), not `disown`. **`adopt` on one occurrence of a recurring
-    iPhone series takes over the WHOLE series in that one call** — a
-    recurring event's master + its overrides live in a single iCloud
-    resource, so removing her phone's alarm (`VALARM`) always affects
-    every occurrence at once; there is no way to adopt just one
-    occurrence while the rest keep ringing from her phone. `<event_id>`
-    can be any occurrence of the series — fam finds and flips every
-    sibling occurrence itself. If it's not obvious from context that she
-    means a recurring event, it is fine to mention it after the fact
-    ("эта тренировка идёт каждую неделю — беру на себя всю серию").
+    iPhone series takes over the WHOLE series, including occurrences
+    that haven't happened yet AND occurrences that haven't even synced
+    into fam's calendar yet** — a recurring event's master + its
+    overrides live in a single iCloud resource, so removing her phone's
+    alarm (`VALARM`) always affects every occurrence at once; there is
+    no way to adopt just one occurrence while the rest keep ringing from
+    her phone. `<event_id>` can be any occurrence of the series — fam
+    finds and flips every sibling occurrence already in its calendar
+    itself, AND every future occurrence of that same series
+    automatically inherits Hermes ownership (with its own reminder
+    chain) the moment it syncs in, however far out that is — you never
+    need to re-adopt the same series later just because a new occurrence
+    rolled into view. `disown` mirrors this the same way: disowning any
+    one occurrence of an already-adopted series reverts every sibling
+    occurrence currently in fam's calendar back to `owner='iphone'` in
+    the same call. If it's not obvious from context that she means a
+    recurring event, it is fine to mention it after the fact ("эта
+    тренировка идёт каждую неделю — беру на себя всю серию, включая
+    будущие повторения").
 22. **Never `cal cancel`/`cal done`/`plan done` (or any other
     calendar-editing verb) on an `owner='iphone'` row.** fam does not
     refuse this today, but nothing about it ever reaches her phone or
