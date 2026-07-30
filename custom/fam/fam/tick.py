@@ -1112,6 +1112,14 @@ def _meds_series(conn, now_utc, cfg):
                 raw = {"mode": "take", "name": name, "dose": dose,
                        "intake_id": intake_id, "attempt_no": attempt_no,
                        "minutes_late": minutes_late}
+                # Design spec S5: this dose's own already-sent wordings
+                # today, if any, are what gate._build_prompt's variation
+                # instruction now has to work with -- key omitted
+                # entirely (not an empty list) when there is nothing
+                # prior, mirroring reminders()' raw["prior_texts"].
+                previous = _med_prior_texts(conn, intake_id, now_utc)
+                if previous:
+                    raw["previous"] = previous
                 human_fallback = gate.med_fallback(name, dose, attempt_no)
                 status = gate.deliver(conn, "med", raw, human_fallback, cfg,
                                        force=True, now_utc=now_utc,
@@ -1189,6 +1197,13 @@ def _meds_series(conn, now_utc, cfg):
                        "dose": items[0]["dose"], "intake_id": ids[0],
                        "attempt_no": _med_attempt_no(conn, ids[0]),
                        "plan_local": items[0]["plan_local"], "late": True}
+                # Same reasoning as attempt_no just above: a release is
+                # very often not this dose's first send, so its earlier
+                # wordings (if any) belong in raw here too, same key and
+                # same omit-when-empty rule as the ordinary take branch.
+                previous = _med_prior_texts(conn, ids[0], now_utc)
+                if previous:
+                    raw["previous"] = previous
                 human_fallback = (
                     f"{items[0]['name']} за {items[0]['plan_local']} "
                     f"ещё не отмечено.")
@@ -1335,6 +1350,68 @@ def _med_attempt_no(conn, intake_id):
         "  SELECT sent_message_id FROM sent_message_refs"
         "  WHERE kind='med' AND ref_id=?"
         ")", (intake_id, intake_id)).fetchone()[0] + 1
+
+
+def _med_prior_texts(conn, intake_id, now_utc, limit=2):
+    """Last `limit` (default 2) delivered texts for this exact dose,
+    already sent TODAY (Asia/Almaty, relative to now_utc), most recent
+    first. Design spec 2026-07-29 (S5): the rewrite LLM is never shown
+    what it already said for this dose, so
+    GATE_MED_VARIATION_INSTRUCTION's "сформулируй иначе, чем в прошлый
+    раз" has nothing to vary against -- this is the missing input, fed
+    into raw["previous"] by _meds_series' take/release branches and
+    turned into an actionable instruction by gate._build_prompt.
+
+    Mirrors gate.prior_texts_today (same audit_log/gate.sent source,
+    same "today" semantics) but lives here, not in gate.py, because the
+    match key is payload["raw"]["intake_id"] -- a meds/tick concept
+    gate.py has no other reason to know about -- rather than
+    raw["event_id"].
+
+    Bounded to today's Asia/Almaty day using this module's own
+    _followup_day_bounds_utc(date_local) + _today_almaty(now_utc) (the
+    same day-bounds helper _digest_already_sent_today's docstring points
+    at gate._almaty_day_utc_bounds for) rather than gate.py's helper, to
+    avoid a fourth reimplementation of the same UTC-bounds math while
+    still not scanning the full audit_log: doses are same-day by
+    construction (meds_gen opens a fresh med_intakes row each day), and
+    audit_log holds 22,000+ rows -- an unbounded scan would run on every
+    single minute tick.
+
+    Rows written before this feature existed have raw WITHOUT
+    intake_id at all (verified in production: older med rows carry raw
+    keys ["dose", "mode", "name"] only) -- raw.get("intake_id") is None
+    for them and simply never equals a real intake_id, so they are
+    skipped, not heuristically matched by name (a wrong match would feed
+    the model someone else's sentence).
+
+    Malformed/unparseable payload JSON is skipped, never raised -- this
+    runs inside the minute tick and one bad audit row must not take the
+    whole tick down.
+    """
+    from_utc, to_utc = _followup_day_bounds_utc(_today_almaty(now_utc))
+    rows = conn.execute(
+        "SELECT payload FROM audit_log WHERE kind='gate.sent' "
+        "AND ts_utc >= ? AND ts_utc < ? ORDER BY id DESC",
+        (from_utc, to_utc),
+    ).fetchall()
+    out = []
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("kind") != "med":
+            continue
+        raw = payload.get("raw")
+        if not isinstance(raw, dict) or raw.get("intake_id") != intake_id:
+            continue
+        final = payload.get("final")
+        if final:
+            out.append(final)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _release_deferred_key(now_utc, ids):

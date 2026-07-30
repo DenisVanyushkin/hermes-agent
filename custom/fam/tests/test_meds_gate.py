@@ -692,6 +692,44 @@ def test_single_released_dose_stays_a_take_message(db, fake_deliver):
         "SELECT COUNT(*) FROM sent_message_refs").fetchone()[0] == 0
 
 
+def test_single_released_dose_carries_raw_previous(db, fake_deliver):
+    # Design spec S5: a release is often attempt 2+ (a dose held by the
+    # away gate after already being sent once) -- raw["previous"] must
+    # be wired into the release branch too, not just the ordinary
+    # +45min repeat.
+    a = _pending_intake(db, name="Эутирокс")
+    db.execute(
+        "INSERT INTO audit_log(ts_utc, kind, actor, payload) VALUES(?,?,?,?)",
+        (MORNING, "gate.sent", "test",
+         json.dumps({"kind": "med",
+                     "raw": {"mode": "take", "intake_id": a},
+                     "final": "Пора принять Эутирокс."},
+                    ensure_ascii=False)))
+    db.commit()
+    tick._meds_series(db, MORNING, CFG)
+    assert fake_deliver.calls == []
+
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", CFG)
+
+    assert len(fake_deliver.calls) == 1
+    assert fake_deliver.calls[0]["raw"]["previous"] == [
+        "Пора принять Эутирокс."]
+
+
+def test_single_released_dose_omits_raw_previous_when_none_sent(
+        db, fake_deliver):
+    _pending_intake(db, name="Эутирокс")
+    tick._meds_series(db, MORNING, CFG)
+    assert fake_deliver.calls == []
+
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", CFG)
+
+    assert len(fake_deliver.calls) == 1
+    assert "previous" not in fake_deliver.calls[0]["raw"]
+
+
 def test_ordinary_repeats_stay_separate(db, fake_deliver):
     _pending_intake(db, name="Эутирокс", plan="2026-07-20T11:00:00+00:00",
                     times=("16:00",))

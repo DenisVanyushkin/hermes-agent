@@ -196,3 +196,45 @@ def test_variation_instruction_only_for_repeats():
 def test_variation_instruction_absent_for_other_kinds():
     prompt = gate._build_prompt({"attempt_no": 3}, kind="reminder")
     assert gate.GATE_MED_VARIATION_INSTRUCTION not in prompt
+
+
+# ---- design spec S5: raw["previous"] makes the variation instruction
+# concrete instead of a blind "word it differently" the model has no
+# basis for following ----
+
+def test_prior_instruction_used_when_previous_present():
+    prompt = gate._build_prompt(
+        {"mode": "take", "name": "X", "attempt_no": 2,
+         "previous": ["Пора принять X."]}, kind="med")
+    assert gate.GATE_MED_PRIOR_VARIATION_INSTRUCTION in prompt
+    assert gate.GATE_MED_VARIATION_INSTRUCTION not in prompt
+
+
+def test_generic_instruction_used_when_attempt_no_repeat_and_no_previous():
+    prompt = gate._build_prompt(
+        {"mode": "take", "name": "X", "attempt_no": 2}, kind="med")
+    assert gate.GATE_MED_VARIATION_INSTRUCTION in prompt
+    assert gate.GATE_MED_PRIOR_VARIATION_INSTRUCTION not in prompt
+
+
+def test_neither_instruction_on_first_attempt_without_previous():
+    prompt = gate._build_prompt(
+        {"mode": "take", "name": "X", "attempt_no": 1}, kind="med")
+    assert gate.GATE_MED_VARIATION_INSTRUCTION not in prompt
+    assert gate.GATE_MED_PRIOR_VARIATION_INSTRUCTION not in prompt
+
+
+def test_prior_instruction_wins_even_when_previous_present_and_empty_list_does_not():
+    # An empty list must behave exactly like an absent key -- only a
+    # non-empty `previous` switches the branch.
+    prompt = gate._build_prompt(
+        {"mode": "take", "name": "X", "attempt_no": 2, "previous": []},
+        kind="med")
+    assert gate.GATE_MED_PRIOR_VARIATION_INSTRUCTION not in prompt
+    assert gate.GATE_MED_VARIATION_INSTRUCTION in prompt
+
+
+def test_prior_variation_instruction_absent_for_other_kinds():
+    prompt = gate._build_prompt(
+        {"attempt_no": 3, "previous": ["Что-то."]}, kind="reminder")
+    assert gate.GATE_MED_PRIOR_VARIATION_INSTRUCTION not in prompt
