@@ -72,6 +72,15 @@ from hermes_cli.config import cfg_get, get_config_path, load_config_readonly, re
 from hermes_cli.fallback_config import get_fallback_chain
 from hermes_cli.review_gate import build_review_gate_startup_log_fields
 from gateway.telegram_reactions import strip_telegram_reaction_only_response as _strip_telegram_reaction_only_response
+from gateway.module_skew import detect_module_skew, take_snapshot
+from gateway.stale_guard import (
+    auto_restart_allowed,
+    format_budget_exhausted_alert,
+    format_skew_alert,
+    get_stale_guard_config,
+    record_auto_restart,
+)
+from gateway.turn_error_alerts import get_alert_config, send_operator_alert
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -5276,6 +5285,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             running_agent_count=self._running_agent_count(),
             seconds_since_last_inbound=time.time() - self._last_inbound_at,
             idle_timeout_seconds=self._scale_to_zero_idle_timeout_seconds(),
+            has_live_background_work=self._scale_to_zero_has_live_background_work(),
+        )
+
+    def _stale_guard_is_idle(self, idle_timeout_seconds: float) -> bool:
+        """Тот же предикат, что у scale-to-zero, но со своим порогом.
+
+        is_idle — чистая функция; scale-to-zero на этой машине не настроен,
+        поэтому его порог не переиспользуется.
+        """
+        from gateway.scale_to_zero import is_idle
+
+        return is_idle(
+            running_agent_count=self._running_agent_count(),
+            seconds_since_last_inbound=time.time() - self._last_inbound_at,
+            idle_timeout_seconds=idle_timeout_seconds,
             has_live_background_work=self._scale_to_zero_has_live_background_work(),
         )
 
@@ -25125,7 +25149,71 @@ def _run_planned_stop_watcher(
         stop_event.wait(poll_interval)
 
 
-def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
+_STALE_GUARD_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _stale_guard_hermes_home() -> Path:
+    """Вынесено отдельной функцией, чтобы тесты подменяли её одной строкой."""
+    from hermes_constants import get_hermes_home  # NB: hermes_constants, НЕ hermes_cli.config
+
+    return Path(get_hermes_home())
+
+
+def _stale_guard_load_config():
+    from hermes_cli.config import load_config
+
+    return load_config() or {}
+
+
+def _stale_guard_tick(runner, cfg: dict, alert_state: dict) -> None:
+    """Один опрос детектора. Никогда не бросает наружу.
+
+    ``alert_state`` живёт столько же, сколько процесс: скос не исчезает сам,
+    поэтому алерт шлётся один раз на эпизод, а не по временно́му дедупу.
+    """
+    try:
+        changed = detect_module_skew(_STALE_GUARD_PROJECT_ROOT)
+        if not changed:
+            return
+
+        alert_cfg = get_alert_config(_stale_guard_load_config())
+
+        if not alert_state.get("skew_alerted"):
+            alert_state["skew_alerted"] = True
+            logger.error(
+                "Gateway is running stale code — changed on disk: %s",
+                ", ".join(changed[:10]),
+            )
+            if alert_cfg:
+                send_operator_alert(
+                    alert_cfg["channel"],
+                    format_skew_alert(changed, alert_state.get("boot_label", "старт")),
+                )
+
+        home = _stale_guard_hermes_home()
+        now = time.time()
+        if not auto_restart_allowed(home, now, cfg["max_auto_restarts_per_hour"]):
+            if not alert_state.get("budget_alerted"):
+                alert_state["budget_alerted"] = True
+                logger.error("stale-guard: auto-restart budget exhausted")
+                if alert_cfg:
+                    send_operator_alert(
+                        alert_cfg["channel"],
+                        format_budget_exhausted_alert(cfg["max_auto_restarts_per_hour"]),
+                    )
+            return
+
+        if not runner._stale_guard_is_idle(cfg["idle_timeout_minutes"] * 60):
+            return
+
+        record_auto_restart(home, now)
+        logger.warning("stale-guard: idle and stale — requesting planned restart")
+        runner.request_restart(via_service=True)
+    except Exception:  # noqa: BLE001 — сторож не имеет права ронять housekeeping
+        logger.warning("stale-guard tick failed", exc_info=True)
+
+
+def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, runner=None):
     """Background thread for gateway-only periodic chores (NOT cron).
 
     Split out of the historical ``_start_cron_ticker`` so the cron *trigger*
@@ -25147,6 +25235,10 @@ def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop
     PASTE_SWEEP_EVERY = 60   # ticks — once per hour
     CURATOR_EVERY = 60       # ticks — poll hourly (inner gate handles the real cadence)
     AUTO_ARCHIVE_EVERY = 60  # ticks — poll hourly (state_meta gate owns the real cadence)
+
+    _stale_cfg = get_stale_guard_config(_stale_guard_load_config())
+    STALE_GUARD_EVERY = _stale_cfg["check_every_minutes"] if _stale_cfg else 0
+    _stale_alert_state = {"boot_label": datetime.now().strftime("%H:%M:%S")}
 
     logger.info("Gateway housekeeping started (interval=%ds)", interval)
     tick_count = 0
@@ -25232,6 +25324,9 @@ def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop
                         _adb.close()
             except Exception as e:
                 logger.debug("Auto-archive tick error: %s", e)
+
+        if STALE_GUARD_EVERY and runner is not None and tick_count % STALE_GUARD_EVERY == 0:
+            _stale_guard_tick(runner, _stale_cfg, _stale_alert_state)
 
         stop_event.wait(timeout=interval)
     logger.info("Gateway housekeeping stopped")
@@ -25810,6 +25905,16 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # code on disk at startup — see preload_turn_path_modules() docstring.
     logger.info("Turn-path preload: %s", ", ".join(preload_turn_path_modules()) or "none")
 
+    # Снимок берётся ЗДЕСЬ, после preload: sys.modules ещё совпадает с диском.
+    # Раньше — не все горячие модули загружены; позже — можно застать уже
+    # разъехавшееся дерево и принять его за исходное.
+    _stale_guard_cfg = get_stale_guard_config(_stale_guard_load_config())
+    if _stale_guard_cfg:
+        _n = take_snapshot(
+            _STALE_GUARD_PROJECT_ROOT, watch_files=_stale_guard_cfg["watch_files"]
+        )
+        logger.info("Stale-code guard armed: %d file(s) fingerprinted", _n)
+
     # Start the gateway
     success = await runner.start()
     if not success:
@@ -25903,7 +26008,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     housekeeping_thread = threading.Thread(
         target=_start_gateway_housekeeping,
         args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
+        kwargs={
+            "adapters": runner.adapters,
+            "loop": asyncio.get_running_loop(),
+            "runner": runner,
+        },
         daemon=True,
         name="gateway-housekeeping",
     )
