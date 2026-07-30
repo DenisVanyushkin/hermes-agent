@@ -198,11 +198,16 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
             # Single-dose case: byte-for-byte the pre-Task-6 not_pending
             # path -- the reaction's intent is satisfied or moot, so it is
             # an idempotent success, and the mapping is marked so repeats
-            # short-circuit at the ack_status check above.
-            conn.execute(
-                "UPDATE sent_messages SET ack_status='confirmed' "
-                "WHERE kind=? AND ref_id=? AND ack_status='none'",
-                (row["kind"], row["ref_id"]))
+            # short-circuit at the ack_status check above. For a group
+            # where EVERY member already left 'pending', the same marking
+            # has to reach all of them (targets), or members 2..n keep
+            # ack_status='none' and their own sibling messages stay
+            # re-ackable forever.
+            for rid in targets:
+                conn.execute(
+                    "UPDATE sent_messages SET ack_status='confirmed' "
+                    "WHERE kind=? AND ref_id=? AND ack_status='none'",
+                    (row["kind"], rid))
             out = {**base, "result": "already_acked",
                    "reason": "not_pending"}
             audit.log(conn, "react.handle", out)

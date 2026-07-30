@@ -569,10 +569,11 @@ def test_ordinary_repeats_stay_separate(db, fake_deliver):
     assert all(c["raw"]["mode"] == "take" for c in fake_deliver.calls)
 
 
-def test_failed_group_send_leaves_doses_held(db, fake_deliver):
-    """Инвариант: если групповая отправка упала, ни одна доза не должна
-    остаться с очищенным gate_reason -- иначе она «отпущена», хотя ничего
-    не ушло. Откат делает отпускание атомарным с отправкой."""
+def test_group_send_exception_leaves_doses_held(db, fake_deliver):
+    """Путь ИСКЛЮЧЕНИЯ (не то же, что упавшая отправка -- та возвращает
+    "error", см. соседний тест ниже): если групповая отправка бросила,
+    ни одна доза не должна остаться с очищенным gate_reason -- иначе она
+    «отпущена», хотя ничего не ушло."""
     a = _pending_intake(db, name="Эутирокс")
     b = _pending_intake(db, name="Магний")
     tick._meds_series(db, MORNING, CFG)
@@ -694,3 +695,89 @@ def test_group_send_marks_every_member_acked_in_sent_messages(db):
     statuses = {r["wa_message_id"]: r["ack_status"] for r in db.execute(
         "SELECT wa_message_id, ack_status FROM sent_messages")}
     assert statuses == {"wa0": "confirmed", "wa1": "confirmed"}
+
+
+# --- Fix round 1: the two seams the first pass left uncovered. ---
+#
+# 1. gate.deliver does NOT raise when the send fails: _call_send returning
+#    (False, None) makes it audit gate.error and RETURN "error". Without a
+#    status check the release would commit as if delivered.
+# 2. The tick -> gate.deliver -> react.record_sent -> sent_message_refs ->
+#    react.handle seam ran with gate.deliver replaced wholesale in every
+#    existing test, so the one-line ref_ids passthrough in gate.deliver was
+#    never executed by anything.
+
+
+def _live_cfg():
+    """CFG plus the keys real gate.deliver needs (max_len_*, budget, ...)."""
+    return {**gate.load_config(), **CFG}
+
+
+def test_group_send_error_status_leaves_doses_held(db, monkeypatch):
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    cfg = _live_cfg()
+    monkeypatch.setattr(gate, "_call_rewrite", lambda *a, **k: None)
+    monkeypatch.setattr(gate, "_call_send", lambda *a, **k: (True, "WAM1"))
+    tick._meds_series(db, MORNING, cfg)
+    for iid in (a, b):
+        assert _intake(db, iid)["gate_reason"] == "asleep"
+
+    # Мост умер: _call_send -> (False, None); deliver возвращает "error",
+    # НЕ бросая. Отпускание обязано откатиться целиком.
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+    monkeypatch.setattr(gate, "_call_send", lambda *a, **k: (False, None))
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", cfg)
+
+    for iid in (a, b):
+        row = _intake(db, iid)
+        assert row["gate_reason"] == "asleep", iid
+        assert row["status"] == "pending", iid
+        assert row["series_next_utc"] == "2026-07-20T05:10:00+00:00", iid
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='med.gate_release'"
+    ).fetchone()[0] == 0
+    assert db.execute(
+        "SELECT COUNT(*) FROM sent_messages").fetchone()[0] == 0
+    deferred = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.med' "
+        "ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert "release_deferred" in deferred
+
+
+def test_group_release_end_to_end_through_real_deliver(db, monkeypatch):
+    """Полный шов: tick -> gate.deliver -> record_sent ->
+    sent_message_refs -> react.handle. Опечатка в проброс ref_ids тихо
+    выродила бы групповое сообщение в одиночный ack -- ловится только
+    здесь, потому что все остальные тесты подменяют gate.deliver целиком."""
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    cfg = _live_cfg()
+    sent = []
+    monkeypatch.setattr(gate, "_call_rewrite", lambda *a, **k: None)
+
+    def _send(text, _cfg):
+        sent.append(text)
+        return True, "WAMGRP"
+
+    monkeypatch.setattr(gate, "_call_send", _send)
+
+    tick._meds_series(db, MORNING, cfg)
+    assert sent == []
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", cfg)
+
+    assert len(sent) == 1, "одно сообщение на обе дозы"
+    assert "Эутирокс" in sent[0] and "Магний" in sent[0]
+    msg = db.execute("SELECT * FROM sent_messages").fetchall()
+    assert len(msg) == 1 and msg[0]["wa_message_id"] == "WAMGRP"
+    refs = {r["ref_id"] for r in db.execute(
+        "SELECT ref_id FROM sent_message_refs WHERE sent_message_id=?",
+        (msg[0]["id"],))}
+    assert refs == {a, b}
+
+    out = react.handle(db, "WAMGRP", "\U0001F44D")
+    assert out["result"] == "confirmed"
+    assert _intake(db, a)["status"] == "taken"
+    assert _intake(db, b)["status"] == "taken"

@@ -924,9 +924,31 @@ def _meds_series(conn, now_utc, cfg):
     and committing it there would survive a later failure of the group
     send, leaving a dose that claims it was released while nothing was
     ever sent. Keeping the writes in the group's own transaction makes
-    release and send atomic: on failure everything rolls back, the doses
-    stay held with their old (already-due) series_next_utc, and the next
-    tick retries the identical release.
+    release and send atomic.
+
+    "Failure" for the release group means BOTH of:
+      1. an exception out of the group body (handled by its except:
+         rollback, then tick.error{"where":"meds_release"}), and
+      2. gate.deliver RETURNING any status other than "sent" -- it does
+         not raise when the send fails: a dead bridge makes _call_send
+         return (False, None), which deliver audits as gate.error and
+         reports as the string "error" (with force=True "quiet"/"budget"
+         are unreachable, but they are treated the same way). This is
+         rolled back too and audited as
+         tick.med{"mode":"release_deferred", status}.
+    In both cases nothing of the release persists: gate_reason keeps its
+    "asleep"/"away" value and series_next_utc keeps the value the last
+    _gate_hold gave it (already <= now), so the very next tick re-examines
+    the same rows and retries the identical release.
+
+    This is DELIBERATELY different from the ordinary take branch above,
+    which advances series_next_utc regardless of gate.deliver's status.
+    That branch escalates a dose Amina was already told about, so the
+    +45min step is right even after a failed resend. A gate release is the
+    FIRST announcement of that dose -- it has never been sent at all -- so
+    retrying at the gate's recheck cadence beats recording a delivery that
+    never happened and then staying silent for 45 minutes. Do not
+    "harmonise" the two.
     """
     now_dt = _parse_utc(now_utc)
     due = conn.execute(
@@ -1114,7 +1136,8 @@ def _meds_series(conn, now_utc, cfg):
             ids = [r["intake_id"] for r in released]
             for r in released:
                 conn.execute(
-                    "UPDATE med_intakes SET gate_reason=NULL WHERE id=?",
+                    "UPDATE med_intakes SET gate_reason=NULL "
+                    "WHERE id=? AND status='pending'",
                     (r["intake_id"],))
                 audit.log(conn, "med.gate_release",
                           {"intake_id": r["intake_id"], "was": r["was"]})
@@ -1138,17 +1161,39 @@ def _meds_series(conn, now_utc, cfg):
                                   force=True, now_utc=now_utc,
                                   sent_ref={"kind": "med", "ref_id": ids[0],
                                             "ref_ids": ids})
-            repeat_min = cfg.get("med_repeat_min", 45)
-            next_utc = (now_dt + timedelta(minutes=repeat_min)).isoformat(
-                timespec="seconds")
-            for iid in ids:
-                conn.execute(
-                    "UPDATE med_intakes SET series_next_utc=? "
-                    "WHERE id=? AND status='pending'", (next_utc, iid))
-            audit.log(conn, "tick.med",
-                      {"mode": "release_group", "intake_ids": ids,
-                       "status": status})
-            conn.commit()
+            if status != "sent":
+                # gate.deliver does NOT raise when the send fails -- a
+                # dead bridge makes _call_send return (False, None),
+                # which it audits as gate.error and reports as the
+                # string "error". Without this branch the release would
+                # commit anyway: gate_reason cleared, series advanced 45
+                # minutes, and not one word delivered.
+                #
+                # Denis's ruling (2026-07-29 fix round): for a RELEASE,
+                # any non-"sent" status rolls the whole release back and
+                # leaves the doses held, so the next tick retries. The
+                # ordinary take branch above deliberately advances even
+                # on "error" -- it escalates a dose Amina already heard
+                # about; this one is her first word of it, so a retry in
+                # ~10 minutes beats a fictitious delivery plus 45
+                # minutes of silence. Do not unify the two.
+                conn.rollback()
+                audit.log(conn, "tick.med",
+                          {"mode": "release_deferred", "intake_ids": ids,
+                           "status": status})
+                conn.commit()
+            else:
+                repeat_min = cfg.get("med_repeat_min", 45)
+                next_utc = (now_dt + timedelta(minutes=repeat_min)).isoformat(
+                    timespec="seconds")
+                for iid in ids:
+                    conn.execute(
+                        "UPDATE med_intakes SET series_next_utc=? "
+                        "WHERE id=? AND status='pending'", (next_utc, iid))
+                audit.log(conn, "tick.med",
+                          {"mode": "release_group", "intake_ids": ids,
+                           "status": status})
+                conn.commit()
         except Exception as e:                        # noqa: BLE001
             conn.rollback()
             audit.log(conn, "tick.error",
