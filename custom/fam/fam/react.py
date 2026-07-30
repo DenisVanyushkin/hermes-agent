@@ -10,6 +10,10 @@ the existing ack primitives:
                                       +45min persistent series)
   skip (👎 ❌):           reminder -> rem.cancel_chain
                           med      -> meds.skip (only this dose)
+  snooze (⏰ 🕐 ⏳):       reminder -> not applicable, "ignored"
+                          med      -> meds.defer (dose stays 'pending',
+                                      series_next_utc pushed by
+                                      med_snooze_min minutes)
 
 Correlation lives in the `sent_messages` table (schema v10): gate.deliver
 records the bridge-returned WhatsApp message id for every reminder/med
@@ -38,14 +42,18 @@ from fam import db as famdb
 # Base emoji AFTER _normalize_emoji (variation selectors and skin-tone
 # modifiers stripped), so 👍🏽 and ❤️ match their bare forms.
 #
-# INVARIANT: EMOJI_CONFIRM | EMOJI_SKIP must remain a subset of
-# DIALOGUE_EMOJI in plugins/platforms/whatsapp/reactions.py. The
-# whitelist filter there runs BEFORE this hook is ever invoked, so any
-# emoji added here without also adding it to DIALOGUE_EMOJI would
+# INVARIANT: EMOJI_CONFIRM | EMOJI_SKIP | EMOJI_SNOOZE must remain a
+# subset of DIALOGUE_EMOJI in plugins/platforms/whatsapp/reactions.py.
+# The whitelist filter there runs BEFORE this hook is ever invoked, so
+# any emoji added here without also adding it to DIALOGUE_EMOJI would
 # silently never reach react-hook -- no error, just a dropped ack.
 # Enforced by tests/gateway/test_whatsapp_reactions_normalize.py.
 EMOJI_CONFIRM = {"\U0001F44D", "❤", "\U0001F4AA", "✅"}  # 👍 ❤ 💪 ✅
 EMOJI_SKIP = {"\U0001F44E", "❌"}                              # 👎 ❌
+
+# ⏰ 🕐 ⏳ -- "not now, remind me later". med-only: an event reminder
+# has no deferral primitive, only ack/cancel make sense there.
+EMOJI_SNOOZE = {"⏰", "\U0001F550", "⏳"}
 
 # Feedback reaction the adapter puts on the reminder message once an ack
 # (or an idempotent re-ack) landed.
@@ -112,14 +120,71 @@ def record_sent(conn, wa_message_id, kind, ref_id, event_id=None,
             "VALUES(?,?,?)", (row["id"], kind, rid))
 
 
+def _snooze(conn, row, base, now_utc):
+    """⏰ -> meds.defer by med_snooze_min minutes for every dose this
+    message covers.
+
+    The dose stays 'pending' -- this is a deferral, not an ack. If
+    now + med_snooze_min would cross Asia/Almaty midnight (meds.defer
+    forbids that: tomorrow's dose is generated on its own schedule), the
+    target is clamped to 23:59 local instead of raising.
+    """
+    from datetime import datetime, timedelta
+
+    from fam import gate
+    from fam.gate import _now
+    from fam.meds import _ALMATY
+
+    cfg = gate.load_config()
+    minutes = int(cfg.get("med_snooze_min", 60))
+    now = datetime.fromisoformat(now_utc or _now())
+    until = now + timedelta(minutes=minutes)
+
+    # Clamp against TODAY's (now's local date) end-of-day, not until's --
+    # once +minutes has already rolled into tomorrow, .replace(hour=23,
+    # minute=59) on that rolled-over datetime would silently clamp to
+    # tomorrow's 23:59 instead of pulling it back to today's.
+    local_now = now.astimezone(_ALMATY)
+    end_of_day = local_now.replace(hour=23, minute=59, second=0, microsecond=0)
+    if until.astimezone(_ALMATY) > end_of_day:
+        until = end_of_day.astimezone(until.tzinfo)
+    until_str = until.isoformat(timespec="seconds")
+
+    targets = [r["ref_id"] for r in conn.execute(
+        "SELECT ref_id FROM sent_message_refs "
+        "WHERE sent_message_id=? AND kind='med' ORDER BY ref_id",
+        (row["id"],))] or [row["ref_id"]]
+
+    deferred = 0
+    for rid in targets:
+        try:
+            meds.defer(conn, rid, until_str, now_utc=now_utc)
+            deferred += 1
+        except ValueError:
+            # Already left 'pending' through another door (verbal
+            # confirmation, midnight closeout, ...) -- not this snooze's
+            # problem, same tolerance as the confirm/skip loop below.
+            continue
+
+    out = {**base, "result": "snoozed" if deferred else "already_acked",
+           "until_utc": until_str, "deferred": deferred}
+    audit.log(conn, "react.handle", out)
+    conn.commit()
+    return out
+
+
 def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
     """Resolve a reaction on WhatsApp message `wa_message_id` and apply
     the mapped ack. Returns a dict whose "result" is one of:
 
       confirmed | skipped     -- ack applied now
+      snoozed                 -- ⏰ on a med: series_next_utc pushed by
+                                 med_snooze_min minutes, status stays
+                                 'pending' (this is NOT an ack)
       already_acked           -- idempotent repeat (or the underlying row
                                  was already taken/acked/cancelled)
-      ignored                 -- unmapped emoji, or a reaction removal
+      ignored                 -- unmapped emoji, a reaction removal, or
+                                 ⏰ on a non-med (kind='reminder') message
       unknown_message         -- id not in sent_messages (normal chat)
 
     Commits on every path that wrote anything. Never raises for the
@@ -139,12 +204,25 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
             "emoji": emoji}
 
     norm = _normalize_emoji(emoji)
-    if removal or (norm not in EMOJI_CONFIRM and norm not in EMOJI_SKIP):
+    if removal or (norm not in EMOJI_CONFIRM and norm not in EMOJI_SKIP
+                   and norm not in EMOJI_SNOOZE):
         out = {**base, "result": "ignored",
                "reason": "removal" if removal else "unmapped_emoji"}
         audit.log(conn, "react.handle", out)
         conn.commit()
         return out
+
+    if norm in EMOJI_SNOOZE:
+        # Not an ack -- deliberately bypasses the ack_status idempotency
+        # check below: a snooze never sets ack_status, so it must not be
+        # gated by it either (an already-acked message has nothing left
+        # to snooze; _snooze's per-target ValueError skip handles that).
+        if row["kind"] != "med":
+            out = {**base, "result": "ignored", "reason": "snooze_not_med"}
+            audit.log(conn, "react.handle", out)
+            conn.commit()
+            return out
+        return _snooze(conn, row, base, now_utc)
 
     action = "confirm" if norm in EMOJI_CONFIRM else "skip"
 

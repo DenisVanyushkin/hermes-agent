@@ -25,16 +25,17 @@ _CUSTOM_FAM = Path(__file__).resolve().parents[2] / "custom" / "fam"
 if str(_CUSTOM_FAM) not in sys.path:
     sys.path.insert(0, str(_CUSTOM_FAM))
 
-from fam.react import EMOJI_CONFIRM, EMOJI_SKIP  # noqa: E402
+from fam.react import EMOJI_CONFIRM, EMOJI_SKIP, EMOJI_SNOOZE  # noqa: E402
 
 
-def test_whitelist_has_exactly_ten_entries():
-    assert len(DIALOGUE_EMOJI) == 10
+def test_whitelist_has_exactly_thirteen_entries():
+    assert len(DIALOGUE_EMOJI) == 13
 
 
 @pytest.mark.parametrize("emoji", ["👍", "❤️", "😂", "😮", "😢", "🙏",
-                                   "👎", "❌", "✅", "💪"])
-def test_all_ten_basic_reactions_pass_the_whitelist(emoji):
+                                   "👎", "❌", "✅", "💪",
+                                   "⏰", "🕐", "⏳"])
+def test_all_thirteen_basic_reactions_pass_the_whitelist(emoji):
     assert is_dialogue_emoji(emoji) is True
 
 
@@ -62,19 +63,19 @@ def test_normalize_emoji_tolerates_none_like_input():
 
 
 def test_ack_emoji_maps_are_a_subset_of_the_dialogue_whitelist():
-    """custom/fam/fam/react.py's EMOJI_CONFIRM | EMOJI_SKIP must stay a
-    subset of DIALOGUE_EMOJI here.
+    """custom/fam/fam/react.py's EMOJI_CONFIRM | EMOJI_SKIP | EMOJI_SNOOZE
+    must stay a subset of DIALOGUE_EMOJI here.
 
     The removal filter and this whitelist now run BEFORE the ack hook
-    (fam react-hook) is ever invoked, so an ack emoji outside
+    (fam react-hook) is ever invoked, so an ack/snooze emoji outside
     DIALOGUE_EMOJI would silently never reach the hook -- no error,
     just a dropped ack. Nothing else enforces this relationship; this
     test is it.
     """
-    ack_emoji = EMOJI_CONFIRM | EMOJI_SKIP
+    ack_emoji = EMOJI_CONFIRM | EMOJI_SKIP | EMOJI_SNOOZE
     missing = ack_emoji - DIALOGUE_EMOJI
     assert not missing, (
-        f"{missing} are in EMOJI_CONFIRM/EMOJI_SKIP but not in "
-        "DIALOGUE_EMOJI -- reactions with these emoji would silently "
+        f"{missing} are in EMOJI_CONFIRM/EMOJI_SKIP/EMOJI_SNOOZE but not "
+        "in DIALOGUE_EMOJI -- reactions with these emoji would silently "
         "never reach fam react-hook"
     )
