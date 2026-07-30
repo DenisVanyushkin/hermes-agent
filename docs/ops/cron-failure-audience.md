@@ -146,12 +146,22 @@ Job id: <job id>. Full details saved in cron output.
 ```
 
 `<redacted, truncated detail>` has gone through `_redact_technical_detail()`
-— exception-class wrappers, traceback frames (including the indented
-source-context line under each `File "..."` line), and filesystem paths
-are stripped before this text is composed, so even the operator alert
-doesn't leak a raw stack trace or install path. Full untouched output is
-still available in the job's cron output directory and the gateway logs
-for anyone who needs to actually debug it.
+— exception-class wrappers (anywhere in the text, not just a leading one —
+including chained wrappers and lowercase names like `gaierror`), traceback
+frames (including the indented source-context line under each `File "..."`
+line), and filesystem paths are stripped before this text is composed, so
+even the operator alert doesn't leak a raw stack trace or install path.
+Full untouched output is still available in the job's cron output
+directory and the gateway logs for anyone who needs to actually debug it.
+
+**URLs are the one exception to path redaction, deliberately.** A failing
+provider call (`https://api.open-meteo.com/v1/forecast returned 500`)
+keeps its full URL in the operator alert — the failing host is the most
+useful diagnostic token there is, and unlike a local filesystem path a
+URL doesn't disclose install layout. This matters concretely for the two
+weather providers this system calls, `yr.no` and `open-meteo.com`: an
+operator alert that named neither would leave you guessing which one
+broke.
 
 This alert delivery, and the `resolve_cron_audience`/
 `plan_cron_failure_delivery` policy machinery generally, is best-effort
@@ -210,3 +220,4 @@ guess "end_user" and withhold when it isn't sure.
 | `_send_cron_operator_alert(alert_text, cfg=None, ...)` | `cron/scheduler.py` | Delivers to `gateway.error_alerts.channel`, `wrap=False`, best-effort |
 | `cron.end_user_targets` | `config.yaml` | List or bare string of delivery targets treated as `end_user` |
 | `gateway.error_alerts.channel` | `config.yaml` | Where withheld-failure alerts land |
+| `_redact_technical_detail(text)` | `cron/scheduler.py` | Strips exception wrappers (anywhere, chained, case-insensitive) and filesystem paths; exempts URLs |

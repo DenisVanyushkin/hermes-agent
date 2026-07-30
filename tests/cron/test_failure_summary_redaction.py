@@ -144,3 +144,95 @@ def test_short_prose_error_survives_intact() -> None:
     )
 
     assert "the weather provider returned no data for tomorrow" in message
+
+
+def test_non_leading_exception_wrapper_is_stripped() -> None:
+    # 2026-07-29 review finding: _EXC_WRAPPER_RE was ^-anchored, so a
+    # wrapper survives whenever it isn't at character zero. This is a real
+    # production shape from cron/scheduler.py's subprocess-failure path
+    # (run_job wraps a script's own failure text with "Script execution
+    # failed: ").
+    message = _summarize_cron_failure_for_delivery(
+        JOB, "Script execution failed: PermissionError: [Errno 13] denied"
+    )
+
+    assert "PermissionError" not in message
+    assert "denied" in message
+
+
+def test_wrapper_after_stderr_traceback_block_is_stripped() -> None:
+    message = _summarize_cron_failure_for_delivery(
+        JOB,
+        "Script exited with code 1\nstderr:\nsome traceback noise\nValueError: bad thing",
+    )
+
+    assert "ValueError" not in message
+    assert "bad thing" in message
+
+
+def test_chained_exception_wrapper_mid_text_is_stripped() -> None:
+    # Only the first wrapper was being stripped after lines are joined —
+    # a chained exception's second wrapper (after the "During handling of
+    # the above exception..." separator) must be stripped too.
+    message = _summarize_cron_failure_for_delivery(
+        JOB,
+        "During handling of the above exception, another exception "
+        "occurred:\n\nRuntimeError: second boom",
+    )
+
+    assert "RuntimeError" not in message
+    assert "second boom" in message
+
+
+def test_lowercase_exception_name_is_stripped() -> None:
+    # socket.gaierror and similar stdlib/C-extension exceptions are
+    # conventionally lowercase and were slipping through the
+    # capitalized-only alternation.
+    message = _summarize_cron_failure_for_delivery(
+        JOB, "gaierror: [Errno -2] Name or service not known"
+    )
+
+    assert "gaierror" not in message
+    assert "Name or service not known" in message
+
+
+def test_provider_url_survives_redaction() -> None:
+    # 2026-07-29 review finding: the failing endpoint is the most useful
+    # diagnostic token in an operator alert. _FS_PATH_RE was mangling
+    # scheme://host/path into "https:/… " and eating the host.
+    message = _summarize_cron_failure_for_delivery(
+        JOB, "provider call to https://api.open-meteo.com/v1/forecast returned 500"
+    )
+
+    assert "https://api.open-meteo.com/v1/forecast" in message
+
+
+def test_yrno_provider_url_survives_redaction() -> None:
+    message = _summarize_cron_failure_for_delivery(
+        JOB, "provider call to https://api.met.no/weatherapi/locationforecast/2.0/ failed"
+    )
+
+    assert "https://api.met.no/weatherapi/locationforecast/2.0/" in message
+
+
+def test_prose_with_colon_and_capitalized_word_is_not_mangled() -> None:
+    # Guard against over-redaction from the broadened, non-anchored,
+    # case-insensitive wrapper rule: ordinary prose with a colon and a
+    # capitalized word — but no Error/Exception/Warning/Interrupt suffix —
+    # must survive intact.
+    message = _summarize_cron_failure_for_delivery(
+        JOB, "Reminder: bring the umbrella tomorrow, Almaty forecast is uncertain"
+    )
+
+    assert "Reminder: bring the umbrella tomorrow" in message
+    assert "Almaty forecast is uncertain" in message
+
+
+def test_generic_error_prefix_without_a_class_name_survives() -> None:
+    # "Error:" alone (no prefixed identifier) is not a Python exception
+    # class name and must not be treated as one.
+    message = _summarize_cron_failure_for_delivery(
+        JOB, "Error: no data returned for the requested day"
+    )
+
+    assert "Error: no data returned for the requested day" in message

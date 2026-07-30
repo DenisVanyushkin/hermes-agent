@@ -87,12 +87,29 @@ def _set_cron_session_title(session_db, session_id, base_title):
         return deduped
 
 
-# Any dotted exception-like class name used as a leading wrapper, e.g.
-# "ImportError: ", "httpx.HTTPStatusError: ". Chained wrappers
-# ("RuntimeError: ValueError: ...") are stripped in a bounded loop.
+# Any dotted exception-like class name used as a wrapper, e.g. "ImportError: ",
+# "httpx.HTTPStatusError: ". Not anchored to the start of the text: a wrapper
+# commonly trails other prose first ("Script execution failed:
+# PermissionError: ...", a real shape from run_job's subprocess-failure path)
+# or appears after "During handling of the above exception..." in a chained
+# traceback — both must be caught, not just a wrapper at character zero.
+# Case-insensitive so lowercase C-extension/stdlib exception names (e.g.
+# socket.gaierror) are also caught. The negative lookbehind keeps the match
+# anchored to a real word boundary so it can't start mid-identifier.
+# A single global substitution (no anchor, no count limit) handles chained
+# wrappers too: after "RuntimeError: " is stripped, the immediately
+# following "ValueError: " is matched in the same pass since re.sub scans
+# the original string left-to-right for non-overlapping matches.
 _EXC_WRAPPER_RE = re.compile(
-    r"^\s*[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Interrupt):\s*"
+    r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Interrupt):\s*",
+    re.IGNORECASE,
 )
+# URLs are exempt from filesystem-path redaction: unlike a local path, a
+# failing provider URL is the single most useful diagnostic token in an
+# operator alert (which provider — yr.no or open-meteo.com — broke), and it
+# never discloses install layout the way a local path does. Matched first so
+# _FS_PATH_RE never gets a chance to chew into scheme://host/path.
+_URL_RE = re.compile(r"https?://[^\s'\"()]+", re.IGNORECASE)
 # Filesystem paths. Chat messages must never disclose where the install
 # lives on disk, including in the common FileNotFoundError/ModuleNotFoundError
 # shape where the path is relative (no leading slash). Three shapes:
@@ -110,6 +127,19 @@ _FS_PATH_RE = re.compile(
     r"|[\w\-]+(?:/[\w\-]+){2,}"
     r"|[\w\-]+/[\w\-]+\.[A-Za-z0-9]{1,6}\b)"
 )
+# Combined pass: try a URL first (kept verbatim) before falling back to path
+# redaction, so a URL substring is never partially chewed by _FS_PATH_RE.
+_URL_OR_FS_PATH_RE = re.compile(
+    r"(?P<url>" + _URL_RE.pattern + r")|(?P<path>" + _FS_PATH_RE.pattern + r")"
+)
+
+
+def _redact_url_or_path(match: "re.Match[str]") -> str:
+    if match.group("url"):
+        return match.group("url")
+    return "…"
+
+
 # Python traceback frame lines — dropped wholesale, never summarized. This
 # matches the header, "File ..." lines and caret markers, but NOT the
 # indented source-context line traceback.format_exc() prints under each
@@ -142,12 +172,10 @@ def _redact_technical_detail(text: str) -> str:
                 continue
         lines.append(line)
     cleaned = " ".join(lines)
-    for _ in range(3):  # bounded: chained wrappers, never an unbounded loop
-        stripped = _EXC_WRAPPER_RE.sub("", cleaned, count=1)
-        if stripped == cleaned:
-            break
-        cleaned = stripped
-    cleaned = _FS_PATH_RE.sub("…", cleaned)
+    # Global, non-anchored: strips every exception-class wrapper in the
+    # text, not just one sitting at character zero (see _EXC_WRAPPER_RE).
+    cleaned = _EXC_WRAPPER_RE.sub("", cleaned)
+    cleaned = _URL_OR_FS_PATH_RE.sub(_redact_url_or_path, cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
