@@ -356,7 +356,7 @@ def test_add_with_coords_and_home_computes_road(db, monkeypatch):
     db.commit()
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (26, "tomtom"))
     e = cal.add(db, "Строймаг", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
     db.commit()
     got = cal.get(db, e["id"])
@@ -380,7 +380,7 @@ def test_add_straight_source_is_also_written(db, monkeypatch):
     db.commit()
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (12, "straight"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (12, "straight"))
     e = cal.add(db, "Строймаг", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
     db.commit()
     got = cal.get(db, e["id"])
@@ -395,13 +395,13 @@ def test_add_manual_or_none_source_leaves_travel_min_road_null(db, monkeypatch):
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
 
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (40, "manual"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (40, "manual"))
     e1 = cal.add(db, "Строймаг1", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
     db.commit()
     assert cal.get(db, e1["id"])["travel_min_road"] is None
 
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (None, "none"))
     e2 = cal.add(db, "Строймаг2", "2026-07-15T06:00:00+00:00", place="Лемана ПРО")
     db.commit()
     assert cal.get(db, e2["id"])["travel_min_road"] is None
@@ -448,7 +448,7 @@ def test_update_title_only_does_not_recompute_road(db, monkeypatch):
     db.commit()
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (26, "tomtom"))
     e = cal.add(db, "Строймаг", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
     db.commit()
 
@@ -466,12 +466,12 @@ def test_update_start_utc_recomputes_road(db, monkeypatch):
     db.commit()
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (26, "tomtom"))
     e = cal.add(db, "Строймаг", "2026-07-15T05:00:00+00:00", place="Лемана ПРО")
     db.commit()
 
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (33, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (33, "tomtom"))
     cal.update(db, e["id"], start_utc="2026-07-15T06:00:00+00:00")
     db.commit()
     assert cal.get(db, e["id"])["travel_min_road"] == 33
@@ -483,7 +483,7 @@ def test_road_hook_unexpected_exception_does_not_break_add(db, monkeypatch):
     db.commit()
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
 
-    def boom(conn, event, cfg, now_utc=None):
+    def boom(conn, event, cfg, now_utc=None, **kw):
         raise RuntimeError("boom")
     monkeypatch.setattr(cal.road, "compute_travel_min", boom)
 
@@ -507,7 +507,7 @@ def test_transport_only_update_that_changes_road_forces_regen(db, monkeypatch):
     db.commit()
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (26, "tomtom"))
     e = cal.add(db, "Строймаг", "2099-01-15T05:00:00+00:00", place="Лемана ПРО",
                 transport="car")
     db.commit()
@@ -519,7 +519,7 @@ def test_transport_only_update_that_changes_road_forces_regen(db, monkeypatch):
     # time -- must force a regen even though start_utc/travel_min/place_id
     # (the regen trigger columns) are untouched.
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (33, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (33, "tomtom"))
     cal.update(db, e["id"], transport="walk")
     db.commit()
 
@@ -536,7 +536,7 @@ def test_transport_only_update_that_keeps_road_same_does_not_force_regen(db, mon
     db.commit()
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG)
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (26, "tomtom"))
     e = cal.add(db, "Строймаг", "2099-01-15T05:00:00+00:00", place="Лемана ПРО",
                 transport="car")
     db.commit()
@@ -546,7 +546,7 @@ def test_transport_only_update_that_keeps_road_same_does_not_force_regen(db, mon
 
     # recompute_road returns the SAME value -- no regen needed.
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (26, "tomtom"))
     cal.update(db, e["id"], transport="walk")
     db.commit()
 

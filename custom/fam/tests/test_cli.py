@@ -955,7 +955,7 @@ def test_road_no_home_config_reason(db, capsys, monkeypatch):
 def test_road_fallback_source_reason(db, capsys, monkeypatch):
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG_T5)
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                        lambda conn, event, cfg, now_utc=None: (40, "manual"))
+                        lambda conn, event, cfg, now_utc=None, **kw: (40, "manual"))
     places.add(db, "Мега", lat=43.2298, lon=76.8823)
     db.commit()
     e = cal.add(db, "Кино", "2099-01-02T06:00:00+00:00", place="Мега")
@@ -967,13 +967,13 @@ def test_road_fallback_source_reason(db, capsys, monkeypatch):
 
 
 def test_road_error_reason(db, capsys, monkeypatch):
-    def boom(conn, event, cfg, now_utc=None):
+    def boom(conn, event, cfg, now_utc=None, **kw):
         raise RuntimeError("boom")
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG_T5)
     places.add(db, "Мега", lat=43.2298, lon=76.8823)
     db.commit()
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                        lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+                        lambda conn, event, cfg, now_utc=None, **kw: (26, "tomtom"))
     e = cal.add(db, "Кино", "2099-01-02T06:00:00+00:00", place="Мега")
     db.commit()
     monkeypatch.setattr(cal.road, "compute_travel_min", boom)
@@ -990,7 +990,7 @@ def test_road_computes_writes_and_regenerates(db, capsys, monkeypatch):
     rem.migrate_rules_2c(db)
     monkeypatch.setattr(cal.gate, "load_config", lambda: ROAD_CFG_T5)
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                        lambda conn, event, cfg, now_utc=None: (26, "tomtom"))
+                        lambda conn, event, cfg, now_utc=None, **kw: (26, "tomtom"))
     places.add(db, "Мега", lat=43.2298, lon=76.8823)
     db.commit()
     e = cal.add(db, "Кино", "2099-01-02T06:00:00+00:00", place="Мега")
@@ -999,7 +999,7 @@ def test_road_computes_writes_and_regenerates(db, capsys, monkeypatch):
     # a fresh recompute returns a different figure -- the command must
     # persist it AND move the chain (leave_at shifts 26 -> 31 min).
     monkeypatch.setattr(cal.road, "compute_travel_min",
-                        lambda conn, event, cfg, now_utc=None: (31, "tomtom"))
+                        lambda conn, event, cfg, now_utc=None, **kw: (31, "tomtom"))
     rc = cli.main(["--json", "road", str(e["id"])])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0

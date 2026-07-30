@@ -93,7 +93,7 @@ def _resolve_place(conn, place_ref):
 _ROAD_TRIGGER_COLUMNS = ("start_utc", "place_id", "transport")
 
 
-def recompute_road(conn, event_id):
+def recompute_road(conn, event_id, now_utc=None):
     """Compute and persist real-road travel time for event_id, if the
     place has coordinates and home is configured. Called from add() (always)
     and update() (only when _ROAD_TRIGGER_COLUMNS changed), BEFORE
@@ -120,6 +120,15 @@ def recompute_road(conn, event_id):
     logic. Any unexpected exception here is swallowed and audited as
     road.hook_error (road.py's own tomtom failures already audit
     road.error internally and don't raise).
+
+    now_utc is the SECOND clock resolve_origin distinguishes: "настоящее",
+    by which the freshness of a GPS fix and the TTL of a shared pin are
+    measured. It is NOT the departure anchor -- that one is start_utc and
+    is passed as at_utc. Every production caller leaves it None (= wall
+    clock), which is what they mean; it exists because a caller working
+    on an injected clock -- whereami.recompute_affected(now_utc=...) --
+    must not silently lose that injection here. It did, and the pin Amina
+    had just sent read as already expired.
     """
     try:
         event = get(conn, event_id)
@@ -138,12 +147,21 @@ def recompute_road(conn, event_id):
         # every rung including home came up empty, which is exactly the
         # condition this guard has always meant. The reason string keeps
         # its old name: `fam road --json` prints it.
-        origin = whereami.resolve_origin(conn, cfg, event=event,
-                                         at_utc=depart_at)
+        origin = whereami.resolve_origin(conn, cfg, now_utc=now_utc,
+                                         event=event, at_utc=depart_at)
         if origin is None:
             return {"minutes": None, "reason": "no_home_config"}
 
-        minutes, source = road.compute_travel_min(conn, event, cfg, now_utc=depart_at)
+        # compute_travel_min resolves the origin a SECOND time, inside
+        # road._origin_for -- the guard above only decides "is there an
+        # origin at all" and supplies road_origin_* below. Both must see
+        # the same clock, or the persisted origin columns would describe
+        # a different point than the minutes stored beside them were
+        # measured from, which is exactly the desync the road_origin_*
+        # comment below warns about.
+        minutes, source = road.compute_travel_min(conn, event, cfg,
+                                                  now_utc=depart_at,
+                                                  wall_now_utc=now_utc)
         if source in ("tomtom", "straight"):
             now = _now()
             # road_origin_* travels with the figure: tick.road_recompute

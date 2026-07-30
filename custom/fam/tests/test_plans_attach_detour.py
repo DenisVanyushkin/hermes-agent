@@ -52,7 +52,7 @@ def _event(db, tmp_path, monkeypatch, start="2026-08-25T09:00:00+00:00"):
     # via-gathering ladder.
     real_compute_travel_min = road.compute_travel_min
     monkeypatch.setattr(road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (None, "none"))
     e = cal.add(db, "Событие", start, place="Клиника")
     db.commit()
     monkeypatch.setattr(road, "compute_travel_min", real_compute_travel_min)
@@ -224,7 +224,7 @@ def test_periodic_recompute_preserves_detour(db, tmp_path, monkeypatch):
     db.commit()
     real_compute_travel_min = road.compute_travel_min
     monkeypatch.setattr(road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (None, "none"))
     e = cal.add(db, "Врач", "2026-07-18T06:59:00+00:00", place="Клиника")
     db.commit()
     # Restore the real ladder now that add()'s own hook has run -- the
@@ -264,7 +264,7 @@ def _second_event(db, monkeypatch, name="Школа", lat=43.2100, lon=76.9000,
     db.commit()
     real = road.compute_travel_min
     monkeypatch.setattr(road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (None, "none"))
     e = cal.add(db, "Второе событие", start, place=name)
     db.commit()
     monkeypatch.setattr(road, "compute_travel_min", real)

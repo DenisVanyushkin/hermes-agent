@@ -112,7 +112,7 @@ def _attached_via_latlons(conn, event):
     return plans_mod.attached_via_points(conn, event)
 
 
-def _origin_for(conn, event, cfg, depart_at=None):
+def _origin_for(conn, event, cfg, depart_at=None, wall_now_utc=None):
     """Откуда ехать. Local-import shim onto whereami.resolve_origin, for
     the same reason as _attached_via_latlons above: whereami imports road
     at module level (it reuses _haversine_km), so a module-level import
@@ -124,22 +124,38 @@ def _origin_for(conn, event, cfg, depart_at=None):
     guards keep working unchanged.
 
     Two clocks, deliberately: `depart_at` is what this route is FOR and
-    becomes whereami's at_utc, while fix-freshness is judged against
-    _wall_now(). Passing the depart anchor as wall clock would call every
+    becomes whereami's at_utc, while fix-freshness is judged against the
+    wall clock. Passing the depart anchor as wall clock would call every
     GPS fix for a future event hopelessly stale -- the same trap
     _tomtom_calls_today documents just above.
+
+    `wall_now_utc` overrides that wall clock, and ONLY it -- never
+    depart_at. Every production caller leaves it None, which is what
+    they mean. It exists because _wall_now() used to be hardcoded here,
+    which made the whole ladder unreachable to a caller working on an
+    injected clock: whereami.recompute_affected(now_utc=X) selected its
+    candidates by X, then measured the pin's TTL against the real
+    clock -- so a pin Amina had just sent read as long expired and the
+    route was quietly computed from home.
     """
     from fam import whereami
     origin = whereami.resolve_origin(
-        conn, cfg, now_utc=_wall_now(), event=event, at_utc=depart_at)
+        conn, cfg, now_utc=wall_now_utc or _wall_now(), event=event,
+        at_utc=depart_at)
     if not origin:
         return None, None
     return origin["lat"], origin["lon"]
 
 
-def compute_travel_min(conn, event, cfg, now_utc=None):
+def compute_travel_min(conn, event, cfg, now_utc=None, wall_now_utc=None):
     """Fallback ladder for an event's travel time, guarded by TomTom's
     daily call cap. Never raises.
+
+    Mind the names: `now_utc` here is the DEPARTURE anchor (cal.recompute_road
+    passes the event's start_utc, possibly days out), not the wall clock.
+    The wall clock -- by which a pin's TTL and a GPS fix's age are judged --
+    is `wall_now_utc`, and None (every production caller) means "the real
+    one". See _origin_for.
 
     0. (Phase 7b, detours) event has usable coordinates AND at least one
        OPEN plan is attached_event_id-linked to it with a resolvable
@@ -168,7 +184,8 @@ def compute_travel_min(conn, event, cfg, now_utc=None):
     now = now_utc or _now()
     event_id = event.get("id")
     place = event.get("place") or {}
-    from_lat, from_lon = _origin_for(conn, event, cfg, depart_at=now)
+    from_lat, from_lon = _origin_for(conn, event, cfg, depart_at=now,
+                                     wall_now_utc=wall_now_utc)
     to_lat = place.get("lat")
     to_lon = place.get("lon")
 

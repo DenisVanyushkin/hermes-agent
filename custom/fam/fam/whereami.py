@@ -388,6 +388,12 @@ def recompute_affected(conn, cfg, now_utc=None, horizon_min=None):
         horizon_min = cfg.get("whereami_predict_horizon_min", 180)
     until = (now + timedelta(minutes=int(horizon_min))).isoformat(
         timespec="seconds")
+    # Одно «сейчас» на всю операцию, и оно же уезжает вниз в
+    # recompute_road: окно отбора и срок жизни подсказки обязаны
+    # мериться одними часами. Пока вниз ничего не уезжало, инъекция
+    # доживала только до SELECT, а resolve_origin брал стенные часы --
+    # и только что присланная точка читалась как просроченная.
+    now_iso = now.isoformat(timespec="seconds")
 
     changed = []
     try:
@@ -396,7 +402,7 @@ def recompute_affected(conn, cfg, now_utc=None, horizon_min=None):
             "WHERE e.status='active' AND e.start_utc > ? AND e.start_utc <= ? "
             "AND p.lat IS NOT NULL AND p.lon IS NOT NULL "
             "ORDER BY e.start_utc",
-            (now.isoformat(timespec="seconds"), until)).fetchall()
+            (now_iso, until)).fetchall()
     except Exception:
         return changed
 
@@ -407,7 +413,7 @@ def recompute_affected(conn, cfg, now_utc=None, horizon_min=None):
                 "SELECT travel_min_road FROM events WHERE id=?",
                 (event_id,)).fetchone()
             old = before["travel_min_road"] if before else None
-            result = cal.recompute_road(conn, event_id)
+            result = cal.recompute_road(conn, event_id, now_utc=now_iso)
             conn.commit()
             new = result.get("minutes")
             if new is not None and new != old:

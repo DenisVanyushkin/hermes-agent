@@ -34,7 +34,7 @@ def _event_with_place(db, monkeypatch, lat=DEST[0], lon=DEST[1], name="Клин�
     # Restored right after, so callers see the real ladder.
     real = road.compute_travel_min
     monkeypatch.setattr(road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (None, "none"))
     places.add(db, name, lat=lat, lon=lon)
     db.commit()
     e = cal.add(db, "Событие", NOW, place=name)
@@ -46,7 +46,7 @@ def _event_with_place(db, monkeypatch, lat=DEST[0], lon=DEST[1], name="Клин�
 def _attach_geo_plan(db, monkeypatch, event_id, lat=VIA[0], lon=VIA[1], name="Аптека"):
     real = road.compute_travel_min
     monkeypatch.setattr(road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (None, "none"))
     places.add(db, name, lat=lat, lon=lon)
     db.commit()
     pid = plans.add(db, "Забрать заказ", place=name)

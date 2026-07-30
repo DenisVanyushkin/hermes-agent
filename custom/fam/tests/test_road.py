@@ -240,7 +240,7 @@ def test_road_recompute_error_rolls_back_partial_state(db, monkeypatch):
     # travel_min_road at None like a from-scratch DB, exactly as
     # test_tick.py's _add_event_neutral_road does.
     monkeypatch.setattr(tick.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (None, "none"))
     event = cal.add(db, "Врач", "2037-07-20T06:29:00+00:00", place="Клиника")
     db.commit()
 
@@ -253,7 +253,7 @@ def test_road_recompute_error_rolls_back_partial_state(db, monkeypatch):
     # entering the UPDATE + audit.log(road.recompute) + rem.regenerate
     # branch (see tick.road_recompute's docstring).
     monkeypatch.setattr(tick.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (45, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (45, "tomtom"))
 
     # rem.regenerate's real contract is DELETE pending, then INSERT a
     # fresh chain. Simulate a failure mid-regenerate by performing the
