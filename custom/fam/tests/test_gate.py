@@ -77,6 +77,10 @@ CFG = {
     "extcal_horizon_weeks": 8,
     "extcal_all_day_as": "plan",
     "extcal_stale_hours": 6,
+    # Final review, Should-fix 8: оба ключа доехали до gate.CONFIG_DEFAULTS,
+    # значит должны быть и в этом зеркале -- см. комментарий выше.
+    "whereami_home_radius_km": 0.3,
+    "whereami_car_fresh_min": 20,
 }
 
 

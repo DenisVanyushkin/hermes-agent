@@ -97,6 +97,14 @@ CONFIG_DEFAULTS = {
     "med_gate_recheck_min": 10,
     # ⏰-реакция на напоминании о лекарстве откладывает дозу на столько минут.
     "med_snooze_min": 60,
+    # Спека мед-гейтинга §6: presence.is_away (и whereami) используют эти
+    # два ключа, но load_config мержит ТОЛЬКО этот словарь --
+    # whereami.CONFIG_DEFAULTS не мержится никем и работает лишь
+    # inline-фоллбэком. Без строк ниже правка fam-config.example.json ни
+    # на что не влияла, то есть тюнингуемыми ключи не были. Значения --
+    # ровно те, на которые presence.py падает inline.
+    "whereami_home_radius_km": 0.3,
+    "whereami_car_fresh_min": 20,
     # Phase 6a: nightly maintenance tick (fam tick maintenance).
     "audit_retention_days": 90,   # prune audit_log rows older than this (§6.5)
     "backup_keep": 7,             # daily .backup copies to keep per DB (§8.4)

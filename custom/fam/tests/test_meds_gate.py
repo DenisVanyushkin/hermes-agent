@@ -34,6 +34,15 @@ def test_new_config_defaults_present():
     assert d["med_snooze_min"] == 60
 
 
+def test_whereami_tunables_are_real_config_defaults():
+    """Final review, Should-fix 8: ключи были только в
+    fam-config.example.json, а load_config мержит лишь CONFIG_DEFAULTS --
+    правка примера не влияла ни на что."""
+    d = gate.CONFIG_DEFAULTS
+    assert d["whereami_home_radius_km"] == 0.3
+    assert d["whereami_car_fresh_min"] == 20
+
+
 def test_example_config_mirrors_new_keys():
     import pathlib
     here = pathlib.Path(__file__).resolve().parent.parent
