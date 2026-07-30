@@ -3201,3 +3201,110 @@ def export_own(conn, cfg, request=None, now_utc=None):
                 _export_put_event(conn, cfg, request, event, exp, location, participants, new_hash, now_dt))
 
     return counts
+
+
+# ---- adopt: strip VALARM from HER OWN copy (Task 9) ------------------
+#
+# `drop_valarm` is the one sanctioned write this module ever makes OUTSIDE
+# the "Гермес" write-target collection `export_own` owns: `fam cal adopt`
+# (cli.py) calls it against an owner='iphone' event's own `external_href`
+# -- her personal calendar's resource, not ours -- specifically and ONLY
+# because she herself asked Hermes to take over reminding her about it.
+# Every other property of that resource (SUMMARY, ORGANIZER, ATTENDEE, any
+# X- property, ...) is left byte-for-byte untouched by `_strip_valarm_ics`:
+# this is a surgical removal on the raw text, never a rebuild from a parsed
+# `Component` (parse_ics's own declared field list would silently drop
+# anything it doesn't track, e.g. ATTENDEE -- unacceptable for a write to
+# HER data).
+#
+# Reuses this module's own existing PUT/retry primitives verbatim
+# (`_export_put`, `_export_reread_etag`, `_export_headers`) -- the same
+# one-412-retry contract `_export_put_event` already implements for the
+# "Гермес" collection, not a second copy of it for this collection.
+
+def _strip_valarm_ics(text):
+    """Raw VCALENDAR text -> the same text with every VALARM sub-component
+    (`BEGIN:VALARM` ... `END:VALARM`) removed, everything else preserved.
+
+    Reuses `_unfold` (the same RFC 5545 unfolding `parse_ics` itself uses)
+    so a VALARM boundary line that happens to be folded across a line
+    break is still recognized, and `_export_fold_line` (the same 75-octet
+    refold `_build_export_vevent` uses) to keep the result a valid CalDAV
+    resource regardless of the server's original folding choices. A
+    resource with no VALARM at all round-trips with the same parsed
+    meaning (fold POINTS may differ -- RFC-legal, and `parse_ics` treats
+    both forms identically).
+
+    Never raises: garbage input is processed line-by-line and returned
+    best-effort; empty/falsy input returns "".
+    """
+    if not text:
+        return ""
+    lines = _unfold(text)
+    out = []
+    in_alarm = False
+    for line in lines:
+        upper = line.strip().upper()
+        if upper == "BEGIN:VALARM":
+            in_alarm = True
+            continue
+        if upper == "END:VALARM":
+            in_alarm = False
+            continue
+        if in_alarm:
+            continue
+        out.append(line)
+    if not out:
+        return ""
+    folded = [_export_fold_line(l) for l in out]
+    return "\r\n".join(folded) + "\r\n"
+
+
+def drop_valarm(cfg, href, etag, request=None):
+    """Strip every VALARM from HER OWN iCloud copy of an event at `href`
+    (`fam cal adopt`'s one sanctioned write outside the "Гермес" write-
+    target -- see module note above). GET the current resource, strip its
+    VALARM block(s) (`_strip_valarm_ics`), PUT the result back with
+    `If-Match: etag` (the caller's stored `events.external_etag`) via
+    `_export_put` -- exactly one re-read-and-retry on a 412 conflict, via
+    `_export_reread_etag`, the SAME contract `_export_put_event` already
+    implements for the other collection (never a second implementation of
+    either).
+
+    Returns `(ok, new_etag, detail)`:
+      - `ok=True`: the PUT succeeded (with or without the one retry);
+        `new_etag` is whatever the server returned (may be None -- some
+        servers only hand back ETag on a follow-up GET, same caveat
+        `_export_put` already documents for the other collection).
+      - `ok=False`: the initial GET, or the PUT (including after the one
+        retry), failed; `detail` is a short human-readable reason (status
+        code only -- never the auth header, never the response body).
+
+    Never raises: `request(...)` (the injected seam, `_request` by
+    default) already never raises; any failure degrades to
+    `(False, None, detail)`. The caller (`cli.cmd_cal_adopt`) is expected
+    to treat a `False` here as "adoption still stands, but her phone may
+    still ring once more for this event" -- NOT as a reason to undo the
+    ownership flip that already happened (design decision, task 9 brief):
+    she asked Hermes to remind her, so silence from Hermes because of a
+    network hiccup on the OTHER phone's copy would be the worse failure
+    mode of the two.
+    """
+    request = request or _request
+    resp = request("GET", href, headers=_export_headers(cfg), timeout=DEFAULT_TIMEOUT)
+    if resp is None or resp.status not in (200, 207):
+        status = resp.status if resp is not None else None
+        return False, None, f"GET {href} failed (status={status})"
+    stripped = _strip_valarm_ics(resp.text)
+
+    ok, new_etag, status, conflict = _export_put(cfg, href, stripped, etag, request)
+    if conflict:
+        # Requirement (task 9 brief): exactly one re-read-and-retry on a
+        # 412 ETag conflict -- never a second retry, regardless of THIS
+        # attempt's own outcome. Same helper `_export_put_event` already
+        # uses for its own 412 path.
+        fresh_etag = _export_reread_etag(cfg, href, request)
+        ok, new_etag, status, _conflict2 = _export_put(cfg, href, stripped, fresh_etag, request)
+    if not ok:
+        return False, None, f"PUT {href} failed (status={status})"
+    return True, new_etag, None

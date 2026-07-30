@@ -544,6 +544,127 @@ def cmd_cal_done(args):
         print(f"done event: {e['title']} (id={e['id']})")
     return 0
 
+def cmd_cal_adopt(args):
+    """`fam cal adopt <event_id>` -- Task 9: she explicitly asked Hermes to
+    take over reminding her about an event she originally created on her
+    iPhone. Flips `owner` 'iphone' -> 'hermes', rebuilds the reminder
+    chain (`rem.regenerate` -- with owner now 'hermes' this actually
+    BUILDS one; see rem.regenerate's own docstring for the mirror-image
+    early-exit an owner='iphone' row takes), audits `cal.adopt`, and
+    best-effort strips every VALARM off her OWN iCloud copy of the event
+    (`extcal.drop_valarm`, via her stored `external_href`/`external_etag`)
+    so her phone stops ringing for it too -- Hermes now owns the alarm; a
+    second ringing source is exactly the duplicate-reminder problem this
+    whole feature exists to avoid.
+
+    Unknown event_id, or an event that is already owner='hermes' (nothing
+    to adopt -- includes a plain Hermes-created event that was never
+    hers), raises ValueError -> main()'s existing exit-2 contract, same as
+    cal update/cancel/show's own unknown-id path.
+
+    VALARM-strip failure does NOT undo the adoption (task 9 brief, an
+    explicit product decision): she asked Hermes to own the reminder, so
+    Hermes must actually own it even if the network call to quiet her
+    phone's own copy failed -- the cost of that failure is one extra ring
+    from her phone, which is strictly better than Hermes silently NOT
+    reminding her because a CalDAV PUT to a DIFFERENT calendar hiccuped.
+    The failure is folded into the same `cal.adopt` audit entry
+    (`valarm_dropped: False`, `valarm_error: <reason>`) rather than
+    swallowed, and surfaced in this command's own output.
+
+    Never calls gate.deliver (this command, like every extcal entry
+    point, is not itself a new source of messages to her -- project
+    invariant #1).
+    """
+    conn = famdb.connect()
+    e = cal.get(conn, args.id)
+    if e is None:
+        raise ValueError(f"unknown event: {args.id}")
+    if e["owner"] == "hermes":
+        raise ValueError(
+            f"event {args.id} is already owner=hermes -- nothing to adopt"
+        )
+    conn.execute(
+        "UPDATE events SET owner='hermes' WHERE id=? AND owner='iphone'",
+        (args.id,),
+    )
+    created = rem.regenerate(conn, args.id)
+
+    valarm_dropped = None
+    valarm_error = None
+    href = e.get("external_href")
+    if href:
+        cfg = gate.load_config()
+        ok, _new_etag, detail = extcal.drop_valarm(cfg, href, e.get("external_etag"))
+        valarm_dropped = ok
+        if not ok:
+            valarm_error = detail
+
+    audit.log(conn, "cal.adopt", {
+        "id": args.id, "reminders_created": created,
+        "valarm_dropped": valarm_dropped, "valarm_error": valarm_error,
+    })
+    conn.commit()
+
+    out = {"id": args.id, "owner": "hermes", "reminders_created": created,
+           "valarm_dropped": valarm_dropped}
+    if valarm_error:
+        out["valarm_error"] = valarm_error
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        print(f"adopted event {args.id}: owner=hermes, "
+              f"{created} reminder(s) scheduled")
+        if valarm_dropped is False:
+            print(f"  warning: could not remove her phone's own alarm "
+                  f"({valarm_error}) -- she may get one extra ring from it")
+    return 0
+
+def cmd_cal_disown(args):
+    """`fam cal disown <event_id>` -- Task 9, the inverse of `cal adopt`:
+    she asked Hermes to STOP reminding her about this event (it goes back
+    to being purely her iPhone's). Flips `owner` 'hermes' -> 'iphone' and
+    rebuilds the chain (`rem.regenerate` -- with owner now 'iphone' this
+    deletes whatever was pending and creates nothing new, the same early
+    exit `cal adopt`'s own docstring describes from the other side), then
+    audits `cal.disown`.
+
+    Deliberately does NOT attempt to restore any VALARM to her iCloud
+    copy: `cal adopt`'s own VALARM removal is not reversible from
+    anything this module retains -- the original alarm's offset/action
+    was gone the moment that PUT overwrote it, never captured anywhere.
+    If she wants her phone to ring for this event again, she has to add a
+    reminder to it herself, on her phone.
+
+    Unknown event_id, or an event that is already owner='iphone' (nothing
+    to disown), raises ValueError -> exit 2, same contract as `cal
+    adopt`'s own already-hermes guard, mirrored.
+    """
+    conn = famdb.connect()
+    e = cal.get(conn, args.id)
+    if e is None:
+        raise ValueError(f"unknown event: {args.id}")
+    if e["owner"] == "iphone":
+        raise ValueError(
+            f"event {args.id} is already owner=iphone -- nothing to disown"
+        )
+    conn.execute(
+        "UPDATE events SET owner='iphone' WHERE id=? AND owner='hermes'",
+        (args.id,),
+    )
+    rem.regenerate(conn, args.id)
+    audit.log(conn, "cal.disown", {"id": args.id})
+    conn.commit()
+
+    out = {"id": args.id, "owner": "iphone"}
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        print(f"disowned event {args.id}: owner=iphone, Hermes reminder "
+              f"chain removed (her phone's own alarm, if any, is not "
+              f"restored -- see cal disown's own limitation)")
+    return 0
+
 def cmd_cal_show(args):
     conn = famdb.connect()
     e = cal.get(conn, args.id)
@@ -2689,6 +2810,16 @@ def build_parser():
     spd.add_argument("id", type=int)
     spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
+
+    spado = cal_sub.add_parser("adopt"); spado.set_defaults(func=cmd_cal_adopt)
+    spado.add_argument("id", type=int)
+    spado.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable output")
+
+    spdis = cal_sub.add_parser("disown"); spdis.set_defaults(func=cmd_cal_disown)
+    spdis.add_argument("id", type=int)
+    spdis.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable output")
 
     sps = cal_sub.add_parser("show"); sps.set_defaults(func=cmd_cal_show)
     sps.add_argument("id", type=int)

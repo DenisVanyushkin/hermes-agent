@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from fam import audit, cal, cli, gate, mail, meds, people, places, rem
+from fam import audit, cal, cli, extcal, gate, mail, meds, people, places, rem
 
 def _future_start(hours=0):
     """A start comfortably in the future so cal-add's past guard never trips.
@@ -1146,3 +1146,216 @@ def test_med_defer_unknown_intake_exits_2(db, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert captured.err.strip() != ""
+
+# --- Task 9 (extcal): `fam cal adopt` / `fam cal disown` --------------------
+# Only `extcal._request` is monkeypatched in this section (the seam the task
+# 9 brief names explicitly) -- these tests exercise the real
+# `extcal.drop_valarm`/`_strip_valarm_ics`/`_export_put`/`_export_reread_etag`
+# code (including the host-guard-adjacent header building and the 412-retry
+# logic), never the real network.
+
+def _iphone_event(db, title="Йога", start=None,
+                   href="https://caldav.icloud.com/1/calendars/personal/evt1.ics",
+                   etag='"e0"'):
+    """An owner='iphone' event with external_href/external_etag attached --
+    mirrors what a real import (extcal._apply_event_insert) leaves behind:
+    cal.add() defaults to owner='hermes' and builds a transient chain, the
+    raw UPDATE flips owner and attaches external_*, and the SECOND
+    rem.regenerate() call retracts that transient chain (the exact two
+    steps _apply_event_insert itself performs -- see extcal.py's own
+    docstring there) -- so this fixture starts genuinely reminder-free,
+    like a freshly-imported row, not an artifact of skipping that step.
+
+    Seeds the default reminder rule first (rem.seed_default_rules) -- the
+    plain `db` fixture does not (only `fam init`/cmd_init does), and
+    without it applicable_rules() has nothing to build a chain from
+    regardless of owner (same convention as this file's own `_seed_rem`
+    helper for the Task 3 `fam rem` tests)."""
+    rem.seed_default_rules(db)
+    start = start or _future_start(hours=5)
+    e = cal.add(db, title, start)
+    db.execute(
+        "UPDATE events SET owner='iphone', external_uid='uid-adopt-test', "
+        "external_href=?, external_etag=? WHERE id=?",
+        (href, etag, e["id"]))
+    rem.regenerate(db, e["id"])
+    db.commit()
+    return cal.get(db, e["id"])
+
+def _ok_valarm_response(*a, **kw):
+    return extcal.Response(200, "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", {})
+
+def test_cal_adopt_flips_owner_and_builds_chain(db, capsys, monkeypatch):
+    e = _iphone_event(db)
+    assert e["owner"] == "iphone"
+    assert rem.list_reminders(db, event_id=e["id"]) == []
+    monkeypatch.setattr(extcal, "_request", _ok_valarm_response)
+
+    rc = cli.main(["cal", "adopt", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["owner"] == "hermes"
+    assert out["reminders_created"] > 0
+    assert out["valarm_dropped"] is True
+
+    updated = cal.get(db, e["id"])
+    assert updated["owner"] == "hermes"
+    assert len(rem.list_reminders(db, event_id=e["id"])) == out["reminders_created"]
+
+    rows = audit.query(db, since_utc=None, kind_prefix="cal.adopt", grep=None, limit=10)
+    assert len(rows) == 1
+    assert rows[0]["payload"]["valarm_dropped"] is True
+
+def test_cal_disown_reverts_owner_and_clears_chain(db, capsys, monkeypatch):
+    e = _iphone_event(db)
+    monkeypatch.setattr(extcal, "_request", _ok_valarm_response)
+    assert cli.main(["cal", "adopt", str(e["id"])]) == 0
+    capsys.readouterr()
+    assert len(rem.list_reminders(db, event_id=e["id"])) > 0
+
+    rc = cli.main(["cal", "disown", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["owner"] == "iphone"
+
+    updated = cal.get(db, e["id"])
+    assert updated["owner"] == "iphone"
+    assert rem.list_reminders(db, event_id=e["id"]) == []
+
+    rows = audit.query(db, since_utc=None, kind_prefix="cal.disown", grep=None, limit=10)
+    assert len(rows) == 1
+    assert rows[0]["payload"]["id"] == e["id"]
+
+def test_cal_adopt_already_hermes_exit_2(db, capsys):
+    e = cal.add(db, "Обычное", _future_start())
+    db.commit()
+    assert e["owner"] == "hermes"
+    rc = cli.main(["cal", "adopt", str(e["id"])])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
+
+def test_cal_disown_already_iphone_exit_2(db, capsys):
+    e = _iphone_event(db)
+    rc = cli.main(["cal", "disown", str(e["id"])])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
+
+def test_cal_adopt_unknown_id_exit_2(db, capsys):
+    rc = cli.main(["cal", "adopt", "999999"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
+
+def test_cal_disown_unknown_id_exit_2(db, capsys):
+    rc = cli.main(["cal", "disown", "999999"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.err.strip() != ""
+
+def test_cal_adopt_valarm_strip_put_has_if_match_and_preserves_other_fields(db, capsys, monkeypatch):
+    original_ics = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n"
+        "UID:her-uid-1\r\nSUMMARY:Йога\r\nDTSTART:20370720T130000Z\r\n"
+        "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n"
+        "END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    calls = []
+    def fake_request(method, url, headers=None, body=None, timeout=None):
+        calls.append((method, url, dict(headers or {}), body))
+        if method == "GET":
+            return extcal.Response(200, original_ics, {})
+        if method == "PUT":
+            return extcal.Response(204, b"", {"ETag": '"e1"'})
+        raise AssertionError(f"unexpected method: {method}")
+    monkeypatch.setattr(extcal, "_request", fake_request)
+
+    href = "https://caldav.icloud.com/1/calendars/personal/evt1.ics"
+    e = _iphone_event(db, href=href, etag='"e0"')
+
+    rc = cli.main(["cal", "adopt", str(e["id"])])
+    assert rc == 0
+
+    methods = [c[0] for c in calls]
+    assert methods == ["GET", "PUT"]
+    _method, put_url, put_headers, put_body = calls[1]
+    assert put_url == href
+    assert put_headers.get("If-Match") == '"e0"'
+    assert "VALARM" not in put_body
+    assert "UID:her-uid-1" in put_body
+    assert "SUMMARY:Йога" in put_body
+    assert "DTSTART:20370720T130000Z" in put_body
+
+def test_cal_adopt_valarm_strip_412_reread_and_retry_once(db, capsys, monkeypatch):
+    ics = ("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:her-uid-1\r\n"
+           "BEGIN:VALARM\r\nACTION:DISPLAY\r\nEND:VALARM\r\n"
+           "END:VEVENT\r\nEND:VCALENDAR\r\n")
+    calls = []
+    def fake_request(method, url, headers=None, body=None, timeout=None):
+        calls.append(method)
+        if method == "GET":
+            return extcal.Response(200, ics, {"ETag": '"fresh"'})
+        if method == "PUT" and calls.count("PUT") == 1:
+            return extcal.Response(412, b"", {})
+        if method == "PUT" and calls.count("PUT") == 2:
+            return extcal.Response(204, b"", {"ETag": '"final"'})
+        raise AssertionError(f"unexpected extra call: {calls}")
+    monkeypatch.setattr(extcal, "_request", fake_request)
+
+    e = _iphone_event(db, etag='"stale"')
+    rc = cli.main(["cal", "adopt", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["valarm_dropped"] is True
+    assert calls == ["GET", "PUT", "GET", "PUT"]  # exactly one retry, never a second
+
+def test_cal_adopt_valarm_strip_failure_does_not_undo_adoption(db, capsys, monkeypatch):
+    def fake_request(method, url, headers=None, body=None, timeout=None):
+        return None  # total transport failure (timeout/DNS/host-guard)
+    monkeypatch.setattr(extcal, "_request", fake_request)
+
+    e = _iphone_event(db)
+    rc = cli.main(["cal", "adopt", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["owner"] == "hermes"
+    assert out["valarm_dropped"] is False
+    assert out.get("valarm_error")
+
+    # Adoption stands despite the VALARM-strip failure (task 9 brief: one
+    # extra ring from her phone is the accepted cost, not silence from
+    # Hermes).
+    updated = cal.get(db, e["id"])
+    assert updated["owner"] == "hermes"
+    assert len(rem.list_reminders(db, event_id=e["id"])) > 0
+
+    rows = audit.query(db, since_utc=None, kind_prefix="cal.adopt", grep=None, limit=10)
+    assert rows[0]["payload"]["valarm_dropped"] is False
+    assert rows[0]["payload"]["valarm_error"]
+
+def test_cal_adopt_disown_never_call_gate_deliver(db, capsys, monkeypatch):
+    monkeypatch.setattr(gate, "deliver", _must_not_be_called)
+    monkeypatch.setattr(extcal, "_request", _ok_valarm_response)
+
+    e = _iphone_event(db)
+    assert cli.main(["cal", "adopt", str(e["id"])]) == 0
+    capsys.readouterr()
+    assert cli.main(["cal", "disown", str(e["id"])]) == 0
+    capsys.readouterr()
+
+def test_cal_adopt_without_external_href_skips_network_entirely(db, capsys, monkeypatch):
+    def boom(*a, **kw):
+        raise AssertionError("must not touch the network when there is no external_href")
+    monkeypatch.setattr(extcal, "_request", boom)
+
+    e = cal.add(db, "Прямое от Гермеса", _future_start())
+    db.execute("UPDATE events SET owner='iphone' WHERE id=?", (e["id"],))
+    rem.regenerate(db, e["id"])
+    db.commit()
+
+    rc = cli.main(["cal", "adopt", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["owner"] == "hermes"
+    assert out["valarm_dropped"] is None
