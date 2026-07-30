@@ -238,3 +238,55 @@ def test_prior_variation_instruction_absent_for_other_kinds():
     prompt = gate._build_prompt(
         {"attempt_no": 3, "previous": ["Что-то."]}, kind="reminder")
     assert gate.GATE_MED_PRIOR_VARIATION_INSTRUCTION not in prompt
+
+
+# ---- late-dose wording (production incident 2026-07-29): a release-path
+# raw carries late=True; the rewrite must not phrase the dose as missed
+# or skipped -- see GATE_MED_LATE_INSTRUCTION's docstring in gate.py.
+# This is a composing addition (separate `if`, not another elif in the
+# kind=="med" chain) because a released dose can be BOTH late AND a
+# repeat with previous texts, and both constraints must reach the model
+# together.
+
+def test_late_instruction_present_when_late_true():
+    prompt = gate._build_prompt(
+        {"mode": "take", "name": "X", "attempt_no": 1, "late": True},
+        kind="med")
+    assert gate.GATE_MED_LATE_INSTRUCTION in prompt
+
+
+def test_late_instruction_absent_when_late_falsy_or_missing():
+    prompt_missing = gate._build_prompt(
+        {"mode": "take", "name": "X", "attempt_no": 1}, kind="med")
+    prompt_false = gate._build_prompt(
+        {"mode": "take", "name": "X", "attempt_no": 1, "late": False},
+        kind="med")
+    assert gate.GATE_MED_LATE_INSTRUCTION not in prompt_missing
+    assert gate.GATE_MED_LATE_INSTRUCTION not in prompt_false
+
+
+def test_late_instruction_composes_with_prior_variation_instruction():
+    prompt = gate._build_prompt(
+        {"mode": "take", "name": "X", "attempt_no": 2, "late": True,
+         "previous": ["Пора принять X."]}, kind="med")
+    assert gate.GATE_MED_LATE_INSTRUCTION in prompt
+    assert gate.GATE_MED_PRIOR_VARIATION_INSTRUCTION in prompt
+    assert gate.GATE_MED_VARIATION_INSTRUCTION not in prompt
+
+
+def test_late_instruction_composes_with_generic_variation_instruction():
+    prompt = gate._build_prompt(
+        {"mode": "take", "name": "X", "attempt_no": 2, "late": True},
+        kind="med")
+    assert gate.GATE_MED_LATE_INSTRUCTION in prompt
+    assert gate.GATE_MED_VARIATION_INSTRUCTION in prompt
+    assert gate.GATE_MED_PRIOR_VARIATION_INSTRUCTION not in prompt
+
+
+def test_late_instruction_absent_for_other_kinds():
+    prompt = gate._build_prompt(
+        {"attempt_no": 1, "late": True}, kind="reminder")
+    assert gate.GATE_MED_LATE_INSTRUCTION not in prompt
+    prompt_digest = gate._build_prompt(
+        {"attempt_no": 1, "late": True}, kind="digest")
+    assert gate.GATE_MED_LATE_INSTRUCTION not in prompt_digest
