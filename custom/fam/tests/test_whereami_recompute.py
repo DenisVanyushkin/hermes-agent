@@ -100,6 +100,69 @@ def test_recompute_road_honours_the_injected_clock(db, monkeypatch):
             round(row["road_origin_lon"], 4)) == (AWAY_LAT, AWAY_LON)
 
 
+def _iphone_soon_event(db, minutes=90, anchor=NOW):
+    """Same shape as `_soon_event`, but `owner='iphone'` -- an imported
+    iCloud event that already rings from her own phone and never gets a
+    Hermes `leave_at` figure in the first place (extcal design doc)."""
+    places.add(db, "Клиника", lat=DEST_LAT, lon=DEST_LON)
+    db.commit()
+    start = (datetime.fromisoformat(anchor) + timedelta(minutes=minutes)).isoformat(
+        timespec="seconds")
+    e = cal.add(db, "Приём", start, place="Клиника")
+    db.execute("UPDATE events SET owner='iphone' WHERE id=?", (e["id"],))
+    db.commit()
+    return e["id"]
+
+
+def test_recompute_affected_skips_owner_iphone_events(db, monkeypatch):
+    """Final review blocker 4 (Important): an `owner='iphone'` imported
+    event already rings from her own phone and never gets a Hermes
+    `leave_at` figure -- recomputing its road on every location ping she
+    sends only burns the SHARED 100/day TomTom budget for no observable
+    effect. Same `owner='hermes'` guard `tick.road_recompute` already
+    applies (tick.py) -- this is `whereami.recompute_affected`'s own
+    missing copy of it. A real `owner='hermes'` event in the SAME window
+    must still be recomputed -- this narrows the candidate set, it does
+    not silently disable the feature."""
+    monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
+    monkeypatch.setattr(cal.gate, "load_config", _cfg)
+    iphone_id = _iphone_soon_event(db)
+    hermes_id = _soon_event(db, minutes=95)
+    cal.recompute_road(db, hermes_id)
+    db.commit()
+    hermes_before = db.execute(
+        "SELECT travel_min_road FROM events WHERE id=?", (hermes_id,)
+    ).fetchone()["travel_min_road"]
+    # `cal.add(place=...)` itself already ran an unconditional
+    # recompute_road at INSERT time (this fixture's own straight-line
+    # figure, computed while the row was still owner='hermes', before the
+    # raw UPDATE below flips it) -- captured here so the assertion below
+    # is "recompute_affected left THIS row alone", not "it is None",
+    # which would conflate the fixture's own setup with the function
+    # under test.
+    iphone_before = db.execute(
+        "SELECT travel_min_road FROM events WHERE id=?", (iphone_id,)
+    ).fetchone()["travel_min_road"]
+
+    whereami.set_hint(db, AWAY_LAT, AWAY_LON, now_utc=NOW, cfg=_cfg())
+    db.commit()
+    changed = whereami.recompute_affected(db, _cfg(), now_utc=NOW)
+
+    changed_ids = [c["event_id"] for c in changed]
+    assert iphone_id not in changed_ids
+    assert hermes_id in changed_ids
+
+    iphone_row = db.execute(
+        "SELECT travel_min_road FROM events WHERE id=?", (iphone_id,)
+    ).fetchone()
+    assert iphone_row["travel_min_road"] == iphone_before
+
+    hermes_row = db.execute(
+        "SELECT travel_min_road FROM events WHERE id=?", (hermes_id,)
+    ).fetchone()
+    assert hermes_row["travel_min_road"] != hermes_before
+
+
 def test_events_beyond_the_horizon_are_left_alone(db, monkeypatch):
     """Past the prediction horizon the resolver ignores physical evidence
     anyway, so recomputing there would only spend TomTom calls."""

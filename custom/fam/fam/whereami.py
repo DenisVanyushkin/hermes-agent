@@ -397,9 +397,18 @@ def recompute_affected(conn, cfg, now_utc=None, horizon_min=None):
 
     changed = []
     try:
+        # extcal final review, blocker 4: owner='hermes' only -- same
+        # guard tick.road_recompute already applies (tick.py) -- an
+        # owner='iphone' imported event already rings from her own phone
+        # and never gets a Hermes leave_at figure in the first place, so
+        # recomputing its road here on every location ping she sends
+        # would only burn the shared 100/day TomTom budget for no
+        # observable effect (nothing reads travel_min_road for those
+        # rows).
         rows = conn.execute(
             "SELECT e.id FROM events e JOIN places p ON p.id = e.place_id "
-            "WHERE e.status='active' AND e.start_utc > ? AND e.start_utc <= ? "
+            "WHERE e.status='active' AND e.owner='hermes' "
+            "AND e.start_utc > ? AND e.start_utc <= ? "
             "AND p.lat IS NOT NULL AND p.lon IS NOT NULL "
             "ORDER BY e.start_utc",
             (now_iso, until)).fetchall()
