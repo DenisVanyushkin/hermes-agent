@@ -13,7 +13,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v19 (external calendar ownership: `cal adopt`/`cal disown`, iPhone-owned events)._
+_Body version: v20 (final-review fixes: `cal adopt` on a whole recurring series, never edit/cancel an `owner='iphone'` row)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -406,7 +406,29 @@ show after cancel), make a second, separate terminal call.
     reminder source with nothing on her phone to replace it; "не
     напоминай про это" about an ordinary Hermes event is `fam rem cancel
     <event_id>` (Reminder Reactions above — stops the chain, keeps the
-    event), not `disown`.
+    event), not `disown`. **`adopt` on one occurrence of a recurring
+    iPhone series takes over the WHOLE series in that one call** — a
+    recurring event's master + its overrides live in a single iCloud
+    resource, so removing her phone's alarm (`VALARM`) always affects
+    every occurrence at once; there is no way to adopt just one
+    occurrence while the rest keep ringing from her phone. `<event_id>`
+    can be any occurrence of the series — fam finds and flips every
+    sibling occurrence itself. If it's not obvious from context that she
+    means a recurring event, it is fine to mention it after the fact
+    ("эта тренировка идёт каждую неделю — беру на себя всю серию").
+22. **Never `cal cancel`/`cal done`/`plan done` (or any other
+    calendar-editing verb) on an `owner='iphone'` row.** fam does not
+    refuse this today, but nothing about it ever reaches her phone or
+    survives the next `cal-ext` sync — a sync only ever adds/updates
+    from what iCloud currently has, it never resurrects a row Hermes
+    cancelled locally, so doing this just makes Hermes silently disagree
+    with her phone forever, with no error anywhere to catch it. "не
+    пойду на йогу" about an `owner='iphone'` event is NOT `fam cal
+    cancel` — tell her the change has to happen on her phone ("сними это
+    в айфоне, я подхвачу изменение в течение 15 минут"), and do not call
+    a mutating calendar verb on that row yourself; you may still
+    acknowledge what she said in conversation. This is a skill-level
+    rule only — fam itself has no owner-check on these verbs yet.
 
 ## Quick Reference
 
