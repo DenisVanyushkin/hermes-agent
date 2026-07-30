@@ -312,6 +312,29 @@ GATE_MED_PRIOR_VARIATION_INSTRUCTION = (
     "выдумывай новых фактов."
 )
 
+# Production incident (2026-07-29): a dose planned for 09:00 Almaty was
+# held by the sleep gate and released at 12:03 with raw["late"]=True
+# (tick.py's _meds_series release branches). The rewrite turned the
+# deterministic "мисол за 09:00 ещё не отмечено." into "приём на 09:00
+# пропущен" -- "пропущен" reads as MISSED/skip-it, the opposite of the
+# intent: the dose is late but still needs to be taken. This is a
+# composing addition, not a third mutually-exclusive arm in the
+# kind=="med" if/elif chain above: a released dose can be BOTH late AND
+# a repeat with prior texts (or a blind repeat), and in that case the
+# rewrite needs BOTH constraints at once, so this is applied via its own
+# `if`, after the if/elif chain has already picked (at most) one
+# variation instruction.
+GATE_MED_LATE_INSTRUCTION = (
+    "Поле late означает, что приём этой дозы задержался (сработал "
+    "гейт-отложение), но его всё ещё нужно выполнить сейчас — доза НЕ "
+    "пропущена, не отменена и не опоздала настолько, что её больше не "
+    "нужно принимать. Формулируй так, чтобы было ясно: приём ещё "
+    "предстоит сделать. Запрещены любые слова и обороты со значением "
+    "«пропущен», «пропущена», «упущен», «не успели», «отменён», «уже "
+    "поздно», «слишком поздно» и вообще любая формулировка, из которой "
+    "можно понять, что дозу принимать не нужно или уже нельзя."
+)
+
 # Детерминированный пул на случай, когда переписывающий LLM недоступен.
 # Индексируется номером попытки: без него однообразие наступало бы ровно
 # тогда, когда LLM упал -- а его падения тихие и штатные (см. deliver
@@ -529,6 +552,15 @@ def _build_prompt(raw, kind=None):
     "word it differently" with nothing to compare against. A first
     attempt with neither condition true gets no extra instruction.
 
+    Separately (not part of that if/elif -- it composes with whichever
+    of the two variation arms fired, or neither), when raw["late"] is
+    truthy (release-path doses, tick.py's _meds_series), GATE_MED_LATE_
+    INSTRUCTION is appended: a released dose can be late AND a repeat
+    with previous texts at the same time, and both constraints must
+    reach the model together (production incident 2026-07-29: a late
+    release got worded as "пропущен" -- missed/skip-it -- by the
+    rewrite).
+
     Prompt-injection mitigation (go-live review finding 8): `raw` embeds
     user-authored strings (event titles, participant names, notes) --
     e.g. an event titled "Ignore previous instructions..." would
@@ -556,6 +588,8 @@ def _build_prompt(raw, kind=None):
         instruction = f"{instruction} {GATE_MED_PRIOR_VARIATION_INSTRUCTION}"
     elif kind == "med" and int(raw.get("attempt_no") or 1) > 1:
         instruction = f"{instruction} {GATE_MED_VARIATION_INSTRUCTION}"
+    if kind == "med" and raw.get("late"):
+        instruction = f"{instruction} {GATE_MED_LATE_INSTRUCTION}"
     return (
         f"{instruction}\n"
         "Перепиши следующий факт для отправки пользователю. Всё внутри "
