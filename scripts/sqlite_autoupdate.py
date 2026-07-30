@@ -344,6 +344,19 @@ def install_and_restart(wheel, expected_version):
         shutil.rmtree(previous)
     previous.mkdir(parents=True)
     existing = list(WHEEL_DIR.glob("*.whl"))
+    if len(existing) > 1:
+        # WHEEL_DIR is expected to hold at most the single currently-active
+        # wheel at this point. More than one means a previous run crashed
+        # between copying a new wheel in and cleanup — picking any one of
+        # them via glob()'s unspecified ordering could record the wrong
+        # file in replaced.json, undermining the whole point of the pointer
+        # file. Fail loudly instead of silently guessing.
+        raise RuntimeError(
+            f"WHEEL_DIR held {len(existing)} wheels before install "
+            f"(expected at most 1): {sorted(p.name for p in existing)} — "
+            "a previous run likely crashed mid-install; resolve manually "
+            "before continuing"
+        )
     for old in existing:
         shutil.copy(old, previous / old.name)
     if existing:
@@ -488,9 +501,11 @@ def rewrite_dockerfile_pins(latest):
         DOCKERFILE_PATH.write_text(new_text)
         return {"dockerfile_args_rewritten": True,
                 "needs_commit": str(DOCKERFILE_PATH)}
-    except OSError as exc:
+    except Exception as exc:   # noqa: BLE001 - reports its own failure via a
+        # return field (never raises), so run()'s post-success annotation
+        # step can treat this the same way regardless of exception type.
         return {"dockerfile_args_rewritten": False,
-                "dockerfile_rewrite_error": str(exc)}
+                "dockerfile_rewrite_error": f"{type(exc).__name__}: {exc}"}
 
 
 def rebuild_containers(url, sha3, version):
@@ -525,7 +540,24 @@ def rebuild_containers(url, sha3, version):
         if probe.returncode != 0:
             return {"job-intel-exporter":
                     f"deployed but version probe failed: {probe.stderr[-300:]}"}
-        return {"job-intel-exporter": "ok", "observed": probe.stdout.strip()}
+        observed = probe.stdout.strip()
+        result = {"job-intel-exporter": "ok", "observed": observed}
+        # Judge the observed version against what we just installed on the
+        # host, rather than merely reporting it. A mismatch is a reported
+        # discrepancy, not an exception — the container may be slow to pick
+        # up the new image, and this must never undo a healthy host upgrade.
+        observed_version = (observed.split() or [""])[0]
+        try:
+            observed_tuple = tuple(int(x) for x in observed_version.split("."))
+        except ValueError:
+            observed_tuple = None
+        expected_tuple = tuple(version)
+        if observed_tuple is not None and observed_tuple != expected_tuple:
+            result["version_mismatch"] = {
+                "expected": ".".join(str(x) for x in expected_tuple),
+                "observed": observed_version,
+            }
+        return result
     except Exception as exc:   # noqa: BLE001 - never undo a healthy host upgrade
         return {"job-intel-exporter": f"error: {exc}"}
 
@@ -625,13 +657,25 @@ def run():
                                   "rollback_recovered": recovered})
 
         if healthy:
+            # The upgrade is done as of here: the wheel is installed, the
+            # gateway restarted, and post_install_healthy has confirmed the
+            # version, the shim, /proc/<pid>/maps and both databases.
+            # Everything below is best-effort post-success bookkeeping
+            # (container rebuild/deploy, Dockerfile pin rewrite) — it must
+            # be structurally incapable of turning this into a "failed"
+            # verdict. Its own try/except records problems as a field on
+            # the *upgraded* payload, never by falling through to the
+            # outer except and reclassifying a completed upgrade.
             stage = "containers"
             result = {"action": "upgraded",
                       "installed": fmt(latest["version"]),
-                      "previous": fmt(current),
-                      "containers": rebuild_containers(
-                          latest["url"], latest["sha3"], latest["version"])}
-            result.update(rewrite_dockerfile_pins(latest))
+                      "previous": fmt(current)}
+            try:
+                result["containers"] = rebuild_containers(
+                    latest["url"], latest["sha3"], latest["version"])
+                result.update(rewrite_dockerfile_pins(latest))
+            except Exception as exc:   # noqa: BLE001 - see comment above
+                result["post_upgrade_errors"] = f"{type(exc).__name__}: {exc}"
             return _write_result(result)
 
         recovered = rollback(current)

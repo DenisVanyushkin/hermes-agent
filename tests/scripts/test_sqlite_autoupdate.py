@@ -152,6 +152,31 @@ def test_upgrade_success_threads_expected_version(monkeypatch, tmp_path):
     )
 
 
+def test_post_success_bookkeeping_failure_does_not_reclassify_the_upgrade(monkeypatch, tmp_path):
+    """A completed upgrade (wheel installed, gateway restarted, health
+    verified) must stay reported as "upgraded" even if the purely
+    best-effort bookkeeping that runs after it — rewriting the exporter
+    Dockerfile's pins — blows up with something other than OSError. The
+    verdict about what actually happened to production must not depend on
+    whether an unrelated annotation step succeeded."""
+    module = _load()
+    _base_upgrade_monkeypatches(module, monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "install_and_restart", lambda wheel, expected: True)
+
+    def raising_rewrite(latest):
+        raise ValueError("dockerfile is a directory somehow")
+
+    monkeypatch.setattr(module, "rewrite_dockerfile_pins", raising_rewrite)
+
+    payload = module.run()
+    assert payload["action"] == "upgraded", (
+        "post-success bookkeeping failing must not turn a completed "
+        "upgrade into a reported failure"
+    )
+    assert "post_upgrade_errors" in payload
+    assert "ValueError" in payload["post_upgrade_errors"]
+
+
 def test_post_install_unhealthy_triggers_rollback(monkeypatch, tmp_path):
     module = _load()
     _base_upgrade_monkeypatches(module, monkeypatch, tmp_path)
