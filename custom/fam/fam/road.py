@@ -112,7 +112,11 @@ def _attached_via_latlons(conn, event):
     return plans_mod.attached_via_points(conn, event)
 
 
-def _origin_for(conn, event, cfg, depart_at=None, wall_now_utc=None):
+_UNSET = object()
+
+
+def _origin_for(conn, event, cfg, depart_at=None, wall_now_utc=None,
+                origin=_UNSET):
     """Откуда ехать. Local-import shim onto whereami.resolve_origin, for
     the same reason as _attached_via_latlons above: whereami imports road
     at module level (it reuses _haversine_km), so a module-level import
@@ -137,17 +141,33 @@ def _origin_for(conn, event, cfg, depart_at=None, wall_now_utc=None):
     candidates by X, then measured the pin's TTL against the real
     clock -- so a pin Amina had just sent read as long expired and the
     route was quietly computed from home.
+
+    `origin` -- уже разрезолвленная точка (тот самый dict от
+    whereami.resolve_origin). Когда она передана, лестница не
+    запускается вовсе: вызывающий уже сходил по ней и, что важнее,
+    СОХРАНИТ этот же объект в road_origin_*. Две резолюции на один
+    пересчёт могли разойтись часами и оставить в базе точку, от которой
+    лежащие рядом минуты никогда не считались.
+
+    None -- это ЗНАЧЕНИЕ («резолвили, origin'а нет»), а не «не
+    передали»: tick.road_recompute держит именно его, когда его
+    поевентная лестница (исключающая целевое событие) пуста, и
+    повторный резолв вернул бы ровно тот же None ценой ещё одного
+    прохода. Отличает эти два случая сентинел _UNSET.
     """
+    if origin is not _UNSET:
+        return (origin["lat"], origin["lon"]) if origin else (None, None)
     from fam import whereami
-    origin = whereami.resolve_origin(
+    resolved = whereami.resolve_origin(
         conn, cfg, now_utc=wall_now_utc or _wall_now(), event=event,
         at_utc=depart_at)
-    if not origin:
+    if not resolved:
         return None, None
-    return origin["lat"], origin["lon"]
+    return resolved["lat"], resolved["lon"]
 
 
-def compute_travel_min(conn, event, cfg, now_utc=None, wall_now_utc=None):
+def compute_travel_min(conn, event, cfg, now_utc=None, wall_now_utc=None,
+                       origin=_UNSET):
     """Fallback ladder for an event's travel time, guarded by TomTom's
     daily call cap. Never raises.
 
@@ -156,6 +176,12 @@ def compute_travel_min(conn, event, cfg, now_utc=None, wall_now_utc=None):
     The wall clock -- by which a pin's TTL and a GPS fix's age are judged --
     is `wall_now_utc`, and None (every production caller) means "the real
     one". See _origin_for.
+
+    `origin`, когда передан, -- готовая точка отправления от
+    вызывающего; лестница whereami не запускается, а wall_now_utc
+    становится неважен (он управлял только самостоятельным резолвом).
+    Так cal.recompute_road и tick.road_recompute считают минуты от
+    ровно того объекта, который сами же кладут в road_origin_*.
 
     0. (Phase 7b, detours) event has usable coordinates AND at least one
        OPEN plan is attached_event_id-linked to it with a resolvable
@@ -185,7 +211,7 @@ def compute_travel_min(conn, event, cfg, now_utc=None, wall_now_utc=None):
     event_id = event.get("id")
     place = event.get("place") or {}
     from_lat, from_lon = _origin_for(conn, event, cfg, depart_at=now,
-                                     wall_now_utc=wall_now_utc)
+                                     wall_now_utc=wall_now_utc, origin=origin)
     to_lat = place.get("lat")
     to_lon = place.get("lon")
 
