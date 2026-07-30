@@ -19,8 +19,6 @@ import re
 import sqlite3
 import subprocess
 
-import pytest
-
 from hermes_state import is_sqlite_wal_reset_vulnerable
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -41,10 +39,28 @@ STDLIB_ONLY = re.compile(
     r"|\.blobopen\(|\bcreate_window_function\b|\.setlimit\(|\.getlimit\("
 )
 
+# Matches any import statement that brings the sqlite3 module into scope:
+# `import sqlite3`, `import sqlite3 as db`, `from sqlite3 import connect`,
+# `import contextlib, sqlite3`. Anchored per-line (^...$ via MULTILINE) so a
+# bare mention of the word "sqlite3" in a comment or string literal does not
+# count as an import. Deliberately not a full parse of Python import syntax —
+# a regex over import statements is sufficient for this guard's purpose.
+IMPORT_SQLITE3 = re.compile(r"^\s*(?:import|from)\s+.*\bsqlite3\b", re.MULTILINE)
+
 EXCLUDED_PATH_PARTS = ("/venv/", "/.venv/", "/.uv-cache/", "site-packages", "/node_modules/")
 
 # This file necessarily contains the very patterns it searches for.
 SELF = pathlib.Path(__file__).name
+
+
+def _imports_sqlite3(text):
+    """True if `text` contains an import statement that brings sqlite3 into scope.
+
+    This is the actual gating predicate used by _sqlite3_importing_python_files
+    below, factored out so it can be exercised directly and hermetically by
+    test_the_import_scoping_actually_discriminates.
+    """
+    return bool(IMPORT_SQLITE3.search(text))
 
 
 def _sqlite3_importing_python_files():
@@ -77,7 +93,7 @@ def _sqlite3_importing_python_files():
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if "import sqlite3" not in text:
+        if not _imports_sqlite3(text):
             continue
         files.append((path, text))
     return files
@@ -101,7 +117,7 @@ def test_no_apis_pysqlite3_lacks():
     )
 
 
-def test_the_guard_can_actually_fire(tmp_path):
+def test_the_guard_can_actually_fire():
     """A guard that cannot fail is not a guard. Prove the regex matches."""
     assert STDLIB_ONLY.search("conn.autocommit = True")
     assert STDLIB_ONLY.search("sqlite3.connect(db, autocommit=False)")
@@ -110,24 +126,34 @@ def test_the_guard_can_actually_fire(tmp_path):
 
 
 def test_the_import_scoping_actually_discriminates():
-    """Prove the sqlite3-import scoping itself works, hermetically.
+    """Prove the sqlite3-import gate itself works, hermetically, on the real
+    predicate (_imports_sqlite3) rather than re-deriving its own copy.
 
-    No files are created under the repo for this — it scans in-memory text
-    through the same two functions the real scan uses (_offenders_in_text
-    for the regex, and an inline "import sqlite3" membership check mirroring
-    _sqlite3_importing_python_files's filter), so the test stays hermetic
-    while still exercising the real scoping decision.
+    No files are created under the repo for this. It covers every import
+    form the guard claims to handle, plus a negative case proving a mere
+    mention of the word "sqlite3" in a comment or string does not count,
+    and finally shows that the regex alone (STDLIB_ONLY / _offenders_in_text)
+    matches both a sqlite3 snippet and a psycopg2 snippet identically — so
+    the import gate, not the regex, is what must do the discriminating.
     """
+    assert _imports_sqlite3("import sqlite3\n")
+    assert _imports_sqlite3("import sqlite3 as db\n")
+    assert _imports_sqlite3("from sqlite3 import connect\n")
+    assert _imports_sqlite3("import contextlib, sqlite3\n")
+
+    assert not _imports_sqlite3("import psycopg2\nconn.autocommit = True\n")
+    assert not _imports_sqlite3(
+        "# this module talks to sqlite3 indirectly\nDRIVER = 'sqlite3'\n"
+    )
+
     with_import = "import sqlite3\nconn.autocommit = True\n"
     without_import = "import psycopg2\nconn.autocommit = True\n"
-
-    assert "import sqlite3" in with_import
+    # The regex alone cannot tell these apart — both are flagged.
     assert _offenders_in_text("snippet.py", with_import) != []
-
-    assert "import sqlite3" not in without_import
-    # The regex alone would still match — proving the import gate, not the
-    # regex, is what changes the outcome.
     assert _offenders_in_text("snippet.py", without_import) != []
+    # Only the import gate discriminates them.
+    assert _imports_sqlite3(with_import)
+    assert not _imports_sqlite3(without_import)
 
 
 def test_runtime_is_not_wal_reset_vulnerable():
