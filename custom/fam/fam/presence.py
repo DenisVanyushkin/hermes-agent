@@ -194,9 +194,9 @@ def _car_fix_dt(row):
         return None
 
 
-def _freshest_car_fix(conn, cutoff):
-    """Строка car_metrics с координатами и самым поздним фиксом не старше
-    cutoff, либо None.
+def _freshest_car_fix(conn):
+    """Строка car_metrics с координатами и самым поздним фиксом, либо None
+    -- безусловно САМАЯ свежая, без отсечения по возрасту.
 
     Решение о свежести принимается в Python по небольшому окну последних
     строк (CAR_CANDIDATE_ROWS, порядок -- по ts_utc, однородной TEXT
@@ -204,15 +204,23 @@ def _freshest_car_fix(conn, cutoff):
     _car_fix_dt. Семантика прежняя: выигрывает самый свежий фикс, и если
     он у дома, то это ответ "не отлучка" -- на более старые строки
     функция не проваливается.
+
+    Раньше здесь был параметр cutoff, и строки старше него отбрасывались
+    ДО выбора самой свежей -- значит, устаревший-но-припаркованный фикс
+    был неотличим от отсутствия данных вовсе. Отбор по возрасту (и
+    правило про gps_speed для устаревших фиксов, см. whereami._evaluate_car)
+    теперь целиком в is_away, после того как freshest уже выбран -- иначе
+    "самая свежая строка" и "строка не старше cutoff" начинают противоречить
+    друг другу на устаревших запаркованных фиксах.
     """
     rows = conn.execute(
-        "SELECT gps_lat, gps_lon, gps_ts, ts_utc FROM car_metrics "
+        "SELECT gps_lat, gps_lon, gps_ts, gps_speed, ts_utc FROM car_metrics "
         "WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL "
         "ORDER BY ts_utc DESC LIMIT ?", (CAR_CANDIDATE_ROWS,)).fetchall()
     best, best_dt = None, None
     for row in rows:
         fix_dt = _car_fix_dt(row)
-        if fix_dt is None or fix_dt < cutoff:
+        if fix_dt is None:
             continue
         if best_dt is None or fix_dt > best_dt:
             best, best_dt = row, fix_dt
@@ -225,10 +233,16 @@ def is_away(conn, cfg, now_utc):
     Только уверенные признаки, в порядке проверки:
       1. "event" -- идёт событие с place_id, чьи координаты дальше
          радиуса. expected_home = end_utc + travel_min.
-      2. "car_gps" -- свежая (фикс не старше whereami_car_fresh_min)
-         строка car_metrics с координатами дальше радиуса. Возраст
-         считается по gps_ts как по Unix-эпохе, с фоллбэком на ts_utc --
-         см. _car_fix_dt. expected_home неизвестен.
+      2. "car_gps" -- самая свежая строка car_metrics с координатами
+         дальше радиуса, если её фикс не старше whereami_car_fresh_min
+         ИЛИ машина стояла (gps_speed 0/NULL) -- та же эвристика, что и
+         в whereami._evaluate_car: припаркованная машина не уезжает сама,
+         поэтому устаревший фикс всё ещё говорит, где она. Едущая машина
+         с устаревшим фиксом отбрасывается -- за 40+ минут на ходу она
+         уже в другом районе, а это единственный способ отличить "она
+         всё ещё там" от "фикс просто древний". Возраст считается по
+         gps_ts как по Unix-эпохе, с фоллбэком на ts_utc -- см.
+         _car_fix_dt. expected_home неизвестен.
       3. "shared_location" -- неистёкшая строка location_hints дальше
          радиуса.
     Иначе (False, "home_or_unknown", None).
@@ -256,10 +270,25 @@ def is_away(conn, cfg, now_utc):
                 timespec="seconds")
         return (True, "event", expected)
 
-    fresh_min = int(cfg.get("whereami_car_fresh_min", 20))
-    car = _freshest_car_fix(conn, now - timedelta(minutes=fresh_min))
+    car = _freshest_car_fix(conn)
     if car is not None and _far_from_home(cfg, car["gps_lat"], car["gps_lon"]):
-        return (True, "car_gps", None)
+        # Возраст решается в Python (см. _car_fix_dt), не в SQL: gps_ts
+        # -- INTEGER эпоха, ts_utc -- TEXT, и SQLite ранжирует их
+        # несравнимо.
+        fix_dt = _car_fix_dt(car)
+        fresh_min = int(cfg.get("whereami_car_fresh_min", 20))
+        is_fresh = fix_dt is not None and now - fix_dt <= timedelta(
+            minutes=fresh_min)
+        # Правило про скорость живёт здесь, а не в _freshest_car_fix:
+        # оно применяется только к УЖЕ выбранному самому свежему фиксу,
+        # а не к отбору кандидатов -- иначе "самая свежая строка" не
+        # была бы одним и тем же понятием во всей функции. Эвристика --
+        # ровно whereami._evaluate_car: устаревший фикс всё ещё
+        # доказателен, если машина стояла (speed 0 или NULL).
+        speed = car["gps_speed"]
+        parked = speed is None or speed == 0
+        if is_fresh or parked:
+            return (True, "car_gps", None)
 
     hint = conn.execute(
         "SELECT lat, lon FROM location_hints "

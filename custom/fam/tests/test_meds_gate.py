@@ -246,7 +246,8 @@ def _add_event(db, title, start_utc, end_utc, place_id=None, travel_min=None):
 _AUTO_GPS_TS = object()
 
 
-def _add_car_metric(db, ts_utc, lat, lon, gps_ts=_AUTO_GPS_TS):
+def _add_car_metric(db, ts_utc, lat, lon, gps_ts=_AUTO_GPS_TS,
+                     gps_speed=40.0):
     """Строка телеметрии в той форме, которую производит прод.
 
     gps_ts -- Unix-эпоха INTEGER (fam.car пишет StarLine position.ts,
@@ -255,13 +256,20 @@ def _add_car_metric(db, ts_utc, lat, lon, gps_ts=_AUTO_GPS_TS):
     чего все car-GPS тесты проходили против несуществующей формы данных
     и не замечали, что SQL-сравнение эпохи со строкой не пропускает ни
     одной реальной строки. gps_ts=None пишет NULL (фоллбэк на ts_utc).
+
+    gps_speed по умолчанию НЕ ноль (40 км/ч -- машина едет). Это
+    осознанный выбор: is_away теперь доверяет устаревшему фиксу, если
+    машина стояла (speed 0/NULL), поэтому тест на "устаревший фикс не
+    считается уликой" обязан явно описывать едущую машину -- иначе он
+    молча проверял бы уже другое поведение. Тесты, которым важен именно
+    факт парковки, передают gps_speed=0.0 или None явно.
     """
     from datetime import datetime as _dt
     if gps_ts is _AUTO_GPS_TS:
         gps_ts = int(_dt.fromisoformat(ts_utc).timestamp())
     db.execute(
-        "INSERT INTO car_metrics(ts_utc, gps_lat, gps_lon, gps_ts) "
-        "VALUES(?,?,?,?)", (ts_utc, lat, lon, gps_ts))
+        "INSERT INTO car_metrics(ts_utc, gps_lat, gps_lon, gps_ts, gps_speed) "
+        "VALUES(?,?,?,?,?)", (ts_utc, lat, lon, gps_ts, gps_speed))
     db.commit()
 
 
@@ -345,8 +353,13 @@ def test_away_false_on_stale_car_gps_with_null_gps_ts(db):
 
 def test_fresh_far_car_gps_wins_over_stale_far_row(db):
     # Более свежий фикс у дома перебивает старый далёкий: выигрывает
-    # самый свежий фикс, а не первый подходящий.
-    _add_car_metric(db, "2026-07-20T09:50:00+00:00", AWAY_LAT, AWAY_LON)
+    # самый свежий фикс, а не первый подходящий -- даже когда старый
+    # далёкий фикс сам по себе, в одиночку, был бы засчитан как улика
+    # (устарел, но машина стояла, speed=0). Функция не имеет права
+    # проваливаться на эту старую строку в поисках "далеко", если
+    # свежайший фикс уже дал ответ "рядом с домом".
+    _add_car_metric(db, "2026-07-20T09:20:00+00:00", AWAY_LAT, AWAY_LON,
+                     gps_speed=0.0)
     _add_car_metric(db, "2026-07-20T09:58:00+00:00", HOME_LAT, HOME_LON)
     assert presence.is_away(db, CFG, NOW)[0] is False
 
@@ -381,9 +394,42 @@ def test_is_away_accepts_a_naive_now(db):
 
 
 def test_away_false_on_stale_car_gps(db):
-    # 09:00 при NOW=10:00 -- старше whereami_car_fresh_min (20 мин).
+    # 09:00 при NOW=10:00 -- старше whereami_car_fresh_min (20 мин), и
+    # машина ехала (дефолтный gps_speed хелпера) -- через 60 минут на
+    # ходу это уже не улика.
     _add_car_metric(db, "2026-07-20T09:00:00+00:00", AWAY_LAT, AWAY_LON)
     assert presence.is_away(db, CFG, NOW)[0] is False
+
+
+def test_away_true_on_stale_car_gps_parked(db):
+    # Тот же возраст, что и test_away_false_on_stale_car_gps, но машина
+    # стояла (speed=0): устаревший фикс всё ещё говорит, где она --
+    # припаркованная машина не уезжает сама. Ровно эвристика
+    # whereami._evaluate_car, перенесённая на away-гейт.
+    _add_car_metric(db, "2026-07-20T09:00:00+00:00", AWAY_LAT, AWAY_LON,
+                     gps_speed=0.0)
+    away, reason, expected_home = presence.is_away(db, CFG, NOW)
+    assert away is True
+    assert reason == "car_gps"
+    assert expected_home is None
+
+
+def test_away_false_on_stale_car_gps_moving(db):
+    # Устаревший фикс, машина ехала (ненулевая скорость): за 40+ минут
+    # на ходу она уже в другом районе -- фикс отбрасывается.
+    _add_car_metric(db, "2026-07-20T09:00:00+00:00", AWAY_LAT, AWAY_LON,
+                     gps_speed=55.0)
+    assert presence.is_away(db, CFG, NOW)[0] is False
+
+
+def test_away_true_on_stale_car_gps_null_speed(db):
+    # StarLine не отдал speed вовсе (NULL) -- трактуется как "не едет",
+    # той же логикой, что и в whereami._evaluate_car: speed is None or 0.
+    _add_car_metric(db, "2026-07-20T09:00:00+00:00", AWAY_LAT, AWAY_LON,
+                     gps_speed=None)
+    away, reason, _ = presence.is_away(db, CFG, NOW)
+    assert away is True
+    assert reason == "car_gps"
 
 
 def test_away_false_when_car_is_at_home(db):
