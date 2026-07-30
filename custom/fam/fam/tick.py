@@ -1093,9 +1093,41 @@ def _meds_series(conn, now_utc, cfg):
                 # naturally excludes held ticks, which is exactly what
                 # we want: a dose held twice then sent should still read
                 # as attempt 1, not attempt 3.
+                #
+                # Two tables are consulted, not one (fix round 1 finding):
+                # a multi-dose group release (tick._meds_series's post-loop
+                # block, react.record_sent) writes ONE sent_messages row
+                # keyed to only the FIRST dose's intake_id (ref_id is a
+                # scalar column); every other dose in that group is
+                # recorded solely in sent_message_refs. A plain COUNT over
+                # sent_messages alone would make every non-first dose of a
+                # group release read back as attempt_no=1 forever,
+                # reproducing the identical first-attempt sentence on its
+                # next repeat -- exactly the bug this task exists to
+                # prevent. The two SELECTs are combined with UNION (not
+                # UNION ALL) so they dedupe both against each other (the
+                # first dose's id appears in both tables for the same
+                # message -- react.record_sent inserts every id in
+                # ref_ids into sent_message_refs, including the one also
+                # stored as sent_messages.ref_id) and against themselves
+                # (sent_message_refs has no UNIQUE(sent_message_id, ref_id)
+                # constraint, so a re-record could in principle fan out
+                # duplicate rows for the same message+dose -- a known,
+                # separately-deferred wart; UNION's row-level dedup
+                # neutralises it here without needing the constraint).
+                # Not covered here: gate.deliver's own "delivered but no
+                # message_id" case (ok=True, message_id=None) skips
+                # react.record_sent entirely, so that send leaves no row
+                # in either table and would still undercount by one --
+                # pre-existing gate.deliver behaviour, out of scope.
                 attempt_no = conn.execute(
-                    "SELECT COUNT(*) FROM sent_messages "
-                    "WHERE kind='med' AND ref_id=?", (intake_id,)
+                    "SELECT COUNT(*) FROM ("
+                    "  SELECT id FROM sent_messages"
+                    "  WHERE kind='med' AND ref_id=?"
+                    "  UNION"
+                    "  SELECT sent_message_id FROM sent_message_refs"
+                    "  WHERE kind='med' AND ref_id=?"
+                    ")", (intake_id, intake_id)
                 ).fetchone()[0] + 1
                 minutes_late = int(
                     (now_dt - _parse_utc(row["plan_ts_utc"])).total_seconds()
