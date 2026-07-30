@@ -273,6 +273,75 @@ def test_dry_run_sync_errors_redact_hrefs(db, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------
+# Final review, blocker 3 (Important, privacy): the SAME redaction must
+# apply on the REAL (non-dry-run) path too -- the boевая `cal.ext.sync`
+# audit row, and the `tick.error` message built from the identical
+# `sync_errors` list (which is what `maint.problem_summary` copies
+# VERBATIM into the nightly message to Denis for `kind='tick.error'`).
+# ---------------------------------------------------------------------
+
+def test_prod_cal_ext_sync_sync_errors_redact_href(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    resource_href = CAL_URL + "broken.ics"
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    item = {"href": resource_href, "deleted": False, "etag": "e1",
+            "ics": "this is not ICS at all\r\n"}
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], None, {"mode": "initial_full", "reason": None}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1  # a real (non-dry-run) run with sync_errors present fails the tick
+
+    sync_rows = _audit_rows(db, "cal.ext.sync")
+    assert len(sync_rows) == 1
+    assert sync_rows[0]["sync_errors"]
+    assert any("<href>" in e for e in sync_rows[0]["sync_errors"])
+    assert not any(resource_href in e for e in sync_rows[0]["sync_errors"])
+    assert not any("broken.ics" in e for e in sync_rows[0]["sync_errors"])
+
+    tick_error_rows = _audit_rows(db, "tick.error")
+    assert len(tick_error_rows) == 1
+    assert resource_href not in tick_error_rows[0]["error"]
+    assert "broken.ics" not in tick_error_rows[0]["error"]
+
+
+def test_prod_cal_ext_sync_sync_errors_redact_raw_rrule(db, monkeypatch):
+    """A master VEVENT with an RRULE `dateutil.rrulestr` can't parse
+    surfaces the raw RRULE VALUE in `expand()`'s own error text
+    (extcal._expand_master: `f"RRULE {master['rrule']!r} for uid=..."`)
+    -- that raw value must not reach the production `cal.ext.sync` audit
+    row or the `tick.error` message either."""
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    bad_rrule = "NOT_A_VALID_RRULE_AT_ALL"
+    ics = ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n"
+           "UID:series1@icloud.com\r\nSUMMARY:Тренировка\r\n"
+           "DTSTART:20370720T130000Z\r\nDTEND:20370720T140000Z\r\n"
+           f"RRULE:{bad_rrule}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    item = {"href": CAL_URL + "series1.ics", "deleted": False, "etag": "e1",
+            "ics": ics}
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], None, {"mode": "initial_full", "reason": None}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1
+
+    sync_rows = _audit_rows(db, "cal.ext.sync")
+    assert len(sync_rows) == 1
+    assert sync_rows[0]["sync_errors"]
+    assert any("RRULE <redacted>" in e for e in sync_rows[0]["sync_errors"])
+    assert not any(bad_rrule in e for e in sync_rows[0]["sync_errors"])
+
+    tick_error_rows = _audit_rows(db, "tick.error")
+    assert len(tick_error_rows) == 1
+    assert bad_rrule not in tick_error_rows[0]["error"]
+
+
+# ---------------------------------------------------------------------
 # success: audit cal.ext.sync with counts AND sync_info.mode
 # ---------------------------------------------------------------------
 

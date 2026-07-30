@@ -557,6 +557,31 @@ def cmd_cal_adopt(args):
     second ringing source is exactly the duplicate-reminder problem this
     whole feature exists to avoid.
 
+    Final-review blocker 1 (Critical): a recurring event's master +
+    RECURRENCE-ID overrides arrive as ONE CalDAV resource, and `expand()`
+    materializes it into N `events` rows that all share the same
+    `external_href` (see extcal.py's own "ключ вхождения" docstrings).
+    `drop_valarm` strips VALARM from that href's resource AS A WHOLE --
+    there is no such thing as "the VALARM for just one occurrence" on the
+    wire. The original single-row `adopt` therefore flipped owner for
+    ONE occurrence while silencing her phone for ALL of them: every OTHER
+    occurrence of the series lost its only alarm and gained no Hermes
+    chain either -- total, silent, unrecoverable-by-`disown` reminder
+    loss for a plain "напоминай мне про <повторяющееся>" request (skill
+    rule 21's own example is a recurring workout).
+
+    Fix: adopt operates on the whole series in one atomic step. Every
+    OTHER `owner='iphone'` row sharing this event's `external_href` (i.e.
+    every sibling occurrence of the same underlying resource) is flipped
+    to `owner='hermes'` and reminder-regenerated ALONGSIDE the requested
+    `event_id`, BEFORE the single `drop_valarm` call against that shared
+    href -- one VALARM-strip network call still covers the whole
+    resource, but now every row it silences also has its own chain. A
+    non-recurring event (href unique to it, or no href/external_uid at
+    all) has no siblings, so this is a no-op widening for the common
+    case -- `adopted_ids`/output stay exactly as before when there is
+    only one row.
+
     Unknown event_id, or an event that is already owner='hermes' (nothing
     to adopt -- includes a plain Hermes-created event that was never
     hers), raises ValueError -> main()'s existing exit-2 contract, same as
@@ -570,7 +595,8 @@ def cmd_cal_adopt(args):
     reminding her because a CalDAV PUT to a DIFFERENT calendar hiccuped.
     The failure is folded into the same `cal.adopt` audit entry
     (`valarm_dropped: False`, `valarm_error: <reason>`) rather than
-    swallowed, and surfaced in this command's own output.
+    swallowed, and surfaced in this command's own output. This still
+    applies series-wide: one shared network failure, folded once.
 
     Never calls gate.deliver (this command, like every extcal entry
     point, is not itself a new source of messages to her -- project
@@ -584,30 +610,56 @@ def cmd_cal_adopt(args):
         raise ValueError(
             f"event {args.id} is already owner=hermes -- nothing to adopt"
         )
-    conn.execute(
-        "UPDATE events SET owner='hermes' WHERE id=? AND owner='iphone'",
-        (args.id,),
-    )
-    created = rem.regenerate(conn, args.id)
+
+    href = e.get("external_href")
+    # Blocker 1: every OTHER occurrence of the SAME recurring series (same
+    # CalDAV resource, hence same href) must be adopted in the same
+    # operation as `args.id` -- see docstring above. A single, non-
+    # recurring event's href is unique to it, so this query naturally
+    # returns just itself.
+    ids = [args.id]
+    if href:
+        sibling_rows = conn.execute(
+            "SELECT id FROM events WHERE external_href=? AND owner='iphone'",
+            (href,),
+        ).fetchall()
+        ids = sorted({row["id"] for row in sibling_rows} | {args.id})
+
+    created = 0
+    for eid in ids:
+        conn.execute(
+            "UPDATE events SET owner='hermes' WHERE id=? AND owner='iphone'",
+            (eid,),
+        )
+        created += rem.regenerate(conn, eid)
 
     valarm_dropped = None
     valarm_error = None
-    href = e.get("external_href")
     if href:
         cfg = gate.load_config()
         ok, _new_etag, detail = extcal.drop_valarm(cfg, href, e.get("external_etag"))
         valarm_dropped = ok
         if not ok:
-            valarm_error = detail
+            # Blocker 3 (privacy): `detail` embeds HER OWN iCloud event's
+            # absolute href (e.g. "GET https://.../evt1.ics failed
+            # (status=...)") -- redact before it lands in this command's
+            # own audit entry AND stdout, the same as every other extcal
+            # diagnostic channel.
+            valarm_error = _redact_extcal_text(detail)
 
-    audit.log(conn, "cal.adopt", {
+    audit_payload = {
         "id": args.id, "reminders_created": created,
         "valarm_dropped": valarm_dropped, "valarm_error": valarm_error,
-    })
+    }
+    if len(ids) > 1:
+        audit_payload["adopted_ids"] = ids
+    audit.log(conn, "cal.adopt", audit_payload)
     conn.commit()
 
     out = {"id": args.id, "owner": "hermes", "reminders_created": created,
            "valarm_dropped": valarm_dropped}
+    if len(ids) > 1:
+        out["adopted_ids"] = ids
     if valarm_error:
         out["valarm_error"] = valarm_error
     if args.json:
@@ -615,6 +667,10 @@ def cmd_cal_adopt(args):
     else:
         print(f"adopted event {args.id}: owner=hermes, "
               f"{created} reminder(s) scheduled")
+        if len(ids) > 1:
+            others = ", ".join(str(i) for i in ids if i != args.id)
+            print(f"  also adopted {len(ids) - 1} other occurrence(s) of "
+                  f"this recurring series (same iCloud resource): {others}")
         if valarm_dropped is False:
             print(f"  warning: could not remove her phone's own alarm "
                   f"({valarm_error}) -- she may get one extra ring from it")
@@ -1348,16 +1404,50 @@ def _dry_run_summary(changeset):
 
 
 _HREF_IN_TEXT_RE = re.compile(r"https?://\S+")
+_RRULE_IN_TEXT_RE = re.compile(r"RRULE\s+'[^']*'")
+
+# Cap on any single redacted diagnostic string landing in audit_log or a
+# message to Denis -- matches the bound `cal.ext.export_error.error`
+# already used (`extcal.py`'s `_export_commit_one`) for the "same view as
+# neighboring channels" this final-review blocker asks for.
+_REDACTED_TEXT_MAX = 300
 
 
-def _redact_sync_errors_for_dry_run(sync_errors):
-    """`--dry-run`'s `sync_errors` list otherwise embeds a full CalDAV
-    resource href (built from her own iCloud account's collection URL)
-    in plain text -- fix-round 2, minor #4. The calendar name/mode/counts
-    around it stay (that's the whole diagnostic point of printing these
-    at all); any `http(s)://...` substring is replaced with a
-    placeholder."""
-    return [_HREF_IN_TEXT_RE.sub("<href>", e) for e in (sync_errors or [])]
+def _redact_extcal_text(text):
+    """One redaction pass, reused by every log/print/audit path that might
+    carry a fragment of her raw iCloud data (final review, blocker 3):
+    an absolute CalDAV resource href (hers, or the "Гермес" write-target's)
+    -- `https?://...` -> `<href>` -- and a raw `RRULE` value quoted in an
+    `expand()`/`_expand_master` diagnostic (`extcal.py`'s own `!r`-quoted
+    `RRULE '<value>' for uid=...` shape) -- `RRULE '...'` -> `RRULE
+    <redacted>`. `uid=...` is left alone: it is an opaque identifier, not
+    her data, and the design doc's own "только UID и счётчики" rule
+    explicitly allows it through. Falsy input passes through unchanged
+    (nothing to redact); never raises."""
+    if not text:
+        return text
+    text = _HREF_IN_TEXT_RE.sub("<href>", text)
+    text = _RRULE_IN_TEXT_RE.sub("RRULE <redacted>", text)
+    return text
+
+
+def _redact_sync_errors(sync_errors):
+    """`sync_errors` list -> redacted + length-capped copy (final review,
+    blocker 3): previously only ever used for `--dry-run` printing
+    (fix-round 2, minor #4, hence this function's former name
+    `_redact_sync_errors_for_dry_run`) -- now ALSO used on the production
+    (non-dry-run) `cal.ext.sync` audit write and the `tick.error` message
+    built from the same list, which is what a real sync failure's
+    diagnostic text rides all the way into `maint.problem_summary`'s
+    nightly message to Denis on. One implementation, every caller that
+    needs it, per this project's own "no second implementation" rule.
+    The calendar name/mode/counts around each entry stay (that's the
+    whole diagnostic point of printing/auditing these at all) -- only an
+    embedded href or raw RRULE value is stripped, and the result is
+    capped at `_REDACTED_TEXT_MAX` chars (a long fallback path -- e.g. a
+    verbose foreign HTTP error body wrapped into the message -- must not
+    make the audit row/nightly message unbounded either)."""
+    return [_redact_extcal_text(e)[:_REDACTED_TEXT_MAX] for e in (sync_errors or [])]
 
 
 def _cal_ext_sync(conn, cfg, now, dry_run):
@@ -1810,13 +1900,22 @@ def cmd_tick_cal_ext(args):
     nothing lands in the DB or in iCloud. The printed changeset is
     REDACTED (`_dry_run_summary`, fix-round finding m3): external_uid/id
     and counts only, never her event titles or raw LOCATION text; the
-    printed `sync_errors` are ALSO redacted (`_redact_sync_errors_for_
-    dry_run`, fix-round 2 minor #4) -- a full CalDAV resource href would
-    otherwise leak in plain text. `--dry-run` ALWAYS exits 0, deliberately,
-    even when `sync_errors` is non-empty (fix-round 2, minor #4): it is a
-    diagnostic preview, nothing was written either way, so there is
-    nothing an exit code needs to protect here -- a human reads the
-    printed output instead.
+    printed `sync_errors` are ALSO redacted (`_redact_sync_errors`,
+    fix-round 2 minor #4) -- a full CalDAV resource href or a raw RRULE
+    value would otherwise leak in plain text. `--dry-run` ALWAYS exits 0,
+    deliberately, even when `sync_errors` is non-empty (fix-round 2,
+    minor #4): it is a diagnostic preview, nothing was written either
+    way, so there is nothing an exit code needs to protect here -- a
+    human reads the printed output instead.
+
+    Final-review blocker 3 (Important, privacy): `_redact_sync_errors`
+    (renamed from `_redact_sync_errors_for_dry_run` -- it is no longer
+    dry-run-only) is now ALSO applied to the production `cal.ext.sync`
+    audit write and to the `sync_errors` fed into this tick's own
+    `tick.error` message below: that message's `error` field is what
+    `maint.problem_summary` copies VERBATIM into the nightly text sent to
+    Denis, so an unredacted href/RRULE there was a real leak into a
+    message she is not the audience for, not just an audit-log detail.
 
     Fix-round 1 (Opus review finding I1): ANY error this tick -- one
     calendar's fetch failing (partial) or every calendar's (total), a
@@ -1837,6 +1936,27 @@ def cmd_tick_cal_ext(args):
     this tick (simpler/safer than attributing one bad row back to a
     specific calendar); `meta["extcal_last_ok"]` only advances on a tick
     with NO error anywhere (its name means "last FULL success").
+
+    Final-review blocker 2 (Important): a real (non-`--dry-run`) `fam
+    tick cal-ext --now ...` invocation from the actual CLI is REFUSED by
+    `main()` (exit 2, before this function is even called -- see that
+    guard's own comment there for why it lives in `main()` and not here).
+    Reason: this function's own `now` is threaded into the LOCAL snapshot
+    window (`_extcal_window`), but the ACTUAL CalDAV query window for a
+    full/fallback read (`extcal._time_range`, used by `_calendar_query`)
+    always uses the REAL system clock -- it takes no `now` parameter at
+    all. A `--now` far from the real clock therefore scopes the local
+    snapshot to one window while the remote read is scoped to a
+    DIFFERENT one; every local `owner='iphone'` row outside the overlap
+    looks to `plan_changes` like it disappeared from iCloud and gets
+    cancelled with an irreversible tombstone -- a real, silent,
+    unrecoverable data loss, not a preview quirk. `--dry-run` makes this
+    safe again (nothing is written regardless of the mismatch), so it
+    remains the only sanctioned way to use `--now` with this tick from
+    the CLI. (This function itself still accepts `now`/`dry_run` on
+    `args` unconditionally -- this project's own tests call it directly,
+    bypassing `main()`, with a fixed `now` and fully-mocked transport,
+    where the real mismatch this guard protects against cannot occur.)
 
     `meta["extcal_last_mode:<url>"]` is pure telemetry (not a safety-
     relevant value) but is only WRITTEN when it actually changes
@@ -1859,6 +1979,16 @@ def cmd_tick_cal_ext(args):
             print("cal-ext disabled; skipping")
         return 0
 
+    # Blocker 2's CLI-usage guard ("--now requires --dry-run") lives in
+    # `main()`, not here -- see that guard's own comment for why: this
+    # function is also called DIRECTLY (bypassing argparse/`main()`
+    # entirely) by this project's own `cmd_tick_cal_ext`-level tests with
+    # a fixed `now` for determinism, transport fully mocked, so the real
+    # danger (a real, unmocked `extcal._time_range` desyncing from an
+    # injected `now`) can never occur there -- only an actual `fam tick
+    # cal-ext --now ...` CLI invocation goes through `main()`.
+    dry_run = getattr(args, "dry_run", False)
+
     now = None
     if getattr(args, "now", None):
         try:
@@ -1871,7 +2001,6 @@ def cmd_tick_cal_ext(args):
             now = now.replace(tzinfo=timezone.utc)
     now = now or datetime.now(timezone.utc)
 
-    dry_run = getattr(args, "dry_run", False)
     conn = famdb.connect()
 
     try:
@@ -1883,7 +2012,7 @@ def cmd_tick_cal_ext(args):
 
     if dry_run:
         out = {"ok": True, "dry_run": True, "calendars": result["calendars"],
-               "sync_errors": _redact_sync_errors_for_dry_run(result["sync_errors"]),
+               "sync_errors": _redact_sync_errors(result["sync_errors"]),
                "changeset": _dry_run_summary(result["changeset"])}
         print(json.dumps(out, ensure_ascii=False))
         # Fix-round 2, minor #4: --dry-run ALWAYS returns 0 here,
@@ -1929,7 +2058,10 @@ def cmd_tick_cal_ext(args):
         audit_payload = dict(counts)
         audit_payload["calendars"] = result["calendars"]
         if result["sync_errors"]:
-            audit_payload["sync_errors"] = result["sync_errors"]
+            # Blocker 3: this row is written on the REAL (non-dry-run)
+            # path -- same redaction the dry-run print already applies,
+            # not a second, laxer copy of the same list.
+            audit_payload["sync_errors"] = _redact_sync_errors(result["sync_errors"])
         # Task 7: export counts ride along in the SAME audit row rather
         # than a second, separate `cal.ext.export` summary row per tick --
         # one sync, one row, matching how import/export are already one
@@ -1964,7 +2096,11 @@ def cmd_tick_cal_ext(args):
         # fix-round 2, minor #5: this used to ALSO append `calendar_errors`
         # here, duplicating the identical text and wasting roughly half of
         # `_audit_tick_error`'s own 200-char slice on a verbatim repeat.
-        reasons = list(result["sync_errors"])
+        # Blocker 3: redacted -- this string is what maint.problem_summary
+        # copies verbatim into the nightly message to Denis, so an
+        # unredacted href/RRULE here is a leak into HER message, not just
+        # an audit-log detail.
+        reasons = list(_redact_sync_errors(result["sync_errors"]))
         reasons += [f"{e.get('branch')}.{e.get('action')} id={e.get('id')}: {e.get('error')}"
                     for e in apply_errors]
         # Task 7: export_own's errors have no "branch" (there is only one
@@ -2959,10 +3095,11 @@ def build_parser():
 
     spce = tick_sub.add_parser("cal-ext"); spce.set_defaults(func=cmd_tick_cal_ext)
     spce.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops -- "
-                       "a value far from the real clock can desync this window from "
-                       "extcal._time_range's own second-precision-vs-midnight-rounded "
-                       "real-clock window used for the ACTUAL iCloud query; harmless "
-                       "on a normal periodic tick, use cautiously for ad-hoc runs)")
+                       "REQUIRES --dry-run: extcal._time_range's ACTUAL iCloud query "
+                       "window always uses the real clock, so on a real run a --now far "
+                       "from it desyncs the local snapshot and permanently cancels rows "
+                       "that never actually disappeared; refused with exit 2 without "
+                       "--dry-run)")
     spce.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS,
                        help="compute and print the changeset without writing to DB or iCloud")
     spce.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
@@ -3199,6 +3336,30 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    # Final-review blocker 2 (Important): a real CLI invocation of `fam
+    # tick cal-ext --now <ISO>` WITHOUT `--dry-run` can permanently
+    # tombstone imported rows (see cmd_tick_cal_ext's own docstring for
+    # the full mechanism: extcal._time_range, the REAL iCloud query
+    # window, ignores --now entirely, desyncing it from the local
+    # snapshot window that DOES honor --now). Refused here, at the
+    # actual CLI entry point, BEFORE any network/DB touch -- deliberately
+    # NOT inside cmd_tick_cal_ext itself, which this project's own test
+    # suite also calls directly (bypassing main()) with a fixed --now and
+    # fully-mocked transport, a pattern the real bug can never reach.
+    if (getattr(args, "func", None) is cmd_tick_cal_ext
+            and getattr(args, "now", None)
+            and not getattr(args, "dry_run", False)):
+        print(
+            "fam tick cal-ext: --now requires --dry-run -- a real run's "
+            "actual iCloud query window always uses the real clock "
+            "(extcal._time_range ignores --now), so combining a real run "
+            "with --now can desync the local snapshot from what iCloud "
+            "returns and permanently cancel rows that never actually "
+            "disappeared. Use --dry-run to preview with --now, or omit "
+            "--now for a real run.",
+            file=sys.stderr,
+        )
+        return 2
     try:
         return args.func(args)
     except cal.UnknownRefError as e:
