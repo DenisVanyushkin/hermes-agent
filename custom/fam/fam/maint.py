@@ -21,16 +21,32 @@ def _summary_watermark(conn, now):
 
 def problem_summary(cfg, now=None, notify=None, run_errors=None):
     """Nightly day-wide health sweep. Scans audit_log since the last run
-    for minute-tick failure markers, snapshots probes, folds in this run's
-    maintenance errors (run_errors), and (if anything is non-clean)
-    delivers ONE consolidated message to Denis. Clean -> silence.
-    notify defaults to gate.notify_denis; injected in tests.
+    for minute-tick failure markers and cal-ext collision counts,
+    snapshots probes, folds in this run's maintenance errors (run_errors),
+    and (if anything is non-clean) delivers ONE consolidated message to
+    Denis. Clean -> silence. notify defaults to gate.notify_denis;
+    injected in tests.
 
     Watermark contract: maint_summary_last_run advances on a clean sweep
     (nothing to report) or once notify() has returned truthy. If notify()
     returns falsy (e.g. Telegram is down), the watermark stays put so the
     next sweep re-covers the same window instead of the day's problems
-    vanishing behind a fresh watermark."""
+    vanishing behind a fresh watermark.
+
+    Cal-ext collisions (Task 8, fix-round 1): `cal.ext.sync` audit rows
+    carry a `collisions` count -- the fuzzy-match reconciliation in
+    `extcal.plan_changes` found the same appointment already filed in
+    both Hermes and the iPhone and linked them rather than duplicating,
+    which Denis has to untangle by hand (design doc, "Краевые случаи" #2:
+    Hermes deliberately never touches her copy's alarm). That row is only
+    written on a nonzero/changed tick (a healthy steady-state tick writes
+    nothing), so it is read here over the SAME `since`/watermark window as
+    `tick.error` rather than inventing a second scan or a separate meta
+    counter -- one audit_log pass, one watermark, same contract. Summed
+    across the window into a single counter-only line: no event titles,
+    no calendar names/URLs, no error text from that row is ever surfaced
+    here, matching the spec's audit/summary rule of UID-and-counts-only
+    for anything sourced from iPhone-controlled data."""
     now = now or _now_utc()
     notify = notify or gate.notify_denis
     conn = famdb.connect()
@@ -38,13 +54,22 @@ def problem_summary(cfg, now=None, notify=None, run_errors=None):
         since = _summary_watermark(conn, now)
         rows = conn.execute(
             "SELECT kind, payload FROM audit_log WHERE ts_utc >= ? "
-            "AND kind = 'tick.error' "
+            "AND kind IN ('tick.error', 'cal.ext.sync') "
             "ORDER BY id", (since,)).fetchall()
         problems = []
+        collisions = 0
         for r in rows:
             payload = json.loads(r["payload"])
+            if r["kind"] == "tick.error":
+                problems.append(
+                    f"тик {payload.get('where','?')}: {payload.get('error','')}")
+            else:  # cal.ext.sync -- counter only, see docstring
+                c = payload.get("collisions")
+                if isinstance(c, int):
+                    collisions += c
+        if collisions:
             problems.append(
-                f"тик {payload.get('where','?')}: {payload.get('error','')}")
+                f"календарь: {collisions} совпадающих записей, разобрать вручную")
         for e in run_errors or []:
             problems.append(f"maintenance: {e}")
         probes = health.all_probes(conn, cfg, now=now)
