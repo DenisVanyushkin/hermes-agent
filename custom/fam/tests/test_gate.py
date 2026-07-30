@@ -24,6 +24,18 @@ CFG = {
     "digest_retry_from": "07:40",
     "digest_retry_until": "12:00",
     "med_repeat_min": 45,
+    # Task 1 (med reminder gating, schema v12/config): keep this
+    # hand-mirror of gate.CONFIG_DEFAULTS in sync, same as every
+    # prior addition above -- test_load_config_creates_from_example_
+    # when_absent below does an exact `cfg == CFG` comparison, so a
+    # CONFIG_DEFAULTS key missing here shows up as a spurious
+    # extra-key failure, not a real regression.
+    "med_wake_gate_enabled": True,
+    "med_wake_gate_until": "12:00",
+    "med_away_gate_enabled": True,
+    "med_away_gate_until": "21:00",
+    "med_gate_recheck_min": 10,
+    "med_snooze_min": 60,
     "audit_retention_days": 90,
     "backup_keep": 7,
     "backup_dir": "/home/denis/.hermes/private/amina/backups",
@@ -64,6 +76,10 @@ CFG = {
     "extcal_write_calendar": "",
     "extcal_horizon_weeks": 8,
     "extcal_stale_hours": 6,
+    # Final review, Should-fix 8: оба ключа доехали до gate.CONFIG_DEFAULTS,
+    # значит должны быть и в этом зеркале -- см. комментарий выше.
+    "whereami_home_radius_km": 0.3,
+    "whereami_car_fresh_min": 20,
 }
 
 

@@ -55,5 +55,13 @@
   "extcal_read_calendars": [],
   "extcal_write_calendar": "",
   "extcal_horizon_weeks": 8,
-  "extcal_stale_hours": 6
+  "extcal_stale_hours": 6,
+  "med_wake_gate_enabled": true,
+  "med_wake_gate_until": "12:00",
+  "med_away_gate_enabled": true,
+  "med_away_gate_until": "21:00",
+  "med_gate_recheck_min": 10,
+  "med_snooze_min": 60,
+  "whereami_home_radius_km": 0.3,
+  "whereami_car_fresh_min": 20
 }

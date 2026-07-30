@@ -38,8 +38,8 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import (audit, cal, db, gate, goals, meds, plans, rem, road, shopping,
-                 weather, whereami)
+from fam import (audit, cal, db, gate, goals, meds, plans, presence, rem, road,
+                 shopping, weather, whereami)
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -905,6 +905,72 @@ def _meds_series(conn, now_utc, cfg):
     effect, so each row's outcome is narrowed to its own transaction).
     The out_of_stock quiet-hours defer commits nothing either -- there is
     nothing to persist, since the row was left exactly as SELECTed.
+
+    ONE EXCEPTION to "one row, one message" (Task 6): doses that a gate
+    (sleep/away) had been holding and that this SAME tick releases do not
+    send from inside the loop. They are collected in `released` and go out
+    as a SINGLE message after the loop. Releasing the sleep gate at 12:00
+    with three medications would otherwise produce three back-to-back
+    messages -- exactly the pile of reminders the gate exists to prevent.
+    Ordinary +45min repeats are untouched by this and stay separate
+    messages: only a same-tick gate RELEASE (prev_reason is not None)
+    coalesces, and a release of a single dose keeps the ordinary
+    mode="take" shape, so nothing about the one-dose case changes.
+
+    The release group has its own try/except with the same discipline as
+    the per-row one, and -- unlike the per-row branches -- it holds ALL of
+    its writes (gate_reason=NULL, med.gate_release audit, series_next_utc)
+    until after gate.deliver returns. Clearing gate_reason inside the loop
+    and committing it there would survive a later failure of the group
+    send, leaving a dose that claims it was released while nothing was
+    ever sent. Keeping the writes in the group's own transaction makes
+    release and send atomic.
+
+    "Failure" for the release group means BOTH of:
+      1. an exception out of the group body (handled by its except:
+         rollback, then tick.error{"where":"meds_release"}), and
+      2. gate.deliver RETURNING any status other than "sent" -- it does
+         not raise when the send fails: a dead bridge makes _call_send
+         return (False, None), which deliver audits as gate.error and
+         reports as the string "error" (with force=True "quiet"/"budget"
+         are unreachable, but they are treated the same way). This is
+         rolled back too and audited as
+         tick.med{"mode":"release_deferred", status, retry_at}.
+    In both cases nothing of the release itself persists: gate_reason
+    keeps its "asleep"/"away" value, so the doses stay held and the
+    release is retried rather than lost.
+
+    HOW THE RETRY IS PACED (final review, Should-fix 4). The rollback is
+    what guarantees the holds survive -- but it also restores
+    series_next_utc to the value the last _gate_hold wrote, which is by
+    construction already <= now (that is why the row was selected this
+    tick at all). Left at that, a deferred release is due again on the
+    very NEXT minute tick: a bridge down from 12:00 produced one bridge
+    call + one rollback + one tick.med{release_deferred} row PER MINUTE
+    until midnight, ~720 of each, contradicting this docstring's own
+    "recheck cadence" claim. So the non-"sent" branch writes a fresh
+    series_next_utc = now + med_gate_recheck_min AFTER the rollback
+    (before it, the rollback would eat the write -- that ordering is the
+    whole mechanism) and leaves gate_reason untouched, so the doses stay
+    held AND genuinely wait out the recheck interval. Its audit row is
+    throttled the same way _gate_hold's is: a meta key
+    "med_release_deferred:<almaty date>:<ids>" makes one continuous
+    outage of one release group leave ONE row instead of dozens; a
+    successful release clears the key, so a later, separate outage is
+    audited again. audit_log already carries 22k+ tick.reminders rows.
+    The exception path (case 1) keeps the plain "due again next tick"
+    behaviour: real gate.deliver does not raise on a failed send, so that
+    branch means a genuine defect, and there a fast retry plus its
+    tick.error row is the more visible outcome.
+
+    This is DELIBERATELY different from the ordinary take branch above,
+    which advances series_next_utc regardless of gate.deliver's status.
+    That branch escalates a dose Amina was already told about, so the
+    +45min step is right even after a failed resend. A gate release is the
+    FIRST announcement of that dose -- it has never been sent at all -- so
+    retrying at the gate's recheck cadence beats recording a delivery that
+    never happened and then staying silent for 45 minutes. Do not
+    "harmonise" the two.
     """
     now_dt = _parse_utc(now_utc)
     due = conn.execute(
@@ -913,6 +979,10 @@ def _meds_series(conn, now_utc, cfg):
         "ORDER BY series_next_utc",
         (now_utc,),
     ).fetchall()
+
+    # Doses whose gate this very tick released. Filled by the "take"
+    # branch below, drained by the single group send after the loop.
+    released = []
 
     for row in due:
         intake_id = row["id"]
@@ -986,9 +1056,63 @@ def _meds_series(conn, now_utc, cfg):
                           {"intake_id": intake_id, "mode": "out_of_stock",
                            "deduped": already is not None})
             else:
-                raw = {"mode": "take", "name": name, "dose": dose}
-                human_fallback = f"Пора принять {name}" + (
-                    f" ({dose})" if dose else "")
+                prev_reason = row["gate_reason"]
+                hold_reason = None
+
+                # Sleep-гейт: утренняя доза ждёт признака жизни, но не
+                # дольше med_wake_gate_until -- это одновременно граница
+                # "утренних" доз и жёсткий бэкстоп, чтобы доза не утекла
+                # молча в полуночный missed-closeout.
+                if (cfg.get("med_wake_gate_enabled", True)
+                        and _local_hhmm_before(row["plan_ts_utc"],
+                                               cfg.get("med_wake_gate_until",
+                                                       "12:00"))
+                        and _local_hhmm_before(now_utc,
+                                               cfg.get("med_wake_gate_until",
+                                                       "12:00"))
+                        and presence.awake_since(conn, cfg, now_utc) is None):
+                    hold_reason = "asleep"
+
+                # Away-гейт: все лекарства дома, поэтому напоминание в
+                # чужом месте -- чистый шум. Сдаётся в med_away_gate_until,
+                # чтобы доза не утекла молча в полуночный closeout.
+                if (hold_reason is None
+                        and cfg.get("med_away_gate_enabled", True)
+                        and _local_hhmm_before(now_utc,
+                                               cfg.get("med_away_gate_until",
+                                                       "21:00"))
+                        and presence.is_away(conn, cfg, now_utc)[0]):
+                    hold_reason = "away"
+
+                if hold_reason is not None:
+                    _gate_hold(conn, intake_id, hold_reason, now_dt, cfg,
+                               prev_reason)
+                    conn.commit()
+                    continue
+
+                if prev_reason is not None:
+                    # Held until a moment ago -> hand this dose to the
+                    # post-loop group send instead of sending it here, so
+                    # every dose released by THIS tick shares one message.
+                    # Nothing is written for it yet (not even
+                    # gate_reason=NULL): the release must be atomic with
+                    # the send -- see this function's docstring.
+                    released.append({
+                        "intake_id": intake_id, "name": name, "dose": dose,
+                        "was": prev_reason,
+                        "plan_local": _parse_utc(
+                            row["plan_ts_utc"]).astimezone(
+                                ALMATY).strftime("%H:%M")})
+                    continue
+
+                attempt_no = _med_attempt_no(conn, intake_id)
+                minutes_late = int(
+                    (now_dt - _parse_utc(row["plan_ts_utc"])).total_seconds()
+                    // 60)
+                raw = {"mode": "take", "name": name, "dose": dose,
+                       "intake_id": intake_id, "attempt_no": attempt_no,
+                       "minutes_late": minutes_late}
+                human_fallback = gate.med_fallback(name, dose, attempt_no)
                 status = gate.deliver(conn, "med", raw, human_fallback, cfg,
                                        force=True, now_utc=now_utc,
                                        sent_ref={"kind": "med",
@@ -1022,9 +1146,237 @@ def _meds_series(conn, now_utc, cfg):
                        "error": str(e)[:200]})
             conn.commit()
 
+    if released:
+        # Doses released by ONE tick leave as ONE message: otherwise
+        # releasing the sleep gate at 12:00 with three medications
+        # reproduces exactly the "pile of reminders" the gate was built to
+        # remove. Ordinary 45-minute repeats stay separate.
+        #
+        # Own try/except with the per-row discipline: on failure NOTHING
+        # of this block persists (rollback), so no dose is left claiming a
+        # release that never went out -- gate_reason stays set and
+        # series_next_utc stays where the last hold put it (already due),
+        # so the next tick retries the same release.
+        try:
+            items = [{"name": r["name"], "dose": r["dose"],
+                      "plan_local": r["plan_local"]} for r in released]
+            ids = [r["intake_id"] for r in released]
+            for r in released:
+                conn.execute(
+                    "UPDATE med_intakes SET gate_reason=NULL "
+                    "WHERE id=? AND status='pending'",
+                    (r["intake_id"],))
+                audit.log(conn, "med.gate_release",
+                          {"intake_id": r["intake_id"], "was": r["was"]})
+            if len(items) == 1:
+                # A single released dose must NOT become a group message:
+                # one dose, one name -> the ordinary "take" shape, so
+                # every downstream reader (gate prompt, react ack) sees
+                # exactly what a non-gated dose produces.
+                #
+                # attempt_no is part of that shape (final review,
+                # Should-fix 6). meds.defer does not clear gate_reason and
+                # the away gate holds REPEATS of a dose Amina was already
+                # told about, so a release is very often attempt 2+: a
+                # 13:00 dose sent at 13:00, held "away" at 13:45,
+                # released at 14:20. Without this key
+                # gate._build_prompt's `raw["attempt_no"] > 1` test read
+                # 1 and appended no variation instruction, silently
+                # disabling Task 8 for every away-gate release. The
+                # wording itself (human_fallback below) is unchanged --
+                # only the metadata was wrong.
+                raw = {"mode": "take", "name": items[0]["name"],
+                       "dose": items[0]["dose"], "intake_id": ids[0],
+                       "attempt_no": _med_attempt_no(conn, ids[0]),
+                       "plan_local": items[0]["plan_local"], "late": True}
+                human_fallback = (
+                    f"{items[0]['name']} за {items[0]['plan_local']} "
+                    f"ещё не отмечено.")
+            else:
+                # Per-item attempt_no, and deliberately NO top-level one:
+                # a group covers doses with DIFFERENT histories (one
+                # first-ever announcement next to one already repeated
+                # three times), so a single group-level number would be
+                # a fiction, and gate._build_prompt keys the variation
+                # instruction off exactly that top-level value -- a
+                # made-up 1 or 4 would either disable variation or
+                # demand it for a dose being announced for the first
+                # time. The per-item numbers keep the raw honest for the
+                # audit trail and for the rewrite prompt's <data> block
+                # without inventing a group-level fact. The group wording
+                # is a recorded product decision and stays untouched.
+                for item, iid in zip(items, ids):
+                    item["attempt_no"] = _med_attempt_no(conn, iid)
+                raw = {"mode": "take_group", "items": items, "late": True}
+                listed = ", ".join(
+                    f"{i['name']} ({i['plan_local']})" for i in items)
+                human_fallback = f"Ещё не отмечено: {listed}."
+            status = gate.deliver(conn, "med", raw, human_fallback, cfg,
+                                  force=True, now_utc=now_utc,
+                                  sent_ref={"kind": "med", "ref_id": ids[0],
+                                            "ref_ids": ids})
+            if status != "sent":
+                # gate.deliver does NOT raise when the send fails -- a
+                # dead bridge makes _call_send return (False, None),
+                # which it audits as gate.error and reports as the
+                # string "error". Without this branch the release would
+                # commit anyway: gate_reason cleared, series advanced 45
+                # minutes, and not one word delivered.
+                #
+                # Denis's ruling (2026-07-29 fix round): for a RELEASE,
+                # any non-"sent" status rolls the whole release back and
+                # leaves the doses held, so the next tick retries. The
+                # ordinary take branch above deliberately advances even
+                # on "error" -- it escalates a dose Amina already heard
+                # about; this one is her first word of it, so a retry in
+                # ~10 minutes beats a fictitious delivery plus 45
+                # minutes of silence. Do not unify the two.
+                conn.rollback()
+                # ПОСЛЕ откката, и только после: он же и восстанавливает
+                # gate_reason (дозы остаются удержанными), и возвращает
+                # series_next_utc к значению последнего _gate_hold, а оно
+                # уже <= now. Без этой записи строка снова due на
+                # СЛЕДУЮЩЕЙ минуте -- мост, умерший в 12:00, давал ~720
+                # вызовов, откатов и audit-строк до полуночи вместо одной
+                # попытки в med_gate_recheck_min. gate_reason не трогаем:
+                # доза остаётся удержанной с тем же поводом, меняется
+                # только срок следующей попытки.
+                recheck = int(cfg.get("med_gate_recheck_min", 10))
+                retry_utc = (now_dt + timedelta(minutes=recheck)).isoformat(
+                    timespec="seconds")
+                for iid in ids:
+                    conn.execute(
+                        "UPDATE med_intakes SET series_next_utc=? "
+                        "WHERE id=? AND status='pending' "
+                        "AND gate_reason IS NOT NULL", (retry_utc, iid))
+                # Троттлинг аудита по образцу _gate_hold (пишем только на
+                # переходе): одна строка на непрерывный простой этой
+                # группы за сутки Алматы. Ключ снимается успешным
+                # отпусканием ниже, поэтому следующий, ОТДЕЛЬНЫЙ простой
+                # снова будет виден.
+                deferred_key = _release_deferred_key(now_utc, ids)
+                seen = conn.execute(
+                    "SELECT value FROM meta WHERE key=?",
+                    (deferred_key,)).fetchone()
+                if seen is None:
+                    audit.log(conn, "tick.med",
+                              {"mode": "release_deferred", "intake_ids": ids,
+                               "status": status, "retry_at": retry_utc})
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                    (deferred_key, now_utc))
+                conn.commit()
+            else:
+                repeat_min = cfg.get("med_repeat_min", 45)
+                next_utc = (now_dt + timedelta(minutes=repeat_min)).isoformat(
+                    timespec="seconds")
+                for iid in ids:
+                    conn.execute(
+                        "UPDATE med_intakes SET series_next_utc=? "
+                        "WHERE id=? AND status='pending'", (next_utc, iid))
+                # Простой кончился -- снимаем ключ троттлинга, чтобы
+                # следующий (уже другой) простой этой же группы снова
+                # оставил свою строку в audit_log.
+                conn.execute("DELETE FROM meta WHERE key=?",
+                             (_release_deferred_key(now_utc, ids),))
+                audit.log(conn, "tick.med",
+                          {"mode": "release_group", "intake_ids": ids,
+                           "status": status})
+                conn.commit()
+        except Exception as e:                        # noqa: BLE001
+            conn.rollback()
+            audit.log(conn, "tick.error",
+                      {"where": "meds_release", "error": str(e)[:200]})
+            conn.commit()
+
 
 def _today_almaty(now_utc):
     return _parse_utc(now_utc).astimezone(ALMATY).date().isoformat()
+
+
+def _med_attempt_no(conn, intake_id):
+    """Номер попытки для этой дозы: сколько её отправок уже состоялось,
+    плюс один. Единственный источник этого числа -- им пользуются и
+    обычная ветка "take", и отпускание гейта (Should-fix 6).
+
+    Считаются существующие строки о фактически доставленных сообщениях,
+    а не отдельная колонка-счётчик: gate.deliver вставляет строку только
+    на успешной отправке (см. обработку sent_ref в gate.py), а
+    гейт-удержания вообще не зовут gate.deliver, поэтому удержанные тики
+    сюда естественно не попадают -- доза, удержанная дважды и потом
+    отправленная, читается как попытка 1, а не 3.
+
+    Таблиц ДВЕ, не одна (Task 8, fix round 1): групповое отпускание
+    (post-loop блок _meds_series, react.record_sent) пишет ОДНУ строку
+    sent_messages, привязанную только к ПЕРВОЙ дозе (ref_id -- скаляр);
+    все остальные дозы группы записаны исключительно в
+    sent_message_refs. COUNT только по sent_messages навсегда оставил бы
+    каждую не-первую дозу группы на attempt_no=1 и воспроизводил бы
+    идентичную первую формулировку в её следующем повторе -- ровно то,
+    против чего Task 8 и делался. UNION (не UNION ALL) дедуплицирует и
+    между таблицами (id первой дозы есть в обеих: record_sent пишет в
+    sent_message_refs все ref_ids, включая тот, что лежит в
+    sent_messages.ref_id), и внутри sent_message_refs, у которой нет
+    UNIQUE(sent_message_id, ref_id) -- известная отложенная заноза,
+    здесь нейтрализованная построчной дедупликацией без самого
+    ограничения.
+
+    Не покрыто: случай gate.deliver "доставлено, но без message_id"
+    (ok=True, message_id=None) вообще не зовёт react.record_sent, так
+    что такая отправка не оставляет строки ни в одной таблице и всё ещё
+    недосчитывается на единицу -- доисторическое поведение gate.deliver,
+    вне области правки.
+    """
+    return conn.execute(
+        "SELECT COUNT(*) FROM ("
+        "  SELECT id FROM sent_messages"
+        "  WHERE kind='med' AND ref_id=?"
+        "  UNION"
+        "  SELECT sent_message_id FROM sent_message_refs"
+        "  WHERE kind='med' AND ref_id=?"
+        ")", (intake_id, intake_id)).fetchone()[0] + 1
+
+
+def _release_deferred_key(now_utc, ids):
+    """meta-ключ, троттлящий аудит отложенного группового отпускания
+    (_meds_series). Ключ на сутки Алматы и на конкретный состав группы:
+    другой набор доз -- другой простой, его видно отдельно. Снимается
+    успешным отпусканием, см. _meds_series.
+    """
+    listed = ",".join(str(i) for i in sorted(ids))
+    return f"med_release_deferred:{_today_almaty(now_utc)}:{listed}"
+
+
+def _local_hhmm_before(ts_utc, hhmm):
+    """True, если локальное время Алматы у ts_utc строго раньше "HH:MM"."""
+    local = _parse_utc(ts_utc).astimezone(ALMATY)
+    hh, mm = (int(p) for p in hhmm.split(":"))
+    return (local.hour, local.minute) < (hh, mm)
+
+
+def _gate_hold(conn, intake_id, reason, now_dt, cfg, prev_reason):
+    """Удержать дозу: перепроверить через med_gate_recheck_min, НЕ отправляя.
+
+    Это ключевое отличие от обычного цикла: 45-минутный шаг означает
+    "мы отправили и ждём"; здесь мы не отправляли, поэтому шаг короткий
+    -- иначе доза, отпущенная в 12:00:01, ждала бы до 12:45.
+
+    med.gate_hold аудитится ТОЛЬКО при смене причины. audit_log уже
+    несёт 22k+ строк tick.reminders; запись на каждой десятиминутной
+    перепроверке по каждой дозе утопила бы его.
+    """
+    recheck = int(cfg.get("med_gate_recheck_min", 10))
+    next_utc = (now_dt + timedelta(minutes=recheck)).isoformat(
+        timespec="seconds")
+    conn.execute(
+        "UPDATE med_intakes SET series_next_utc=?, gate_reason=? "
+        "WHERE id=? AND status='pending'",
+        (next_utc, reason, intake_id))
+    if prev_reason != reason:
+        audit.log(conn, "med.gate_hold",
+                  {"intake_id": intake_id, "reason": reason,
+                   "recheck_at": next_utc})
+    return next_utc
 
 
 def _followup_related_plans(conn, event, open_plans):
@@ -1153,6 +1505,11 @@ def _followup(conn, now_utc, cfg):
     respectively -- same "record the null outcome" contract as
     tick.reminders' all-zero run.
 
+    Held medication doses (Task 9) are mentioned too, but only the ones
+    for which the day really is over: today's Almaty day only, and never
+    a dose still holdable by the away gate (gate_reason='away' while now
+    is before med_away_gate_until) -- see the query below.
+
     Otherwise: ONE gate.deliver(kind="followup", force=False) call per
     tick -- an ordinary budget unit, quiet hours respected exactly like
     any other non-reminder kind (gate.deliver's own gate, not duplicated
@@ -1210,8 +1567,39 @@ def _followup(conn, now_utc, cfg):
 
     prep_candidate = _followup_prep_check_candidate(conn, now_dt, date_local, cfg)
 
+    # Гейт-удержанные дозы, о которых стоит сказать вечером -- но не
+    # все pending с непустым gate_reason (final review, Should-fix 5):
+    #
+    #  * Доза, всё ещё удерживаемая away-гейтом, НЕ упоминается. Гейт
+    #    сдаётся в med_away_gate_until (21:00), а follow-up идёт в
+    #    followup_local_time (20:00): анонс в 20:00 отправил бы на
+    #    телефон вдали от лекарств ровно то сообщение, которое away-гейт
+    #    весь день подавлял, а в 21:0x бэкстоп сказал бы это ЖЕ второй
+    #    раз. Спека говорит "не отмечено к концу дня" -- в 20:00 для
+    #    away-гейта день ещё не кончился. Sleep-гейт этой оговорки не
+    #    требует: он сдаётся в 12:00, к вечеру его удержаний уже нет.
+    #  * Границы суток Алматы. Если полуночный тик генерации когда-нибудь
+    #    пропустит ночь, вчерашние удержанные pending-строки иначе попали
+    #    бы в сегодняшний follow-up с ВЧЕРАШНИМ временем дозы.
+    held_sql = ("SELECT d.name AS name, m.plan_ts_utc AS plan_ts_utc, "
+                "       m.gate_reason AS gate_reason "
+                "FROM med_intakes m JOIN meds d ON d.id = m.med_id "
+                "WHERE m.status='pending' AND m.gate_reason IS NOT NULL "
+                "  AND m.plan_ts_utc >= ? AND m.plan_ts_utc < ? ")
+    held_params = [from_utc, to_utc]
+    if _local_hhmm_before(now_utc, cfg.get("med_away_gate_until", "21:00")):
+        held_sql += "  AND m.gate_reason <> 'away' "
+    held_sql += "ORDER BY m.plan_ts_utc"
+    held_meds = [
+        {"name": r["name"],
+         "plan_local": _parse_utc(r["plan_ts_utc"]).astimezone(
+             ALMATY).strftime("%H:%M"),
+         "reason": r["gate_reason"]}
+        for r in conn.execute(held_sql, held_params)
+    ]
+
     has_recap = bool(outbound_events and related_plans)
-    if not has_recap and prep_candidate is None:
+    if not has_recap and prep_candidate is None and not held_meds:
         status = "no_events" if not outbound_events else "no_plans"
     else:
         raw = {
@@ -1230,6 +1618,11 @@ def _followup(conn, now_utc, cfg):
         if related_plans:
             lines.append("Открытые планы:")
             lines.extend(p["title"] for p in related_plans)
+        if held_meds:
+            raw["held_meds"] = held_meds
+            listed = ", ".join(
+                f"{h['name']} ({h['plan_local']})" for h in held_meds)
+            lines.append(f"Сегодня не отмечено: {listed}.")
         if prep_candidate is not None:
             raw["prep_check"] = {
                 "event_id": prep_candidate["id"],
@@ -1267,7 +1660,8 @@ def _followup(conn, now_utc, cfg):
     audit.log(conn, "tick.followup",
               {"date_local": date_local, "status": status,
                "n_events": len(outbound_events),
-               "n_plans": len(related_plans)})
+               "n_plans": len(related_plans),
+               "n_held_meds": len(held_meds)})
     conn.commit()
     return status
 

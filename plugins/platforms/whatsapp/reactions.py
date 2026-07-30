@@ -19,7 +19,8 @@ _VARIATION_SELECTORS = ("️", "︎")
 
 # Base forms AFTER normalize_emoji(). The six WhatsApp defaults plus the
 # four the ack path already uses, so ❌ means the same thing on a reminder
-# and in ordinary chat.
+# and in ordinary chat -- plus the three "remind me later" (snooze)
+# emoji the med ack path added (spec: med-reminder-gating, 2026-07-29).
 DIALOGUE_EMOJI = frozenset({
     "\U0001F44D",  # 👍
     "❤",      # ❤️
@@ -31,6 +32,9 @@ DIALOGUE_EMOJI = frozenset({
     "❌",      # ❌
     "✅",      # ✅
     "\U0001F4AA",  # 💪
+    "⏰",      # ⏰
+    "\U0001F550",  # 🕐
+    "⏳",      # ⏳
 })
 
 

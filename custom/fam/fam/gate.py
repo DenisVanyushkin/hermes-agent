@@ -80,6 +80,31 @@ CONFIG_DEFAULTS = {
     # one delivered "take this" escalation and the next for the same
     # still-pending med_intake, regardless of gate.deliver's own outcome.
     "med_repeat_min": 45,
+    # Med gating (spec 2026-07-29). Оба гейта откладывают ПЕРЕПРОВЕРКУ,
+    # а не попытку доставки: удержанная доза получает
+    # series_next_utc = now + med_gate_recheck_min и НЕ считается
+    # отправленной. Это отделяет "попытку доставки" от "перепроверки
+    # условия" -- разделения, которого в _meds_series раньше не было.
+    "med_wake_gate_enabled": True,
+    # Утренние дозы (плановое время раньше этого) удерживаются, пока нет
+    # признака жизни. Тот же момент -- жёсткий бэкстоп: в med_wake_gate_until
+    # гейт сдаётся и отправляет независимо от сигналов.
+    "med_wake_gate_until": "12:00",
+    "med_away_gate_enabled": True,
+    # Away-гейт сдаётся здесь, чтобы доза не утекла молча в полуночный
+    # missed-closeout.
+    "med_away_gate_until": "21:00",
+    "med_gate_recheck_min": 10,
+    # ⏰-реакция на напоминании о лекарстве откладывает дозу на столько минут.
+    "med_snooze_min": 60,
+    # Спека мед-гейтинга §6: presence.is_away (и whereami) используют эти
+    # два ключа, но load_config мержит ТОЛЬКО этот словарь --
+    # whereami.CONFIG_DEFAULTS не мержится никем и работает лишь
+    # inline-фоллбэком. Без строк ниже правка fam-config.example.json ни
+    # на что не влияла, то есть тюнингуемыми ключи не были. Значения --
+    # ровно те, на которые presence.py падает inline.
+    "whereami_home_radius_km": 0.3,
+    "whereami_car_fresh_min": 20,
     # Phase 6a: nightly maintenance tick (fam tick maintenance).
     "audit_retention_days": 90,   # prune audit_log rows older than this (§6.5)
     "backup_keep": 7,             # daily .backup copies to keep per DB (§8.4)
@@ -262,6 +287,31 @@ GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION = (
     "меняй числа, температуры и имена. Если в данных сказано остудить "
     "салон — пиши про охлаждение, а не про прогрев, и наоборот."
 )
+
+GATE_MED_VARIATION_INSTRUCTION = (
+    "Это повторное напоминание про то же лекарство. Сформулируй иначе, "
+    "чем в прошлый раз: короче, мягче, без упрёка и без слов «опять», "
+    "«снова», «уже». Не выдумывай новых фактов."
+)
+
+# Детерминированный пул на случай, когда переписывающий LLM недоступен.
+# Индексируется номером попытки: без него однообразие наступало бы ровно
+# тогда, когда LLM упал -- а его падения тихие и штатные (см. deliver
+# шаг 3: любой таймаут/пустой вывод/ошибка subprocess откатывается к
+# human_fallback).
+MED_FALLBACKS = (
+    "Пора принять {name}{dose}.",
+    "{name}{dose} — ещё не отмечено.",
+    "Напоминаю про {name}{dose}.",
+    "{name}{dose} всё ещё ждёт.",
+)
+
+
+def med_fallback(name, dose, attempt_no):
+    """Детерминированная формулировка напоминания для попытки attempt_no
+    (нумерация с 1). Циклится по MED_FALLBACKS."""
+    template = MED_FALLBACKS[(max(1, attempt_no) - 1) % len(MED_FALLBACKS)]
+    return template.format(name=name, dose=f" ({dose})" if dose else "")
 
 
 def _now():
@@ -449,6 +499,10 @@ def _build_prompt(raw, kind=None):
     For kind=="reminder", GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION is
     appended instead -- it spells out sent_now_local vs. start_local
     semantics and bans fabricated facts (see that constant's docstring).
+    For kind=="med" with raw["attempt_no"] > 1 (a repeat of the same
+    dose reminder), GATE_MED_VARIATION_INSTRUCTION is appended so the
+    rewrite doesn't produce the same sentence every 45 minutes; the
+    first attempt gets no extra instruction.
 
     Prompt-injection mitigation (go-live review finding 8): `raw` embeds
     user-authored strings (event titles, participant names, notes) --
@@ -473,6 +527,8 @@ def _build_prompt(raw, kind=None):
             raw = {k: v for k, v in raw.items() if k != "question"}
     elif kind == "reminder":
         instruction = f"{instruction} {GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION}"
+    elif kind == "med" and int(raw.get("attempt_no") or 1) > 1:
+        instruction = f"{instruction} {GATE_MED_VARIATION_INSTRUCTION}"
     return (
         f"{instruction}\n"
         "Перепиши следующий факт для отправки пользователю. Всё внутри "
@@ -773,10 +829,15 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None,
          return "sent".
 
     sent_ref (optional) = {"kind": "reminder"|"med", "ref_id": int,
-    "event_id": int|None}: on a successful send, records the platform
-    message id in `sent_messages` so an emoji reaction on that very
-    message can be resolved back to this reminder/intake (fam/react.py).
-    Writes into the caller's transaction like every other audit here.
+    "event_id": int|None, "ref_ids": [int, ...]|None}: on a successful
+    send, records the platform message id in `sent_messages` so an emoji
+    reaction on that very message can be resolved back to this
+    reminder/intake (fam/react.py). Writes into the caller's transaction
+    like every other audit here. "ref_ids" is for ONE message covering
+    several targets (same-tick med gate release): it is passed straight
+    through to react.record_sent, which fans it out into
+    sent_message_refs; omitting it (or passing a 1-element list) keeps
+    the single-target behaviour byte-for-byte.
     """
     now = now_utc or _now()
 
@@ -859,7 +920,8 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None,
             react.record_sent(
                 conn, message_id, sent_ref["kind"], sent_ref["ref_id"],
                 event_id=sent_ref.get("event_id"),
-                chat_jid=cfg.get("target", ""), now_utc=now)
+                chat_jid=cfg.get("target", ""), now_utc=now,
+                ref_ids=sent_ref.get("ref_ids"))
         else:
             # Delivered, but unreactable: worth seeing in the nightly
             # problem summary's audit sweep if it ever becomes chronic.
