@@ -75,6 +75,43 @@ def test_snooze_clamped_before_almaty_midnight(db):
     assert row["series_next_utc"] == "2026-07-20T18:59:00+00:00"
 
 
+def test_snooze_in_the_last_minute_of_the_day_is_not_a_success(db):
+    """Final review, Blocker 3: 23:59:30 Алматы -- клэмп на 23:59:00 уже
+    в прошлом, meds.defer отвергает цель, отложить некуда. Раньше это
+    отдавалось как "snooze_moot", то есть handled=true + ✅: ложная
+    положительная обратная связь за полное отсутствие эффекта."""
+    iid = _intake(db)
+    react.record_sent(db, "wa-late", "med", iid)
+    db.commit()
+
+    out = react.handle(db, "wa-late", "⏰",
+                       now_utc="2026-07-20T18:59:30+00:00")
+
+    assert out["result"] == "snooze_too_late"
+    assert out["deferred"] == 0
+    row = db.execute("SELECT * FROM med_intakes WHERE id=?", (iid,)).fetchone()
+    assert row["status"] == "pending"
+    # серия не тронута, дозу по-прежнему закроет полуночный closeout
+    assert row["series_next_utc"] == "2026-07-20T04:00:00+00:00"
+    assert row["deferred_until_utc"] is None
+
+
+def test_hook_marks_snooze_too_late_handled_but_without_a_checkmark(db,
+                                                                   monkeypatch):
+    """Реакция съедена (в LLM-диалог ей нельзя), но ✅ не ставится:
+    checkmark означал бы "перенесено", а перенесено ничего."""
+    monkeypatch.setattr(react, "handle",
+                        lambda *a, **k: {"result": "snooze_too_late"})
+
+    rc, payload = _run_hook(db, {"target_message_id": "wa-x", "emoji": "⏰"})
+
+    assert rc == 0
+    assert payload["handled"] is True, (
+        "запоздавшая ⏰ всё равно не должна становиться ходом агента")
+    assert "react" not in payload, "успех рапортовать нечем"
+    assert payload["result"] == "snooze_too_late"
+
+
 def test_snooze_group_defers_every_member(db):
     a = _intake(db, "Эутирокс")
     b = _intake(db, "Магний")

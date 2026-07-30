@@ -750,6 +750,68 @@ def test_group_reaction_is_idempotent_on_repeat(db):
     assert react.handle(db, "wa1", "\U0001F44D")["result"] == "already_acked"
 
 
+def test_group_ack_after_a_sibling_ack_still_acks_the_other_dose(db):
+    """Final review, Blocker 2: 👍 сначала на обычном +45 повторе дозы a
+    (её ref_id совпадает с ref_id группового сообщения, потому что
+    sent_messages.ref_id -- скаляр и хранит ids[0]), потом 👍 на самом
+    групповом сообщении.
+
+    Раньше fan-out первого ack помечал ack_status='confirmed' И на
+    групповом сообщении, поэтому второй 👍 коротил на проверке
+    ack_status: доза b оставалась pending, Амина видела ✅ и считала
+    обе дозы отмеченными, а полуночный closeout записывал b как
+    missed -- ложная медицинская запись из явного положительного
+    действия пользователя."""
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    react.record_sent(db, "wa-grp", "med", a, ref_ids=[a, b])
+    react.record_sent(db, "wa-sib", "med", a)      # обычный повтор дозы a
+    db.commit()
+
+    first = react.handle(db, "wa-sib", "\U0001F44D")
+    assert first["result"] == "confirmed"
+    assert _intake(db, a)["status"] == "taken"
+    assert _intake(db, b)["status"] == "pending"
+
+    second = react.handle(db, "wa-grp", "\U0001F44D")
+
+    assert second["result"] == "confirmed"
+    assert _intake(db, b)["status"] == "taken", (
+        "👍 на групповом сообщении обязан отметить все ещё pending дозы")
+
+
+def test_group_ack_repeat_is_still_idempotent(db):
+    # Групповое сообщение больше не полагается на свой ack_status, так
+    # что идемпотентность повторного 👍 держится на per-dose пути:
+    # ни одна доза не применима -> already_acked/not_pending.
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    react.record_sent(db, "wa-grp", "med", a, ref_ids=[a, b])
+    db.commit()
+
+    assert react.handle(db, "wa-grp", "\U0001F44D")["result"] == "confirmed"
+    again = react.handle(db, "wa-grp", "\U0001F44D")
+    assert again["result"] == "already_acked"
+    assert again["reason"] == "not_pending"
+
+
+def test_single_dose_ack_shape_is_unchanged(db):
+    # Одиночное сообщение по-прежнему коротит на ack_status и отдаёт
+    # ровно ту же форму ответа, что до этой правки.
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    react.record_sent(db, "wa-one", "med", a)
+    db.commit()
+
+    assert react.handle(db, "wa-one", "\U0001F44D")["result"] == "confirmed"
+    again = react.handle(db, "wa-one", "\U0001F44D")
+    assert again["result"] == "already_acked"
+    assert again["ack_status"] == "confirmed"
+    assert "reason" not in again
+
+
 def test_record_sent_single_ref_writes_no_refs_rows(db):
     from fam import react
     a = _pending_intake(db, name="Эутирокс")

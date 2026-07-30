@@ -59,6 +59,19 @@ EMOJI_SNOOZE = {"⏰", "\U0001F550", "⏳"}
 # (or an idempotent re-ack) landed.
 FEEDBACK_EMOJI = "✅"  # ✅
 
+# run_hook's two verdicts, deliberately NOT the same set.
+#
+# HANDLED_RESULTS -- the reaction was consumed and must not become an
+# agent turn (this module's "no LLM in the reaction path" contract).
+# FEEDBACK_RESULTS -- and the outcome was positive enough to earn the ✅.
+#
+# They differ by exactly one member: "snooze_too_late" is consumed but
+# achieved nothing, so the ✅ would be a lie (final review, Blocker 3).
+HANDLED_RESULTS = ("confirmed", "skipped", "already_acked", "snoozed",
+                   "snooze_moot", "snooze_too_late")
+FEEDBACK_RESULTS = ("confirmed", "skipped", "already_acked", "snoozed",
+                    "snooze_moot")
+
 _SKIN_TONES = {chr(cp) for cp in range(0x1F3FB, 0x1F400)}  # U+1F3FB..U+1F3FF
 
 
@@ -128,6 +141,15 @@ def _snooze(conn, row, base, now_utc):
     now + med_snooze_min would cross Asia/Almaty midnight (meds.defer
     forbids that: tomorrow's dose is generated on its own schedule), the
     target is clamped to 23:59 local instead of raising.
+
+    In the LAST minute of the local day the clamp target is itself
+    already in the past (23:59:30 -> 23:59:00), so there is nowhere left
+    to defer to: meds.defer would reject every target and the reaction
+    would have accomplished exactly nothing. That case returns
+    "snooze_too_late" -- still a CONSUMED reaction (it must not reach
+    the LLM dialogue path), but explicitly not a success, so run_hook
+    withholds the ✅ feedback instead of telling Amina the dose was
+    moved when it was not.
     """
     from datetime import datetime, timedelta
 
@@ -149,6 +171,20 @@ def _snooze(conn, row, base, now_utc):
     if until.astimezone(_ALMATY) > end_of_day:
         until = end_of_day.astimezone(until.tzinfo)
     until_str = until.isoformat(timespec="seconds")
+
+    if until <= now:
+        # Последняя минута суток: клэмп уехал в прошлое, откладывать
+        # некуда. Раньше здесь получался "snooze_moot" -- то есть ✅ и
+        # handled=true при полном отсутствии эффекта: положительная
+        # обратная связь за no-op, тот же класс, что групповой 👍,
+        # отмечающий одну дозу из двух. Реакция всё равно съедена (в
+        # диалог с LLM ей нельзя), но успехом не называется: run_hook
+        # отдаёт handled=true БЕЗ feedback-эмодзи.
+        out = {**base, "result": "snooze_too_late", "until_utc": until_str,
+               "deferred": 0}
+        audit.log(conn, "react.handle", out)
+        conn.commit()
+        return out
 
     targets = [r["ref_id"] for r in conn.execute(
         "SELECT ref_id FROM sent_message_refs "
@@ -192,6 +228,11 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
                                  already left 'pending' through another
                                  door -- nothing to defer, but still a
                                  consumed reaction, not a dialogue turn
+      snooze_too_late         -- ⏰ in the last minute of the local day:
+                                 the clamp target is already in the
+                                 past, so nothing could be deferred.
+                                 Consumed like the two above, but NOT a
+                                 success -- run_hook withholds the ✅
       already_acked           -- idempotent repeat (or the underlying row
                                  was already taken/acked/cancelled)
       ignored                 -- unmapped emoji, a reaction removal, or
@@ -237,12 +278,45 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
 
     action = "confirm" if norm in EMOJI_CONFIRM else "skip"
 
-    if row["ack_status"] != "none":
+    # One message may cover several doses (same-tick gate release,
+    # tick._meds_series): sent_message_refs carries the full target
+    # list, and its absence means the pre-Task-6 single-dose shape --
+    # exactly one target, row["ref_id"], handled below by the same code
+    # path with the same idempotency semantics. Resolved BEFORE the
+    # ack_status check because that check is only valid for a message
+    # whose ref set is a single dose -- see below.
+    targets = None
+    if row["kind"] == "med":
+        targets = [r["ref_id"] for r in conn.execute(
+            "SELECT ref_id FROM sent_message_refs "
+            "WHERE sent_message_id=? AND kind='med' ORDER BY ref_id",
+            (row["id"],))] or [row["ref_id"]]
+
+    if row["ack_status"] != "none" and not (targets and len(targets) > 1):
         out = {**base, "result": "already_acked",
                "ack_status": row["ack_status"]}
         audit.log(conn, "react.handle", out)
         conn.commit()
         return out
+
+    # Why a GROUP message never trusts its own ack_status (final review,
+    # Blocker 2): sent_messages.ref_id is a scalar, so a group message
+    # stores only ids[0], and the ack fan-out below marks every med row
+    # with that ref_id -- including the group message itself. So a 👍 on
+    # the ordinary 45-minute repeat of dose ids[0] flips the GROUP
+    # message to 'confirmed' while the group's other doses are still
+    # pending. Short-circuiting on that here returned "confirmed"-shaped
+    # success (handled=true, ✅) while touching nothing: Amina saw a
+    # checkmark, believed both doses were recorded, and the second dose
+    # kept nagging until the midnight closeout filed it as "missed" -- a
+    # false medical record produced by an explicit, positive user action.
+    # For a group the verdict therefore belongs to the DOSES: the loop
+    # below applies every still-pending member and falls back to
+    # "already_acked"/not_pending only when none was applicable. The
+    # single-dose path (targets of length 1, incl. every pre-Task-6
+    # message) keeps the message-level check and its exact return shape:
+    # there ref_id identifies the one dose the message is about, so the
+    # fan-out can never over-mark it.
 
     detail = {}
     if row["kind"] == "reminder":
@@ -252,17 +326,7 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
         else:
             detail["cancelled"] = rem.cancel_chain(conn, row["event_id"])
             result, new_status = "skipped", "skipped"
-    else:  # med
-        # One message may cover several doses (same-tick gate release,
-        # tick._meds_series): sent_message_refs carries the full target
-        # list, and its absence means the pre-Task-6 single-dose shape --
-        # exactly one target, row["ref_id"], handled below by the same
-        # code path with the same idempotency semantics.
-        targets = [r["ref_id"] for r in conn.execute(
-            "SELECT ref_id FROM sent_message_refs "
-            "WHERE sent_message_id=? AND kind='med' ORDER BY ref_id",
-            (row["id"],))] or [row["ref_id"]]
-
+    else:  # med (targets resolved above, before the ack_status check)
         applied = 0
         for rid in targets:
             try:
@@ -378,10 +442,13 @@ def run_hook(stdin=None, stdout=None, connect=None):
     # violating this module's "no LLM in the reaction path" contract
     # (fix round 1, Finding 1). `ignored`/`unknown_message` are ordinary
     # chat reactions and belong to the dialogue path (spec:
-    # reactions-dialogue, 2026-07-29).
-    handled = out["result"] in ("confirmed", "skipped", "already_acked",
-                                "snoozed", "snooze_moot")
-    feedback = {"react": FEEDBACK_EMOJI} if handled else {}
+    # reactions-dialogue, 2026-07-29). `snooze_too_late` is the one
+    # consumed outcome that earns NO ✅: the reaction changed nothing,
+    # and a checkmark would claim the dose was moved when it was not
+    # (final review, Blocker 3) -- hence two sets, not one boolean.
+    handled = out["result"] in HANDLED_RESULTS
+    feedback = ({"react": FEEDBACK_EMOJI}
+                if out["result"] in FEEDBACK_RESULTS else {})
     print(json.dumps({"handled": handled, **feedback, "result": out["result"]},
                      ensure_ascii=False), file=stdout)
     return 0
