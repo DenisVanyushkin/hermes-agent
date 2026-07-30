@@ -935,11 +935,33 @@ def _meds_series(conn, now_utc, cfg):
          reports as the string "error" (with force=True "quiet"/"budget"
          are unreachable, but they are treated the same way). This is
          rolled back too and audited as
-         tick.med{"mode":"release_deferred", status}.
-    In both cases nothing of the release persists: gate_reason keeps its
-    "asleep"/"away" value and series_next_utc keeps the value the last
-    _gate_hold gave it (already <= now), so the very next tick re-examines
-    the same rows and retries the identical release.
+         tick.med{"mode":"release_deferred", status, retry_at}.
+    In both cases nothing of the release itself persists: gate_reason
+    keeps its "asleep"/"away" value, so the doses stay held and the
+    release is retried rather than lost.
+
+    HOW THE RETRY IS PACED (final review, Should-fix 4). The rollback is
+    what guarantees the holds survive -- but it also restores
+    series_next_utc to the value the last _gate_hold wrote, which is by
+    construction already <= now (that is why the row was selected this
+    tick at all). Left at that, a deferred release is due again on the
+    very NEXT minute tick: a bridge down from 12:00 produced one bridge
+    call + one rollback + one tick.med{release_deferred} row PER MINUTE
+    until midnight, ~720 of each, contradicting this docstring's own
+    "recheck cadence" claim. So the non-"sent" branch writes a fresh
+    series_next_utc = now + med_gate_recheck_min AFTER the rollback
+    (before it, the rollback would eat the write -- that ordering is the
+    whole mechanism) and leaves gate_reason untouched, so the doses stay
+    held AND genuinely wait out the recheck interval. Its audit row is
+    throttled the same way _gate_hold's is: a meta key
+    "med_release_deferred:<almaty date>:<ids>" makes one continuous
+    outage of one release group leave ONE row instead of dozens; a
+    successful release clears the key, so a later, separate outage is
+    audited again. audit_log already carries 22k+ tick.reminders rows.
+    The exception path (case 1) keeps the plain "due again next tick"
+    behaviour: real gate.deliver does not raise on a failed send, so that
+    branch means a genuine defect, and there a fast retry plus its
+    tick.error row is the more visible outcome.
 
     This is DELIBERATELY different from the ordinary take branch above,
     which advances series_next_utc regardless of gate.deliver's status.
@@ -1228,9 +1250,39 @@ def _meds_series(conn, now_utc, cfg):
                 # ~10 minutes beats a fictitious delivery plus 45
                 # minutes of silence. Do not unify the two.
                 conn.rollback()
-                audit.log(conn, "tick.med",
-                          {"mode": "release_deferred", "intake_ids": ids,
-                           "status": status})
+                # ПОСЛЕ откката, и только после: он же и восстанавливает
+                # gate_reason (дозы остаются удержанными), и возвращает
+                # series_next_utc к значению последнего _gate_hold, а оно
+                # уже <= now. Без этой записи строка снова due на
+                # СЛЕДУЮЩЕЙ минуте -- мост, умерший в 12:00, давал ~720
+                # вызовов, откатов и audit-строк до полуночи вместо одной
+                # попытки в med_gate_recheck_min. gate_reason не трогаем:
+                # доза остаётся удержанной с тем же поводом, меняется
+                # только срок следующей попытки.
+                recheck = int(cfg.get("med_gate_recheck_min", 10))
+                retry_utc = (now_dt + timedelta(minutes=recheck)).isoformat(
+                    timespec="seconds")
+                for iid in ids:
+                    conn.execute(
+                        "UPDATE med_intakes SET series_next_utc=? "
+                        "WHERE id=? AND status='pending' "
+                        "AND gate_reason IS NOT NULL", (retry_utc, iid))
+                # Троттлинг аудита по образцу _gate_hold (пишем только на
+                # переходе): одна строка на непрерывный простой этой
+                # группы за сутки Алматы. Ключ снимается успешным
+                # отпусканием ниже, поэтому следующий, ОТДЕЛЬНЫЙ простой
+                # снова будет виден.
+                deferred_key = _release_deferred_key(now_utc, ids)
+                seen = conn.execute(
+                    "SELECT value FROM meta WHERE key=?",
+                    (deferred_key,)).fetchone()
+                if seen is None:
+                    audit.log(conn, "tick.med",
+                              {"mode": "release_deferred", "intake_ids": ids,
+                               "status": status, "retry_at": retry_utc})
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                    (deferred_key, now_utc))
                 conn.commit()
             else:
                 repeat_min = cfg.get("med_repeat_min", 45)
@@ -1240,6 +1292,11 @@ def _meds_series(conn, now_utc, cfg):
                     conn.execute(
                         "UPDATE med_intakes SET series_next_utc=? "
                         "WHERE id=? AND status='pending'", (next_utc, iid))
+                # Простой кончился -- снимаем ключ троттлинга, чтобы
+                # следующий (уже другой) простой этой же группы снова
+                # оставил свою строку в audit_log.
+                conn.execute("DELETE FROM meta WHERE key=?",
+                             (_release_deferred_key(now_utc, ids),))
                 audit.log(conn, "tick.med",
                           {"mode": "release_group", "intake_ids": ids,
                            "status": status})
@@ -1253,6 +1310,16 @@ def _meds_series(conn, now_utc, cfg):
 
 def _today_almaty(now_utc):
     return _parse_utc(now_utc).astimezone(ALMATY).date().isoformat()
+
+
+def _release_deferred_key(now_utc, ids):
+    """meta-ключ, троттлящий аудит отложенного группового отпускания
+    (_meds_series). Ключ на сутки Алматы и на конкретный состав группы:
+    другой набор доз -- другой простой, его видно отдельно. Снимается
+    успешным отпусканием, см. _meds_series.
+    """
+    listed = ",".join(str(i) for i in sorted(ids))
+    return f"med_release_deferred:{_today_almaty(now_utc)}:{listed}"
 
 
 def _local_hhmm_before(ts_utc, hhmm):

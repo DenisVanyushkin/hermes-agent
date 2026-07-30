@@ -874,7 +874,11 @@ def test_group_send_error_status_leaves_doses_held(db, monkeypatch):
         row = _intake(db, iid)
         assert row["gate_reason"] == "asleep", iid
         assert row["status"] == "pending", iid
-        assert row["series_next_utc"] == "2026-07-20T05:10:00+00:00", iid
+        # Дозы остались удержанными, но повтор -- через
+        # med_gate_recheck_min, а НЕ на следующей же минуте (final
+        # review, Should-fix 4): раньше здесь оставалось 05:10, то есть
+        # строка была due каждую минуту до полуночи.
+        assert row["series_next_utc"] == "2026-07-20T05:20:00+00:00", iid
     assert db.execute(
         "SELECT COUNT(*) FROM audit_log WHERE kind='med.gate_release'"
     ).fetchone()[0] == 0
@@ -884,6 +888,64 @@ def test_group_send_error_status_leaves_doses_held(db, monkeypatch):
         "SELECT payload FROM audit_log WHERE kind='tick.med' "
         "ORDER BY id DESC LIMIT 1").fetchone()[0]
     assert "release_deferred" in deferred
+
+
+def test_release_deferred_retries_after_recheck_not_next_minute(db,
+                                                                fake_deliver):
+    """Final review, Should-fix 4: неудавшееся отпускание обязано ждать
+    med_gate_recheck_min. Раньше откат оставлял series_next_utc на
+    значении последнего _gate_hold (уже <= now), и доза была due каждую
+    минуту -- один вызов моста, один откат и одна audit-строка в
+    минуту."""
+    a = _pending_intake(db, name="Эутирокс")
+    tick._meds_series(db, MORNING, CFG)              # удержана как asleep
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+
+    fake_deliver.responses = ["error"]
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", CFG)
+    assert len(fake_deliver.calls) == 1
+    row = _intake(db, a)
+    assert row["gate_reason"] == "asleep", "удержание должно выжить откат"
+    assert row["series_next_utc"] == "2026-07-20T05:20:00+00:00"
+
+    tick._meds_series(db, "2026-07-20T05:11:00+00:00", CFG)
+    assert len(fake_deliver.calls) == 1, "через минуту доза ещё не due"
+
+    tick._meds_series(db, "2026-07-20T05:20:00+00:00", CFG)
+    assert len(fake_deliver.calls) == 2, "через 10 минут -- повторная попытка"
+    assert _intake(db, a)["gate_reason"] is None
+
+
+def test_release_deferred_audit_is_throttled_during_an_outage(db,
+                                                             fake_deliver):
+    """audit_log уже несёт 22k+ tick.reminders; многочасовой простой
+    моста не должен дописывать в него строку на каждую перепроверку."""
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    tick._meds_series(db, MORNING, CFG)
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+
+    fake_deliver.responses = ["error"] * 5
+    for minute in (10, 20, 30, 40, 50):
+        tick._meds_series(db, f"2026-07-20T05:{minute}:00+00:00", CFG)
+
+    assert len(fake_deliver.calls) == 5, "каждые 10 минут -- одна попытка"
+    rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.med'").fetchall()
+    deferred = [r[0] for r in rows if "release_deferred" in r[0]]
+    assert len(deferred) == 1, "одна строка на непрерывный простой"
+    for iid in (a, b):
+        row = _intake(db, iid)
+        assert row["gate_reason"] == "asleep", iid
+        assert row["series_next_utc"] == "2026-07-20T06:00:00+00:00", iid
+
+    # Простой кончился -> ключ троттлинга снят, следующий простой снова
+    # оставит свою строку.
+    tick._meds_series(db, "2026-07-20T06:00:00+00:00", CFG)
+    assert _intake(db, a)["gate_reason"] is None
+    assert db.execute(
+        "SELECT COUNT(*) FROM meta WHERE key LIKE 'med_release_deferred:%'"
+    ).fetchone()[0] == 0
 
 
 def test_group_release_end_to_end_through_real_deliver(db, monkeypatch):
