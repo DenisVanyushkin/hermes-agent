@@ -115,3 +115,73 @@ def test_deleted_file_does_not_raise(tmp_path, monkeypatch):
     src.unlink()
 
     assert module_skew.detect_module_skew(tmp_path) == ["pkg/mod_e.py"]
+
+
+def test_venv_files_are_never_fingerprinted(tmp_path, monkeypatch):
+    """I8: на проде venv лежит ВНУТРИ корня; pip install -e . — штатный шаг."""
+    from gateway import module_skew
+
+    module_skew.reset_snapshot()
+    own = _write(tmp_path / "gateway" / "mod_own.py", "x = 1\n")
+    dep = _write(
+        tmp_path / "venv" / "lib" / "python3.11" / "site-packages" / "dep" / "core.py",
+        "y = 1\n",
+    )
+    monkeypatch.setitem(sys.modules, "probe_mod_own", _fake_module("probe_mod_own", own))
+    monkeypatch.setitem(sys.modules, "probe_dep_core", _fake_module("probe_dep_core", dep))
+
+    module_skew.take_snapshot(tmp_path)
+
+    assert dep.resolve() not in module_skew._snapshot
+    assert own.resolve() in module_skew._snapshot
+
+    dep.write_text("y = 2\n", encoding="utf-8")
+    assert module_skew.detect_module_skew(tmp_path) == []
+
+
+def test_dot_venv_files_are_never_fingerprinted(tmp_path, monkeypatch):
+    from gateway import module_skew
+
+    module_skew.reset_snapshot()
+    dep = _write(tmp_path / ".venv" / "lib" / "site-packages" / "dep2.py", "y = 1\n")
+    monkeypatch.setitem(sys.modules, "probe_dep2", _fake_module("probe_dep2", dep))
+
+    module_skew.take_snapshot(tmp_path)
+
+    assert dep.resolve() not in module_skew._snapshot
+
+
+def test_module_imported_after_snapshot_is_folded_in(tmp_path, monkeypatch):
+    """M2: ленивый импорт (как run_agent) обязан попасть в снимок при виде."""
+    from gateway import module_skew
+
+    module_skew.reset_snapshot()
+    first = _write(tmp_path / "pkg" / "mod_f.py", "x = 1\n")
+    monkeypatch.setitem(sys.modules, "probe_mod_f", _fake_module("probe_mod_f", first))
+    module_skew.take_snapshot(tmp_path)
+
+    late = _write(tmp_path / "pkg" / "mod_lazy.py", "y = 1\n")
+    monkeypatch.setitem(
+        sys.modules, "probe_mod_lazy", _fake_module("probe_mod_lazy", late)
+    )
+
+    assert module_skew.detect_module_skew(tmp_path) == []  # только что прочитан
+    assert late.resolve() in module_skew._snapshot
+
+    late.write_text("y = 2\n", encoding="utf-8")
+    assert module_skew.detect_module_skew(tmp_path) == ["pkg/mod_lazy.py"]
+
+
+def test_unresolvable_module_path_does_not_kill_the_snapshot(tmp_path, monkeypatch):
+    """M4: RuntimeError/ValueError из resolve() не имеет права снести снимок."""
+    from gateway import module_skew
+
+    module_skew.reset_snapshot()
+    good = _write(tmp_path / "pkg" / "mod_g.py", "x = 1\n")
+    monkeypatch.setitem(sys.modules, "probe_mod_g", _fake_module("probe_mod_g", good))
+    monkeypatch.setitem(
+        sys.modules, "probe_mod_nul", _fake_module("probe_mod_nul", "/tmp/bad\x00name.py")
+    )
+
+    assert module_skew.take_snapshot(tmp_path) >= 1
+    assert good.resolve() in module_skew._snapshot

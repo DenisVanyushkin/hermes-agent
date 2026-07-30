@@ -49,8 +49,23 @@ def _fingerprint(path: Path) -> tuple[int, int, str] | None:
         return None
 
 
+# Компоненты пути, по которым файл считается ЧУЖИМ, даже если лежит внутри
+# корня репозитория. На проде venv живёт прямо в корне
+# (``<repo>/venv/lib/python3.x/site-packages``), и без этого фильтра снимок
+# накрывал бы сотни файлов зависимостей: ``pip install -e .`` — штатный шаг
+# деплоя — переписывает их и выглядел бы как скос кода гейтвея.
+_FOREIGN_PATH_PARTS = frozenset({"site-packages", "site-python", ".venv", "venv"})
+
+
+def _is_foreign_path(path: Path) -> bool:
+    return any(part in _FOREIGN_PATH_PARTS for part in path.parts)
+
+
 def _repo_module_files(project_root: Path) -> list[Path]:
-    """Файлы модулей из sys.modules, лежащие внутри корня репозитория."""
+    """Файлы модулей из sys.modules, лежащие внутри корня репозитория.
+
+    Файлы venv/site-packages исключаются: см. ``_FOREIGN_PATH_PARTS``.
+    """
     found = []
     for module in list(sys.modules.values()):
         filename = getattr(module, "__file__", None)
@@ -58,9 +73,11 @@ def _repo_module_files(project_root: Path) -> list[Path]:
             continue
         try:
             path = Path(filename).resolve()
-        except OSError:
+        except Exception:  # noqa: BLE001 — OSError, RuntimeError (петля
+            # симлинков), ValueError (NUL в пути): один битый путь не имеет
+            # права ронять весь снимок и выключать детектор навсегда.
             continue
-        if project_root in path.parents:
+        if project_root in path.parents and not _is_foreign_path(path):
             found.append(path)
     return found
 
@@ -104,7 +121,13 @@ def detect_module_skew(project_root: Path) -> list[str]:
     проверки хешей гейтвей рестартовал бы на пустом месте.
 
     Файлы, появившиеся в sys.modules ПОСЛЕ снимка, скосом не считаются: они
-    только что прочитаны с текущего диска.
+    только что прочитаны с текущего диска, — но добавляются в снимок здесь же,
+    чтобы их последующая правка на диске уже ловилась (ленивые импорты вроде
+    ``run_agent`` иначе оставались бы невидимыми навсегда).
+
+    Известное ограничение: правка, сохранившая И mtime, И размер, первым
+    (stat-)шагом не отсеивается и до sha256 не доходит — осознанный размен на
+    дешёвый проход по всему снимку каждые несколько минут.
     """
     if not _snapshot_taken:
         return []
@@ -124,6 +147,16 @@ def detect_module_skew(project_root: Path) -> list[str]:
                     changed.append(path)
             except OSError:
                 changed.append(path)
+
+        # Модули, доехавшие в sys.modules после снимка (ленивые импорты),
+        # фиксируем текущим состоянием диска: с этого момента их правка
+        # будет считаться скосом.
+        for path in _repo_module_files(root):
+            if path in _snapshot:
+                continue
+            fp = _fingerprint(path)
+            if fp is not None:
+                _snapshot[path] = fp
 
         out = []
         for path in changed:
