@@ -25034,9 +25034,22 @@ async def _await_thread_exit(
 # process began: a deploy under a live gateway then changes nothing until
 # the next restart, instead of half-loading new code into an old process
 # (2026-07-27 incident — see docs/superpowers/plans/2026-07-29-cron-failure-audience.md).
+#
+# hermes_cli.plugins and hermes_cli.kanban_db are also imported lazily on
+# this path (agent/turn_finalizer.py's transform_llm_output/post_llm_call/
+# on_session_end hook calls, and its budget-exhaustion kanban-failure
+# recording). Those call sites already wrap the import in try/except, so a
+# desync there doesn't crash a turn — but it silently stops those hooks and
+# the kanban failure-recording from firing for the rest of the process's
+# life, with only a logger.warning marking it: the same two-days-unnoticed
+# shape as the incident, just quieter. Confirmed side-effect-free at import
+# (no plugin discovery, no DB connection, no filesystem writes) before
+# adding them here.
 _TURN_PATH_PRELOAD = (
     "agent.turn_finalizer",
     "hermes_cli.review_gate",
+    "hermes_cli.plugins",
+    "hermes_cli.kanban_db",
 )
 
 
