@@ -277,3 +277,17 @@ def test_run_py_hook_wired():
     tail = src.split("maybe_alert_turn_error(", 1)[1][:600]
     for kw in ("platform=", "chat_id=", "user_message=", "agent_result=", "final_response="):
         assert kw in tail, kw
+
+
+def test_send_operator_alert_is_public_and_delegates(monkeypatch):
+    """Публичная обёртка над _send_alert — точка входа для подсистем вне пути хода."""
+    from gateway import turn_error_alerts
+
+    calls = []
+    monkeypatch.setattr(
+        turn_error_alerts, "_send_alert", lambda channel, text: calls.append((channel, text))
+    )
+
+    turn_error_alerts.send_operator_alert("telegram:123", "текст")
+
+    assert calls == [("telegram:123", "текст")]
