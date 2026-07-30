@@ -23,6 +23,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban import run_slash
+from tools.registry import registry
 
 
 # ---------------------------------------------------------------------------
@@ -3043,6 +3044,38 @@ def test_create_task_skills_lists_all_toolset_typos(kanban_home):
         assert "are toolset names" in msg
     finally:
         conn.close()
+
+
+def test_known_toolset_names_reflects_toolsets_registered_after_import(monkeypatch):
+    """``kb._known_toolset_names()`` must not be frozen at import time.
+
+    Regression for the gateway turn-path preload (2026-07-29): preloading
+    ``hermes_cli.kanban_db`` at gateway startup means this module can now be
+    imported *before* ``discover_plugins()`` registers plugin toolsets (that
+    happens later, inside ``GatewayRunner.start()``). A module-level
+    ``KNOWN_TOOLSET_NAMES = frozenset(...)`` snapshot taken at import time
+    would permanently miss any toolset a plugin registers afterward. This
+    proves the lazy, cached accessor picks it up on first use instead —
+    the exact scenario a naive module-level constant would have broken.
+    """
+    monkeypatch.setattr(kb, "_known_toolset_names_cache", None)
+
+    new_toolset = "regression_test_plugin_toolset"
+    tool_name = "__regression_test_known_toolset_names_tool__"
+    registry.register(
+        name=tool_name,
+        toolset=new_toolset,
+        schema={
+            "type": "function",
+            "function": {"name": tool_name, "description": "x", "parameters": {}},
+        },
+        handler=lambda *a, **kw: None,
+    )
+    try:
+        assert new_toolset in kb._known_toolset_names()
+    finally:
+        registry.deregister(tool_name)
+        monkeypatch.setattr(kb, "_known_toolset_names_cache", None)
 
 
 def test_default_spawn_appends_per_task_skills(kanban_home, monkeypatch):

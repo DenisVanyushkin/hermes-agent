@@ -133,9 +133,34 @@ VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 # not dispatcher spawn/crash/timeout failures.
 BLOCK_RECURRENCE_LIMIT = 2
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
-KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
+
+_known_toolset_names_cache: frozenset | None = None
+
+
+def _known_toolset_names() -> frozenset:
+    """Casefolded toolset names, computed lazily and cached on first use.
+
+    Deliberately NOT a module-level constant: this module can now be
+    imported early (gateway/run.py's turn-path preload, at startup) before
+    ``discover_plugins()`` registers plugin toolsets (that happens later,
+    inside ``GatewayRunner.start()``). A module-level snapshot taken at
+    import time would freeze this set before plugin toolsets exist and
+    they'd be permanently missing for the process's lifetime — the same
+    "state captured at the wrong moment because of import timing" class of
+    bug this preload work exists to close, just relocated into this
+    module. Computing on first use (rather than at every call) still
+    avoids repeated registry walks; by the time anything actually
+    references this — validating a task's ``skills=`` list — plugin
+    discovery has long since run.
+    """
+    global _known_toolset_names_cache
+    if _known_toolset_names_cache is None:
+        _known_toolset_names_cache = frozenset(
+            name.casefold() for name in get_toolset_names()
+        )
+    return _known_toolset_names_cache
 
 
 def _assert_not_delegated_child_mutation() -> None:
@@ -3001,7 +3026,7 @@ def create_task(
                     f"skill name cannot contain comma: {name!r} "
                     f"(pass a list of separate names instead of a comma-joined string)"
                 )
-            if name.casefold() in KNOWN_TOOLSET_NAMES:
+            if name.casefold() in _known_toolset_names():
                 toolset_typos.append(name)
                 continue
             if name in seen:
