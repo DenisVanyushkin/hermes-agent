@@ -107,6 +107,46 @@ def test_due_intake_is_delivered_and_series_advances_by_med_repeat_min(
     assert payload == {"intake_id": intake_id, "mode": "take", "status": "sent"}
 
 
+# ---- raw["previous"] (design spec S5: previous wordings feed the
+# rewrite's variation instruction) ----
+
+def test_raw_previous_absent_on_first_send(db, fake_deliver):
+    med_id = meds.add(db, "Магний", ["08:00"])
+    db.commit()
+    plan_ts = "2026-07-20T03:00:00+00:00"
+    _insert_intake(db, med_id, plan_ts, plan_ts)
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    calls = _med_calls(fake_deliver)
+    assert len(calls) == 1
+    assert "previous" not in calls[0]["raw"]
+
+
+def test_raw_previous_carries_this_intakes_earlier_finals(db, fake_deliver):
+    med_id = meds.add(db, "Магний", ["08:00"])
+    db.commit()
+    plan_ts = "2026-07-20T03:00:00+00:00"
+    intake_id = _insert_intake(db, med_id, plan_ts, plan_ts)
+    # An earlier gate.sent row for this SAME intake, earlier today.
+    db.execute(
+        "INSERT INTO audit_log(ts_utc, kind, actor, payload) VALUES(?,?,?,?)",
+        (plan_ts, "gate.sent", "test",
+         json.dumps({"kind": "med",
+                     "raw": {"mode": "take", "intake_id": intake_id},
+                     "final": "Пора принять Магний."},
+                    ensure_ascii=False)))
+    db.commit()
+    fake_deliver.responses = ["sent"]
+
+    tick.reminders(db, now_utc=NOW, cfg=CFG)
+
+    calls = _med_calls(fake_deliver)
+    assert len(calls) == 1
+    assert calls[0]["raw"]["previous"] == ["Пора принять Магний."]
+
+
 def test_series_advances_even_when_deliver_returns_quiet(db, fake_deliver):
     # Brief: series_next_utc advances "при статусе sent/quiet/..." -- i.e.
     # regardless of gate.deliver's own outcome, not just on "sent".

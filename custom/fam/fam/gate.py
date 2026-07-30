@@ -294,6 +294,24 @@ GATE_MED_VARIATION_INSTRUCTION = (
     "«снова», «уже». Не выдумывай новых фактов."
 )
 
+# Design spec 2026-07-29 (docs/2026-07-29-med-reminder-gating-design.md,
+# S5): GATE_MED_VARIATION_INSTRUCTION above tells the rewrite to word
+# things "differently than last time" without ever showing it what last
+# time actually said -- an instruction the model has no way to follow,
+# confirmed live: two same-day sends happened to differ, but a send the
+# day before was near-verbatim identical to one of them. tick.py's
+# _med_prior_texts now puts those actual prior wordings into
+# raw["previous"] (reaching the model automatically inside the <data>
+# block _build_prompt already wraps raw in); this instruction is what
+# tells the model what to DO with that field -- point at it explicitly
+# and forbid repeating it, rather than a blind "vary somehow".
+GATE_MED_PRIOR_VARIATION_INSTRUCTION = (
+    "Поле previous — формулировки, уже отправленные для этой же дозы "
+    "сегодня. Новое сообщение должно отличаться от каждой из них: не "
+    "повторяй их дословно и не пересказывай близко к тексту. Не "
+    "выдумывай новых фактов."
+)
+
 # Детерминированный пул на случай, когда переписывающий LLM недоступен.
 # Индексируется номером попытки: без него однообразие наступало бы ровно
 # тогда, когда LLM упал -- а его падения тихие и штатные (см. deliver
@@ -499,10 +517,17 @@ def _build_prompt(raw, kind=None):
     For kind=="reminder", GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION is
     appended instead -- it spells out sent_now_local vs. start_local
     semantics and bans fabricated facts (see that constant's docstring).
-    For kind=="med" with raw["attempt_no"] > 1 (a repeat of the same
-    dose reminder), GATE_MED_VARIATION_INSTRUCTION is appended so the
-    rewrite doesn't produce the same sentence every 45 minutes; the
-    first attempt gets no extra instruction.
+    For kind=="med" the two variation instructions are mutually
+    exclusive, same as the digest/reminder branches above (this stays an
+    if/elif chain): when raw["previous"] is a non-empty list (this
+    dose's own already-sent wordings today, from tick._med_prior_texts),
+    GATE_MED_PRIOR_VARIATION_INSTRUCTION is appended -- it points the
+    rewrite at that concrete field and forbids repeating it. Otherwise,
+    when raw["attempt_no"] > 1 (a repeat with no prior text available,
+    e.g. audit rows predating this feature), the older
+    GATE_MED_VARIATION_INSTRUCTION is appended unchanged -- a blind
+    "word it differently" with nothing to compare against. A first
+    attempt with neither condition true gets no extra instruction.
 
     Prompt-injection mitigation (go-live review finding 8): `raw` embeds
     user-authored strings (event titles, participant names, notes) --
@@ -527,6 +552,8 @@ def _build_prompt(raw, kind=None):
             raw = {k: v for k, v in raw.items() if k != "question"}
     elif kind == "reminder":
         instruction = f"{instruction} {GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION}"
+    elif kind == "med" and raw.get("previous"):
+        instruction = f"{instruction} {GATE_MED_PRIOR_VARIATION_INSTRUCTION}"
     elif kind == "med" and int(raw.get("attempt_no") or 1) > 1:
         instruction = f"{instruction} {GATE_MED_VARIATION_INSTRUCTION}"
     return (
