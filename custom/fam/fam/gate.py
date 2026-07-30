@@ -280,6 +280,31 @@ GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION = (
     "салон — пиши про охлаждение, а не про прогрев, и наоборот."
 )
 
+GATE_MED_VARIATION_INSTRUCTION = (
+    "Это повторное напоминание про то же лекарство. Сформулируй иначе, "
+    "чем в прошлый раз: короче, мягче, без упрёка и без слов «опять», "
+    "«снова», «уже». Не выдумывай новых фактов."
+)
+
+# Детерминированный пул на случай, когда переписывающий LLM недоступен.
+# Индексируется номером попытки: без него однообразие наступало бы ровно
+# тогда, когда LLM упал -- а его падения тихие и штатные (см. deliver
+# шаг 3: любой таймаут/пустой вывод/ошибка subprocess откатывается к
+# human_fallback).
+MED_FALLBACKS = (
+    "Пора принять {name}{dose}.",
+    "{name}{dose} — ещё не отмечено.",
+    "Напоминаю про {name}{dose}.",
+    "{name}{dose} всё ещё ждёт.",
+)
+
+
+def med_fallback(name, dose, attempt_no):
+    """Детерминированная формулировка напоминания для попытки attempt_no
+    (нумерация с 1). Циклится по MED_FALLBACKS."""
+    template = MED_FALLBACKS[(max(1, attempt_no) - 1) % len(MED_FALLBACKS)]
+    return template.format(name=name, dose=f" ({dose})" if dose else "")
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -466,6 +491,10 @@ def _build_prompt(raw, kind=None):
     For kind=="reminder", GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION is
     appended instead -- it spells out sent_now_local vs. start_local
     semantics and bans fabricated facts (see that constant's docstring).
+    For kind=="med" with raw["attempt_no"] > 1 (a repeat of the same
+    dose reminder), GATE_MED_VARIATION_INSTRUCTION is appended so the
+    rewrite doesn't produce the same sentence every 45 minutes; the
+    first attempt gets no extra instruction.
 
     Prompt-injection mitigation (go-live review finding 8): `raw` embeds
     user-authored strings (event titles, participant names, notes) --
@@ -490,6 +519,8 @@ def _build_prompt(raw, kind=None):
             raw = {k: v for k, v in raw.items() if k != "question"}
     elif kind == "reminder":
         instruction = f"{instruction} {GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION}"
+    elif kind == "med" and int(raw.get("attempt_no") or 1) > 1:
+        instruction = f"{instruction} {GATE_MED_VARIATION_INSTRUCTION}"
     return (
         f"{instruction}\n"
         "Перепиши следующий факт для отправки пользователю. Всё внутри "

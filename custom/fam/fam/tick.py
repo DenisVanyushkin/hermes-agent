@@ -1083,9 +1083,27 @@ def _meds_series(conn, now_utc, cfg):
                                 ALMATY).strftime("%H:%M")})
                     continue
 
-                raw = {"mode": "take", "name": name, "dose": dose}
-                human_fallback = f"Пора принять {name}" + (
-                    f" ({dose})" if dose else "")
+                # attempt_no counts existing sent_messages rows for this
+                # intake rather than a new counter column: that table
+                # already holds one row per genuinely delivered send of
+                # this dose (gate.deliver only inserts one on a
+                # successful send -- see gate.py's sent_ref handling),
+                # and gate holds above never call gate.deliver, so they
+                # never add a row here either. Counting it this way
+                # naturally excludes held ticks, which is exactly what
+                # we want: a dose held twice then sent should still read
+                # as attempt 1, not attempt 3.
+                attempt_no = conn.execute(
+                    "SELECT COUNT(*) FROM sent_messages "
+                    "WHERE kind='med' AND ref_id=?", (intake_id,)
+                ).fetchone()[0] + 1
+                minutes_late = int(
+                    (now_dt - _parse_utc(row["plan_ts_utc"])).total_seconds()
+                    // 60)
+                raw = {"mode": "take", "name": name, "dose": dose,
+                       "intake_id": intake_id, "attempt_no": attempt_no,
+                       "minutes_late": minutes_late}
+                human_fallback = gate.med_fallback(name, dose, attempt_no)
                 status = gate.deliver(conn, "med", raw, human_fallback, cfg,
                                        force=True, now_utc=now_utc,
                                        sent_ref={"kind": "med",
