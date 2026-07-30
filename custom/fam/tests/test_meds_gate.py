@@ -234,10 +234,25 @@ def _add_event(db, title, start_utc, end_utc, place_id=None, travel_min=None):
     return cur.lastrowid
 
 
-def _add_car_metric(db, ts_utc, lat, lon, gps_ts=None):
+_AUTO_GPS_TS = object()
+
+
+def _add_car_metric(db, ts_utc, lat, lon, gps_ts=_AUTO_GPS_TS):
+    """Строка телеметрии в той форме, которую производит прод.
+
+    gps_ts -- Unix-эпоха INTEGER (fam.car пишет StarLine position.ts,
+    колонка объявлена INTEGER). Раньше этот хелпер по умолчанию писал
+    сюда ISO-СТРОКУ, форму, которой прод не производит никогда, из-за
+    чего все car-GPS тесты проходили против несуществующей формы данных
+    и не замечали, что SQL-сравнение эпохи со строкой не пропускает ни
+    одной реальной строки. gps_ts=None пишет NULL (фоллбэк на ts_utc).
+    """
+    from datetime import datetime as _dt
+    if gps_ts is _AUTO_GPS_TS:
+        gps_ts = int(_dt.fromisoformat(ts_utc).timestamp())
     db.execute(
         "INSERT INTO car_metrics(ts_utc, gps_lat, gps_lon, gps_ts) "
-        "VALUES(?,?,?,?)", (ts_utc, lat, lon, gps_ts or ts_utc))
+        "VALUES(?,?,?,?)", (ts_utc, lat, lon, gps_ts))
     db.commit()
 
 
@@ -290,6 +305,70 @@ def test_away_true_on_fresh_car_gps_far_from_home(db):
     assert away is True
     assert reason == "car_gps"
     assert expected_home is None
+
+
+def test_car_gps_is_stored_as_an_epoch_integer(db):
+    """Форма данных, вокруг которой всё и сломалось: gps_ts -- INTEGER.
+    SQLite ранжирует INTEGER ниже любого TEXT, поэтому сравнение с
+    ISO-cutoff отбрасывало ровно все реальные строки."""
+    _add_car_metric(db, "2026-07-20T09:55:00+00:00", AWAY_LAT, AWAY_LON)
+    kind = db.execute(
+        "SELECT typeof(gps_ts) FROM car_metrics").fetchone()[0]
+    assert kind == "integer"
+    assert presence.is_away(db, CFG, NOW)[1] == "car_gps"
+
+
+def test_away_true_on_fresh_car_gps_with_null_gps_ts(db):
+    # gps_ts NULL (StarLine не отдал position.ts) -- свежесть считается
+    # по ts_utc как по ISO-строке.
+    _add_car_metric(db, "2026-07-20T09:55:00+00:00", AWAY_LAT, AWAY_LON,
+                    gps_ts=None)
+    away, reason, _ = presence.is_away(db, CFG, NOW)
+    assert away is True
+    assert reason == "car_gps"
+
+
+def test_away_false_on_stale_car_gps_with_null_gps_ts(db):
+    _add_car_metric(db, "2026-07-20T09:00:00+00:00", AWAY_LAT, AWAY_LON,
+                    gps_ts=None)
+    assert presence.is_away(db, CFG, NOW)[0] is False
+
+
+def test_fresh_far_car_gps_wins_over_stale_far_row(db):
+    # Более свежий фикс у дома перебивает старый далёкий: выигрывает
+    # самый свежий фикс, а не первый подходящий.
+    _add_car_metric(db, "2026-07-20T09:50:00+00:00", AWAY_LAT, AWAY_LON)
+    _add_car_metric(db, "2026-07-20T09:58:00+00:00", HOME_LAT, HOME_LON)
+    assert presence.is_away(db, CFG, NOW)[0] is False
+
+
+def test_nearby_event_does_not_mask_a_far_car_gps(db):
+    """Отложенный в Task 3 тест, ставший несущим: идущее событие в месте
+    РЯДОМ с домом не должно затенять свежий далёкий фикс машины --
+    лестница обязана провалиться на ступень car_gps, а не ответить
+    "дома" по первому же совпадению."""
+    pid = _add_place(db, "Двор", HOME_LAT, HOME_LON)
+    _add_event(db, "Уборка", "2026-07-20T09:30:00+00:00",
+               "2026-07-20T10:30:00+00:00", place_id=pid)
+    db.commit()
+    _add_car_metric(db, "2026-07-20T09:55:00+00:00", AWAY_LAT, AWAY_LON)
+
+    away, reason, expected_home = presence.is_away(db, CFG, NOW)
+    assert away is True
+    assert reason == "car_gps"
+    assert expected_home is None
+
+
+def test_parse_treats_naive_timestamps_as_utc(db):
+    # Как tick._parse_utc: наивная строка -- это UTC, а не системная
+    # зона хоста (иначе границы суток Алматы уезжают вне UTC-хоста).
+    assert presence._parse("2026-07-20T10:00:00") == presence._parse(
+        "2026-07-20T10:00:00+00:00")
+
+
+def test_is_away_accepts_a_naive_now(db):
+    _add_car_metric(db, "2026-07-20T09:55:00+00:00", AWAY_LAT, AWAY_LON)
+    assert presence.is_away(db, CFG, "2026-07-20T10:00:00")[0] is True
 
 
 def test_away_false_on_stale_car_gps(db):
