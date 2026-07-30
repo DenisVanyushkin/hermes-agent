@@ -121,6 +121,92 @@ def test_run_errors_reported_same_night(db, monkeypatch):
     assert "maintenance: backup /x: disk full" in sent[0]
 
 
+# ---- cal-ext collision counter (Task 8, fix-round 1) -------------------
+
+def test_collision_counter_shows_up_no_content_leaked(db, monkeypatch):
+    monkeypatch.setattr(maint.health, "bridge_readiness",
+                         lambda conn, cfg, now=None: _ok_probe("bridge"))
+    monkeypatch.setattr(maint.health, "starline_staleness",
+                         lambda conn, cfg, now=None: _ok_probe("starline"))
+    monkeypatch.setattr(maint.health, "degradation_flags",
+                         lambda conn, cfg, now=None: _ok_probe("degradation"))
+    audit.log(db, "cal.ext.sync", {
+        "collisions": 3, "events_inserted": 0, "errors": [],
+        "calendars": [{"url": "https://p01-caldav.icloud.com/secret/personal/",
+                        "name": "Личный", "mode": "read", "reason": None}],
+    })
+    db.commit()
+    sent = []
+    out = maint.problem_summary({}, notify=lambda t: sent.append(t) or True)
+    assert out["sent"] is True
+    assert len(sent) == 1
+    assert "3 совпадающих записей" in sent[0]
+    assert "разобрать вручную" in sent[0]
+    # counter only -- no calendar name/URL, no titles, ever leak into
+    # the summary (spec: audit/summary carry UIDs and counts only).
+    assert "icloud.com" not in sent[0]
+    assert "Личный" not in sent[0]
+
+
+def test_no_collision_line_when_zero(db, monkeypatch):
+    monkeypatch.setattr(maint.health, "bridge_readiness",
+                         lambda conn, cfg, now=None: _ok_probe("bridge"))
+    monkeypatch.setattr(maint.health, "starline_staleness",
+                         lambda conn, cfg, now=None: _ok_probe("starline"))
+    monkeypatch.setattr(maint.health, "degradation_flags",
+                         lambda conn, cfg, now=None: _ok_probe("degradation"))
+    # a healthy, zero-collision cal.ext.sync row (e.g. written because a
+    # calendar's mode changed) must not add a collision line on its own.
+    audit.log(db, "cal.ext.sync", {"collisions": 0, "events_inserted": 1})
+    db.commit()
+    audit.log(db, "tick.error", {"where": "digest", "error": "boom"}, actor="tick")
+    db.commit()
+    sent = []
+    out = maint.problem_summary({}, notify=lambda t: sent.append(t) or True)
+    assert out["sent"] is True
+    assert "совпадающих" not in sent[0]
+
+
+def test_collision_counter_sums_across_window(db, monkeypatch):
+    monkeypatch.setattr(maint.health, "bridge_readiness",
+                         lambda conn, cfg, now=None: _ok_probe("bridge"))
+    monkeypatch.setattr(maint.health, "starline_staleness",
+                         lambda conn, cfg, now=None: _ok_probe("starline"))
+    monkeypatch.setattr(maint.health, "degradation_flags",
+                         lambda conn, cfg, now=None: _ok_probe("degradation"))
+    audit.log(db, "cal.ext.sync", {"collisions": 2})
+    db.commit()
+    audit.log(db, "cal.ext.sync", {"collisions": 1})
+    db.commit()
+    sent = []
+    out = maint.problem_summary({}, notify=lambda t: sent.append(t) or True)
+    assert out["sent"] is True
+    assert "3 совпадающих записей" in sent[0]
+
+
+def test_collision_counter_uses_same_watermark_as_tick_error(db, monkeypatch):
+    monkeypatch.setattr(maint.health, "bridge_readiness",
+                         lambda conn, cfg, now=None: _ok_probe("bridge"))
+    monkeypatch.setattr(maint.health, "starline_staleness",
+                         lambda conn, cfg, now=None: _ok_probe("starline"))
+    monkeypatch.setattr(maint.health, "degradation_flags",
+                         lambda conn, cfg, now=None: _ok_probe("degradation"))
+    from fam import db as famdb
+    famdb.meta_set(db, "maint_summary_last_run", "2026-07-13T03:00:00+00:00")
+    db.commit()
+    # pre-watermark cal.ext.sync row: must NOT be counted, same as a
+    # pre-watermark tick.error row wouldn't be.
+    db.execute(
+        "INSERT INTO audit_log(ts_utc, kind, payload, actor) "
+        "VALUES (?, 'cal.ext.sync', ?, 'tick')",
+        ("2026-07-12T00:00:00", '{"collisions": 5}'))
+    db.commit()
+    sent = []
+    out = maint.problem_summary({}, notify=lambda t: sent.append(t) or True)
+    assert out["skipped_clean"] is True
+    assert sent == []
+
+
 def test_tick_error_reported_once_not_twice(db, monkeypatch):
     monkeypatch.setattr(maint.health, "bridge_readiness",
                          lambda conn, cfg, now=None: _ok_probe("bridge"))

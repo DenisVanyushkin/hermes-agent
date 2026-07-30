@@ -43,6 +43,7 @@ import {
   mediaPayloadForFile,
   pollCreationMessageFromPayload,
   pollUpdateForAggregation,
+  reactionTargetText,
 } from './bridge_helpers.js';
 
 // Parse CLI args
@@ -296,9 +297,10 @@ const messageQueue = [];
 const MAX_QUEUE_SIZE = 100;
 
 // Emoji reactions on our own outbound messages, drained by GET
-// /reactions. Deliberately separate from messageQueue: reactions are
-// answered deterministically (fam react-hook) and must never reach the
-// agent loop as a turn.
+// /reactions. Deliberately separate from messageQueue: every reaction
+// is offered to the deterministic ack hook (fam react-hook) first, and
+// only one the hook does not consume can become an agent turn (when
+// reaction_dialogue is enabled).
 const reactionQueue = [];
 
 // Track recently sent message IDs.  Two purposes:
@@ -416,9 +418,11 @@ function enqueuePollUpdateEvent({ key, update, selectedOptions, aggregation }) {
 }
 
 // Reactions live in their own queue, drained by GET /reactions. Kept
-// apart from messageQueue on purpose: /messages feeds the agent loop,
-// and an emoji reaction must never spend a model turn (see the
-// reactionMessage branch in messages.upsert).
+// apart from messageQueue on purpose: the ack hook gets first look at
+// every reaction, ahead of any LLM turn, and only a reaction it does
+// not handle can become an agent turn -- and only when
+// reaction_dialogue is enabled (see the reactionMessage branch in
+// messages.upsert).
 function enqueueReactionEvent(event) {
   const dedupeId = `react:${event.targetMessageId}:${event.senderId}:${event.emoji}`;
   if (recentlyProcessedReactions.has(dedupeId)) return;
@@ -718,9 +722,11 @@ async function startSocket() {
       // Emoji reactions ride in on messages.upsert with an empty body, so
       // without this branch they fall through to the "Skip empty messages"
       // guard below and vanish. They are NOT queued onto messageQueue:
-      // a reaction must never become an agent turn (it is answered
-      // deterministically by `fam react-hook`, no LLM). A separate queue
-      // + endpoint keeps every existing /messages consumer byte-identical.
+      // the deterministic ack hook (`fam react-hook`) gets first look at
+      // every reaction, ahead of any LLM turn -- only one it does not
+      // handle can become an agent turn, and only when reaction_dialogue
+      // is enabled. A separate queue + endpoint keeps every existing
+      // /messages consumer byte-identical.
       if (messageContent.reactionMessage) {
         const reaction = messageContent.reactionMessage;
         const target = reaction.key || {};
@@ -730,6 +736,7 @@ async function startSocket() {
         if (target.fromMe && target.id) {
           enqueueReactionEvent({
             targetMessageId: target.id,
+            targetText: reactionTargetText(messageStore, target.id),
             emoji: reaction.text || '',
             removal: !reaction.text,
             chatId,

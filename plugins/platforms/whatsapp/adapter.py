@@ -281,6 +281,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.whatsapp_common import WhatsAppBehaviorMixin
 from gateway.whatsapp_identity import to_whatsapp_jid
+from plugins.platforms.whatsapp.reactions import is_dialogue_emoji, normalize_emoji
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -467,6 +468,11 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         # polled from nobody and this whole path stays dormant.
         # config.yaml: gateway.platforms.whatsapp.extra.reaction_hook_cmd
         self._reaction_hook_cmd = config.extra.get("reaction_hook_cmd") or None
+        # config.yaml: gateway.platforms.whatsapp.extra.reaction_dialogue
+        # When true, a reaction the ack hook did not consume becomes an
+        # ordinary agent turn. Independent of reaction_hook_cmd: either
+        # flag alone is enough to arm the reaction poll loop.
+        self._reaction_dialogue = bool(config.extra.get("reaction_dialogue", False))
         self._reaction_poll_task: Optional[asyncio.Task] = None
 
     def _coerce_float_extra(self, key: str, default: float) -> float:
@@ -1574,16 +1580,30 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         """Drain the bridge's reaction queue and apply each reaction via
         the configured hook command.
 
-        Only runs when ``extra.reaction_hook_cmd`` is set. The bridge only
-        queues reactions on messages Hermes itself sent, and its own
-        allowlist (WHATSAPP_ALLOWED_USERS) already gated the sender, so
-        this loop's job is transport, not policy.
+        Runs when either ``extra.reaction_hook_cmd`` (ack path) or
+        ``extra.reaction_dialogue`` (agent-turn path) is set. The bridge
+        only queues reactions on messages Hermes itself sent, but sender
+        gating here is much thinner than for an ordinary inbound message:
+        WHATSAPP_ALLOWED_USERS is skipped entirely when
+        WHATSAPP_DM_POLICY=pairing, and this loop never calls
+        ``_should_process_message``, so none of the adapter's normal
+        gates (``_is_group_allowed``, ``require_mention``,
+        ``_is_broadcast_chat``) apply to reactions either. With
+        ``reaction_dialogue`` enabled, under a pairing DM policy or in a
+        group chat, a sender the adapter's normal message gates would
+        reject can still produce an agent turn via a reaction -- a known,
+        accepted gap (not fixed here).
 
-        The hook reads one JSON event on stdin and prints a JSON verdict:
-        ``{"react": "✅"}`` asks us to acknowledge the reaction visibly on
-        the original message; anything else means stay silent. A failing
-        hook must never take down the adapter -- it is logged and, when a
-        notify command is configured, reported to the operator.
+        The hook reads one JSON event on stdin and prints a JSON verdict
+        shaped like ``{"handled": bool, "react": str, ...}``. When
+        ``handled`` is truthy the reaction is consumed by the
+        deterministic ack path (and ``react``, if present, is applied as
+        a visible feedback reaction on the original message) and does
+        NOT reach the agent. When ``handled`` is falsy -- including any
+        failure of the hook itself -- the reaction falls through to the
+        agent-turn path. A failing hook must never take down the
+        adapter -- it is logged and, when a notify command is
+        configured, reported to the operator.
         """
         import aiohttp
 
@@ -1606,7 +1626,30 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             await asyncio.sleep(1)
 
     async def _apply_reaction_event(self, event: Dict[str, Any]) -> None:
-        """Run the reaction hook for one event and honour its verdict."""
+        """Route one reaction: ack fast path first, agent turn second.
+
+        Order matters. The ack hook is deterministic, idempotent and costs
+        no tokens, so a reaction that acks a reminder or a med dose must
+        never also spend a model turn. Everything the hook did not consume
+        -- including an unmapped emoji on a reminder -- is ordinary chat
+        and belongs to the agent (spec: reactions-dialogue, 2026-07-29).
+
+        Both filters run BEFORE the hook: un-reacting has no semantics on
+        either path, and an off-whitelist emoji is not worth a subprocess.
+
+        Every hook failure mode falls through to the dialogue path rather
+        than returning. A broken ack hook should degrade to "the agent
+        sees it", not to "the reaction vanished".
+        """
+        if bool(event.get("removal")):
+            return
+        if not is_dialogue_emoji(event.get("emoji") or ""):
+            return
+
+        if not self._reaction_hook_cmd:
+            await self._dispatch_reaction_dialogue(event)
+            return
+
         payload = json.dumps({
             "target_message_id": event.get("targetMessageId"),
             "emoji": event.get("emoji") or "",
@@ -1625,21 +1668,94 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 proc.communicate(payload.encode()), timeout=30)
         except Exception as e:
             print(f"[{self.name}] Reaction hook failed to run: {e}")
+            await self._dispatch_reaction_dialogue(event)
             return
         if proc.returncode != 0:
             print(f"[{self.name}] Reaction hook exit {proc.returncode}: "
                   f"{(stderr or b'').decode(errors='replace')[:200]}")
+            await self._dispatch_reaction_dialogue(event)
             return
         try:
             verdict = json.loads((stdout or b"").decode().strip() or "{}")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             print(f"[{self.name}] Reaction hook returned non-JSON output")
+            await self._dispatch_reaction_dialogue(event)
             return
-        feedback = verdict.get("react")
-        if feedback:
-            await self._send_reaction(
-                event.get("chatId") or "", event.get("targetMessageId") or "",
-                feedback)
+
+        if verdict.get("handled"):
+            feedback = verdict.get("react")
+            if feedback:
+                await self._send_reaction(
+                    event.get("chatId") or "",
+                    event.get("targetMessageId") or "", feedback)
+            return
+
+        await self._dispatch_reaction_dialogue(event)
+
+    async def _dispatch_reaction_dialogue(self, event: Dict[str, Any]) -> None:
+        """Turn an unacked reaction into an ordinary agent turn.
+
+        The reaction is shaped as a reply-with-quote, not as a bespoke
+        event type: GatewayRunner._prepare_inbound_message_text already
+        renders reply_to_* into the prompt for every platform, so a
+        reaction arrives structurally identical to a quoted reply and no
+        new branch appears in run.py.
+        """
+        if not self._reaction_dialogue:
+            return
+        target_text = event.get("targetText")
+        target_message_id = event.get("targetMessageId")
+        if not target_text or not target_message_id:
+            # Bridge restart emptied its message store, or the bridge sent
+            # no id to quote. Either way run.py's reply-to rendering needs
+            # BOTH fields truthy, so a turn with only one is a contextless
+            # turn -- worse than a dropped reaction.
+            print(f"[{self.name}] Reaction on unknown message "
+                  f"{event.get('targetMessageId')}: no cached text, dropped")
+            return
+
+        emoji = normalize_emoji(event.get("emoji") or "")
+        chat_id = event.get("chatId") or ""
+        source = self.build_source(
+            chat_id=chat_id,
+            chat_type="group" if chat_id.endswith("@g.us") else "dm",
+            user_id=event.get("senderId") or "",
+        )
+        message = MessageEvent(
+            text=f"[Реакция {emoji}]",
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=event,
+            metadata={"whatsapp_reaction": emoji},
+            reply_to_message_id=str(target_message_id),
+            reply_to_text=str(target_text),
+            reply_to_is_own_message=True,
+        )
+        # Text events sit in the debounce buffer while reactions dispatch
+        # immediately, so without this flush a reaction would overtake a
+        # message typed a second earlier.
+        await self._force_flush_text_batch(self._text_batch_key(message))
+        await self.handle_message(message)
+
+    async def _force_flush_text_batch(self, key: str) -> None:
+        """Dispatch any buffered text for ``key`` right now.
+
+        Pop the buffered event BEFORE touching the timer task. If the
+        timer already fired and is suspended inside ``handle_message``
+        (its ``asyncio.to_thread`` hop, the busy-session handler, or
+        session-store I/O), ``_pending_text_batches`` has already been
+        popped by that in-flight flush -- so ``pending`` here is ``None``
+        and we correctly skip both the cancel and the dispatch, letting
+        the in-flight call finish on its own. Cancelling the timer task in
+        that window would abort the in-flight dispatch and lose the
+        user's text outright; checking ``pending`` first avoids that race.
+        """
+        pending = self._pending_text_batches.pop(key, None)
+        task = self._pending_text_batch_tasks.pop(key, None)
+        if pending:
+            if task and not task.done():
+                task.cancel()
+            await self.handle_message(pending)
 
     async def _send_reaction(self, chat_id: str, message_id: str,
                              emoji: str) -> bool:
@@ -1666,7 +1782,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
 
     def _start_reaction_polling(self) -> None:
         """Arm the reaction loop when configured (called from connect())."""
-        if not self._reaction_hook_cmd:
+        if not (self._reaction_hook_cmd or self._reaction_dialogue):
             return
         if self._reaction_poll_task and not self._reaction_poll_task.done():
             return

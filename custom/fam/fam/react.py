@@ -10,6 +10,10 @@ the existing ack primitives:
                                       +45min persistent series)
   skip (👎 ❌):           reminder -> rem.cancel_chain
                           med      -> meds.skip (only this dose)
+  snooze (⏰ 🕐 ⏳):       reminder -> not applicable, "ignored"
+                          med      -> meds.defer (dose stays 'pending',
+                                      series_next_utc pushed by
+                                      med_snooze_min minutes)
 
 Correlation lives in the `sent_messages` table (schema v10): gate.deliver
 records the bridge-returned WhatsApp message id for every reminder/med
@@ -37,12 +41,36 @@ from fam import db as famdb
 
 # Base emoji AFTER _normalize_emoji (variation selectors and skin-tone
 # modifiers stripped), so 👍🏽 and ❤️ match their bare forms.
+#
+# INVARIANT: EMOJI_CONFIRM | EMOJI_SKIP | EMOJI_SNOOZE must remain a
+# subset of DIALOGUE_EMOJI in plugins/platforms/whatsapp/reactions.py.
+# The whitelist filter there runs BEFORE this hook is ever invoked, so
+# any emoji added here without also adding it to DIALOGUE_EMOJI would
+# silently never reach react-hook -- no error, just a dropped ack.
+# Enforced by tests/gateway/test_whatsapp_reactions_normalize.py.
 EMOJI_CONFIRM = {"\U0001F44D", "❤", "\U0001F4AA", "✅"}  # 👍 ❤ 💪 ✅
 EMOJI_SKIP = {"\U0001F44E", "❌"}                              # 👎 ❌
+
+# ⏰ 🕐 ⏳ -- "not now, remind me later". med-only: an event reminder
+# has no deferral primitive, only ack/cancel make sense there.
+EMOJI_SNOOZE = {"⏰", "\U0001F550", "⏳"}
 
 # Feedback reaction the adapter puts on the reminder message once an ack
 # (or an idempotent re-ack) landed.
 FEEDBACK_EMOJI = "✅"  # ✅
+
+# run_hook's two verdicts, deliberately NOT the same set.
+#
+# HANDLED_RESULTS -- the reaction was consumed and must not become an
+# agent turn (this module's "no LLM in the reaction path" contract).
+# FEEDBACK_RESULTS -- and the outcome was positive enough to earn the ✅.
+#
+# They differ by exactly one member: "snooze_too_late" is consumed but
+# achieved nothing, so the ✅ would be a lie (final review, Blocker 3).
+HANDLED_RESULTS = ("confirmed", "skipped", "already_acked", "snoozed",
+                   "snooze_moot", "snooze_too_late")
+FEEDBACK_RESULTS = ("confirmed", "skipped", "already_acked", "snoozed",
+                    "snooze_moot")
 
 _SKIN_TONES = {chr(cp) for cp in range(0x1F3FB, 0x1F400)}  # U+1F3FB..U+1F3FF
 
@@ -62,7 +90,7 @@ def _normalize_emoji(emoji):
 
 
 def record_sent(conn, wa_message_id, kind, ref_id, event_id=None,
-                chat_jid="", now_utc=None):
+                chat_jid="", now_utc=None, ref_ids=None):
     """Persist one outbound message id -> reminder/med mapping.
 
     Called from gate.deliver (via its sent_ref parameter) right after a
@@ -72,6 +100,19 @@ def record_sent(conn, wa_message_id, kind, ref_id, event_id=None,
     same id -- silently keeping the first row is correct either way.
     Does NOT commit -- runs inside the caller's transaction so the
     mapping and the reminder's own status='sent' UPDATE land atomically.
+
+    ref_ids: the FULL list of targets when this is ONE message covering
+    several doses (same-tick gate release, tick._meds_series). Such a
+    message cannot be represented by sent_messages alone:
+    wa_message_id is UNIQUE (so one row per message, not per dose) and
+    ref_id is a scalar. sent_messages.ref_id keeps the first target for
+    compatibility with every existing reader; the full list goes into
+    sent_message_refs, which handle() consults.
+
+    A single-target send writes NOTHING extra: with 0 or 1 entries in
+    ref_ids the fan-out table stays empty, so the pre-Task-6 shape of a
+    recorded message (and of handle()'s resolution) is bit-for-bit
+    unchanged for every existing call site.
     """
     from fam.gate import _now  # local import: gate imports this module too
     conn.execute(
@@ -80,6 +121,99 @@ def record_sent(conn, wa_message_id, kind, ref_id, event_id=None,
         " VALUES (?,?,?,?,?,?)",
         (wa_message_id, chat_jid or "", kind, ref_id, event_id,
          now_utc or _now()))
+    if not ref_ids or len(ref_ids) <= 1:
+        return
+    row = conn.execute("SELECT id FROM sent_messages WHERE wa_message_id=?",
+                       (wa_message_id,)).fetchone()
+    if row is None:
+        return
+    for rid in ref_ids:
+        conn.execute(
+            "INSERT INTO sent_message_refs(sent_message_id, kind, ref_id) "
+            "VALUES(?,?,?)", (row["id"], kind, rid))
+
+
+def _snooze(conn, row, base, now_utc):
+    """⏰ -> meds.defer by med_snooze_min minutes for every dose this
+    message covers.
+
+    The dose stays 'pending' -- this is a deferral, not an ack. If
+    now + med_snooze_min would cross Asia/Almaty midnight (meds.defer
+    forbids that: tomorrow's dose is generated on its own schedule), the
+    target is clamped to 23:59 local instead of raising.
+
+    In the LAST minute of the local day the clamp target is itself
+    already in the past (23:59:30 -> 23:59:00), so there is nowhere left
+    to defer to: meds.defer would reject every target and the reaction
+    would have accomplished exactly nothing. That case returns
+    "snooze_too_late" -- still a CONSUMED reaction (it must not reach
+    the LLM dialogue path), but explicitly not a success, so run_hook
+    withholds the ✅ feedback instead of telling Amina the dose was
+    moved when it was not.
+    """
+    from datetime import datetime, timedelta
+
+    from fam import gate
+    from fam.gate import _now
+    from fam.meds import _ALMATY
+
+    cfg = gate.load_config()
+    minutes = int(cfg.get("med_snooze_min", 60))
+    now = datetime.fromisoformat(now_utc or _now())
+    until = now + timedelta(minutes=minutes)
+
+    # Clamp against TODAY's (now's local date) end-of-day, not until's --
+    # once +minutes has already rolled into tomorrow, .replace(hour=23,
+    # minute=59) on that rolled-over datetime would silently clamp to
+    # tomorrow's 23:59 instead of pulling it back to today's.
+    local_now = now.astimezone(_ALMATY)
+    end_of_day = local_now.replace(hour=23, minute=59, second=0, microsecond=0)
+    if until.astimezone(_ALMATY) > end_of_day:
+        until = end_of_day.astimezone(until.tzinfo)
+    until_str = until.isoformat(timespec="seconds")
+
+    if until <= now:
+        # Последняя минута суток: клэмп уехал в прошлое, откладывать
+        # некуда. Раньше здесь получался "snooze_moot" -- то есть ✅ и
+        # handled=true при полном отсутствии эффекта: положительная
+        # обратная связь за no-op, тот же класс, что групповой 👍,
+        # отмечающий одну дозу из двух. Реакция всё равно съедена (в
+        # диалог с LLM ей нельзя), но успехом не называется: run_hook
+        # отдаёт handled=true БЕЗ feedback-эмодзи.
+        out = {**base, "result": "snooze_too_late", "until_utc": until_str,
+               "deferred": 0}
+        audit.log(conn, "react.handle", out)
+        conn.commit()
+        return out
+
+    targets = [r["ref_id"] for r in conn.execute(
+        "SELECT ref_id FROM sent_message_refs "
+        "WHERE sent_message_id=? AND kind='med' ORDER BY ref_id",
+        (row["id"],))] or [row["ref_id"]]
+
+    deferred = 0
+    for rid in targets:
+        try:
+            meds.defer(conn, rid, until_str, now_utc=now_utc)
+            deferred += 1
+        except ValueError:
+            # Already left 'pending' through another door (verbal
+            # confirmation, midnight closeout, ...) -- not this snooze's
+            # problem, same tolerance as the confirm/skip loop below.
+            continue
+
+    # "snooze_moot", not "already_acked": every target here already left
+    # 'pending' through some other door, so there was nothing left to
+    # defer -- but a snooze is not an ack, so overloading the ack path's
+    # "already_acked" would make a genuine idempotent re-ack and a moot
+    # snooze indistinguishable to anything keying off `result` (fix
+    # round 1, Finding 2). Both are still "consumed" outcomes for
+    # run_hook's handled tuple below.
+    out = {**base, "result": "snoozed" if deferred else "snooze_moot",
+           "until_utc": until_str, "deferred": deferred}
+    audit.log(conn, "react.handle", out)
+    conn.commit()
+    return out
 
 
 def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
@@ -87,9 +221,22 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
     the mapped ack. Returns a dict whose "result" is one of:
 
       confirmed | skipped     -- ack applied now
+      snoozed                 -- ⏰ on a med: series_next_utc pushed by
+                                 med_snooze_min minutes, status stays
+                                 'pending' (this is NOT an ack)
+      snooze_moot              -- ⏰ on a med where every target dose had
+                                 already left 'pending' through another
+                                 door -- nothing to defer, but still a
+                                 consumed reaction, not a dialogue turn
+      snooze_too_late         -- ⏰ in the last minute of the local day:
+                                 the clamp target is already in the
+                                 past, so nothing could be deferred.
+                                 Consumed like the two above, but NOT a
+                                 success -- run_hook withholds the ✅
       already_acked           -- idempotent repeat (or the underlying row
                                  was already taken/acked/cancelled)
-      ignored                 -- unmapped emoji, or a reaction removal
+      ignored                 -- unmapped emoji, a reaction removal, or
+                                 ⏰ on a non-med (kind='reminder') message
       unknown_message         -- id not in sent_messages (normal chat)
 
     Commits on every path that wrote anything. Never raises for the
@@ -109,21 +256,67 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
             "emoji": emoji}
 
     norm = _normalize_emoji(emoji)
-    if removal or (norm not in EMOJI_CONFIRM and norm not in EMOJI_SKIP):
+    if removal or (norm not in EMOJI_CONFIRM and norm not in EMOJI_SKIP
+                   and norm not in EMOJI_SNOOZE):
         out = {**base, "result": "ignored",
                "reason": "removal" if removal else "unmapped_emoji"}
         audit.log(conn, "react.handle", out)
         conn.commit()
         return out
 
+    if norm in EMOJI_SNOOZE:
+        # Not an ack -- deliberately bypasses the ack_status idempotency
+        # check below: a snooze never sets ack_status, so it must not be
+        # gated by it either (an already-acked message has nothing left
+        # to snooze; _snooze's per-target ValueError skip handles that).
+        if row["kind"] != "med":
+            out = {**base, "result": "ignored", "reason": "snooze_not_med"}
+            audit.log(conn, "react.handle", out)
+            conn.commit()
+            return out
+        return _snooze(conn, row, base, now_utc)
+
     action = "confirm" if norm in EMOJI_CONFIRM else "skip"
 
-    if row["ack_status"] != "none":
+    # One message may cover several doses (same-tick gate release,
+    # tick._meds_series): sent_message_refs carries the full target
+    # list, and its absence means the pre-Task-6 single-dose shape --
+    # exactly one target, row["ref_id"], handled below by the same code
+    # path with the same idempotency semantics. Resolved BEFORE the
+    # ack_status check because that check is only valid for a message
+    # whose ref set is a single dose -- see below.
+    targets = None
+    if row["kind"] == "med":
+        targets = [r["ref_id"] for r in conn.execute(
+            "SELECT ref_id FROM sent_message_refs "
+            "WHERE sent_message_id=? AND kind='med' ORDER BY ref_id",
+            (row["id"],))] or [row["ref_id"]]
+
+    if row["ack_status"] != "none" and not (targets and len(targets) > 1):
         out = {**base, "result": "already_acked",
                "ack_status": row["ack_status"]}
         audit.log(conn, "react.handle", out)
         conn.commit()
         return out
+
+    # Why a GROUP message never trusts its own ack_status (final review,
+    # Blocker 2): sent_messages.ref_id is a scalar, so a group message
+    # stores only ids[0], and the ack fan-out below marks every med row
+    # with that ref_id -- including the group message itself. So a 👍 on
+    # the ordinary 45-minute repeat of dose ids[0] flips the GROUP
+    # message to 'confirmed' while the group's other doses are still
+    # pending. Short-circuiting on that here returned "confirmed"-shaped
+    # success (handled=true, ✅) while touching nothing: Amina saw a
+    # checkmark, believed both doses were recorded, and the second dose
+    # kept nagging until the midnight closeout filed it as "missed" -- a
+    # false medical record produced by an explicit, positive user action.
+    # For a group the verdict therefore belongs to the DOSES: the loop
+    # below applies every still-pending member and falls back to
+    # "already_acked"/not_pending only when none was applicable. The
+    # single-dose path (targets of length 1, incl. every pre-Task-6
+    # message) keeps the message-level check and its exact return shape:
+    # there ref_id identifies the one dose the message is about, so the
+    # fan-out can never over-mark it.
 
     detail = {}
     if row["kind"] == "reminder":
@@ -133,31 +326,51 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
         else:
             detail["cancelled"] = rem.cancel_chain(conn, row["event_id"])
             result, new_status = "skipped", "skipped"
-    else:  # med
-        try:
-            if action == "confirm":
-                take_out = meds.take(conn, row["ref_id"], now_utc=now_utc)
-                detail.update({k: take_out[k]
-                               for k in ("remaining", "restock")
-                               if isinstance(take_out, dict) and k in take_out})
-                result, new_status = "confirmed", "confirmed"
-            else:
-                meds.skip(conn, row["ref_id"])
-                result, new_status = "skipped", "skipped"
-        except ValueError:
-            # The intake already left 'pending' through another door (a
-            # verbal "выпила", midnight missed-closeout, ...). The
-            # reaction's intent is satisfied or moot -- idempotent
-            # success, and mark the mapping so repeats short-circuit.
-            conn.execute(
-                "UPDATE sent_messages SET ack_status='confirmed' "
-                "WHERE kind=? AND ref_id=? AND ack_status='none'",
-                (row["kind"], row["ref_id"]))
+    else:  # med (targets resolved above, before the ack_status check)
+        applied = 0
+        for rid in targets:
+            try:
+                if action == "confirm":
+                    take_out = meds.take(conn, rid, now_utc=now_utc)
+                    detail.update({k: take_out[k]
+                                   for k in ("remaining", "restock")
+                                   if isinstance(take_out, dict)
+                                   and k in take_out})
+                else:
+                    meds.skip(conn, rid)
+                applied += 1
+            except ValueError:
+                # This dose already left 'pending' through another door (a
+                # verbal "выпила", midnight missed-closeout, ...).
+                # For a group that is normal -- its other members are
+                # still waiting, so keep going and only fall back to
+                # "already_acked" if NOTHING was applicable.
+                continue
+
+        if applied == 0:
+            # Single-dose case: byte-for-byte the pre-Task-6 not_pending
+            # path -- the reaction's intent is satisfied or moot, so it is
+            # an idempotent success, and the mapping is marked so repeats
+            # short-circuit at the ack_status check above. For a group
+            # where EVERY member already left 'pending', the same marking
+            # has to reach all of them (targets), or members 2..n keep
+            # ack_status='none' and their own sibling messages stay
+            # re-ackable forever.
+            for rid in targets:
+                conn.execute(
+                    "UPDATE sent_messages SET ack_status='confirmed' "
+                    "WHERE kind=? AND ref_id=? AND ack_status='none'",
+                    (row["kind"], rid))
             out = {**base, "result": "already_acked",
                    "reason": "not_pending"}
             audit.log(conn, "react.handle", out)
             conn.commit()
             return out
+
+        if len(targets) > 1:
+            detail["applied"] = applied
+        result = "confirmed" if action == "confirm" else "skipped"
+        new_status = result
 
     # Mark every recorded message of this reminder chain / med intake
     # (multi-stage chains and +45min med resends each have their own
@@ -169,10 +382,11 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
             "WHERE kind='reminder' AND event_id=? AND ack_status='none'",
             (new_status, row["event_id"]))
     else:
-        conn.execute(
-            "UPDATE sent_messages SET ack_status=? "
-            "WHERE kind='med' AND ref_id=? AND ack_status='none'",
-            (new_status, row["ref_id"]))
+        for rid in targets:
+            conn.execute(
+                "UPDATE sent_messages SET ack_status=? "
+                "WHERE kind='med' AND ref_id=? AND ack_status='none'",
+                (new_status, rid))
 
     out = {**base, "result": result, **detail}
     audit.log(conn, "react.handle", out)
@@ -182,18 +396,26 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
 
 def run_hook(stdin=None, stdout=None, connect=None):
     """`fam react-hook` entry: read ONE reaction-event JSON object from
-    stdin, apply handle(), and print the adapter's feedback instruction:
+    stdin, apply handle(), and print the adapter's verdict:
 
-        {"react": "✅"}   -- put/keep the feedback reaction
-        {}                -- do nothing
+        {"handled": true,  "react": "✅", "result": "confirmed"}
+            -- consumed as an ack; put/keep the feedback reaction and do
+               NOT route this reaction to the agent
+        {"handled": false, "result": "unknown_message"}
+            -- not an ack; the adapter may route it to the dialogue path
 
     Event shape (produced by plugins/platforms/whatsapp/adapter.py):
       {"target_message_id": str, "emoji": str, "removal": bool,
        "chat_jid": str, "sender": str}
 
-    The adapter allowlists senders before invoking us (bridge-level
-    WHATSAPP_ALLOWED_USERS plus the adapter's own DM gate) -- this
-    process trusts its caller, same as every other fam entry point.
+    Sender gating here is thinner than it looks: bridge-level
+    WHATSAPP_ALLOWED_USERS is skipped entirely under
+    WHATSAPP_DM_POLICY=pairing, and the adapter's reaction path never
+    calls its own DM/group gates (_should_process_message and friends)
+    before invoking us. With reaction_dialogue enabled, a sender those
+    gates would otherwise reject can still reach us via a reaction --
+    a known, accepted gap. This process trusts its caller regardless,
+    same as every other fam entry point.
 
     Exit codes: 0 handled (including unknown_message/ignored);
     2 malformed event. Internal failures propagate to cli.main's
@@ -212,9 +434,21 @@ def run_hook(stdin=None, stdout=None, connect=None):
     conn = (connect or famdb.connect)()
     out = handle(conn, wa_message_id, emoji,
                  removal=bool(event.get("removal")))
-    feedback = {}
-    if out["result"] in ("confirmed", "skipped", "already_acked"):
-        feedback = {"react": FEEDBACK_EMOJI}
-    print(json.dumps({**feedback, "result": out["result"]},
+    # `handled` is the adapter's routing signal, not a success flag: true
+    # means this reaction was consumed (as an ack, or -- ⏰ -- as a
+    # snooze) and must NOT become an agent turn. `snoozed`/`snooze_moot`
+    # are not acks but ARE consumed: a snooze that fell through to
+    # "handled": false would silently become an ordinary LLM turn,
+    # violating this module's "no LLM in the reaction path" contract
+    # (fix round 1, Finding 1). `ignored`/`unknown_message` are ordinary
+    # chat reactions and belong to the dialogue path (spec:
+    # reactions-dialogue, 2026-07-29). `snooze_too_late` is the one
+    # consumed outcome that earns NO ✅: the reaction changed nothing,
+    # and a checkmark would claim the dose was moved when it was not
+    # (final review, Blocker 3) -- hence two sets, not one boolean.
+    handled = out["result"] in HANDLED_RESULTS
+    feedback = ({"react": FEEDBACK_EMOJI}
+                if out["result"] in FEEDBACK_RESULTS else {})
+    print(json.dumps({"handled": handled, **feedback, "result": out["result"]},
                      ensure_ascii=False), file=stdout)
     return 0

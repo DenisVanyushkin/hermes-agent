@@ -87,6 +87,98 @@ def _set_cron_session_title(session_db, session_id, base_title):
         return deduped
 
 
+# Any dotted exception-like class name used as a wrapper, e.g. "ImportError: ",
+# "httpx.HTTPStatusError: ". Not anchored to the start of the text: a wrapper
+# commonly trails other prose first ("Script execution failed:
+# PermissionError: ...", a real shape from run_job's subprocess-failure path)
+# or appears after "During handling of the above exception..." in a chained
+# traceback — both must be caught, not just a wrapper at character zero.
+# Case-insensitive so lowercase C-extension/stdlib exception names (e.g.
+# socket.gaierror) are also caught. The negative lookbehind keeps the match
+# anchored to a real word boundary so it can't start mid-identifier.
+# A single global substitution (no anchor, no count limit) handles chained
+# wrappers too: after "RuntimeError: " is stripped, the immediately
+# following "ValueError: " is matched in the same pass since re.sub scans
+# the original string left-to-right for non-overlapping matches.
+_EXC_WRAPPER_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Interrupt):\s*",
+    re.IGNORECASE,
+)
+# URLs are exempt from filesystem-path redaction: unlike a local path, a
+# failing provider URL is the single most useful diagnostic token in an
+# operator alert (which provider — yr.no or open-meteo.com — broke), and it
+# never discloses install layout the way a local path does. Matched first so
+# _FS_PATH_RE never gets a chance to chew into scheme://host/path.
+_URL_RE = re.compile(r"https?://[^\s'\"()]+", re.IGNORECASE)
+# Filesystem paths. Chat messages must never disclose where the install
+# lives on disk, including in the common FileNotFoundError/ModuleNotFoundError
+# shape where the path is relative (no leading slash). Three shapes:
+#   - Windows drive paths: C:\Users\...
+#   - absolute POSIX paths, 2+ segments: /home/denis
+#   - relative paths, 3+ segments: cron_output/2026-07-29/run.log
+#   - relative paths, 2 segments where the last has a file extension:
+#     config/settings.yaml, hermes_cli/review_gate.py
+# The narrower 2-segment relative case requires a file extension so that
+# ordinary prose with slashes ("and/or", "5/hour", "24/7",
+# "yr.no/Open-Meteo") is not mangled.
+_FS_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:\\[^\s'\"()]*"
+    r"|(?:/[\w.\-]+){2,}/?"
+    r"|[\w\-]+(?:/[\w\-]+){2,}"
+    r"|[\w\-]+/[\w\-]+\.[A-Za-z0-9]{1,6}\b)"
+)
+# Combined pass: try a URL first (kept verbatim) before falling back to path
+# redaction, so a URL substring is never partially chewed by _FS_PATH_RE.
+_URL_OR_FS_PATH_RE = re.compile(
+    r"(?P<url>" + _URL_RE.pattern + r")|(?P<path>" + _FS_PATH_RE.pattern + r")"
+)
+
+
+def _redact_url_or_path(match: "re.Match[str]") -> str:
+    if match.group("url"):
+        return match.group("url")
+    return "…"
+
+
+# Python traceback frame lines — dropped wholesale, never summarized. This
+# matches the header, "File ..." lines and caret markers, but NOT the
+# indented source-context line traceback.format_exc() prints under each
+# "File ..." line — that is handled statefully below, since it carries no
+# fixed marker of its own.
+_TRACEBACK_LINE_RE = re.compile(
+    r"^\s*(?:Traceback \(most recent call last\):|File \".*|\s+\^+\s*)$"
+)
+_TRACEBACK_FILE_LINE_RE = re.compile(r'^\s*File "')
+
+
+def _redact_technical_detail(text: str) -> str:
+    """Strip exception wrappers, traceback frames and filesystem paths.
+
+    Whatever the audience, a chat delivery must not disclose Python
+    internals or install layout (2026-07-28/29 incident: an ImportError
+    naming an absolute path was delivered to a non-technical recipient).
+    """
+    lines = []
+    drop_next_if_indented = False
+    for line in text.splitlines():
+        if _TRACEBACK_LINE_RE.match(line):
+            drop_next_if_indented = bool(_TRACEBACK_FILE_LINE_RE.match(line))
+            continue
+        if drop_next_if_indented:
+            drop_next_if_indented = False
+            if line[:1].isspace():
+                # The source-context line traceback.format_exc() prints
+                # under a "File ..." line — drop it too, never summarize it.
+                continue
+        lines.append(line)
+    cleaned = " ".join(lines)
+    # Global, non-anchored: strips every exception-class wrapper in the
+    # text, not just one sitting at character zero (see _EXC_WRAPPER_RE).
+    cleaned = _EXC_WRAPPER_RE.sub("", cleaned)
+    cleaned = _URL_OR_FS_PATH_RE.sub(_redact_url_or_path, cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     """Return a compact one-line failure message for chat delivery.
 
@@ -148,17 +240,144 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
             "Full details saved in cron output."
         )
 
-    # Strip common exception wrappers and collapse provider payloads. Bound
-    # the input first so a multi-KB provider blob cannot slow the
-    # substitutions.
-    cleaned = re.sub(
-        r"^(RuntimeError|Exception|ValueError|HTTPStatusError):\s*",
-        "", text[:2000],
-    )
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # Strip exception wrappers, traceback frames and filesystem paths, and
+    # collapse provider payloads. Bound the input first so a multi-KB
+    # provider blob cannot slow the substitutions.
+    cleaned = _redact_technical_detail(text[:2000])
+    if not cleaned:
+        cleaned = "no diagnostic detail available"
     if len(cleaned) > 180:
         cleaned = cleaned[:177].rstrip() + "..."
     return f"⚠️ Cron '{job_name}' failed: {cleaned}"
+
+
+def resolve_cron_audience(job: dict, cfg: Optional[dict] = None) -> str:
+    """Who reads this job's deliveries: "operator" or "end_user".
+
+    Never raises — this runs inside failure handling, where a second
+    exception would compound the incident. Does not call
+    ``cron.jobs.normalize_audience``, which raises ``ValueError`` on an
+    unrecognized value; a job carrying a typo in a hand-edited
+    ``jobs.json`` (e.g. ``"enduser"``) must degrade to the config-based
+    check below rather than crash mid-delivery. The stored ``audience``
+    value is untrusted input (an operator may have written it directly
+    into ``jobs.json``, bypassing ``normalize_audience``), so it is
+    stripped and lowercased before the membership test.
+
+    An explicit ``audience`` field wins. Otherwise any resolved delivery
+    target listed in ``cron.end_user_targets`` marks the job as end-user
+    facing — a safety net so a job created later without the flag still
+    cannot deliver a technical failure to a non-technical reader.
+
+    Two misconfiguration shapes degrade silently to ``"operator"`` by
+    design (never raising), but are logged so the degradation is at least
+    visible: a stored ``audience`` value that doesn't match
+    ``CRON_AUDIENCES`` after stripping/lowercasing (e.g. a hand-written
+    typo like ``"enduser"``), and a ``cron.end_user_targets`` value that is
+    neither a string nor a list (e.g. a hand-edited ``5`` or ``true``).
+    """
+    raw_audience = job.get("audience")
+    explicit = str(raw_audience or "").strip().lower()
+    if explicit in CRON_AUDIENCES:
+        return explicit
+    if explicit:
+        logger.warning(
+            "cron job %r has unrecognized audience %r; ignoring it and "
+            "falling back to the cron.end_user_targets net (then operator)",
+            job.get("id") or job.get("name") or "?",
+            raw_audience,
+        )
+
+    cron_cfg = (cfg or {}).get("cron")
+    configured = (cron_cfg if isinstance(cron_cfg, dict) else {}).get("end_user_targets") or []
+    # A hand-edited config.yaml can easily drop the list dash (`end_user_targets:
+    # whatsapp:+123` instead of a `- whatsapp:+123` list) and leave a bare
+    # string. A string is iterable, so treating it as a list of targets below
+    # would silently iterate its characters and match nothing -- disabling
+    # the safety net without any error. Normalize a bare string to a
+    # single-element list so the scalar hand-edit still protects.
+    if isinstance(configured, str):
+        configured = [configured]
+    elif not isinstance(configured, (list, tuple, set, frozenset)):
+        if configured:
+            logger.warning(
+                "cron.end_user_targets is not a string or list (got %r); "
+                "ignoring it — the end-user safety net is disabled until "
+                "this is fixed",
+                configured,
+            )
+        configured = []
+    if not configured:
+        return "operator"
+    marked = {str(t).strip().lower() for t in configured if str(t).strip()}
+    for target in _resolve_delivery_targets(job):
+        platform = str(target.get("platform", "")).lower()
+        chat_id = str(target.get("chat_id", ""))
+        if f"{platform}:{chat_id}".lower() in marked or chat_id.lower() in marked:
+            return "end_user"
+    return "operator"
+
+
+def plan_cron_failure_delivery(
+    job: dict, error: Optional[str], cfg: Optional[dict] = None
+) -> tuple[Optional[str], Optional[str]]:
+    """Decide what a failed run delivers, and to whom.
+
+    Returns ``(chat_text, operator_alert_text)``. ``chat_text is None``
+    means the job's own delivery target gets nothing at all — the policy
+    for ``end_user`` jobs, where a technical failure is noise the reader
+    cannot act on (2026-07-28/29: an ImportError reached Amina's
+    WhatsApp). ``operator_alert_text is None`` means no separate alert is
+    warranted because the chat target is already the operator.
+    """
+    summary = _summarize_cron_failure_for_delivery(job, error)
+    if resolve_cron_audience(job, cfg) == "operator":
+        return summary, None
+
+    job_name = job.get("name") or job.get("id") or "cron job"
+    targets = ", ".join(
+        f"{t.get('platform')}:{t.get('chat_id')}" for t in _resolve_delivery_targets(job)
+    ) or _normalize_deliver_value(job.get("deliver", "local"))
+    detail = _redact_technical_detail(str(error or "unknown error")[:2000])
+    if len(detail) > 600:
+        detail = detail[:597].rstrip() + "..."
+    alert = (
+        f"⚠️ Cron '{job_name}' failed and the failure was WITHHELD from the "
+        f"end-user target ({targets}) — nothing was delivered there.\n"
+        f"Reason: {detail}\n"
+        f"Job id: {job.get('id', '?')}. Full details saved in cron output."
+    )
+    return None, alert
+
+
+def _send_cron_operator_alert(
+    alert_text: str, cfg: Optional[dict] = None, adapters=None, loop=None
+) -> None:
+    """Best-effort delivery of a cron failure to the operator alert channel.
+
+    Reuses ``gateway.error_alerts.channel`` (the same channel turn-error
+    alerts use) via a synthetic job, so target resolution, adapter reuse
+    and the standalone fallback all stay in ``_deliver_result``. Never
+    raises: an alert that cannot be delivered must not fail the run.
+    """
+    try:
+        from gateway.turn_error_alerts import get_alert_config
+
+        if cfg is None:
+            cfg = load_config()
+        alert_cfg = get_alert_config(cfg)
+        if not alert_cfg:
+            return  # feature off — VPS-safe default
+
+        synthetic_job = {
+            "id": "cron-operator-alert",
+            "name": "cron operator alert",
+            "deliver": alert_cfg["channel"],
+            "origin": None,
+        }
+        _deliver_result(synthetic_job, alert_text, adapters=adapters, loop=loop, wrap=False)
+    except Exception as exc:  # noqa: BLE001 — best-effort by contract
+        logger.warning("cron operator alert failed: %s", exc)
 
 
 class CronPromptInjectionBlocked(Exception):
@@ -298,7 +517,7 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim
+from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim, CRON_AUDIENCES
 from cron.executions import create_execution, finish_execution, mark_execution_running
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
@@ -1506,7 +1725,9 @@ def _is_channel_dm_topic(
     return is_channel
 
 
-def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
+def _deliver_result(
+    job: dict, content: str, adapters=None, loop=None, wrap: Optional[bool] = None
+) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
 
@@ -1514,6 +1735,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     use the live adapter first — this supports E2EE rooms (e.g. Matrix) where
     the standalone HTTP path cannot encrypt.  Falls back to standalone send if
     the adapter path fails or is unavailable.
+
+    ``wrap`` overrides the ``cron.wrap_response`` config lookup for this one
+    call: ``None`` (default) keeps today's behaviour — consult config,
+    defaulting True — so every existing caller is unaffected. ``False`` skips
+    the header/footer unconditionally; used by synthetic, non-job deliveries
+    like the operator alert, where the "Cronjob Response: <job name>" header
+    and "stop reminder <job name>" footer would misidentify the message
+    (there is no such job to stop).
 
     Returns None on success, or an error string on failure.
     """
@@ -1544,14 +1773,18 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     # Optionally wrap the content with a header/footer so the user knows this
     # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
-    # in config.yaml for clean output.
-    wrap_response = True
+    # in config.yaml for clean output. An explicit `wrap` argument (used by
+    # synthetic, non-job deliveries) bypasses the config lookup entirely.
     user_cfg = None
-    try:
-        user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
-    except Exception:
-        pass
+    if wrap is not None:
+        wrap_response = wrap
+    else:
+        wrap_response = True
+        try:
+            user_cfg = load_config()
+            wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+        except Exception:
+            pass
 
     if wrap_response:
         task_name = job.get("name", job["id"])
@@ -4047,8 +4280,44 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
             # Deliver the final response to the origin/target chat.
             # If the agent responded with [SILENT], skip delivery (but
-            # output is already saved above).  Failed jobs always deliver.
-            deliver_content = final_response if success else _summarize_cron_failure_for_delivery(job, error)
+            # output is already saved above).  Failed jobs always deliver
+            # -- to the operator alert channel when the job is end-user
+            # facing (2026-07-28/29 incident: an ImportError was delivered
+            # to Amina's WhatsApp), otherwise to the job's own chat target
+            # as before.
+            # _audience_cfg is initialized here (not only on the failure
+            # branch below) so the `if operator_alert:` check after the
+            # should_deliver block can reference it unconditionally --
+            # otherwise a future change to either branch risks a NameError.
+            operator_alert = None
+            _audience_cfg = None
+            if success:
+                deliver_content = final_response
+            else:
+                try:
+                    _audience_cfg = load_config()
+                except Exception:  # noqa: BLE001 — policy must not fail the run
+                    pass
+                try:
+                    deliver_content, operator_alert = plan_cron_failure_delivery(
+                        job, error, _audience_cfg
+                    )
+                except Exception as pe:  # noqa: BLE001 — fall back toward the
+                    # historical behaviour (deliver the summary), never
+                    # toward silence: a malformed audience/cfg (e.g. a
+                    # hand-edited config.yaml with `cron:` set to a
+                    # non-dict) must not cost an operator-audience job its
+                    # failure notification. We don't know the audience
+                    # here, so we do NOT withhold -- withholding is only
+                    # safe when we've positively resolved end_user.
+                    logger.warning(
+                        "plan_cron_failure_delivery failed for job %s, "
+                        "falling back to the historical failure summary: %s",
+                        job["id"], pe,
+                    )
+                    deliver_content = _summarize_cron_failure_for_delivery(job, error)
+                    operator_alert = None
+                deliver_content = deliver_content or ""
             # Treat whitespace-only final responses the same as empty
             # responses: do not deliver a blank message, and let the
             # empty-response guard below mark the run as a soft failure.
@@ -4069,6 +4338,11 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
                 except Exception as de:
                     delivery_error = str(de)
                     logger.error("Delivery failed for job %s: %s", job["id"], de)
+
+            if operator_alert:
+                _send_cron_operator_alert(
+                    operator_alert, cfg=_audience_cfg, adapters=adapters, loop=loop
+                )
         finally:
             # Tear down the deferred agent(s) now that save + delivery have run
             # (or raised). Must happen on every path so cron agents never leak

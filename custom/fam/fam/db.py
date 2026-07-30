@@ -166,6 +166,16 @@ CREATE TABLE IF NOT EXISTS car_metrics (
   gps_lat REAL, gps_lon REAL,
   raw_json TEXT);
 CREATE INDEX IF NOT EXISTS idx_car_metrics_ts ON car_metrics(ts_utc);
+CREATE TABLE IF NOT EXISTS location_hints (
+  id INTEGER PRIMARY KEY,
+  source TEXT NOT NULL CHECK (source IN ('manual','shared')),
+  lat REAL NOT NULL,
+  lon REAL NOT NULL,
+  label TEXT NOT NULL DEFAULT '',        -- human-readable origin for reminders
+  ts_utc TEXT NOT NULL,                  -- when the hint was recorded
+  expires_utc TEXT NOT NULL);            -- TTL; whereami ignores expired rows
+CREATE INDEX IF NOT EXISTS idx_location_hints_expires
+  ON location_hints(expires_utc);
 CREATE TABLE IF NOT EXISTS goals (
   id INTEGER PRIMARY KEY,
   title TEXT NOT NULL,
@@ -188,6 +198,22 @@ CREATE TABLE IF NOT EXISTS sent_messages (
     CHECK (ack_status IN ('none','confirmed','skipped')),
   created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_sent_messages_kind_ref ON sent_messages(kind, ref_id);
+CREATE TABLE IF NOT EXISTS sent_message_refs (
+  id INTEGER PRIMARY KEY,
+  sent_message_id INTEGER NOT NULL
+    REFERENCES sent_messages(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('reminder','med')),
+  ref_id INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_sent_message_refs_msg
+  ON sent_message_refs(sent_message_id);
+CREATE INDEX IF NOT EXISTS idx_sent_message_refs_ref
+  ON sent_message_refs(kind, ref_id);
+CREATE TABLE IF NOT EXISTS ext_exports (
+  event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+  href TEXT,
+  etag TEXT,
+  body_hash TEXT,
+  synced_at TEXT);
 """
 
 def resolve_db_path():
@@ -309,10 +335,117 @@ def init_db(conn):
     # from an ordinary +45min nag, both land in the future the same way.
     _ensure_column(conn, "med_intakes", "deferred_until_utc",
                    "deferred_until_utc TEXT")
+    # -- v12 (external calendar sync, Task 3): events/plans gain `owner`
+    # ('hermes'|'iphone', CHECK-enforced, DEFAULT 'hermes') so the
+    # upcoming CalDAV ingest can tell which side created a row without
+    # touching anything that already exists -- ALTER TABLE ADD COLUMN
+    # with both NOT NULL DEFAULT and CHECK backfills every pre-v12 row to
+    # 'hermes' in one statement (verified against this SQLite build,
+    # unlike the CHECK-on-ALTER caveat noted for reminders.kind/places.
+    # category above). `external_uid`/`external_href`/`external_etag`
+    # track the iCloud VEVENT identity for round-tripping; `external_seq`
+    # (events only -- plans have no SEQUENCE concept) lets the sync tick
+    # detect a stale write. The partial UNIQUE index on
+    # events.external_uid enforces one local event per remote UID while
+    # leaving every locally-created event (external_uid IS NULL) alone --
+    # SQLite partial indexes simply skip NULL rows, so any number of them
+    # coexist. `ext_exports` is a whole new table (CREATE TABLE IF NOT
+    # EXISTS above covers fresh installs and pre-v12 databases alike, no
+    # _ensure_column migration needed -- same pattern as `goals` in v9 /
+    # `sent_messages` in v10): one row per Hermes-owned event that has
+    # been PUT to the "Гермес" collection, so the export tick can compare
+    # body_hash and skip a no-op PUT.
+    #
+    # `external_location` (Task 5 fix-round 4, controller-authorized into
+    # this same still-unmigrated v12 block -- prod is on v11, no version
+    # bump needed) holds the RAW free-text iCloud `LOCATION` of an
+    # owner='iphone' row: the text exactly as it stands on Amina's phone,
+    # whether or not it also happened to match a `places` entry (in which
+    # case `place_id` is set too -- the two are independent). It exists
+    # because that text has to be stored SOMEWHERE for the sync to diff
+    # against on the next tick, and `notes` -- the column three earlier
+    # attempts used -- is human-owned: `fam cal update --notes` replaces
+    # it wholesale, and an LLM agent driving that command cannot be relied
+    # on to reproduce any in-band delimiter a machine hid in it. A column
+    # nothing but extcal reads or writes removes that whole class of
+    # collision instead of re-encoding it: `notes` stays purely human,
+    # `external_location` stays purely machine.
+    _ensure_column(conn, "events", "owner",
+                   "owner TEXT NOT NULL DEFAULT 'hermes' "
+                   "CHECK (owner IN ('hermes','iphone'))")
+    _ensure_column(conn, "events", "external_uid", "external_uid TEXT")
+    _ensure_column(conn, "events", "external_href", "external_href TEXT")
+    _ensure_column(conn, "events", "external_etag", "external_etag TEXT")
+    _ensure_column(conn, "events", "external_seq", "external_seq INTEGER")
+    _ensure_column(conn, "events", "external_location", "external_location TEXT")
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','11')")
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_external_uid "
+        "ON events(external_uid) WHERE external_uid IS NOT NULL")
+    _ensure_column(conn, "plans", "owner",
+                   "owner TEXT NOT NULL DEFAULT 'hermes' "
+                   "CHECK (owner IN ('hermes','iphone'))")
+    _ensure_column(conn, "plans", "external_uid", "external_uid TEXT")
+    _ensure_column(conn, "plans", "external_href", "external_href TEXT")
+    _ensure_column(conn, "plans", "external_etag", "external_etag TEXT")
+    _ensure_column(conn, "plans", "external_location", "external_location TEXT")
+    # Same partial UNIQUE as events.external_uid above, added to this same
+    # v12 migration (Task 5 fix-round finding I3, controller-authorized:
+    # prod is still on v11 as of this addition, so widening the v12
+    # migration itself -- rather than bumping to a new schema version --
+    # is safe; there is no already-migrated v12 database anywhere whose
+    # plans.external_uid values this index could retroactively conflict
+    # with). Without it, a re-applied Changeset (a retried tick after a
+    # mid-batch crash, or two overlapping tick runs) could insert a SECOND
+    # plans row for the same iCloud occurrence with nothing at the DB
+    # level to stop it -- extcal.apply_changes' own SELECT-before-insert
+    # check (mirroring tick.py::meds_gen's identical no-index-yet
+    # bootstrapping pattern) is the first line of defense; this index is
+    # the same TOCTOU backstop idx_events_external_uid already is for the
+    # events branch.
     conn.execute(
-        "UPDATE meta SET value='11' WHERE key='schema_version'")
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_external_uid "
+        "ON plans(external_uid) WHERE external_uid IS NOT NULL")
+    # Dynamic road origin (fam/whereami.py), widened into this same
+    # still-unmigrated v12 block for the third time -- prod is on v11
+    # (verified against assistant.db 2026-07-29), so there is no
+    # already-migrated v12 database anywhere for these columns to
+    # retroactively disagree with.
+    #
+    # car_metrics.gps_ts/gps_speed/gps_sat: StarLine's `position` dict
+    # already carries ts (unix seconds -- when the GPS FIX happened), s
+    # (km/h) and sat_qty on every poll, and car.normalize() already
+    # persists all three inside raw_json. They get real columns because
+    # whereami's "parked vs moving vs stale" decision needs the fix time,
+    # and ts_utc is NOT it: ts_utc is when fam polled, and the two were
+    # ~7 minutes apart in the live row this was designed against. Reading
+    # them out of raw_json per query would work but makes the hot path
+    # parse a JSON blob per row; a column is cheaper and indexable.
+    #
+    # events.road_origin_lat/lon/source: which point produced the cached
+    # travel_min_road. Until now the origin was the constant
+    # road_home_lat/lon, so road_checked_at alone was a complete cache
+    # key -- "when did we compute this" fully determined "is it still
+    # good". With a dynamic origin that stops being true: tick.py's
+    # `checked_dt >= window_open` guard would happily keep a figure
+    # computed from a point Amina has since driven away from. Storing the
+    # origin turns an implicit assumption into a checkable one.
+    _ensure_column(conn, "car_metrics", "gps_ts", "gps_ts INTEGER")
+    _ensure_column(conn, "car_metrics", "gps_speed", "gps_speed REAL")
+    _ensure_column(conn, "car_metrics", "gps_sat", "gps_sat INTEGER")
+    _ensure_column(conn, "events", "road_origin_lat", "road_origin_lat REAL")
+    _ensure_column(conn, "events", "road_origin_lon", "road_origin_lon REAL")
+    _ensure_column(conn, "events", "road_origin_source",
+                   "road_origin_source TEXT")
+    # Med gating (spec 2026-07-29): why a still-pending dose is being
+    # held back by tick._meds_series. NULL = not held. Written only on
+    # transition into/out of a hold, never on the 10-minute recheck --
+    # audit_log already carries 22k+ tick.reminders rows and a
+    # per-recheck audit row per dose would swamp it.
+    _ensure_column(conn, "med_intakes", "gate_reason", "gate_reason TEXT")
+    conn.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','12')")
+    conn.execute(
+        "UPDATE meta SET value='12' WHERE key='schema_version'")
     conn.commit()
 
 

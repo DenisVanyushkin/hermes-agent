@@ -25294,6 +25294,44 @@ async def _await_thread_exit(
     return not thread.is_alive()
 
 
+# Modules the turn-completion path imports lazily. Importing them at startup
+# keeps sys.modules coherent with the source that was on disk when the
+# process began: a deploy under a live gateway then changes nothing until
+# the next restart, instead of half-loading new code into an old process
+# (2026-07-27 incident — see docs/superpowers/plans/2026-07-29-cron-failure-audience.md).
+#
+# hermes_cli.plugins and hermes_cli.kanban_db are also imported lazily on
+# this path (agent/turn_finalizer.py's transform_llm_output/post_llm_call/
+# on_session_end hook calls, and its budget-exhaustion kanban-failure
+# recording). Those call sites already wrap the import in try/except, so a
+# desync there doesn't crash a turn — but it silently stops those hooks and
+# the kanban failure-recording from firing for the rest of the process's
+# life, with only a logger.warning marking it: the same two-days-unnoticed
+# shape as the incident, just quieter. Confirmed side-effect-free at import
+# (no plugin discovery, no DB connection, no filesystem writes) before
+# adding them here.
+_TURN_PATH_PRELOAD = (
+    "agent.turn_finalizer",
+    "hermes_cli.review_gate",
+    "hermes_cli.plugins",
+    "hermes_cli.kanban_db",
+)
+
+
+def preload_turn_path_modules() -> list[str]:
+    """Import the lazily-loaded turn-path modules. Best-effort, never raises."""
+    import importlib
+
+    loaded = []
+    for name in _TURN_PATH_PRELOAD:
+        try:
+            importlib.import_module(name)
+            loaded.append(name)
+        except Exception as exc:  # noqa: BLE001 — a preload miss must not block startup
+            logger.warning("turn-path preload failed for %s: %s", name, exc)
+    return loaded
+
+
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
     """
     Start the gateway and run until interrupted.
@@ -25766,6 +25804,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         await _loop.run_in_executor(None, discover_mcp_tools)
     except Exception as e:
         logger.debug("MCP tool discovery failed: %s", e)
+
+    # Preload turn-path modules that are otherwise imported lazily on first
+    # turn finalization, so the process's module graph is coherent with the
+    # code on disk at startup — see preload_turn_path_modules() docstring.
+    logger.info("Turn-path preload: %s", ", ".join(preload_turn_path_modules()) or "none")
 
     # Start the gateway
     success = await runner.start()

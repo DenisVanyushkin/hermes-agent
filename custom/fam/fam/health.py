@@ -6,6 +6,7 @@ sends a message or writes to the DB.
 """
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from . import car
 from . import db as famdb, gate
 
@@ -51,6 +52,48 @@ def starline_staleness(conn, cfg, now=None):
                    "нет свежих данных о машине" if stale else "свежо",
                    last_ok_ts=last)
 
+def extcal_staleness(conn, cfg, now_utc=None):
+    """Calque of car.check_staleness, but reading `meta.extcal_last_ok`
+    instead of a car_metrics row -- Task 6's cal-ext tick is a 15-minute
+    silent timer that never messages Amina on its own (invariant), so a
+    dead timer (unit disabled, VM rebooted, Apple ID password rotated)
+    would otherwise go unnoticed forever: `tick.error` only catches a
+    *failed run*, never the absence of any run at all.
+
+    Three-way read, pure (never writes conn or meta):
+    - `extcal_enabled` falsy -> "ok", silent: sync is deliberately off,
+      that is not a degradation. Must be checked BEFORE looking at
+      `extcal_last_ok` -- a prod box with the sync never turned on has no
+      such key either, and that is the *other*, non-degraded, reason for
+      it being absent.
+    - enabled but `meta.extcal_last_ok` missing entirely -> "degraded":
+      the sync has never once completed successfully, distinct from
+      merely being stale.
+    - enabled and present but older than `extcal_stale_hours` -> "degraded"
+      with the human-readable age.
+    - enabled and fresh -> "ok".
+    """
+    if not cfg.get("extcal_enabled"):
+        return _result("extcal_staleness", "ok", "extcal выключен")
+    last = famdb.meta_get(conn, "extcal_last_ok")
+    if not last:
+        return _result("extcal_staleness", "degraded",
+                        "extcal включён, но синк ни разу не отработал успешно")
+    now_dt = datetime.now(timezone.utc) if now_utc is None else now_utc
+    if isinstance(now_dt, str):
+        now_dt = datetime.fromisoformat(now_dt)
+    last_dt = datetime.fromisoformat(last)
+    age = now_dt - last_dt
+    stale_hours = cfg["extcal_stale_hours"]
+    if age > timedelta(hours=stale_hours):
+        age_hours = age.total_seconds() / 3600
+        return _result(
+            "extcal_staleness", "degraded",
+            f"синк iCloud не отвечал успехом {age_hours:.1f}ч "
+            f"(порог {stale_hours}ч)",
+            last_ok_ts=last)
+    return _result("extcal_staleness", "ok", "свежо", last_ok_ts=last)
+
 def degradation_flags(conn, cfg, now=None):
     """Informational: surface known fallback state (road on straight-line
     fallback). Reads the most recent road.* audit marker; absence == ok."""
@@ -83,11 +126,17 @@ def maybe_alert_readiness(conn, cfg, now=None, notify=None):
 
 def all_probes(conn, cfg, now=None):
     """Run every probe; a probe that raises becomes a down result so one
-    broken probe never sinks the summary."""
+    broken probe never sinks the summary.
+
+    Called positionally (not `now=now`) so this loop stays agnostic to a
+    probe's own parameter name -- `extcal_staleness` names its third
+    parameter `now_utc` (matching the rest of the `extcal` module family)
+    rather than `now`."""
     out = []
-    for fn in (bridge_readiness, starline_staleness, degradation_flags):
+    for fn in (bridge_readiness, starline_staleness, degradation_flags,
+               extcal_staleness):
         try:
-            out.append(fn(conn, cfg, now=now))
+            out.append(fn(conn, cfg, now))
         except Exception as e:                        # noqa: BLE001 -- isolate
             out.append(_result(fn.__name__, "down", f"проба упала: {e}"))
     return out

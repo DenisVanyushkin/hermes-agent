@@ -290,3 +290,6 @@ controlled_execution_report.json
 /partition_result.json
 /gen_pending.py
 native/fts5_cjk/*.so
+
+# SDD scratch workspace (subagent-driven-development)
+.superpowers/

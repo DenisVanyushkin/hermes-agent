@@ -10,7 +10,7 @@ convert through Asia/Almaty via zoneinfo.
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fam import audit, gate, people, places, rem, road
+from fam import audit, gate, people, places, rem, road, whereami
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -93,7 +93,7 @@ def _resolve_place(conn, place_ref):
 _ROAD_TRIGGER_COLUMNS = ("start_utc", "place_id", "transport")
 
 
-def recompute_road(conn, event_id):
+def recompute_road(conn, event_id, now_utc=None):
     """Compute and persist real-road travel time for event_id, if the
     place has coordinates and home is configured. Called from add() (always)
     and update() (only when _ROAD_TRIGGER_COLUMNS changed), BEFORE
@@ -120,6 +120,15 @@ def recompute_road(conn, event_id):
     logic. Any unexpected exception here is swallowed and audited as
     road.hook_error (road.py's own tomtom failures already audit
     road.error internally and don't raise).
+
+    now_utc is the SECOND clock resolve_origin distinguishes: "настоящее",
+    by which the freshness of a GPS fix and the TTL of a shared pin are
+    measured. It is NOT the departure anchor -- that one is start_utc and
+    is passed as at_utc. Every production caller leaves it None (= wall
+    clock), which is what they mean; it exists because a caller working
+    on an injected clock -- whereami.recompute_affected(now_utc=...) --
+    must not silently lose that injection here. It did, and the pin Amina
+    had just sent read as already expired.
     """
     try:
         event = get(conn, event_id)
@@ -129,17 +138,44 @@ def recompute_road(conn, event_id):
         if not place or place.get("lat") is None or place.get("lon") is None:
             return {"minutes": None, "reason": "no_place_coords"}
         cfg = gate.load_config()
-        if cfg.get("road_home_lat") is None or cfg.get("road_home_lon") is None:
+        depart_at = event["start_utc"]
+        # Ask the resolver, not the config: since the origin became
+        # dynamic, "дом не настроен" is no longer the same thing as "не
+        # от чего считать" -- a location Amina shared, or the place of
+        # the event she is sitting in, is a perfectly good start point
+        # with road_home_lat unset. resolve_origin returns None only when
+        # every rung including home came up empty, which is exactly the
+        # condition this guard has always meant. The reason string keeps
+        # its old name: `fam road --json` prints it.
+        origin = whereami.resolve_origin(conn, cfg, now_utc=now_utc,
+                                         event=event, at_utc=depart_at)
+        if origin is None:
             return {"minutes": None, "reason": "no_home_config"}
 
-        depart_at = event["start_utc"]
-        minutes, source = road.compute_travel_min(conn, event, cfg, now_utc=depart_at)
+        # Один резолв на один пересчёт: тот же объект, что уедет в
+        # road_origin_* ниже, и считает минуты. Поэтому «сохранённая
+        # точка» и «точка, от которой мерили» -- не два значения,
+        # которые обязаны совпадать, а одно. Раньше compute_travel_min
+        # резолвил заново внутри road._origin_for, и совпадение
+        # приходилось удерживать руками, общими часами (wall_now_utc);
+        # теперь расходиться нечему.
+        minutes, source = road.compute_travel_min(conn, event, cfg,
+                                                  now_utc=depart_at,
+                                                  origin=origin)
         if source in ("tomtom", "straight"):
             now = _now()
+            # road_origin_* travels with the figure: tick.road_recompute
+            # compares the next tick's origin against it to decide
+            # whether the cached minutes still describe the trip Amina
+            # is actually about to make. Storing the minutes without the
+            # point they were measured from would leave that check with
+            # nothing to compare to, and it would silently never fire.
             conn.execute(
-                "UPDATE events SET travel_min_road=?, road_checked_at=? "
+                "UPDATE events SET travel_min_road=?, road_checked_at=?, "
+                "road_origin_lat=?, road_origin_lon=?, road_origin_source=? "
                 "WHERE id=?",
-                (minutes, now, event_id),
+                (minutes, now, origin["lat"], origin["lon"],
+                 origin["source"], event_id),
             )
             audit.log(conn, "road.computed",
                       {"event_id": event_id, "minutes": minutes, "source": source})

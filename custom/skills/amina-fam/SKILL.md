@@ -5,6 +5,7 @@ version: 1.0.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
+required_environment_variables: [TOMTOM_API_KEY]
 metadata:
   hermes:
     tags: [fam, calendar, family, people, places, cli, amina]
@@ -12,7 +13,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v17 (medication defer verb)._
+_Body version: v19 (external calendar ownership: `cal adopt`/`cal disown`, iPhone-owned events)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -66,7 +67,7 @@ way to read or change family data.
   - `log [--since|--last-hours] [--kind] [--grep] [--limit]`
   - `people add|alias|member|resolve|list`
   - `places add|update|alias|resolve|list`
-  - `cal add|update|cancel|done|show|day|range|grid`
+  - `cal add|update|cancel|done|show|day|range|grid|adopt|disown`
   - `rem list|ack|cancel|rules|active`
   - `plan add|list|done|drop|attach`
   - `meds add|list|edit|rm`
@@ -215,7 +216,9 @@ show after cancel), make a second, separate terminal call.
     without `cal update --add-person/--rm-person` (or `cal series update`
     for a series) exiting 0, and don't say a detour is planned ("заедем к
     X") without an exit-0 `fam plan attach` — the detour offer and the
-    user's "да" are not by themselves a save (see rule 17).
+    user's "да" are not by themselves a save (see rule 17), and don't say
+    you're now handling reminders for an event (or that it's back on her
+    phone) without an exit-0 `cal adopt`/`cal disown` (see rule 21).
 13. **A trip needs a transport mode — `unknown` is rejected for place-bound
     events. Ask it TOGETHER with the prep-time question, in ONE message.**
     Whenever you record an event WITH a `--place` (a one-off `fam cal add
@@ -357,6 +360,53 @@ show after cancel), make a second, separate terminal call.
         itself; don't call `plan-mark` for a deferral.
       - "не буду планировать"/"не хочу" → `fam goal plan-mark declined`
         (no dialog, no goal add calls).
+19. **`owner='iphone'` events — Hermes does not run their reminder chain,
+    but everything else still applies.** An event imported from her
+    iPhone calendar already rings from her phone's own alarm
+    (`"owner": "iphone"` on `cal show`/`cal day --json`); Hermes never
+    builds or runs a separate reminder chain for it — a second alarm for
+    the same thing is exactly the duplicate-reminder problem this whole
+    feature exists to avoid. You may still know about it and answer
+    questions about it in conversation ("в 10:00 у тебя йога"), and —
+    Denis's decision, supersedes any earlier "не напоминает и не
+    предлагает" framing — you may still offer to help her prepare for it
+    in the evening follow-up, same as any other event (Plan Verbs' prep
+    flow above): не напоминает, но подготовку предложить может. Only `fam
+    cal adopt` (rule 21 below) changes which side owns the alarm.
+20. **Before recording a new event, check it isn't already on her iPhone
+    calendar.** When the request plausibly matches something that could
+    already be imported (she names a day/time you can look up — "у меня
+    в 10 йога"), run `fam cal day <date> --json` first (or `cal
+    show`/`cal range` if a specific id/range fits better) and look for a
+    matching event (same day, close time, matching title) BEFORE `cal
+    add` — regardless of its `owner`. If it's already there, tell her
+    it's already on the calendar instead of creating a duplicate; a
+    fresh `owner='hermes'` entry next to an already-imported
+    `owner='iphone'` one would ring twice for the same thing.
+21. **`fam cal adopt`/`fam cal disown` — only on her explicit request,
+    never something you propose.** "напоминай мне про <X>"/"возьми это
+    на себя" about an `owner='iphone'` event she names → `fam cal adopt
+    <event_id>` (owner flips to 'hermes', Hermes builds the reminder
+    chain, and best-effort quiets her phone's own alarm on that same
+    event too). "не напоминай мне больше про <X>, я по телефону"/"верни
+    на телефон" → `fam cal disown <event_id>` (owner flips back to
+    'iphone', Hermes's chain is dropped). Resolve `<event_id>` the same
+    way as any other event reference (`cal day`/`cal show`, never guess).
+    Never call either on your own initiative, even if it looks obviously
+    helpful — whose alarm rings for an event is her decision, not yours
+    to make for her. **`disown` cannot bring back her phone's original
+    alarm** — `adopt` permanently removed it from her iCloud copy of the
+    event, and nothing remembers what it was; if she disowns something
+    expecting her phone to start ringing again on its own, say so
+    plainly: "сниму со своей стороны, но напоминание на телефоне само не
+    вернётся — надо будет поставить его заново". **`disown` is only for
+    an event that actually came from her iPhone in the first place** —
+    fam refuses (exit 2) a plain Hermes-created event that was never
+    imported, because flipping it to 'iphone' would drop its only
+    reminder source with nothing on her phone to replace it; "не
+    напоминай про это" about an ordinary Hermes event is `fam rem cancel
+    <event_id>` (Reminder Reactions above — stops the chain, keeps the
+    event), not `disown`.
 
 ## Quick Reference
 
@@ -366,6 +416,8 @@ show after cancel), make a second, separate terminal call.
 | Change an event | `fam cal update <id> [--start ISO] [--place P] [--add-person N] [--rm-person N] ...` |
 | Cancel an event | `fam cal cancel <id>` |
 | Mark an event done | `fam cal done <id>` |
+| Take over reminding her about an iPhone-owned event | `fam cal adopt <event_id>` |
+| Hand a reminder chain back to her phone | `fam cal disown <event_id>` |
 | One event | `fam cal show <id>` |
 | One day | `fam cal day YYYY-MM-DD` |
 | A date range | `fam cal range <from_iso> <to_iso>` |
@@ -688,12 +740,28 @@ conversation.
     HH:MM" (defer — dose stays open, just remind again later) → `fam
     med defer <intake_id> --until HH:MM`. Resolve `HH:MM` from "now" the
     same way as the Time rule above (message's timestamp prefix, or one
-    `date` call) — never guess it. If the target time is after 21:30
-    Asia/Almaty, warn first: "после 21:30 напоминания молчат до утра —
-    точно на HH:MM?" and only run `defer` after an explicit
-    confirmation. Confirm the deferral itself as an ordinary
+    `date` call) — never guess it. Medication reminders fire through
+    quiet hours (Denis, 2026-07-16: silent non-delivery of a medical
+    reminder is worse than a late message), so do NOT warn that a late
+    target will be silenced — it will not. `defer` only refuses a
+    target at or past Almaty midnight, because tomorrow's dose is
+    generated on its own schedule. Confirm the deferral itself as an ordinary
     conversational reply ("хорошо, напомню про X в 20:00"), not a
     proactive message — same as the taken/skip confirmations above.
+- **⏰ (or 🕐 ⏳) on a medication reminder is a one-hour snooze applied by
+  CODE** before you ever see anything — same out-of-band path as 👍/👎 in
+  Reminder Reactions. Never run `fam med defer` "just in case" after one.
+  If it landed too late in the day to move (past Almaty 23:59) the code
+  reports it and applies nothing — the dose keeps its original schedule.
+- **Reminders can legitimately stay silent.** A morning dose is held
+  until Amina shows a sign of life, and at the latest until 12:00; a dose
+  is held while she is confidently away from home, and at the latest
+  until 21:00. If she asks why nothing arrived, look it up — `fam med
+  list --pending --json` carries `gate_reason` (`asleep`, `away`, or
+  null). Answer from that field, never from a guess.
+- **One message can cover several doses.** When a gate releases more than
+  one dose in the same tick they are sent as a single message; a reaction
+  on it acks every dose it covered, not just the first.
 
 ## Shopping Verbs
 
@@ -829,6 +897,12 @@ The morning digest always closes with the same question: "Если появят�
 - `cal show`/`cal day` on an id/date with no match still exits cleanly for
   `day`/`range` (empty list) but `cal show <unknown id>` exits 2 —
   treat it like any other unknown-ref error.
+- `cal show`/`cal day --json` carry an `"owner"` field (`"hermes"` or
+  `"iphone"`) on every event — see rule 19 for what it means for
+  reminders, and rule 21 for `cal adopt`/`cal disown`. `cal adopt` on an
+  already-`"hermes"` event, or `cal disown` on an already-`"iphone"` one,
+  exits 2 ("nothing to adopt/disown") — same unknown-ref-style error
+  handling as any other exit-2 case (rule 6).
 
 ## Verification
 

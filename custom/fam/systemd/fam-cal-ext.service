@@ -1,0 +1,15 @@
+[Unit]
+Description=Amina fam: external calendar (iCloud CalDAV) sync tick
+# Fix-round 2, minor #3: network-online.target does not exist in a user
+# systemd instance (only PID1's system manager has it) -- After=/Wants=
+# on it here would be silently ignored, giving false confidence. Left
+# out on purpose: a network gap right after boot just surfaces as ONE
+# clean tick.error (mode=error on that single run) before the very next
+# 15-minute fire self-recovers once the network is actually up -- an
+# acceptable, self-healing cost, not worth adding boot-detection logic
+# to cli.py for.
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.hermes/.env
+ExecStart=/home/denis/.hermes/hermes-agent/custom/fam/bin/fam tick cal-ext

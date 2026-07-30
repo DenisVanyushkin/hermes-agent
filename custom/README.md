@@ -1425,14 +1425,23 @@ so a reaction on ANY of them acks once and marks the siblings — a later
 ### Transport
 
 * **bridge.js** — reactions on our own messages go to a *separate*
-  `reactionQueue`, drained by `GET /reactions`. They never enter
-  `messageQueue`, so a reaction can never become an agent turn.
-  `POST /send-reaction` puts the ✅ back (empty emoji removes it).
-  Redelivered reactions (resync/reconnect) are deduped in the bridge.
-* **adapter.py** — `_poll_reactions()` runs only when
-  `whatsapp.reaction_hook_cmd` is configured, pipes each event into that
-  command as JSON on stdin, and honours its `{"react": "✅"}` verdict.
-  A failing hook is logged and skipped; it can never take down the
+  `reactionQueue`, drained by `GET /reactions`; they never enter
+  `messageQueue` directly. `reactionTargetText()` resolves the quoted
+  message's text from the bridge's in-memory `messageStore` (capacity
+  512, not a database — a bridge restart empties it). `POST
+  /send-reaction` puts the ✅ back (empty emoji removes it). Redelivered
+  reactions (resync/reconnect) are deduped in the bridge. adapter.py
+  (below) is what may turn one of these into an agent turn when
+  `reaction_dialogue` is on — see Config and the paragraph below it.
+* **adapter.py** — `_poll_reactions()` runs when either
+  `whatsapp.reaction_hook_cmd` or `whatsapp.reaction_dialogue` is
+  configured. If a hook is set, each event is piped into it as JSON on
+  stdin and its `{"react": "✅"}` verdict is honoured; a failing hook is
+  logged and falls through to the dialogue path rather than being
+  dropped. Whatever the hook did not consume — including a removal, an
+  off-whitelist emoji, or (with `reaction_dialogue` on) an unmapped
+  emoji on a reminder — either stops there or becomes an ordinary agent
+  turn quoting the reacted-to message. It can never take down the
   adapter or the message loop.
 * **`fam react-hook`** — the hook itself. Exit 0 for every handled
   outcome (including "not one of ours"), exit 2 only on a malformed
@@ -1442,13 +1451,23 @@ so a reaction on ANY of them acks once and marks the siblings — a later
 
 ```yaml
 whatsapp:
-  reaction_hook_cmd:
+  reaction_hook_cmd:            # ack path: reminders/meds, no LLM
     - /home/denis/.hermes/hermes-agent/custom/fam/bin/fam
     - react-hook
+  reaction_dialogue: true       # dialogue path: everything the hook
+                                 # did not consume becomes an agent turn
 ```
 
 Unset (the default, and the state on the VPS) = the whole path stays
 dormant, nothing polls, nothing changes.
+
+Флаги независимы. `reaction_hook_cmd` закрывает подтверждения напоминаний
+и доз детерминированно, без токенов. `reaction_dialogue` отправляет всё
+остальное (whitelist из 10 базовых эмодзи) в агента как обычный ход с
+цитатой сообщения, на которое поставили реакцию. Любой из двух флагов
+включает поллинг `/reactions`. Текст цитаты берётся из in-memory
+`messageStore` bridge — после рестарта bridge реакции на более старые
+сообщения дропаются.
 
 ### Idempotency & edge cases
 

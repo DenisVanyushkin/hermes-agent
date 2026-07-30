@@ -174,7 +174,7 @@ def test_harden_perms_missing_file_never_raises(tmp_path):
 def test_fresh_db_schema_version_current(db):
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
 
 def test_fresh_db_has_med_intakes_deferred_until_utc_column(db):
     cols = {r["name"] for r in db.execute("PRAGMA table_info(med_intakes)")}
@@ -187,7 +187,7 @@ def test_init_db_is_idempotent_with_deferred_until_utc_column(db):
     assert "deferred_until_utc" in cols
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
 
 def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     from fam import db as famdb
@@ -204,7 +204,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
 
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -225,7 +225,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
     conn.close()
 
 def test_places_travel_min_default_zero(db):
@@ -317,7 +317,7 @@ def test_legacy_2b_db_gets_kind_column(legacy_2b_conn):
     assert "kind" in cols
     assert legacy_2b_conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
 
 # ---- schema 3a migration: events.travel_min_road, events.road_checked_at ----
 
@@ -368,7 +368,7 @@ CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
     assert "road_checked_at" in cols
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
     conn.close()
 
 def test_events_travel_min_road_nullable(db):
@@ -452,7 +452,7 @@ def test_schema_v8_columns(db):
     ver = db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(ver) == 11
+    assert int(ver) == 12
 
 def test_schema_v8_migrates_from_v7(tmp_path):
     from fam import db as famdb
@@ -547,7 +547,7 @@ CREATE TABLE plans (
     assert "home_place_id" in cols("people")
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
 
     # pre-existing rows survived the ALTER TABLE ADD COLUMN migration
     ev = conn.execute("SELECT title FROM events WHERE id=1").fetchone()
@@ -559,7 +559,7 @@ CREATE TABLE plans (
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
     conn.close()
 
 
@@ -606,7 +606,7 @@ def test_schema_v9_goals_table(db):
     ver = db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(ver) == 11
+    assert int(ver) == 12
 
 def test_schema_v9_migrates_from_v8(tmp_path):
     from fam import db as famdb
@@ -641,7 +641,7 @@ def test_schema_v9_migrates_from_v8(tmp_path):
             "closed_at"} <= cols
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
 
     # pre-existing data survived untouched
     ev = conn.execute("SELECT title FROM events WHERE id=1").fetchone()
@@ -651,4 +651,221 @@ def test_schema_v9_migrates_from_v8(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
+
+
+# ---- schema 12 migration: external calendar (owner, external_*, ext_exports) ----
+
+def test_schema_v12_columns_and_table(db):
+    cols_events = {r["name"] for r in db.execute("PRAGMA table_info(events)")}
+    assert {"owner", "external_uid", "external_href", "external_etag",
+            "external_seq", "external_location"} <= cols_events
+    cols_plans = {r["name"] for r in db.execute("PRAGMA table_info(plans)")}
+    assert {"owner", "external_uid", "external_href", "external_etag",
+            "external_location"} <= cols_plans
+    # controller decision #1: external_seq lives on events only
+    assert "external_seq" not in cols_plans
+    # Task 5 fix-round 4: `external_location` (BOTH tables) holds the raw
+    # free-text iCloud LOCATION of an owner='iphone' row. It exists so the
+    # sync never has to hide machine data in the human-owned `notes`
+    # column, which `fam cal update --notes` replaces wholesale.
+
+    tables = {r["name"] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "ext_exports" in tables
+    exports_cols = {r["name"] for r in db.execute("PRAGMA table_info(ext_exports)")}
+    assert {"event_id", "href", "etag", "body_hash", "synced_at"} <= exports_cols
+
+    idx = {r["name"] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "idx_events_external_uid" in idx
+    # Task 5 fix-round finding I3: plans.external_uid gets the same
+    # partial UNIQUE events.external_uid already had -- added to this
+    # same v12 migration (controller-authorized: prod was still on v11
+    # when this was added, so there is no already-migrated database this
+    # could retroactively conflict with).
+    assert "idx_plans_external_uid" in idx
+
+    assert db.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "12"
+
+
+def test_schema_v12_migrates_from_v11(tmp_path):
+    from fam import db as famdb
+    conn = sqlite3.connect(str(tmp_path / "legacy_11.db"))
+    conn.row_factory = sqlite3.Row
+    # A v11-shaped db is the current SCHEMA minus `ext_exports` -- that
+    # table is brand new in v12 (same class of migration as `goals` in
+    # v9 / `sent_messages` in v10). events/plans never carried
+    # owner/external_* in SCHEMA's CREATE TABLE text to begin with (same
+    # convention as prep_min/home_place_id in v8, deferred_until_utc in
+    # v11 above: additive columns on *existing* tables only ever reach
+    # them through _ensure_column, the historical CREATE TABLE strings
+    # are never edited), so executing the current SCHEMA already yields
+    # a pre-v12-shaped events/plans -- only ext_exports needs dropping.
+    conn.executescript(famdb.SCHEMA)
+    conn.execute("DROP TABLE ext_exports")
+    conn.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','11')")
+    conn.execute("UPDATE meta SET value='11' WHERE key='schema_version'")
+    # existing rows that must survive the migration and get owner='hermes'
+    conn.execute(
+        "INSERT INTO events(id,title,start_utc,created_at,updated_at) "
+        "VALUES (1,'старое событие','2026-07-01T00:00:00Z',"
+        "'2026-07-01T00:00:00Z','2026-07-01T00:00:00Z')")
+    conn.execute(
+        "INSERT INTO plans(id,title,status,created_at) "
+        "VALUES (1,'старый план','open','2026-07-01T00:00:00Z')")
+    conn.commit()
+
+    cols_before = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    assert "owner" not in cols_before
+    tables_before = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "ext_exports" not in tables_before
+
+    famdb.init_db(conn)  # migrate
+
+    # every pre-existing row got owner='hermes' (controller decision #3)
+    ev = conn.execute(
+        "SELECT owner, title, external_location FROM events WHERE id=1").fetchone()
+    assert ev["owner"] == "hermes"
+    assert ev["title"] == "старое событие"
+    pl = conn.execute(
+        "SELECT owner, title, external_location FROM plans WHERE id=1").fetchone()
+    assert pl["owner"] == "hermes"
+    assert pl["title"] == "старый план"
+    # fix-round 4: the new external_location column backfills to NULL on
+    # every pre-existing row -- a locally-created (hermes) row has no
+    # external location by definition, and nothing reads it for one.
+    assert ev["external_location"] is None
+    assert pl["external_location"] is None
+
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "ext_exports" in tables
+
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "12"
+
+    # re-run is harmless (idempotent migration)
+    famdb.init_db(conn)
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "12"
+    conn.close()
+
+
+def test_events_owner_defaults_to_hermes(db):
+    db.execute(
+        "INSERT INTO events(title, start_utc, created_at, updated_at) "
+        "VALUES ('E','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
+    row = db.execute("SELECT owner FROM events WHERE title='E'").fetchone()
+    assert row["owner"] == "hermes"
+
+
+def test_plans_owner_defaults_to_hermes(db):
+    db.execute(
+        "INSERT INTO plans(title, status, created_at) "
+        "VALUES ('P','open','2026-01-01T00:00:00Z')")
+    row = db.execute("SELECT owner FROM plans WHERE title='P'").fetchone()
+    assert row["owner"] == "hermes"
+
+
+def test_events_owner_check_rejects_bogus(db):
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO events(title, start_utc, created_at, updated_at, owner) "
+            "VALUES ('E','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',"
+            "'2026-01-01T00:00:00Z','bogus')")
+
+
+def test_plans_owner_check_rejects_bogus(db):
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO plans(title, status, created_at, owner) "
+            "VALUES ('P','open','2026-01-01T00:00:00Z','bogus')")
+
+
+def test_events_owner_accepts_iphone(db):
+    db.execute(
+        "INSERT INTO events(title, start_utc, created_at, updated_at, owner) "
+        "VALUES ('E','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',"
+        "'2026-01-01T00:00:00Z','iphone')")
+    row = db.execute("SELECT owner FROM events WHERE title='E'").fetchone()
+    assert row["owner"] == "iphone"
+
+
+def test_events_external_uid_partial_unique_allows_multiple_null(db):
+    # partial index (WHERE external_uid IS NOT NULL) must not treat the
+    # many locally-created events (external_uid left NULL) as duplicates
+    # of one another -- SQLite indexes simply skip NULL rows.
+    db.execute(
+        "INSERT INTO events(title, start_utc, created_at, updated_at) "
+        "VALUES ('E1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
+    db.execute(
+        "INSERT INTO events(title, start_utc, created_at, updated_at) "
+        "VALUES ('E2','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
+    db.commit()  # both rows have external_uid IS NULL
+    count = db.execute(
+        "SELECT COUNT(*) c FROM events WHERE external_uid IS NULL").fetchone()["c"]
+    assert count == 2
+
+
+def test_events_external_uid_unique_rejects_duplicate(db):
+    db.execute(
+        "INSERT INTO events(title, start_utc, created_at, updated_at, external_uid) "
+        "VALUES ('E1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',"
+        "'2026-01-01T00:00:00Z','uid-1')")
+    db.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO events(title, start_utc, created_at, updated_at, external_uid) "
+            "VALUES ('E2','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',"
+            "'2026-01-01T00:00:00Z','uid-1')")
+
+
+def test_plans_external_uid_partial_unique_allows_multiple_null(db):
+    # Same partial-index rationale as the events test above, mirrored for
+    # plans (Task 5 fix-round finding I3).
+    db.execute("INSERT INTO plans(title, created_at) VALUES ('P1','2026-01-01T00:00:00Z')")
+    db.execute("INSERT INTO plans(title, created_at) VALUES ('P2','2026-01-01T00:00:00Z')")
+    db.commit()  # both rows have external_uid IS NULL
+    count = db.execute(
+        "SELECT COUNT(*) c FROM plans WHERE external_uid IS NULL").fetchone()["c"]
+    assert count == 2
+
+
+def test_plans_external_uid_unique_rejects_duplicate(db):
+    db.execute(
+        "INSERT INTO plans(title, created_at, external_uid) "
+        "VALUES ('P1','2026-01-01T00:00:00Z','uid-1')")
+    db.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO plans(title, created_at, external_uid) "
+            "VALUES ('P2','2026-01-01T00:00:00Z','uid-1')")
+
+
+def test_ext_exports_table_shape_and_cascade(db):
+    db.execute(
+        "INSERT INTO events(title, start_utc, created_at, updated_at) "
+        "VALUES ('E','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
+    eid = db.execute("SELECT id FROM events").fetchone()["id"]
+    db.execute(
+        "INSERT INTO ext_exports(event_id, href, etag, body_hash, synced_at) "
+        "VALUES (?, 'https://example/hermes.ics', '\"etag1\"', 'hash1', "
+        "'2026-01-01T00:00:00Z')", (eid,))
+    db.commit()
+    row = db.execute(
+        "SELECT * FROM ext_exports WHERE event_id=?", (eid,)).fetchone()
+    assert row["href"] == "https://example/hermes.ics"
+    assert row["body_hash"] == "hash1"
+
+    # ON DELETE CASCADE: deleting the event drops its export row too
+    db.execute("DELETE FROM events WHERE id=?", (eid,))
+    db.commit()
+    count = db.execute("SELECT COUNT(*) c FROM ext_exports").fetchone()["c"]
+    assert count == 0

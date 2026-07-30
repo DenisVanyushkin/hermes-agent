@@ -80,6 +80,31 @@ CONFIG_DEFAULTS = {
     # one delivered "take this" escalation and the next for the same
     # still-pending med_intake, regardless of gate.deliver's own outcome.
     "med_repeat_min": 45,
+    # Med gating (spec 2026-07-29). Оба гейта откладывают ПЕРЕПРОВЕРКУ,
+    # а не попытку доставки: удержанная доза получает
+    # series_next_utc = now + med_gate_recheck_min и НЕ считается
+    # отправленной. Это отделяет "попытку доставки" от "перепроверки
+    # условия" -- разделения, которого в _meds_series раньше не было.
+    "med_wake_gate_enabled": True,
+    # Утренние дозы (плановое время раньше этого) удерживаются, пока нет
+    # признака жизни. Тот же момент -- жёсткий бэкстоп: в med_wake_gate_until
+    # гейт сдаётся и отправляет независимо от сигналов.
+    "med_wake_gate_until": "12:00",
+    "med_away_gate_enabled": True,
+    # Away-гейт сдаётся здесь, чтобы доза не утекла молча в полуночный
+    # missed-closeout.
+    "med_away_gate_until": "21:00",
+    "med_gate_recheck_min": 10,
+    # ⏰-реакция на напоминании о лекарстве откладывает дозу на столько минут.
+    "med_snooze_min": 60,
+    # Спека мед-гейтинга §6: presence.is_away (и whereami) используют эти
+    # два ключа, но load_config мержит ТОЛЬКО этот словарь --
+    # whereami.CONFIG_DEFAULTS не мержится никем и работает лишь
+    # inline-фоллбэком. Без строк ниже правка fam-config.example.json ни
+    # на что не влияла, то есть тюнингуемыми ключи не были. Значения --
+    # ровно те, на которые presence.py падает inline.
+    "whereami_home_radius_km": 0.3,
+    "whereami_car_fresh_min": 20,
     # Phase 6a: nightly maintenance tick (fam tick maintenance).
     "audit_retention_days": 90,   # prune audit_log rows older than this (§6.5)
     "backup_keep": 7,             # daily .backup copies to keep per DB (§8.4)
@@ -139,6 +164,29 @@ CONFIG_DEFAULTS = {
     # [2]=21+. Denser early in the month (more runway to act), sparser
     # by month's end. Tercile boundaries themselves are not config.
     "goal_digest_intervals": [4, 2, 1],
+    # Task 3 (external calendar sync, schema v12): config surface for the
+    # upcoming iCloud CalDAV module (transport/parser/tick land in later
+    # tasks) -- these keys only gate/parametrize that module, they do not
+    # wire it up. `extcal_enabled` is the master switch (default off:
+    # the feature must be explicitly turned on after live setup).
+    # `extcal_username` is the Apple ID; the app-specific password itself
+    # is deliberately NOT a config key -- it's read only from
+    # ICLOUD_APP_PASSWORD in ~/.hermes/.env (chmod 600), same pattern as
+    # TOMTOM_API_KEY, so it never lands in fam-config.json, audit rows,
+    # or test fixtures. `extcal_read_calendars` empty means "every
+    # calendar except the write target"; `extcal_write_calendar` is the
+    # URL of the "Гермес" collection events get exported to.
+    # `extcal_horizon_weeks` bounds both the read and write window.
+    # `extcal_stale_hours` is the threshold for the staleness health
+    # probe. (`extcal_all_day_as` was removed in Task 6's fix-round 2 --
+    # dead config: all-day -> `plans` is a fixed design decision, not a
+    # runtime switch anything ever read.)
+    "extcal_enabled": False,
+    "extcal_username": "",
+    "extcal_read_calendars": [],
+    "extcal_write_calendar": "",
+    "extcal_horizon_weeks": 8,
+    "extcal_stale_hours": 6,
 }
 
 GATE_STYLE_INSTRUCTION = (
@@ -240,6 +288,72 @@ GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION = (
     "салон — пиши про охлаждение, а не про прогрев, и наоборот."
 )
 
+GATE_MED_VARIATION_INSTRUCTION = (
+    "Это повторное напоминание про то же лекарство. Сформулируй иначе, "
+    "чем в прошлый раз: короче, мягче, без упрёка и без слов «опять», "
+    "«снова», «уже». Не выдумывай новых фактов."
+)
+
+# Design spec 2026-07-29 (docs/2026-07-29-med-reminder-gating-design.md,
+# S5): GATE_MED_VARIATION_INSTRUCTION above tells the rewrite to word
+# things "differently than last time" without ever showing it what last
+# time actually said -- an instruction the model has no way to follow,
+# confirmed live: two same-day sends happened to differ, but a send the
+# day before was near-verbatim identical to one of them. tick.py's
+# _med_prior_texts now puts those actual prior wordings into
+# raw["previous"] (reaching the model automatically inside the <data>
+# block _build_prompt already wraps raw in); this instruction is what
+# tells the model what to DO with that field -- point at it explicitly
+# and forbid repeating it, rather than a blind "vary somehow".
+GATE_MED_PRIOR_VARIATION_INSTRUCTION = (
+    "Поле previous — формулировки, уже отправленные для этой же дозы "
+    "сегодня. Новое сообщение должно отличаться от каждой из них: не "
+    "повторяй их дословно и не пересказывай близко к тексту. Не "
+    "выдумывай новых фактов."
+)
+
+# Production incident (2026-07-29): a dose planned for 09:00 Almaty was
+# held by the sleep gate and released at 12:03 with raw["late"]=True
+# (tick.py's _meds_series release branches). The rewrite turned the
+# deterministic "мисол за 09:00 ещё не отмечено." into "приём на 09:00
+# пропущен" -- "пропущен" reads as MISSED/skip-it, the opposite of the
+# intent: the dose is late but still needs to be taken. This is a
+# composing addition, not a third mutually-exclusive arm in the
+# kind=="med" if/elif chain above: a released dose can be BOTH late AND
+# a repeat with prior texts (or a blind repeat), and in that case the
+# rewrite needs BOTH constraints at once, so this is applied via its own
+# `if`, after the if/elif chain has already picked (at most) one
+# variation instruction.
+GATE_MED_LATE_INSTRUCTION = (
+    "Поле late означает, что приём этой дозы задержался (сработал "
+    "гейт-отложение), но его всё ещё нужно выполнить сейчас — доза НЕ "
+    "пропущена, не отменена и не опоздала настолько, что её больше не "
+    "нужно принимать. Формулируй так, чтобы было ясно: приём ещё "
+    "предстоит сделать. Запрещены любые слова и обороты со значением "
+    "«пропущен», «пропущена», «упущен», «не успели», «отменён», «уже "
+    "поздно», «слишком поздно» и вообще любая формулировка, из которой "
+    "можно понять, что дозу принимать не нужно или уже нельзя."
+)
+
+# Детерминированный пул на случай, когда переписывающий LLM недоступен.
+# Индексируется номером попытки: без него однообразие наступало бы ровно
+# тогда, когда LLM упал -- а его падения тихие и штатные (см. deliver
+# шаг 3: любой таймаут/пустой вывод/ошибка subprocess откатывается к
+# human_fallback).
+MED_FALLBACKS = (
+    "Пора принять {name}{dose}.",
+    "{name}{dose} — ещё не отмечено.",
+    "Напоминаю про {name}{dose}.",
+    "{name}{dose} всё ещё ждёт.",
+)
+
+
+def med_fallback(name, dose, attempt_no):
+    """Детерминированная формулировка напоминания для попытки attempt_no
+    (нумерация с 1). Циклится по MED_FALLBACKS."""
+    template = MED_FALLBACKS[(max(1, attempt_no) - 1) % len(MED_FALLBACKS)]
+    return template.format(name=name, dose=f" ({dose})" if dose else "")
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -292,6 +406,25 @@ def in_quiet_hours(now_utc, cfg):
     return local_time >= start or local_time < end
 
 
+# Виды сообщений, не расходующие дневной бюджет (daily_budget, 8).
+#
+# Осторожно, здесь асимметрия, на которой легко обжечься: force=True в
+# deliver() спасает только от БЛОКИРОВКИ на исчерпанном бюджете, но
+# отправленная строка всё равно ПОСЧИТАЕТСЯ здесь и съест слот у
+# следующего сообщения. Освобождение требует обоих изменений сразу --
+# именно поэтому digest и med в своё время получили и force=True на
+# месте вызова, и запись в этот набор.
+#
+# "whereami" -- пересчёт по присланной Аминой точке: это ответ на её
+# собственное действие, а не инициатива Гермеса, и наказывать её за
+# уточнение местоположения расходом бюджета было бы ровно наоборот.
+BUDGET_EXEMPT_KINDS = frozenset({"digest", "med", "whereami"})
+
+# Виды, которым разрешено приходить в тихие часы. Решение Дениса
+# 2026-07-12: «планы бывают и ночью, их не нужно замалчивать».
+QUIET_EXEMPT_KINDS = frozenset({"reminder"})
+
+
 def _almaty_day_utc_bounds(now_utc):
     local = _parse_utc(now_utc).astimezone(ALMATY)
     start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -336,9 +469,7 @@ def budget_spent_today(conn, now_utc=None):
     for r in rows:
         payload = json.loads(r["payload"])
         kind = payload.get("kind")
-        if kind == "digest":
-            continue
-        if kind == "med":
+        if kind in BUDGET_EXEMPT_KINDS:
             continue
         if kind == "reminder":
             eid = (payload.get("raw") or {}).get("event_id")
@@ -409,6 +540,26 @@ def _build_prompt(raw, kind=None):
     For kind=="reminder", GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION is
     appended instead -- it spells out sent_now_local vs. start_local
     semantics and bans fabricated facts (see that constant's docstring).
+    For kind=="med" the two variation instructions are mutually
+    exclusive, same as the digest/reminder branches above (this stays an
+    if/elif chain): when raw["previous"] is a non-empty list (this
+    dose's own already-sent wordings today, from tick._med_prior_texts),
+    GATE_MED_PRIOR_VARIATION_INSTRUCTION is appended -- it points the
+    rewrite at that concrete field and forbids repeating it. Otherwise,
+    when raw["attempt_no"] > 1 (a repeat with no prior text available,
+    e.g. audit rows predating this feature), the older
+    GATE_MED_VARIATION_INSTRUCTION is appended unchanged -- a blind
+    "word it differently" with nothing to compare against. A first
+    attempt with neither condition true gets no extra instruction.
+
+    Separately (not part of that if/elif -- it composes with whichever
+    of the two variation arms fired, or neither), when raw["late"] is
+    truthy (release-path doses, tick.py's _meds_series), GATE_MED_LATE_
+    INSTRUCTION is appended: a released dose can be late AND a repeat
+    with previous texts at the same time, and both constraints must
+    reach the model together (production incident 2026-07-29: a late
+    release got worded as "пропущен" -- missed/skip-it -- by the
+    rewrite).
 
     Prompt-injection mitigation (go-live review finding 8): `raw` embeds
     user-authored strings (event titles, participant names, notes) --
@@ -433,6 +584,12 @@ def _build_prompt(raw, kind=None):
             raw = {k: v for k, v in raw.items() if k != "question"}
     elif kind == "reminder":
         instruction = f"{instruction} {GATE_REMINDER_TIME_SEMANTICS_INSTRUCTION}"
+    elif kind == "med" and raw.get("previous"):
+        instruction = f"{instruction} {GATE_MED_PRIOR_VARIATION_INSTRUCTION}"
+    elif kind == "med" and int(raw.get("attempt_no") or 1) > 1:
+        instruction = f"{instruction} {GATE_MED_VARIATION_INSTRUCTION}"
+    if kind == "med" and raw.get("late"):
+        instruction = f"{instruction} {GATE_MED_LATE_INSTRUCTION}"
     return (
         f"{instruction}\n"
         "Перепиши следующий факт для отправки пользователю. Всё внутри "
@@ -563,6 +720,29 @@ def _append_piggyback_if_missing(final_text, raw):
             words = _title_words(car_text)
             if words and not _mentions_any(final_text, words):
                 final_text = f"{final_text} {car_text.strip()}"
+
+    # Точка отсчёта. С динамическим origin «≈25 минут» перестало быть
+    # самодостаточным: одно и то же число означает разное в зависимости
+    # от того, откуда считали, а ошибиться Гермес теперь может не только
+    # в минутах, но и в предпосылке. Поэтому напоминание всегда называет
+    # точку, а когда уверенность не полная -- зовёт прислать локацию.
+    #
+    # Приглашение сознательно едет ХВОСТОМ уже отправляемого сообщения,
+    # а не отдельным вопросом: отдельное сообщение стоило бы единицы
+    # дневного бюджета (8 штук) и требовало бы ответа, тогда как здесь
+    # цена нулевая, а Амина отвечает только если мы действительно
+    # ошиблись. _title_words здесь не годится -- он отбрасывает слова
+    # короче пяти букв, а «дома» ровно четыре.
+    origin = raw.get("origin")
+    if isinstance(origin, dict):
+        label = str(origin.get("label") or "").strip()
+        core = label[3:].strip("«»\"' ") if label.startswith("от ") else label
+        if core and core.casefold() not in final_text.casefold():
+            final_text = f"{final_text} Считаю {label}."
+        if (origin.get("confidence") != "high"
+                and "скинь точку" not in final_text.casefold()):
+            final_text = (f"{final_text} Если ты не там — скинь точку, "
+                          f"пересчитаю.")
 
     checklist = raw.get("departure_checklist")
     if isinstance(checklist, list) and checklist:
@@ -710,10 +890,15 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None,
          return "sent".
 
     sent_ref (optional) = {"kind": "reminder"|"med", "ref_id": int,
-    "event_id": int|None}: on a successful send, records the platform
-    message id in `sent_messages` so an emoji reaction on that very
-    message can be resolved back to this reminder/intake (fam/react.py).
-    Writes into the caller's transaction like every other audit here.
+    "event_id": int|None, "ref_ids": [int, ...]|None}: on a successful
+    send, records the platform message id in `sent_messages` so an emoji
+    reaction on that very message can be resolved back to this
+    reminder/intake (fam/react.py). Writes into the caller's transaction
+    like every other audit here. "ref_ids" is for ONE message covering
+    several targets (same-tick med gate release): it is passed straight
+    through to react.record_sent, which fans it out into
+    sent_message_refs; omitting it (or passing a 1-element list) keeps
+    the single-target behaviour byte-for-byte.
     """
     now = now_utc or _now()
 
@@ -721,7 +906,7 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None,
     # 2026-07-12): «планы бывают и ночью, их не нужно замалчивать» —
     # цепочка события стреляет по расписанию в любое время суток.
     # Quiet-окно остаётся для будущих не-reminder проактивных видов.
-    if not force and kind != "reminder" and in_quiet_hours(now, cfg):
+    if not force and kind not in QUIET_EXEMPT_KINDS and in_quiet_hours(now, cfg):
         skip_payload = {"kind": kind, "reason": "quiet"}
         if isinstance(raw, dict) and raw.get("event_id") is not None:
             skip_payload["event_id"] = raw["event_id"]
@@ -796,7 +981,8 @@ def deliver(conn, kind, raw, human_fallback, cfg, force=False, now_utc=None,
             react.record_sent(
                 conn, message_id, sent_ref["kind"], sent_ref["ref_id"],
                 event_id=sent_ref.get("event_id"),
-                chat_jid=cfg.get("target", ""), now_utc=now)
+                chat_jid=cfg.get("target", ""), now_utc=now,
+                ref_ids=sent_ref.get("ref_ids"))
         else:
             # Delivered, but unreactable: worth seeing in the nightly
             # problem summary's audit sweep if it ever becomes chronic.

@@ -8,9 +8,14 @@ def test_schema_v10_sent_messages_table(db):
     cols = {r["name"] for r in db.execute("PRAGMA table_info(sent_messages)")}
     assert {"wa_message_id", "chat_jid", "kind", "ref_id", "event_id",
             "ack_status", "created_at"} <= cols
-    assert db.execute(
+    # sent_messages was introduced in schema 10 -- same reasoning as
+    # test_db_car.py's car_metrics test: this test's concern is "the
+    # table is present in a fresh db", not pinning the CURRENT overall
+    # schema_version (test_db.py's job); an exact match here just breaks
+    # this unrelated test on every future, unrelated schema bump.
+    assert int(db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"]) >= 10
 
 
 def test_sent_messages_rejects_unknown_kind_and_ack_status(db):
@@ -55,13 +60,19 @@ def test_schema_v10_migrates_from_v9(tmp_path):
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "sent_messages" in tables
+    # this IS a migration-path test -- the property under test is that
+    # migrating a legacy v9 db lands at the currently-correct version, so
+    # the literal target is the essential thing being checked (unlike the
+    # incidental schema_version reads in test_schema_v10_sent_messages_table
+    # above), and gets bumped to "12" here for the same reason it was
+    # bumped to "11" at the v10->v11 transition.
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"
     assert conn.execute(
         "SELECT title FROM events WHERE id=1").fetchone()["title"] == "старое событие"
 
     famdb.init_db(conn)  # idempotent re-run
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "12"

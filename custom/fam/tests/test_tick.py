@@ -581,7 +581,7 @@ def _add_event_neutral_road(db, monkeypatch, place, start="2026-07-20T06:29:00+0
     compute_travel_min stub for the tick-level recompute under test.
     """
     monkeypatch.setattr(tick.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (None, "none"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (None, "none"))
     e = cal.add(db, "Врач", start, place=place, **kw)
     db.commit()
     return e
@@ -593,7 +593,7 @@ def test_road_recompute_at_119min_happens_once_per_window(db, fake_deliver, monk
     # start = NOW + 119min, travel 0 initially -> leave_at = start
 
     monkeypatch.setattr(tick.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (5, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (5, "tomtom"))
     fake_deliver.responses = []
 
     counts = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
@@ -618,7 +618,7 @@ def test_road_recompute_second_threshold_window_after_first(db, fake_deliver, mo
     # boundary can be reasoned about precisely on the second tick.
     e = _add_event_neutral_road(db, monkeypatch, place)
     monkeypatch.setattr(tick.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (10, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (10, "tomtom"))
     fake_deliver.responses = []
 
     first = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
@@ -650,7 +650,7 @@ def test_road_recompute_changed_minutes_updates_and_regenerates_chain(
         "ORDER BY fire_at_utc LIMIT 1", (e["id"],)).fetchone()
 
     monkeypatch.setattr(tick.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (45, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (45, "tomtom"))
     fake_deliver.responses = []
     counts = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
 
@@ -690,7 +690,7 @@ def test_road_recompute_unchanged_minutes_only_bumps_checked_at(
     regen_before = len(audit.query(db, None, "rem.regenerate", None))
 
     monkeypatch.setattr(tick.road, "compute_travel_min",
-                         lambda conn, event, cfg, now_utc=None: (7, "tomtom"))
+                         lambda conn, event, cfg, now_utc=None, **kw: (7, "tomtom"))
     fake_deliver.responses = []
     counts = tick.reminders(db, now_utc=NOW, cfg=ROAD_CFG)
 
@@ -713,7 +713,7 @@ class RecordingRoad:
         self.results = list(results)
         self.calls = []
 
-    def __call__(self, conn, event, cfg, now_utc=None):
+    def __call__(self, conn, event, cfg, now_utc=None, **kw):
         self.calls.append({"now_utc": now_utc})
         if len(self.results) > 1:
             return self.results.pop(0)
@@ -829,7 +829,7 @@ def test_road_recompute_error_is_audited_and_tick_continues(
     due_id = _insert_reminder(db, e["id"], fire_at=PAST)
     db.commit()
 
-    def boom(conn, event, cfg, now_utc=None):
+    def boom(conn, event, cfg, now_utc=None, **kw):
         raise RuntimeError("boom")
     monkeypatch.setattr(tick.road, "compute_travel_min", boom)
     fake_deliver.responses = ["sent"]
