@@ -117,6 +117,16 @@ from agent.iteration_budget import IterationBudget
 
 
 from hermes_cli.env_loader import load_hermes_dotenv
+# На модульном уровне, НЕ внутри функции: ленивый импорт читал бы алертер
+# с диска в момент сбоя, и он мог бы оказаться другой версии, чем остальной
+# процесс — то есть сломался бы ровно тогда, когда он единственный, кто может
+# сообщить о поломке. Проверено: импорт 0.22 с, gateway.run и run_agent за
+# собой не тянет, цикла нет.
+from gateway.turn_error_alerts import (
+    dedup_decision,
+    get_alert_config,
+    send_operator_alert,
+)
 from hermes_cli.timeouts import (
     get_provider_request_timeout,
     get_provider_stale_timeout,
@@ -401,6 +411,47 @@ class _StreamErrorEvent(Exception):
                 "type": "error",
             }
         }
+
+
+_PERSISTENCE_ALERT_ERR_LIMIT = 600  # то же значение, что _ERR_LIMIT в turn_error_alerts (приватная)
+
+
+def _format_persistence_alert(session_id, exc, streak: int) -> str:
+    return "\n".join(
+        [
+            "🔴 Гермес: транскрипт не пишется",
+            f"Сессия: {session_id or '<нет id>'}",
+            f"Сбоев подряд: {streak}",
+            f"Ошибка: {str(exc)[:_PERSISTENCE_ALERT_ERR_LIMIT]}",
+            "Диалог этой сессии в state.db не сохраняется.",
+        ]
+    )
+
+
+def _maybe_alert_persistence_failure(session_id, exc, streak: int) -> None:
+    """Разовый операторский алерт о детерминированном сбое записи.
+
+    Никогда не бросает: алерт не имеет права сломать ту запись, которую
+    он охраняет.
+    """
+    try:
+        from hermes_cli.config import load_config as _load_config
+
+        cfg = get_alert_config(_load_config() or {})
+        if not cfg:
+            return  # канал не настроен — VPS-safe
+        send_now, _repeats = dedup_decision(
+            ("db_persist_failure", session_id, type(exc).__name__),
+            time.time(),
+            cfg["dedup_minutes"],
+        )
+        if not send_now:
+            return
+        send_operator_alert(
+            cfg["channel"], _format_persistence_alert(session_id, exc, streak)
+        )
+    except Exception:
+        logger.warning("persistence-failure alert crashed", exc_info=True)
 
 
 class AIAgent:
@@ -2123,6 +2174,7 @@ class AIAgent:
                     streak,
                     e,
                 )
+                _maybe_alert_persistence_failure(self.session_id, e, streak)
             else:
                 logger.warning("Session DB append_message failed: %s", e)
 
