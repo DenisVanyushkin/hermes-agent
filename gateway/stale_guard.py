@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -78,16 +80,71 @@ def _read_marks(hermes_home) -> list[float]:
     return [float(m) for m in marks if isinstance(m, (int, float))]
 
 
-def record_auto_restart(hermes_home, now: float) -> None:
-    """Записать метку авторестарта. Никогда не бросает."""
+def _write_marks(hermes_home, marks: list[float]) -> None:
+    """Атомарная запись меток. Бросает при любой проблеме записи.
+
+    Через временный файл рядом + ``os.replace``: рестарт посреди записи иначе
+    оставил бы обрезанный JSON, ``_read_marks`` прочитал бы его как пустой, и
+    единственное, что переживает рестарт, обнулилось бы.
+    """
+    path = budget_path(hermes_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(marks))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def record_auto_restart(hermes_home, now: float) -> bool:
+    """Записать метку авторестарта. Никогда не бросает.
+
+    Возвращает True, только если метка реально легла на диск. Бюджет —
+    единственное, что удерживает гейтвей от петли рестартов, поэтому потеря
+    записи трактуется как «рестартовать нельзя» (fail closed), а не как
+    безобидный сбой учёта.
+    """
     try:
         marks = [m for m in _read_marks(hermes_home) if now - m < _WINDOW_SECONDS]
         marks.append(now)
-        path = budget_path(hermes_home)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(marks), encoding="utf-8")
+        _write_marks(hermes_home, marks)
+        return True
     except Exception:  # noqa: BLE001 — учёт бюджета не должен ронять тик
-        logger.warning("stale-guard budget write failed", exc_info=True)
+        logger.error(
+            "stale-guard: не удалось записать бюджет авторестартов (%s) — "
+            "авторестарт запрещён",
+            budget_path(hermes_home),
+            exc_info=True,
+        )
+        return False
+
+
+def budget_writable(hermes_home) -> bool:
+    """Проба записи файла бюджета: перезаписать его собственным содержимым.
+
+    Зовётся при вооружении сторожа и перед каждым авторестартом: если
+    HERMES_HOME смонтирован read-only / диск полон / права чужие, бюджет
+    молча терялся бы и гейтвей рестартовал бы каждые ``check_every_minutes``
+    вечно.
+    """
+    try:
+        _write_marks(hermes_home, _read_marks(hermes_home))
+        return True
+    except Exception:  # noqa: BLE001
+        logger.error(
+            "stale-guard: файл бюджета %s недоступен для записи",
+            budget_path(hermes_home),
+            exc_info=True,
+        )
+        return False
 
 
 def auto_restart_allowed(hermes_home, now: float, max_per_hour: int) -> bool:
@@ -113,6 +170,17 @@ def format_budget_exhausted_alert(max_per_hour: int) -> str:
         [
             "🔴 Гермес: авторестарт отключён",
             f"Исчерпан бюджет ({max_per_hour} за час) — дерево продолжает ехать.",
+            "Больше сам рестартовать не буду до перезапуска процесса.",
             "Дальше руками: hermes gateway restart",
+        ]
+    )
+
+
+def format_budget_unwritable_alert(path) -> str:
+    return "\n".join(
+        [
+            "🔴 Гермес: авторестарт отключён",
+            f"Не могу вести бюджет рестартов: {path} не пишется.",
+            "Без бюджета рестартовать опасно (петля). Дальше руками: hermes gateway restart",
         ]
     )

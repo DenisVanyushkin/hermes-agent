@@ -160,3 +160,51 @@ def test_alert_text_names_the_changed_files():
     assert "hermes_state.py" in text
     assert "09:27:31" in text
     assert "+3" in text  # первые два названы, остальные посчитаны
+
+
+def test_record_auto_restart_reports_success(tmp_path):
+    from gateway.stale_guard import auto_restart_allowed, record_auto_restart
+
+    assert record_auto_restart(tmp_path, 1_000.0) is True
+    assert auto_restart_allowed(tmp_path, 1_001.0, 1) is False
+
+
+def test_record_auto_restart_reports_failure_when_unwritable(tmp_path):
+    """I3: потеря бюджета — единственная защита от петли, значит fail closed."""
+    import os
+
+    from gateway.stale_guard import budget_writable, record_auto_restart
+
+    home = tmp_path / "ro"
+    home.mkdir()
+    os.chmod(home, 0o500)
+    try:
+        assert budget_writable(home) is False
+        assert record_auto_restart(home, 1_000.0) is False
+    finally:
+        os.chmod(home, 0o700)
+
+
+def test_budget_writable_true_on_a_normal_home(tmp_path):
+    from gateway.stale_guard import budget_writable
+
+    assert budget_writable(tmp_path) is True
+
+
+def test_budget_write_is_atomic(tmp_path, monkeypatch):
+    """M7: os.replace — иначе рестарт посреди write_text обнуляет бюджет."""
+    import os
+
+    from gateway import stale_guard
+
+    replaced = []
+    real_replace = os.replace
+    monkeypatch.setattr(
+        os, "replace", lambda a, b: replaced.append((a, b)) or real_replace(a, b)
+    )
+
+    assert stale_guard.record_auto_restart(tmp_path, 1_000.0) is True
+    assert replaced and str(replaced[0][1]) == str(stale_guard.budget_path(tmp_path))
+    assert list(stale_guard._read_marks(tmp_path)) == [1_000.0]
+    # никакого мусора рядом: временный файл убран за собой
+    assert not [f.name for f in tmp_path.iterdir() if f.name.endswith(".tmp")]
