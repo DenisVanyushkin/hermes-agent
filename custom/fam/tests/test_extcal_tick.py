@@ -764,17 +764,34 @@ def test_component_count_mismatch_excludes_only_that_href_not_the_whole_calendar
 # ---------------------------------------------------------------------
 # R1 (fix-round 3): the component-count detector must not be silenced by
 # case or by \r-only line endings.
+#
+# Fix-round 4: this detector no longer lives in cli.py at all -- three
+# rounds in a row (fix-round 2's bare regex, fix-round 3's own
+# case/CR fix, fix-round 3's second attempt) each reintroduced the SAME
+# class of bug on a new input, because each was a second, independent
+# reimplementation of "what counts as a VEVENT boundary" that inevitably
+# drifted from parse_ics's own answer to that question. `extcal.
+# parse_ics_with_count` now returns the block count computed by the SAME
+# parsing pass that decides component boundaries in the first place (see
+# its own docstring and test_extcal_parse.py's dedicated unit tests) --
+# this end-to-end test is kept as-is (same scenario, same assertions) to
+# prove the case/CR-tolerance property still holds all the way through
+# `cli.cmd_tick_cal_ext`, not just at the parser's own unit-test layer.
 # ---------------------------------------------------------------------
 
 def test_count_mismatch_detector_is_case_insensitive_and_cr_tolerant(db, monkeypatch):
-    """The fix-round 2 detector used a bare `re.compile(r"^BEGIN:VEVENT",
+    """Fix-round 2's first cut used a bare `re.compile(r"^BEGIN:VEVENT",
     re.M)` -- no `re.I`, and `re.M`'s `^` only anchors after an actual
     `\\n`. RFC 5545 property names are case-insensitive (parse_ics's own
     `_split_property_line` upper-cases before comparing) and a feed using
     lone `\\r` line endings is exactly what `extcal._unfold` normalizes
     for parse_ics itself -- either mismatch would have silently counted
     `begin_count=0` and turned the WHOLE guard off, the exact class of
-    failure this detector exists to catch."""
+    failure this test exists to catch. `extcal.parse_ics_with_count`
+    (fix-round 4) closes this structurally: see test_extcal_parse.py's
+    `test_parse_ics_with_count_is_case_insensitive_for_begin_and_end` /
+    `..._is_tolerant_of_cr_only_line_endings` for the parser-level proof;
+    this test proves the SAME property survives through the whole tick."""
     broken_href = CAL_URL + "cr-and-case.ics"
     existing = cal.add(db, "Перенос был здесь", "2037-07-27T13:00:00+00:00",
                         end_utc="2037-07-27T14:00:00+00:00")
@@ -852,6 +869,56 @@ def test_live_item_with_no_calendar_data_is_not_treated_as_deleted(db, monkeypat
     monkeypatch.setattr(cli.extcal, "fetch_changes",
                          lambda cfg, calendar, sync_token=None, request=None:
                          ([item], None, {"mode": "fallback_full", "reason": "http_403"}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1  # a real, flagged error -- not a silent no-op
+
+    row = db.execute("SELECT * FROM events WHERE id=?", (existing["id"],)).fetchone()
+    assert row["status"] == "active"  # NOT cancelled -- excluded, not tombstoned
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert any("no calendar-data" in e for e in rows[0]["sync_errors"])
+
+
+def test_live_item_with_whitespace_only_calendar_data_is_not_treated_as_deleted(db, monkeypatch):
+    """Fix-round 4: `if not ics_text:` alone does not catch a
+    WHITESPACE-ONLY string -- exactly the shape a pretty-printed
+    multistatus XML response's `<C:calendar-data>\\n   </C:calendar-data>`
+    produces when its actual content is empty. That string is truthy, so
+    it used to sail past the fix-round 3 `if not ics_text:` guard
+    straight into `parse_ics_with_count`, which (correctly, per its own
+    contract) returns `([], 0)` for it -- 0 == 0, no mismatch detected --
+    and in `sync_collection` mode (the tick's own NORMAL running mode
+    once the sync-token exchange settles in) a 0-VEVENT result is
+    otherwise unremarkable (cheap fix #1: a changed VTODO/VJOURNAL is
+    normal there) -- so this exact shape reached `plan_changes`'
+    disappearance sweep completely uncontested, with the href already
+    sitting in `batch_hrefs`. Round 3's own regression test for this bug
+    class (`test_live_item_with_no_calendar_data_is_not_treated_as_
+    deleted`, above) only used `ics=None`, which the bare truthiness
+    check already caught -- whitespace-only needed its own test, since
+    it is exactly the input the OLD check silently let through."""
+    href = CAL_URL + "whitespace-only.ics"
+    existing = cal.add(db, "Была раньше", "2037-07-20T08:00:00+00:00",
+                        end_utc="2037-07-20T09:00:00+00:00")
+    db.execute(
+        "UPDATE events SET owner='iphone', external_uid=?, external_href=? "
+        "WHERE id=?",
+        (extcal._occurrence_key("whitespace@icloud.com", None), href, existing["id"]),
+    )
+    db.commit()
+
+    # Whitespace-only -- truthy in Python, but no real calendar-data.
+    item = {"href": href, "deleted": False, "etag": "eW", "ics": "\n   "}
+
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    # sync_collection -- the tick's own normal running mode, where cheap
+    # fix #1 otherwise waves a 0-VEVENT result through unremarked.
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], "NEXT-TOK", {"mode": "sync_collection", "reason": None}))
 
     rc = cli.cmd_tick_cal_ext(_args())
     assert rc == 1  # a real, flagged error -- not a silent no-op

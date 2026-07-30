@@ -1036,25 +1036,18 @@ _EXTCAL_ECHO_UID_RE = re.compile(r"^fam-.*@hermes-home$")
 # SAME resource survives). The only externally-observable signal is a
 # component COUNT mismatch against the raw `BEGIN:VEVENT` blocks actually
 # present in the resource text.
-def _count_vevent_begin_blocks(ics_text):
-    """Raw `BEGIN:VEVENT` block count for the N1 detector above (fix-round
-    3, finding R1): the fix-round 2 cut used a bare `re.compile(r"^BEGIN:
-    VEVENT", re.M)`, which is wrong TWO ways `parse_ics` itself is
-    careful about and this detector was not: (1) RFC 5545 property names
-    are case-insensitive and `parse_ics`'s own `_split_property_line`
-    upper-cases before comparing (`extcal.py`) -- a feed spelling it
-    `Begin:VEvent` made this detector count 0 unconditionally, silently
-    DISABLING the whole guard (the exact failure class fix-round 2 was
-    trying to close); (2) `re.M`'s `^` only anchors after an actual `\n`,
-    while a feed using lone `\r` line endings (which `extcal._unfold`
-    already normalizes before `parse_ics` ever sees them) would never
-    match at all. `str.splitlines()` handles every line-ending
-    convention Python recognizes as a boundary, and comparing case-
-    normalized, whitespace-stripped lines sidesteps both problems at
-    once -- `BEGIN:VEVENT` takes no parameters, so an exact match after
-    stripping is the correct comparison, not a regex search."""
-    return sum(1 for line in ics_text.splitlines()
-               if line.strip().upper() == "BEGIN:VEVENT")
+#
+# Fix-round 3 (finding R1) tried to detect that mismatch with an
+# INDEPENDENT line-counter here in cli.py (`_count_vevent_begin_blocks`,
+# then a bare regex before that) -- and each cut disagreed with
+# `parse_ics`'s own notion of "this is a VEVENT boundary" on some axis
+# (case, line-ending convention, whitespace around the colon), silently
+# undercounting and disabling the very guard this comment describes.
+# Fix-round 4 removes the second implementation entirely: `extcal.
+# parse_ics_with_count` returns the block count computed by the SAME
+# parsing pass, inside `extcal.py`, that decides component boundaries in
+# the first place -- see that function's own docstring. There is nothing
+# left in this module to drift.
 
 # Fix-round 2 (finding N2): `extcal.expand()`'s own per-master RRULE
 # failure message embeds the master's uid via `repr()`
@@ -1394,7 +1387,7 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             if item.get("deleted"):
                 continue  # tombstone: no ICS to parse -- disappearance below handles it
             ics_text = item.get("ics")
-            if not ics_text:
+            if not (ics_text or "").strip():
                 # Fix-round 3, finding R2: extcal.fetch_changes' OWN
                 # docstring used to claim `ics=None` only ever happens for
                 # a deleted (tombstoned) item -- it doesn't.
@@ -1408,13 +1401,29 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 # with no error recorded at all: cancel, tombstone,
                 # unrecoverable. Excluded BY HREF instead, same as any
                 # other unreadable resource this round.
+                #
+                # Fix-round 4: `if not ics_text` alone does not catch a
+                # whitespace-only string (e.g. a pretty-printed multistatus
+                # XML response whose `<C:calendar-data>\n   </C:calendar-
+                # data>` has indentation but no real content) -- that
+                # string is truthy, so it used to fall through to
+                # parse_ics_with_count below, which (correctly, per its own
+                # contract) returns `([], 0)` for it: 0 == 0, no mismatch,
+                # no error, and the href had already gone into batch_hrefs
+                # above -- exactly the "normal, empty VTODO" shape in
+                # sync_collection mode, silently clearing the way to the
+                # disappearance sweep. `.strip()` closes that.
                 bad_hrefs.add(abs_href)
                 sync_errors.append(
                     f"{calendar.get('name') or url}: no calendar-data "
                     f"for {abs_href} (not marked deleted -- treated as "
                     f"unreadable this round, not gone)")
                 continue
-            parsed = extcal.parse_ics(ics_text)
+            # Fix-round 4: `parse_ics_with_count` (extcal.py) -- NOT a
+            # second, independent line-counter in this module (see the
+            # comment above this loop) -- returns the VEVENT block count
+            # computed by the SAME pass that decides component boundaries.
+            parsed, begin_count = extcal.parse_ics_with_count(ics_text)
             # Fix-round 2, finding N1: a per-component uid/dtstart_utc
             # check AFTER parse_ics returns can never fire -- parse_ics/
             # _finalize_component already guarantee every returned
@@ -1425,7 +1434,6 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             # master in the SAME resource survives) -- the only
             # externally-observable signal is a component COUNT mismatch
             # against this resource's own raw BEGIN:VEVENT blocks.
-            begin_count = _count_vevent_begin_blocks(ics_text)
             if begin_count == 0:
                 # Fix-round 3, cheap fix: a resource with ZERO BEGIN:VEVENT
                 # blocks is only suspicious when the query that fetched it

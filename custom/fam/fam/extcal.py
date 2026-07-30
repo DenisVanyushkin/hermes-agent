@@ -1015,23 +1015,44 @@ def _finalize_component(cur):
     }
 
 
-def parse_ics(text):
-    """Raw VCALENDAR text -> `list[Component]` (VEVENTs only -- VTODO/
-    VJOURNAL/VTIMEZONE are out of scope, matching the design doc). A
-    nested VALARM's own properties are skipped entirely (only its
-    PRESENCE, as `has_alarm`, is recorded); any other nested sub-component
-    is skipped the same defensive way.
+def _parse_ics_components(text):
+    """Single shared implementation behind BOTH `parse_ics` and
+    `parse_ics_with_count` (fix-round 4, Task 6): this is the ONE place in
+    the codebase that decides "this line is where a VEVENT block begins"
+    -- the exact same decision `_finalize_component` acts on. Returns
+    `(components, vevent_count)`, where `vevent_count` is incremented at
+    the SAME site `cur = _new_component()` is created, i.e. once per
+    top-level `BEGIN:VEVENT` this loop recognized as the start of a
+    component attempt.
+
+    `vevent_count > len(components)` means this call dropped at least one
+    VEVENT block: either `_finalize_component` rejected it (no usable
+    UID/DTSTART), or the resource was truncated (a `BEGIN:VEVENT` with no
+    matching `END:VEVENT` before the text ends). Both are real,
+    observable data loss a caller may need to react to -- see
+    `parse_ics_with_count`'s own docstring.
+
+    A `BEGIN:VEVENT` line folded into the middle of another property's
+    value (e.g. a DESCRIPTION whose continuation line, once unfolded,
+    happens to read "...BEGIN:VEVENT...") is NOT counted here, structurally,
+    not by a second pass over the text: `_unfold` already joins a folded
+    continuation onto its parent line before this loop ever sees it, so
+    `_split_property_line` reports the parent property's own NAME (e.g.
+    "DESCRIPTION"), never "BEGIN" -- there is no separate line to
+    misinterpret in the first place.
 
     Never raises: garbage input (not ICS, truncated, undecodable-as-text)
-    yields `[]`; a single malformed VEVENT inside an otherwise-good feed
-    is dropped (see `_finalize_component`) without losing its siblings.
+    yields `([], 0)`; a single malformed VEVENT inside an otherwise-good
+    feed is dropped (see `_finalize_component`) without losing its
+    siblings, and IS reflected in the count mismatch above.
     """
     if not text:
-        return []
+        return [], 0
     try:
         text = text.lstrip("﻿")  # tolerate a leading UTF-8 BOM
         lines = _unfold(text)
         components = []
+        vevent_count = 0
         cur = None
         nested_depth = 0
         for raw_line in lines:
@@ -1047,6 +1068,7 @@ def parse_ics(text):
                 if cur is None:
                     if kind == "VEVENT":
                         cur = _new_component()
+                        vevent_count += 1
                     continue  # BEGIN:VCALENDAR/VTIMEZONE/... at top level
                 nested_depth += 1
                 if kind == "VALARM":
@@ -1067,9 +1089,57 @@ def parse_ics(text):
             if cur is None or nested_depth > 0:
                 continue  # property outside any tracked VEVENT, or inside VALARM
             _apply_property(cur, name, params, value)
-        return components
+        return components, vevent_count
     except Exception:
-        return []
+        return [], 0
+
+
+def parse_ics(text):
+    """Raw VCALENDAR text -> `list[Component]` (VEVENTs only -- VTODO/
+    VJOURNAL/VTIMEZONE are out of scope, matching the design doc). A
+    nested VALARM's own properties are skipped entirely (only its
+    PRESENCE, as `has_alarm`, is recorded); any other nested sub-component
+    is skipped the same defensive way.
+
+    Never raises: garbage input (not ICS, truncated, undecodable-as-text)
+    yields `[]`; a single malformed VEVENT inside an otherwise-good feed
+    is dropped (see `_finalize_component`) without losing its siblings.
+
+    Thin wrapper over `_parse_ics_components` (fix-round 4) -- see
+    `parse_ics_with_count` for the sibling entry point a caller that needs
+    to know whether anything was silently dropped should use instead. Kept
+    as a separate function, rather than requiring every existing caller to
+    unpack a tuple, precisely so none of them (this module's own tests
+    included) had to change for this task.
+    """
+    return _parse_ics_components(text)[0]
+
+
+def parse_ics_with_count(text):
+    """`parse_ics`, plus the raw `BEGIN:VEVENT` block count `_parse_ics_
+    components` computed in the SAME pass (fix-round 4, Task 6). Returns
+    `(components, vevent_count)`.
+
+    Exists for a caller (`cli.py`'s per-resource "did the parser silently
+    drop a component" guard) that must detect a shortfall between "VEVENT
+    blocks present" and "components successfully parsed" WITHOUT
+    re-implementing "what counts as the start of a VEVENT block" as a
+    second, independent piece of code -- three fix rounds in a row
+    (task-6-report.md) reintroduced exactly that drift: an external
+    line-counter that disagreed with `parse_ics`'s own notion of a VEVENT
+    boundary on case, line-ending convention, or whitespace-around-colon,
+    each time silencing the very guard it was supposed to be. Both
+    `parse_ics` and this function read the result of the SAME single
+    decision (`_parse_ics_components`), made once per call -- there is
+    structurally nothing left for a second implementation to drift from.
+
+    `vevent_count > len(components)` means this resource lost at least
+    one VEVENT block this call: caller should treat the resource as
+    untrustworthy this round (exclude it from any disappearance sweep,
+    record an error) rather than silently tombstoning whatever local row
+    it can no longer see.
+    """
+    return _parse_ics_components(text)
 
 
 # ---- recurrence expansion (Task 2) ----------------------------------------

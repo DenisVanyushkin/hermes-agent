@@ -261,6 +261,159 @@ def test_vevent_missing_dtstart_is_dropped_but_siblings_survive():
 
 
 # ---------------------------------------------------------------------
+# parse_ics_with_count (fix-round 4, Task 6): the block-count guard's ONLY
+# data source -- must be computed by the exact same boundary decision
+# parse_ics itself uses, not a second, independent implementation (three
+# fix rounds of task-6-report.md each reintroduced that drift as a fresh
+# bug on a new input: case, then CR-only line endings, then whitespace
+# around the colon). `parse_ics(text) == parse_ics_with_count(text)[0]`
+# always -- both read the SAME `_parse_ics_components` call.
+# ---------------------------------------------------------------------
+
+def test_parse_ics_with_count_matches_when_nothing_is_dropped():
+    ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "BEGIN:VEVENT\r\n"
+        "UID:evt-clean@example.com\r\n"
+        "DTSTART:20260705T100000Z\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    comps, count = extcal.parse_ics_with_count(ics)
+    assert count == 1
+    assert len(comps) == 1
+    assert comps == extcal.parse_ics(ics)
+
+
+def test_parse_ics_with_count_detects_component_dropped_for_missing_uid():
+    ics = (
+        "BEGIN:VEVENT\r\n"
+        "SUMMARY:No uid, unusable\r\n"
+        "DTSTART:20260705T100000Z\r\n"
+        "END:VEVENT\r\n"
+        "BEGIN:VEVENT\r\n"
+        "UID:evt-good@example.com\r\n"
+        "DTSTART:20260705T110000Z\r\n"
+        "END:VEVENT\r\n"
+    )
+    comps, count = extcal.parse_ics_with_count(ics)
+    assert count == 2          # two raw BEGIN:VEVENT blocks were present
+    assert len(comps) == 1      # only one survived _finalize_component
+    assert comps == extcal.parse_ics(ics)
+
+
+def test_parse_ics_with_count_detects_truncated_vevent_with_no_end():
+    ics = (
+        "BEGIN:VEVENT\r\n"
+        "UID:evt-truncated@example.com\r\n"
+        "SUMMARY:Never closed\r\n"
+        "DTSTART:20260705T100000Z\r\n"
+    )
+    comps, count = extcal.parse_ics_with_count(ics)
+    assert count == 1           # the block was started...
+    assert comps == []           # ...but never finalized (no END:VEVENT)
+
+
+def test_parse_ics_with_count_is_case_insensitive_for_begin_and_end():
+    """A feed spelling it `Begin:VEvent`/`End:VEvent` (round 3's own R1
+    regression input) must not silently zero out the count -- the count
+    is computed by the SAME branch that already upper-cases before
+    matching, so a well-formed component in mixed case is not mistaken
+    for a dropped one either (no false positive)."""
+    ics = (
+        "Begin:VCalendar\r\n"
+        "Begin:VEvent\r\n"
+        "UID:evt-mixedcase@example.com\r\n"
+        "DTSTART:20260705T100000Z\r\n"
+        "End:VEvent\r\n"
+        "End:VCalendar\r\n"
+    )
+    comps, count = extcal.parse_ics_with_count(ics)
+    assert count == 1
+    assert len(comps) == 1
+    assert comps[0]["uid"] == "evt-mixedcase@example.com"
+
+
+def test_parse_ics_with_count_is_tolerant_of_cr_only_line_endings():
+    """Round 3's own R1 regression input: a feed using lone `\\r` (no
+    `\\n` at all) throughout -- `_unfold` already normalizes this before
+    the counting loop ever runs, so the count must not come back 0."""
+    ics = (
+        "BEGIN:VCALENDAR\r"
+        "BEGIN:VEVENT\r"
+        "UID:evt-cronly@example.com\r"
+        "DTSTART:20260705T100000Z\r"
+        "END:VEVENT\r"
+        "END:VCALENDAR\r"
+    )
+    comps, count = extcal.parse_ics_with_count(ics)
+    assert count == 1
+    assert len(comps) == 1
+    assert comps[0]["uid"] == "evt-cronly@example.com"
+
+
+def test_parse_ics_with_count_tolerates_whitespace_around_the_colon():
+    """`_split_property_line` strips whitespace on both sides of the
+    colon (`head.strip()`, `value.strip()`) -- a feed spelling it
+    `BEGIN : VEVENT` is a valid component boundary to parse_ics itself,
+    so the count must agree, not undercount it as garbage (round 3's
+    second regression input)."""
+    ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "BEGIN : VEVENT\r\n"
+        "UID:evt-spaced@example.com\r\n"
+        "DTSTART:20260705T100000Z\r\n"
+        "END : VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    comps, count = extcal.parse_ics_with_count(ics)
+    assert count == 1
+    assert len(comps) == 1
+    assert comps[0]["uid"] == "evt-spaced@example.com"
+
+
+def test_parse_ics_with_count_tolerates_tab_around_the_colon():
+    ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "BEGIN\t:VEVENT\r\n"
+        "UID:evt-tabbed@example.com\r\n"
+        "DTSTART:20260705T100000Z\r\n"
+        "END\t:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    comps, count = extcal.parse_ics_with_count(ics)
+    assert count == 1
+    assert len(comps) == 1
+    assert comps[0]["uid"] == "evt-tabbed@example.com"
+
+
+def test_parse_ics_with_count_folded_description_text_is_not_a_false_positive():
+    """A DESCRIPTION whose FOLDED continuation line, once unfolded, happens
+    to read "...BEGIN:VEVENT..." must NOT be counted as a second VEVENT
+    block: `_unfold` joins the continuation onto DESCRIPTION's own line
+    before this loop ever sees it, so `_split_property_line` reports the
+    parent property's real NAME ("DESCRIPTION"), never "BEGIN" -- there is
+    no separate line here to misinterpret. An overcount would wrongly flag
+    a perfectly healthy resource as having lost data (fix-round 3's
+    documented, accepted-as-fail-safe-but-noisy gap; closed structurally
+    by routing the count through the parser itself)."""
+    ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "BEGIN:VEVENT\r\n"
+        "UID:evt-folded@example.com\r\n"
+        "DTSTART:20260705T100000Z\r\n"
+        "DESCRIPTION:Some notes\r\n"
+        " BEGIN:VEVENT this is folded content, not a real block\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    comps, count = extcal.parse_ics_with_count(ics)
+    assert count == 1
+    assert len(comps) == 1
+    assert comps[0]["uid"] == "evt-folded@example.com"
+
+
+# ---------------------------------------------------------------------
 # RRULE expansion: weekly, monthly+interval, COUNT, UNTIL, window bounds
 # ---------------------------------------------------------------------
 
