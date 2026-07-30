@@ -77,6 +77,13 @@ degrades to `"operator"` rather than raising — but that means a typo
 silently loses end-user protection rather than erroring loudly. Write it
 correctly the first time.
 
+A typo does not fail silently *invisibly*, though: `resolve_cron_audience()`
+logs a `logger.warning` (`cron.scheduler`) naming the job and the
+unrecognized value whenever a non-empty `audience` field doesn't match
+`CRON_AUDIENCES`, before falling through to the config net (then
+`"operator"`). Grep the gateway log for `unrecognized audience` after
+hand-editing a job's `audience` field to confirm it was accepted.
+
 Example direct edit of an existing job record in `~/.hermes/cron/jobs.json`:
 
 ```json
@@ -113,6 +120,12 @@ string works exactly like a one-element list — `end_user_targets:
 "whatsapp:+77011102626"` (no `-` list marker) is normalized internally to
 a single-element list rather than being silently iterated character by
 character, which would otherwise disable the net without any error.
+
+A hand-edit that instead leaves `end_user_targets` as some other scalar
+(a bare number, `true`, etc. — neither a string nor a list) disables the
+net the same way, and is also not silent: `resolve_cron_audience()` logs a
+`logger.warning` naming the bad value before falling through to
+`"operator"`.
 
 **Precedence:** the explicit `audience` field on the job always wins. If
 `audience` is set to `"operator"` or `"end_user"`, `resolve_cron_audience`

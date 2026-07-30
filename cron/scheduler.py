@@ -268,10 +268,25 @@ def resolve_cron_audience(job: dict, cfg: Optional[dict] = None) -> str:
     target listed in ``cron.end_user_targets`` marks the job as end-user
     facing — a safety net so a job created later without the flag still
     cannot deliver a technical failure to a non-technical reader.
+
+    Two misconfiguration shapes degrade silently to ``"operator"`` by
+    design (never raising), but are logged so the degradation is at least
+    visible: a stored ``audience`` value that doesn't match
+    ``CRON_AUDIENCES`` after stripping/lowercasing (e.g. a hand-written
+    typo like ``"enduser"``), and a ``cron.end_user_targets`` value that is
+    neither a string nor a list (e.g. a hand-edited ``5`` or ``true``).
     """
-    explicit = str(job.get("audience") or "").strip().lower()
+    raw_audience = job.get("audience")
+    explicit = str(raw_audience or "").strip().lower()
     if explicit in CRON_AUDIENCES:
         return explicit
+    if explicit:
+        logger.warning(
+            "cron job %r has unrecognized audience %r; ignoring it and "
+            "falling back to the cron.end_user_targets net (then operator)",
+            job.get("id") or job.get("name") or "?",
+            raw_audience,
+        )
 
     cron_cfg = (cfg or {}).get("cron")
     configured = (cron_cfg if isinstance(cron_cfg, dict) else {}).get("end_user_targets") or []
@@ -284,6 +299,13 @@ def resolve_cron_audience(job: dict, cfg: Optional[dict] = None) -> str:
     if isinstance(configured, str):
         configured = [configured]
     elif not isinstance(configured, (list, tuple, set, frozenset)):
+        if configured:
+            logger.warning(
+                "cron.end_user_targets is not a string or list (got %r); "
+                "ignoring it — the end-user safety net is disabled until "
+                "this is fixed",
+                configured,
+            )
         configured = []
     if not configured:
         return "operator"

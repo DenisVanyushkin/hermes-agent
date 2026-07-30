@@ -198,6 +198,37 @@ def test_alert_delivery_failure_never_raises(monkeypatch) -> None:
     )  # must not raise
 
 
+def test_unrecognized_audience_value_logs_warning(caplog) -> None:
+    """A hand-written typo like "enduser" degrades silently to "operator" by
+    design (never raises) — but that degradation must be visible in the
+    logs, or a real misconfiguration reverts protection with no signal
+    anywhere (2026-07-29 review finding)."""
+    import logging
+
+    job = {**UNFLAGGED_AMINA_JOB, "audience": "enduser"}
+
+    with caplog.at_level(logging.WARNING, logger="cron.scheduler"):
+        result = resolve_cron_audience(job)
+
+    assert result == "operator"
+    assert any("enduser" in r.getMessage() for r in caplog.records)
+
+
+def test_non_list_end_user_targets_logs_warning(caplog) -> None:
+    """A hand-edited config.yaml can set cron.end_user_targets to a scalar
+    that is neither a string nor a list (e.g. a bare number or boolean).
+    That silently disables the end-user safety net; it must at least log."""
+    import logging
+
+    cfg = {"cron": {"end_user_targets": 5}}
+
+    with caplog.at_level(logging.WARNING, logger="cron.scheduler"):
+        result = resolve_cron_audience(UNFLAGGED_AMINA_JOB, cfg)
+
+    assert result == "operator"
+    assert any("end_user_targets" in r.getMessage() for r in caplog.records)
+
+
 def test_operator_alert_delivers_unwrapped(monkeypatch) -> None:
     """The alert must NOT go through _deliver_result's default cron-response
     wrapper: that header/footer names a job ("cron operator alert") that
