@@ -1097,7 +1097,8 @@ def test_away_release_carries_the_real_attempt_no(db, fake_deliver):
     tick._meds_series(db, AFTERNOON, CFG)             # удержана как away
     assert fake_deliver.calls == []
 
-    tick._meds_series(db, "2026-07-20T11:40:00+00:00", CFG)   # событие кончилось
+    # событие кончилось в 11:30 -> away-гейт отпускает дозу
+    tick._meds_series(db, "2026-07-20T11:40:00+00:00", CFG)
 
     assert len(fake_deliver.calls) == 1
     raw = fake_deliver.calls[0]["raw"]
