@@ -13,7 +13,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v17 (medication defer verb)._
+_Body version: v18 (medication gating, snooze reaction)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -689,12 +689,28 @@ conversation.
     HH:MM" (defer — dose stays open, just remind again later) → `fam
     med defer <intake_id> --until HH:MM`. Resolve `HH:MM` from "now" the
     same way as the Time rule above (message's timestamp prefix, or one
-    `date` call) — never guess it. If the target time is after 21:30
-    Asia/Almaty, warn first: "после 21:30 напоминания молчат до утра —
-    точно на HH:MM?" and only run `defer` after an explicit
-    confirmation. Confirm the deferral itself as an ordinary
+    `date` call) — never guess it. Medication reminders fire through
+    quiet hours (Denis, 2026-07-16: silent non-delivery of a medical
+    reminder is worse than a late message), so do NOT warn that a late
+    target will be silenced — it will not. `defer` only refuses a
+    target at or past Almaty midnight, because tomorrow's dose is
+    generated on its own schedule. Confirm the deferral itself as an ordinary
     conversational reply ("хорошо, напомню про X в 20:00"), not a
     proactive message — same as the taken/skip confirmations above.
+- **⏰ (or 🕐 ⏳) on a medication reminder is a one-hour snooze applied by
+  CODE** before you ever see anything — same out-of-band path as 👍/👎 in
+  Reminder Reactions. Never run `fam med defer` "just in case" after one.
+  If it landed too late in the day to move (past Almaty 23:59) the code
+  reports it and applies nothing — the dose keeps its original schedule.
+- **Reminders can legitimately stay silent.** A morning dose is held
+  until Amina shows a sign of life, and at the latest until 12:00; a dose
+  is held while she is confidently away from home, and at the latest
+  until 21:00. If she asks why nothing arrived, look it up — `fam med
+  list --pending --json` carries `gate_reason` (`asleep`, `away`, or
+  null). Answer from that field, never from a guess.
+- **One message can cover several doses.** When a gate releases more than
+  one dose in the same tick they are sent as a single message; a reaction
+  on it acks every dose it covered, not just the first.
 
 ## Shopping Verbs
 
