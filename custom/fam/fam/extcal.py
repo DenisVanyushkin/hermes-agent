@@ -3224,7 +3224,10 @@ def export_own(conn, cfg, request=None, now_utc=None):
 
 def _strip_valarm_ics(text):
     """Raw VCALENDAR text -> the same text with every VALARM sub-component
-    (`BEGIN:VALARM` ... `END:VALARM`) removed, everything else preserved.
+    (`BEGIN:VALARM` ... `END:VALARM`) removed, everything else preserved --
+    or `None` if `text` is too malformed/truncated to safely write back
+    (fix-round 1, finding I3: a resource that is NOT provably intact must
+    never be re-PUT as a truncated stand-in for the rest of her event).
 
     Reuses `_unfold` (the same RFC 5545 unfolding `parse_ics` itself uses)
     so a VALARM boundary line that happens to be folded across a line
@@ -3235,16 +3238,51 @@ def _strip_valarm_ics(text):
     meaning (fold POINTS may differ -- RFC-legal, and `parse_ics` treats
     both forms identically).
 
-    Never raises: garbage input is processed line-by-line and returned
-    best-effort; empty/falsy input returns "".
+    Integrity checks (fix-round 1, finding I3) -- ANY of these makes this
+    function return `None` instead of a (possibly truncated) string:
+      - an unclosed `BEGIN:VALARM` (no matching `END:VALARM` before the
+        text ends) -- the ORIGINAL code let its own `in_alarm` flag stay
+        True to the end of the text, silently dropping EVERYTHING after
+        it (`END:VEVENT`, `END:VCALENDAR`, any later property) as if it
+        had been part of the alarm. That is exactly the truncation this
+        rewrite refuses to produce.
+      - an unbalanced `BEGIN:`/`END:` line count anywhere in the resource
+        (not just inside VALARM) -- the cheapest general proxy for "this
+        GET came back truncated" (e.g. a network hiccup mid-read), since
+        a genuinely complete VCALENDAR/VEVENT/VALARM resource always
+        closes everything it opens.
+      - a missing `END:VEVENT` or a missing `END:VCALENDAR` -- the two
+        closing lines a real, complete single-event resource must always
+        carry.
+    None of these checks second-guess VALARM detection itself (still one
+    case-insensitive `BEGIN:VALARM`/`END:VALARM` line pair, same as
+    before, still correct for multiple back-to-back VALARM blocks and for
+    `BEGIN:valarm`-style casing -- review confirmed both already work and
+    asked that they be left alone).
+
+    Never raises: garbage/truncated input degrades to `None`, never a
+    partial string; empty/falsy input also returns `None` (there is
+    nothing here to safely write back either).
     """
     if not text:
-        return ""
+        return None
     lines = _unfold(text)
     out = []
     in_alarm = False
+    begin_count = 0
+    end_count = 0
+    saw_end_vevent = False
+    saw_end_vcalendar = False
     for line in lines:
         upper = line.strip().upper()
+        if upper.startswith("BEGIN:"):
+            begin_count += 1
+        elif upper.startswith("END:"):
+            end_count += 1
+            if upper == "END:VEVENT":
+                saw_end_vevent = True
+            elif upper == "END:VCALENDAR":
+                saw_end_vcalendar = True
         if upper == "BEGIN:VALARM":
             in_alarm = True
             continue
@@ -3254,8 +3292,14 @@ def _strip_valarm_ics(text):
         if in_alarm:
             continue
         out.append(line)
+    if in_alarm:
+        return None  # unclosed VALARM -- refuse rather than truncate
+    if begin_count != end_count:
+        return None  # unbalanced BEGIN/END -- looks truncated
+    if not (saw_end_vevent and saw_end_vcalendar):
+        return None  # missing a required closing component
     if not out:
-        return ""
+        return None
     folded = [_export_fold_line(l) for l in out]
     return "\r\n".join(folded) + "\r\n"
 
@@ -3271,14 +3315,36 @@ def drop_valarm(cfg, href, etag, request=None):
     implements for the other collection (never a second implementation of
     either).
 
+    Two refusal cases added in fix-round 1, BOTH before any PUT is
+    attempted:
+      - finding I3: `_strip_valarm_ics` returned `None` (malformed or
+        truncated GET response) -- writing back a resource that isn't
+        provably intact would risk clobbering the rest of her event.
+      - finding I2: no etag to write with, EITHER on the way in (`etag`
+        arg empty -- a real, if rare, gap: the sibling update path a few
+        hundred lines up this same file already has to `COALESCE` around
+        exactly this) or after a 412's re-read (`_export_reread_etag`
+        returned nothing). `_export_put`'s own docstring says writing
+        with no `If-Match` is fine ONLY because ITS collection holds
+        nothing but this module's own prior writes -- that reasoning
+        does NOT carry over here: this collection is HERS, and she may
+        have edited the very same resource (on her phone) between import
+        and this `adopt` call. An unconditional PUT here would silently
+        overwrite whatever she just wrote with the copy this function
+        read moments earlier. Refusing is strictly safer than a 412 retry
+        that isn't actually conditional on anything.
+
     Returns `(ok, new_etag, detail)`:
       - `ok=True`: the PUT succeeded (with or without the one retry);
         `new_etag` is whatever the server returned (may be None -- some
         servers only hand back ETag on a follow-up GET, same caveat
         `_export_put` already documents for the other collection).
-      - `ok=False`: the initial GET, or the PUT (including after the one
-        retry), failed; `detail` is a short human-readable reason (status
-        code only -- never the auth header, never the response body).
+      - `ok=False`: the initial GET failed, the resource didn't pass the
+        integrity check above, no etag was available to write with
+        safely, or the PUT itself (including after the one retry)
+        failed; `detail` is a short human-readable reason (status code or
+        a plain description -- never the auth header, never the response
+        body).
 
     Never raises: `request(...)` (the injected seam, `_request` by
     default) already never raises; any failure degrades to
@@ -3287,15 +3353,29 @@ def drop_valarm(cfg, href, etag, request=None):
     still ring once more for this event" -- NOT as a reason to undo the
     ownership flip that already happened (design decision, task 9 brief):
     she asked Hermes to remind her, so silence from Hermes because of a
-    network hiccup on the OTHER phone's copy would be the worse failure
-    mode of the two.
+    network hiccup (or a refused unsafe write) on the OTHER phone's copy
+    would be the worse failure mode of the two.
     """
     request = request or _request
     resp = request("GET", href, headers=_export_headers(cfg), timeout=DEFAULT_TIMEOUT)
     if resp is None or resp.status not in (200, 207):
         status = resp.status if resp is not None else None
         return False, None, f"GET {href} failed (status={status})"
+
     stripped = _strip_valarm_ics(resp.text)
+    if stripped is None:
+        return False, None, (
+            f"GET {href} returned a malformed or truncated ICS resource "
+            f"-- refusing to write it back"
+        )
+
+    if not etag:
+        return False, None, (
+            "no external_etag on record for this resource -- refusing an "
+            "unconditional PUT into her own collection (unlike the "
+            "\"Гермес\" write-target, this collection can hold her own "
+            "concurrent edits)"
+        )
 
     ok, new_etag, status, conflict = _export_put(cfg, href, stripped, etag, request)
     if conflict:
@@ -3304,6 +3384,14 @@ def drop_valarm(cfg, href, etag, request=None):
         # attempt's own outcome. Same helper `_export_put_event` already
         # uses for its own 412 path.
         fresh_etag = _export_reread_etag(cfg, href, request)
+        if not fresh_etag:
+            # Fix-round 1, finding I2: a retry with no etag at all would
+            # be an unconditional overwrite of a resource that is NOT
+            # ours -- refuse instead (see this function's own docstring).
+            return False, None, (
+                f"412 conflict on {href}, and the re-read found no fresh "
+                f"etag -- refusing an unconditional retry PUT"
+            )
         ok, new_etag, status, _conflict2 = _export_put(cfg, href, stripped, fresh_etag, request)
     if not ok:
         return False, None, f"PUT {href} failed (status={status})"

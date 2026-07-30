@@ -399,7 +399,14 @@ show after cancel), make a second, separate terminal call.
     event, and nothing remembers what it was; if she disowns something
     expecting her phone to start ringing again on its own, say so
     plainly: "сниму со своей стороны, но напоминание на телефоне само не
-    вернётся — надо будет поставить его заново".
+    вернётся — надо будет поставить его заново". **`disown` is only for
+    an event that actually came from her iPhone in the first place** —
+    fam refuses (exit 2) a plain Hermes-created event that was never
+    imported, because flipping it to 'iphone' would drop its only
+    reminder source with nothing on her phone to replace it; "не
+    напоминай про это" about an ordinary Hermes event is `fam rem cancel
+    <event_id>` (Reminder Reactions above — stops the chain, keeps the
+    event), not `disown`.
 
 ## Quick Reference
 

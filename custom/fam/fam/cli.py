@@ -636,9 +636,25 @@ def cmd_cal_disown(args):
     If she wants her phone to ring for this event again, she has to add a
     reminder to it herself, on her phone.
 
-    Unknown event_id, or an event that is already owner='iphone' (nothing
-    to disown), raises ValueError -> exit 2, same contract as `cal
-    adopt`'s own already-hermes guard, mirrored.
+    Unknown event_id, an event that is already owner='iphone' (nothing to
+    disown), OR an owner='hermes' event that was never actually imported
+    from her iPhone in the first place (no `external_uid`/`external_href`
+    -- a plain Hermes-created event) all raise ValueError -> exit 2.
+
+    The never-imported guard is fix-round 1, finding C1: without it, "не
+    напоминай про это" said about a perfectly ordinary Hermes-created
+    event would flip its owner to 'iphone' and drop its reminder chain
+    (`rem.regenerate`'s own owner='iphone' early exit) even though there
+    is NOTHING on her iPhone that could ever ring for it -- a silent,
+    total loss of the only reminder source that event had. That is the
+    exact inverse of this feature's own `cal adopt` rule ("a VALARM-strip
+    failure must not silence Hermes -- one extra ring beats silence"):
+    here the failure mode Hermes must refuse is producing silence by a
+    perfectly ordinary, everyday phrase. `fam rem cancel <event_id>` is
+    the correct verb for "stop reminding me about a Hermes event" (it
+    drops the chain but leaves the event itself alone) -- not `disown`,
+    which is only meaningful for an event her iPhone actually has its own
+    copy of.
     """
     conn = famdb.connect()
     e = cal.get(conn, args.id)
@@ -648,21 +664,38 @@ def cmd_cal_disown(args):
         raise ValueError(
             f"event {args.id} is already owner=iphone -- nothing to disown"
         )
+    if not (e.get("external_uid") or e.get("external_href")):
+        raise ValueError(
+            f"event {args.id} was never imported from her iPhone (no "
+            f"external_uid/external_href) -- disown is only for an event "
+            f"that originated on her iPhone; for a plain Hermes event use "
+            f"`fam rem cancel {args.id}` to stop its reminders instead"
+        )
     conn.execute(
         "UPDATE events SET owner='iphone' WHERE id=? AND owner='hermes'",
         (args.id,),
     )
+    # Minor #4 (fix-round 1): capture how many pending reminders actually
+    # get dropped, the same way `cal adopt`'s own `reminders_created`
+    # already surfaces its side of this -- rem.regenerate() itself only
+    # ever returns the CREATED count (0 here, since owner is now
+    # 'iphone' -- see its own early-exit docstring), never touches
+    # rem.py to add a second return value for this.
+    removed = conn.execute(
+        "SELECT COUNT(*) AS n FROM reminders WHERE event_id=? AND status='pending'",
+        (args.id,),
+    ).fetchone()["n"]
     rem.regenerate(conn, args.id)
-    audit.log(conn, "cal.disown", {"id": args.id})
+    audit.log(conn, "cal.disown", {"id": args.id, "reminders_removed": removed})
     conn.commit()
 
-    out = {"id": args.id, "owner": "iphone"}
+    out = {"id": args.id, "owner": "iphone", "reminders_removed": removed}
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
     else:
-        print(f"disowned event {args.id}: owner=iphone, Hermes reminder "
-              f"chain removed (her phone's own alarm, if any, is not "
-              f"restored -- see cal disown's own limitation)")
+        print(f"disowned event {args.id}: owner=iphone, {removed} pending "
+              f"reminder(s) removed (her phone's own alarm, if any, is "
+              f"not restored -- see cal disown's own limitation)")
     return 0
 
 def cmd_cal_show(args):
