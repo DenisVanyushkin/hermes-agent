@@ -16,8 +16,10 @@ from datetime import datetime, timedelta
 from fam import cal, places, road, tick, whereami
 
 HOME_LAT, HOME_LON = 43.197391, 76.872737
-# ~9 км от дома -- достаточно далеко, чтобы прямую оценку отсюда нельзя
-# было спутать с оценкой от дома
+# Расстояние до ДОМА тут ни при чём -- тесты различают HOME и AWAY по
+# тому, что каждая точка на разном расстоянии от DEST: HOME -> DEST
+# ≈6.28 км (18 мин), AWAY -> DEST ≈6.73 км (19 мин). Запас всего в одну
+# минуту, но straight_line_minutes округляет по-разному, и этого хватает.
 AWAY_LAT, AWAY_LON = 43.26, 76.94
 DEST_LAT, DEST_LON = 43.20, 76.95
 
@@ -193,6 +195,16 @@ def test_persisted_origin_is_the_point_the_minutes_were_measured_from(
         "SELECT road_origin_lat, road_origin_lon, road_origin_source "
         "FROM events WHERE id=?", (event["id"],)).fetchone()
     assert row["road_origin_source"] == "hint"
+
+    home_minutes = road.straight_line_minutes(
+        HOME_LAT, HOME_LON, DEST_LAT, DEST_LON, _cfg())
+    away_minutes = road.straight_line_minutes(
+        AWAY_LAT, AWAY_LON, DEST_LAT, DEST_LON, _cfg())
+    assert home_minutes != away_minutes, (
+        "HOME and AWAY collapsed onto the same travel-minute figure -- "
+        "the assertion below would pass no matter which origin got "
+        "persisted, so the test would be meaningless")
+
     assert out["minutes"] == road.straight_line_minutes(
         row["road_origin_lat"], row["road_origin_lon"],
         DEST_LAT, DEST_LON, _cfg()), (
@@ -255,9 +267,12 @@ def test_tick_does_not_resolve_an_origin_for_a_far_future_event(db, monkeypatch)
     """minutes_to_leave > самого широкого порога -> ни одно окно не
     открыто, тело цикла не исполняется ни разу, и origin был бы
     выброшен неиспользованным. На календаре из N будущих событий это N
-    лишних проходов по лестнице в минуту, а внутри
-    whereami_predict_horizon_min лестница включает _car_origin -- то
-    есть поход в StarLine."""
+    лишних проходов по лестнице в минуту. Живого опроса StarLine среди
+    сэкономленного нет -- may_poll требует at - now <=
+    whereami_live_poll_within_min (60), а это уже внутри самого
+    широкого порога, где ветка и так открыта; экономятся обращения к
+    своей же базе -- подсказка, кэшированная строка car_metrics,
+    календарный запрос."""
     monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
     _tick_event(db, monkeypatch, minutes_ahead=600)   # далеко за T-120
     calls = _spy_resolve_origin(monkeypatch)
@@ -296,6 +311,16 @@ def test_tick_persists_the_origin_it_computed_the_minutes_from(db, monkeypatch):
         "SELECT travel_min_road, road_origin_lat, road_origin_lon, "
         "road_origin_source FROM events WHERE id=?", (e["id"],)).fetchone()
     assert row["road_origin_source"] == "hint"
+
+    home_minutes = road.straight_line_minutes(
+        HOME_LAT, HOME_LON, DEST_LAT, DEST_LON, _cfg())
+    away_minutes = road.straight_line_minutes(
+        AWAY_LAT, AWAY_LON, DEST_LAT, DEST_LON, _cfg())
+    assert home_minutes != away_minutes, (
+        "HOME and AWAY collapsed onto the same travel-minute figure -- "
+        "the assertion below would pass no matter which origin got "
+        "persisted, so the test would be meaningless")
+
     assert row["travel_min_road"] == road.straight_line_minutes(
         row["road_origin_lat"], row["road_origin_lon"],
         DEST_LAT, DEST_LON, _cfg()), (

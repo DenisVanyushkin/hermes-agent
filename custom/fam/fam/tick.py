@@ -188,7 +188,9 @@ def road_recompute(conn, now_utc=None, cfg=None):
     # shared location or an in-progress event can supply a start point
     # that road_home_lat/lon never had. Asking the resolver once here,
     # with no event, answers "is there ANY origin at all today" -- the
-    # per-event resolution still happens inside road.compute_travel_min.
+    # per-event origin (when a threshold window is open) is resolved
+    # here below and threaded down into road.compute_travel_min, which
+    # does not resolve again.
     if whereami.resolve_origin(conn, cfg, now_utc=now_utc) is None:
         return 0
 
@@ -245,8 +247,12 @@ def road_recompute(conn, now_utc=None, cfg=None):
             # thresholds, а он при minutes_to_leave больше самого
             # широкого порога не исполняется ни разу. На календаре из N
             # будущих событий это N лишних проходов по лестнице в
-            # минуту, и внутри whereami_predict_horizon_min лестница
-            # включает _car_origin, то есть поход в StarLine.
+            # минуту. Живого опроса StarLine среди сэкономленного нет —
+            # may_poll требует at - now <= whereami_live_poll_within_min
+            # (60), а это уже внутри самого широкого порога, где ветка и
+            # так открыта; экономятся обращения к своей же базе —
+            # подсказка, кэшированная строка car_metrics, календарный
+            # запрос.
             origin = None
             origin_moved = False
             if thresholds and minutes_to_leave <= thresholds[0]:
