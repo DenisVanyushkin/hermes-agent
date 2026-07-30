@@ -75,7 +75,10 @@ from gateway.telegram_reactions import strip_telegram_reaction_only_response as 
 from gateway.module_skew import detect_module_skew, take_snapshot
 from gateway.stale_guard import (
     auto_restart_allowed,
+    budget_path,
+    budget_writable,
     format_budget_exhausted_alert,
+    format_budget_unwritable_alert,
     format_skew_alert,
     get_stale_guard_config,
     record_auto_restart,
@@ -5296,8 +5299,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         from gateway.scale_to_zero import is_idle
 
+        # _active_work_count(), НЕ _running_agent_count(): cron-джобы крутятся
+        # на своём пуле потоков вне _running_agents, и рестарт посреди джобы —
+        # ровно та нагрузка, которую сторож обязан защищать.
         return is_idle(
-            running_agent_count=self._running_agent_count(),
+            running_agent_count=self._active_work_count(),
             seconds_since_last_inbound=time.time() - self._last_inbound_at,
             idle_timeout_seconds=idle_timeout_seconds,
             has_live_background_work=self._scale_to_zero_has_live_background_work(),
@@ -25165,18 +25171,85 @@ def _stale_guard_load_config():
     return load_config() or {}
 
 
-def _stale_guard_tick(runner, cfg: dict, alert_state: dict) -> None:
+async def _stale_guard_request_restart(runner) -> None:
+    """Вызвать ``request_restart`` УЖЕ на event loop.
+
+    ``request_restart`` защёлкивает ``_restart_task_started`` и только потом
+    зовёт ``asyncio.create_task``, которому нужен запущенный loop в ТЕКУЩЕМ
+    потоке. Из потока housekeeping это RuntimeError уже после защёлки —
+    и ``/restart`` с ``hermes gateway restart`` умирали бы навсегда.
+    """
+    runner.request_restart(via_service=True)
+
+
+def _stale_guard_arm(config, *, take_snapshot_now: bool = True):
+    """Решить, вооружать ли сторож, и снять снимок. Никогда не бросает.
+
+    Возвращает ``(cfg | None, boot_label | None)``. ``None`` == сторож не
+    вооружён: ни снимка, ни тиков — «без блока в конфиге НИЧЕГО не
+    происходит».
+    """
+    try:
+        cfg = get_stale_guard_config(config)
+        if not cfg:
+            return None, None
+
+        # Авторестарт делается выходом с кодом 75 — это работает только если
+        # процесс кто-то поднимет обратно. Без супервизора «рестарт» означал
+        # бы просто смерть гейтвея (ср. slash_commands: /restart выбирает
+        # путь тем же предикатом).
+        from gateway.restart import is_gateway_supervisor_process
+
+        under_service = is_gateway_supervisor_process()
+        in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+        if not (under_service or in_container):
+            logger.warning(
+                "Stale-code guard NOT armed: no supervisor detected — "
+                "exit 75 would leave the gateway down"
+            )
+            return None, None
+
+        home = _stale_guard_hermes_home()
+        if not budget_writable(home):
+            logger.error(
+                "Stale-code guard NOT armed: budget file %s is not writable",
+                budget_path(home),
+            )
+            return None, None
+
+        boot_label = datetime.now().strftime("%H:%M:%S")
+        if take_snapshot_now:
+            n = take_snapshot(
+                _STALE_GUARD_PROJECT_ROOT, watch_files=cfg["watch_files"]
+            )
+            logger.info("Stale-code guard armed: %d file(s) fingerprinted", n)
+        return cfg, boot_label
+    except Exception:  # noqa: BLE001 — вооружение не имеет права ронять старт
+        logger.warning("stale-guard arming failed", exc_info=True)
+        return None, None
+
+
+def _stale_guard_tick(runner, cfg: dict, alert_state: dict, loop=None) -> None:
     """Один опрос детектора. Никогда не бросает наружу.
 
     ``alert_state`` живёт столько же, сколько процесс: скос не исчезает сам,
-    поэтому алерт шлётся один раз на эпизод, а не по временно́му дедупу.
+    поэтому алерт шлётся один раз на эпизод, а не по временно́му дедупу. Там
+    же защёлка ``guard_disabled`` — исчерпанный бюджет выключает авторестарт
+    до ручного вмешательства, а не на скользящий час.
     """
     try:
+        if alert_state.get("guard_disabled"):
+            return
+
         changed = detect_module_skew(_STALE_GUARD_PROJECT_ROOT)
         if not changed:
             return
 
-        alert_cfg = get_alert_config(_stale_guard_load_config())
+        try:
+            alert_cfg = get_alert_config(_stale_guard_load_config())
+        except Exception:  # noqa: BLE001 — config.yaml правят на живую
+            logger.warning("stale-guard: alert config unreadable", exc_info=True)
+            alert_cfg = None
 
         if not alert_state.get("skew_alerted"):
             alert_state["skew_alerted"] = True
@@ -25189,13 +25262,24 @@ def _stale_guard_tick(runner, cfg: dict, alert_state: dict) -> None:
                     alert_cfg["channel"],
                     format_skew_alert(changed, alert_state.get("boot_label", "старт")),
                 )
+            # Алерт уходит демон-потоком (`hermes send` подпроцессом); выход
+            # процесса убил бы его до отправки, и рестарт выглядел бы для
+            # человека необъяснимым. Откладываем рестарт на один тик — заодно
+            # окно вмешаться.
+            return
 
         home = _stale_guard_hermes_home()
         now = time.time()
         if not auto_restart_allowed(home, now, cfg["max_auto_restarts_per_hour"]):
+            # Спека: «бюджет исчерпан → авторестарт выключается до ручного
+            # вмешательства». Без защёлки сторож сам оживал бы через час.
+            alert_state["guard_disabled"] = True
             if not alert_state.get("budget_alerted"):
                 alert_state["budget_alerted"] = True
-                logger.error("stale-guard: auto-restart budget exhausted")
+                logger.error(
+                    "stale-guard: auto-restart budget exhausted — "
+                    "auto-restart disabled for the life of this process"
+                )
                 if alert_cfg:
                     send_operator_alert(
                         alert_cfg["channel"],
@@ -25206,14 +25290,40 @@ def _stale_guard_tick(runner, cfg: dict, alert_state: dict) -> None:
         if not runner._stale_guard_is_idle(cfg["idle_timeout_minutes"] * 60):
             return
 
-        record_auto_restart(home, now)
+        # Бюджет — единственная защита от петли рестартов. Если его нельзя
+        # записать, не рестартуем вовсе (fail closed).
+        if not budget_writable(home):
+            alert_state["guard_disabled"] = True
+            if not alert_state.get("budget_write_alerted"):
+                alert_state["budget_write_alerted"] = True
+                if alert_cfg:
+                    send_operator_alert(
+                        alert_cfg["channel"],
+                        format_budget_unwritable_alert(budget_path(home)),
+                    )
+            return
+
+        fut = safe_schedule_threadsafe(
+            _stale_guard_request_restart(runner),
+            loop,
+            logger=logger,
+            log_message="stale-guard: failed to schedule restart on the event loop",
+            log_level=logging.ERROR,
+        )
+        if fut is None:
+            return
+
         logger.warning("stale-guard: idle and stale — requesting planned restart")
-        runner.request_restart(via_service=True)
+        if not record_auto_restart(home, now):
+            # Рестарт уже поставлен в очередь, но метка не легла: дальше
+            # автоматике доверять нельзя.
+            alert_state["guard_disabled"] = True
     except Exception:  # noqa: BLE001 — сторож не имеет права ронять housekeeping
         logger.warning("stale-guard tick failed", exc_info=True)
 
 
-def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, runner=None):
+def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, runner=None,
+                                stale_guard_cfg=None, stale_guard_boot_label=None):
     """Background thread for gateway-only periodic chores (NOT cron).
 
     Split out of the historical ``_start_cron_ticker`` so the cron *trigger*
@@ -25236,9 +25346,17 @@ def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop
     CURATOR_EVERY = 60       # ticks — poll hourly (inner gate handles the real cadence)
     AUTO_ARCHIVE_EVERY = 60  # ticks — poll hourly (state_meta gate owns the real cadence)
 
-    _stale_cfg = get_stale_guard_config(_stale_guard_load_config())
+    # Конфиг сторожа приходит готовым с загрузочного пути (там же снят
+    # снимок): load_config() здесь читал бы живой, уже поменявшийся файл и
+    # мог бы бросить — а исключение до первого тика убило бы весь поток
+    # housekeeping (channel directory, кеши, пасты, куратор, авто-архив).
+    _stale_cfg = stale_guard_cfg
     STALE_GUARD_EVERY = _stale_cfg["check_every_minutes"] if _stale_cfg else 0
-    _stale_alert_state = {"boot_label": datetime.now().strftime("%H:%M:%S")}
+    # boot_label — момент снятия СНИМКА, а не старта этого потока: именно он
+    # показывается человеку как «Загружены в память».
+    _stale_alert_state = {
+        "boot_label": stale_guard_boot_label or datetime.now().strftime("%H:%M:%S")
+    }
 
     logger.info("Gateway housekeeping started (interval=%ds)", interval)
     tick_count = 0
@@ -25326,7 +25444,7 @@ def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop
                 logger.debug("Auto-archive tick error: %s", e)
 
         if STALE_GUARD_EVERY and runner is not None and tick_count % STALE_GUARD_EVERY == 0:
-            _stale_guard_tick(runner, _stale_cfg, _stale_alert_state)
+            _stale_guard_tick(runner, _stale_cfg, _stale_alert_state, loop=loop)
 
         stop_event.wait(timeout=interval)
     logger.info("Gateway housekeeping stopped")
@@ -25908,12 +26026,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Снимок берётся ЗДЕСЬ, после preload: sys.modules ещё совпадает с диском.
     # Раньше — не все горячие модули загружены; позже — можно застать уже
     # разъехавшееся дерево и принять его за исходное.
-    _stale_guard_cfg = get_stale_guard_config(_stale_guard_load_config())
-    if _stale_guard_cfg:
-        _n = take_snapshot(
-            _STALE_GUARD_PROJECT_ROOT, watch_files=_stale_guard_cfg["watch_files"]
-        )
-        logger.info("Stale-code guard armed: %d file(s) fingerprinted", _n)
+    _stale_guard_cfg, _stale_guard_boot_label = _stale_guard_arm(
+        _stale_guard_load_config()
+    )
 
     # Start the gateway
     success = await runner.start()
@@ -26012,6 +26127,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             "adapters": runner.adapters,
             "loop": asyncio.get_running_loop(),
             "runner": runner,
+            "stale_guard_cfg": _stale_guard_cfg,
+            "stale_guard_boot_label": _stale_guard_boot_label,
         },
         daemon=True,
         name="gateway-housekeeping",
