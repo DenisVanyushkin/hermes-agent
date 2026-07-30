@@ -1470,8 +1470,21 @@ def _followup(conn, now_utc, cfg):
 
     prep_candidate = _followup_prep_check_candidate(conn, now_dt, date_local, cfg)
 
+    held_meds = [
+        {"name": r["name"],
+         "plan_local": _parse_utc(r["plan_ts_utc"]).astimezone(
+             ALMATY).strftime("%H:%M"),
+         "reason": r["gate_reason"]}
+        for r in conn.execute(
+            "SELECT d.name AS name, m.plan_ts_utc AS plan_ts_utc, "
+            "       m.gate_reason AS gate_reason "
+            "FROM med_intakes m JOIN meds d ON d.id = m.med_id "
+            "WHERE m.status='pending' AND m.gate_reason IS NOT NULL "
+            "ORDER BY m.plan_ts_utc")
+    ]
+
     has_recap = bool(outbound_events and related_plans)
-    if not has_recap and prep_candidate is None:
+    if not has_recap and prep_candidate is None and not held_meds:
         status = "no_events" if not outbound_events else "no_plans"
     else:
         raw = {
@@ -1490,6 +1503,11 @@ def _followup(conn, now_utc, cfg):
         if related_plans:
             lines.append("Открытые планы:")
             lines.extend(p["title"] for p in related_plans)
+        if held_meds:
+            raw["held_meds"] = held_meds
+            listed = ", ".join(
+                f"{h['name']} ({h['plan_local']})" for h in held_meds)
+            lines.append(f"Сегодня не отмечено: {listed}.")
         if prep_candidate is not None:
             raw["prep_check"] = {
                 "event_id": prep_candidate["id"],
@@ -1527,7 +1545,8 @@ def _followup(conn, now_utc, cfg):
     audit.log(conn, "tick.followup",
               {"date_local": date_local, "status": status,
                "n_events": len(outbound_events),
-               "n_plans": len(related_plans)})
+               "n_plans": len(related_plans),
+               "n_held_meds": len(held_meds)})
     conn.commit()
     return status
 

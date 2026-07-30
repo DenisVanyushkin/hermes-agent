@@ -781,3 +781,33 @@ def test_group_release_end_to_end_through_real_deliver(db, monkeypatch):
     assert out["result"] == "confirmed"
     assert _intake(db, a)["status"] == "taken"
     assert _intake(db, b)["status"] == "taken"
+
+
+def test_list_pending_exposes_gate_reason(db, fake_deliver):
+    _pending_intake(db)
+    tick._meds_series(db, MORNING, CFG)
+
+    rows = meds.list_pending(db)
+    assert len(rows) == 1
+    assert rows[0]["gate_reason"] == "asleep"
+
+
+def test_list_pending_gate_reason_none_when_not_held(db):
+    _pending_intake(db)
+    rows = meds.list_pending(db)
+    assert rows[0]["gate_reason"] is None
+
+
+def test_followup_mentions_held_doses(db, fake_deliver, monkeypatch):
+    fake_deliver.responses = ["sent"]
+    _pending_intake(db)
+    tick._meds_series(db, MORNING, CFG)          # доза удержана как asleep
+
+    # 20:00 Алматы = 15:00 UTC
+    tick._followup(db, "2026-07-20T15:00:00+00:00", CFG)
+
+    calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert len(calls) == 1
+    assert calls[0]["raw"]["held_meds"] == [
+        {"name": "Эутирокс", "plan_local": "09:00", "reason": "asleep"}]
+    assert "Эутирокс" in calls[0]["human_fallback"]

@@ -112,12 +112,16 @@ def list_pending(conn):
     Returns a list of dicts: intake_id, med_id, name, plan_ts_utc,
     status (always "pending" -- included so a caller need not assume
     it, same as meds.take()/skip()'s result dicts always echoing
-    status back).
+    status back), deferred_until_utc, and gate_reason -- why the tick is
+    holding this dose ("asleep" / "away"), or None if it is not
+    currently gated. Needed so the agent can answer "why didn't you
+    remind me" with a fact instead of a guess (Task 9).
     """
     rows = conn.execute(
         "SELECT m.id AS intake_id, m.med_id AS med_id, d.name AS name, "
         "m.plan_ts_utc AS plan_ts_utc, m.status AS status, "
-        "m.deferred_until_utc AS deferred_until_utc "
+        "m.deferred_until_utc AS deferred_until_utc, "
+        "m.gate_reason AS gate_reason "
         "FROM med_intakes m JOIN meds d ON d.id = m.med_id "
         "WHERE m.status='pending' ORDER BY m.plan_ts_utc"
     ).fetchall()
