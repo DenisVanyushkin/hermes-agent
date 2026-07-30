@@ -1105,52 +1105,7 @@ def _meds_series(conn, now_utc, cfg):
                                 ALMATY).strftime("%H:%M")})
                     continue
 
-                # attempt_no counts existing sent_messages rows for this
-                # intake rather than a new counter column: that table
-                # already holds one row per genuinely delivered send of
-                # this dose (gate.deliver only inserts one on a
-                # successful send -- see gate.py's sent_ref handling),
-                # and gate holds above never call gate.deliver, so they
-                # never add a row here either. Counting it this way
-                # naturally excludes held ticks, which is exactly what
-                # we want: a dose held twice then sent should still read
-                # as attempt 1, not attempt 3.
-                #
-                # Two tables are consulted, not one (fix round 1 finding):
-                # a multi-dose group release (tick._meds_series's post-loop
-                # block, react.record_sent) writes ONE sent_messages row
-                # keyed to only the FIRST dose's intake_id (ref_id is a
-                # scalar column); every other dose in that group is
-                # recorded solely in sent_message_refs. A plain COUNT over
-                # sent_messages alone would make every non-first dose of a
-                # group release read back as attempt_no=1 forever,
-                # reproducing the identical first-attempt sentence on its
-                # next repeat -- exactly the bug this task exists to
-                # prevent. The two SELECTs are combined with UNION (not
-                # UNION ALL) so they dedupe both against each other (the
-                # first dose's id appears in both tables for the same
-                # message -- react.record_sent inserts every id in
-                # ref_ids into sent_message_refs, including the one also
-                # stored as sent_messages.ref_id) and against themselves
-                # (sent_message_refs has no UNIQUE(sent_message_id, ref_id)
-                # constraint, so a re-record could in principle fan out
-                # duplicate rows for the same message+dose -- a known,
-                # separately-deferred wart; UNION's row-level dedup
-                # neutralises it here without needing the constraint).
-                # Not covered here: gate.deliver's own "delivered but no
-                # message_id" case (ok=True, message_id=None) skips
-                # react.record_sent entirely, so that send leaves no row
-                # in either table and would still undercount by one --
-                # pre-existing gate.deliver behaviour, out of scope.
-                attempt_no = conn.execute(
-                    "SELECT COUNT(*) FROM ("
-                    "  SELECT id FROM sent_messages"
-                    "  WHERE kind='med' AND ref_id=?"
-                    "  UNION"
-                    "  SELECT sent_message_id FROM sent_message_refs"
-                    "  WHERE kind='med' AND ref_id=?"
-                    ")", (intake_id, intake_id)
-                ).fetchone()[0] + 1
+                attempt_no = _med_attempt_no(conn, intake_id)
                 minutes_late = int(
                     (now_dt - _parse_utc(row["plan_ts_utc"])).total_seconds()
                     // 60)
@@ -1218,13 +1173,40 @@ def _meds_series(conn, now_utc, cfg):
                 # one dose, one name -> the ordinary "take" shape, so
                 # every downstream reader (gate prompt, react ack) sees
                 # exactly what a non-gated dose produces.
+                #
+                # attempt_no is part of that shape (final review,
+                # Should-fix 6). meds.defer does not clear gate_reason and
+                # the away gate holds REPEATS of a dose Amina was already
+                # told about, so a release is very often attempt 2+: a
+                # 13:00 dose sent at 13:00, held "away" at 13:45,
+                # released at 14:20. Without this key
+                # gate._build_prompt's `raw["attempt_no"] > 1` test read
+                # 1 and appended no variation instruction, silently
+                # disabling Task 8 for every away-gate release. The
+                # wording itself (human_fallback below) is unchanged --
+                # only the metadata was wrong.
                 raw = {"mode": "take", "name": items[0]["name"],
                        "dose": items[0]["dose"], "intake_id": ids[0],
+                       "attempt_no": _med_attempt_no(conn, ids[0]),
                        "plan_local": items[0]["plan_local"], "late": True}
                 human_fallback = (
                     f"{items[0]['name']} за {items[0]['plan_local']} "
                     f"ещё не отмечено.")
             else:
+                # Per-item attempt_no, and deliberately NO top-level one:
+                # a group covers doses with DIFFERENT histories (one
+                # first-ever announcement next to one already repeated
+                # three times), so a single group-level number would be
+                # a fiction, and gate._build_prompt keys the variation
+                # instruction off exactly that top-level value -- a
+                # made-up 1 or 4 would either disable variation or
+                # demand it for a dose being announced for the first
+                # time. The per-item numbers keep the raw honest for the
+                # audit trail and for the rewrite prompt's <data> block
+                # without inventing a group-level fact. The group wording
+                # is a recorded product decision and stays untouched.
+                for item, iid in zip(items, ids):
+                    item["attempt_no"] = _med_attempt_no(conn, iid)
                 raw = {"mode": "take_group", "items": items, "late": True}
                 listed = ", ".join(
                     f"{i['name']} ({i['plan_local']})" for i in items)
@@ -1310,6 +1292,49 @@ def _meds_series(conn, now_utc, cfg):
 
 def _today_almaty(now_utc):
     return _parse_utc(now_utc).astimezone(ALMATY).date().isoformat()
+
+
+def _med_attempt_no(conn, intake_id):
+    """Номер попытки для этой дозы: сколько её отправок уже состоялось,
+    плюс один. Единственный источник этого числа -- им пользуются и
+    обычная ветка "take", и отпускание гейта (Should-fix 6).
+
+    Считаются существующие строки о фактически доставленных сообщениях,
+    а не отдельная колонка-счётчик: gate.deliver вставляет строку только
+    на успешной отправке (см. обработку sent_ref в gate.py), а
+    гейт-удержания вообще не зовут gate.deliver, поэтому удержанные тики
+    сюда естественно не попадают -- доза, удержанная дважды и потом
+    отправленная, читается как попытка 1, а не 3.
+
+    Таблиц ДВЕ, не одна (Task 8, fix round 1): групповое отпускание
+    (post-loop блок _meds_series, react.record_sent) пишет ОДНУ строку
+    sent_messages, привязанную только к ПЕРВОЙ дозе (ref_id -- скаляр);
+    все остальные дозы группы записаны исключительно в
+    sent_message_refs. COUNT только по sent_messages навсегда оставил бы
+    каждую не-первую дозу группы на attempt_no=1 и воспроизводил бы
+    идентичную первую формулировку в её следующем повторе -- ровно то,
+    против чего Task 8 и делался. UNION (не UNION ALL) дедуплицирует и
+    между таблицами (id первой дозы есть в обеих: record_sent пишет в
+    sent_message_refs все ref_ids, включая тот, что лежит в
+    sent_messages.ref_id), и внутри sent_message_refs, у которой нет
+    UNIQUE(sent_message_id, ref_id) -- известная отложенная заноза,
+    здесь нейтрализованная построчной дедупликацией без самого
+    ограничения.
+
+    Не покрыто: случай gate.deliver "доставлено, но без message_id"
+    (ok=True, message_id=None) вообще не зовёт react.record_sent, так
+    что такая отправка не оставляет строки ни в одной таблице и всё ещё
+    недосчитывается на единицу -- доисторическое поведение gate.deliver,
+    вне области правки.
+    """
+    return conn.execute(
+        "SELECT COUNT(*) FROM ("
+        "  SELECT id FROM sent_messages"
+        "  WHERE kind='med' AND ref_id=?"
+        "  UNION"
+        "  SELECT sent_message_id FROM sent_message_refs"
+        "  WHERE kind='med' AND ref_id=?"
+        ")", (intake_id, intake_id)).fetchone()[0] + 1
 
 
 def _release_deferred_key(now_utc, ids):
@@ -1480,6 +1505,11 @@ def _followup(conn, now_utc, cfg):
     respectively -- same "record the null outcome" contract as
     tick.reminders' all-zero run.
 
+    Held medication doses (Task 9) are mentioned too, but only the ones
+    for which the day really is over: today's Almaty day only, and never
+    a dose still holdable by the away gate (gate_reason='away' while now
+    is before med_away_gate_until) -- see the query below.
+
     Otherwise: ONE gate.deliver(kind="followup", force=False) call per
     tick -- an ordinary budget unit, quiet hours respected exactly like
     any other non-reminder kind (gate.deliver's own gate, not duplicated
@@ -1537,17 +1567,35 @@ def _followup(conn, now_utc, cfg):
 
     prep_candidate = _followup_prep_check_candidate(conn, now_dt, date_local, cfg)
 
+    # Гейт-удержанные дозы, о которых стоит сказать вечером -- но не
+    # все pending с непустым gate_reason (final review, Should-fix 5):
+    #
+    #  * Доза, всё ещё удерживаемая away-гейтом, НЕ упоминается. Гейт
+    #    сдаётся в med_away_gate_until (21:00), а follow-up идёт в
+    #    followup_local_time (20:00): анонс в 20:00 отправил бы на
+    #    телефон вдали от лекарств ровно то сообщение, которое away-гейт
+    #    весь день подавлял, а в 21:0x бэкстоп сказал бы это ЖЕ второй
+    #    раз. Спека говорит "не отмечено к концу дня" -- в 20:00 для
+    #    away-гейта день ещё не кончился. Sleep-гейт этой оговорки не
+    #    требует: он сдаётся в 12:00, к вечеру его удержаний уже нет.
+    #  * Границы суток Алматы. Если полуночный тик генерации когда-нибудь
+    #    пропустит ночь, вчерашние удержанные pending-строки иначе попали
+    #    бы в сегодняшний follow-up с ВЧЕРАШНИМ временем дозы.
+    held_sql = ("SELECT d.name AS name, m.plan_ts_utc AS plan_ts_utc, "
+                "       m.gate_reason AS gate_reason "
+                "FROM med_intakes m JOIN meds d ON d.id = m.med_id "
+                "WHERE m.status='pending' AND m.gate_reason IS NOT NULL "
+                "  AND m.plan_ts_utc >= ? AND m.plan_ts_utc < ? ")
+    held_params = [from_utc, to_utc]
+    if _local_hhmm_before(now_utc, cfg.get("med_away_gate_until", "21:00")):
+        held_sql += "  AND m.gate_reason <> 'away' "
+    held_sql += "ORDER BY m.plan_ts_utc"
     held_meds = [
         {"name": r["name"],
          "plan_local": _parse_utc(r["plan_ts_utc"]).astimezone(
              ALMATY).strftime("%H:%M"),
          "reason": r["gate_reason"]}
-        for r in conn.execute(
-            "SELECT d.name AS name, m.plan_ts_utc AS plan_ts_utc, "
-            "       m.gate_reason AS gate_reason "
-            "FROM med_intakes m JOIN meds d ON d.id = m.med_id "
-            "WHERE m.status='pending' AND m.gate_reason IS NOT NULL "
-            "ORDER BY m.plan_ts_utc")
+        for r in conn.execute(held_sql, held_params)
     ]
 
     has_recap = bool(outbound_events and related_plans)

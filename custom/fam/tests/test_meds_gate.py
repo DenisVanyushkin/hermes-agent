@@ -1001,6 +1001,126 @@ def test_list_pending_gate_reason_none_when_not_held(db):
     assert rows[0]["gate_reason"] is None
 
 
+# 15:00 UTC = 20:00 Алматы -- followup_local_time.
+FOLLOWUP_NOW = "2026-07-20T15:00:00+00:00"
+# 16:00 UTC = 21:00 Алматы -- момент сдачи away-гейта.
+FOLLOWUP_AFTER_BACKSTOP = "2026-07-20T16:00:00+00:00"
+
+
+def _away_held_dose(db, fake_deliver):
+    """Доза на 16:00 Алматы, удержанная away-гейтом (событие в зале)."""
+    pid = _add_place(db, "Зал", AWAY_LAT, AWAY_LON)
+    _add_event(db, "Долгая тренировка", "2026-07-20T10:30:00+00:00",
+               "2026-07-20T18:00:00+00:00", place_id=pid)
+    iid = _pending_intake(db, name="Магний", plan="2026-07-20T11:00:00+00:00",
+                          times=("16:00",))
+    tick._meds_series(db, AFTERNOON, CFG)
+    assert _intake(db, iid)["gate_reason"] == "away"
+    fake_deliver.calls = []
+    return iid
+
+
+def test_followup_omits_a_dose_the_away_gate_can_still_hold(db, fake_deliver):
+    """Final review, Should-fix 5: в 20:00 away-гейт ещё держит (сдаётся
+    в 21:00), поэтому анонс отправил бы на телефон вдали от лекарств
+    ровно то сообщение, которое гейт весь день подавлял -- и повторил бы
+    его в 21:0x бэкстопом."""
+    _away_held_dose(db, fake_deliver)
+
+    tick._followup(db, FOLLOWUP_NOW, CFG)
+
+    held = [c for c in fake_deliver.calls
+            if c["kind"] == "followup" and c["raw"].get("held_meds")]
+    assert held == [], "удерживаемую away-дозу в 20:00 упоминать нельзя"
+
+
+def test_followup_mentions_an_away_dose_after_the_backstop(db, fake_deliver):
+    # В 21:00 гейт сдался: доза уже не удерживаема, и о ней честно
+    # сказать вечером.
+    _away_held_dose(db, fake_deliver)
+
+    tick._followup(db, FOLLOWUP_AFTER_BACKSTOP, CFG)
+
+    calls = [c for c in fake_deliver.calls if c["kind"] == "followup"]
+    assert len(calls) == 1
+    assert [h["name"] for h in calls[0]["raw"]["held_meds"]] == ["Магний"]
+
+
+def test_followup_ignores_yesterdays_held_dose(db, fake_deliver):
+    # Если полуночный тик генерации пропустил ночь, вчерашняя pending
+    # строка не должна всплыть в сегодняшнем follow-up с вчерашним
+    # временем.
+    med_id = meds.add(db, "Эутирокс", ["09:00"], remaining=10)
+    db.execute(
+        "INSERT INTO med_intakes(med_id, plan_ts_utc, status, "
+        "series_next_utc, gate_reason, created_at) "
+        "VALUES(?,?,'pending',?,'asleep',?)",
+        (med_id, "2026-07-19T04:00:00+00:00", "2026-07-19T04:00:00+00:00",
+         "2026-07-19T04:00:00+00:00"))
+    db.commit()
+
+    tick._followup(db, FOLLOWUP_NOW, CFG)
+
+    held = [c for c in fake_deliver.calls
+            if c["kind"] == "followup" and c["raw"].get("held_meds")]
+    assert held == [], "вчерашняя удержанная доза не относится к сегодня"
+
+
+# --- Should-fix 6: отпускание несёт настоящий attempt_no ---
+
+
+def test_away_release_carries_the_real_attempt_no(db, fake_deliver):
+    """meds.defer не чистит gate_reason, а away-гейт держит ПОВТОРЫ уже
+    объявленной дозы, поэтому отпускание почти всегда попытка 2+. Без
+    attempt_no в raw gate._build_prompt не добавлял инструкцию
+    варьирования -- Task 8 был молча отключён для каждого away-release."""
+    from fam import react
+    a = _pending_intake(db, name="Магний", plan="2026-07-20T11:00:00+00:00",
+                        times=("16:00",))
+    # первая отправка этой дозы уже состоялась
+    react.record_sent(db, "wa-first", "med", a)
+    db.commit()
+
+    pid = _add_place(db, "Зал", AWAY_LAT, AWAY_LON)
+    _add_event(db, "Тренировка", "2026-07-20T10:30:00+00:00",
+               "2026-07-20T11:30:00+00:00", place_id=pid)
+    db.commit()
+    tick._meds_series(db, AFTERNOON, CFG)             # удержана как away
+    assert fake_deliver.calls == []
+
+    tick._meds_series(db, "2026-07-20T11:40:00+00:00", CFG)   # событие кончилось
+
+    assert len(fake_deliver.calls) == 1
+    raw = fake_deliver.calls[0]["raw"]
+    assert raw["mode"] == "take"
+    assert raw["late"] is True
+    assert raw["attempt_no"] == 2
+    # формулировка отпускания не менялась
+    assert fake_deliver.calls[0]["human_fallback"] == (
+        "Магний за 16:00 ещё не отмечено.")
+
+
+def test_group_release_carries_per_item_attempt_no(db, fake_deliver):
+    from fam import react
+    a = _pending_intake(db, name="Эутирокс")
+    b = _pending_intake(db, name="Магний")
+    react.record_sent(db, "wa-first", "med", a)   # у Эутирокса была отправка
+    db.commit()
+
+    tick._meds_series(db, MORNING, CFG)
+    _audit_at(db, "cal.add", "2026-07-20T05:05:00+00:00")
+    tick._meds_series(db, "2026-07-20T05:10:00+00:00", CFG)
+
+    raw = fake_deliver.calls[-1]["raw"]
+    assert raw["mode"] == "take_group"
+    assert {i["name"]: i["attempt_no"] for i in raw["items"]} == {
+        "Эутирокс": 2, "Магний": 1}
+    assert "attempt_no" not in raw, (
+        "у группы нет одного общего номера попытки -- он был бы выдумкой")
+    assert fake_deliver.calls[-1]["human_fallback"].startswith(
+        "Ещё не отмечено:")
+
+
 def test_followup_mentions_held_doses(db, fake_deliver, monkeypatch):
     fake_deliver.responses = ["sent"]
     _pending_intake(db)
