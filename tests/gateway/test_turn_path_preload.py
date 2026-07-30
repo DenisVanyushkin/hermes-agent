@@ -98,3 +98,50 @@ def test_preload_logs_a_warning_when_a_module_fails(monkeypatch, caplog) -> None
         preload_turn_path_modules()
 
     assert any(failing in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_calls_preload_turn_path_modules(monkeypatch, tmp_path) -> None:
+    """Regression for the finding that every test in this file calls
+    preload_turn_path_modules() directly, so a startup wiring deletion (the
+    single ``logger.info(...)`` line in gateway/run.py that invokes it)
+    would leave this whole suite green. Drives the real start_gateway() —
+    same technique as
+    test_runner_startup_failures.test_start_gateway_verbosity_imports_redacting_formatter
+    — and asserts gateway.run.preload_turn_path_modules was actually
+    called during startup, not merely that the function works standalone.
+    """
+    from unittest.mock import MagicMock
+
+    import gateway.run as gateway_run
+    from gateway.config import GatewayConfig
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    class _CleanExitRunner:
+        def __init__(self, config):
+            self.config = config
+            self.should_exit_cleanly = True
+            self.exit_reason = None
+            self.exit_code = None
+            self.adapters = {}
+
+        async def start(self):
+            return True
+
+        async def stop(self):
+            return None
+
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
+    monkeypatch.setattr("hermes_logging.setup_logging", lambda hermes_home, mode: tmp_path)
+    monkeypatch.setattr("hermes_logging._add_rotating_handler", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gateway_run, "GatewayRunner", _CleanExitRunner)
+
+    preload_mock = MagicMock(return_value=[])
+    monkeypatch.setattr(gateway_run, "preload_turn_path_modules", preload_mock)
+
+    ok = await gateway_run.start_gateway(config=GatewayConfig(), replace=False, verbosity=0)
+
+    assert ok is True
+    preload_mock.assert_called_once()
