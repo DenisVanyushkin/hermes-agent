@@ -13,7 +13,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 WINDOW_HOURS = 24
@@ -414,8 +414,80 @@ def collect_docker() -> dict:
     return {"total": len(lines), "exited": len(exited), "monitoring_down": monitoring_down[:10]}
 
 
+def _sqlite_runtime_vulnerable(hermes_home: Path, version_info) -> tuple[bool | None, str | None]:
+    """(vulnerable, detector_error) via upstream's own predicate.
+
+    Never a local copy of the affected version range — a second copy would
+    drift the day upstream learns something new.
+    """
+    try:
+        sys.path.insert(0, str(hermes_home / "hermes-agent"))
+        from hermes_cli.sqlite_runtime import is_sqlite_wal_reset_vulnerable
+
+        return bool(is_sqlite_wal_reset_vulnerable(version_info)), None
+    except Exception as exc:  # noqa: BLE001 - report, never crash the digest
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _collect_exporter_sqlite_health(hermes_home: Path) -> dict:
+    """Probe the job-intel-exporter container's effective SQLite, the same
+    way collect_docker() elsewhere in this module shells out to docker.
+
+    Degrades explicitly when docker or the container is absent: "cannot
+    tell" is reported as its own attention-worthy state, not folded into a
+    silent "clean" reading.
+    """
+    code, out = run_command(
+        ["docker", "exec", "monitoring-job-intel-exporter", "python", "-c",
+         "import sqlite3; print(sqlite3.sqlite_version, sqlite3.__name__)"],
+        timeout=30,
+    )
+    if code != 0:
+        return {
+            "reachable": False,
+            "error": out.strip()[:300],
+            "needs_attention": True,
+        }
+    parts = out.strip().split()
+    version = parts[0] if parts else ""
+    module_name = parts[1] if len(parts) > 1 else ""
+    shim_active = "pysqlite3" in module_name
+    vulnerable = None
+    if version:
+        try:
+            version_info = tuple(int(x) for x in version.split("."))
+        except ValueError:
+            version_info = None
+        if version_info is not None:
+            vulnerable, _ = _sqlite_runtime_vulnerable(hermes_home, version_info)
+    return {
+        "reachable": True,
+        "version": version,
+        "module": module_name,
+        "shim_active": shim_active,
+        "wal_reset_vulnerable": vulnerable,
+        "needs_attention": bool(vulnerable or not shim_active or vulnerable is None),
+    }
+
+
+def _autoupdate_ts_stale(report: dict, max_days: int = 10) -> bool:
+    """A result file nobody has refreshed in ~10 days can't be trusted as
+    "clean" even if its last recorded action looked fine."""
+    ts = report.get("ts")
+    if not ts:
+        return False
+    try:
+        when = datetime.fromisoformat(ts)
+    except ValueError:
+        return True
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).days > max_days
+
+
 def collect_sqlite_health(hermes_home: Path) -> dict:
-    """Report the SQLite this deployment actually runs, plus the updater result.
+    """Report the SQLite this deployment actually runs — the gateway venv
+    AND the job-intel-exporter image — plus the updater result.
 
     The gateway venv and the job-intel-exporter image run a statically compiled
     SQLite via a .pth shim, because no supplier ships a version without the
@@ -434,16 +506,11 @@ def collect_sqlite_health(hermes_home: Path) -> dict:
         "module": module_file,
         "shim_active": "pysqlite3" in module_file,
     }
-    try:
-        sys.path.insert(0, str(hermes_home / "hermes-agent"))
-        from hermes_cli.sqlite_runtime import is_sqlite_wal_reset_vulnerable
-
-        info["wal_reset_vulnerable"] = bool(
-            is_sqlite_wal_reset_vulnerable(sqlite3.sqlite_version_info)
-        )
-    except Exception as exc:  # noqa: BLE001 - report, never crash the digest
-        info["wal_reset_vulnerable"] = None
-        info["detector_error"] = f"{type(exc).__name__}: {exc}"
+    info["wal_reset_vulnerable"], detector_error = _sqlite_runtime_vulnerable(
+        hermes_home, sqlite3.sqlite_version_info
+    )
+    if detector_error:
+        info["detector_error"] = detector_error
 
     result_path = hermes_home / "state" / "sqlite_autoupdate_last.json"
     try:
@@ -454,13 +521,24 @@ def collect_sqlite_health(hermes_home: Path) -> dict:
         info["autoupdate"] = {"action": "unreadable", "error": str(exc)}
 
     report = info["autoupdate"] or {}
+    info["exporter"] = _collect_exporter_sqlite_health(hermes_home)
+
+    # detector_error is its own attention trigger: it is the one condition
+    # where nobody can vouch for vulnerability status, and a bare "not
+    # vulnerable" boolean check would silently pass right through it.
     info["needs_attention"] = bool(
         info["wal_reset_vulnerable"]
+        or info.get("detector_error")
         or not info["shim_active"]
         or report.get("action")
-        in {"rejected", "rolled_back", "never_ran", "unreadable"}
-        or report.get("upstream_runtime_viable")
+        in {"failed", "rejected", "rolled_back", "never_ran", "unreadable"}
+        or info["exporter"].get("needs_attention")
+        or _autoupdate_ts_stale(report)
     )
+    # Informational only: "the shim is now retirable" is good news, not an
+    # alarm — kept out of needs_attention so it doesn't latch the digest's
+    # alarm permanently on once uv's CPython finally catches up.
+    info["retirement_available"] = bool(report.get("upstream_runtime_viable"))
     return info
 
 

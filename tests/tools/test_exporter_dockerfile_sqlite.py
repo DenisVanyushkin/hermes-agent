@@ -6,6 +6,7 @@ built pysqlite3 as the host venv, or the concurrent-writer condition survives.
 """
 
 import pathlib
+import re
 
 DOCKERFILE = (
     pathlib.Path(__file__).resolve().parents[2]
@@ -25,6 +26,20 @@ def test_pins_the_amalgamation_by_url_and_hash():
     assert "sqlite-amalgamation-3530400" in text, "default must pin 3.53.4"
 
 
+def test_pins_pysqlite3_by_commit():
+    """The SQLite amalgamation is SHA3-verified; the code that compiles it
+    (pysqlite3 itself) must be pinned too, or a weekly unattended build
+    compiles whatever unreviewed commit sits at the tip of master that day."""
+    text = _text()
+    assert "ARG PYSQLITE3_COMMIT=" in text, "pysqlite3 checkout must be pinned by commit"
+    match = re.search(r"ARG PYSQLITE3_COMMIT=([0-9a-f]{40})\b", text)
+    assert match, "pin must be a full 40-character commit SHA"
+    assert "rev-parse HEAD" in text, "the build must verify the checkout landed on the pin"
+    assert "PYSQLITE3_COMMIT" in text.split("rev-parse HEAD")[1][:200], (
+        "the pin must actually be compared against the resolved HEAD"
+    )
+
+
 def test_builds_statically_with_fts5():
     text = _text()
     # Static linkage comes from placing the amalgamation in the pysqlite3
@@ -36,7 +51,17 @@ def test_builds_statically_with_fts5():
     assert "SQLITE_OMIT_LOAD_EXTENSION" not in text, "load_extension must stay in"
     # setuptools >= 83 rejects NAME=VALUE in build_ext --define; bare names only.
     assert "=250000" not in text, "NAME=VALUE defines break the build"
-    assert "ldd" in text, "the build must assert static linkage, not assume it"
+    # A bare "ldd" substring would also match a comment that merely mentions
+    # ldd (the Dockerfile now has one, explaining why the assertion exists) —
+    # assert on the actual guard: grepping ldd's output for libsqlite3 and
+    # failing the build if found.
+    assert "grep -qi libsqlite3" in text, (
+        "the build must assert static linkage by grepping ldd output for "
+        "libsqlite3, not merely mention ldd in a comment"
+    )
+    assert re.search(r"if ldd .*\| grep -qi libsqlite3.*exit 1", text), (
+        "the libsqlite3 grep must actually gate the build's exit code"
+    )
 
 
 def test_verifies_the_download_with_sha3_not_sha256():
@@ -47,7 +72,18 @@ def test_verifies_the_download_with_sha3_not_sha256():
 
 def test_fails_the_build_on_a_stale_sqlite():
     """A wrong version must fail the image, not ship."""
-    assert "(3,53,4)" in _text(), "in-build version assertion missing"
+    text = _text()
+    # A bare "(3,53,4)" substring would pass even if someone deleted the
+    # comparison and left only a comment mentioning the tuple. Assert on the
+    # actual branching expression that turns a stale version into exit 1.
+    assert "v >= (3,53,4)" in text, "in-build version comparison missing"
+    assert "sys.exit(0 if v >= (3,53,4) else 1)" in text, (
+        "the version gate must actually branch the exit code, not merely "
+        "mention the tuple in a comment"
+    )
+    assert "sys.exit(0 if tuple(int(x) for x in sqlite3.sqlite_version.split('.')) >= (3,53,4) else 1)" in text, (
+        "stage 2's effective-runtime check must also branch on the same gate"
+    )
 
 
 def test_ships_the_shim_as_a_pth():

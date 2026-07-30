@@ -7,12 +7,24 @@ FROM python:3.11-slim AS sqlite_build
 ARG SQLITE_AMALGAMATION_URL=https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip
 ARG SQLITE_AMALGAMATION_SHA3=628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed76285612227934e
 
+# pysqlite3 has no tagged releases; pin an exact commit so the build never
+# silently compiles whatever unreviewed code sits at the tip of master on
+# the day this image is built. Pinned 2026-07-30 via `git ls-remote
+# https://github.com/coleifer/pysqlite3 HEAD` (master branch tip at the time).
+ARG PYSQLITE3_COMMIT=54c9e703d4a5ca530223ca9b0463a53d29d2477e
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential curl unzip ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-RUN git clone --depth 1 https://github.com/coleifer/pysqlite3 src \
+RUN git init -q src \
+    && git -C src fetch --depth 1 https://github.com/coleifer/pysqlite3 "${PYSQLITE3_COMMIT}" \
+    && git -C src checkout -q FETCH_HEAD \
+    && actual=$(git -C src rev-parse HEAD) \
+    && if [ "$actual" != "${PYSQLITE3_COMMIT}" ]; then \
+         echo "pysqlite3 HEAD $actual != pinned ${PYSQLITE3_COMMIT}" >&2; exit 1; \
+       fi \
     && curl -fsSLO "${SQLITE_AMALGAMATION_URL}" \
     && python -c "import glob, hashlib, sys; \
 p = glob.glob('sqlite-amalgamation-*.zip')[0]; \

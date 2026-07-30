@@ -34,9 +34,15 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 # `autocommit` is matched as an attribute or keyword with optional spacing,
 # because `conn.autocommit = True` is the idiomatic form and a bare
 # `autocommit=` pattern would miss it.
+#
+# `sqlite3.Blob`, `sqlite3.LEGACY_TRANSACTION_CONTROL` and the `SQLITE_*`
+# constants are CPython 3.12 stdlib exports pysqlite3 0.5.x does not provide.
+# Zero uses today (latent), added so a future one is caught rather than
+# breaking at runtime once sqlite3 is aliased to pysqlite3.
 STDLIB_ONLY = re.compile(
     r"\.autocommit\s*=|\bautocommit\s*=\s*(?:True|False|sqlite3\.)"
     r"|\.blobopen\(|\bcreate_window_function\b|\.setlimit\(|\.getlimit\("
+    r"|\bsqlite3\.(?:Blob|LEGACY_TRANSACTION_CONTROL|SQLITE_[A-Z_]+)\b"
 )
 
 # Matches any import statement that brings the sqlite3 module into scope:
@@ -125,6 +131,17 @@ def test_the_guard_can_actually_fire():
     assert not STDLIB_ONLY.search("payload = encrypted_file.serialize()")
 
 
+def test_the_guard_catches_cpython_312_only_sqlite3_exports():
+    """sqlite3.Blob, LEGACY_TRANSACTION_CONTROL and the SQLITE_* constants
+    are stdlib-only exports pysqlite3 0.5.x lacks. Zero uses today, but a
+    future one must trip this guard, not fail silently at import time once
+    sqlite3 is aliased."""
+    assert STDLIB_ONLY.search("b = sqlite3.Blob(conn, 't', 'c', 1)")
+    assert STDLIB_ONLY.search("conn.autocommit = sqlite3.LEGACY_TRANSACTION_CONTROL")
+    assert STDLIB_ONLY.search("flags = sqlite3.SQLITE_DENY")
+    assert not STDLIB_ONLY.search("driver = 'sqlite3.Blobber'")
+
+
 def test_the_import_scoping_actually_discriminates():
     """Prove the sqlite3-import gate itself works, hermetically, on the real
     predicate (_imports_sqlite3) rather than re-deriving its own copy.
@@ -159,8 +176,8 @@ def test_the_import_scoping_actually_discriminates():
 def test_runtime_is_not_wal_reset_vulnerable():
     """Upstream's own predicate is the oracle — we do not re-derive the range.
 
-    Fails on the unmigrated host (SQLite 3.45.1) and passes once the
-    sitecustomize shim aliases sqlite3 to the statically built pysqlite3.
+    Fails on the unmigrated host (SQLite 3.45.1) and passes once the .pth
+    shim aliases sqlite3 to the statically built pysqlite3.
     """
     assert not is_sqlite_wal_reset_vulnerable(), (
         f"linked SQLite {sqlite3.sqlite_version} still has the WAL-reset bug "
