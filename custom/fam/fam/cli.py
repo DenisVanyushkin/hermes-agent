@@ -1035,10 +1035,26 @@ _EXTCAL_ECHO_UID_RE = re.compile(r"^fam-.*@hermes-home$")
 # DTSTART is dropped there, invisibly, while a healthy sibling in the
 # SAME resource survives). The only externally-observable signal is a
 # component COUNT mismatch against the raw `BEGIN:VEVENT` blocks actually
-# present in the resource text -- counted with this regex, never folded
-# (RFC 5545 line-folding only ever applies to lines long enough to need
-# it, and "BEGIN:VEVENT" never is).
-_VEVENT_BEGIN_RE = re.compile(r"^BEGIN:VEVENT", re.M)
+# present in the resource text.
+def _count_vevent_begin_blocks(ics_text):
+    """Raw `BEGIN:VEVENT` block count for the N1 detector above (fix-round
+    3, finding R1): the fix-round 2 cut used a bare `re.compile(r"^BEGIN:
+    VEVENT", re.M)`, which is wrong TWO ways `parse_ics` itself is
+    careful about and this detector was not: (1) RFC 5545 property names
+    are case-insensitive and `parse_ics`'s own `_split_property_line`
+    upper-cases before comparing (`extcal.py`) -- a feed spelling it
+    `Begin:VEvent` made this detector count 0 unconditionally, silently
+    DISABLING the whole guard (the exact failure class fix-round 2 was
+    trying to close); (2) `re.M`'s `^` only anchors after an actual `\n`,
+    while a feed using lone `\r` line endings (which `extcal._unfold`
+    already normalizes before `parse_ics` ever sees them) would never
+    match at all. `str.splitlines()` handles every line-ending
+    convention Python recognizes as a boundary, and comparing case-
+    normalized, whitespace-stripped lines sidesteps both problems at
+    once -- `BEGIN:VEVENT` takes no parameters, so an exact match after
+    stripping is the correct comparison, not a regex search."""
+    return sum(1 for line in ics_text.splitlines()
+               if line.strip().upper() == "BEGIN:VEVENT")
 
 # Fix-round 2 (finding N2): `extcal.expand()`'s own per-master RRULE
 # failure message embeds the master's uid via `repr()`
@@ -1219,23 +1235,41 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     owner='iphone' row is only ever offered to plan_changes THIS round --
     i.e. only ever a disappearance CANDIDATE -- when ALL of the following
     hold, checked in `_include_iphone_row` below:
-      0. its own `external_href` is not in `bad_hrefs` (fix-round 2,
-         findings N1/N2): a specific RESOURCE this round could not fully
-         trust -- either `parse_ics` returned FEWER components than the
-         resource's own raw `BEGIN:VEVENT` block count (fix-round 1's
-         per-component uid/dtstart_utc re-check after parse_ics returns
-         could never actually fire -- parse_ics/`_finalize_component`
-         already guarantee every returned Component has both; the real
-         silent loss happens INSIDE parse_ics, e.g. a resource holding a
+      0. either its own `external_href` is not in `bad_hrefs`, OR its own
+         `external_uid` key WAS one of the occurrence keys this round
+         actually reproduced from that href (`occ_keys_by_href`,
+         fix-round 3 cheap fix #2 -- see below). `bad_hrefs` (fix-round
+         2, findings N1/N2, case/newline-fixed in fix-round 3 finding R1)
+         marks a specific RESOURCE this round could not fully trust:
+         `parse_ics` returned FEWER components than the resource's own
+         raw `BEGIN:VEVENT` block count (fix-round 1's per-component
+         uid/dtstart_utc re-check after parse_ics returns could never
+         actually fire -- parse_ics/`_finalize_component` already
+         guarantee every returned Component has both; the real silent
+         loss happens INSIDE parse_ics, e.g. a resource holding a
          recurring master together with its RECURRENCE-ID overrides,
          where one override's broken DTSTART is dropped there while a
-         healthy master in the SAME resource survives -- a block-count
-         mismatch is the only externally-observable signal), or one
-         `expand()` error was attributable to this specific resource (a
-         broken RRULE on ONE master, via the uid `_expand_master`'s own
-         error message embeds). Scoped to the ONE resource, not its
-         whole calendar (N2): a healthy sibling resource -- or a healthy
-         master sharing this SAME resource with a lost override -- must
+         healthy master in the SAME resource survives), a live
+         (non-deleted) item with NO `ics` text at all (fix-round 3,
+         finding R2 -- a per-resource 403/500/507 or a missing/empty
+         `<C:calendar-data>`, NOT a real deletion, despite
+         `extcal.fetch_changes`'s docstring formerly claiming otherwise),
+         or one `expand()` error attributable to this specific resource
+         (a broken RRULE on ONE master, via the uid `_expand_master`'s
+         own error message embeds). A block-count mismatch specifically
+         is scoped down FURTHER, to the occurrence(s) actually missing
+         (cheap fix #2): a healthy master sharing a bad resource with a
+         lost override still produced its OWN occurrence this round, so
+         its existing row stays a normal update candidate -- without
+         this, that row would be excluded from the snapshot (and
+         therefore stop accepting title/time edits) for as long as the
+         resource stays broken, AND `apply_changes`' own idempotency
+         guard would silently re-absorb its re-queued "insert" as
+         `insert_skipped_duplicate` every 15 minutes, writing an audit
+         row per recurring instance per tick into the same WAL file m6's
+         `RandomizedDelaySec` exists to de-contend. Either way, a
+         healthy sibling resource in the same calendar -- or a healthy
+         occurrence sharing this SAME resource with a lost one -- must
          not be held hostage by it;
       1. its own calendar is identifiable at all (`external_href` matches
          one of THIS round's `eligible` calendars by URL prefix) -- a row
@@ -1361,6 +1395,24 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 continue  # tombstone: no ICS to parse -- disappearance below handles it
             ics_text = item.get("ics")
             if not ics_text:
+                # Fix-round 3, finding R2: extcal.fetch_changes' OWN
+                # docstring used to claim `ics=None` only ever happens for
+                # a deleted (tombstoned) item -- it doesn't.
+                # _parse_multistatus_items returns `ics=None` for ANY
+                # non-404 response too (a per-resource 403/500/507 inside
+                # an otherwise-200 multistatus, or a 200 whose
+                # <C:calendar-data> is simply missing/empty). Treating
+                # this silently as "nothing to do" -- the fix-round 2 cut
+                # of this line -- let such a resource's local row fall
+                # straight through to plan_changes' disappearance sweep
+                # with no error recorded at all: cancel, tombstone,
+                # unrecoverable. Excluded BY HREF instead, same as any
+                # other unreadable resource this round.
+                bad_hrefs.add(abs_href)
+                sync_errors.append(
+                    f"{calendar.get('name') or url}: no calendar-data "
+                    f"for {abs_href} (not marked deleted -- treated as "
+                    f"unreadable this round, not gone)")
                 continue
             parsed = extcal.parse_ics(ics_text)
             # Fix-round 2, finding N1: a per-component uid/dtstart_utc
@@ -1373,19 +1425,43 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             # master in the SAME resource survives) -- the only
             # externally-observable signal is a component COUNT mismatch
             # against this resource's own raw BEGIN:VEVENT blocks.
-            begin_count = len(_VEVENT_BEGIN_RE.findall(ics_text))
-            if not parsed or len(parsed) < begin_count:
+            begin_count = _count_vevent_begin_blocks(ics_text)
+            if begin_count == 0:
+                # Fix-round 3, cheap fix: a resource with ZERO BEGIN:VEVENT
+                # blocks is only suspicious when the query that fetched it
+                # PROMISED VEVENT content -- a FULL-mode read
+                # (calendar-query) server-side filters by `comp-filter
+                # name="VEVENT"` (extcal._QUERY_BODY_TMPL), so a 0-VEVENT
+                # result there means something we used to be able to
+                # parse no longer parses. REPORT sync-collection has NO
+                # such filter (RFC 6578: it returns every changed resource
+                # in the collection regardless of component type) -- a
+                # changed VTODO/VJOURNAL sitting in the same subscribed
+                # calendar is completely normal there and must not fail
+                # the whole tick (the fix-round 2 cut flagged this
+                # unconditionally, a false positive on any non-VEVENT
+                # resource in an incremental delta).
+                if mode != "sync_collection":
+                    bad_hrefs.add(abs_href)
+                    sync_errors.append(
+                        f"{calendar.get('name') or url}: 0 VEVENT block(s) "
+                        f"found for {abs_href} despite a VEVENT-filtered "
+                        f"query (mode={mode})")
+                continue
+            if len(parsed) < begin_count:
                 # Excluded BY HREF (finding N2), not the whole calendar --
                 # a healthy SIBLING resource in the same calendar (or,
                 # within THIS resource, a healthy master alongside a lost
-                # override) must not be held hostage by one bad one.
+                # override) must not be held hostage by one bad one. See
+                # `occ_keys_by_href` below (fix-round 3, cheap fix #2):
+                # this only ends up excluding the occurrence(s) we truly
+                # have no fresh data on, not every occurrence sharing this
+                # href.
                 bad_hrefs.add(abs_href)
                 sync_errors.append(
                     f"{calendar.get('name') or url}: parse_ics returned "
                     f"{len(parsed)} of {begin_count} VEVENT block(s) "
                     f"(dropped {begin_count - len(parsed)}) for {abs_href}")
-                if not parsed:
-                    continue
             for comp in parsed:
                 uid = comp.get("uid")
                 if uid and _EXTCAL_ECHO_UID_RE.match(uid):
@@ -1433,8 +1509,14 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     # produced (extcal._occurrence_key -- the SAME length-prefixed
     # encoding local rows' own external_uid column uses, see extcal.py's
     # module note): one recurring master's single ICS resource expands
-    # into MANY occurrences sharing one href/etag.
+    # into MANY occurrences sharing one href/etag. `occ_keys_by_href`
+    # (fix-round 3, cheap fix #2) is the SAME fan-out, indexed the other
+    # way -- every occurrence key successfully produced FROM a given
+    # href this round -- so a bad_hrefs exclusion below can be scoped to
+    # just the occurrence(s) actually missing, not every occurrence that
+    # happens to share a resource with them.
     occ_key_meta = {}
+    occ_keys_by_href = {}
     for occ in combined_occurrences:
         uid = occ.get("uid")
         if not uid or uid not in key_meta:
@@ -1443,11 +1525,30 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         meta = dict(key_meta[uid])
         meta["seq"] = occ.get("seq") or 0
         occ_key_meta[key] = meta
+        href = meta.get("href")
+        if href:
+            occ_keys_by_href.setdefault(href, set()).add(key)
 
     def _include_iphone_row(row):
         href = row.get("external_href")
         if href and href in bad_hrefs:
-            return False  # THIS resource's data was untrustworthy this round (N1/N2)
+            # Fix-round 3, cheap fix #2: bad_hrefs marks a RESOURCE, not
+            # necessarily every occurrence inside it -- a healthy master
+            # sharing a resource with a lost RECURRENCE-ID override (N1's
+            # own scenario) still produced its OWN occurrence this round
+            # (it's in occ_keys_by_href[href]) and should stay a normal
+            # update candidate; only a row whose key was NOT reproduced
+            # this round is the piece we actually have no fresh data on.
+            # Without this narrowing, the healthy master's existing row
+            # would be excluded from the snapshot every tick, its own
+            # edits would stop applying while the resource stays broken,
+            # AND plan_changes would re-queue it as a fresh "insert" that
+            # apply_changes' own idempotency guard silently no-ops
+            # (`insert_skipped_duplicate`) EVERY 15 MINUTES -- an audit
+            # row per recurring instance, per tick, forever, in the same
+            # WAL file m6's RandomizedDelaySec was trying to de-contend.
+            if row.get("external_uid") not in occ_keys_by_href.get(href, ()):
+                return False  # THIS occurrence's data was untrustworthy this round
         calendar_url = _extcal_row_calendar_url(row, eligible)
         if calendar_url is None:
             return False  # no eligible calendar claims this row this round
@@ -1562,11 +1663,15 @@ def cmd_tick_cal_ext(args):
     specific calendar); `meta["extcal_last_ok"]` only advances on a tick
     with NO error anywhere (its name means "last FULL success").
 
-    `meta["extcal_last_mode:<url>"]` is updated every run regardless of
-    error (pure telemetry, not a safety-relevant value) and its own
-    change is one of the triggers for writing `audit cal.ext.sync` at all
-    (fix-round finding I5: that audit is no longer unconditional -- a
-    perfectly healthy, zero-change, steady-state tick would otherwise
+    `meta["extcal_last_mode:<url>"]` is pure telemetry (not a safety-
+    relevant value) but is only WRITTEN when it actually changes
+    (fix-round 2, minor #6 -- this docstring previously said "every run,"
+    which stopped being true the moment that minor landed: an
+    unconditional write here would add another 96/day to the very WAL
+    contention m6's own `RandomizedDelaySec` was trying to reduce). Its
+    change is still one of the triggers for writing `audit cal.ext.sync`
+    at all (fix-round finding I5: that audit is no longer unconditional --
+    a perfectly healthy, zero-change, steady-state tick would otherwise
     write 96 near-identical rows a day forever; `meta["extcal_last_ok"]`
     already covers the heartbeat).
     """
@@ -2641,7 +2746,11 @@ def build_parser():
     spb.add_argument("--now"); spb.add_argument("--json", action="store_true")
 
     spce = tick_sub.add_parser("cal-ext"); spce.set_defaults(func=cmd_tick_cal_ext)
-    spce.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops)")
+    spce.add_argument("--now", help="ISO-8601 UTC override for \"now\" (testing/ops -- "
+                       "a value far from the real clock can desync this window from "
+                       "extcal._time_range's own second-precision-vs-midnight-rounded "
+                       "real-clock window used for the ACTUAL iCloud query; harmless "
+                       "on a normal periodic tick, use cautiously for ad-hoc runs)")
     spce.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS,
                        help="compute and print the changeset without writing to DB or iCloud")
     spce.add_argument("--json", action="store_true", default=argparse.SUPPRESS,

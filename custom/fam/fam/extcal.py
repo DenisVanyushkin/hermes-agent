@@ -635,9 +635,17 @@ def fetch_changes(cfg, calendar, sync_token=None, request=None):
     Never raises. On total failure returns `(None, None, {"mode":
     "error", "reason": "..."})`.
 
-    `items` is a list of `{href, deleted, etag, ics}` dicts -- `ics` is
-    the raw VCALENDAR text for a live item, None for a tombstoned
-    (deleted=True) one.
+    `items` is a list of `{href, deleted, etag, ics}` dicts. `ics` is
+    None for a tombstoned (deleted=True) item -- but a LIVE item
+    (deleted=False) can ALSO carry `ics=None` (fix-round 3, finding R2:
+    this docstring previously claimed otherwise, and a caller that
+    believed it treated that case as "nothing to do" rather than "we
+    could not actually read this one"): `_parse_multistatus_items`
+    returns `ics=None` for ANY `<response>` whose status is not 404 --
+    including a per-resource 403/500/507 on an otherwise-200 multistatus
+    -- and also when the response IS 200 but its `<C:calendar-data>`
+    element is missing or empty. A caller must not treat `deleted=False,
+    ics=None` as equivalent to a real deletion.
     """
     cfg = cfg or {}
     request = request or _request

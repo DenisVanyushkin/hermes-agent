@@ -762,6 +762,230 @@ def test_component_count_mismatch_excludes_only_that_href_not_the_whole_calendar
 
 
 # ---------------------------------------------------------------------
+# R1 (fix-round 3): the component-count detector must not be silenced by
+# case or by \r-only line endings.
+# ---------------------------------------------------------------------
+
+def test_count_mismatch_detector_is_case_insensitive_and_cr_tolerant(db, monkeypatch):
+    """The fix-round 2 detector used a bare `re.compile(r"^BEGIN:VEVENT",
+    re.M)` -- no `re.I`, and `re.M`'s `^` only anchors after an actual
+    `\\n`. RFC 5545 property names are case-insensitive (parse_ics's own
+    `_split_property_line` upper-cases before comparing) and a feed using
+    lone `\\r` line endings is exactly what `extcal._unfold` normalizes
+    for parse_ics itself -- either mismatch would have silently counted
+    `begin_count=0` and turned the WHOLE guard off, the exact class of
+    failure this detector exists to catch."""
+    broken_href = CAL_URL + "cr-and-case.ics"
+    existing = cal.add(db, "Перенос был здесь", "2037-07-27T13:00:00+00:00",
+                        end_utc="2037-07-27T14:00:00+00:00")
+    db.execute(
+        "UPDATE events SET owner='iphone', external_uid=?, external_href=? "
+        "WHERE id=?",
+        (extcal._occurrence_key("recur2@icloud.com", "2037-07-27T13:00:00+00:00"),
+         broken_href, existing["id"]),
+    )
+    db.commit()
+
+    # Mixed-case "Begin:VEvent"/"End:VEvent", and CR-ONLY (\r, no \n at
+    # all) line endings throughout.
+    broken_resource_ics = (
+        "Begin:VCalendar\rVERSION:2.0\r"
+        "Begin:VEvent\rUID:recur2@icloud.com\rSUMMARY:Мастер\r"
+        "DTSTART:20370720T130000Z\rDTEND:20370720T140000Z\rEnd:VEvent\r"
+        "Begin:VEvent\rUID:recur2@icloud.com\r"
+        "RECURRENCE-ID:20370727T130000Z\rSUMMARY:Сломанный перенос\r"
+        "End:VEvent\r"
+        "End:VCalendar\r"
+    )
+    item = {"href": broken_href, "deleted": False, "etag": "eC",
+            "ics": broken_resource_ics}
+
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], None, {"mode": "fallback_full", "reason": "http_403"}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1  # the mismatch IS detected (would be 0 with the old bug)
+
+    row = db.execute("SELECT * FROM events WHERE id=?", (existing["id"],)).fetchone()
+    assert row["status"] == "active"  # NOT cancelled
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert any("VEVENT block" in e and "dropped 1" in e
+               for e in rows[0]["sync_errors"])
+
+
+# ---------------------------------------------------------------------
+# R2 (fix-round 3): a live item with no calendar-data is untrustworthy,
+# not "nothing to do" and not a deletion.
+# ---------------------------------------------------------------------
+
+def test_live_item_with_no_calendar_data_is_not_treated_as_deleted(db, monkeypatch):
+    """extcal._parse_multistatus_items returns `ics=None` for ANY
+    non-404 response -- including a per-resource 403/500/507 on an
+    otherwise-200 multistatus, or a 200 whose <C:calendar-data> is
+    missing/empty -- NOT only for a real deletion (`deleted=True`). The
+    fix-round 2 cut's `if not ics_text: continue` silently treated this
+    exactly like "nothing changed," letting a pre-existing row fall
+    straight into plan_changes' disappearance sweep with zero record of
+    the read failure."""
+    href = CAL_URL + "unreadable.ics"
+    existing = cal.add(db, "Была раньше", "2037-07-20T08:00:00+00:00",
+                        end_utc="2037-07-20T09:00:00+00:00")
+    db.execute(
+        "UPDATE events SET owner='iphone', external_uid=?, external_href=? "
+        "WHERE id=?",
+        (extcal._occurrence_key("unreadable@icloud.com", None), href, existing["id"]),
+    )
+    db.commit()
+
+    # deleted=False (NOT a tombstone) but ics=None -- exactly what a
+    # per-resource 403/500/507 or an empty <C:calendar-data> produces.
+    item = {"href": href, "deleted": False, "etag": "eU", "ics": None}
+
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], None, {"mode": "fallback_full", "reason": "http_403"}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1  # a real, flagged error -- not a silent no-op
+
+    row = db.execute("SELECT * FROM events WHERE id=?", (existing["id"],)).fetchone()
+    assert row["status"] == "active"  # NOT cancelled -- excluded, not tombstoned
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert any("no calendar-data" in e for e in rows[0]["sync_errors"])
+
+
+# ---------------------------------------------------------------------
+# Cheap fix #1 (fix-round 3): a 0-VEVENT item in an incremental
+# (sync_collection) delta is unremarkable -- no server-side comp-filter
+# there, unlike a FULL-mode calendar-query.
+# ---------------------------------------------------------------------
+
+def test_zero_vevent_item_in_sync_collection_mode_is_not_an_error(db, monkeypatch):
+    """REPORT sync-collection has NO comp-filter (RFC 6578 returns every
+    changed resource in the collection regardless of component type) --
+    a changed VTODO sitting in the same subscribed calendar is completely
+    normal there. The fix-round 2 cut flagged ANY 0-VEVENT resource
+    unconditionally, which would have made a to-do edit in her calendar
+    fail the WHOLE cal-ext tick every time."""
+    vtodo_only = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"
+        "BEGIN:VTODO\r\nUID:todo1@icloud.com\r\nSUMMARY:Купить молоко\r\n"
+        "END:VTODO\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    item = {"href": CAL_URL + "todo1.ics", "deleted": False, "etag": "eT",
+            "ics": vtodo_only}
+
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], "NEXT-TOK", {"mode": "sync_collection", "reason": None}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0  # NOT an error -- a VTODO with 0 VEVENT is unremarkable here
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    # No sync_errors mentioning this resource at all.
+    all_errors = rows[0].get("sync_errors", []) if rows else []
+    assert not any("todo1.ics" in e for e in all_errors)
+
+
+def test_zero_vevent_item_in_full_mode_is_still_flagged(db, monkeypatch):
+    """The mirror case: calendar-query (FULL mode) DOES server-side
+    filter by comp-filter name="VEVENT" -- a 0-VEVENT result there means
+    something that used to match no longer parses, and stays a real,
+    flagged concern."""
+    garbage = "this is not ICS at all\r\nno BEGIN:VEVENT anywhere\r\n"
+    item = {"href": CAL_URL + "garbage.ics", "deleted": False, "etag": "eG",
+            "ics": garbage}
+
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], None, {"mode": "initial_full", "reason": None}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1  # FULL mode: 0 VEVENT is still suspicious
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert any("VEVENT block" in e for e in rows[0]["sync_errors"])
+
+
+# ---------------------------------------------------------------------
+# Cheap fix #2 (fix-round 3): a healthy occurrence sharing a bad resource
+# with a lost sibling stays a normal update candidate -- not silently
+# excluded (and re-queued as insert_skipped_duplicate every tick).
+# ---------------------------------------------------------------------
+
+def test_healthy_master_alongside_lost_override_still_gets_updated(db, monkeypatch):
+    """Fix-round 2's own bad_hrefs exclusion was scoped to the whole
+    HREF: an existing row for the healthy master sharing a resource with
+    a lost RECURRENCE-ID override would ALSO be excluded from the
+    snapshot -- its own title/time edits would stop applying for as long
+    as the resource stays broken, and plan_changes would re-queue it as
+    a fresh insert that apply_changes' own idempotency guard silently
+    absorbs as insert_skipped_duplicate every single tick. Narrowed
+    (cheap fix #2) to only exclude the occurrence(s) NOT reproduced this
+    round."""
+    broken_href = CAL_URL + "master-plus-lost-override.ics"
+    existing = cal.add(db, "Старое название", "2037-07-20T13:00:00+00:00",
+                        end_utc="2037-07-20T14:00:00+00:00")
+    db.execute(
+        "UPDATE events SET owner='iphone', external_uid=?, external_href=? "
+        "WHERE id=?",
+        (extcal._occurrence_key("master3@icloud.com", None), broken_href, existing["id"]),
+    )
+    db.commit()
+
+    # Same resource: the master (matches the EXISTING row's own key,
+    # title CHANGED) plus an override with no DTSTART (dropped).
+    broken_resource_ics = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"
+        "BEGIN:VEVENT\r\nUID:master3@icloud.com\r\nSUMMARY:Новое название\r\n"
+        "DTSTART:20370720T130000Z\r\nDTEND:20370720T140000Z\r\nEND:VEVENT\r\n"
+        "BEGIN:VEVENT\r\nUID:master3@icloud.com\r\n"
+        "RECURRENCE-ID:20370727T130000Z\r\nSUMMARY:Сломанный перенос\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    item = {"href": broken_href, "deleted": False, "etag": "eM",
+            "ics": broken_resource_ics}
+
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None:
+                         ([item], None, {"mode": "fallback_full", "reason": "http_403"}))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 1  # the count mismatch is still a real, flagged error
+
+    # The healthy master's EXISTING row was updated in place -- not
+    # excluded, not re-inserted as a duplicate.
+    row = db.execute("SELECT * FROM events WHERE id=?", (existing["id"],)).fetchone()
+    assert row["title"] == "Новое название"
+    assert db.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"] == 1
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert rows[0]["events_updated"] == 1
+    assert rows[0]["events_inserted"] == 0
+
+
+# ---------------------------------------------------------------------
 # I5: a truly steady-state tick (mode unchanged, zero counts) does not
 # spam a fresh cal.ext.sync audit row every single run.
 # ---------------------------------------------------------------------
