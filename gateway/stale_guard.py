@@ -41,7 +41,7 @@ def get_stale_guard_config(config) -> dict | None:
         block = (config or {}).get("gateway", {}).get("stale_code_guard")
     except AttributeError:
         return None
-    if not isinstance(block, dict) or not block.get("enabled"):
+    if not isinstance(block, dict) or block.get("enabled") is not True:
         return None
 
     watch = block.get("watch_files")

@@ -69,6 +69,41 @@ def test_malformed_values_fall_back_to_defaults():
     assert out["watch_files"] == []
 
 
+def test_non_positive_check_every_minutes_falls_back_to_default():
+    from gateway.stale_guard import get_stale_guard_config
+
+    cfg_zero = {
+        "gateway": {"stale_code_guard": {"enabled": True, "check_every_minutes": 0}}
+    }
+    cfg_negative = {
+        "gateway": {"stale_code_guard": {"enabled": True, "check_every_minutes": -3}}
+    }
+
+    assert get_stale_guard_config(cfg_zero)["check_every_minutes"] == 5
+    assert get_stale_guard_config(cfg_negative)["check_every_minutes"] == 5
+
+
+def test_truthy_string_enabled_does_not_arm_the_feature():
+    from gateway.stale_guard import get_stale_guard_config
+
+    cfg = {"gateway": {"stale_code_guard": {"enabled": "true"}}}
+    assert get_stale_guard_config(cfg) is None
+
+
+def test_truthy_int_enabled_does_not_arm_the_feature():
+    from gateway.stale_guard import get_stale_guard_config
+
+    cfg = {"gateway": {"stale_code_guard": {"enabled": 1}}}
+    assert get_stale_guard_config(cfg) is None
+
+
+def test_real_bool_true_enabled_arms_the_feature():
+    from gateway.stale_guard import get_stale_guard_config
+
+    cfg = {"gateway": {"stale_code_guard": {"enabled": True}}}
+    assert get_stale_guard_config(cfg) is not None
+
+
 def test_budget_allows_until_limit_then_blocks(tmp_path):
     from gateway.stale_guard import auto_restart_allowed, record_auto_restart
 
