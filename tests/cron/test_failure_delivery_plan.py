@@ -156,18 +156,33 @@ def test_operator_alert_is_sent_to_the_configured_channel(monkeypatch) -> None:
     assert content == "⚠️ Cron 'x' failed"
 
 
-def test_no_alert_channel_configured_is_a_silent_no_op(monkeypatch) -> None:
+def test_no_alert_channel_configured_is_a_silent_no_op(monkeypatch, caplog) -> None:
+    """The ``if not alert_cfg: return`` gate in _send_cron_operator_alert is
+    what keeps this feature inert on any install that has no
+    gateway.error_alerts.channel configured. Proving the gate held requires
+    a stub that accepts the real call signature (``wrap`` included) — a
+    stub missing ``wrap`` would make a bypassed gate raise TypeError instead
+    of calling through, which the function's bare ``except Exception`` then
+    swallows, leaving ``sent == []`` true either way and the test unable to
+    fail if the gate were deleted. Asserting no warning was logged rules
+    that out directly: a bypassed gate reaches ``alert_cfg["channel"]``
+    with ``alert_cfg is None`` and raises, which the except-Exception logs
+    as a warning."""
+    import logging
+
     from cron import scheduler
 
     sent = []
     monkeypatch.setattr(
         scheduler, "_deliver_result",
-        lambda job, content, adapters=None, loop=None: sent.append(content),
+        lambda job, content, adapters=None, loop=None, wrap=None: sent.append(content),
     )
 
-    scheduler._send_cron_operator_alert("⚠️ Cron 'x' failed", cfg={})
+    with caplog.at_level(logging.WARNING, logger="cron.scheduler"):
+        scheduler._send_cron_operator_alert("⚠️ Cron 'x' failed", cfg={})
 
     assert sent == []
+    assert not caplog.records, [r.getMessage() for r in caplog.records]
 
 
 def test_alert_delivery_failure_never_raises(monkeypatch) -> None:
