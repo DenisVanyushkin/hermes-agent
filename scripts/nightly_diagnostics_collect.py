@@ -414,6 +414,56 @@ def collect_docker() -> dict:
     return {"total": len(lines), "exited": len(exited), "monitoring_down": monitoring_down[:10]}
 
 
+def collect_sqlite_health(hermes_home: Path) -> dict:
+    """Report the SQLite this deployment actually runs, plus the updater result.
+
+    The gateway venv and the job-intel-exporter image run a statically compiled
+    SQLite via a .pth shim, because no supplier ships a version without the
+    WAL-reset corruption bug: Ubuntu pins libsqlite3 at 3.45.1 for the life of
+    the LTS and uv's CPython bundles 3.50.4, both inside the affected range.
+    That took those processes out of apt's update path, so this section is the
+    only thing that reports drift.
+
+    Fitness is judged by upstream's own detector (hermes_cli.sqlite_runtime),
+    never by a local copy of the affected version range — a second copy would
+    drift the day upstream learns something new.
+    """
+    module_file = getattr(sqlite3, "__file__", "") or ""
+    info: dict = {
+        "version": sqlite3.sqlite_version,
+        "module": module_file,
+        "shim_active": "pysqlite3" in module_file,
+    }
+    try:
+        sys.path.insert(0, str(hermes_home / "hermes-agent"))
+        from hermes_cli.sqlite_runtime import is_sqlite_wal_reset_vulnerable
+
+        info["wal_reset_vulnerable"] = bool(
+            is_sqlite_wal_reset_vulnerable(sqlite3.sqlite_version_info)
+        )
+    except Exception as exc:  # noqa: BLE001 - report, never crash the digest
+        info["wal_reset_vulnerable"] = None
+        info["detector_error"] = f"{type(exc).__name__}: {exc}"
+
+    result_path = hermes_home / "state" / "sqlite_autoupdate_last.json"
+    try:
+        info["autoupdate"] = json.loads(result_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        info["autoupdate"] = {"action": "never_ran"}
+    except (OSError, ValueError) as exc:
+        info["autoupdate"] = {"action": "unreadable", "error": str(exc)}
+
+    report = info["autoupdate"] or {}
+    info["needs_attention"] = bool(
+        info["wal_reset_vulnerable"]
+        or not info["shim_active"]
+        or report.get("action")
+        in {"rejected", "rolled_back", "never_ran", "unreadable"}
+        or report.get("upstream_runtime_viable")
+    )
+    return info
+
+
 def collect_doctors(workdir: Path, hermes_home: Path, db_path: Path) -> dict:
     env = os.environ.copy()
     env["HERMES_HOME"] = str(hermes_home)
@@ -450,6 +500,7 @@ def build_digest(hermes_home: Path, workdir: Path, db_path: Path, now: datetime)
     section("job_intel", lambda: job_intel_summary(db_path))
     section("system", lambda: collect_system_health([str(hermes_home), str(workdir), "/", "/var/lib/browser-desktop"]))
     section("docker", collect_docker)
+    section("sqlite", lambda: collect_sqlite_health(hermes_home))
     section("doctors", lambda: collect_doctors(workdir, hermes_home, db_path))
     return digest
 
