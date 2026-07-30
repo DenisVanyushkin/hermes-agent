@@ -163,7 +163,6 @@ def send_operator_alert(channel: str, text: str) -> None:
     _send_alert(channel, text)
 
 
-
 def maybe_alert_turn_error(config, *, platform, chat_id, chat_label=None,
                            user_message, agent_result, final_response,
                            now=None) -> None:
