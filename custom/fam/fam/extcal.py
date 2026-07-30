@@ -1705,11 +1705,15 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
 
     Linking, per occurrence: primary path is by `_occurrence_key` (ICS
     UID(+RECURRENCE-ID)) against the matching branch's owner='iphone' rows.
-    On a miss, fuzzy-link against owner='hermes' rows (rule #2) -- a hit
-    there is a `collisions` entry, NOT an insert/update. A miss on both is a
-    plain insert (unless the occurrence itself carries STATUS:CANCELLED,
-    in which case there is nothing to insert OR cancel -- it never existed
-    locally to begin with).
+    On a miss, an EXACT `external_uid` match against an owner='hermes' row
+    (fix-round 2, finding N4 -- see the module note above `hermes_events_
+    by_uid`/`hermes_plans_by_uid`) is a quiet no-op: this is the SAME
+    occurrence, already adopted, not a coincidence and not new data. Only
+    past that is fuzzy-link against owner='hermes' rows tried at all
+    (rule #2) -- a hit there is a `collisions` entry, NOT an insert/update.
+    A miss on all three is a plain insert (unless the occurrence itself
+    carries STATUS:CANCELLED, in which case there is nothing to insert OR
+    cancel -- it never existed locally to begin with).
 
     Guard (rule #3): owner='hermes' rows never appear in insert/update/
     cancel/drop for either branch -- `events_by_key`/`plans_by_key` below are
@@ -1788,6 +1792,29 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
         # entirely, without needing a synthetic (branch, id) tuple key.
         claimed_hermes_events, claimed_hermes_plans = set(), set()
 
+        # Fix-round 2, finding N4: an already-ADOPTED occurrence (`fam
+        # cal adopt`) keeps its own `external_uid` after its owner flips
+        # to 'hermes' -- it is no longer reachable through `events_by_
+        # key`/`plans_by_key` (rule #3: those are 'iphone'-only), so it
+        # falls through to the rule #2 fuzzy (title+time / title+deadline)
+        # path below on every later resync of the SAME occurrence. Fuzzy
+        # matching there is a HEURISTIC for two independently-created
+        # things that merely look alike; here the incoming occurrence
+        # and the local row are, by construction, the exact same CalDAV
+        # occurrence (identical uid+recurrence_id key) -- not a
+        # coincidence to report as a `collisions` entry, and not new
+        # data to insert (a second row for the same external_uid would
+        # collide with the partial UNIQUE index anyway). These dicts let
+        # the per-occurrence loop recognize that case by EXACT key
+        # before ever reaching the fuzzy heuristic, so it can be a quiet
+        # no-op instead of a `collisions` entry that would otherwise
+        # repeat, unfixably, on every single tick for as long as the
+        # adopted occurrence exists.
+        hermes_events_by_uid = {r["external_uid"]: r for r in hermes_events
+                                 if r.get("external_uid")}
+        hermes_plans_by_uid = {r["external_uid"]: r for r in hermes_plans
+                                if r.get("external_uid")}
+
         for occ in remote_occurrences:
             try:
                 if not isinstance(occ, dict):
@@ -1824,6 +1851,11 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
                     deadline = _deadline_from_occurrence(occ)
                     existing = plans_by_key.get(key)
                     if existing is None:
+                        if key in hermes_plans_by_uid:
+                            # N4: same occurrence, already adopted -- see
+                            # the module note above. Quiet no-op, not a
+                            # collision, not an insert.
+                            continue
                         fuzzy = _fuzzy_match_plan(occ, hermes_plans, deadline, claimed_hermes_plans)
                         if fuzzy is not None:
                             changeset["collisions"].append({
@@ -1866,6 +1898,11 @@ def plan_changes(remote_occurrences, local_snapshot, now_utc):
 
                     existing = events_by_key.get(key)
                     if existing is None:
+                        if key in hermes_events_by_uid:
+                            # N4: same occurrence, already adopted -- see
+                            # the module note above. Quiet no-op, not a
+                            # collision, not an insert.
+                            continue
                         fuzzy = _fuzzy_match_event(occ, hermes_events, claimed_hermes_events)
                         if fuzzy is not None:
                             changeset["collisions"].append({
@@ -2148,6 +2185,39 @@ def _existing_id_by_external_uid(conn, table, external_uid):
     return row["id"] if row else None
 
 
+def _series_already_adopted(conn, href):
+    """True when some OTHER row of the SAME CalDAV resource (`external_
+    href`) has already been adopted (`owner='hermes'`, via `fam cal
+    adopt`). Used by `_apply_event_insert` (final-review blocker 1,
+    fix-round 2 finding N1 -- the horizon-rollover gap): a recurring
+    series arrives as ONE CalDAV resource, but `expand()` only
+    materializes the occurrences that currently fall inside the sync
+    window; when the horizon later rolls forward and a BRAND-NEW
+    occurrence of that same resource slides into view for the first
+    time, it must inherit `owner='hermes'` too, complete with its own
+    reminder chain -- her phone's VALARM for the whole resource was
+    already permanently stripped by the earlier `adopt` (`drop_valarm`
+    acts on the resource as a whole; there is no such thing as a
+    per-occurrence VALARM on the wire), so an `owner='iphone'` new
+    occurrence would silently never remind at all, forever, one freshly
+    silent occurrence every time the window advances.
+
+    No new state needs to be stored for this: an already-adopted sibling
+    row already answers the question on its own, since adopted rows are
+    never cleaned up or reset (`owner='hermes'` rows stay exactly where
+    `fam cal adopt` left them). `href` with no rows at all (a brand-new
+    series, or a non-recurring event) -> False, same as any other row's
+    href simply having no siblings yet.
+    """
+    if not href:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM events WHERE external_href=? AND owner='hermes' LIMIT 1",
+        (href,),
+    ).fetchone()
+    return row is not None
+
+
 _SKIPPED = object()
 
 
@@ -2210,6 +2280,17 @@ def _apply_event_insert(conn, entry):
     UNIQUE index remains as the TOCTOU backstop for both branches, same
     dual-layer pattern `tick.py::meds_gen` uses for its own SELECT-guarded
     inserts.
+
+    Owner inheritance (final-review blocker 1, fix-round 2 finding N1):
+    a brand-new occurrence whose `external_href` already has an adopted
+    (`owner='hermes'`) sibling row inherits `owner='hermes'` instead of
+    the usual `'iphone'` -- see `_series_already_adopted`'s own
+    docstring for why. `rem.regenerate()` below is unconditional either
+    way: for the ordinary 'iphone' case it retracts the transient
+    'hermes'-shaped chain `cal.add()` just built (as always); for the
+    inherited-'hermes' case it instead BUILDS the real chain this new
+    occurrence needs from day one, exactly like `cal adopt` itself does
+    for the occurrences that existed at adopt-time.
     """
     external_uid = entry.get("external_uid")
     existing_id = _existing_id_by_external_uid(conn, "events", external_uid)
@@ -2220,23 +2301,34 @@ def _apply_event_insert(conn, entry):
         })
         return _SKIPPED
 
+    href = entry.get("external_href")
+    inherit_hermes = _series_already_adopted(conn, href)
     place_id = _resolve_place_ref(conn, entry.get("location"))
     added = cal.add(conn, entry.get("title") or "", entry["start_utc"],
                      end_utc=entry.get("end_utc"), place=None)
     event_id = added["id"]
+    owner = "hermes" if inherit_hermes else "iphone"
     conn.execute(
-        "UPDATE events SET owner='iphone', external_uid=?, external_href=?, "
+        "UPDATE events SET owner=?, external_uid=?, external_href=?, "
         "external_etag=?, external_seq=?, external_location=?, place_id=? "
         "WHERE id=?",
-        (entry.get("external_uid"), entry.get("external_href"),
+        (owner, entry.get("external_uid"), href,
          entry.get("external_etag"), entry.get("external_seq"),
          _external_location_value(entry.get("location")), place_id, event_id),
     )
-    rem.regenerate(conn, event_id)
-    audit.log(conn, "cal.ext.apply", {
+    created = rem.regenerate(conn, event_id)
+    audit_payload = {
         "branch": "events", "action": "insert", "id": event_id,
         "external_uid": entry.get("external_uid"),
-    })
+    }
+    if inherit_hermes:
+        # Visible in the audit trail (not just a silent side effect) --
+        # this is the one insert-time path that deviates from the
+        # ordinary "owner='iphone', reminder-free" outcome the rest of
+        # this function's docstring/tests describe.
+        audit_payload["owner"] = "hermes"
+        audit_payload["reminders_created"] = created
+    audit.log(conn, "cal.ext.apply", audit_payload)
     return None
 
 
@@ -3122,6 +3214,20 @@ def export_own(conn, cfg, request=None, now_utc=None):
     owner='hermes'` makes them structurally unreachable, the same
     guarantee `plan_changes`' rule #3 gives the import direction).
 
+    Adopted rows excluded (final review, finding N3): an `owner='hermes'`
+    row with a non-NULL `external_uid` was imported from HER OWN iCloud
+    calendar and later adopted (`fam cal adopt`) -- it already lives in
+    her calendar under its original CalDAV resource; that resource is
+    untouched by adoption (only its VALARM is stripped, via `drop_valarm`,
+    a completely separate write path below). Exporting it here as well
+    would PUT a second copy into the "Гермес" collection, so she would
+    see every adopted occurrence twice on her phone: once under its
+    original calendar, once more under "Гермес". The eligibility query's
+    own `AND external_uid IS NULL` excludes exactly these rows -- a plain
+    Hermes-native event (never touched by extcal's import direction at
+    all) always has `external_uid IS NULL`, so this changes nothing for
+    the common case this function existed for before adoption existed.
+
     Returns counts: `{exported, updated, unchanged, deleted, errors}`.
       - `exported`: a brand-new PUT (no prior `ext_exports` row).
       - `updated`: a PUT for an event whose `body_hash` changed since its
@@ -3169,6 +3275,7 @@ def export_own(conn, cfg, request=None, now_utc=None):
 
     eligible_rows = conn.execute(
         "SELECT * FROM events WHERE owner='hermes' AND status='active' "
+        "AND external_uid IS NULL "
         "AND start_utc >= ? AND start_utc <= ?",
         (window_start, window_end)).fetchall()
     eligible = {r["id"]: dict(r) for r in eligible_rows}

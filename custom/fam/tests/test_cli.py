@@ -1581,10 +1581,25 @@ def test_cal_adopt_recurring_series_adopts_every_occurrence_sharing_href(db, cap
 def test_cal_adopt_single_event_unaffected_by_series_widening(db, capsys, monkeypatch):
     """Regression guard: a plain, non-recurring iPhone event (its href
     belongs to no other row) must still adopt exactly as before -- no
-    `adopted_ids` in the output, no unrelated event touched."""
-    e = _iphone_event(db)
-    other = cal.add(db, "Другое", _future_start(hours=10))
-    db.commit()
+    `adopted_ids` in the output, and a DIFFERENT owner='iphone' event
+    (its own, unrelated external_href) is not swept up by the widening
+    query.
+
+    Fix-round 2, minor (c): the PREVIOUS version of this guard asserted
+    `cal.get(db, other["id"])["owner"] == "hermes"` on a PLAIN
+    `cal.add()`-created event -- true trivially, since `cal.add()`
+    already defaults new events to `owner='hermes'` with no `adopt`
+    call involved at all, so that assertion could never have caught a
+    regression where the sibling-widening query over-matched. This
+    version uses a second, genuinely owner='iphone' event (via
+    `_iphone_series_occurrence`) with its OWN distinct href, and checks
+    that IT specifically is left untouched (`owner` still 'iphone').
+    """
+    e = _iphone_event(
+        db, href="https://caldav.icloud.com/1/calendars/personal/evt1.ics")
+    other = _iphone_series_occurrence(
+        db, "https://caldav.icloud.com/1/calendars/personal/evt-unrelated.ics",
+        "other-uid-unrelated", title="Другое", start=_future_start(hours=10))
     monkeypatch.setattr(extcal, "_request", _ok_valarm_response)
 
     rc = cli.main(["cal", "adopt", str(e["id"]), "--json"])
@@ -1593,7 +1608,119 @@ def test_cal_adopt_single_event_unaffected_by_series_widening(db, capsys, monkey
     assert out["owner"] == "hermes"
     assert "adopted_ids" not in out
 
-    assert cal.get(db, other["id"])["owner"] == "hermes"
+    untouched = cal.get(db, other["id"])
+    assert untouched["owner"] == "iphone"
+
+# --- Fix-round 2, finding N2: `disown` mirrors adopt's series widening -----
+# (final review had flagged this as an asymmetry: `adopt` widens to the
+# whole series, `disown` did not, leaving a confusing half-revert).
+
+def test_cal_disown_recurring_series_disowns_every_occurrence_sharing_href(db, capsys, monkeypatch):
+    href = "https://caldav.icloud.com/1/calendars/personal/training-series.ics"
+    e1 = _iphone_series_occurrence(db, href, "training-uid::rid1",
+                                    start=_future_start(hours=5))
+    e2 = _iphone_series_occurrence(db, href, "training-uid::rid2",
+                                    start=_future_start(hours=5 + 24 * 7))
+    e3 = _iphone_series_occurrence(db, href, "training-uid::rid3",
+                                    start=_future_start(hours=5 + 24 * 14))
+    monkeypatch.setattr(extcal, "_request", _ok_valarm_response)
+
+    rc = cli.main(["cal", "adopt", str(e1["id"])])
+    assert rc == 0
+    capsys.readouterr()
+    for e in (e1, e2, e3):
+        assert cal.get(db, e["id"])["owner"] == "hermes"
+        assert len(rem.list_reminders(db, event_id=e["id"])) > 0
+
+    rc = cli.main(["cal", "disown", str(e2["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["owner"] == "iphone"
+    assert sorted(out["disowned_ids"]) == sorted([e1["id"], e2["id"], e3["id"]])
+
+    for e in (e1, e2, e3):
+        updated = cal.get(db, e["id"])
+        assert updated["owner"] == "iphone"
+        assert rem.list_reminders(db, event_id=e["id"]) == []
+
+    rows = audit.query(db, since_utc=None, kind_prefix="cal.disown", grep=None, limit=10)
+    assert len(rows) == 1
+    assert sorted(rows[0]["payload"]["disowned_ids"]) == sorted([e1["id"], e2["id"], e3["id"]])
+    assert rows[0]["payload"]["reminders_removed"] > 0
+
+
+def test_cal_disown_single_event_unaffected_by_series_widening(db, capsys, monkeypatch):
+    """Regression guard, mirrors adopt's own: disowning one adopted event
+    must not touch a DIFFERENT adopted event with its own, unrelated
+    href."""
+    e = _iphone_event(
+        db, href="https://caldav.icloud.com/1/calendars/personal/evt1.ics")
+    other = _iphone_series_occurrence(
+        db, "https://caldav.icloud.com/1/calendars/personal/evt-unrelated2.ics",
+        "other-uid-unrelated-2", title="Другое2", start=_future_start(hours=12))
+    monkeypatch.setattr(extcal, "_request", _ok_valarm_response)
+    assert cli.main(["cal", "adopt", str(e["id"])]) == 0
+    capsys.readouterr()
+    assert cli.main(["cal", "adopt", str(other["id"])]) == 0
+    capsys.readouterr()
+
+    rc = cli.main(["cal", "disown", str(e["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert "disowned_ids" not in out
+
+    assert cal.get(db, other["id"])["owner"] == "hermes"  # untouched
+
+
+# --- Fix-round 2, minor (a): adopt/disown widening must not sweep in a
+# cancelled/done occurrence of the same recurring resource -- it is already
+# resolved, not a live occurrence to remind about.
+
+def test_cal_adopt_skips_cancelled_sibling_of_the_series(db, capsys, monkeypatch):
+    href = "https://caldav.icloud.com/1/calendars/personal/training-series2.ics"
+    e1 = _iphone_series_occurrence(db, href, "training2-uid::rid1",
+                                    start=_future_start(hours=5))
+    e2 = _iphone_series_occurrence(db, href, "training2-uid::rid2",
+                                    start=_future_start(hours=5 + 24 * 7))
+    db.execute("UPDATE events SET status='cancelled' WHERE id=?", (e2["id"],))
+    db.commit()
+    monkeypatch.setattr(extcal, "_request", _ok_valarm_response)
+
+    rc = cli.main(["cal", "adopt", str(e1["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert "adopted_ids" not in out  # only e1 -- e2 excluded (cancelled)
+
+    untouched = cal.get(db, e2["id"])
+    assert untouched["owner"] == "iphone"
+    assert untouched["status"] == "cancelled"
+
+
+def test_cal_disown_skips_cancelled_sibling_of_the_series(db, capsys, monkeypatch):
+    href = "https://caldav.icloud.com/1/calendars/personal/training-series3.ics"
+    e1 = _iphone_series_occurrence(db, href, "training3-uid::rid1",
+                                    start=_future_start(hours=5))
+    e2 = _iphone_series_occurrence(db, href, "training3-uid::rid2",
+                                    start=_future_start(hours=5 + 24 * 7))
+    monkeypatch.setattr(extcal, "_request", _ok_valarm_response)
+    assert cli.main(["cal", "adopt", str(e1["id"]), "--json"]) == 0
+    capsys.readouterr()
+    assert cal.get(db, e2["id"])["owner"] == "hermes"  # e2 adopted alongside e1
+
+    # Now cancel e2 before disowning e1 -- the cancelled sibling must not
+    # be reverted either.
+    db.execute("UPDATE events SET status='cancelled' WHERE id=?", (e2["id"],))
+    db.commit()
+
+    rc = cli.main(["cal", "disown", str(e1["id"]), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert "disowned_ids" not in out  # only e1 -- e2 excluded (cancelled)
+
+    untouched = cal.get(db, e2["id"])
+    assert untouched["owner"] == "hermes"
+    assert untouched["status"] == "cancelled"
+
 
 # --- Final review, blocker 2 (Important): `--now` requires `--dry-run` -----
 # on the real CLI path (extcal._time_range's own iCloud query window always
@@ -1647,3 +1774,51 @@ def test_cal_adopt_valarm_error_redacts_her_href(db, capsys, monkeypatch):
     payload_text = json.dumps(rows[0]["payload"], ensure_ascii=False)
     assert href not in payload_text
     assert "evt-secret.ics" not in payload_text
+
+
+# --- Fix-round 2, minor (b): `_redact_extcal_text` must also catch the
+# double-quoted `repr()` form (an RRULE value containing an apostrophe
+# switches Python's repr to double quotes) and the free-form dateutil
+# exception-detail text `_expand_master` appends alongside the quoted
+# RRULE literal -- neither was reachable by the original single-quote-only
+# pattern.
+
+def test_redact_extcal_text_catches_double_quoted_rrule_repr():
+    # A value containing an apostrophe -> Python's repr() switches to
+    # double quotes (verified directly: repr("FREQ=WEEKLY;X=IT'S") ==
+    # '"FREQ=WEEKLY;X=IT\'S"' style double-quoted form).
+    text = ("Calendar: RRULE \"FREQ=WEEKLY;NOTE=IT'S\" for uid='series1' "
+            "could not be parsed/evaluated (ValueError: bad token)")
+    out = cli._redact_extcal_text(text)
+    assert "IT'S" not in out
+    assert "FREQ=WEEKLY" not in out
+    assert "RRULE <redacted>" in out
+    assert "uid='series1'" in out  # uid is deliberately left alone
+
+
+def test_redact_extcal_text_strips_dateutil_exception_detail():
+    # The dateutil exception's OWN text (`{e}`) is not `!r`-quoted at all
+    # -- it can independently echo a raw fragment of the RRULE value in a
+    # shape the quoted-literal pattern never matches.
+    text = ("Calendar: RRULE 'FREQ=WEEKLY;BYDAY=MO' for uid='series1' "
+            "could not be parsed/evaluated (ValueError: leaked "
+            "FREQ=WEEKLY;BYDAY=MO fragment)")
+    out = cli._redact_extcal_text(text)
+    assert "FREQ=WEEKLY;BYDAY=MO" not in out
+    assert "leaked" not in out
+    assert "RRULE <redacted>" in out
+    assert "(ValueError: <redacted>)" in out
+    assert "uid='series1'" in out
+
+
+def test_redact_extcal_text_still_redacts_plain_href_and_single_quoted_rrule():
+    # Regression guard: the original two cases (final review, blocker 3)
+    # keep working exactly as before.
+    text = ("GET https://caldav.icloud.com/1/calendars/personal/evt1.ics "
+            "failed (status=404); RRULE 'FREQ=DAILY' for uid='u1' could "
+            "not be parsed/evaluated (ValueError: bad)")
+    out = cli._redact_extcal_text(text)
+    assert "evt1.ics" not in out
+    assert "<href>" in out
+    assert "FREQ=DAILY" not in out
+    assert "RRULE <redacted>" in out

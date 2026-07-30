@@ -617,10 +617,16 @@ def cmd_cal_adopt(args):
     # operation as `args.id` -- see docstring above. A single, non-
     # recurring event's href is unique to it, so this query naturally
     # returns just itself.
+    # `AND status='active'` (fix-round 2, minor (a)): a cancelled or done
+    # occurrence of the SAME resource is already resolved -- nothing left
+    # to remind about -- so it must not get swept into `owner='hermes'`
+    # and reported as "also adopted N other occurrence(s)" alongside the
+    # live ones.
     ids = [args.id]
     if href:
         sibling_rows = conn.execute(
-            "SELECT id FROM events WHERE external_href=? AND owner='iphone'",
+            "SELECT id FROM events WHERE external_href=? AND owner='iphone' "
+            "AND status='active'",
             (href,),
         ).fetchall()
         ids = sorted({row["id"] for row in sibling_rows} | {args.id})
@@ -711,6 +717,24 @@ def cmd_cal_disown(args):
     drops the chain but leaves the event itself alone) -- not `disown`,
     which is only meaningful for an event her iPhone actually has its own
     copy of.
+
+    Series widening (fix-round 2, finding N2 -- mirrors `cal adopt`'s own
+    blocker-1 fix): the SAME resource-sharing rationale applies in
+    reverse. If `args.id` carries an `external_href` shared by other
+    `owner='hermes'` occurrences (typically: the whole series was
+    adopted together in one `cal adopt` call), disowning only the one
+    named occurrence would leave every sibling still `owner='hermes'`,
+    quietly chained, while THIS occurrence goes back to owner='iphone'
+    with no chain of its own and her phone's alarm for the whole
+    resource already gone (stripped by the earlier adopt) -- a confusing
+    half-revert, loud on the one occurrence she asked about and silent
+    on the rest. Every OTHER `owner='hermes'` `status='active'` row
+    sharing this href is flipped back to `owner='iphone'` in the same
+    operation (status filter mirrors adopt's own minor (a): a cancelled/
+    done sibling is already resolved, not a live reminder to touch).
+    This is not a network operation (disown never touches her iCloud
+    copy at all, unlike adopt's VALARM strip), so widening it costs
+    nothing extra on the wire.
     """
     conn = famdb.connect()
     e = cal.get(conn, args.id)
@@ -727,31 +751,55 @@ def cmd_cal_disown(args):
             f"that originated on her iPhone; for a plain Hermes event use "
             f"`fam rem cancel {args.id}` to stop its reminders instead"
         )
-    conn.execute(
-        "UPDATE events SET owner='iphone' WHERE id=? AND owner='hermes'",
-        (args.id,),
-    )
-    # Minor #4 (fix-round 1): capture how many pending reminders actually
-    # get dropped, the same way `cal adopt`'s own `reminders_created`
-    # already surfaces its side of this -- rem.regenerate() itself only
-    # ever returns the CREATED count (0 here, since owner is now
-    # 'iphone' -- see its own early-exit docstring), never touches
-    # rem.py to add a second return value for this.
-    removed = conn.execute(
-        "SELECT COUNT(*) AS n FROM reminders WHERE event_id=? AND status='pending'",
-        (args.id,),
-    ).fetchone()["n"]
-    rem.regenerate(conn, args.id)
-    audit.log(conn, "cal.disown", {"id": args.id, "reminders_removed": removed})
+
+    href = e.get("external_href")
+    ids = [args.id]
+    if href:
+        sibling_rows = conn.execute(
+            "SELECT id FROM events WHERE external_href=? AND owner='hermes' "
+            "AND status='active'",
+            (href,),
+        ).fetchall()
+        ids = sorted({row["id"] for row in sibling_rows} | {args.id})
+
+    # Minor #4 (fix-round 1), now summed across every id widened onto
+    # (fix-round 2): capture how many pending reminders actually get
+    # dropped, the same way `cal adopt`'s own `reminders_created` already
+    # surfaces its side of this -- rem.regenerate() itself only ever
+    # returns the CREATED count (0 here, since owner is now 'iphone' --
+    # see its own early-exit docstring), never touches rem.py to add a
+    # second return value for this.
+    removed_total = 0
+    for eid in ids:
+        removed_total += conn.execute(
+            "SELECT COUNT(*) AS n FROM reminders WHERE event_id=? AND status='pending'",
+            (eid,),
+        ).fetchone()["n"]
+        conn.execute(
+            "UPDATE events SET owner='iphone' WHERE id=? AND owner='hermes'",
+            (eid,),
+        )
+        rem.regenerate(conn, eid)
+
+    audit_payload = {"id": args.id, "reminders_removed": removed_total}
+    if len(ids) > 1:
+        audit_payload["disowned_ids"] = ids
+    audit.log(conn, "cal.disown", audit_payload)
     conn.commit()
 
-    out = {"id": args.id, "owner": "iphone", "reminders_removed": removed}
+    out = {"id": args.id, "owner": "iphone", "reminders_removed": removed_total}
+    if len(ids) > 1:
+        out["disowned_ids"] = ids
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
     else:
-        print(f"disowned event {args.id}: owner=iphone, {removed} pending "
+        print(f"disowned event {args.id}: owner=iphone, {removed_total} pending "
               f"reminder(s) removed (her phone's own alarm, if any, is "
               f"not restored -- see cal disown's own limitation)")
+        if len(ids) > 1:
+            others = ", ".join(str(i) for i in ids if i != args.id)
+            print(f"  also disowned {len(ids) - 1} other occurrence(s) of "
+                  f"this recurring series (same iCloud resource): {others}")
     return 0
 
 def cmd_cal_show(args):
@@ -1404,7 +1452,27 @@ def _dry_run_summary(changeset):
 
 
 _HREF_IN_TEXT_RE = re.compile(r"https?://\S+")
-_RRULE_IN_TEXT_RE = re.compile(r"RRULE\s+'[^']*'")
+# Both of Python's `repr()` quoting conventions: single quotes (the common
+# case), OR double quotes -- `repr()` switches to double quotes whenever
+# the string contains an apostrophe but no `"` (fix-round 2, minor (b)):
+# `_expand_master`'s `f"RRULE {master['rrule']!r} for uid=..."` uses `!r`
+# on the raw RRULE VALUE text, and an Apple RRULE can itself legitimately
+# contain an apostrophe (e.g. inside an X- extension or a stray comment
+# some client appended) -- the OLD single-quote-only pattern silently let
+# that one shape straight through.
+_RRULE_IN_TEXT_RE = re.compile(r"RRULE\s+(?:'[^']*'|\"[^\"]*\")")
+# `_expand_master`'s diagnostic also appends `({type(e).__name__}: {e})`
+# -- `dateutil.rrulestr`'s OWN exception text (`{e}`), not `!r`-quoted at
+# all, can independently echo a fragment of the same raw RRULE value
+# (e.g. an "unsupported/invalid token: <fragment>"-shaped message) in a
+# form the pattern above never sees, since it never touches the quoted
+# literal. This targets that known, fixed diagnostic shape by structure
+# (the literal string `_expand_master` builds it with) and drops
+# everything after the exception TYPE name, rather than trying to guess
+# what shape the un-quoted fragment might take.
+_EXPAND_ERROR_DETAIL_RE = re.compile(
+    r"(could not be parsed/evaluated \(\w+): [^)]*(\))"
+)
 
 # Cap on any single redacted diagnostic string landing in audit_log or a
 # message to Denis -- matches the bound `cal.ext.export_error.error`
@@ -1419,15 +1487,22 @@ def _redact_extcal_text(text):
     an absolute CalDAV resource href (hers, or the "Гермес" write-target's)
     -- `https?://...` -> `<href>` -- and a raw `RRULE` value quoted in an
     `expand()`/`_expand_master` diagnostic (`extcal.py`'s own `!r`-quoted
-    `RRULE '<value>' for uid=...` shape) -- `RRULE '...'` -> `RRULE
-    <redacted>`. `uid=...` is left alone: it is an opaque identifier, not
-    her data, and the design doc's own "только UID и счётчики" rule
-    explicitly allows it through. Falsy input passes through unchanged
-    (nothing to redact); never raises."""
+    `RRULE '<value>' for uid=...` shape, single OR double quoted -- see
+    `_RRULE_IN_TEXT_RE`'s own comment) -- `RRULE '...'`/`RRULE "..."` ->
+    `RRULE <redacted>`. Fix-round 2 (minor (b)) additionally drops the
+    free-form exception-detail text `_expand_master` appends after that
+    (`dateutil.rrulestr`'s own `{e}`, which is not `!r`-quoted and can
+    independently echo a raw fragment of the RRULE value in a shape the
+    quoted pattern never matches) -- only the exception's TYPE name
+    survives (`ValueError`, etc.), not its message text. `uid=...` is left
+    alone: it is an opaque identifier, not her data, and the design doc's
+    own "только UID и счётчики" rule explicitly allows it through. Falsy
+    input passes through unchanged (nothing to redact); never raises."""
     if not text:
         return text
     text = _HREF_IN_TEXT_RE.sub("<href>", text)
     text = _RRULE_IN_TEXT_RE.sub("RRULE <redacted>", text)
+    text = _EXPAND_ERROR_DETAIL_RE.sub(r"\1: <redacted>\2", text)
     return text
 
 
