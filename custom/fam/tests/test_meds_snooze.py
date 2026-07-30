@@ -3,12 +3,27 @@
 Мотив (спека 2026-07-29): "принято" и "пропускаю" доступны одним тапом,
 а "позже" требует набрать текст -- и именно в этом сценарии чаще всего
 возникает раздражение.
+
+Fix round 1 (Finding 3): run_hook's "handled" boundary was never covered
+for ⏰, which is exactly why Finding 1 (run_hook forgot "snoozed" in its
+handled tuple -> a real snooze fell through to an agent turn) slipped
+past review. test_hook_* below close that gap.
 """
+import io
+import json
+
 import pytest
 
 from fam import meds, react
 
 NOW = "2026-07-20T05:00:00+00:00"   # 10:00 Алматы
+
+
+def _run_hook(db, event):
+    out = io.StringIO()
+    rc = react.run_hook(stdin=io.StringIO(json.dumps(event)), stdout=out,
+                        connect=lambda: db)
+    return rc, json.loads(out.getvalue())
 
 
 def _intake(db, name="Эутирокс"):
@@ -82,3 +97,62 @@ def test_snooze_emoji_is_in_dialogue_whitelist():
     src = (root / "plugins/platforms/whatsapp/reactions.py").read_text()
     for emoji in react.EMOJI_SNOOZE:
         assert emoji in src, f"{emoji!r} отсутствует в DIALOGUE_EMOJI"
+
+
+# ---- run_hook boundary (fix round 1, Finding 1 / Finding 3) ----
+#
+# handle() returning "snoozed" is not enough on its own: run_hook maps
+# handle()'s result onto {"handled": bool} for the adapter, and it is
+# THAT boolean the adapter's _apply_reaction_event branches on. Before
+# this fix round, run_hook's handled tuple only listed
+# ("confirmed", "skipped", "already_acked") -- "snoozed" fell through to
+# handled=False, and a false "handled" makes the adapter dispatch the
+# reaction to the agent (_dispatch_reaction_dialogue), spending an LLM
+# turn on what was already a fully-applied deterministic snooze. That
+# violates this module's own "no LLM in the reaction path" contract.
+
+def test_hook_marks_snoozed_as_handled(db):
+    med_id = meds.add(db, "Эутирокс", ["09:00"], remaining=10)
+    cur = db.execute(
+        "INSERT INTO med_intakes(med_id, plan_ts_utc, status, "
+        "series_next_utc, created_at) VALUES(?,?,'pending',?,?)",
+        (med_id, "2026-07-20T04:00:00+00:00", "2026-07-20T04:00:00+00:00",
+         "2026-07-20T04:00:00+00:00"))
+    iid = cur.lastrowid
+    react.record_sent(db, "wa-hook-snooze", "med", iid)
+    db.commit()
+
+    rc, payload = _run_hook(
+        db, {"target_message_id": "wa-hook-snooze", "emoji": "⏰"})
+
+    assert rc == 0
+    assert payload["handled"] is True, (
+        "a real snooze must not fall through to the agent-turn path")
+    assert payload["result"] == "snoozed"
+    assert payload["react"] == react.FEEDBACK_EMOJI
+
+
+def test_hook_marks_snooze_moot_as_handled(db):
+    # The dose left 'pending' through another door (a verbal "выпила")
+    # before the ⏰ reaction arrived -- meds.defer has nothing left to
+    # do, but the reaction was still consumed and must not reach the
+    # agent either.
+    med_id = meds.add(db, "Эутирокс", ["09:00"], remaining=10)
+    cur = db.execute(
+        "INSERT INTO med_intakes(med_id, plan_ts_utc, status, "
+        "series_next_utc, created_at) VALUES(?,?,'pending',?,?)",
+        (med_id, "2026-07-20T04:00:00+00:00", "2026-07-20T04:00:00+00:00",
+         "2026-07-20T04:00:00+00:00"))
+    iid = cur.lastrowid
+    react.record_sent(db, "wa-hook-moot", "med", iid)
+    db.commit()
+    meds.take(db, iid)
+    db.commit()
+
+    rc, payload = _run_hook(
+        db, {"target_message_id": "wa-hook-moot", "emoji": "⏰"})
+
+    assert rc == 0
+    assert payload["handled"] is True, (
+        "a moot snooze was still consumed and must not reach the agent")
+    assert payload["result"] == "snooze_moot"

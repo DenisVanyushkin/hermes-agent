@@ -166,7 +166,14 @@ def _snooze(conn, row, base, now_utc):
             # problem, same tolerance as the confirm/skip loop below.
             continue
 
-    out = {**base, "result": "snoozed" if deferred else "already_acked",
+    # "snooze_moot", not "already_acked": every target here already left
+    # 'pending' through some other door, so there was nothing left to
+    # defer -- but a snooze is not an ack, so overloading the ack path's
+    # "already_acked" would make a genuine idempotent re-ack and a moot
+    # snooze indistinguishable to anything keying off `result` (fix
+    # round 1, Finding 2). Both are still "consumed" outcomes for
+    # run_hook's handled tuple below.
+    out = {**base, "result": "snoozed" if deferred else "snooze_moot",
            "until_utc": until_str, "deferred": deferred}
     audit.log(conn, "react.handle", out)
     conn.commit()
@@ -181,6 +188,10 @@ def handle(conn, wa_message_id, emoji, removal=False, now_utc=None):
       snoozed                 -- ⏰ on a med: series_next_utc pushed by
                                  med_snooze_min minutes, status stays
                                  'pending' (this is NOT an ack)
+      snooze_moot              -- ⏰ on a med where every target dose had
+                                 already left 'pending' through another
+                                 door -- nothing to defer, but still a
+                                 consumed reaction, not a dialogue turn
       already_acked           -- idempotent repeat (or the underlying row
                                  was already taken/acked/cancelled)
       ignored                 -- unmapped emoji, a reaction removal, or
@@ -360,11 +371,16 @@ def run_hook(stdin=None, stdout=None, connect=None):
     out = handle(conn, wa_message_id, emoji,
                  removal=bool(event.get("removal")))
     # `handled` is the adapter's routing signal, not a success flag: true
-    # means this reaction was consumed as an ack and must NOT become an
-    # agent turn. `ignored`/`unknown_message` are ordinary chat reactions
-    # and belong to the dialogue path (spec: reactions-dialogue,
-    # 2026-07-29).
-    handled = out["result"] in ("confirmed", "skipped", "already_acked")
+    # means this reaction was consumed (as an ack, or -- ⏰ -- as a
+    # snooze) and must NOT become an agent turn. `snoozed`/`snooze_moot`
+    # are not acks but ARE consumed: a snooze that fell through to
+    # "handled": false would silently become an ordinary LLM turn,
+    # violating this module's "no LLM in the reaction path" contract
+    # (fix round 1, Finding 1). `ignored`/`unknown_message` are ordinary
+    # chat reactions and belong to the dialogue path (spec:
+    # reactions-dialogue, 2026-07-29).
+    handled = out["result"] in ("confirmed", "skipped", "already_acked",
+                                "snoozed", "snooze_moot")
     feedback = {"react": FEEDBACK_EMOJI} if handled else {}
     print(json.dumps({"handled": handled, **feedback, "result": out["result"]},
                      ensure_ascii=False), file=stdout)
