@@ -144,3 +144,69 @@ def test_compute_travel_min_with_origin_none_falls_to_the_lower_rungs(db, monkey
              "place": {"lat": DEST_LAT, "lon": DEST_LON}}
     assert road.compute_travel_min(db, event, _cfg(), now_utc=SOON,
                                    origin=None) == (42, "manual")
+
+
+# --- Task 2: cal.recompute_road -------------------------------------------
+
+def test_recompute_road_resolves_the_origin_exactly_once(db, monkeypatch):
+    monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
+    monkeypatch.setattr(cal.gate, "load_config", _cfg)
+    event = _event_with_place(db)
+    _park_car_away(db)
+    calls = _spy_resolve_origin(monkeypatch)
+
+    out = cal.recompute_road(db, event["id"])
+    db.commit()
+
+    assert out["source"] == "straight"
+    assert len(calls) == 1, (
+        f"origin resolved {len(calls)}x per recompute, expected 1: "
+        f"{calls}")
+
+
+def test_persisted_origin_is_the_point_the_minutes_were_measured_from(
+        db, monkeypatch):
+    """Страховка от рассинхрона. С резолвером, который отвечает
+    РАЗНОЕ на каждый вызов, вторая резолюция перестаёт быть незаметной:
+    в колонках оказалась бы одна точка, а в минутах рядом -- другая.
+    Против кода с двумя резолюциями этот тест написать нельзя вовсе --
+    он и есть инвариант, который создаёт изменение.
+    """
+    monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
+    monkeypatch.setattr(cal.gate, "load_config", _cfg)
+    event = _event_with_place(db)
+
+    seen = []
+
+    def shifting(conn, cfg, now_utc=None, event=None, at_utc=None):
+        seen.append(1)
+        if len(seen) == 1:
+            return _origin_at(AWAY_LAT, AWAY_LON)
+        return _origin_at(HOME_LAT, HOME_LON, source="home")
+
+    monkeypatch.setattr(whereami, "resolve_origin", shifting)
+
+    out = cal.recompute_road(db, event["id"])
+    db.commit()
+
+    row = db.execute(
+        "SELECT road_origin_lat, road_origin_lon, road_origin_source "
+        "FROM events WHERE id=?", (event["id"],)).fetchone()
+    assert row["road_origin_source"] == "hint"
+    assert out["minutes"] == road.straight_line_minutes(
+        row["road_origin_lat"], row["road_origin_lon"],
+        DEST_LAT, DEST_LON, _cfg()), (
+        "persisted origin and the origin the minutes were computed from "
+        "have drifted apart")
+
+
+def test_recompute_road_keeps_its_no_origin_guard(db, monkeypatch):
+    """Резолвер вернул None -> прежний ранний выход, а не поход в
+    compute_travel_min с origin=None."""
+    monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
+    monkeypatch.setattr(cal.gate, "load_config", _cfg)
+    event = _event_with_place(db)
+    monkeypatch.setattr(whereami, "resolve_origin", lambda *a, **k: None)
+
+    out = cal.recompute_road(db, event["id"])
+    assert out == {"minutes": None, "reason": "no_home_config"}

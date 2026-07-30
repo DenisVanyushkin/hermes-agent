@@ -152,16 +152,16 @@ def recompute_road(conn, event_id, now_utc=None):
         if origin is None:
             return {"minutes": None, "reason": "no_home_config"}
 
-        # compute_travel_min resolves the origin a SECOND time, inside
-        # road._origin_for -- the guard above only decides "is there an
-        # origin at all" and supplies road_origin_* below. Both must see
-        # the same clock, or the persisted origin columns would describe
-        # a different point than the minutes stored beside them were
-        # measured from, which is exactly the desync the road_origin_*
-        # comment below warns about.
+        # Один резолв на один пересчёт: тот же объект, что уедет в
+        # road_origin_* ниже, и считает минуты. Поэтому «сохранённая
+        # точка» и «точка, от которой мерили» -- не два значения,
+        # которые обязаны совпадать, а одно. Раньше compute_travel_min
+        # резолвил заново внутри road._origin_for, и совпадение
+        # приходилось удерживать руками, общими часами (wall_now_utc);
+        # теперь расходиться нечему.
         minutes, source = road.compute_travel_min(conn, event, cfg,
                                                   now_utc=depart_at,
-                                                  wall_now_utc=now_utc)
+                                                  origin=origin)
         if source in ("tomtom", "straight"):
             now = _now()
             # road_origin_* travels with the figure: tick.road_recompute
