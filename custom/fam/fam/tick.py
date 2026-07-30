@@ -239,22 +239,33 @@ def road_recompute(conn, now_utc=None, cfg=None):
             # (100) inside a single commute. whereami_origin_recheck_min
             # is the floor between two origin-driven recomputes of the
             # same event; the threshold windows still apply on top.
-            origin = whereami.resolve_origin(
-                conn, cfg, now_utc=now, event=event,
-                at_utc=leave_dt.isoformat(timespec="seconds"))
+            #
+            # Резолвим только когда хоть одно окно открыто: и
+            # origin_moved, и запись road_origin_* живут ВНУТРИ цикла по
+            # thresholds, а он при minutes_to_leave больше самого
+            # широкого порога не исполняется ни разу. На календаре из N
+            # будущих событий это N лишних проходов по лестнице в
+            # минуту, и внутри whereami_predict_horizon_min лестница
+            # включает _car_origin, то есть поход в StarLine.
+            origin = None
             origin_moved = False
-            prev_lat = event.get("road_origin_lat")
-            prev_lon = event.get("road_origin_lon")
-            if origin is not None and prev_lat is not None and prev_lon is not None:
-                moved_km = road._haversine_km(
-                    prev_lat, prev_lon, origin["lat"], origin["lon"])
-                cooled_down = (
-                    checked_dt is None
-                    or (now_dt - checked_dt).total_seconds() / 60
-                    >= cfg.get("whereami_origin_recheck_min", 10))
-                origin_moved = (
-                    moved_km > cfg.get("whereami_origin_move_km", 1.0)
-                    and cooled_down)
+            if thresholds and minutes_to_leave <= thresholds[0]:
+                origin = whereami.resolve_origin(
+                    conn, cfg, now_utc=now, event=event,
+                    at_utc=leave_dt.isoformat(timespec="seconds"))
+                prev_lat = event.get("road_origin_lat")
+                prev_lon = event.get("road_origin_lon")
+                if (origin is not None and prev_lat is not None
+                        and prev_lon is not None):
+                    moved_km = road._haversine_km(
+                        prev_lat, prev_lon, origin["lat"], origin["lon"])
+                    cooled_down = (
+                        checked_dt is None
+                        or (now_dt - checked_dt).total_seconds() / 60
+                        >= cfg.get("whereami_origin_recheck_min", 10))
+                    origin_moved = (
+                        moved_km > cfg.get("whereami_origin_move_km", 1.0)
+                        and cooled_down)
 
             for threshold in thresholds:
                 if minutes_to_leave > threshold:
@@ -266,7 +277,7 @@ def road_recompute(conn, now_utc=None, cfg=None):
 
                 depart_at = leave_dt.isoformat(timespec="seconds")
                 minutes, source = road.compute_travel_min(
-                    conn, event, cfg, now_utc=depart_at)
+                    conn, event, cfg, now_utc=depart_at, origin=origin)
                 # road_checked_at is stamped from this tick's own `now`
                 # (injected or real, per _now() at the top of reminders())
                 # -- NOT a fresh real-clock read -- so the threshold-

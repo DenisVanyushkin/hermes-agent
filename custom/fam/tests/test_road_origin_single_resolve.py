@@ -210,3 +210,93 @@ def test_recompute_road_keeps_its_no_origin_guard(db, monkeypatch):
 
     out = cal.recompute_road(db, event["id"])
     assert out == {"minutes": None, "reason": "no_home_config"}
+
+
+# --- Task 3: tick.road_recompute ------------------------------------------
+
+def _tick_event(db, monkeypatch, minutes_ahead, place_name="Клиника"):
+    """cal.add() гоняет собственный road-хук на add-time, читая РЕАЛЬНЫЙ
+    конфиг с диска (gate.load_config) -- на этом хосте с домашними
+    координатами. Глушим compute_travel_min только на время add(), чтобы
+    событие легло с travel_min_road=None и leave_at == start; тот же
+    приём, что у _add_event_neutral_road в test_tick.py.
+    """
+    places.add(db, place_name, lat=DEST_LAT, lon=DEST_LON)
+    db.commit()
+    start = (datetime.fromisoformat(NOW)
+             + timedelta(minutes=minutes_ahead)).isoformat(timespec="seconds")
+    real = road.compute_travel_min
+    monkeypatch.setattr(
+        road, "compute_travel_min",
+        lambda conn, event, cfg, now_utc=None, **kw: (None, "none"))
+    e = cal.add(db, "Врач", start, place=place_name)
+    db.commit()
+    monkeypatch.setattr(road, "compute_travel_min", real)
+    return e
+
+
+def test_tick_resolves_the_per_event_origin_once(db, monkeypatch):
+    """Внутри окна T-120 tick резолвит origin сам (ради origin_moved и
+    road_origin_*), а compute_travel_min резолвил его ещё раз."""
+    monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
+    _tick_event(db, monkeypatch, minutes_ahead=90)
+    calls = _spy_resolve_origin(monkeypatch)
+
+    touched = tick.road_recompute(db, now_utc=NOW, cfg=_cfg())
+
+    assert touched == 1
+    per_event = [c for c in calls if c["event_id"] is not None]
+    assert len(per_event) == 1, (
+        f"per-event origin resolved {len(per_event)}x, expected 1: "
+        f"{per_event}")
+
+
+def test_tick_does_not_resolve_an_origin_for_a_far_future_event(db, monkeypatch):
+    """minutes_to_leave > самого широкого порога -> ни одно окно не
+    открыто, тело цикла не исполняется ни разу, и origin был бы
+    выброшен неиспользованным. На календаре из N будущих событий это N
+    лишних проходов по лестнице в минуту, а внутри
+    whereami_predict_horizon_min лестница включает _car_origin -- то
+    есть поход в StarLine."""
+    monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
+    _tick_event(db, monkeypatch, minutes_ahead=600)   # далеко за T-120
+    calls = _spy_resolve_origin(monkeypatch)
+
+    touched = tick.road_recompute(db, now_utc=NOW, cfg=_cfg())
+
+    assert touched == 0
+    per_event = [c for c in calls if c["event_id"] is not None]
+    assert per_event == [], (
+        "no threshold window is open; the per-event origin is resolved "
+        f"and thrown away: {per_event}")
+
+
+def test_tick_persists_the_origin_it_computed_the_minutes_from(db, monkeypatch):
+    """Тот же инвариант, что у cal.recompute_road, на тиковом пути:
+    резолвер, отвечающий РАЗНОЕ на каждый вызов, разводит колонки и
+    минуты, если резолюций две."""
+    monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
+    e = _tick_event(db, monkeypatch, minutes_ahead=90)
+
+    seen = []
+
+    def shifting(conn, cfg, now_utc=None, event=None, at_utc=None):
+        seen.append(1)
+        if event is None:          # модульная проверка «есть ли origin»
+            return _origin_at(HOME_LAT, HOME_LON, source="home")
+        if len(seen) <= 2:
+            return _origin_at(AWAY_LAT, AWAY_LON)
+        return _origin_at(HOME_LAT, HOME_LON, source="home")
+
+    monkeypatch.setattr(whereami, "resolve_origin", shifting)
+
+    tick.road_recompute(db, now_utc=NOW, cfg=_cfg())
+
+    row = db.execute(
+        "SELECT travel_min_road, road_origin_lat, road_origin_lon, "
+        "road_origin_source FROM events WHERE id=?", (e["id"],)).fetchone()
+    assert row["road_origin_source"] == "hint"
+    assert row["travel_min_road"] == road.straight_line_minutes(
+        row["road_origin_lat"], row["road_origin_lon"],
+        DEST_LAT, DEST_LON, _cfg()), (
+        "tick persisted one origin and computed the minutes from another")

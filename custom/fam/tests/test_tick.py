@@ -713,7 +713,7 @@ class RecordingRoad:
         self.results = list(results)
         self.calls = []
 
-    def __call__(self, conn, event, cfg, now_utc=None):
+    def __call__(self, conn, event, cfg, now_utc=None, **kw):
         self.calls.append({"now_utc": now_utc})
         if len(self.results) > 1:
             return self.results.pop(0)
