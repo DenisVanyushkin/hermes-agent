@@ -403,6 +403,35 @@ def test_412_conflict_retry_also_failing_is_recorded_as_one_error_not_retried_ag
     assert calls.count("GET") == 1
 
 
+def test_export_commit_one_caps_error_length_for_export_failure_too(db):
+    """Final review blocker 3 (privacy): `_export_commit_one`'s
+    `_ExportFailure` branch used to skip the `[:300]` cap entirely (only
+    the OTHER branch -- an unexpected non-`_ExportFailure` exception --
+    had it). `_ExportFailure`'s own messages embed an absolute CalDAV
+    resource href (`f"PUT {href} failed (status=...)"`,
+    `f"DELETE {href} failed (status=...)"`), so an unbounded `str(e)`
+    here was the one inconsistent channel -- both branches must cap the
+    same way now."""
+    long_href = ("https://caldav.icloud.com/1/calendars/hermes/"
+                 + ("x" * 400) + ".ics")
+
+    def boom():
+        raise extcal._ExportFailure(f"PUT {long_href} failed (status=500)")
+
+    counts = {"errors": []}
+    extcal._export_commit_one(db, 1, "update", "updated", counts, boom)
+
+    assert len(counts["errors"]) == 1
+    assert len(counts["errors"][0]["error"]) <= 300
+
+    rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='cal.ext.export_error'"
+    ).fetchall()
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload"])
+    assert len(payload["error"]) <= 300
+
+
 # ---------------------------------------------------------------------
 # requirement #6: cancellation -> DELETE + ext_exports row dropped
 # ---------------------------------------------------------------------

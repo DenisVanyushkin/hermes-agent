@@ -54,10 +54,17 @@ separately rebuilt (a later, production-rollout step -- not this task). So:
     therefore `cli.py`, and every other `fam` command) works with zero
     recurring events in scope whether or not `dateutil` is installed;
   - if `expand()` DOES need to expand an RRULE and `dateutil` turns out to
-    be missing, that is surfaced as an explicit sentinel entry in the
-    returned list (`{"error": "dateutil_missing", ...}`, `uid` is None) --
-    never a silently-empty/short result indistinguishable from "this
-    calendar genuinely has no recurring events".
+    be missing, that is surfaced as an entry in `expand()`'s own SEPARATE
+    `errors` list (`expand()` returns `{"occurrences": [...], "errors":
+    [...]}`, never a bare list) -- never a silently-empty/short result
+    indistinguishable from "this calendar genuinely has no recurring
+    events", and never a fake occurrence mixed into `occurrences` itself
+    (an earlier design used a `{"error": "dateutil_missing", ...}`
+    sentinel dict planted inside the SAME list as real occurrences --
+    removed after review flagged it as a poison pill: a caller that
+    forgot the `if occ.get("error")` guard would hand a `start_utc=None`
+    dict straight to `cal.add()` and crash the whole batch. See
+    `expand()`'s own docstring for the current contract.)
 """
 import base64
 import hashlib
@@ -3082,7 +3089,14 @@ def _export_commit_one(conn, event_id, action, count_key, counts, fn):
     try:
         fn()
     except Exception as e:
-        error = str(e) if isinstance(e, _ExportFailure) else f"{type(e).__name__}: {e}"[:300]
+        # Final review blocker 3: the `_ExportFailure` branch used to skip
+        # the `[:300]` bound entirely (only the OTHER branch had it) --
+        # `_ExportFailure`'s own messages (`f"PUT {href} failed ..."`,
+        # `f"DELETE {href} failed ..."`) carry an absolute CalDAV resource
+        # href, so an unbounded `str(e)` here was the one channel in this
+        # function inconsistent with its sibling. Same cap either way now.
+        error = (str(e) if isinstance(e, _ExportFailure)
+                 else f"{type(e).__name__}: {e}")[:300]
         counts["errors"].append({"event_id": event_id, "action": action, "error": error})
         try:
             conn.rollback()
