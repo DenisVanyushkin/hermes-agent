@@ -2107,8 +2107,24 @@ class AIAgent:
             # allocated next turn at a recycled address.
             self._flushed_db_message_ids = set()
             self._last_flushed_db_idx = len(messages)
+            self._consecutive_flush_failures = 0
         except Exception as e:
-            logger.warning("Session DB append_message failed: %s", e)
+            # Повторяемость, а не тип исключения, отличает детерминированный
+            # сбой от транзиентного: то, что упало дважды подряд, не пройдёт
+            # и на третий раз. 27-29.07.2026 такой сбой съел 46 сообщений в
+            # четырёх сессиях, оставив только WARNING (разбор:
+            # docs/superpowers/specs/2026-07-30-stale-process-warnings-investigation.md).
+            streak = getattr(self, "_consecutive_flush_failures", 0) + 1
+            self._consecutive_flush_failures = streak
+            if streak >= 2:
+                logger.error(
+                    "Session DB append_message failed %d× подряд — транскрипт "
+                    "сессии не сохраняется: %s",
+                    streak,
+                    e,
+                )
+            else:
+                logger.warning("Session DB append_message failed: %s", e)
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """
