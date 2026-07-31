@@ -215,6 +215,53 @@ def test_unwritable_budget_blocks_the_restart(monkeypatch, wiring, gw_loop):
     assert any("не пишется" in t for t in wiring["sent"])
 
 
+def test_failed_budget_mark_after_scheduling_alerts_that_the_guard_is_off(
+    monkeypatch, wiring, gw_loop
+):
+    """Остаток 2b: метка бюджета не легла → сторож выключен, и человек узнаёт.
+
+    Рестарт уже поставлен в очередь, откатить его нельзя — единственное,
+    что остаётся, это выключить автоматику и СКАЗАТЬ об этом, а не оставить
+    строчку в логе.
+    """
+    from gateway import run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["a.py"])
+    monkeypatch.setattr(gateway_run, "budget_writable", lambda home: True)
+    monkeypatch.setattr(gateway_run, "record_auto_restart", lambda home, now: False)
+
+    runner = _FakeRunner(idle=True)
+    state = {}
+
+    gateway_run._stale_guard_tick(runner, _cfg(), state, loop=gw_loop)  # первый тик — алерт о скосе
+    gateway_run._stale_guard_tick(runner, _cfg(), state, loop=gw_loop)  # второй — рестарт
+
+    assert _wait(lambda: runner.restart_calls == 1)
+    assert state["guard_disabled"] is True
+    assert any("авторестарт отключён" in t.lower() for t in wiring["sent"])
+    assert any("рестартовать больше не буду" in t for t in wiring["sent"])
+
+
+def test_failed_budget_mark_alert_failure_does_not_propagate(monkeypatch, wiring, gw_loop):
+    """Падение отправки алерта не имеет права ронять тик."""
+    from gateway import run as gateway_run
+
+    def _boom(channel, text):
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["a.py"])
+    monkeypatch.setattr(gateway_run, "budget_writable", lambda home: True)
+    monkeypatch.setattr(gateway_run, "record_auto_restart", lambda home, now: False)
+    monkeypatch.setattr(gateway_run, "send_operator_alert", _boom)
+
+    runner = _FakeRunner(idle=True)
+    state = {"skew_alerted": True, "boot_label": "00:00:00"}
+
+    gateway_run._stale_guard_tick(runner, _cfg(), state, loop=gw_loop)  # не должно бросить
+
+    assert state["guard_disabled"] is True
+
+
 def test_detector_failure_does_not_propagate(monkeypatch, wiring, gw_loop):
     from gateway import run as gateway_run
 
@@ -405,6 +452,88 @@ def test_unwritable_budget_refuses_to_arm(monkeypatch, arming):
 
     assert gateway_run._stale_guard_arm(_ENABLED) == (None, None)
     assert arming["taken"] == []
+
+
+def test_unwritable_budget_at_arming_alerts_that_the_guard_is_off(monkeypatch, arming):
+    """Остаток 2a: отказ вооружиться — не только строчка в логе."""
+    from gateway import run as gateway_run
+
+    sent = []
+    _with_supervisor(monkeypatch)
+    monkeypatch.setattr(gateway_run, "budget_writable", lambda home: False)
+    monkeypatch.setattr(gateway_run, "send_operator_alert", lambda ch, text: sent.append(text))
+    monkeypatch.setattr(
+        gateway_run, "get_alert_config", lambda cfg: {"channel": "telegram:1", "dedup_minutes": 15}
+    )
+
+    assert gateway_run._stale_guard_arm(_ENABLED) == (None, None)
+
+    assert len(sent) == 1
+    assert "НЕ включился" in sent[0]
+    assert "Авторестарт выключен" in sent[0]
+
+
+def test_unwritable_budget_at_arming_is_silent_without_an_alert_channel(monkeypatch, arming):
+    """На хостах без gateway.error_alerts.channel фича молчит, а не падает."""
+    from gateway import run as gateway_run
+
+    sent = []
+    _with_supervisor(monkeypatch)
+    monkeypatch.setattr(gateway_run, "budget_writable", lambda home: False)
+    monkeypatch.setattr(gateway_run, "send_operator_alert", lambda ch, text: sent.append(text))
+    monkeypatch.setattr(gateway_run, "get_alert_config", lambda cfg: None)
+
+    assert gateway_run._stale_guard_arm(_ENABLED) == (None, None)
+    assert sent == []
+
+
+def test_arming_alert_failure_does_not_propagate(monkeypatch, arming):
+    """Сбой доставки алерта не имеет права уронить старт гейтвея."""
+    from gateway import run as gateway_run
+
+    def _boom(channel, text):
+        raise RuntimeError("telegram down")
+
+    _with_supervisor(monkeypatch)
+    monkeypatch.setattr(gateway_run, "budget_writable", lambda home: False)
+    monkeypatch.setattr(gateway_run, "send_operator_alert", _boom)
+    monkeypatch.setattr(
+        gateway_run, "get_alert_config", lambda cfg: {"channel": "telegram:1", "dedup_minutes": 15}
+    )
+
+    assert gateway_run._stale_guard_arm(_ENABLED) == (None, None)
+
+
+def test_unreadable_config_leaves_the_guard_off_and_the_gateway_booting(monkeypatch, arming):
+    """Остаток 1: битый config.yaml выключает сторож, а не гейтвей.
+
+    Раньше конфиг читался как АРГУМЕНТ ``_stale_guard_arm(...)``, то есть вне
+    его try/except — правка YAML руками означала «гейтвей не стартует».
+    """
+    from gateway import run as gateway_run
+
+    def _boom():
+        raise ValueError("config.yaml is malformed")
+
+    _with_supervisor(monkeypatch)
+    monkeypatch.setattr(gateway_run, "_stale_guard_load_config", _boom)
+
+    assert gateway_run._stale_guard_arm() == (None, None)  # не должно бросить
+    assert arming["taken"] == []
+
+
+def test_arming_without_an_argument_reads_the_config_itself(monkeypatch, arming):
+    """Boot-путь зовёт ``_stale_guard_arm()`` без аргумента."""
+    from gateway import run as gateway_run
+
+    _with_supervisor(monkeypatch)
+    monkeypatch.setattr(gateway_run, "_stale_guard_load_config", lambda: _ENABLED)
+
+    cfg, label = gateway_run._stale_guard_arm()
+
+    assert cfg is not None
+    assert label
+    assert len(arming["taken"]) == 1
 
 
 def test_arming_never_raises(monkeypatch, arming):

@@ -77,8 +77,10 @@ from gateway.stale_guard import (
     auto_restart_allowed,
     budget_path,
     budget_writable,
+    format_arm_refused_alert,
     format_budget_exhausted_alert,
     format_budget_unwritable_alert,
+    format_budget_write_failed_alert,
     format_skew_alert,
     get_stale_guard_config,
     record_auto_restart,
@@ -25182,14 +25184,46 @@ async def _stale_guard_request_restart(runner) -> None:
     runner.request_restart(via_service=True)
 
 
-def _stale_guard_arm(config, *, take_snapshot_now: bool = True):
+_STALE_GUARD_UNSET = object()
+
+
+def _stale_guard_alert_config(config):
+    """Канал оператора для алертов сторожа. Не настроен / нечитаем → None.
+
+    Тот же путь, что и у тика: ``config.yaml`` тут правят руками, поэтому
+    нечитаемый конфиг обязан означать «алерт не уходит», а не исключение.
+    """
+    try:
+        return get_alert_config(config)
+    except Exception:  # noqa: BLE001 — config.yaml правят на живую
+        logger.warning("stale-guard: alert config unreadable", exc_info=True)
+        return None
+
+
+def _stale_guard_send_alert(alert_cfg, text) -> None:
+    """Послать алерт оператору. Никогда не бросает и молчит без канала."""
+    if not alert_cfg:
+        return
+    try:
+        send_operator_alert(alert_cfg["channel"], text)
+    except Exception:  # noqa: BLE001 — доставка не имеет права ронять вызывающего
+        logger.warning("stale-guard: failed to send operator alert", exc_info=True)
+
+
+def _stale_guard_arm(config=_STALE_GUARD_UNSET, *, take_snapshot_now: bool = True):
     """Решить, вооружать ли сторож, и снять снимок. Никогда не бросает.
 
     Возвращает ``(cfg | None, boot_label | None)``. ``None`` == сторож не
     вооружён: ни снимка, ни тиков — «без блока в конфиге НИЧЕГО не
     происходит».
+
+    Без аргумента конфиг читается ЗДЕСЬ, внутри try: на этой машине
+    ``config.yaml`` правят руками, и раньше битый YAML на старте ронял не
+    сторож, а весь гейтвей — читать его на стороне вызывающего нельзя.
     """
     try:
+        if config is _STALE_GUARD_UNSET:
+            config = _stale_guard_load_config()
         cfg = get_stale_guard_config(config)
         if not cfg:
             return None, None
@@ -25214,6 +25248,12 @@ def _stale_guard_arm(config, *, take_snapshot_now: bool = True):
             logger.error(
                 "Stale-code guard NOT armed: budget file %s is not writable",
                 budget_path(home),
+            )
+            # Молчаливое «сторож не включился» — худшее, что можно узнать
+            # поздно: человек считает, что защита есть, а её нет.
+            _stale_guard_send_alert(
+                _stale_guard_alert_config(config),
+                format_arm_refused_alert(budget_path(home)),
             )
             return None, None
 
@@ -25316,8 +25356,12 @@ def _stale_guard_tick(runner, cfg: dict, alert_state: dict, loop=None) -> None:
         logger.warning("stale-guard: idle and stale — requesting planned restart")
         if not record_auto_restart(home, now):
             # Рестарт уже поставлен в очередь, но метка не легла: дальше
-            # автоматике доверять нельзя.
+            # автоматике доверять нельзя. Сторож выключается — и человек
+            # обязан узнать об этом не из лога.
             alert_state["guard_disabled"] = True
+            _stale_guard_send_alert(
+                alert_cfg, format_budget_write_failed_alert(budget_path(home))
+            )
     except Exception:  # noqa: BLE001 — сторож не имеет права ронять housekeeping
         logger.warning("stale-guard tick failed", exc_info=True)
 
@@ -26026,9 +26070,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Снимок берётся ЗДЕСЬ, после preload: sys.modules ещё совпадает с диском.
     # Раньше — не все горячие модули загружены; позже — можно застать уже
     # разъехавшееся дерево и принять его за исходное.
-    _stale_guard_cfg, _stale_guard_boot_label = _stale_guard_arm(
-        _stale_guard_load_config()
-    )
+    _stale_guard_cfg, _stale_guard_boot_label = _stale_guard_arm()
 
     # Start the gateway
     success = await runner.start()
