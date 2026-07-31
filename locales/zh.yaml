@@ -27,6 +27,11 @@ gateway:
   config_read_failed: "⚠️ 无法读取 config.yaml：{error}"
   config_save_failed: "⚠️ 无法保存配置：{error}"
 
+  media_delivery_failed_sandbox: "⚠️ `{path}` 是在沙箱内创建的，主机无法看到，因此无法作为附件发送。请让智能体把它写入共享目录后重新发送。"
+  media_delivery_failed_missing: "⚠️ `{path}` 不存在，因此无法作为附件发送。"
+  media_delivery_failed_blocked: "⚠️ 文件投递策略拒绝发送 `{path}`。"
+  media_delivery_failed_invalid: "⚠️ 承诺了一个文件，但其路径不可用，因此没有任何内容可以附加。"
+
   model:
     error_prefix:           "错误：{error}"
     switched:               "已切换模型为 `{model}`"

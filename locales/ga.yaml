@@ -31,6 +31,11 @@ gateway:
   config_read_failed: "⚠️ Níorbh fhéidir config.yaml a léamh: {error}"
   config_save_failed: "⚠️ Níorbh fhéidir an chumraíocht a shábháil: {error}"
 
+  media_delivery_failed_sandbox: "⚠️ Cruthaíodh `{path}` laistigh den bhosca gainimh agus níl sé le feiceáil ag an óstríomhaire, mar sin níorbh fhéidir é a cheangal. Iarr ar an ngníomhaire é a scríobh chuig comhadlann roinnte agus é a sheoladh arís."
+  media_delivery_failed_missing: "⚠️ Níl `{path}` ann, mar sin níorbh fhéidir é a cheangal."
+  media_delivery_failed_blocked: "⚠️ Dhiúltaigh an polasaí seachadta comhad `{path}` a cheangal."
+  media_delivery_failed_invalid: "⚠️ Gealladh comhad, ach ní raibh an chonair inúsáidte, mar sin ní raibh aon rud le ceangal."
+
   model:
     error_prefix:           "Earráid: {error}"
     switched:               "Athraíodh an tsamhail go `{model}`"

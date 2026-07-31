@@ -32,6 +32,11 @@ gateway:
   config_read_failed: "⚠️ تعذّر قراءة config.yaml: {error}"
   config_save_failed: "⚠️ تعذّر حفظ الإعدادات: {error}"
 
+  media_delivery_failed_sandbox: "⚠️ تم إنشاء `{path}` داخل البيئة المعزولة وهو غير مرئي للمضيف، لذا تعذّر إرفاقه. اطلب من الوكيل كتابته في دليل مشترك وإرساله مرة أخرى."
+  media_delivery_failed_missing: "⚠️ الملف `{path}` غير موجود، لذا تعذّر إرفاقه."
+  media_delivery_failed_blocked: "⚠️ رفضت سياسة تسليم الملفات إرفاق `{path}`."
+  media_delivery_failed_invalid: "⚠️ تم الوعد بملف لكن مساره غير صالح، لذا لا يوجد ما يمكن إرفاقه."
+
   model:
     error_prefix:           "خطأ: {error}"
     switched:               "تم التبديل إلى النموذج `{model}`"

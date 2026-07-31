@@ -27,6 +27,11 @@ gateway:
   config_read_failed: "⚠️ Не удалось прочитать config.yaml: {error}"
   config_save_failed: "⚠️ Не удалось сохранить конфигурацию: {error}"
 
+  media_delivery_failed_sandbox: "⚠️ Файл `{path}` создан внутри песочницы и не виден хосту, поэтому его не удалось приложить. Попросите агента записать его в общий каталог и отправить снова."
+  media_delivery_failed_missing: "⚠️ Файла `{path}` не существует, поэтому приложить его не удалось."
+  media_delivery_failed_blocked: "⚠️ Отправка файла `{path}` запрещена политикой доставки файлов."
+  media_delivery_failed_invalid: "⚠️ Файл был обещан, но путь к нему непригоден — приложить нечего."
+
   model:
     error_prefix:           "Ошибка: {error}"
     switched:               "Модель изменена на `{model}`"

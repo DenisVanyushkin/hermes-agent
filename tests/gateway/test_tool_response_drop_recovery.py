@@ -189,42 +189,55 @@ class TestRecoveryDoesNotLeakMediaFragments:
     stops at the first space), a spaced path whose file gets filtered out leaks
     a fragment like 'vacation photo.png'.  The recovery must instead use the
     post-extract_media `response`, which the strong regex already cleaned.
+
+    A dropped attachment is now reported to the user by name (the sandbox
+    delivery fix), so "no path text at all" is no longer the invariant. The
+    guard that still matters is *fragment* vs *whole*: any message that
+    mentions the file must carry the COMPLETE path, which is exactly what a
+    weak-regex fragment cannot do.
     """
 
     @pytest.mark.asyncio
-    async def test_spaced_media_path_does_not_leak_fragment(self, monkeypatch, caplog):
+    async def test_spaced_media_path_is_never_truncated(self, monkeypatch, caplog):
         adapter = _DummyAdapter(Platform.DISCORD)
         adapter._keep_typing = _hold_typing
+        spaced_path = "/tmp/nope_dir_zzz/my vacation photo.png"
 
         async def handler(_event):
             # Spaced path with a valid extension — matched in full by the real
             # extract_media regex, then removed from the body.
-            return "MEDIA: /tmp/nope_dir_zzz/my vacation photo.png"
+            return f"MEDIA: {spaced_path}"
 
         adapter.set_message_handler(handler)
         # Use the REAL extract_media (so the strong regex cleans `response`),
-        # but force the path to be filtered out (unsafe/nonexistent) so we hit
-        # the empty-text + no-attachment recovery branch deterministically.
+        # but force the path to be rejected (unsafe/nonexistent) so we hit the
+        # empty-text + no-attachment branch deterministically. Patch the
+        # partition entry point — the filter wrapper delegates to it, so
+        # patching the wrapper alone no longer forces anything.
         monkeypatch.setattr(
-            type(adapter), "filter_media_delivery_paths", staticmethod(lambda m: [])
+            type(adapter), "partition_media_delivery_paths",
+            staticmethod(lambda m: ([], [(spaced_path, "missing_on_host")])),
         )
 
         event = _make_event(Platform.DISCORD)
-        with caplog.at_level(logging.ERROR, logger="gateway.platforms.base"):
+        with caplog.at_level(logging.WARNING, logger="gateway.platforms.base"):
             await adapter._process_message_background(
                 event, build_session_key(event.source)
             )
 
-        # No fragment of the media path may reach the user.
-        leaked = [
-            s for s in adapter.sent
-            if "vacation" in s["content"] or "photo" in s["content"] or "MEDIA" in s["content"]
-        ]
-        assert leaked == [], f"media-path fragment leaked to user: {leaked}"
-        # The genuinely-undeliverable response is logged loudly, not silent.
+        # Nothing may mention the file by a truncated name, and no raw
+        # directive may survive into the visible text.
+        for sent in adapter.sent:
+            content = sent["content"]
+            assert "MEDIA" not in content, f"raw directive leaked: {content}"
+            if "vacation" in content or "photo" in content:
+                assert spaced_path in content, f"path fragment leaked: {content}"
+
+        # The undeliverable attachment is reported, not silently dropped.
+        assert len(adapter.sent) == 1, f"expected a failure notice, got {adapter.sent}"
         assert any(
-            "response_delivery_dropped" in r.getMessage()
-            for r in caplog.records if r.levelno == logging.ERROR
+            "media_delivery_failed" in r.getMessage()
+            for r in caplog.records if r.levelno == logging.WARNING
         ), [r.getMessage() for r in caplog.records]
 
 
