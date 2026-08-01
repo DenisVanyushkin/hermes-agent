@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from fam import audit, cli, diag
 
 
@@ -217,8 +219,38 @@ def test_timers_split_failed_and_ok():
                        "fam-car.timer loaded active waiting Amina fam\n")
 
     timers = diag.collect_timers(runner=fake_run)
-    assert timers["failed"] == [{"unit": "fam-car.service", "detail": "failed"}]
+    # SUB is the literal "failed" again here -- redundant with the ACTIVE
+    # column -- so detail falls back to the unit's Description text
+    # ("Amina fam: car") rather than repeating "failed".
+    assert timers["failed"] == [{"unit": "fam-car.service", "detail": "Amina fam: car"}]
     assert timers["ok"] == ["fam-reminders.timer", "fam-car.timer"]
+
+
+def test_timers_raises_on_nonzero_returncode():
+    # A dead session bus (no live XDG_RUNTIME_DIR under a systemd timer,
+    # for instance) answers with a non-zero code and EMPTY stdout -- which
+    # would otherwise parse into a fake "no failed units, no timers"
+    # all-clear. Must raise instead of reporting health it never observed.
+    class _Result:
+        def __init__(self):
+            self.stdout, self.stderr, self.returncode = "", "Failed to connect to bus", 1
+
+    def fake_run(cmd, **kwargs):
+        return _Result()
+
+    with pytest.raises(RuntimeError, match="systemctl"):
+        diag.collect_timers(runner=fake_run)
+
+
+def test_timers_empty_stdout_with_ok_returncode_is_not_an_error():
+    class _Result:
+        def __init__(self):
+            self.stdout, self.stderr, self.returncode = "", "", 0
+
+    def fake_run(cmd, **kwargs):
+        return _Result()
+
+    assert diag.collect_timers(runner=fake_run) == {"failed": [], "ok": []}
 
 
 def test_backups_report_verify_result(tmp_path):
@@ -231,3 +263,38 @@ def test_backups_report_verify_result(tmp_path):
     assert result["last_path"] == "assistant-20260801.db"
     assert result["verify"] == "ok"
     assert result["schema_version"] == "12"
+
+
+def test_backups_missing_reports_no_backup_found(tmp_path):
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    result = diag.collect_backups(
+        {"backup_dir": str(tmp_path), "offsite_enabled": False}, now,
+        verify=lambda path: (True, {"integrity": "ok", "schema_version": "12"}))
+    assert result == {"last_path": None, "verify": "missing", "schema_version": None,
+                      "offsite_age_days": None}
+
+
+def test_backups_reports_verify_failure_detail(tmp_path):
+    backup = tmp_path / "assistant-20260801.db"
+    backup.write_bytes(b"x")
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    result = diag.collect_backups(
+        {"backup_dir": str(tmp_path), "offsite_enabled": False}, now,
+        verify=lambda path: (False, {"integrity": "corrupt", "schema_version": None}))
+    assert result["verify"] == "corrupt"
+    assert result["schema_version"] is None
+
+
+def test_backups_offsite_age_days_computed_from_newest_dump(tmp_path):
+    backup_dir = tmp_path / "local"
+    backup_dir.mkdir()
+    (backup_dir / "assistant-20260801.db").write_bytes(b"x")
+    offsite_dir = tmp_path / "offsite"
+    offsite_dir.mkdir()
+    (offsite_dir / "assistant-20260728.db.age").write_bytes(b"x")
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    result = diag.collect_backups(
+        {"backup_dir": str(backup_dir), "offsite_enabled": True,
+         "offsite_dir": str(offsite_dir)}, now,
+        verify=lambda path: (True, {"integrity": "ok", "schema_version": "12"}))
+    assert result["offsite_age_days"] == 4

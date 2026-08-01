@@ -219,8 +219,18 @@ def collect_calendar(conn, since):
 
 
 def _systemctl(runner, *args):
-    return runner(["systemctl", "--user", "--no-legend", "--no-pager", *args],
-                  capture_output=True, text=True, timeout=SYSTEMCTL_TIMEOUT)
+    result = runner(["systemctl", "--user", "--no-legend", "--no-pager", *args],
+                    capture_output=True, text=True, timeout=SYSTEMCTL_TIMEOUT)
+    if result.returncode != 0:
+        # Not an exception path: systemctl answers a dead session bus with a
+        # non-zero code and EMPTY stdout, which would otherwise parse into
+        # "no failed units, no timers" -- a monitoring collector inventing
+        # health it never observed. Raise so build_digest's per-section
+        # guard records it in section_errors instead.
+        raise RuntimeError(
+            f"systemctl {' '.join(args)} exited {result.returncode}: "
+            f"{(result.stderr or '').strip()[:200]}")
+    return result
 
 
 def collect_timers(runner=None):
@@ -234,8 +244,16 @@ def collect_timers(runner=None):
     result = _systemctl(runner, "list-units", "--failed", "--all", "fam-*.service")
     for line in (result.stdout or "").splitlines():
         parts = line.replace("●", " ").split()
-        if parts:
-            failed.append({"unit": parts[0], "detail": parts[3] if len(parts) > 3 else "failed"})
+        if not parts:
+            continue
+        sub = parts[3] if len(parts) > 3 else "failed"
+        description = " ".join(parts[4:])
+        # SUB is usually the literal "failed" again for a failed unit --
+        # redundant with the ACTIVE column already implying failure. Fall
+        # back to the unit's Description text so the digest carries
+        # something a human can actually act on.
+        detail = description if sub == "failed" and description else sub
+        failed.append({"unit": parts[0], "detail": detail})
     ok = []
     result = _systemctl(runner, "list-units", "--type=timer", "--all", "fam-*.timer")
     for line in (result.stdout or "").splitlines():
