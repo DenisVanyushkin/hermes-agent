@@ -74,7 +74,11 @@ def collect_errors(conn, since):
                       "context": {}, "examples": []}
             for field in spec["sig"]:
                 if payload.get(field) is not None:
-                    bucket[field] = payload[field]
+                    # p_ prefix: payload field names share a namespace with
+                    # the finding's own keys, and gate.error's payload has
+                    # a "kind" of its own (reminder/med/digest) that would
+                    # otherwise overwrite the audit event kind above.
+                    bucket[f"p_{field}"] = payload[field]
             buckets[signature] = bucket
         bucket["count"] += 1
         for field in spec["ctx"]:

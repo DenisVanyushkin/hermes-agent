@@ -37,8 +37,9 @@ def test_identical_errors_collapse_into_one_finding(db):
     findings = diag.collect_errors(db, "1970-01-01T00:00:00+00:00")
     assert len(findings) == 1
     assert findings[0]["count"] == 113
-    assert findings[0]["where"] == "meds_row"
-    assert findings[0]["exc_type"] == "KeyError"
+    assert findings[0]["kind"] == "tick.error"
+    assert findings[0]["p_where"] == "meds_row"
+    assert findings[0]["p_exc_type"] == "KeyError"
     assert findings[0]["context"]["intake_id"] == [10]
 
 
@@ -68,7 +69,33 @@ def test_gate_error_never_exposes_message_text(db):
               {"kind": "reminder", "attempt": 2,
                "raw": {"text": "прими лекарство"}, "final": "Прими лекарство"})
     db.commit()
-    blob = json.dumps(diag.collect_errors(db, "1970-01-01T00:00:00+00:00"),
-                      ensure_ascii=False)
+    findings = diag.collect_errors(db, "1970-01-01T00:00:00+00:00")
+    blob = json.dumps(findings, ensure_ascii=False)
     assert "лекарство" not in blob
     assert "final" not in blob and "raw" not in blob
+    assert findings[0]["kind"] == "gate.error"
+    assert findings[0]["p_kind"] == "reminder"
+
+
+def test_unparseable_json_payload_still_yields_finding(db):
+    # A malformed error row (non-JSON) must produce a finding, not silently
+    # disappear -- it's exactly the kind of breakage this digest must surface.
+    db.execute(
+        "INSERT INTO audit_log (ts_utc, kind, payload, actor) "
+        "VALUES (datetime('now'), 'tick.error', 'not json', 'test')")
+    db.commit()
+    findings = diag.collect_errors(db, "1970-01-01T00:00:00+00:00")
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "tick.error"
+    assert findings[0]["count"] == 1
+
+
+def test_mail_error_event_id_in_context_and_text_in_signature(db):
+    audit.log(db, "mail.error",
+              {"event_id": 42, "error": "DNS resolution failed"}, actor="mail")
+    db.commit()
+    findings = diag.collect_errors(db, "1970-01-01T00:00:00+00:00")
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "mail.error"
+    assert findings[0]["context"]["event_id"] == [42]
+    assert "DNS resolution failed" in findings[0]["examples"]
