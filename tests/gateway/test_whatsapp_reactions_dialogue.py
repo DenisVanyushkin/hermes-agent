@@ -57,7 +57,7 @@ async def _arm(adapter):
     adapter._start_reaction_polling()
 
 
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 def _reaction(**overrides):
@@ -348,13 +348,27 @@ def _pending_text_event(adapter, text):
     )
 
 
-def _hung_hook(kill_side_effect=None):
+def _hung_hook(reap_behavior="ok", terminate_side_effect=None):
     """Patch create_subprocess_exec to return a proc whose communicate()
-    never completes -- asyncio.wait_for around it will raise TimeoutError
-    on the real 30s clock. We patch asyncio.wait_for too so the test does
-    not actually wait 30s; it closes the pending coroutine (as a real
-    timeout would abandon it) and raises TimeoutError, exactly what the
-    production code must handle."""
+    never completes, so the (also patched) asyncio.wait_for around it
+    times out deterministically instead of on the real 30s clock.
+
+    ``reap_behavior`` controls what happens on the second wait_for call
+    -- the bounded reap after the kill:
+      "ok"            -- proc.wait() completes normally (the common case:
+                          the tree-kill worked and there is nothing left
+                          holding the pipes open).
+      "hang"          -- the reap's own wait_for also times out, as it
+                          would for real if a surviving descendant still
+                          held the inherited pipes open (the scenario C1
+                          exists to bound).
+      "lookup_error"  -- proc.wait() raises ProcessLookupError (the
+                          process was already reaped by the time we got
+                          here).
+
+    ``terminate_side_effect``, if given, is raised by the patched
+    ``_terminate_bridge_process`` instead of it succeeding.
+    """
     proc = AsyncMock()
     proc.pid = 4242
 
@@ -362,47 +376,133 @@ def _hung_hook(kill_side_effect=None):
         await asyncio.sleep(999)
 
     proc.communicate = _never_completes
-    from unittest.mock import MagicMock
-    proc.kill = MagicMock(side_effect=kill_side_effect)
-    proc.wait = AsyncMock(return_value=None)
+    proc.kill = MagicMock()
+
+    if reap_behavior == "lookup_error":
+        async def _wait(*_a, **_kw):
+            raise ProcessLookupError()
+        proc.wait = _wait
+    else:
+        proc.wait = AsyncMock(return_value=None)
+
+    calls = {"n": 0}
 
     async def fake_wait_for(aw, timeout=None):
-        aw.close()
-        raise asyncio.TimeoutError()
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # the hook-communicate wait: always the timeout under test
+            aw.close()
+            raise asyncio.TimeoutError()
+        # the reap wait, following the kill
+        if reap_behavior == "hang":
+            aw.close()
+            raise asyncio.TimeoutError()
+        return await aw
 
     create_patch = patch("asyncio.create_subprocess_exec",
                           AsyncMock(return_value=proc))
     wait_for_patch = patch("asyncio.wait_for", fake_wait_for)
-    return proc, create_patch, wait_for_patch
+    terminate_patch = patch(
+        "plugins.platforms.whatsapp.adapter._terminate_bridge_process",
+        MagicMock(side_effect=terminate_side_effect))
+    return proc, create_patch, wait_for_patch, terminate_patch, calls
 
 
 def test_timed_out_hook_still_falls_through_to_dialogue():
     adapter = _make_adapter(reaction_dialogue=True,
                             reaction_hook_cmd=["/bin/true"])
-    proc, create_patch, wait_for_patch = _hung_hook()
-    with create_patch, wait_for_patch:
+    proc, create_patch, wait_for_patch, terminate_patch, _calls = _hung_hook()
+    with create_patch, wait_for_patch, terminate_patch:
         dispatch = _apply(adapter, _reaction())
     dispatch.assert_awaited_once()
 
 
-def test_timed_out_hook_is_killed_and_reaped():
+def test_timed_out_hook_kills_the_process_tree_not_just_the_child():
+    """A hook that forked instead of exec'ing leaves a live grandchild
+    after a plain proc.kill() -- the fix must kill the whole tree via
+    the same helper the bridge-process shutdown path uses, not just the
+    direct child."""
     adapter = _make_adapter(reaction_dialogue=True,
                             reaction_hook_cmd=["/bin/true"])
-    proc, create_patch, wait_for_patch = _hung_hook()
-    with create_patch, wait_for_patch:
+    proc, create_patch, wait_for_patch, terminate_patch, _calls = _hung_hook()
+    with create_patch, wait_for_patch, terminate_patch as terminate_mock:
         _apply(adapter, _reaction())
-    proc.kill.assert_called_once()
-    proc.wait.assert_awaited_once()
+    terminate_mock.assert_called_once_with(proc, force=True)
+    proc.kill.assert_not_called()
 
 
-def test_timed_out_hook_kill_raising_process_lookup_error_is_swallowed():
-    """The process may already have exited by the time we get to kill()
-    it -- that race is not an error, and the dialogue path must still
-    run."""
+def test_timed_out_hook_reap_is_bounded_when_the_tree_survives_the_kill():
+    """C1: asyncio.Process.wait() returns when the inherited pipe
+    transports close, not merely when the pid dies -- a killed hook
+    whose descendant still holds those pipes would hang an unbounded
+    reap forever, turning a 30s stall into the poll loop never
+    advancing again. The reap must be bounded and the timeout on it
+    swallowed, same as the kill it follows."""
     adapter = _make_adapter(reaction_dialogue=True,
                             reaction_hook_cmd=["/bin/true"])
-    proc, create_patch, wait_for_patch = _hung_hook(
-        kill_side_effect=ProcessLookupError())
-    with create_patch, wait_for_patch:
+    proc, create_patch, wait_for_patch, terminate_patch, calls = _hung_hook(
+        reap_behavior="hang")
+    with create_patch, wait_for_patch, terminate_patch:
+        dispatch = _apply(adapter, _reaction())
+    dispatch.assert_awaited_once()
+    # Proves the reap actually went through asyncio.wait_for (bounded)
+    # rather than a bare `await proc.wait()` -- if it had regressed to
+    # the latter, fake_wait_for would only ever see the one call for
+    # communicate() and this would catch that.
+    assert calls["n"] == 2
+
+
+def test_timed_out_hook_reap_process_lookup_error_is_swallowed():
+    """The process may already have been reaped by the time the bounded
+    wait() runs -- that race is not an error, and the dialogue path
+    must still run."""
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    proc, create_patch, wait_for_patch, terminate_patch, _calls = _hung_hook(
+        reap_behavior="lookup_error")
+    with create_patch, wait_for_patch, terminate_patch:
+        dispatch = _apply(adapter, _reaction())
+    dispatch.assert_awaited_once()
+
+
+def test_timed_out_hook_tree_kill_lookup_error_falls_back_to_plain_kill():
+    """If the tree-kill helper itself reports the process is already
+    gone, fall back to a plain proc.kill() rather than treating that as
+    fatal."""
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    proc, create_patch, wait_for_patch, terminate_patch, _calls = _hung_hook(
+        terminate_side_effect=ProcessLookupError())
+    with create_patch, wait_for_patch, terminate_patch:
+        dispatch = _apply(adapter, _reaction())
+    proc.kill.assert_called_once()
+    dispatch.assert_awaited_once()
+
+
+def test_timed_out_hook_tree_kill_generic_failure_is_swallowed():
+    """A tree-kill failure that is neither ProcessLookupError nor
+    PermissionError (e.g. a psutil oddity) must not escape and must not
+    stop the dialogue path from running."""
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    proc, create_patch, wait_for_patch, terminate_patch, _calls = _hung_hook(
+        terminate_side_effect=RuntimeError("psutil oddity"))
+    with create_patch, wait_for_patch, terminate_patch:
+        dispatch = _apply(adapter, _reaction())
+    dispatch.assert_awaited_once()
+
+
+def test_create_subprocess_exec_raising_timeout_error_does_not_crash():
+    """Minor 1: asyncio.TimeoutError is a plain OSError subclass on
+    3.11+, so create_subprocess_exec itself (not just the wait_for
+    around communicate()) could in principle raise it. That must not
+    reach the TimeoutError handler with an unbound `proc` -- it is
+    structurally impossible here because create_subprocess_exec has its
+    own try/except, but this pins the observable behaviour: graceful
+    fall-through, no crash."""
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    with patch("asyncio.create_subprocess_exec",
+               AsyncMock(side_effect=asyncio.TimeoutError())):
         dispatch = _apply(adapter, _reaction())
     dispatch.assert_awaited_once()
