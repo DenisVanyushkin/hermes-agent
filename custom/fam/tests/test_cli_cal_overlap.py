@@ -169,3 +169,19 @@ def test_series_on_a_free_grid_still_works(db, capsys):
                    "--end-time", "19:00"])
     assert rc == 0
     assert _ack_rows(db) == []
+
+
+def test_series_unknown_place_wins_over_busy_slot(db, capsys):
+    """An unresolvable --place must surface as 'unknown place', not get
+    masked by the overlap preview -- the LLM's stop-and-ask rule is keyed
+    to that exact message, and a busy slot alone would send it down the
+    wrong ('ask Amina about the double-booking') branch instead."""
+    _busy(db, days_ahead=1)
+    rc = cli.main(["cal", "add", "--title", "Тренировка", "--repeat", "weekly",
+                   "--days", _tomorrow_weekday(), "--start-time", "11:00",
+                   "--end-time", "12:00", "--place", "Nowhere",
+                   "--transport", "car"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "unknown place: Nowhere" in err
+    assert db.execute("SELECT COUNT(*) c FROM event_series").fetchone()["c"] == 0

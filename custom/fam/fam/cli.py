@@ -462,6 +462,17 @@ def _cmd_cal_add_series(args):
         return 2
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
+    # Ref validation must win over the overlap preview below: series.add()
+    # used to be the first thing this function called, so an unknown place
+    # or participant surfaced immediately. Resolving refs here (pure reads,
+    # same as series.add()'s own resolution) keeps that ordering -- a bad
+    # ref is not something the overlap message's "ask Amina" framing fits.
+    try:
+        cal._resolve_place(conn, args.place)
+        cal._resolve_participants(conn, args.with_)
+    except (ValueError, cal.UnknownRefError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     now_local = datetime.now(timezone.utc).astimezone(cal.ALMATY)
     horizon_date = (now_local + timedelta(weeks=series.HORIZON_WEEKS)).date()
     try:
