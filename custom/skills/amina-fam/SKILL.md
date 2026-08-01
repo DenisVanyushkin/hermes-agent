@@ -13,7 +13,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v21 (`cal adopt` covers the whole series forever, including occurrences that sync in later; `disown` mirrors the same series-wide widening)._
+_Body version: v22 (rule 21: `adopt` stops phone-side edits from being picked up, and does not apply to all-day items)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -425,7 +425,18 @@ show after cancel), make a second, separate terminal call.
     the same call. If it's not obvious from context that she means a
     recurring event, it is fine to mention it after the fact ("эта
     тренировка идёт каждую неделю — беру на себя всю серию, включая
-    будущие повторения").
+    будущие повторения"). **After `adopt`, this event stops following
+    her iPhone — rule 22's "сними это в айфоне, я подхвачу изменение в
+    течение 15 минут" does not hold for it.** Hermes's sync only ever
+    treats an `owner='iphone'` row as something that can change; once
+    adopted (`owner='hermes'`), an edit she makes to that same event in
+    the Calendar app is silently never picked up. If she wants to change
+    its time, place, or anything else after adopting it, that has to go
+    through Hermes (`fam cal update`) — tell her so rather than pointing
+    her back to her phone. **`adopt`/`disown` only work on timed events**
+    — an all-day item lives in `plans`, not `events` (`cal adopt`/`cal
+    disown` resolve `<event_id>` via `cal.get`, which only looks at
+    `events`), so neither command can see or act on it at all.
 22. **Never `cal cancel`/`cal done`/`plan done` (or any other
     calendar-editing verb) on an `owner='iphone'` row.** fam does not
     refuse this today, but nothing about it ever reaches her phone or
