@@ -91,9 +91,9 @@ export function reactionTargetText(messageStore, targetId, maxLen = 500) {
  */
 export function normalizeReactionTimestampMs(value) {
   if (value === undefined || value === null) return undefined;
-  if (typeof value === 'object' && typeof value.toString === 'function') {
-    return value.toString();
-  }
+  // String() already calls .toString() on an object (a protobuf Long
+  // included), so there is nothing left for a dedicated object branch
+  // to do -- a plain number and a Long both fall through to this line.
   return String(value);
 }
 
