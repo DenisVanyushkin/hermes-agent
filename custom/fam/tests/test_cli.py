@@ -1696,7 +1696,23 @@ def test_cal_adopt_skips_cancelled_sibling_of_the_series(db, capsys, monkeypatch
     assert untouched["status"] == "cancelled"
 
 
-def test_cal_disown_skips_cancelled_sibling_of_the_series(db, capsys, monkeypatch):
+def test_cal_disown_widens_to_a_cancelled_sibling_of_the_series_too(db, capsys, monkeypatch):
+    """Fix-round 3, Important finding I1 (status asymmetry): this test
+    used to be `test_cal_disown_skips_cancelled_sibling_of_the_series`
+    and asserted the OPPOSITE of what is asserted below -- that a
+    cancelled `owner='hermes'` sibling stayed untouched by `disown`,
+    mirroring `cal adopt`'s own `status='active'` widening filter. That
+    mirroring was the bug: `extcal._series_already_adopted` (the check a
+    later sync tick uses to decide whether a BRAND-NEW occurrence should
+    inherit `owner='hermes'`) matches ANY status, not just 'active' --
+    so a status-filtered `disown` could leave exactly one cancelled-but-
+    still-`owner='hermes'` row behind, which `_series_already_adopted`
+    would keep finding forever, silently re-adopting every future
+    occurrence of a series she explicitly disowned. `disown`'s widening
+    now matches ANY status too -- see `cmd_cal_disown`'s own docstring.
+    (`cal adopt`'s OWN widening keeps its `status='active'` filter
+    unchanged -- that side of the asymmetry was never the problem.)
+    """
     href = "https://caldav.icloud.com/1/calendars/personal/training-series3.ics"
     e1 = _iphone_series_occurrence(db, href, "training3-uid::rid1",
                                     start=_future_start(hours=5))
@@ -1707,19 +1723,51 @@ def test_cal_disown_skips_cancelled_sibling_of_the_series(db, capsys, monkeypatc
     capsys.readouterr()
     assert cal.get(db, e2["id"])["owner"] == "hermes"  # e2 adopted alongside e1
 
-    # Now cancel e2 before disowning e1 -- the cancelled sibling must not
-    # be reverted either.
+    # e2 gets cancelled while still owner='hermes' -- exactly what a
+    # remote cancellation via the sync tick leaves behind
+    # (extcal._apply_event_cancel never touches owner).
     db.execute("UPDATE events SET status='cancelled' WHERE id=?", (e2["id"],))
     db.commit()
 
     rc = cli.main(["cal", "disown", str(e1["id"]), "--json"])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert "disowned_ids" not in out  # only e1 -- e2 excluded (cancelled)
+    assert sorted(out["disowned_ids"]) == sorted([e1["id"], e2["id"]])
 
-    untouched = cal.get(db, e2["id"])
-    assert untouched["owner"] == "hermes"
-    assert untouched["status"] == "cancelled"
+    reverted = cal.get(db, e2["id"])
+    assert reverted["owner"] == "iphone"  # no longer left behind as owner='hermes'
+    assert reverted["status"] == "cancelled"  # its own status is untouched either way
+
+
+def test_cal_disown_status_asymmetry_no_longer_strands_a_hermes_row(db, capsys, monkeypatch):
+    """I1's own end-to-end scenario: after `disown` widens to every
+    status (the fix above), NO `owner='hermes'` row is left sharing this
+    href -- so `extcal._series_already_adopted` (what a later sync tick
+    actually calls to decide a brand-new occurrence's owner) correctly
+    reports "not adopted" afterwards, instead of continuing to answer
+    "yes" off a stale cancelled leftover forever."""
+    href = "https://caldav.icloud.com/1/calendars/personal/training-series4.ics"
+    e1 = _iphone_series_occurrence(db, href, "training4-uid::rid1",
+                                    start=_future_start(hours=5))
+    e2 = _iphone_series_occurrence(db, href, "training4-uid::rid2",
+                                    start=_future_start(hours=5 + 24 * 7))
+    monkeypatch.setattr(extcal, "_request", _ok_valarm_response)
+    assert cli.main(["cal", "adopt", str(e1["id"]), "--json"]) == 0
+    capsys.readouterr()
+    assert extcal._series_already_adopted(db, href) is True
+
+    db.execute("UPDATE events SET status='cancelled' WHERE id=?", (e2["id"],))
+    db.commit()
+
+    rc = cli.main(["cal", "disown", str(e1["id"]), "--json"])
+    assert rc == 0
+    capsys.readouterr()
+
+    # Before this fix: e2 stayed owner='hermes' (status filter excluded
+    # it), so this would still report True -- a future occurrence of the
+    # series would silently keep inheriting owner='hermes' despite the
+    # explicit disown.
+    assert extcal._series_already_adopted(db, href) is False
 
 
 # --- Final review, blocker 2 (Important): `--now` requires `--dry-run` -----
@@ -1822,3 +1870,39 @@ def test_redact_extcal_text_still_redacts_plain_href_and_single_quoted_rrule():
     assert "<href>" in out
     assert "FREQ=DAILY" not in out
     assert "RRULE <redacted>" in out
+
+
+# --- Fix-round 3, Minor finding M2: `_EXPAND_ERROR_DETAIL_RE` used to
+# close its capture on the FIRST `)` after the exception type/colon
+# (`[^)]*(\))`) -- wrong whenever dateutil's own exception text contains
+# ITS OWN, unrelated parentheses, and unable to match AT ALL (so nothing
+# in the whole clause got redacted) when that text happened to contain no
+# `)` before the end of the string.
+
+def test_redact_extcal_text_does_not_leak_a_tail_after_a_nested_paren():
+    # dateutil quotes the bad token in its own parentheses -- the OLD
+    # pattern stopped at THAT `)`, letting everything after it (a second
+    # RRULE-shaped fragment) ride straight through unredacted.
+    text = ("Calendar: RRULE 'FREQ=SECRETLY' for uid='series1' could not "
+            "be parsed/evaluated (ValueError: invalid token "
+            "(FREQ=SECRETLY) trailing FREQ=LEAK)")
+    out = cli._redact_extcal_text(text)
+    assert "FREQ=LEAK" not in out
+    assert "FREQ=SECRETLY" not in out
+    assert "(ValueError: <redacted>)" in out
+    assert "uid='series1'" in out
+
+
+def test_redact_extcal_text_redacts_even_without_a_trailing_closing_paren():
+    # No `)` anywhere after the exception type/colon -- the OLD pattern
+    # (which REQUIRED one to match at all) skipped redaction entirely
+    # here, leaking the whole raw exception text, RRULE fragment
+    # included.
+    text = ("Calendar: RRULE 'FREQ=DAILY' for uid='series2' could not be "
+            "parsed/evaluated (ValueError: unterminated token "
+            "FREQ=DAILY;X=(unbalanced")
+    out = cli._redact_extcal_text(text)
+    assert "FREQ=DAILY;X=" not in out
+    assert "unbalanced" not in out
+    assert "(ValueError: <redacted>" in out
+    assert "uid='series2'" in out

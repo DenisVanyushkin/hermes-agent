@@ -602,7 +602,7 @@ def _calendar_query(cfg, calendar_url, horizon_weeks, request):
     return items, None
 
 
-def fetch_changes(cfg, calendar, sync_token=None, request=None):
+def fetch_changes(cfg, calendar, sync_token=None, request=None, force_full=False):
     """One page of changes for `calendar` (a Calendar dict from
     discover(), or a bare url string).
 
@@ -630,6 +630,24 @@ def fetch_changes(cfg, calendar, sync_token=None, request=None):
         instead of the token eventually settling into steady-state
         "sync_collection", has a real, previously-invisible signal that
         the sync-token exchange itself is broken.
+      - "periodic_full": `force_full=True` was passed AND a `sync_token`
+        WAS supplied (fix-round 3, Critical finding C1 -- the rolling-
+        horizon gap: a calendar that only ever sees `REPORT sync-
+        collection` deltas never re-materializes an occurrence whose
+        resource simply hasn't changed since the window last moved past
+        it, so a rolling `expand()` window can silently stop inserting
+        NEW occurrences of an untouched recurring series forever). The
+        caller (Task 6's tick) decides WHEN this is due (a config-
+        driven interval, tracked in `meta`) and skips offering the
+        stored token at all THIS round -- `sync_token` here is only
+        used to distinguish this mode from "initial_full" (no token
+        ever existed) in the report; `_sync_collection` is never even
+        attempted, exactly the "initial_full" code path (`_calendar_
+        query` over the horizon window, same disappearance-sweep-
+        eligible exhaustive listing) is reused verbatim, just labelled
+        differently for observability. `sync_info["reason"]` is None,
+        same as "initial_full" -- this is a scheduled, not a failure,
+        full read.
       - "error": every attempt failed outright (missing credentials, or
         both sync-collection AND calendar-query failed, or the only
         attempted call -- calendar-query, when there was no token to try
@@ -642,7 +660,10 @@ def fetch_changes(cfg, calendar, sync_token=None, request=None):
     time-range -- mode "fallback_full". sync_token is None (first sync
     for this calendar): goes straight to calendar-query -- mode
     "initial_full" -- since an unfiltered sync-collection would return
-    the WHOLE collection, unbounded by the horizon window.
+    the WHOLE collection, unbounded by the horizon window. `force_full=
+    True` with a `sync_token` present: also goes straight to calendar-
+    query (the stored token is never offered to `_sync_collection`),
+    but reports as "periodic_full", not "initial_full" -- see above.
 
     Never raises. On total failure returns `(None, None, {"mode":
     "error", "reason": "..."})`.
@@ -667,7 +688,13 @@ def fetch_changes(cfg, calendar, sync_token=None, request=None):
         return None, None, {"mode": "error", "reason": "missing_credentials"}
 
     fallback_reason = None
-    if sync_token:
+    # Fix-round 3 (Critical finding C1): `force_full` skips offering the
+    # stored token to `_sync_collection` at all -- a periodic, SCHEDULED
+    # full re-baseline (the caller's own decision, based on `meta`), not
+    # a failure fallback. Falls straight through to the SAME `_calendar_
+    # query` call below that "initial_full"/"fallback_full" already use;
+    # only the reported mode differs (see this function's own docstring).
+    if sync_token and not force_full:
         items, new_token, ok, reason = _sync_collection(cfg, calendar_url, sync_token, request)
         if ok:
             return items, new_token, {"mode": "sync_collection", "reason": None}
@@ -687,6 +714,8 @@ def fetch_changes(cfg, calendar, sync_token=None, request=None):
 
     if fallback_reason is not None:
         return items, None, {"mode": "fallback_full", "reason": fallback_reason}
+    if force_full and sync_token:
+        return items, None, {"mode": "periodic_full", "reason": None}
     return items, None, {"mode": "initial_full", "reason": None}
 
 

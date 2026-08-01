@@ -700,7 +700,7 @@ def test_belt2_filters_our_own_exported_event_even_with_write_url_blank(db, monk
                               "sync_token": None, "supports_sync_token": True,
                               "components": ["VEVENT"]}])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([{"href": other_url + "echo.ics", "deleted": False,
                             "etag": "e9", "ics": exported_ics}],
                           None, {"mode": "initial_full", "reason": None}))
@@ -744,7 +744,7 @@ def test_belt2_filters_our_own_exported_event_even_with_write_url_pointing_elsew
                               "sync_token": None, "supports_sync_token": True,
                               "components": ["VEVENT"]}])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([{"href": other_url + "echo.ics", "deleted": False,
                             "etag": "e9", "ics": exported_ics}],
                           None, {"mode": "initial_full", "reason": None}))

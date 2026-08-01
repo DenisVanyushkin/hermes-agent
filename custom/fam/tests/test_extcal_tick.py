@@ -113,7 +113,7 @@ def test_gate_deliver_never_called(db, monkeypatch):
 
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "initial_full", "reason": None}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -149,7 +149,7 @@ def test_total_sync_failure_audits_tick_error_and_exits_1(db, monkeypatch):
     monkeypatch.setattr(cli.extcal, "discover",
                          lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          (None, None, {"mode": "error", "reason": "missing_credentials"}))
     calls = []
     monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append((where, exc)))
@@ -174,7 +174,7 @@ def test_total_sync_failure_still_audits_cal_ext_sync_with_calendar_error(db, mo
     monkeypatch.setattr(cli.extcal, "discover",
                          lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          (None, None, {"mode": "error", "reason": "http_500"}))
     rc = cli.cmd_tick_cal_ext(_args())
     assert rc == 1
@@ -199,7 +199,7 @@ def test_dry_run_writes_nothing(db, monkeypatch):
                                 "20370720T130000Z", "20370720T140000Z")}
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "initial_full", "reason": None}))
 
     def _boom(*a, **k):
@@ -224,7 +224,7 @@ def test_dry_run_changeset_is_redacted(db, monkeypatch, capsys):
                                 location="Тайная клиника, ул. Скрытая 1")}
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "initial_full", "reason": None}))
 
     rc = cli.cmd_tick_cal_ext(_args(dry_run=True))
@@ -257,7 +257,7 @@ def test_dry_run_sync_errors_redact_hrefs(db, monkeypatch, capsys):
             "ics": "this is not ICS at all\r\n"}
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "initial_full", "reason": None}))
 
     rc = cli.cmd_tick_cal_ext(_args(dry_run=True))
@@ -288,7 +288,7 @@ def test_prod_cal_ext_sync_sync_errors_redact_href(db, monkeypatch):
             "ics": "this is not ICS at all\r\n"}
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "initial_full", "reason": None}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -324,7 +324,7 @@ def test_prod_cal_ext_sync_sync_errors_redact_raw_rrule(db, monkeypatch):
             "ics": ics}
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "initial_full", "reason": None}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -354,7 +354,7 @@ def test_success_audits_counts_and_sync_mode(db, monkeypatch):
                                 location="Invictus")}
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "initial_full", "reason": None}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -384,7 +384,7 @@ def test_sync_token_seeded_before_full_pass_then_reused(db, monkeypatch):
 
     fetch_calls = []
 
-    def _fetch_first(cfg, calendar, sync_token=None, request=None):
+    def _fetch_first(cfg, calendar, sync_token=None, request=None, force_full=False):
         fetch_calls.append(sync_token)
         item = {"href": CAL_URL + "evt1.ics", "deleted": False, "etag": "e1",
                 "ics": _ics_vevent("evt1@icloud.com", "Йога",
@@ -406,7 +406,7 @@ def test_sync_token_seeded_before_full_pass_then_reused(db, monkeypatch):
     # pass -- NOT the (empty) new_token initial_full returned.
     assert stored == "SEEDED-TOKEN"
 
-    def _fetch_second(cfg, calendar, sync_token=None, request=None):
+    def _fetch_second(cfg, calendar, sync_token=None, request=None, force_full=False):
         fetch_calls.append(sync_token)
         return ([], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None})
 
@@ -449,7 +449,7 @@ def test_snapshot_uses_owner_iphone_rows_with_external_location(db, monkeypatch)
                                 location="New Address")}
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "fallback_full", "reason": "http_403"}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -535,7 +535,7 @@ def test_partial_failure_applies_live_calendar_but_flags_the_tick(db, monkeypatc
                              _calendar(url_down, "Invictus", sync_token="T2"),
                          ])
 
-    def _fetch(cfg, calendar, sync_token=None, request=None):
+    def _fetch(cfg, calendar, sync_token=None, request=None, force_full=False):
         if calendar["url"] == url_down:
             return (None, None, {"mode": "error", "reason": "no_response"})
         item = {"href": url_live + "evt1.ics", "deleted": False, "etag": "e1",
@@ -590,7 +590,7 @@ def test_partial_failure_does_not_spuriously_cancel_unrelated_synced_rows(db, mo
                              _calendar(url_b, "Invictus", sync_token="TB"),
                          ])
 
-    def _fetch(cfg, calendar, sync_token=None, request=None):
+    def _fetch(cfg, calendar, sync_token=None, request=None, force_full=False):
         if calendar["url"] == url_b:
             return (None, None, {"mode": "error", "reason": "http_500"})
         # Calendar A: nothing changed since the last sync (steady-state
@@ -624,7 +624,7 @@ def test_apply_error_blocks_every_calendars_token_this_tick(db, monkeypatch):
                                 "20370720T130000Z", "20370720T140000Z")}
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None}))
 
     # Simulate apply_changes reporting a real per-row failure (e.g. "database
@@ -747,7 +747,7 @@ def test_broken_ics_excludes_its_href_from_disappearance_instead_of_cancelling(d
     item = {"href": CAL_URL + "evt-broken.ics", "deleted": False, "etag": "e9",
             "ics": "this is not ICS at all\r\nno BEGIN:VEVENT anywhere\r\n"}
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "fallback_full", "reason": "http_403"}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -807,7 +807,7 @@ def test_component_count_mismatch_excludes_only_that_href_not_the_whole_calendar
     cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([healthy_item, broken_item], None,
                           {"mode": "fallback_full", "reason": "http_403"}))
 
@@ -890,7 +890,7 @@ def test_count_mismatch_detector_is_case_insensitive_and_cr_tolerant(db, monkeyp
     cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "fallback_full", "reason": "http_403"}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -936,7 +936,7 @@ def test_live_item_with_no_calendar_data_is_not_treated_as_deleted(db, monkeypat
     cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "fallback_full", "reason": "http_403"}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -986,7 +986,7 @@ def test_live_item_with_whitespace_only_calendar_data_is_not_treated_as_deleted(
     # sync_collection -- the tick's own normal running mode, where cheap
     # fix #1 otherwise waves a 0-VEVENT result through unremarked.
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], "NEXT-TOK", {"mode": "sync_collection", "reason": None}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -1025,7 +1025,7 @@ def test_zero_vevent_item_in_sync_collection_mode_is_not_an_error(db, monkeypatc
     cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], "NEXT-TOK", {"mode": "sync_collection", "reason": None}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -1050,7 +1050,7 @@ def test_zero_vevent_item_in_full_mode_is_still_flagged(db, monkeypatch):
     cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "initial_full", "reason": None}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -1104,7 +1104,7 @@ def test_healthy_master_alongside_lost_override_still_gets_updated(db, monkeypat
     cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([item], None, {"mode": "fallback_full", "reason": "http_403"}))
 
     rc = cli.cmd_tick_cal_ext(_args())
@@ -1131,7 +1131,7 @@ def test_steady_state_noop_tick_does_not_spam_the_audit_log(db, monkeypatch):
     cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([], "SAME-MODE-TOKEN", {"mode": "sync_collection", "reason": None}))
 
     rc1 = cli.cmd_tick_cal_ext(_args())
@@ -1165,7 +1165,7 @@ def test_read_filter_trailing_slash_mismatch_still_matches(db, monkeypatch):
                          lambda cfg, request=None: [_calendar(url_allowed, "Calendar")])
     fetched = []
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          (fetched.append(calendar["url"]) or ([], None,
                           {"mode": "initial_full", "reason": None})))
 
@@ -1194,7 +1194,7 @@ def test_read_calendars_filter_is_honored(db, monkeypatch):
 
     fetched_urls = []
 
-    def _fetch(cfg, calendar, sync_token=None, request=None):
+    def _fetch(cfg, calendar, sync_token=None, request=None, force_full=False):
         fetched_urls.append(calendar["url"])
         return ([], None, {"mode": "initial_full", "reason": None})
 
@@ -1220,7 +1220,7 @@ def test_tick_error_message_does_not_duplicate_calendar_reason(db, monkeypatch):
     monkeypatch.setattr(cli.extcal, "discover",
                          lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          (None, None, {"mode": "error",
                                         "reason": "a_very_specific_reason_xyz"}))
     calls = []
@@ -1241,7 +1241,7 @@ def test_last_mode_meta_only_written_when_it_changes(db, monkeypatch):
     cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([], "SAME-TOKEN", {"mode": "sync_collection", "reason": None}))
 
     # First tick: mode transitions from "no prior record" -- writes once.
@@ -1262,6 +1262,206 @@ def test_last_mode_meta_only_written_when_it_changes(db, monkeypatch):
     # very contention m6's own RandomizedDelaySec was trying to reduce).
     cli.cmd_tick_cal_ext(_args())
     assert last_mode_writes == []
+
+
+# ---------------------------------------------------------------------
+# Fix-round 3, Critical finding C1: the rolling-horizon gap. Steady-state
+# `REPORT sync-collection` deltas only ever mention a resource that
+# actually changed -- an untouched recurring series never reappears in a
+# delta, so a rolling `expand()` window silently stops inserting its NEW
+# occurrences forever once they scroll into view. `extcal_full_resync_
+# days` (default 1, gate.py) plus the per-calendar `meta["extcal_last_
+# full:<url>"]` watermark force a periodic full re-baseline through the
+# SAME `calendar-query` path (and therefore the SAME disappearance sweep
+# and bad_hrefs/degraded_urls/apply-error guards) already used for
+# initial_full/fallback_full.
+# ---------------------------------------------------------------------
+
+_ROLLING_SERIES_HREF = CAL_URL + "training-series.ics"
+_ROLLING_SERIES_ICS = (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n"
+    "UID:training-series@icloud.com\r\nSUMMARY:Тренировка\r\n"
+    "DTSTART:20370601T090000Z\r\nDTEND:20370601T100000Z\r\n"
+    "RRULE:FREQ=WEEKLY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+
+
+def test_periodic_full_resync_materializes_occurrences_a_delta_would_never_see(
+        db, monkeypatch):
+    """The core C1 scenario: a weekly series nobody has edited since
+    2037-06-01 stopped changing long ago, so a plain incremental delta
+    for its resource legitimately comes back EMPTY (nothing changed
+    since the stored token) -- proven by the second half of this test.
+    With the `extcal_last_full` watermark already 5 days stale (past the
+    default 1-day interval), THIS tick must force a full `calendar-
+    query` pass (`force_full=True`, mode "periodic_full") instead, which
+    re-lists the whole resource and lets `expand()` materialize every
+    occurrence currently inside the window -- occurrences a delta round
+    would never have surfaced."""
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="SEEDED-TOKEN")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+
+    famdb.meta_set(db, f"extcal_sync_token:{CAL_URL}", "OLD-TOKEN")
+    famdb.meta_set(db, f"extcal_last_full:{CAL_URL}", "2037-07-10T00:00:00+00:00")
+    db.commit()
+
+    seen_force_full = []
+
+    def _fetch_full(cfg, calendar, sync_token=None, request=None, force_full=False):
+        seen_force_full.append(force_full)
+        item = {"href": _ROLLING_SERIES_HREF, "deleted": False, "etag": "e1",
+                "ics": _ROLLING_SERIES_ICS}
+        return ([item], None, {"mode": "periodic_full", "reason": None})
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch_full)
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0
+    assert seen_force_full == [True]  # the stale watermark forced a full pass
+
+    rows = db.execute("SELECT * FROM events WHERE external_href=?",
+                       (_ROLLING_SERIES_HREF,)).fetchall()
+    # The weekly series expands to several occurrences inside the
+    # [now-1d, now+8w] window -- every one of them just got inserted in
+    # ONE full pass.
+    assert len(rows) > 1
+    assert all(r["owner"] == "iphone" for r in rows)
+
+    stored_full = famdb.meta_get(db, f"extcal_last_full:{CAL_URL}")
+    assert stored_full == TEST_NOW  # watermark advanced to this tick's "now"
+
+    # Second half: the SAME resource, still unedited, through a plain
+    # incremental delta -- sync-collection legitimately returns an EMPTY
+    # items list (nothing changed since the token). This IS the silence
+    # C1 is about -- without the watermark forcing a periodic full pass,
+    # a tick would look exactly like this forever.
+    seen_force_full.clear()
+
+    def _fetch_delta(cfg, calendar, sync_token=None, request=None, force_full=False):
+        seen_force_full.append(force_full)
+        return ([], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None})
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch_delta)
+
+    rc2 = cli.cmd_tick_cal_ext(_args())
+    assert rc2 == 0
+    assert seen_force_full == [False]  # watermark just advanced -- stays incremental
+
+
+def test_full_resync_not_forced_before_interval_elapses(db, monkeypatch):
+    """Regression guard, the other half of C1: a calendar whose
+    `extcal_last_full` watermark is still FRESH (inside the configured
+    interval) must not be forced through a full pass every tick -- that
+    would defeat the entire point of `REPORT sync-collection` deltas
+    (one full `calendar-query` per calendar per day is meant to be cheap
+    exactly BECAUSE it is rare)."""
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="SEEDED-TOKEN")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+
+    famdb.meta_set(db, f"extcal_sync_token:{CAL_URL}", "OLD-TOKEN")
+    # One hour stale -- well inside the default 1-day interval.
+    famdb.meta_set(db, f"extcal_last_full:{CAL_URL}", "2037-07-14T23:00:00+00:00")
+    db.commit()
+
+    seen_force_full = []
+
+    def _fetch(cfg, calendar, sync_token=None, request=None, force_full=False):
+        seen_force_full.append(force_full)
+        return ([], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None})
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch)
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0
+    assert seen_force_full == [False]
+
+    # A calendar that stayed incremental this round does not touch its
+    # own full watermark -- it should stay exactly where it was.
+    assert famdb.meta_get(db, f"extcal_last_full:{CAL_URL}") == "2037-07-14T23:00:00+00:00"
+
+
+def test_missing_full_watermark_forces_full_then_gates_the_next_tick(db, monkeypatch):
+    """A calendar with an EXISTING stored sync-token but NO recorded
+    `extcal_last_full` yet (e.g. right after this fix first deploys) is
+    treated as overdue -- self-healing, not a special case: the safest
+    assumption about an unknown-age token is that it might already be
+    stale. Once this tick's full pass completes, the watermark persists
+    in `meta` (the same table `extcal_sync_token` and `extcal_last_ok`
+    already survive a process restart through -- nothing new to prove
+    there) and correctly gates the very next tick back to incremental."""
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="SEEDED-TOKEN")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+
+    famdb.meta_set(db, f"extcal_sync_token:{CAL_URL}", "OLD-TOKEN")
+    db.commit()
+    assert famdb.meta_get(db, f"extcal_last_full:{CAL_URL}") is None
+
+    seen = []
+
+    def _fetch_full(cfg, calendar, sync_token=None, request=None, force_full=False):
+        seen.append(force_full)
+        return ([], None, {"mode": "periodic_full", "reason": None})
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch_full)
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0
+    assert seen == [True]
+    assert famdb.meta_get(db, f"extcal_last_full:{CAL_URL}") == TEST_NOW
+
+    # Next tick: watermark is now fresh -- stays incremental. This is the
+    # persistence check -- a fresh `cmd_tick_cal_ext` call (this project's
+    # own equivalent of "a new process after a restart", since `meta`
+    # lives in the sqlite file, not in memory) reads back exactly what
+    # the previous call wrote.
+    seen.clear()
+
+    def _fetch_delta(cfg, calendar, sync_token=None, request=None, force_full=False):
+        seen.append(force_full)
+        return ([], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None})
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch_delta)
+
+    rc2 = cli.cmd_tick_cal_ext(_args())
+    assert rc2 == 0
+    assert seen == [False]
+
+
+def test_periodic_full_still_runs_the_disappearance_sweep_like_any_other_full_mode(
+        db, monkeypatch):
+    """C1's fix must not invent a side door around the existing full-mode
+    guards (the task's own explicit warning: this project has already
+    burned four review rounds on irreversible-cancellation regressions
+    here) -- `periodic_full` has to be exactly as exhaustive-listing-
+    trustworthy as `initial_full`/`fallback_full` already are, so a row
+    that genuinely vanished from her calendar is still cancelled by
+    `plan_changes`' disappearance sweep, same as before this finding."""
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: _cfg())
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="SEEDED-TOKEN")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+
+    existing = cal.add(db, "Уже не будет", "2037-07-20T08:00:00+00:00",
+                        end_utc="2037-07-20T09:00:00+00:00")
+    db.execute(
+        "UPDATE events SET owner='iphone', external_uid=?, external_href=? "
+        "WHERE id=?",
+        (extcal._occurrence_key("evt-gone@icloud.com", None),
+         CAL_URL + "evt-gone.ics", existing["id"]),
+    )
+    famdb.meta_set(db, f"extcal_sync_token:{CAL_URL}", "OLD-TOKEN")
+    famdb.meta_set(db, f"extcal_last_full:{CAL_URL}", "2037-07-10T00:00:00+00:00")
+    db.commit()
+
+    def _fetch(cfg, calendar, sync_token=None, request=None, force_full=False):
+        assert force_full is True
+        # Exhaustive listing that no longer mentions evt-gone.ics at all
+        # -- a genuine phone-side deletion, not a fetch problem.
+        return ([], None, {"mode": "periodic_full", "reason": None})
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch)
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0
+
+    row = db.execute("SELECT * FROM events WHERE id=?", (existing["id"],)).fetchone()
+    assert row["status"] == "cancelled"
 
 
 # ---------------------------------------------------------------------
