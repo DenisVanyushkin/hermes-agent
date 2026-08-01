@@ -1009,12 +1009,21 @@ def cmd_rem_active(args):
 def _audit_tick_error(where, exc):
     """Persist a tick.error marker so the nightly problem_summary sweep
     (6b) can see a failure that would otherwise only hit journald.
-    Best-effort: a failure to record must not mask the original error."""
+    Best-effort: a failure to record must not mask the original error.
+
+    `exc_type` (design 2026-08-01, §8): the exception class name, or None
+    when the caller passes a pre-joined string (cli.py's offsite path).
+    str(exc) alone is ambiguous -- "No item with that key" is a KeyError
+    from sqlite3.Row and almost always means the prod schema lags the
+    code, which the text does not say. The nightly reporter keys its
+    diagnosis off this field, so it is worth the five lines."""
     try:
         conn = famdb.connect()
         try:
             audit.log(conn, "tick.error",
-                      {"where": where, "error": str(exc)[:200]}, actor="tick")
+                      {"where": where,
+                       "exc_type": type(exc).__name__ if isinstance(exc, BaseException) else None,
+                       "error": str(exc)[:200]}, actor="tick")
             conn.commit()
         finally:
             conn.close()
