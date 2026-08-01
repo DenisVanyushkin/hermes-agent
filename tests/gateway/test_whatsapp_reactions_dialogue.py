@@ -58,6 +58,7 @@ async def _arm(adapter):
 
 
 from unittest.mock import patch, MagicMock
+import psutil
 
 
 def _reaction(**overrides):
@@ -368,9 +369,15 @@ def _hung_hook(reap_behavior="ok", terminate_side_effect=None):
 
     ``terminate_side_effect``, if given, is raised by the patched
     ``_terminate_bridge_process`` instead of it succeeding.
+
+    proc.returncode is pinned to None: these are all "still alive when
+    the timeout fires" scenarios, which is what makes the tree-kill
+    guard (NEW-1: never tree-kill an already-exited proc, since its pid
+    may have been recycled) let the call through in the first place.
     """
     proc = AsyncMock()
     proc.pid = 4242
+    proc.returncode = None  # still running -- these tests are about that case
 
     async def _never_completes(*_a, **_kw):
         await asyncio.sleep(999)
@@ -465,14 +472,17 @@ def test_timed_out_hook_reap_process_lookup_error_is_swallowed():
     dispatch.assert_awaited_once()
 
 
-def test_timed_out_hook_tree_kill_lookup_error_falls_back_to_plain_kill():
-    """If the tree-kill helper itself reports the process is already
-    gone, fall back to a plain proc.kill() rather than treating that as
-    fatal."""
+def test_timed_out_hook_tree_kill_access_denied_falls_back_to_plain_kill():
+    """review NEW-2: _terminate_bridge_process already swallows
+    psutil.NoSuchProcess internally, and never raises a bare
+    ProcessLookupError or PermissionError -- psutil.AccessDenied is the
+    one failure mode it does NOT catch, so that is what a genuine
+    permission failure looks like from the caller's side. Falls back to
+    a plain proc.kill() rather than treating that as fatal."""
     adapter = _make_adapter(reaction_dialogue=True,
                             reaction_hook_cmd=["/bin/true"])
     proc, create_patch, wait_for_patch, terminate_patch, _calls = _hung_hook(
-        terminate_side_effect=ProcessLookupError())
+        terminate_side_effect=psutil.AccessDenied())
     with create_patch, wait_for_patch, terminate_patch:
         dispatch = _apply(adapter, _reaction())
     proc.kill.assert_called_once()
@@ -480,15 +490,18 @@ def test_timed_out_hook_tree_kill_lookup_error_falls_back_to_plain_kill():
 
 
 def test_timed_out_hook_tree_kill_generic_failure_is_swallowed():
-    """A tree-kill failure that is neither ProcessLookupError nor
-    PermissionError (e.g. a psutil oddity) must not escape and must not
-    stop the dialogue path from running."""
+    """A tree-kill failure that is not psutil.AccessDenied (e.g. some
+    other psutil oddity) must not escape and must not stop the dialogue
+    path from running -- and must NOT trigger the proc.kill() fallback,
+    since that fallback is reserved for the one failure mode we can
+    positively identify as \"we have permission but couldn't act\"."""
     adapter = _make_adapter(reaction_dialogue=True,
                             reaction_hook_cmd=["/bin/true"])
     proc, create_patch, wait_for_patch, terminate_patch, _calls = _hung_hook(
         terminate_side_effect=RuntimeError("psutil oddity"))
     with create_patch, wait_for_patch, terminate_patch:
         dispatch = _apply(adapter, _reaction())
+    proc.kill.assert_not_called()
     dispatch.assert_awaited_once()
 
 
@@ -506,3 +519,27 @@ def test_create_subprocess_exec_raising_timeout_error_does_not_crash():
                AsyncMock(side_effect=asyncio.TimeoutError())):
         dispatch = _apply(adapter, _reaction())
     dispatch.assert_awaited_once()
+
+
+def test_orphaned_grandchild_hook_never_tree_kills_a_recycled_pid():
+    """review NEW-1, real subprocess (every other test here mocks
+    create_subprocess_exec/wait_for/the tree-kill helper, which is
+    exactly why this failure mode was invisible to the suite).
+
+    A hook shaped like `sh -c "... &"` forks a grandchild and exits
+    immediately -- proc.returncode is set almost at once -- but the
+    grandchild inherits and keeps open the stdout/stderr pipes, so
+    wait_for(communicate()) still times out. By then proc.pid may have
+    been recycled by the OS for an unrelated process; the guard
+    (`if proc.returncode is None`) must keep _terminate_bridge_process
+    from ever being called against it. Asserted on the guard itself,
+    not on wall-clock timing.
+    """
+    adapter = _make_adapter(
+        reaction_dialogue=True,
+        reaction_hook_cmd=["/bin/sh", "-c", "sleep 2 &"])
+    with patch("plugins.platforms.whatsapp.adapter._REACTION_HOOK_TIMEOUT_S", 0.3), \
+         patch("plugins.platforms.whatsapp.adapter._terminate_bridge_process") as terminate_mock:
+        dispatch = _apply(adapter, _reaction())
+    dispatch.assert_awaited_once()
+    terminate_mock.assert_not_called()
