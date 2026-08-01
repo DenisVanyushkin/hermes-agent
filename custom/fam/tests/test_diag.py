@@ -298,3 +298,46 @@ def test_backups_offsite_age_days_computed_from_newest_dump(tmp_path):
          "offsite_dir": str(offsite_dir)}, now,
         verify=lambda path: (True, {"integrity": "ok", "schema_version": "12"}))
     assert result["offsite_age_days"] == 4
+
+
+def test_build_digest_isolates_a_failing_section(db, monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError("systemctl gone")
+    monkeypatch.setattr(diag, "collect_timers", boom)
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    digest, _ = diag.build_digest(
+        db, {"daily_budget": 8, "backup_dir": "/nonexistent"},
+        "1970-01-01T00:00:00+00:00", now,
+        delivery={"previous_report_ok": True}, state={},
+        verify=lambda p: (True, {}))
+    assert "timers" not in digest["sections"]
+    assert "RuntimeError" in digest["section_errors"]["timers"]
+    assert "activity" in digest["sections"], "other sections must survive"
+
+
+def test_build_digest_keeps_state_when_error_section_fails(db, monkeypatch):
+    monkeypatch.setattr(diag, "collect_errors",
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("db gone")))
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    prior = {"sig": {"first_seen": "2026-07-01T00:00:00+00:00",
+                     "last_seen": "2026-07-31T00:00:00+00:00", "count": 1}}
+    digest, new_state = diag.build_digest(
+        db, {"daily_budget": 8, "backup_dir": "/nonexistent"},
+        "1970-01-01T00:00:00+00:00", now,
+        delivery={"previous_report_ok": True}, state=prior,
+        verify=lambda p: (True, {}))
+    assert new_state == prior, "a failed collection must not wipe age tracking"
+
+
+def test_write_digest_is_atomic_and_rotates(tmp_path):
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    for day in range(1, 17):
+        old = tmp_path / f"fam-digest-202607{day:02d}.json"
+        old.write_text("{}", encoding="utf-8")
+    path = diag.write_digest({"generated_at": now.isoformat()}, tmp_path, now)
+    assert path.name == "fam-digest-latest.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["generated_at"]
+    assert (tmp_path / "fam-digest-20260801.json").exists()
+    dated = sorted(tmp_path.glob("fam-digest-????????.json"))
+    assert len(dated) == diag.ROTATE_DAYS
+    assert not list(tmp_path.glob("*.tmp"))

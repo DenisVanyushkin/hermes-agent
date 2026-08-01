@@ -44,6 +44,11 @@ CFG = {
     "offsite_dir": "/mnt/nas-hermes",
     "offsite_age_recipient": "",
     "offsite_keep": 8,
+    # Task 5 (nightly LLM report, schema v12/config): keep this hand-mirror
+    # of gate.CONFIG_DEFAULTS in sync, same as every prior addition above.
+    "diagnostics_dir": "/home/denis/.hermes/diagnostics",
+    "report_jobs_path": "/home/denis/.hermes/cron/jobs.json",
+    "report_job_name": "fam-nightly-report",
     "car_poll_interval_min": 30,
     "car_fuel_low_pct": 25,
     "car_fuel_hysteresis": 5,

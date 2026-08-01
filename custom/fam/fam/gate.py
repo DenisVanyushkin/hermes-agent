@@ -114,6 +114,13 @@ CONFIG_DEFAULTS = {
     "offsite_dir": "/mnt/nas-hermes",  # NFS mount point of 192.168.1.25:/volume1/hermes-backups
     "offsite_age_recipient": "",       # age public key; private key lives off-VM with Denis
     "offsite_keep": 8,                 # weekly .age dumps to keep per DB (~2 months)
+    # Nightly LLM report (design 2026-08-01). fam writes the digest here;
+    # the agent's cron job reads it, renders it and delivers it. fam reads
+    # that job's row back from jobs.json to learn whether the report was
+    # actually delivered -- see maint.problem_summary.
+    "diagnostics_dir": "/home/denis/.hermes/diagnostics",
+    "report_jobs_path": "/home/denis/.hermes/cron/jobs.json",
+    "report_job_name": "fam-nightly-report",
     # phase 4: car / StarLine
     "car_poll_interval_min": 30,
     "car_fuel_low_pct": 25,

@@ -6,12 +6,14 @@ for the agent's `fam-nightly-report` cron job to render via LLM. Collects
 only; never delivers. Delivery and the watermark contract live in maint.py.
 """
 import json
+import os
 import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from . import db as famdb
 from . import gate
+from . import health
 
 MAX_EXAMPLES = 3
 MAX_CONTEXT_VALUES = 10
@@ -289,3 +291,70 @@ def collect_backups(cfg, now, verify):
             except ValueError:
                 result["offsite_age_days"] = None
     return result
+
+
+DEFAULT_DIAGNOSTICS_DIR = "/home/denis/.hermes/diagnostics"
+ROTATE_DAYS = 14
+DIGEST_LATEST = "fam-digest-latest.json"
+
+
+def build_digest(conn, cfg, since, now, delivery, state, verify, runner=None):
+    """Assemble the digest. Returns (digest, new_state).
+
+    Every section is isolated: one collector raising lands in
+    section_errors and the rest of the digest still ships. If the error
+    section itself fails, new_state is returned unchanged -- losing age
+    tracking on a bad night would silently reset every 'known' finding
+    back to 'new'."""
+    sections, section_errors = {}, {}
+    new_state = dict(state)
+
+    def _section(name, fn):
+        try:
+            sections[name] = fn()
+        except Exception as exc:                     # noqa: BLE001 -- isolate
+            section_errors[name] = f"{type(exc).__name__}: {exc}"
+
+    def _errors():
+        nonlocal new_state
+        annotated, resolved, new_state = diff_known_issues(
+            state, collect_errors(conn, since), now)
+        return {"findings": annotated, "resolved": resolved}
+
+    _section("errors", _errors)
+    _section("probes", lambda: health.all_probes(conn, cfg, now=now))
+    _section("calendar", lambda: collect_calendar(conn, since))
+    _section("activity", lambda: collect_activity(conn, cfg, since, now))
+    _section("timers", lambda: collect_timers(runner=runner))
+    _section("backups", lambda: collect_backups(cfg, now, verify))
+    return {
+        "generated_at": now.isoformat(timespec="seconds"),
+        "window": {"since": since},
+        "fam_schema_version": famdb.meta_get(conn, "schema_version"),
+        "delivery": delivery,
+        "sections": sections,
+        "section_errors": section_errors,
+    }, new_state
+
+
+def write_digest(digest, dest_dir, now):
+    """Publish the digest atomically and rotate dated copies.
+
+    os.replace, not a plain write: the agent's cron job may read the file
+    at any moment, and a half-written digest would surface to Denis as a
+    bogus DIGEST MISSING."""
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir.chmod(0o700)                 # same PII posture as the DB backups
+    body = json.dumps(digest, ensure_ascii=False, indent=1)
+    latest = dest_dir / DIGEST_LATEST
+    tmp = dest_dir / (DIGEST_LATEST + ".tmp")
+    tmp.write_text(body, encoding="utf-8")
+    tmp.chmod(0o600)
+    os.replace(tmp, latest)
+    dated = dest_dir / f"fam-digest-{now.strftime('%Y%m%d')}.json"
+    dated.write_text(body, encoding="utf-8")
+    dated.chmod(0o600)
+    for old in sorted(dest_dir.glob("fam-digest-????????.json"))[:-ROTATE_DAYS]:
+        old.unlink()
+    return latest

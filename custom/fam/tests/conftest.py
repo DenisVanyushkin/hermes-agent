@@ -13,11 +13,14 @@ def _isolate_prod_stores(tmp_path, monkeypatch):
     # starline-token.json when a refactor briefly broke their TOKEN_PATH
     # monkeypatch. Repoint every default path at tmp so a test that
     # forgets an explicit path can only ever touch tmp.
-    from fam import car, gate
+    from fam import car, diag, gate
     monkeypatch.setattr(car, "TOKEN_PATH", str(tmp_path / "starline-token.json"))
     monkeypatch.setattr(car, "SANDBOX_TOKEN_PATH", str(tmp_path / "sandbox-starline-token.json"))
     monkeypatch.setattr(gate, "CONFIG_PATH", tmp_path / "fam-config.json")
     monkeypatch.setattr(gate, "SANDBOX_CONFIG_PATH", tmp_path / "sandbox-fam-config.json")
+    # Same class of leak as the starline token above: problem_summary({})
+    # would otherwise write into the LIVE ~/.hermes/diagnostics.
+    monkeypatch.setattr(diag, "DEFAULT_DIAGNOSTICS_DIR", str(tmp_path / "diagnostics"))
 
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
