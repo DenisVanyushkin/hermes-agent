@@ -491,6 +491,66 @@ def test_fetch_changes_distinguishes_initial_full_from_fallback_full(monkeypatch
     assert info_initial["reason"] is None
 
 
+# --- Fix-round 3, Critical finding C1: `force_full` -- the periodic
+# rolling-horizon re-baseline (Task 6's tick decides WHEN, based on
+# `meta`; this module only needs to honor the flag by skipping
+# sync-collection and reusing the SAME calendar-query path already used
+# for initial_full/fallback_full, under a distinct "periodic_full" mode
+# label).
+
+def test_fetch_changes_force_full_skips_sync_collection_entirely(monkeypatch):
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+    calls = []
+
+    def fake(method, url, headers=None, body=None, timeout=20):
+        calls.append(body)
+        # sync-collection must never even be attempted when force_full
+        # is set -- if it were, this fake would 200 it just like a
+        # healthy server, and the test below would fail to catch a
+        # regression that silently re-enables it.
+        assert "sync-collection" not in body
+        assert "calendar-query" in body
+        return extcal.Response(207, _QUERY_RESPONSE_XML.encode())
+
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token="a-perfectly-valid-token",
+        request=fake, force_full=True)
+    assert len(calls) == 1  # exactly one request -- no wasted sync-collection round-trip
+    assert new_token is None  # calendar-query never yields an incremental token
+    assert len(items) == 1
+    assert sync_info == {"mode": "periodic_full", "reason": None}
+
+
+def test_fetch_changes_force_full_without_a_token_is_still_initial_full(monkeypatch):
+    # force_full with NO sync_token at all is indistinguishable from a
+    # plain first-ever sync -- there was never a token to skip offering,
+    # so this stays "initial_full", not a new, redundant third label.
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+
+    def fake(method, url, headers=None, body=None, timeout=20):
+        assert "calendar-query" in body
+        return extcal.Response(207, _QUERY_RESPONSE_XML.encode())
+
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token=None, request=fake, force_full=True)
+    assert sync_info == {"mode": "initial_full", "reason": None}
+
+
+def test_fetch_changes_force_full_defaults_to_false(monkeypatch):
+    # Regression guard: omitting force_full entirely must behave exactly
+    # as before this finding -- a valid token still goes through
+    # sync-collection first.
+    monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
+
+    def fake(method, url, headers=None, body=None, timeout=20):
+        assert "sync-collection" in body
+        return extcal.Response(207, _SYNC_RESPONSE_XML.encode())
+
+    items, new_token, sync_info = extcal.fetch_changes(
+        _cfg(), _CALENDAR, sync_token="tok", request=fake)
+    assert sync_info["mode"] == "sync_collection"
+
+
 def test_fetch_changes_timeout_returns_none_no_exception(monkeypatch):
     monkeypatch.setenv("ICLOUD_APP_PASSWORD", "pw")
 

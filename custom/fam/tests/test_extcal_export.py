@@ -573,6 +573,59 @@ def test_owner_iphone_event_never_exported(db, monkeypatch):
 
 
 # ---------------------------------------------------------------------
+# final review, finding N3: an adopted event (owner='hermes' but STILL
+# carries the external_uid from its original iPhone import) must never
+# be exported -- it already lives in her calendar under its original
+# CalDAV resource; PUTting it into "Гермес" too would show it twice.
+# ---------------------------------------------------------------------
+
+def test_adopted_event_with_external_uid_is_never_exported(db, monkeypatch):
+    def boom(req, timeout):
+        raise AssertionError("must not touch the network for an "
+                              "adopted (external_uid-carrying) event")
+    monkeypatch.setattr(extcal, "_default_open", boom)
+
+    # Mirrors exactly what `fam cal adopt` leaves behind: owner flipped to
+    # 'hermes', external_uid/external_href left untouched (adopt never
+    # clears them -- see cli.cmd_cal_adopt's own docstring).
+    event = _hermes_event(db, title="Йога (усыновлено)",
+                           start="2037-07-20T13:00:00+00:00")
+    db.execute(
+        "UPDATE events SET external_uid='uid-adopted-1', "
+        "external_href='https://caldav.icloud.com/1/calendars/personal/evt1.ics' "
+        "WHERE id=?",
+        (event["id"],))
+    db.commit()
+
+    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    assert counts == {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 0, "errors": []}
+    assert db.execute("SELECT COUNT(*) AS n FROM ext_exports").fetchone()["n"] == 0
+
+
+def test_plain_hermes_event_still_exports_alongside_an_adopted_one(db, monkeypatch):
+    """Regression guard: N3's exclusion must be scoped to external_uid-
+    carrying rows only -- an ordinary, never-imported Hermes event in the
+    SAME batch still exports normally."""
+    def fake_open(req, timeout):
+        return extcal.Response(201, b"", {"ETag": '"e1"'})
+    monkeypatch.setattr(extcal, "_default_open", fake_open)
+
+    adopted = _hermes_event(db, title="Йога (усыновлено)",
+                             start="2037-07-20T13:00:00+00:00")
+    db.execute(
+        "UPDATE events SET external_uid='uid-adopted-2', "
+        "external_href='https://caldav.icloud.com/1/calendars/personal/evt2.ics' "
+        "WHERE id=?",
+        (adopted["id"],))
+    _hermes_event(db, title="Обычное от Гермеса", start="2037-07-21T10:00:00+00:00")
+    db.commit()
+
+    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    assert counts["exported"] == 1
+    assert counts["errors"] == []
+
+
+# ---------------------------------------------------------------------
 # invariant #1: gate.deliver is never called on the export path
 # ---------------------------------------------------------------------
 
@@ -647,7 +700,7 @@ def test_belt2_filters_our_own_exported_event_even_with_write_url_blank(db, monk
                               "sync_token": None, "supports_sync_token": True,
                               "components": ["VEVENT"]}])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([{"href": other_url + "echo.ics", "deleted": False,
                             "etag": "e9", "ics": exported_ics}],
                           None, {"mode": "initial_full", "reason": None}))
@@ -691,7 +744,7 @@ def test_belt2_filters_our_own_exported_event_even_with_write_url_pointing_elsew
                               "sync_token": None, "supports_sync_token": True,
                               "components": ["VEVENT"]}])
     monkeypatch.setattr(cli.extcal, "fetch_changes",
-                         lambda cfg, calendar, sync_token=None, request=None:
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
                          ([{"href": other_url + "echo.ics", "deleted": False,
                             "etag": "e9", "ics": exported_ics}],
                           None, {"mode": "initial_full", "reason": None}))

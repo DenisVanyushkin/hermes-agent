@@ -617,10 +617,16 @@ def cmd_cal_adopt(args):
     # operation as `args.id` -- see docstring above. A single, non-
     # recurring event's href is unique to it, so this query naturally
     # returns just itself.
+    # `AND status='active'` (fix-round 2, minor (a)): a cancelled or done
+    # occurrence of the SAME resource is already resolved -- nothing left
+    # to remind about -- so it must not get swept into `owner='hermes'`
+    # and reported as "also adopted N other occurrence(s)" alongside the
+    # live ones.
     ids = [args.id]
     if href:
         sibling_rows = conn.execute(
-            "SELECT id FROM events WHERE external_href=? AND owner='iphone'",
+            "SELECT id FROM events WHERE external_href=? AND owner='iphone' "
+            "AND status='active'",
             (href,),
         ).fetchall()
         ids = sorted({row["id"] for row in sibling_rows} | {args.id})
@@ -711,6 +717,53 @@ def cmd_cal_disown(args):
     drops the chain but leaves the event itself alone) -- not `disown`,
     which is only meaningful for an event her iPhone actually has its own
     copy of.
+
+    Series widening (fix-round 2, finding N2 -- mirrors `cal adopt`'s own
+    blocker-1 fix): the SAME resource-sharing rationale applies in
+    reverse. If `args.id` carries an `external_href` shared by other
+    `owner='hermes'` occurrences (typically: the whole series was
+    adopted together in one `cal adopt` call), disowning only the one
+    named occurrence would leave every sibling still `owner='hermes'`,
+    quietly chained, while THIS occurrence goes back to owner='iphone'
+    with no chain of its own and her phone's alarm for the whole
+    resource already gone (stripped by the earlier adopt) -- a confusing
+    half-revert, loud on the one occurrence she asked about and silent
+    on the rest. Every OTHER `owner='hermes'` row sharing this href is
+    flipped back to `owner='iphone'` in the same operation. This is not
+    a network operation (disown never touches her iCloud copy at all,
+    unlike adopt's VALARM strip), so widening it costs nothing extra on
+    the wire.
+
+    Fix-round 3, Important finding I1 (status asymmetry): fix-round 2's
+    own widening query ADDED `AND status='active'` here (mirroring `cal
+    adopt`'s minor (a), which skips an already-cancelled/done SIBLING so
+    it does not get swept into a fresh adoption) -- but the two queries
+    answer different questions, and mirroring the FILTER was wrong even
+    though mirroring the WIDENING was right. `extcal._series_already_
+    adopted` (the function a later sync tick uses to decide whether a
+    BRAND-NEW occurrence of this resource should inherit owner='hermes')
+    deliberately checks for ANY `owner='hermes'` sibling, regardless of
+    its status -- see that function's own docstring. If one occurrence
+    of an adopted series is later cancelled (the remote side cancels it;
+    `owner` stays 'hermes', only `status` changes -- see `extcal._apply_
+    event_cancel`), THEN she says "не напоминай про это" and `disown`
+    runs: the OLD `status='active'` filter here left that one cancelled-
+    but-still-`owner='hermes'` row untouched forever, since it is not
+    "active". `_series_already_adopted` does not know or care that she
+    disowned the rest of the series -- it still finds that one leftover
+    `owner='hermes'` row and answers "yes, adopted" -- so every FUTURE
+    occurrence of the series keeps silently inheriting `owner='hermes'`
+    again, and a repeated `disown` on the new occurrence does not fix it
+    either (the same stale cancelled row is still there, still
+    `owner='hermes'`, still invisible to the status filter). The fix:
+    `disown`'s widening matches ANY status, exactly like `_series_
+    already_adopted` -- a status filter on THIS side can never be
+    correct as long as that inheritance check has none. `cal adopt`'s
+    OWN widening keeps its `status='active'` filter unchanged (a
+    cancelled/done `owner='iphone'` sibling has nothing left to remind
+    about, and leaving it `owner='iphone'` does not create this
+    asymmetry -- `_series_already_adopted` only ever looks for
+    `owner='hermes'` rows).
     """
     conn = famdb.connect()
     e = cal.get(conn, args.id)
@@ -727,31 +780,60 @@ def cmd_cal_disown(args):
             f"that originated on her iPhone; for a plain Hermes event use "
             f"`fam rem cancel {args.id}` to stop its reminders instead"
         )
-    conn.execute(
-        "UPDATE events SET owner='iphone' WHERE id=? AND owner='hermes'",
-        (args.id,),
-    )
-    # Minor #4 (fix-round 1): capture how many pending reminders actually
-    # get dropped, the same way `cal adopt`'s own `reminders_created`
-    # already surfaces its side of this -- rem.regenerate() itself only
-    # ever returns the CREATED count (0 here, since owner is now
-    # 'iphone' -- see its own early-exit docstring), never touches
-    # rem.py to add a second return value for this.
-    removed = conn.execute(
-        "SELECT COUNT(*) AS n FROM reminders WHERE event_id=? AND status='pending'",
-        (args.id,),
-    ).fetchone()["n"]
-    rem.regenerate(conn, args.id)
-    audit.log(conn, "cal.disown", {"id": args.id, "reminders_removed": removed})
+
+    href = e.get("external_href")
+    ids = [args.id]
+    if href:
+        # I1: no `AND status='active'` here -- see this command's own
+        # docstring. `extcal._series_already_adopted` checks ANY
+        # `owner='hermes'` sibling regardless of status; a filtered
+        # widening here could leave a cancelled-but-still-`owner=
+        # 'hermes'` row behind, which that check would keep finding
+        # forever, silently re-adopting every future occurrence.
+        sibling_rows = conn.execute(
+            "SELECT id FROM events WHERE external_href=? AND owner='hermes'",
+            (href,),
+        ).fetchall()
+        ids = sorted({row["id"] for row in sibling_rows} | {args.id})
+
+    # Minor #4 (fix-round 1), now summed across every id widened onto
+    # (fix-round 2): capture how many pending reminders actually get
+    # dropped, the same way `cal adopt`'s own `reminders_created` already
+    # surfaces its side of this -- rem.regenerate() itself only ever
+    # returns the CREATED count (0 here, since owner is now 'iphone' --
+    # see its own early-exit docstring), never touches rem.py to add a
+    # second return value for this.
+    removed_total = 0
+    for eid in ids:
+        removed_total += conn.execute(
+            "SELECT COUNT(*) AS n FROM reminders WHERE event_id=? AND status='pending'",
+            (eid,),
+        ).fetchone()["n"]
+        conn.execute(
+            "UPDATE events SET owner='iphone' WHERE id=? AND owner='hermes'",
+            (eid,),
+        )
+        rem.regenerate(conn, eid)
+
+    audit_payload = {"id": args.id, "reminders_removed": removed_total}
+    if len(ids) > 1:
+        audit_payload["disowned_ids"] = ids
+    audit.log(conn, "cal.disown", audit_payload)
     conn.commit()
 
-    out = {"id": args.id, "owner": "iphone", "reminders_removed": removed}
+    out = {"id": args.id, "owner": "iphone", "reminders_removed": removed_total}
+    if len(ids) > 1:
+        out["disowned_ids"] = ids
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
     else:
-        print(f"disowned event {args.id}: owner=iphone, {removed} pending "
+        print(f"disowned event {args.id}: owner=iphone, {removed_total} pending "
               f"reminder(s) removed (her phone's own alarm, if any, is "
               f"not restored -- see cal disown's own limitation)")
+        if len(ids) > 1:
+            others = ", ".join(str(i) for i in ids if i != args.id)
+            print(f"  also disowned {len(ids) - 1} other occurrence(s) of "
+                  f"this recurring series (same iCloud resource): {others}")
     return 0
 
 def cmd_cal_show(args):
@@ -1404,7 +1486,48 @@ def _dry_run_summary(changeset):
 
 
 _HREF_IN_TEXT_RE = re.compile(r"https?://\S+")
-_RRULE_IN_TEXT_RE = re.compile(r"RRULE\s+'[^']*'")
+# Both of Python's `repr()` quoting conventions: single quotes (the common
+# case), OR double quotes -- `repr()` switches to double quotes whenever
+# the string contains an apostrophe but no `"` (fix-round 2, minor (b)):
+# `_expand_master`'s `f"RRULE {master['rrule']!r} for uid=..."` uses `!r`
+# on the raw RRULE VALUE text, and an Apple RRULE can itself legitimately
+# contain an apostrophe (e.g. inside an X- extension or a stray comment
+# some client appended) -- the OLD single-quote-only pattern silently let
+# that one shape straight through.
+_RRULE_IN_TEXT_RE = re.compile(r"RRULE\s+(?:'[^']*'|\"[^\"]*\")")
+# `_expand_master`'s diagnostic also appends `({type(e).__name__}: {e})`
+# -- `dateutil.rrulestr`'s OWN exception text (`{e}`), not `!r`-quoted at
+# all, can independently echo a fragment of the same raw RRULE value
+# (e.g. an "unsupported/invalid token: <fragment>"-shaped message) in a
+# form the pattern above never sees, since it never touches the quoted
+# literal. This targets that known, fixed diagnostic shape by structure
+# (the literal string `_expand_master` builds it with) and drops
+# everything after the exception TYPE name, rather than trying to guess
+# what shape the un-quoted fragment might take.
+#
+# Fix-round 3, Minor finding M2: the ORIGINAL pattern closed its capture
+# on `[^)]*(\))` -- the FIRST `)` after the exception type/colon. But
+# `{e}`'s own free-form text can legitimately contain its OWN, unrelated
+# parentheses (e.g. dateutil quoting the bad token as "invalid token
+# (FREQ=SECRETLY)") -- the first `)` the old pattern found was that
+# INNER one, not the outer diagnostic's real closing paren, so
+# everything after it (a second leaked fragment, e.g. "trailing
+# FREQ=LEAK") rode straight through unredacted, past where the
+# substitution stopped. And if `{e}`'s text happened to contain NO `)`
+# at all before the end of the string, `[^)]*(\))` could not match
+# ANYTHING -- the whole clause, RRULE fragment included, passed through
+# completely unredacted, not merely truncated. Anchored on the actual
+# END of the string instead (single-line diagnostic text, one such
+# clause per string at every call site -- see `_redact_extcal_text`'s
+# own callers): `.*?` lazily consumes the whole tail, and the optional
+# `(\)?)` captures a real trailing `)` when the text has one (the normal
+# case -- `_expand_master`'s own f-string always ends with one) or
+# nothing when it doesn't, so the substitution below never leaves a
+# dangling unredacted fragment on either side of a nested paren, and
+# never fully skips redaction for want of one.
+_EXPAND_ERROR_DETAIL_RE = re.compile(
+    r"(could not be parsed/evaluated \(\w+: ).*?(\)?)$"
+)
 
 # Cap on any single redacted diagnostic string landing in audit_log or a
 # message to Denis -- matches the bound `cal.ext.export_error.error`
@@ -1419,15 +1542,30 @@ def _redact_extcal_text(text):
     an absolute CalDAV resource href (hers, or the "Гермес" write-target's)
     -- `https?://...` -> `<href>` -- and a raw `RRULE` value quoted in an
     `expand()`/`_expand_master` diagnostic (`extcal.py`'s own `!r`-quoted
-    `RRULE '<value>' for uid=...` shape) -- `RRULE '...'` -> `RRULE
-    <redacted>`. `uid=...` is left alone: it is an opaque identifier, not
-    her data, and the design doc's own "только UID и счётчики" rule
+    `RRULE '<value>' for uid=...` shape, single OR double quoted -- see
+    `_RRULE_IN_TEXT_RE`'s own comment) -- `RRULE '...'`/`RRULE "..."` ->
+    `RRULE <redacted>`. Fix-round 2 (minor (b)) additionally drops the
+    free-form exception-detail text `_expand_master` appends after that
+    (`dateutil.rrulestr`'s own `{e}`, which is not `!r`-quoted and can
+    independently echo a raw fragment of the RRULE value in a shape the
+    quoted pattern never matches) -- only the exception's TYPE name
+    survives (`ValueError`, etc.), not its message text (fix-round 3, M2:
+    `_EXPAND_ERROR_DETAIL_RE` now anchors on the end of the string rather
+    than the first `)` it finds, so a nested paren inside the exception's
+    own text can no longer let a tail fragment leak past the
+    substitution, and text with no trailing `)` at all still gets
+    redacted instead of passing through untouched -- see that pattern's
+    own comment). `uid=...` is left alone: it is an opaque identifier,
+    not her data, and the design doc's own "только UID и счётчики" rule
     explicitly allows it through. Falsy input passes through unchanged
     (nothing to redact); never raises."""
     if not text:
         return text
     text = _HREF_IN_TEXT_RE.sub("<href>", text)
     text = _RRULE_IN_TEXT_RE.sub("RRULE <redacted>", text)
+    # M2: group 1 already carries the trailing ": " (see
+    # `_EXPAND_ERROR_DETAIL_RE`'s own comment) -- no extra ": " here.
+    text = _EXPAND_ERROR_DETAIL_RE.sub(r"\1<redacted>\2", text)
     return text
 
 
@@ -1454,7 +1592,10 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     """The whole read -> reconcile -> (write) pipeline for one `fam tick
     cal-ext` run. Returns `{"counts": dict|None (None on --dry-run),
     "calendars": [{url,name,mode,reason}, ...], "changeset": Changeset,
-    "sync_errors": [str, ...], "tokens": {calendar_url: token}}`.
+    "sync_errors": [str, ...], "tokens": {calendar_url: token},
+    "full_mode_urls": {calendar_url, ...}}` -- the last is every calendar
+    that ran in ANY full mode this round (fix-round 3, C1 -- see
+    `cmd_tick_cal_ext`'s own `extcal_last_full` persistence).
 
     ALWAYS runs the full pipeline through to `plan_changes` (and
     `apply_changes`, unless `dry_run`) -- fix-round 1 removed the earlier
@@ -1600,6 +1741,23 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             f"{len(calendars)} discovered calendar(s) -- check config "
             "spelling/case, credentials, or network reachability")
 
+    # Fix-round 3, Critical finding C1 (the rolling-horizon gap): a
+    # calendar left running on `REPORT sync-collection` deltas forever
+    # never re-materializes an occurrence whose resource nobody has
+    # touched since the window last moved past it -- a rolling `expand()`
+    # window can silently stop inserting NEW occurrences of an untouched
+    # recurring series. `extcal_full_resync_days` (default 1, gate.py)
+    # bounds how long a calendar may go without a full re-baseline;
+    # `meta["extcal_last_full:<url>"]` (below) is the per-calendar
+    # watermark, advanced only when this round's full pass actually
+    # completed cleanly (same gate as sync-token persistence -- see
+    # `cmd_tick_cal_ext`). No marker yet for a calendar that DOES already
+    # have a stored sync-token (e.g. right after this fix first deploys)
+    # is treated the same as "overdue" -- self-healing, not a special
+    # case: the safest assumption about an unknown-age token is that it
+    # might already be stale.
+    full_resync_days = cfg.get("extcal_full_resync_days", 1)
+
     for calendar in eligible:
         url = calendar.get("url")
         stored_token = famdb.meta_get(conn, f"extcal_sync_token:{url}")
@@ -1607,8 +1765,23 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         # function's own docstring, "Sync-token seeding".
         candidate_token = calendar.get("sync_token")
 
+        force_full = False
+        if stored_token:
+            last_full_raw = famdb.meta_get(conn, f"extcal_last_full:{url}")
+            if not last_full_raw:
+                force_full = True
+            else:
+                try:
+                    last_full_dt = datetime.fromisoformat(last_full_raw)
+                except ValueError:
+                    force_full = True
+                else:
+                    if last_full_dt.tzinfo is None:
+                        last_full_dt = last_full_dt.replace(tzinfo=timezone.utc)
+                    force_full = (now - last_full_dt) >= timedelta(days=full_resync_days)
+
         items, new_token, sync_info = extcal.fetch_changes(
-            cfg, calendar, sync_token=stored_token)
+            cfg, calendar, sync_token=stored_token, force_full=force_full)
         mode = sync_info.get("mode") if isinstance(sync_info, dict) else "error"
         reason = sync_info.get("reason") if isinstance(sync_info, dict) else "unknown"
         per_calendar.append({"url": url, "name": calendar.get("name"),
@@ -1860,7 +2033,7 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         return {
             "counts": None, "calendars": per_calendar,
             "changeset": changeset, "sync_errors": sync_errors, "tokens": {},
-            "export_counts": None,
+            "export_counts": None, "full_mode_urls": set(),
         }
 
     counts = extcal.apply_changes(conn, changeset, cfg)
@@ -1880,6 +2053,14 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         "counts": counts, "calendars": per_calendar,
         "changeset": changeset, "sync_errors": sync_errors,
         "tokens": tokens_to_persist, "export_counts": export_counts,
+        # Fix-round 3, C1: every calendar that ran in ANY full mode this
+        # round (initial_full/fallback_full/periodic_full -- anything
+        # that isn't "sync_collection") -- `cmd_tick_cal_ext` advances
+        # `meta["extcal_last_full:<url>"]` for whichever of these also
+        # made it into `tokens_to_persist` (i.e. NOT batch-wide degraded
+        # this round -- the same "healthy this round" set token
+        # persistence already uses).
+        "full_mode_urls": full_mode_urls,
     }
 
 
@@ -1930,12 +2111,17 @@ def cmd_tick_cal_ext(args):
     hostage to an unrelated calendar being down (fix-round C2 is scoped
     to `apply_changes` errors specifically -- a calendar-level fetch/parse
     problem already excludes only ITS OWN rows via `_cal_ext_sync`'s
-    per-row snapshot scoping, see that function's docstring). Only TWO
+    per-row snapshot scoping, see that function's docstring). Three
     things are gated: `meta["extcal_sync_token:<url>"]` is written for
     NO calendar at all when there is ANY `apply_changes` error anywhere
     this tick (simpler/safer than attributing one bad row back to a
-    specific calendar); `meta["extcal_last_ok"]` only advances on a tick
-    with NO error anywhere (its name means "last FULL success").
+    specific calendar); `meta["extcal_last_full:<url>"]` (fix-round 3,
+    C1 -- the rolling-horizon periodic full re-baseline, see `_cal_ext_
+    sync`'s own docstring) is gated the SAME way, one calendar at a time
+    (only a calendar that both ran a full mode this round AND stayed out
+    of `apply_errors`' blanket gate advances its watermark); `meta
+    ["extcal_last_ok"]` only advances on a tick with NO error anywhere
+    (its name means "last FULL success").
 
     Final-review blocker 2 (Important): a real (non-`--dry-run`) `fam
     tick cal-ext --now ...` invocation from the actual CLI is REFUSED by
@@ -2081,6 +2267,17 @@ def cmd_tick_cal_ext(args):
         for url, token in result["tokens"].items():
             if token:
                 famdb.meta_set(conn, f"extcal_sync_token:{url}", token)
+        # Fix-round 3, C1: same gate as sync-token persistence above, on
+        # purpose -- a calendar that completed a full pass (initial_full/
+        # fallback_full/periodic_full) THIS round but is not in `result
+        # ["tokens"]` was batch-wide degraded (`_cal_ext_sync`'s own
+        # `degraded_urls`), i.e. NOT a trustworthy full read, so its
+        # `extcal_last_full` watermark must not advance either -- the
+        # very next tick should try again, not wait out the full interval
+        # on data nobody actually trusted.
+        for url in result.get("full_mode_urls") or ():
+            if url in result["tokens"]:
+                famdb.meta_set(conn, f"extcal_last_full:{url}", now.isoformat())
 
     # extcal_last_ok: only a FULLY clean tick counts (matches the exit
     # code -- "last_ok" means "last full success", not "last time SOME

@@ -233,17 +233,85 @@ def test_hermes_owned_rows_never_appear_in_any_list():
     assert len(cs["events"]["insert"]) == 1
 
 
-def test_hermes_owned_row_not_fuzzy_eligible_is_untouched_and_remote_still_inserts():
-    # Same external_uid as the remote occurrence would compute (a
-    # hypothetical corruption/edge case) -- still invisible to key-matching,
-    # since events_by_key is built from owner='iphone' rows only.
+def test_hermes_owned_row_matching_by_external_uid_is_not_a_duplicate_or_collision():
+    """Fix-round 2, finding N4: a hermes-owned row whose `external_uid`
+    EXACTLY matches the incoming occurrence's own key is the SAME CalDAV
+    occurrence (this is the ordinary, expected shape for anything `fam
+    cal adopt` has touched, possibly with a title/time edited on her
+    phone afterward since) -- not a coincidental fuzzy dup (rule #2,
+    which exists for two INDEPENDENTLY created things that merely look
+    alike) and not fresh data to insert (rule #3 forbids updating a
+    hermes row here at all, and inserting a second row for the same
+    external_uid would collide with the DB's own partial UNIQUE index
+    regardless). Neither an insert nor a `collisions` entry should ever
+    be produced for it.
+
+    (Formerly named test_hermes_owned_row_not_fuzzy_eligible_is_
+    untouched_and_remote_still_inserts and asserted an INSERT did
+    happen, calling the shared external_uid "a hypothetical corruption/
+    edge case" -- that framing predates `fam cal adopt` (Task 9), which
+    made a hermes row with a real external_uid the normal, common case,
+    not corruption. The old assertion pointed at a latent bug -- in
+    the real system this insert would hit the UNIQUE(external_uid)
+    index -- rather than a real invariant worth protecting.)
+    """
     hermes_event = _event_row(22, "uid-12@icloud.com", "Совсем другое",
                                "2026-08-10T05:00:00+00:00", owner="hermes")
     occ = _occ("uid-12@icloud.com", "Йога", "2026-08-01T13:00:00+00:00")
     cs = extcal.plan_changes([occ], _snap(events=[hermes_event]), NOW)
-    assert len(cs["events"]["insert"]) == 1
+    assert cs["events"]["insert"] == []
     assert cs["events"]["update"] == [] and cs["events"]["cancel"] == []
     assert cs["collisions"] == []
+
+
+def test_adopted_event_occurrence_reappearing_is_not_a_collision():
+    """N4: the ordinary post-adopt case, framed directly -- the same
+    title AND time as the local hermes row (i.e. nothing changed on her
+    phone since adopt), still just an exact external_uid match. Without
+    this fix, this would previously have fallen through to the rule #2
+    fuzzy heuristic (title+time within 15 minutes) and matched there
+    too -- BUT would then be logged as a `collisions` entry, repeating
+    every single tick forever for as long as the adopted occurrence
+    exists (the ночная сводка noise the design doc's own "разобрать
+    нечего" phrase describes)."""
+    hermes_event = _event_row(50, "adopted-uid", "Йога",
+                               "2026-08-01T13:00:00+00:00", owner="hermes")
+    occ = _occ("adopted-uid", "Йога", "2026-08-01T13:00:00+00:00")
+    cs = extcal.plan_changes([occ], _snap(events=[hermes_event]), NOW)
+    assert cs["events"]["insert"] == []
+    assert cs["events"]["update"] == [] and cs["events"]["cancel"] == []
+    assert cs["collisions"] == []
+
+
+def test_adopted_plan_occurrence_reappearing_is_not_a_collision():
+    """N4's plans-branch mirror."""
+    hermes_plan = _plan_row(51, "adopted-plan-uid", "Купить подарок",
+                             "2026-07-31", owner="hermes")
+    start = _all_day_utc("2026-07-31")
+    occ = _occ("adopted-plan-uid", "Купить подарок", start, end_utc=start,
+               all_day=True)
+    cs = extcal.plan_changes([occ], _snap(plans=[hermes_plan]), NOW)
+    assert cs["plans"]["insert"] == []
+    assert cs["plans"]["update"] == [] and cs["plans"]["drop"] == []
+    assert cs["collisions"] == []
+
+
+def test_adopted_event_occurrence_with_a_genuine_fuzzy_dup_elsewhere_still_collides():
+    """N4's suppression must be scoped to an EXACT external_uid match
+    only -- a genuinely independent, coincidentally similar Hermes-native
+    event (no external_uid of its own at all) elsewhere in the SAME batch
+    must still be reported as a rule #2 collision, unaffected."""
+    adopted = _event_row(52, "adopted-uid-2", "Йога",
+                          "2026-08-01T13:00:00+00:00", owner="hermes")
+    native = _event_row(53, None, "Стоматолог",
+                         "2026-08-05T09:00:00+00:00", owner="hermes")
+    occ_adopted = _occ("adopted-uid-2", "Йога", "2026-08-01T13:00:00+00:00")
+    occ_collide = _occ("uid-99@icloud.com", "стоматолог", "2026-08-05T09:05:00+00:00")
+    cs = extcal.plan_changes([occ_adopted, occ_collide],
+                              _snap(events=[adopted, native]), NOW)
+    assert cs["events"]["insert"] == []
+    assert len(cs["collisions"]) == 1
+    assert cs["collisions"][0]["local_id"] == 53
 
 
 # ---------------------------------------------------------------------

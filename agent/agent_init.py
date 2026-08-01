@@ -1521,6 +1521,7 @@ def init_agent(
     # the race before the agent's normal early turn flush.
     agent._pending_cli_user_message = None
     agent._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
+    agent._consecutive_flush_failures = 0  # подряд идущие неудачные flush'ы; >=2 == детерминированный сбой
     agent._session_db_created = False  # DB row deferred to run_conversation()
     # Most agents own their session row and should finalize it on close().
     # Some temporary helper agents (manual compression / session-hygiene /

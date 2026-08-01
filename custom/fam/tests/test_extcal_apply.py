@@ -737,6 +737,77 @@ def test_insert_attaches_href_and_etag_when_present_on_entry(db):
     assert row["external_etag"] == '"abc123"'
 
 
+# ---------------------------------------------------------------------
+# owner inheritance at insert time (final-review blocker 1, fix-round 2
+# finding N1): a NEW occurrence sliding into the sync window after its
+# series was already adopted must not silently revert to owner='iphone'.
+# ---------------------------------------------------------------------
+
+def test_new_occurrence_of_an_adopted_series_inherits_owner_hermes(db):
+    """N1: `fam cal adopt` flips every occurrence CURRENTLY IN THE DB to
+    owner='hermes' for a shared `external_href`, but a recurring series
+    arrives as ONE CalDAV resource and only occurrences inside the sync
+    window ever materialize as rows. A LATER tick that pulls in a
+    brand-new occurrence of that SAME resource (the horizon rolled
+    forward) must inherit owner='hermes' -- complete with its own
+    reminder chain -- rather than reverting to 'iphone': her phone's
+    VALARM for the whole resource was already permanently stripped by
+    the earlier adopt, so an 'iphone'-owned new occurrence would
+    silently never remind at all, forever."""
+    rem.seed_default_rules(db)
+    db.commit()
+
+    href = "https://caldav.icloud.com/1/calendars/personal/yoga-series.ics"
+    entry1 = _event_insert("yoga-uid", "Йога", "2037-07-20T13:00:00+00:00",
+                            href=href, etag='"e0"')
+    extcal.apply_changes(db, _changeset(events_insert=[entry1]), {})
+    row1 = _get_event_by_uid(db, entry1["external_uid"])
+    # Simulate `fam cal adopt` having already happened for this occurrence
+    # (cli.py's own job, out of this module's boundary -- see cmd_cal_adopt)
+    # -- the fact this leaves behind is exactly and only `owner='hermes'`
+    # on the row that shares this href.
+    db.execute("UPDATE events SET owner='hermes' WHERE id=?", (row1["id"],))
+    db.commit()
+
+    # A NEW occurrence of the SAME resource (different RECURRENCE-ID ->
+    # different external_uid, SAME external_href) arrives on a later tick.
+    entry2 = _event_insert("yoga-uid", "Йога", "2037-07-27T13:00:00+00:00",
+                            href=href, etag='"e0"',
+                            recurrence_id="2037-07-27T13:00:00+00:00")
+    counts = extcal.apply_changes(db, _changeset(events_insert=[entry2]), {})
+    assert counts["events_inserted"] == 1
+    assert counts["errors"] == []
+
+    row2 = _get_event_by_uid(db, entry2["external_uid"])
+    assert row2 is not None
+    assert row2["owner"] == "hermes"
+    assert row2["external_href"] == href
+    assert _reminder_count(db, row2["id"]) > 0
+
+
+def test_new_occurrence_of_a_non_adopted_series_is_still_owner_iphone(db):
+    """Regression guard: the inheritance above must not fire for the
+    ordinary case -- a brand-new occurrence of a series that was NEVER
+    adopted (no owner='hermes' sibling at all) stays owner='iphone' and
+    reminder-free, exactly as before N1."""
+    rem.seed_default_rules(db)
+    db.commit()
+
+    href = "https://caldav.icloud.com/1/calendars/personal/run-series.ics"
+    entry1 = _event_insert("run-uid", "Пробежка", "2037-07-20T07:00:00+00:00",
+                            href=href, etag='"e0"')
+    extcal.apply_changes(db, _changeset(events_insert=[entry1]), {})
+
+    entry2 = _event_insert("run-uid", "Пробежка", "2037-07-27T07:00:00+00:00",
+                            href=href, etag='"e0"',
+                            recurrence_id="2037-07-27T07:00:00+00:00")
+    extcal.apply_changes(db, _changeset(events_insert=[entry2]), {})
+
+    row2 = _get_event_by_uid(db, entry2["external_uid"])
+    assert row2["owner"] == "iphone"
+    assert _reminder_count(db, row2["id"]) == 0
+
+
 def test_update_does_not_clobber_href_etag_when_absent_from_entry(db):
     entry = _event_insert("uid-602@icloud.com", "Тренировка",
                            "2037-07-20T13:00:00+00:00",

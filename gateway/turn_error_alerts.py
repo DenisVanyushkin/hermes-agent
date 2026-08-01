@@ -153,6 +153,16 @@ def _send_alert(channel: str, text: str) -> None:
     threading.Thread(target=_worker, daemon=True, name="turn-error-alert").start()
 
 
+def send_operator_alert(channel: str, text: str) -> None:
+    """Публичная точка входа для подсистем вне пути хода.
+
+    ``_send_alert`` приватная; подсистемы (persistence-сбои в run_agent,
+    stale-code guard) зовут её через этот алиас, чтобы не тащить
+    подчёркивание через границу модуля. Fire-and-forget, не бросает.
+    """
+    _send_alert(channel, text)
+
+
 def maybe_alert_turn_error(config, *, platform, chat_id, chat_label=None,
                            user_message, agent_result, final_response,
                            now=None) -> None:

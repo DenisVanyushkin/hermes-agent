@@ -181,12 +181,34 @@ CONFIG_DEFAULTS = {
     # probe. (`extcal_all_day_as` was removed in Task 6's fix-round 2 --
     # dead config: all-day -> `plans` is a fixed design decision, not a
     # runtime switch anything ever read.)
+    #
+    # `extcal_full_resync_days` (fix-round 3, Critical finding C1 -- the
+    # rolling-horizon gap): in steady state, `fam tick cal-ext` reads
+    # `REPORT sync-collection` deltas only -- a resource neither she nor
+    # Hermes ever touches again simply never reappears in a delta, so
+    # `expand()`'s per-tick window never re-materializes ITS occurrences
+    # once the window rolls past whatever was already in the DB. For an
+    # adopted recurring series this is not cosmetic: `fam cal adopt`
+    # permanently strips her phone's OWN alarm for the whole resource, so
+    # a new occurrence that never gets inserted also never gets a Hermes
+    # chain -- total, silent reminder loss with no error anywhere. Every
+    # N days, one tick per eligible calendar is forced through the SAME
+    # full `calendar-query` path already used for `initial_full`/
+    # `fallback_full` (`extcal.fetch_changes(..., force_full=True)`) --
+    # same exhaustive listing, same disappearance sweep, same
+    # `bad_hrefs`/`degraded_urls`/apply-error guards, nothing new to
+    # trust. Default 1 (day): the horizon is 8 weeks wide, so even a full
+    # day of staleness leaves enormous margin before a rolling series
+    # could ever go dark, while a daily full `calendar-query` (one
+    # request per calendar, once every ~96 ticks) is cheap next to the
+    # 15-minute delta cadence.
     "extcal_enabled": False,
     "extcal_username": "",
     "extcal_read_calendars": [],
     "extcal_write_calendar": "",
     "extcal_horizon_weeks": 8,
     "extcal_stale_hours": 6,
+    "extcal_full_resync_days": 1,
 }
 
 GATE_STYLE_INSTRUCTION = (
