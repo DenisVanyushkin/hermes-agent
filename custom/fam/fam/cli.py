@@ -385,6 +385,50 @@ def _check_trip_has_transport(place, transport):
             "Transport is unknown."
         )
 
+# Occupancy guardrail (2026-08-01), CLI-layer only -- same split as
+# _check_start_not_past: cal.add()/cal.update() still accept anything.
+# Double-booking is legitimate (Amina may genuinely want two things at
+# once), but it must be HER decision: without --allow-overlap fam writes
+# nothing and names what is already there, so the skill has to ask.
+def _format_conflict(e):
+    """'Интервизия 06.08 10:00–12:15 (id=103)' -- local time, en dash."""
+    start = datetime.fromisoformat(e["start_local"])
+    span = start.strftime("%d.%m %H:%M")
+    if e["end_local"]:
+        span += "–" + datetime.fromisoformat(e["end_local"]).strftime("%H:%M")
+    return f"{e['title']} {span} (id={e['id']})"
+
+
+def _conflict_list(conflicts, limit=3):
+    shown = ", ".join(_format_conflict(e) for e in conflicts[:limit])
+    extra = len(conflicts) - limit
+    return shown + (f" (+{extra} more)" if extra > 0 else "")
+
+
+def _check_no_overlap(conn, start_utc, end_utc, allow_overlap, exclude_id=None):
+    """Raise ValueError (-> main -> exit 2) when the slot is taken and the
+    caller did not pass --allow-overlap. Returns the conflicts it let
+    through, so the caller can audit the acknowledgement."""
+    conflicts = cal.overlaps(conn, start_utc, end_utc, exclude_id=exclude_id)
+    if conflicts and not allow_overlap:
+        n = len(conflicts)
+        raise ValueError(
+            f"overlaps {n} active event{'s' if n > 1 else ''}: "
+            f"{_conflict_list(conflicts)}. Ask Amina whether to keep both, "
+            "then retry with --allow-overlap.")
+    return conflicts
+
+
+def _audit_overlap_ack(conn, scope, conflicts, **ids):
+    """One audit row per acknowledged double-booking -- makes Amina's
+    deliberate overlap distinguishable from an accidental one afterwards."""
+    if not conflicts:
+        return
+    payload = {"scope": scope, "conflicts": sorted({e["id"] for e in conflicts})}
+    payload.update(ids)
+    audit.log(conn, "cal.overlap_ack", payload)
+
+
 def cmd_cal_add(args):
     if getattr(args, "repeat", None):
         return _cmd_cal_add_series(args)
@@ -395,9 +439,11 @@ def cmd_cal_add(args):
     _check_start_not_past(args.start, args.allow_past)
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
+    conflicts = _check_no_overlap(conn, args.start, args.end, args.allow_overlap)
     e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
                 participants=args.with_, transport=args.transport, notes=args.notes,
                 travel_min=args.travel_min, prep_min=args.prep_min)
+    _audit_overlap_ack(conn, "add", conflicts, event_id=e["id"])
     conn.commit()
     _maybe_email_event(conn, e)
     if args.json:
@@ -3178,6 +3224,9 @@ def build_parser():
                            "with --repeat, copied onto every occurrence)")
     spa.add_argument("--allow-past", dest="allow_past", action="store_true",
                       help="skip the past-start guardrail (retroactive event entry)")
+    spa.add_argument("--allow-overlap", dest="allow_overlap", action="store_true",
+                      help="record this event even though the slot is already "
+                           "taken (only after Amina confirmed she wants both)")
     spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
