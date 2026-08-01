@@ -1906,3 +1906,65 @@ def test_redact_extcal_text_redacts_even_without_a_trailing_closing_paren():
     assert "unbalanced" not in out
     assert "(ValueError: <redacted>" in out
     assert "uid='series2'" in out
+
+
+# --- Final re-review (pre-prod hardening): `_EXPAND_ERROR_DETAIL_RE` was
+# built without `re.DOTALL`, so bare `.` could never cross a `\n` --
+# `expand()` catches `Exception` broadly around `dateutil.rrulestr`, so a
+# multi-line exception message is possible, and when one lands here the
+# pattern's `$` (end of string) was never reachable across the embedded
+# newline: NOT a partial/truncated redaction, the WHOLE match failed and
+# the entire multi-line tail (RRULE fragment included) rode straight
+# through unredacted -- verified live before the fix by feeding exactly
+# this text through `_redact_extcal_text` and observing it come back
+# completely unchanged.
+
+def test_redact_extcal_text_handles_multiline_exception_detail():
+    text = ("Calendar: RRULE 'FREQ=ANNUALLY' for uid='series3' could not "
+            "be parsed/evaluated (ValueError: line1 FREQ=ANNUALLY\n"
+            "line2 FREQ=LEAK)")
+    out = cli._redact_extcal_text(text)
+    assert "FREQ=ANNUALLY" not in out
+    assert "FREQ=LEAK" not in out
+    assert "line1" not in out
+    assert "line2" not in out
+    assert "RRULE <redacted>" in out
+    assert "(ValueError: <redacted>)" in out
+    assert "uid='series3'" in out
+
+
+# --- Final re-review (pre-prod hardening): `extcal_full_resync_days`
+# used to go straight from `cfg.get(...)` into `timedelta(days=...)`
+# with no validation. `0`/negative makes `force_full` true on EVERY tick
+# forever (instead of ~once/day); non-numeric blows up `timedelta` with
+# a `TypeError` the broad `except Exception` in `cmd_tick_cal_ext` turns
+# into a `tick.error` -- sync stays dead until a human fixes the config
+# by hand. `_extcal_full_resync_days` clamps to `[1, 30]` and defaults
+# (never raises) on anything that doesn't coerce to `int`.
+
+@pytest.mark.parametrize("raw, expected", [
+    (0, 1),            # zero -- would otherwise force a full pass every tick
+    (-5, 1),            # negative -- same runaway-full-resync failure mode
+    (1, 1),             # already the minimum -- passes through unchanged
+    (15, 15),           # ordinary in-range value -- passes through unchanged
+    (30, 30),           # already the maximum -- passes through unchanged
+    (31, 30),           # one over the cap -- clamped down
+    (1000, 30),         # wildly too large -- clamped down
+    (3.7, 3),           # float coerces via int() truncation, not a fallback
+])
+def test_extcal_full_resync_days_clamps_numeric_range(raw, expected):
+    assert cli._extcal_full_resync_days(
+        {"extcal_full_resync_days": raw}) == expected
+
+
+@pytest.mark.parametrize("raw", ["not-a-number", None, [], {}, "3.5x"])
+def test_extcal_full_resync_days_falls_back_to_default_on_non_numeric(raw):
+    # Must NOT raise (the old code's bare `cfg.get(...)` fed straight
+    # into `timedelta(days=...)` would TypeError on all of these) --
+    # falls back to the same default `gate.CONFIG_DEFAULTS` documents.
+    assert cli._extcal_full_resync_days(
+        {"extcal_full_resync_days": raw}) == 1
+
+
+def test_extcal_full_resync_days_defaults_when_key_missing():
+    assert cli._extcal_full_resync_days({}) == 1

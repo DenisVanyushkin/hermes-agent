@@ -1517,16 +1517,31 @@ _RRULE_IN_TEXT_RE = re.compile(r"RRULE\s+(?:'[^']*'|\"[^\"]*\")")
 # at all before the end of the string, `[^)]*(\))` could not match
 # ANYTHING -- the whole clause, RRULE fragment included, passed through
 # completely unredacted, not merely truncated. Anchored on the actual
-# END of the string instead (single-line diagnostic text, one such
-# clause per string at every call site -- see `_redact_extcal_text`'s
-# own callers): `.*?` lazily consumes the whole tail, and the optional
-# `(\)?)` captures a real trailing `)` when the text has one (the normal
-# case -- `_expand_master`'s own f-string always ends with one) or
-# nothing when it doesn't, so the substitution below never leaves a
-# dangling unredacted fragment on either side of a nested paren, and
-# never fully skips redaction for want of one.
+# END of the string instead (one such clause per string at every call
+# site -- see `_redact_extcal_text`'s own callers): `.*?` lazily
+# consumes the whole tail, and the optional `(\)?)` captures a real
+# trailing `)` when the text has one (the normal case -- `_expand_
+# master`'s own f-string always ends with one) or nothing when it
+# doesn't, so the substitution below never leaves a dangling unredacted
+# fragment on either side of a nested paren, and never fully skips
+# redaction for want of one.
+#
+# Final re-review (pre-prod hardening): `expand()` catches `Exception`
+# broadly around `dateutil.rrulestr`, so `{e}`'s text is NOT guaranteed
+# single-line -- a multi-line exception message (e.g. one `dateutil`
+# variant that embeds `\n` in its own diagnostic) has bare `.` unable to
+# cross the newline without `re.DOTALL`, so `$` (end of string) was
+# never reachable and the WHOLE match failed -- not truncated, not
+# partially redacted, just skipped entirely, leaking the full multi-line
+# tail (RRULE fragment included) into `audit cal.ext.sync.sync_errors`,
+# `tick.error`, and from there verbatim into `maint.problem_summary`'s
+# nightly message to Denis. `re.DOTALL` makes `.` match `\n` too, so the
+# lazy `.*?` can still reach the real end of the string across any
+# embedded newlines; the anchor stays end-of-STRING (not `re.MULTILINE`,
+# which would instead make `$` match before every internal `\n` and stop
+# the redaction short at the first line break).
 _EXPAND_ERROR_DETAIL_RE = re.compile(
-    r"(could not be parsed/evaluated \(\w+: ).*?(\)?)$"
+    r"(could not be parsed/evaluated \(\w+: ).*?(\)?)$", re.DOTALL
 )
 
 # Cap on any single redacted diagnostic string landing in audit_log or a
@@ -1586,6 +1601,44 @@ def _redact_sync_errors(sync_errors):
     verbose foreign HTTP error body wrapped into the message -- must not
     make the audit row/nightly message unbounded either)."""
     return [_redact_extcal_text(e)[:_REDACTED_TEXT_MAX] for e in (sync_errors or [])]
+
+
+# `extcal_full_resync_days` bounds -- final re-review (pre-prod
+# hardening): the value comes straight from `fam-config.json` (`gate.py`
+# default 1) and used to go directly into `timedelta(days=...)` below
+# with no validation at all. Two unguarded failure modes: (1) `0` or a
+# negative value makes `force_full` (`now - last_full_dt) >= timedelta
+# (days=N)`) true on EVERY tick forever instead of roughly once a day --
+# a full `calendar-query` re-baseline every 15 minutes, not the rare/
+# cheap path the whole periodic-full design (fix-round 3, C1) counted
+# on; (2) anything non-numeric (a stray string, `null`, etc.) blows up
+# `timedelta(days=...)` with a `TypeError` that the broad `except
+# Exception` in `cmd_tick_cal_ext` turns into a `tick.error` -- syncing
+# stays dead every 15 minutes until a human edits the config by hand.
+# Clamped to a sane [1, 30]-day range and defaulted (not raised) on
+# anything that doesn't coerce to an int, so a bad config value degrades
+# to "sync keeps working with the default cadence" instead of either
+# runaway full-resyncs or a wedged tick.
+_EXTCAL_FULL_RESYNC_DAYS_DEFAULT = 1
+_EXTCAL_FULL_RESYNC_DAYS_MIN = 1
+_EXTCAL_FULL_RESYNC_DAYS_MAX = 30
+
+
+def _extcal_full_resync_days(cfg):
+    """`cfg["extcal_full_resync_days"]` -> a valid int in `[1, 30]`, never
+    raises. A missing key or anything that doesn't coerce to `int`
+    (non-numeric string, `None`, ...) falls back to the same default
+    (`1`) `gate.CONFIG_DEFAULTS` already documents; an in-range numeric
+    value (including a `float`, truncated) passes straight through;
+    zero/negative or too-large values are clamped to the nearest bound
+    rather than silently accepted (see the module-level comment above
+    for why both directions matter)."""
+    raw = cfg.get("extcal_full_resync_days", _EXTCAL_FULL_RESYNC_DAYS_DEFAULT)
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return _EXTCAL_FULL_RESYNC_DAYS_DEFAULT
+    return max(_EXTCAL_FULL_RESYNC_DAYS_MIN, min(_EXTCAL_FULL_RESYNC_DAYS_MAX, days))
 
 
 def _cal_ext_sync(conn, cfg, now, dry_run):
@@ -1755,8 +1808,11 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     # have a stored sync-token (e.g. right after this fix first deploys)
     # is treated the same as "overdue" -- self-healing, not a special
     # case: the safest assumption about an unknown-age token is that it
-    # might already be stale.
-    full_resync_days = cfg.get("extcal_full_resync_days", 1)
+    # might already be stale. Final re-review: clamped/defaulted via
+    # `_extcal_full_resync_days` (see that function's own comment) --
+    # zero/negative or non-numeric config no longer forces a full pass
+    # every tick or wedges the sync with a `TypeError`.
+    full_resync_days = _extcal_full_resync_days(cfg)
 
     for calendar in eligible:
         url = calendar.get("url")
