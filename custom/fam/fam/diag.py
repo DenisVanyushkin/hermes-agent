@@ -112,7 +112,14 @@ def load_state(conn):
         state = json.loads(raw)
     except ValueError:
         return {}
-    return state if isinstance(state, dict) else {}
+    if not isinstance(state, dict):
+        return {}
+    # Leaf shape matters as much as the top level: a hand-edited or
+    # half-written value like {"sig": "oops"} would otherwise sail past
+    # this check and blow up in diff_known_issues' prior.get(). Dropping
+    # the bad entry costs one night of age tracking for that signature;
+    # raising here would cost the whole nightly sweep.
+    return {k: v for k, v in state.items() if isinstance(v, dict)}
 
 
 def save_state(conn, state):
@@ -138,7 +145,7 @@ def diff_known_issues(state, findings, now):
             try:
                 age_days = (now - datetime.fromisoformat(first_seen)).days
             except (TypeError, ValueError):
-                first_seen, age_days = now_iso, 0
+                first_seen, age_days, status = now_iso, 0, "new"
         else:
             first_seen, age_days, status = now_iso, 0, "new"
         annotated.append({**finding, "status": status,

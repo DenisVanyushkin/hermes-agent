@@ -130,7 +130,10 @@ def test_state_round_trips_through_meta(db):
     diag.save_state(db, {"sig": {"first_seen": "2026-08-01T00:00:00+00:00",
                                  "last_seen": "2026-08-01T00:00:00+00:00", "count": 2}})
     db.commit()
-    assert diag.load_state(db)["sig"]["count"] == 2
+    loaded = diag.load_state(db)
+    assert loaded["sig"]["count"] == 2
+    assert loaded["sig"]["first_seen"] == "2026-08-01T00:00:00+00:00"
+    assert loaded["sig"]["last_seen"] == "2026-08-01T00:00:00+00:00"
 
 
 def test_corrupt_state_degrades_to_empty(db):
@@ -138,3 +141,37 @@ def test_corrupt_state_degrades_to_empty(db):
     famdb.meta_set(db, diag.STATE_KEY, "{not json")
     db.commit()
     assert diag.load_state(db) == {}
+
+
+def test_leaf_corrupted_state_degrades_safely(db):
+    # Hand-edited or partially-written state like {"sig1": "not-a-dict"}
+    # would blow up diff_known_issues' prior.get() without leaf validation.
+    from fam import db as famdb
+    famdb.meta_set(db, diag.STATE_KEY, '{"sig1": "not-a-dict-value"}')
+    db.commit()
+    loaded = diag.load_state(db)
+    assert loaded == {}, "leaf-corrupted entries must drop silently"
+    # Must not raise AttributeError on prior.get()
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    annotated, resolved, new_state = diag.diff_known_issues(
+        loaded, [{"signature": "sig1", "count": 1}], now)
+    assert len(annotated) == 1
+    assert annotated[0]["status"] == "new"
+
+
+def test_unparseable_first_seen_demotes_to_new(db):
+    # A naive timestamp like "2026-08-01T00:00:00" (no timezone) raises
+    # TypeError on datetime.fromisoformat() and subtraction. Must demote
+    # to "new" status, not leave it as "known" with age_days=0.
+    now = datetime(2026, 8, 4, 22, 30, tzinfo=timezone.utc)
+    state = {
+        "sig1": {
+            "first_seen": "2026-08-01T00:00:00",  # naive, no timezone
+            "last_seen": "2026-08-01T00:00:00",
+            "count": 1
+        }
+    }
+    annotated, resolved, new_state = diag.diff_known_issues(
+        state, [{"signature": "sig1", "count": 1}], now)
+    assert annotated[0]["status"] == "new", "unparseable first_seen must demote to new"
+    assert annotated[0]["age_days"] == 0
