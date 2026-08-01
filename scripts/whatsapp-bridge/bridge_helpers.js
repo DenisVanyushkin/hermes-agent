@@ -83,6 +83,35 @@ export function reactionTargetText(messageStore, targetId, maxLen = 500) {
   return text.length > maxLen ? text.slice(0, maxLen) : text;
 }
 
+/**
+ * senderTimestampMs on IReactionMessage may arrive as a protobuf Long, a
+ * plain number, or be absent entirely -- normalise to a decimal string
+ * so the dedupe key (below) never has to care which shape it got.
+ * Returns undefined when absent, matching the "no timestamp" case.
+ */
+export function normalizeReactionTimestampMs(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'object' && typeof value.toString === 'function') {
+    return value.toString();
+  }
+  return String(value);
+}
+
+/**
+ * Identity of one reaction event for the dedupe tracker. WhatsApp
+ * redelivers reactions on resync/reconnect with the same
+ * senderTimestampMs, so including it (when present) lets a genuine
+ * remove-then-reapply of the same emoji -- which carries a new
+ * timestamp -- through, while a true redelivery still dedupes. Clients
+ * that omit the field fall back to the pre-existing key exactly, so
+ * behaviour does not regress there.
+ */
+export function reactionDedupeKey(event) {
+  const base = `react:${event.targetMessageId}:${event.senderId}:${event.emoji}`;
+  const ts = normalizeReactionTimestampMs(event.senderTimestampMs);
+  return ts === undefined ? base : `${base}:${ts}`;
+}
+
 export function pollCreationMessageSecret(pollCreation) {
   return pollCreation?.message?.messageContextInfo?.messageSecret
     || pollCreation?.messageContextInfo?.messageSecret
