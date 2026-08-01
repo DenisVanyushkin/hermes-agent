@@ -613,7 +613,11 @@ def collect_activity(conn, cfg, since, now):
         "meds_generated": _count("tick.med"),
         "meds_taken": _count("meds.take"),
         "reminder_chains_built": _count("rem.regenerate"),
-        "budget_spent": gate.budget_spent_today(conn, now_utc=now),
+        # gate.budget_spent_today's now_utc contract is a string (its
+        # _parse_utc calls datetime.fromisoformat directly) -- every other
+        # caller in the codebase passes one; `now` here is a datetime.
+        "budget_spent": gate.budget_spent_today(
+            conn, now_utc=now.isoformat(timespec="seconds")),
         "budget_limit": cfg.get("daily_budget", 8),
     }
 
