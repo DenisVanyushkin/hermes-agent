@@ -123,3 +123,49 @@ def test_update_with_allow_overlap_audits_ack(db, capsys):
     assert payload["scope"] == "update"
     assert payload["event_id"] == other["id"]
     assert payload["conflicts"] == [busy["id"]]
+
+
+_WD = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _tomorrow_weekday():
+    d = (datetime.now(timezone.utc).astimezone(cal.ALMATY)
+         + timedelta(days=1)).date()
+    return _WD[d.weekday()]
+
+
+def test_series_with_overlapping_occurrence_exits_2_and_creates_nothing(db, capsys):
+    _busy(db, days_ahead=1)          # завтра 10:00–12:15
+    rc = cli.main(["cal", "add", "--title", "Тренировка", "--repeat", "weekly",
+                   "--days", _tomorrow_weekday(), "--start-time", "11:00",
+                   "--end-time", "12:00"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "series overlaps 1 of" in err
+    assert "planned occurrences" in err
+    assert "Интервизия" in err
+    assert "--allow-overlap" in err
+    assert db.execute("SELECT COUNT(*) c FROM event_series").fetchone()["c"] == 0
+    assert db.execute("SELECT COUNT(*) c FROM events").fetchone()["c"] == 1
+
+
+def test_series_with_allow_overlap_is_created_and_audited(db, capsys):
+    busy = _busy(db, days_ahead=1)
+    rc = cli.main(["cal", "add", "--title", "Тренировка", "--repeat", "weekly",
+                   "--days", _tomorrow_weekday(), "--start-time", "11:00",
+                   "--end-time", "12:00", "--allow-overlap"])
+    assert rc == 0
+    sid = db.execute("SELECT id FROM event_series").fetchone()["id"]
+    payload = json.loads(_ack_rows(db)[0]["payload"])
+    assert payload["scope"] == "series"
+    assert payload["series_id"] == sid
+    assert payload["conflicts"] == [busy["id"]]
+
+
+def test_series_on_a_free_grid_still_works(db, capsys):
+    _busy(db, days_ahead=1)
+    rc = cli.main(["cal", "add", "--title", "Тренировка", "--repeat", "weekly",
+                   "--days", _tomorrow_weekday(), "--start-time", "18:00",
+                   "--end-time", "19:00"])
+    assert rc == 0
+    assert _ack_rows(db) == []

@@ -462,6 +462,30 @@ def _cmd_cal_add_series(args):
         return 2
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
+    now_local = datetime.now(timezone.utc).astimezone(cal.ALMATY)
+    horizon_date = (now_local + timedelta(weeks=series.HORIZON_WEEKS)).date()
+    try:
+        occurrences = series.iter_occurrences(
+            args.days, args.start_time, args.end_time, args.until,
+            now_local, horizon_date)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    # Check the whole grid BEFORE anything is written: a series that
+    # collides every week is exactly the case worth asking about once.
+    busy = [(start, cal.overlaps(conn, start, end)) for start, end in occurrences]
+    busy = [(start, hits) for start, hits in busy if hits]
+    if busy and not args.allow_overlap:
+        first_start, first_hits = busy[0]
+        first_local = datetime.fromisoformat(first_start).astimezone(
+            cal.ALMATY).strftime("%d.%m %H:%M")
+        print(f"error: series overlaps {len(busy)} of {len(occurrences)} "
+              f"planned occurrences, first: {_format_conflict(first_hits[0])} "
+              f"vs new {first_local}. Ask Amina, then retry with "
+              "--allow-overlap.", file=sys.stderr)
+        return 2
+
     try:
         s = series.add(conn, args.title, args.days, args.start_time,
                        end_time=args.end_time, place=args.place,
@@ -472,6 +496,9 @@ def _cmd_cal_add_series(args):
         print(f"error: {e}", file=sys.stderr)
         return 2
     created = series.generate(conn)
+    _audit_overlap_ack(conn, "series",
+                       [e for _, hits in busy for e in hits],
+                       series_id=s["id"])
     conn.commit()
     if args.json:
         print(json.dumps({"series": s, "generated": created}, ensure_ascii=False))
