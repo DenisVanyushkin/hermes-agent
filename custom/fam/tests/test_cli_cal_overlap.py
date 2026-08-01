@@ -82,3 +82,44 @@ def test_error_lists_at_most_three_conflicts(db, capsys):
     assert rc == 2
     assert "overlaps 5 active events" in err
     assert "(+2 more)" in err
+
+
+def test_update_into_busy_slot_exits_2(db, capsys):
+    _busy(db)
+    other = cal.add(db, "Маникюр", _local(3, 15))
+    db.commit()
+    rc = cli.main(["cal", "update", str(other["id"]), "--start", _local(3, 11)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "Интервизия" in err
+    row = db.execute("SELECT start_utc FROM events WHERE id=?",
+                     (other["id"],)).fetchone()
+    assert row["start_utc"] == cal._to_utc_iso(_local(3, 15))   # не сдвинулось
+
+
+def test_update_within_itself_is_clean(db, capsys):
+    busy = _busy(db)
+    rc = cli.main(["cal", "update", str(busy["id"]), "--start", _local(3, 10, 5)])
+    assert rc == 0
+
+
+def test_update_stretching_end_over_a_neighbour_exits_2(db, capsys):
+    early = cal.add(db, "Ранняя", _local(3, 8), end_utc=_local(3, 9))
+    _busy(db)
+    db.commit()
+    rc = cli.main(["cal", "update", str(early["id"]), "--end", _local(3, 11)])
+    assert rc == 2
+    assert "Интервизия" in capsys.readouterr().err
+
+
+def test_update_with_allow_overlap_audits_ack(db, capsys):
+    busy = _busy(db)
+    other = cal.add(db, "Маникюр", _local(3, 15))
+    db.commit()
+    rc = cli.main(["cal", "update", str(other["id"]), "--start", _local(3, 11),
+                   "--allow-overlap"])
+    assert rc == 0
+    payload = json.loads(_ack_rows(db)[0]["payload"])
+    assert payload["scope"] == "update"
+    assert payload["event_id"] == other["id"]
+    assert payload["conflicts"] == [busy["id"]]

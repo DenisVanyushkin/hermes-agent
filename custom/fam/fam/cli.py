@@ -528,6 +528,16 @@ def cmd_cal_update(args):
     if args.start is not None:
         _check_start_not_past(args.start, args.allow_past)
     conn = famdb.connect()
+    conflicts = []
+    if args.start is not None or args.end is not None:
+        current = cal.get(conn, args.id)
+        # current is None -> unknown id: leave it to cal.update()'s own
+        # ValueError so the existing "unknown event: N" contract is intact.
+        if current is not None:
+            new_start = args.start if args.start is not None else current["start_utc"]
+            new_end = args.end if args.end is not None else current["end_utc"]
+            conflicts = _check_no_overlap(conn, new_start, new_end,
+                                          args.allow_overlap, exclude_id=args.id)
     fields = {}
     if args.title is not None: fields["title"] = args.title
     if args.start is not None: fields["start_utc"] = args.start
@@ -540,6 +550,7 @@ def cmd_cal_update(args):
     if args.add_person: fields["add_person"] = args.add_person
     if args.rm_person: fields["rm_person"] = args.rm_person
     e = cal.update(conn, args.id, **fields)
+    _audit_overlap_ack(conn, "update", conflicts, event_id=args.id)
     conn.commit()
     # cal.update()'s "_material_changed" is an internal signal for this
     # hook only (see cal.py's docstring) -- pop it before anything else
@@ -3250,6 +3261,9 @@ def build_parser():
                       help="participant ref to remove (repeatable)")
     spu.add_argument("--allow-past", dest="allow_past", action="store_true",
                       help="skip the past-start guardrail (retroactive event entry)")
+    spu.add_argument("--allow-overlap", dest="allow_overlap", action="store_true",
+                      help="move this event onto a slot that is already taken "
+                           "(only after Amina confirmed she wants both)")
     spu.add_argument("--prep-asked", dest="prep_asked", action="store_true",
                       help="mark this event as having already been asked "
                            "about prep (sets events.prep_asked=1)")
