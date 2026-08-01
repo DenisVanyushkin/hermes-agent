@@ -341,3 +341,54 @@ def test_write_digest_is_atomic_and_rotates(tmp_path):
     dated = sorted(tmp_path.glob("fam-digest-????????.json"))
     assert len(dated) == diag.ROTATE_DAYS
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def _jobs_file(tmp_path, **overrides):
+    job = {"name": "fam-nightly-report", "last_status": "ok",
+           "last_run_at": "2026-08-02T03:00:12+00:00", "last_delivery_error": None}
+    job.update(overrides)
+    path = tmp_path / "jobs.json"
+    path.write_text(json.dumps([job]), encoding="utf-8")
+    return path
+
+
+def test_delivery_ok_when_job_ran_after_digest(tmp_path):
+    ok, detail = diag.report_delivery_status(
+        _jobs_file(tmp_path), "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is True
+    assert "2026-08-02" in detail
+
+
+def test_delivery_not_ok_on_delivery_error(tmp_path):
+    ok, detail = diag.report_delivery_status(
+        _jobs_file(tmp_path, last_delivery_error="telegram 502"),
+        "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is False
+    assert "telegram 502" in detail
+
+
+def test_delivery_not_ok_when_run_predates_digest(tmp_path):
+    ok, detail = diag.report_delivery_status(
+        _jobs_file(tmp_path, last_run_at="2026-07-30T03:00:00+00:00"),
+        "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is False
+    assert "predates" in detail
+
+
+def test_delivery_not_ok_when_job_missing_or_file_unreadable(tmp_path):
+    ok, _ = diag.report_delivery_status(
+        _jobs_file(tmp_path), "no-such-job", "2026-08-01T22:30:01+00:00")
+    assert ok is False
+    ok, detail = diag.report_delivery_status(
+        tmp_path / "absent.json", "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is False
+    assert "unreadable" in detail
+
+
+def test_first_run_is_not_confirmed(tmp_path):
+    # No previous digest means the job did not exist yet: treating this as
+    # confirmed would advance the watermark having sent nothing at all.
+    ok, detail = diag.report_delivery_status(
+        _jobs_file(tmp_path), "fam-nightly-report", None)
+    assert ok is False
+    assert "first run" in detail

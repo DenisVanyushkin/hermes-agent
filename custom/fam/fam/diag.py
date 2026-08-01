@@ -9,7 +9,7 @@ import json
 import os
 import re
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from . import db as famdb
 from . import gate
@@ -358,3 +358,42 @@ def write_digest(digest, dest_dir, now):
     for old in sorted(dest_dir.glob("fam-digest-????????.json"))[:-ROTATE_DAYS]:
         old.unlink()
     return latest
+
+
+def _aware(value):
+    parsed = datetime.fromisoformat(str(value))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def report_delivery_status(jobs_path, job_name, previous_digest_at):
+    """Did the agent's reporter job deliver the previous digest?
+
+    Returns (ok, detail). Every uncertain case answers False: the cost of
+    a false negative is one redundant raw message, the cost of a false
+    positive is a silently burnt watermark and a lost day of problems."""
+    if not previous_digest_at:
+        return False, "first run: no previous digest"
+    try:
+        data = json.loads(Path(jobs_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, f"jobs.json unreadable: {type(exc).__name__}"
+    jobs = data.get("jobs", data) if isinstance(data, dict) else data
+    if isinstance(jobs, dict):
+        jobs = list(jobs.values())
+    if not isinstance(jobs, list):
+        return False, "jobs.json: unexpected shape"
+    job = next((j for j in jobs
+                if isinstance(j, dict) and j.get("name") == job_name), None)
+    if job is None:
+        return False, f"job {job_name!r} not found"
+    if job.get("last_status") != "ok":
+        return False, f"last_status={job.get('last_status')!r}"
+    if job.get("last_delivery_error"):
+        return False, f"delivery error: {str(job['last_delivery_error'])[:120]}"
+    try:
+        ran, previous = _aware(job.get("last_run_at")), _aware(previous_digest_at)
+    except (TypeError, ValueError):
+        return False, f"unparseable last_run_at={job.get('last_run_at')!r}"
+    if ran <= previous:
+        return False, f"last_run_at={job.get('last_run_at')} predates digest"
+    return True, f"delivered at {job.get('last_run_at')}"
