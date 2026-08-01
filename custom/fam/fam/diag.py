@@ -7,6 +7,8 @@ only; never delivers. Delivery and the watermark contract live in maint.py.
 """
 import json
 import re
+from datetime import datetime
+from . import db as famdb
 
 MAX_EXAMPLES = 3
 MAX_CONTEXT_VALUES = 10
@@ -94,3 +96,56 @@ def collect_errors(conn, since):
                     and len(bucket["examples"]) < MAX_EXAMPLES:
                 bucket["examples"].append(example)
     return sorted(buckets.values(), key=lambda b: -b["count"])
+
+
+STATE_KEY = "maint_known_issues"
+
+
+def load_state(conn):
+    """Known-issue state from the meta table. Corrupt state degrades to
+    empty rather than raising: a bad value must cost one night of age
+    tracking, not the whole nightly sweep."""
+    raw = famdb.meta_get(conn, STATE_KEY)
+    if not raw:
+        return {}
+    try:
+        state = json.loads(raw)
+    except ValueError:
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def save_state(conn, state):
+    famdb.meta_set(conn, STATE_KEY, json.dumps(state, ensure_ascii=False))
+
+
+def diff_known_issues(state, findings, now):
+    """Annotate findings with new/known/age_days against prior state.
+
+    Returns (annotated, resolved, new_state). Signatures absent from this
+    window drop out of new_state entirely -- otherwise state would grow
+    without bound and every long-gone defect would keep re-reporting as
+    'resolved' every night."""
+    now_iso = now.isoformat(timespec="seconds")
+    annotated = []
+    new_state = {}
+    for finding in findings:
+        signature = finding["signature"]
+        prior = state.get(signature) or {}
+        first_seen = prior.get("first_seen")
+        if first_seen:
+            status = "known"
+            try:
+                age_days = (now - datetime.fromisoformat(first_seen)).days
+            except (TypeError, ValueError):
+                first_seen, age_days = now_iso, 0
+        else:
+            first_seen, age_days, status = now_iso, 0, "new"
+        annotated.append({**finding, "status": status,
+                          "first_seen": first_seen, "age_days": age_days})
+        new_state[signature] = {"first_seen": first_seen, "last_seen": now_iso,
+                                "count": finding["count"]}
+    resolved = [{"signature": sig, "first_seen": meta.get("first_seen"),
+                 "last_seen": meta.get("last_seen")}
+                for sig, meta in state.items() if sig not in new_state]
+    return annotated, resolved, new_state

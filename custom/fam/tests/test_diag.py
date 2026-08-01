@@ -99,3 +99,42 @@ def test_mail_error_event_id_in_context_and_text_in_signature(db):
     assert findings[0]["kind"] == "mail.error"
     assert findings[0]["context"]["event_id"] == [42]
     assert "DNS resolution failed" in findings[0]["examples"]
+
+
+def test_first_sighting_is_new_then_known(db):
+    now1 = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    findings = [{"signature": "tick.error|where=meds_row", "count": 3}]
+    annotated, resolved, state = diag.diff_known_issues({}, findings, now1)
+    assert annotated[0]["status"] == "new"
+    assert annotated[0]["age_days"] == 0
+    assert resolved == []
+
+    now2 = datetime(2026, 8, 4, 22, 30, tzinfo=timezone.utc)
+    annotated, resolved, state = diag.diff_known_issues(state, findings, now2)
+    assert annotated[0]["status"] == "known"
+    assert annotated[0]["age_days"] == 3
+
+
+def test_disappeared_signature_becomes_resolved(db):
+    now1 = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    _, _, state = diag.diff_known_issues(
+        {}, [{"signature": "tick.error|where=digest", "count": 1}], now1)
+    now2 = datetime(2026, 8, 2, 22, 30, tzinfo=timezone.utc)
+    annotated, resolved, state = diag.diff_known_issues(state, [], now2)
+    assert annotated == []
+    assert [r["signature"] for r in resolved] == ["tick.error|where=digest"]
+    assert state == {}, "a resolved signature must not linger in state forever"
+
+
+def test_state_round_trips_through_meta(db):
+    diag.save_state(db, {"sig": {"first_seen": "2026-08-01T00:00:00+00:00",
+                                 "last_seen": "2026-08-01T00:00:00+00:00", "count": 2}})
+    db.commit()
+    assert diag.load_state(db)["sig"]["count"] == 2
+
+
+def test_corrupt_state_degrades_to_empty(db):
+    from fam import db as famdb
+    famdb.meta_set(db, diag.STATE_KEY, "{not json")
+    db.commit()
+    assert diag.load_state(db) == {}
