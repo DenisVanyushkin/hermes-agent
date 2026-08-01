@@ -175,3 +175,59 @@ def test_unparseable_first_seen_demotes_to_new(db):
         state, [{"signature": "sig1", "count": 1}], now)
     assert annotated[0]["status"] == "new", "unparseable first_seen must demote to new"
     assert annotated[0]["age_days"] == 0
+
+
+def test_activity_counts_by_message_kind(db):
+    audit.log(db, "gate.sent", {"kind": "reminder", "raw": {"text": "секрет"}})
+    audit.log(db, "gate.sent", {"kind": "med", "raw": {"text": "секрет"}})
+    audit.log(db, "gate.sent", {"kind": "med", "raw": {"text": "секрет"}})
+    audit.log(db, "tick.med", {"intake_id": 1})
+    audit.log(db, "meds.take", {"intake_id": 1})
+    db.commit()
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    activity = diag.collect_activity(db, {"daily_budget": 8},
+                                     "1970-01-01T00:00:00+00:00", now)
+    assert activity["sent_by_kind"] == {"reminder": 1, "med": 2}
+    assert activity["meds_generated"] == 1
+    assert activity["meds_taken"] == 1
+    assert activity["budget_limit"] == 8
+    assert "секрет" not in json.dumps(activity, ensure_ascii=False)
+
+
+def test_calendar_reports_collisions_only(db):
+    audit.log(db, "cal.ext.sync", {"collisions": 2, "title": "Врач в 15:00"})
+    audit.log(db, "cal.ext.sync", {"collisions": 1})
+    db.commit()
+    calendar = diag.collect_calendar(db, "1970-01-01T00:00:00+00:00")
+    assert calendar == {"collisions": 3}
+
+
+def test_timers_split_failed_and_ok():
+    calls = []
+
+    class _Result:
+        def __init__(self, stdout):
+            self.stdout, self.returncode = stdout, 0
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "--failed" in cmd:
+            return _Result("fam-car.service loaded failed failed Amina fam: car\n")
+        return _Result("fam-reminders.timer loaded active waiting Amina fam\n"
+                       "fam-car.timer loaded active waiting Amina fam\n")
+
+    timers = diag.collect_timers(runner=fake_run)
+    assert timers["failed"] == [{"unit": "fam-car.service", "detail": "failed"}]
+    assert timers["ok"] == ["fam-reminders.timer", "fam-car.timer"]
+
+
+def test_backups_report_verify_result(tmp_path):
+    backup = tmp_path / "assistant-20260801.db"
+    backup.write_bytes(b"x")
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    result = diag.collect_backups(
+        {"backup_dir": str(tmp_path), "offsite_enabled": False}, now,
+        verify=lambda path: (True, {"integrity": "ok", "schema_version": "12"}))
+    assert result["last_path"] == "assistant-20260801.db"
+    assert result["verify"] == "ok"
+    assert result["schema_version"] == "12"

@@ -7,8 +7,11 @@ only; never delivers. Delivery and the watermark contract live in maint.py.
 """
 import json
 import re
+import subprocess
 from datetime import datetime
+from pathlib import Path
 from . import db as famdb
+from . import gate
 
 MAX_EXAMPLES = 3
 MAX_CONTEXT_VALUES = 10
@@ -156,3 +159,115 @@ def diff_known_issues(state, findings, now):
                  "last_seen": meta.get("last_seen")}
                 for sig, meta in state.items() if sig not in new_state]
     return annotated, resolved, new_state
+
+
+SYSTEMCTL_TIMEOUT = 30
+
+
+def collect_activity(conn, cfg, since, now):
+    """Counters only -- never message text. `sent_by_kind` uses the inner
+    payload["kind"] (reminder/med/digest), which is a fixed vocabulary,
+    not user content."""
+    def _count(kind):
+        return conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE kind=? AND ts_utc >= ?",
+            (kind, since)).fetchone()[0]
+
+    sent_by_kind = {}
+    for row in conn.execute(
+            "SELECT payload FROM audit_log WHERE kind='gate.sent' AND ts_utc >= ?",
+            (since,)):
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        kind = payload.get("kind") or "?"
+        sent_by_kind[kind] = sent_by_kind.get(kind, 0) + 1
+    return {
+        "sent_by_kind": sent_by_kind,
+        "messages_sent": sum(sent_by_kind.values()),
+        "meds_generated": _count("tick.med"),
+        "meds_taken": _count("meds.take"),
+        "reminder_chains_built": _count("rem.regenerate"),
+        # gate.budget_spent_today's now_utc contract is a string (its
+        # _parse_utc calls datetime.fromisoformat directly) -- every other
+        # caller in the codebase passes one; `now` here is a datetime.
+        "budget_spent": gate.budget_spent_today(
+            conn, now_utc=now.isoformat(timespec="seconds")),
+        "budget_limit": cfg.get("daily_budget", 8),
+    }
+
+
+def collect_calendar(conn, since):
+    """Counter only. The design's audit rule for iPhone-controlled data
+    is UID-and-counts-only: no event titles, calendar names or URLs ever
+    leave the host through this digest."""
+    total = 0
+    for row in conn.execute(
+            "SELECT payload FROM audit_log WHERE kind='cal.ext.sync' AND ts_utc >= ?",
+            (since,)):
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        collisions = payload.get("collisions") if isinstance(payload, dict) else None
+        if isinstance(collisions, int):
+            total += collisions
+    return {"collisions": total}
+
+
+def _systemctl(runner, *args):
+    return runner(["systemctl", "--user", "--no-legend", "--no-pager", *args],
+                  capture_output=True, text=True, timeout=SYSTEMCTL_TIMEOUT)
+
+
+def collect_timers(runner=None):
+    """Failed fam units + the roster of loaded fam timers.
+
+    Uses `list-units` rather than `list-timers`: list-timers output is
+    six positional columns whose widths shift with locale and schedule,
+    while list-units puts the unit name first on every line."""
+    runner = runner or subprocess.run
+    failed = []
+    result = _systemctl(runner, "list-units", "--failed", "--all", "fam-*.service")
+    for line in (result.stdout or "").splitlines():
+        parts = line.replace("●", " ").split()
+        if parts:
+            failed.append({"unit": parts[0], "detail": parts[3] if len(parts) > 3 else "failed"})
+    ok = []
+    result = _systemctl(runner, "list-units", "--type=timer", "--all", "fam-*.timer")
+    for line in (result.stdout or "").splitlines():
+        parts = line.replace("●", " ").split()
+        if parts:
+            ok.append(parts[0])
+    return {"failed": failed, "ok": ok}
+
+
+def collect_backups(cfg, now, verify):
+    """Newest dated backup + its integrity verdict. `verify` is injected
+    (maint.verify_backup) so diag never imports maint -- maint imports
+    diag, and the reverse edge would be a cycle."""
+    backup_dir = Path(cfg["backup_dir"])
+    files = sorted(backup_dir.glob("*-????????.db")) if backup_dir.is_dir() else []
+    if not files:
+        return {"last_path": None, "verify": "missing", "schema_version": None,
+                "offsite_age_days": None}
+    newest = files[-1]
+    ok, detail = verify(newest)
+    result = {"last_path": newest.name,
+              "verify": "ok" if ok else str(detail.get("integrity")),
+              "schema_version": detail.get("schema_version"),
+              "offsite_age_days": None}
+    if cfg.get("offsite_enabled"):
+        offsite = Path(cfg["offsite_dir"])
+        dumps = sorted(offsite.glob("*-????????.db.age")) if offsite.is_dir() else []
+        if dumps:
+            stamp = dumps[-1].name.split("-")[-1][:8]
+            try:
+                written = datetime.strptime(stamp, "%Y%m%d").replace(tzinfo=now.tzinfo)
+                result["offsite_age_days"] = (now - written).days
+            except ValueError:
+                result["offsite_age_days"] = None
+    return result
