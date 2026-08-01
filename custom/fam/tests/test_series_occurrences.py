@@ -1,5 +1,5 @@
 """series.iter_occurrences(): чистая сетка повторов (её же использует generate)."""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -65,15 +65,23 @@ def test_bad_weekday_raises():
 
 def test_generate_matches_iter_occurrences(db):
     """Регресс на рефактор: generate() материализует ровно те слоты,
-    которые отдаёт чистый генератор."""
+    которые отдаёт чистый генератор.
+
+    Both sides must derive from the SAME instant -- reading the wall clock
+    twice (once inside generate(), once here) risks straddling an
+    occurrence boundary or a local-midnight horizon rollover between the
+    two reads, which would make the test spuriously flaky. generate()'s
+    now_utc test seam lets us pin one instant and feed it to both.
+    """
     s = series.add(db, "Тренировка", "mon,wed,fri", "10:00", end_time="12:00")
     db.commit()
-    series.generate(db)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    series.generate(db, now_utc=now.isoformat())
     db.commit()
     stored = [r["start_utc"] for r in db.execute(
         "SELECT start_utc FROM events WHERE series_id=? ORDER BY start_utc",
         (s["id"],))]
-    now_local = datetime.now(cal.ALMATY)
+    now_local = now.astimezone(cal.ALMATY)
     horizon = (now_local + timedelta(weeks=series.HORIZON_WEEKS)).date()
     expected = [start for start, _ in series.iter_occurrences(
         "mon,wed,fri", "10:00", "12:00", None, now_local, horizon)]
