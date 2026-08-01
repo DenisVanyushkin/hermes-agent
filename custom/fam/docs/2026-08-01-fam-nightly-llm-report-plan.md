@@ -205,8 +205,9 @@ def test_identical_errors_collapse_into_one_finding(db):
     findings = diag.collect_errors(db, "1970-01-01T00:00:00+00:00")
     assert len(findings) == 1
     assert findings[0]["count"] == 113
-    assert findings[0]["where"] == "meds_row"
-    assert findings[0]["exc_type"] == "KeyError"
+    assert findings[0]["kind"] == "tick.error"
+    assert findings[0]["p_where"] == "meds_row"
+    assert findings[0]["p_exc_type"] == "KeyError"
     assert findings[0]["context"]["intake_id"] == [10]
 
 
@@ -236,10 +237,14 @@ def test_gate_error_never_exposes_message_text(db):
               {"kind": "reminder", "attempt": 2,
                "raw": {"text": "прими лекарство"}, "final": "Прими лекарство"})
     db.commit()
-    blob = json.dumps(diag.collect_errors(db, "1970-01-01T00:00:00+00:00"),
-                      ensure_ascii=False)
+    findings = diag.collect_errors(db, "1970-01-01T00:00:00+00:00")
+    blob = json.dumps(findings, ensure_ascii=False)
     assert "лекарство" not in blob
     assert "final" not in blob and "raw" not in blob
+    # gate.error's payload has its own "kind" (the MESSAGE kind). It must
+    # not shadow the audit event kind in the finding -- hence the p_ prefix.
+    assert findings[0]["kind"] == "gate.error"
+    assert findings[0]["p_kind"] == "reminder"
 ```
 
 - [ ] **Step 2: Убедиться, что тесты падают**
@@ -326,7 +331,11 @@ def collect_errors(conn, since):
                       "context": {}, "examples": []}
             for field in spec["sig"]:
                 if payload.get(field) is not None:
-                    bucket[field] = payload[field]
+                    # p_ prefix: payload field names share a namespace with
+                    # the finding's own keys, and gate.error's payload has
+                    # a "kind" of its own (reminder/med/digest) that would
+                    # otherwise overwrite the audit event kind above.
+                    bucket[f"p_{field}"] = payload[field]
             buckets[signature] = bucket
         bucket["count"] += 1
         for field in spec["ctx"]:
@@ -1175,7 +1184,7 @@ def _problem_lines(digest):
     sections = digest["sections"]
     lines = []
     for finding in sections.get("errors", {}).get("findings", []):
-        where = finding.get("where") or finding.get("kind")
+        where = finding.get("p_where") or finding.get("kind")
         example = (finding.get("examples") or [""])[0]
         lines.append(f"{where}: {example} (×{finding['count']}, "
                      f"{finding['status']}, {finding['age_days']} дн.)")
