@@ -346,3 +346,63 @@ def _pending_text_event(adapter, text):
         ),
         raw_message={},
     )
+
+
+def _hung_hook(kill_side_effect=None):
+    """Patch create_subprocess_exec to return a proc whose communicate()
+    never completes -- asyncio.wait_for around it will raise TimeoutError
+    on the real 30s clock. We patch asyncio.wait_for too so the test does
+    not actually wait 30s; it closes the pending coroutine (as a real
+    timeout would abandon it) and raises TimeoutError, exactly what the
+    production code must handle."""
+    proc = AsyncMock()
+    proc.pid = 4242
+
+    async def _never_completes(*_a, **_kw):
+        await asyncio.sleep(999)
+
+    proc.communicate = _never_completes
+    from unittest.mock import MagicMock
+    proc.kill = MagicMock(side_effect=kill_side_effect)
+    proc.wait = AsyncMock(return_value=None)
+
+    async def fake_wait_for(aw, timeout=None):
+        aw.close()
+        raise asyncio.TimeoutError()
+
+    create_patch = patch("asyncio.create_subprocess_exec",
+                          AsyncMock(return_value=proc))
+    wait_for_patch = patch("asyncio.wait_for", fake_wait_for)
+    return proc, create_patch, wait_for_patch
+
+
+def test_timed_out_hook_still_falls_through_to_dialogue():
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    proc, create_patch, wait_for_patch = _hung_hook()
+    with create_patch, wait_for_patch:
+        dispatch = _apply(adapter, _reaction())
+    dispatch.assert_awaited_once()
+
+
+def test_timed_out_hook_is_killed_and_reaped():
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    proc, create_patch, wait_for_patch = _hung_hook()
+    with create_patch, wait_for_patch:
+        _apply(adapter, _reaction())
+    proc.kill.assert_called_once()
+    proc.wait.assert_awaited_once()
+
+
+def test_timed_out_hook_kill_raising_process_lookup_error_is_swallowed():
+    """The process may already have exited by the time we get to kill()
+    it -- that race is not an error, and the dialogue path must still
+    run."""
+    adapter = _make_adapter(reaction_dialogue=True,
+                            reaction_hook_cmd=["/bin/true"])
+    proc, create_patch, wait_for_patch = _hung_hook(
+        kill_side_effect=ProcessLookupError())
+    with create_patch, wait_for_patch:
+        dispatch = _apply(adapter, _reaction())
+    dispatch.assert_awaited_once()

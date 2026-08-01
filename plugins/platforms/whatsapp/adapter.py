@@ -1666,6 +1666,24 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(payload.encode()), timeout=30)
+        except asyncio.TimeoutError:
+            # wait_for abandons the coroutine but leaves the subprocess
+            # running, holding its pipes open -- kill it and reap it so
+            # it does not linger as a zombie. Both steps are defensive:
+            # the process may have exited in the race between the
+            # timeout firing and us getting here.
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            print(f"[{self.name}] Reaction hook timed out after 30s; "
+                  f"killed pid {proc.pid}")
+            await self._dispatch_reaction_dialogue(event)
+            return
         except Exception as e:
             print(f"[{self.name}] Reaction hook failed to run: {e}")
             await self._dispatch_reaction_dialogue(event)
