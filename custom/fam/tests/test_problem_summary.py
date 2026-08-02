@@ -56,7 +56,9 @@ def test_writes_digest_instead_of_sending(db, tmp_path, monkeypatch):
     digest = json.loads((tmp_path / "diagnostics" / "fam-digest-latest.json")
                         .read_text(encoding="utf-8"))
     assert digest["sections"]["errors"]["findings"][0]["count"] == 1
-    assert famdb.meta_get(db, "maint_summary_last_run") == NOW.isoformat(timespec="seconds")
+    # To the CONFIRMED digest's timestamp, not NOW: tonight's digest has
+    # not been delivered yet and its window must stay open.
+    assert famdb.meta_get(db, "maint_summary_last_run") == "2026-08-01T22:30:00+00:00"
 
 
 def test_raw_fallback_when_report_not_confirmed(db, tmp_path, monkeypatch):
@@ -99,10 +101,11 @@ def test_watermark_held_when_fallback_also_fails(db, tmp_path, monkeypatch):
         "an undelivered problem window must survive into the next sweep"
 
 
-def test_clean_window_is_silent_and_advances(db, tmp_path, monkeypatch):
+def test_clean_window_is_silent_and_holds_the_watermark(db, tmp_path, monkeypatch):
     # Daily cadence is the LLM report's job. The fallback stays an
     # emergency channel: silence on a clean night keeps rollout behaviour
-    # identical to today's.
+    # identical to today's. And with nothing confirmed delivered, the
+    # watermark must not move -- see the next test for why.
     _all_probes_ok(monkeypatch)
     monkeypatch.setattr(maint.diag, "collect_timers",
                         lambda runner=None: {"failed": [], "ok": []})
@@ -111,7 +114,30 @@ def test_clean_window_is_silent_and_advances(db, tmp_path, monkeypatch):
                                 notify=lambda t: sent.append(t) or True)
     assert sent == []
     assert out["skipped_clean"] is True
-    assert famdb.meta_get(db, "maint_summary_last_run") == NOW.isoformat(timespec="seconds")
+    assert famdb.meta_get(db, "maint_summary_last_run") is None
+
+
+def test_clean_night_does_not_strand_an_undelivered_digest(db, tmp_path, monkeypatch):
+    # The failure this contract exists to prevent. Night A publishes a
+    # digest holding a real error. Night B finds that digest undelivered
+    # but has a quiet window of its own. If B advanced the watermark,
+    # night A's error would fall behind every future window and be lost
+    # with no fallback ever attempted for it.
+    _all_probes_ok(monkeypatch)
+    monkeypatch.setattr(maint.diag, "collect_timers",
+                        lambda runner=None: {"failed": [], "ok": []})
+    famdb.meta_set(db, "maint_summary_last_run", "2026-07-31T22:30:00+00:00")
+    famdb.meta_set(db, "maint_digest_last_written", "2026-08-01T22:30:00+00:00")
+    db.commit()
+    _confirmed_job(tmp_path, "2026-07-01T03:00:00+00:00")   # never delivered digest A
+
+    sent = []
+    out = maint.problem_summary(_cfg(tmp_path), now=NOW,
+                                notify=lambda t: sent.append(t) or True)
+
+    assert out["delivery_ok"] is False
+    assert sent == [], "a clean window has nothing of its own to report"
+    assert famdb.meta_get(db, "maint_summary_last_run") == "2026-07-31T22:30:00+00:00"
 
 
 def test_run_errors_are_folded_into_the_digest(db, tmp_path, monkeypatch):

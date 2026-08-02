@@ -54,11 +54,12 @@ def problem_summary(cfg, now=None, notify=None, run_errors=None):
     Delivery moved out of fam (design 2026-08-01): the LLM report is
     rendered and delivered by the agent. What stays here is the invariant
     this function has always enforced -- the watermark closes a window
-    only once its problems reached Denis. It now advances when the
-    reporter job confirms delivery of the PREVIOUS digest, when the raw
-    fallback gets through, or when the window is clean and there is
-    nothing to carry forward. Anything else holds the window open so the
-    next sweep re-covers it.
+    only once its problems reached Denis. The watermark marks how far
+    delivery is CONFIRMED, not when we last looked: on a confirmed report
+    it moves to the previous digest's own timestamp, on a delivered raw
+    fallback to now, and otherwise it does not move at all -- including
+    on a clean night, because a clean window says nothing about an
+    earlier digest that never arrived.
 
     The fallback stays an emergency channel and is silent on a clean
     night: daily cadence is the LLM report's contract, not fam's, and
@@ -90,16 +91,27 @@ def problem_summary(cfg, now=None, notify=None, run_errors=None):
 
         problems = _problem_lines(digest)
         fallback_sent = False
-        if delivered or not problems:
-            advance = True
-        else:
+        if delivered:
+            # To the CONFIRMED digest's timestamp, not to now. The digest
+            # written moments ago is still unconfirmed: closing the window
+            # on it would stake this night's problems on a delivery nobody
+            # has verified. Consequence -- consecutive digests overlap by
+            # one night, which is the safety margin: an undelivered
+            # digest's contents reappear in the next one, deduplicated by
+            # signature and marked `known`.
+            advance_to = previous_digest_at
+        elif problems:
             fallback_sent = bool(notify(
                 "Гермес — сводка за сутки (LLM-отчёт не дошёл):\n"
                 + "\n".join(f"• {p}" for p in problems)))
-            advance = fallback_sent
-        if advance:
-            famdb.meta_set(conn, "maint_summary_last_run",
-                           now.isoformat(timespec="seconds"))
+            advance_to = now.isoformat(timespec="seconds") if fallback_sent else None
+        else:
+            # Clean window, report unconfirmed: nothing was delivered, so
+            # nothing may be closed. Advancing here is what would strand an
+            # earlier undelivered digest behind the watermark forever.
+            advance_to = None
+        if advance_to:
+            famdb.meta_set(conn, "maint_summary_last_run", advance_to)
             conn.commit()
         return {"digest_path": str(path), "delivery_ok": delivered,
                 "delivery_detail": detail, "fallback_sent": fallback_sent,
