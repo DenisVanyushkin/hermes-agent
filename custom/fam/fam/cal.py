@@ -633,3 +633,61 @@ def day(conn, date_local):
     from_utc = start_of_day.astimezone(timezone.utc).isoformat(timespec="seconds")
     to_utc = end_of_day.astimezone(timezone.utc).isoformat(timespec="seconds")
     return list_range(conn, from_utc, to_utc, status="active")
+
+
+# --- occupancy (2026-08-01) ---------------------------------------------
+# Candidate window for overlaps(): an event longer than a day is not
+# supported by this check (none exist in this household's data, and the
+# window keeps the scan on the start_utc index instead of the whole table).
+_OVERLAP_WINDOW = timedelta(days=1)
+
+
+def overlaps(conn, start_utc, end_utc=None, exclude_id=None):
+    """Active events overlapping the half-open interval [start, end).
+
+    An event with no end_utc is a zero-length moment -- both here (when
+    end_utc is None) and among the candidates. Two rules, deliberately:
+
+      * strict interval overlap: new.start < cand.end AND cand.start < new.end
+        -- so back-to-back (10:00-11:00 next to 11:00-12:00) is NOT a
+        conflict, and a moment landing exactly on an end is not either;
+      * equal starts always conflict -- the strict rule alone returns False
+        for two zero-length events at the same instant, which is precisely
+        the double-booking a caller cares about.
+
+    status='active' only; owner is deliberately NOT filtered -- an event
+    imported from her iPhone occupies the slot just as much as one Hermes
+    created. exclude_id skips one event (cal update moving itself).
+
+    Pure read: no writes, no audit. The decision to block lives in the CLI
+    guardrail (cli._check_no_overlap), same split as --allow-past.
+    """
+    start = _to_utc_iso(start_utc)
+    end = _to_utc_iso(end_utc) if end_utc is not None else start
+    if end < start:
+        # Local time (Asia/Almaty) + a remedy clause: every other
+        # user-facing time in fam is presented in local time, and a bare
+        # UTC comparison gives the LLM caller nothing to act on.
+        raise ValueError(
+            f"end is before start: {_to_local_iso(end)} < "
+            f"{_to_local_iso(start)} -- check --end"
+        )
+
+    from_utc = (datetime.fromisoformat(start) - _OVERLAP_WINDOW).isoformat(
+        timespec="seconds")
+    to_utc = (datetime.fromisoformat(end) + _OVERLAP_WINDOW).isoformat(
+        timespec="seconds")
+
+    hits = []
+    for row in conn.execute(
+            "SELECT id, start_utc, end_utc FROM events "
+            "WHERE status='active' AND start_utc >= ? AND start_utc < ? "
+            "ORDER BY start_utc",
+            (from_utc, to_utc)):
+        if exclude_id is not None and row["id"] == exclude_id:
+            continue
+        cand_start = row["start_utc"]
+        cand_end = row["end_utc"] or cand_start
+        if cand_start == start or (start < cand_end and cand_start < end):
+            hits.append(get(conn, row["id"]))
+    return hits

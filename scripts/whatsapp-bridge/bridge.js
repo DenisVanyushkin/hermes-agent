@@ -44,6 +44,8 @@ import {
   pollCreationMessageFromPayload,
   pollUpdateForAggregation,
   reactionTargetText,
+  reactionDedupeKey,
+  normalizeReactionTimestampMs,
 } from './bridge_helpers.js';
 
 // Parse CLI args
@@ -424,7 +426,7 @@ function enqueuePollUpdateEvent({ key, update, selectedOptions, aggregation }) {
 // reaction_dialogue is enabled (see the reactionMessage branch in
 // messages.upsert).
 function enqueueReactionEvent(event) {
-  const dedupeId = `react:${event.targetMessageId}:${event.senderId}:${event.emoji}`;
+  const dedupeId = reactionDedupeKey(event);
   if (recentlyProcessedReactions.has(dedupeId)) return;
   recentlyProcessedReactions.remember(dedupeId);
   reactionQueue.push(event);
@@ -742,6 +744,7 @@ async function startSocket() {
             chatId,
             senderId,
             timestamp: Math.floor(Date.now() / 1000),
+            senderTimestampMs: normalizeReactionTimestampMs(reaction.senderTimestampMs),
           });
         } else {
           emitDebugEvent({

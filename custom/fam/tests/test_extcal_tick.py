@@ -1465,6 +1465,72 @@ def test_periodic_full_still_runs_the_disappearance_sweep_like_any_other_full_mo
 
 
 # ---------------------------------------------------------------------
+# Final re-review (pre-prod hardening): `extcal_full_resync_days` used to
+# go straight from config into `timedelta(days=...)` unvalidated. `0`/
+# negative made `force_full` true on EVERY tick forever (a full
+# `calendar-query` re-baseline every 15 minutes instead of ~once/day);
+# non-numeric blew up `timedelta(...)` with a `TypeError` the broad
+# `except Exception` in `cmd_tick_cal_ext` turns into `tick.error` --
+# sync stays dead until a human edits the config. `cli._extcal_full_
+# resync_days` (unit-tested directly in test_cli.py) clamps/defaults
+# this; these two tests prove the fix reaches all the way through the
+# real `fam tick cal-ext` path, not just the helper in isolation.
+# ---------------------------------------------------------------------
+
+def test_tick_survives_zero_or_negative_full_resync_days_without_forcing_every_tick(
+        db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_full_resync_days=0))
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="SEEDED-TOKEN")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+
+    famdb.meta_set(db, f"extcal_sync_token:{CAL_URL}", "OLD-TOKEN")
+    # One hour stale -- well inside the clamped-to-minimum 1-day interval.
+    # Pre-fix, `timedelta(days=0)` made ANY elapsed time (including this
+    # one hour) count as overdue -- force_full would have been True here.
+    famdb.meta_set(db, f"extcal_last_full:{CAL_URL}", "2037-07-14T23:00:00+00:00")
+    db.commit()
+
+    seen_force_full = []
+
+    def _fetch(cfg, calendar, sync_token=None, request=None, force_full=False):
+        seen_force_full.append(force_full)
+        return ([], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None})
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch)
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0
+    assert seen_force_full == [False]
+
+
+def test_tick_survives_non_numeric_full_resync_days_and_defaults(db, monkeypatch):
+    monkeypatch.setattr(
+        cli.gate, "load_config",
+        lambda *a, **k: _cfg(extcal_full_resync_days="not-a-number"))
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="SEEDED-TOKEN")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+
+    famdb.meta_set(db, f"extcal_sync_token:{CAL_URL}", "OLD-TOKEN")
+    # Fresh watermark (1h stale, inside the DEFAULTED 1-day interval) --
+    # pre-fix this raised TypeError inside `timedelta(days=...)`, caught
+    # by `cmd_tick_cal_ext`'s broad `except Exception` and turned into a
+    # `tick.error`, wedging sync until a human fixed the config by hand.
+    famdb.meta_set(db, f"extcal_last_full:{CAL_URL}", "2037-07-14T23:00:00+00:00")
+    db.commit()
+
+    seen_force_full = []
+
+    def _fetch(cfg, calendar, sync_token=None, request=None, force_full=False):
+        seen_force_full.append(force_full)
+        return ([], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None})
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch)
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0                    # no tick.error -- sync keeps working
+    assert seen_force_full == [False]  # defaulted to 1 day, not forced
+
+
+# ---------------------------------------------------------------------
 # m4: a malformed --now is a graceful tick.error, not an uncaught traceback
 # ---------------------------------------------------------------------
 
