@@ -1168,6 +1168,7 @@ def _meds_series(conn, now_utc, cfg):
             conn.rollback()
             audit.log(conn, "tick.error",
                       {"where": "meds_row", "intake_id": intake_id,
+                       "exc_type": type(e).__name__,
                        "error": str(e)[:200]})
             conn.commit()
 
