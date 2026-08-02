@@ -567,19 +567,42 @@ def cmd_cal_update(args):
         _check_start_not_past(args.start, args.allow_past)
     conn = famdb.connect()
     conflicts = []
+    shifted_end_utc = None
     if args.start is not None or args.end is not None:
         current = cal.get(conn, args.id)
         # current is None -> unknown id: leave it to cal.update()'s own
         # ValueError so the existing "unknown event: N" contract is intact.
         if current is not None:
             new_start = args.start if args.start is not None else current["start_utc"]
-            new_end = args.end if args.end is not None else current["end_utc"]
+            if (args.start is not None and args.end is None
+                    and current["end_utc"] is not None):
+                # --start alone must SHIFT THE END BY THE SAME DELTA,
+                # preserving the event's duration (Denis's ruling): moving
+                # a 10:00-12:15 event to 14:00 must land at 14:00-16:15, not
+                # leave end_utc where it was (which can put end before the
+                # new start -- the exact pre-existing silent-corruption bug
+                # this also fixes). An explicit --end always wins (this
+                # branch is skipped below); an end-less event stays
+                # end-less. Delta computed on real UTC datetimes, then
+                # renormalized through cal._to_utc_iso like every other
+                # stored value.
+                old_start_dt = datetime.fromisoformat(current["start_utc"])
+                old_end_dt = datetime.fromisoformat(current["end_utc"])
+                new_start_dt = datetime.fromisoformat(cal._to_utc_iso(args.start))
+                shifted_end_utc = cal._to_utc_iso(
+                    (old_end_dt + (new_start_dt - old_start_dt)).isoformat())
+                new_end = shifted_end_utc
+            else:
+                new_end = args.end if args.end is not None else current["end_utc"]
             conflicts = _check_no_overlap(conn, new_start, new_end,
                                           args.allow_overlap, exclude_id=args.id)
     fields = {}
     if args.title is not None: fields["title"] = args.title
     if args.start is not None: fields["start_utc"] = args.start
-    if args.end is not None: fields["end_utc"] = args.end
+    if args.end is not None:
+        fields["end_utc"] = args.end
+    elif shifted_end_utc is not None:
+        fields["end_utc"] = shifted_end_utc
     if args.place is not None: fields["place"] = args.place
     if args.transport is not None: fields["transport"] = args.transport
     if args.notes is not None: fields["notes"] = args.notes

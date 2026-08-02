@@ -125,6 +125,68 @@ def test_update_with_allow_overlap_audits_ack(db, capsys):
     assert payload["conflicts"] == [busy["id"]]
 
 
+# --- --start alone shifts end, preserving duration (Finding 1) ------------
+
+def test_update_start_shifts_end_preserving_duration(db, capsys):
+    e = cal.add(db, "Приём", _local(3, 10), end_utc=_local(3, 12, 15))
+    db.commit()
+    rc = cli.main(["cal", "update", str(e["id"]), "--start", _local(3, 14)])
+    assert rc == 0
+    row = db.execute("SELECT start_utc, end_utc FROM events WHERE id=?",
+                     (e["id"],)).fetchone()
+    assert row["start_utc"] == cal._to_utc_iso(_local(3, 14))
+    assert row["end_utc"] == cal._to_utc_iso(_local(3, 16, 15))   # +2:15 duration kept
+
+
+def test_update_explicit_end_overrides_shift(db, capsys):
+    e = cal.add(db, "Приём", _local(3, 10), end_utc=_local(3, 12, 15))
+    db.commit()
+    rc = cli.main(["cal", "update", str(e["id"]), "--start", _local(3, 14),
+                   "--end", _local(3, 15)])
+    assert rc == 0
+    row = db.execute("SELECT start_utc, end_utc FROM events WHERE id=?",
+                     (e["id"],)).fetchone()
+    assert row["start_utc"] == cal._to_utc_iso(_local(3, 14))
+    assert row["end_utc"] == cal._to_utc_iso(_local(3, 15))       # explicit --end wins
+
+
+def test_update_start_on_endless_event_stays_endless(db, capsys):
+    e = cal.add(db, "Точка", _local(3, 10))
+    db.commit()
+    rc = cli.main(["cal", "update", str(e["id"]), "--start", _local(3, 14)])
+    assert rc == 0
+    row = db.execute("SELECT start_utc, end_utc FROM events WHERE id=?",
+                     (e["id"],)).fetchone()
+    assert row["start_utc"] == cal._to_utc_iso(_local(3, 14))
+    assert row["end_utc"] is None
+
+
+def test_update_start_shift_onto_busy_slot_exits_2_and_row_unchanged(db, capsys):
+    busy = _busy(db)                    # Интервизия 10:00-12:15
+    other = cal.add(db, "Ранняя", _local(3, 8), end_utc=_local(3, 9))
+    db.commit()
+    # 1h duration, moved to 11:30 -> shifted end 12:30 collides with busy.
+    rc = cli.main(["cal", "update", str(other["id"]), "--start", _local(3, 11, 30)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "Интервизия" in err
+    row = db.execute("SELECT start_utc, end_utc FROM events WHERE id=?",
+                     (other["id"],)).fetchone()
+    assert row["start_utc"] == cal._to_utc_iso(_local(3, 8))      # unchanged
+    assert row["end_utc"] == cal._to_utc_iso(_local(3, 9))        # unchanged
+
+    rc = cli.main(["cal", "update", str(other["id"]), "--start", _local(3, 11, 30),
+                   "--allow-overlap"])
+    assert rc == 0
+    row = db.execute("SELECT start_utc, end_utc FROM events WHERE id=?",
+                     (other["id"],)).fetchone()
+    assert row["start_utc"] == cal._to_utc_iso(_local(3, 11, 30))
+    assert row["end_utc"] == cal._to_utc_iso(_local(3, 12, 30))   # duration preserved
+    payload = json.loads(_ack_rows(db)[0]["payload"])
+    assert payload["scope"] == "update"
+    assert payload["conflicts"] == [busy["id"]]
+
+
 _WD = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
