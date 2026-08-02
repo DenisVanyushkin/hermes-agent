@@ -8,6 +8,7 @@
 
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -113,6 +114,23 @@ def _no_plugin_hooks(monkeypatch):
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
 
 
+@pytest.fixture(autouse=True)
+def _pristine_session_context(monkeypatch):
+    """Ни платформа, ни аудитория крона не должны протекать между тестами.
+
+    Возврат делается в сентинел `_UNSET` («никогда не выставлялась»), а не в
+    `""`: пустая строка -- отдельное состояние «явно очищено», подавляющее
+    fallback на os.environ.
+    """
+    monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+    monkeypatch.delenv("HERMES_CRON_AUDIENCE", raising=False)
+    yield
+    import gateway.session_context as sc
+
+    for var in sc._VAR_MAP.values():
+        var.set(sc._UNSET)
+
+
 @pytest.fixture
 def suppressed(monkeypatch):
     monkeypatch.setattr(
@@ -213,3 +231,195 @@ def test_empty_response_on_healthy_exit_stays_empty_on_a_suppressed_channel(supp
 
     assert result["final_response"] == ""
     assert SUPPRESSED_TURN_NOTICE not in result["final_response"]
+
+
+# --- два оставшихся триггера объяснялки ------------------------------------
+#
+# Спека объявляет три: пустой ответ (покрыт выше), обрывок <= 24 символов без
+# финальной пунктуации и `partial_stream_recovery`. Последние два ведут себя
+# иначе -- обрывок СОХРАНЯЕТСЯ, а объяснялка приписывается к нему, поэтому
+# «работает как первый» их не проверяет.
+
+_FRAGMENT = "Сейчас посмотрю"
+
+#: Ход без вызовов песочницы. Триггер «обрывок» меряет длину УЖЕ СОБРАННОГО
+#: ответа, поэтому на инженерном канале приклеенный блок про песочницу сам
+#: уводит его за 24 символа и гасит объяснялку. Чтобы пара тестов ниже
+#: сравнивала каналы, а не длину, ход не должен ничего выполнять.
+PLAIN_MESSAGES = [{"role": "user", "content": "как дела"}]
+
+
+def test_a_short_fragment_is_kept_and_gets_the_plain_notice(suppressed):
+    result = _finalize(
+        _FooterAgent(),
+        final_response=_FRAGMENT,
+        exit_reason="stream_truncated",
+        messages=PLAIN_MESSAGES,
+    )
+
+    assert result["final_response"] == _FRAGMENT + "\n\n" + SUPPRESSED_TURN_NOTICE
+
+
+def test_a_short_fragment_keeps_the_english_explainer_on_an_engineering_channel(
+    not_suppressed,
+):
+    result = _finalize(
+        _FooterAgent(platform="telegram"),
+        final_response=_FRAGMENT,
+        exit_reason="stream_truncated",
+        messages=PLAIN_MESSAGES,
+    )
+
+    assert result["final_response"].startswith(_FRAGMENT)
+    assert "No reply" in result["final_response"]
+    assert SUPPRESSED_TURN_NOTICE not in result["final_response"]
+
+
+def test_partial_stream_recovery_gets_the_plain_notice(suppressed):
+    """Третий триггер не про длину: ответ может быть полноценным и с точкой,
+    решает сам `_turn_exit_reason`."""
+    result = _finalize(
+        _FooterAgent(),
+        final_response="Готово.",
+        exit_reason="partial_stream_recovery",
+    )
+
+    assert result["final_response"] == "Готово.\n\n" + SUPPRESSED_TURN_NOTICE
+
+
+def test_partial_stream_recovery_keeps_the_english_explainer_on_an_engineering_channel(
+    not_suppressed,
+):
+    result = _finalize(
+        _FooterAgent(platform="telegram"),
+        final_response="Готово.",
+        exit_reason="partial_stream_recovery",
+    )
+
+    assert "No reply" in result["final_response"]
+    assert SUPPRESSED_TURN_NOTICE not in result["final_response"]
+
+
+# --- cron: футеры глушим, объяснялку не трогаем ----------------------------
+
+
+def _bind_cron_audience(value):
+    from gateway.session_context import _VAR_MAP
+
+    _VAR_MAP["HERMES_CRON_AUDIENCE"].set(value)
+
+
+def _no_suppress_config():
+    """Реальный предикат с пустым списком платформ: подавить может только крон."""
+    return patch(
+        "hermes_cli.config.load_config_readonly",
+        return_value={"display": {"suppress_engineering_footers_platforms": []}},
+    )
+
+
+def test_cron_end_user_turn_drops_the_locus_block():
+    _bind_cron_audience("end_user")
+    with _no_suppress_config():
+        result = _finalize(_FooterAgent(platform="cron"), final_response="• завтра: 🌤️ 22…36°C")
+
+    assert result["final_response"] == "• завтра: 🌤️ 22…36°C"
+    assert "песочниц" not in result["final_response"]
+
+
+def test_cron_operator_turn_keeps_the_locus_block():
+    """Половина, без которой первый тест ничего не доказывает: гейт обязан
+    смотреть на аудиторию, а не просто выключаться на всяком cron-ходе."""
+    _bind_cron_audience("operator")
+    with _no_suppress_config():
+        result = _finalize(_FooterAgent(platform="cron"), final_response="Готово")
+
+    assert "Где выполнялись проверки" in result["final_response"]
+
+
+def test_cron_end_user_turn_keeps_the_explainer_text_verbatim():
+    """Ловушка внутри подавления.
+
+    `cron/scheduler.py` опознаёт аномально пустой ход сравнением НА РАВЕНСТВО
+    с текстом того же форматтера:
+
+        final_response.strip() == AIAgent._format_turn_completion_explanation(
+            turn_exit_reason
+        ).strip()
+
+    и на совпадении обнуляет ответ, чтобы задание не доставило ничего. Подставь
+    здесь `SUPPRESSED_TURN_NOTICE` -- равенство перестанет выполняться, и вместо
+    тишины Амина получит извинение, а прогон будет помечен успешным. Тест
+    воспроизводит ровно то сравнение, которое делает планировщик.
+    """
+    agent = _FooterAgent(platform="cron")
+    _bind_cron_audience("end_user")
+    with _no_suppress_config():
+        result = _finalize(agent, final_response="", exit_reason="empty_response_exhausted")
+
+    expected = agent._format_turn_completion_explanation("empty_response_exhausted")
+    assert result["final_response"].strip() == expected.strip()
+    assert SUPPRESSED_TURN_NOTICE not in result["final_response"]
+
+
+def test_cron_end_user_fragment_is_not_rewritten_either():
+    """Тот же запрет на втором триггере объяснялки: обрывок + английский футер.
+
+    Сравнение планировщика тут не сработает в любом случае (ответ длиннее
+    объяснялки), но подменять текст всё равно нельзя: подмена превратила бы
+    инженерный хвост, который крон и так не доставляет целиком, в русское
+    извинение внутри доставляемого ответа.
+    """
+    _bind_cron_audience("end_user")
+    with _no_suppress_config():
+        result = _finalize(
+            _FooterAgent(platform="cron"),
+            final_response=_FRAGMENT,
+            exit_reason="stream_truncated",
+        )
+
+    assert "No reply" in result["final_response"]
+    assert SUPPRESSED_TURN_NOTICE not in result["final_response"]
+
+
+# --- проводка предиката ----------------------------------------------------
+
+
+def _whatsapp_only_config():
+    return patch(
+        "hermes_cli.config.load_config_readonly",
+        return_value={"display": {"suppress_engineering_footers_platforms": ["whatsapp"]}},
+    )
+
+
+def test_session_context_platform_outranks_the_agent_attribute_in_the_wiring():
+    """Ловит подмену `fallback_platform=` на позиционный `platform=`.
+
+    Остальные тесты файла патчат сам предикат, поэтому проводка в
+    `finalize_turn` ими не проверяется вовсе: замена именованного аргумента на
+    позиционный инвертировала бы задокументированный приоритет (атрибут агента
+    начал бы побеждать контекст сессии) и оставила бы их все зелёными.
+
+    Здесь предикат настоящий. Контекст сессии говорит `telegram`, атрибут
+    агента -- `whatsapp`, подавляется только `whatsapp`. При правильной
+    проводке побеждает контекст и блок остаётся; при позиционном аргументе
+    победит атрибут агента, блок исчезнет и тест покраснеет.
+    """
+    from gateway.session_context import set_session_vars
+
+    set_session_vars(platform="telegram", chat_id="79564752")
+    with _whatsapp_only_config():
+        result = _finalize(_FooterAgent(platform="whatsapp"), final_response="Готово")
+
+    assert "Где выполнялись проверки" in result["final_response"]
+
+
+def test_the_agent_attribute_is_used_when_the_session_context_is_empty():
+    """Вторая половина: без контекста атрибут агента обязан РАБОТАТЬ.
+
+    Без неё предыдущий тест проходил бы и на проводке, которая вообще
+    перестала передавать платформу агента.
+    """
+    with _whatsapp_only_config():
+        result = _finalize(_FooterAgent(platform="whatsapp"), final_response="Готово")
+
+    assert result["final_response"] == "Готово"

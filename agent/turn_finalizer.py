@@ -547,12 +547,26 @@ def finalize_turn(
     # между собой. Отказ предиката (False) означает «показать всё», поэтому
     # исключение здесь не может ничего скрыть.
     _suppress_eng_footers = False
+    # Замена объяснялки оборванного хода -- отдельный флаг, а не тот же самый.
+    # На cron-ходе её подменять НЕЛЬЗЯ: `cron/scheduler.py` опознаёт аномально
+    # пустой ход сравнением НА РАВЕНСТВО с текстом того же форматтера
+    # (`final_response.strip() == AIAgent._format_turn_completion_explanation(
+    # turn_exit_reason).strip()`) и на совпадении обнуляет ответ, чтобы задание
+    # ничего не доставило. Подставь сюда другую строку -- равенство перестанет
+    # выполняться, и вместо тишины конечный пользователь получит извинение,
+    # а прогон будет помечен успешным. Футеры на cron-ходе глушим, объяснялку
+    # оставляем как была.
+    _replace_turn_explanation = False
     try:
-        from hermes_cli.run_evidence import engineering_footers_suppressed
+        from hermes_cli.run_evidence import (
+            cron_end_user_turn,
+            engineering_footers_suppressed,
+        )
 
         _suppress_eng_footers = engineering_footers_suppressed(
             fallback_platform=getattr(agent, "platform", None)
         )
+        _replace_turn_explanation = _suppress_eng_footers and not cron_end_user_turn()
     except Exception as _sup_err:
         logger.debug("engineering footer suppression check failed: %s", _sup_err)
 
@@ -647,7 +661,7 @@ def finalize_turn(
                     _explanation = agent._format_turn_completion_explanation(
                         _turn_exit_reason
                     )
-                    if _explanation and _suppress_eng_footers:
+                    if _explanation and _replace_turn_explanation:
                         # Пустая объяснялка -- признак нормального выхода;
                         # подставлять вместо неё извинение значило бы
                         # извиняться за успешный ответ.
