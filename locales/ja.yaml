@@ -27,6 +27,11 @@ gateway:
   config_read_failed: "⚠️ config.yaml を読み込めませんでした: {error}"
   config_save_failed: "⚠️ 設定を保存できませんでした: {error}"
 
+  media_delivery_failed_sandbox: "⚠️ `{path}` はサンドボックス内に作成されたためホストからは見えず、添付できませんでした。共有ディレクトリに書き出して再送するようエージェントに依頼してください。"
+  media_delivery_failed_missing: "⚠️ `{path}` は存在しないため、添付できませんでした。"
+  media_delivery_failed_blocked: "⚠️ `{path}` の添付はファイル配信ポリシーにより拒否されました。"
+  media_delivery_failed_invalid: "⚠️ ファイルが約束されましたが、パスが使用できないため何も添付できませんでした。"
+
   model:
     error_prefix:           "エラー: {error}"
     switched:               "モデルを `{model}` に切り替えました"

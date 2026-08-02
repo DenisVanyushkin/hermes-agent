@@ -27,6 +27,11 @@ gateway:
   config_read_failed: "⚠️ Kon nie config.yaml lees nie: {error}"
   config_save_failed: "⚠️ Kon nie konfigurasie stoor nie: {error}"
 
+  media_delivery_failed_sandbox: "⚠️ `{path}` is binne die sandput geskep en is nie vir die gasheer sigbaar nie, daarom kon dit nie aangeheg word nie. Vra die agent om dit na 'n gedeelde gids te skryf en weer te stuur."
+  media_delivery_failed_missing: "⚠️ `{path}` bestaan nie, daarom kon dit nie aangeheg word nie."
+  media_delivery_failed_blocked: "⚠️ Die lêerafleweringsbeleid het geweier om `{path}` aan te heg."
+  media_delivery_failed_invalid: "⚠️ 'n Lêer is belowe, maar die pad daarheen is onbruikbaar, daarom kon niks aangeheg word nie."
+
   model:
     error_prefix:           "Fout: {error}"
     switched:               "Model verander na `{model}`"

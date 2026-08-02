@@ -38,6 +38,13 @@ gateway:
   config_read_failed: "⚠️ Could not read config.yaml: {error}"
   config_save_failed: "⚠️ Could not save config: {error}"
 
+  # Attachment could not be delivered. "sandbox" is the common case: the agent
+  # wrote the file inside its sandbox, which the host cannot read.
+  media_delivery_failed_sandbox: "⚠️ `{path}` was created inside the sandbox and is not visible to the host, so it could not be attached. Ask the agent to write it to a shared directory and send it again."
+  media_delivery_failed_missing: "⚠️ `{path}` does not exist, so it could not be attached."
+  media_delivery_failed_blocked: "⚠️ Attaching `{path}` was refused by the file delivery policy."
+  media_delivery_failed_invalid: "⚠️ A file was promised but its path was unusable, so nothing could be attached."
+
   # /model command output -- shown after a model switch or when listing models.
   # Provider names, model IDs, capability strings, and cost figures are NOT
   # translated -- they're identifiers/values, not prose.  Only the labels

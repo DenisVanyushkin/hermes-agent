@@ -1331,7 +1331,244 @@ def _path_is_within(path: Path, root: Path) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Sandbox -> host path translation
+#
+# The agent's file tools (write_file, patch, terminal) run inside the terminal
+# backend; MEDIA delivery resolves paths in the gateway process, on the HOST.
+# A file the agent wrote to the sandbox's own $HOME therefore does not exist
+# for delivery and used to be dropped with a misleading "unsafe" warning.
+#
+# Where the operator actually shared a directory, the container path can be
+# mapped back to its host equivalent. Translation is deliberately narrow:
+#   * the auto-mounted cache dirs (/root/.hermes/cache/*), which is how an
+#     INBOUND attachment is handed to the agent in the first place, and
+#   * the documented export mounts (/output, /outputs) that
+#     _warn_if_docker_media_delivery_is_risky() already tells operators to
+#     configure.
+# Any other rw mount (a source checkout, a service dir) stays untranslated:
+# turning every bind mount into a delivery channel would widen the exfil
+# surface for the sake of convenience. Translation happens BEFORE validation,
+# so the denylist, the safe-root allowlist and strict mode all still apply --
+# to the host path, which is the only path that means anything to them.
+# ---------------------------------------------------------------------------
+
+# Terminal backends that run the agent's file tools somewhere other than the
+# host. Mirrors agent/prompt_builder._REMOTE_TERMINAL_BACKENDS.
+_SANDBOX_TERMINAL_BACKENDS = frozenset({
+    "docker", "singularity", "modal", "daytona", "ssh", "managed_modal",
+})
+
+# Container paths that are, by convention, an operator-configured export mount.
+# Same set gateway/run.py checks when warning about a missing export mount.
+_MEDIA_EXPORT_CONTAINER_PATHS = ("/output", "/outputs")
+
+
+def _agent_files_run_in_sandbox() -> bool:
+    """True when file tools write somewhere the host cannot see directly."""
+    return (os.environ.get("TERMINAL_ENV") or "local").strip().lower() in _SANDBOX_TERMINAL_BACKENDS
+
+
+def _normalize_media_candidate(path: str) -> str:
+    """Strip quoting/backticks and trailing punctuation from a model-emitted path."""
+    candidate = str(path or "").strip()
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in "`\"'":
+        candidate = candidate[1:-1].strip()
+    return candidate.lstrip("`\"'").rstrip("`\"',.;:)}]")
+
+
+def _media_export_mounts() -> List[Tuple[str, str]]:
+    """Return [(container_path, host_path)] for writable export mounts."""
+    import json as _json
+
+    raw = (os.environ.get("TERMINAL_DOCKER_VOLUMES") or "").strip()
+    if not raw:
+        return []
+    try:
+        specs = _json.loads(raw)
+    except Exception:
+        logger.debug("Could not parse TERMINAL_DOCKER_VOLUMES for media translation", exc_info=True)
+        return []
+    if not isinstance(specs, list):
+        return []
+
+    mounts: List[Tuple[str, str]] = []
+    for spec in specs:
+        if not isinstance(spec, str):
+            continue
+        parsed = _parse_bind_mount_spec(spec)
+        if not parsed:
+            continue
+        host_path, container_path, options = parsed
+        if "ro" in options:
+            # A read-only mount cannot hold anything the agent produced.
+            continue
+        if container_path.rstrip("/") in _MEDIA_EXPORT_CONTAINER_PATHS:
+            mounts.append((container_path.rstrip("/"), host_path))
+    return mounts
+
+
+def _parse_bind_mount_spec(spec: str) -> Optional[Tuple[str, str, List[str]]]:
+    """Split ``host:container[:opts]`` into its parts, or None if malformed."""
+    parts = str(spec or "").strip().split(":")
+    if len(parts) < 2:
+        return None
+    options: List[str] = []
+    if len(parts) >= 3 and not parts[-1].startswith("/"):
+        options = [o.strip() for o in parts[-1].split(",") if o.strip()]
+        parts = parts[:-1]
+    container_path = parts[-1]
+    host_path = ":".join(parts[:-1])
+    if not container_path.startswith("/") or not host_path:
+        return None
+    return host_path, container_path, options
+
+
+def _host_visible_media_candidates(candidate: str) -> List[str]:
+    """Return host-path candidates for a possibly sandbox-local path.
+
+    The original is always first, so a genuine host path never changes
+    meaning. Translations are appended only under a Docker backend, and only
+    for the mounts described above.
+    """
+    candidates = [candidate]
+    if (os.environ.get("TERMINAL_ENV") or "local").strip().lower() != "docker":
+        return candidates
+
+    # 1. Auto-mounted cache dirs -- the inbound direction, in reverse.
+    try:
+        from tools.credential_files import from_agent_visible_cache_path
+        translated = from_agent_visible_cache_path(candidate)
+    except Exception:
+        logger.debug("Cache-path translation unavailable", exc_info=True)
+        translated = candidate
+    if translated and translated != candidate:
+        candidates.append(translated)
+
+    # 2. Operator-configured export mounts.
+    for container_path, host_path in _media_export_mounts():
+        prefix = container_path + "/"
+        if not candidate.startswith(prefix):
+            continue
+        rel = candidate[len(prefix):]
+        if not rel or ".." in Path(rel).parts:
+            continue
+        candidates.append(str(Path(host_path) / rel))
+
+    return candidates
+
+
+# Rejection reasons. Reported by classify_media_delivery_rejection() and used
+# both for the operator-facing log line and the user-facing notice. The old
+# code logged every rejection as "unsafe", which sent operators looking for a
+# security block when the real cause was almost always a path the host cannot
+# see.
+MEDIA_REJECT_SANDBOX_ONLY = "sandbox_only"
+MEDIA_REJECT_MISSING = "missing_on_host"
+MEDIA_REJECT_BLOCKED = "blocked_by_policy"
+MEDIA_REJECT_INVALID = "invalid_path"
+
+
+def classify_media_delivery_rejection(path: str) -> Optional[str]:
+    """Return why *path* cannot be delivered, or None when it can be.
+
+    ``sandbox_only`` -- no host file under any shared mount, and file tools run
+    in a sandbox: the agent wrote it somewhere the host cannot reach.
+    ``missing_on_host`` -- no such file, no sandbox to blame.
+    ``blocked_by_policy`` -- the file exists but delivery policy refuses it.
+    """
+    candidate = _normalize_media_candidate(path)
+    if not candidate:
+        return MEDIA_REJECT_INVALID
+
+    exists_on_host = False
+    for cand in _host_visible_media_candidates(candidate):
+        if _validate_host_media_path(cand):
+            return None
+        try:
+            if Path(os.path.expanduser(cand)).resolve(strict=True).is_file():
+                exists_on_host = True
+        except (OSError, RuntimeError, ValueError):
+            continue
+
+    if exists_on_host:
+        return MEDIA_REJECT_BLOCKED
+    if _agent_files_run_in_sandbox():
+        return MEDIA_REJECT_SANDBOX_ONLY
+    return MEDIA_REJECT_MISSING
+
+
+# English fallbacks, used when the locale catalog is unavailable.
+_MEDIA_FAILURE_FALLBACKS = {
+    MEDIA_REJECT_SANDBOX_ONLY: (
+        "\u26a0\ufe0f `{path}` was created inside the sandbox and is not visible to "
+        "the host, so it could not be attached. Ask the agent to write it to a "
+        "shared directory and send it again."
+    ),
+    MEDIA_REJECT_MISSING: (
+        "\u26a0\ufe0f `{path}` does not exist, so it could not be attached."
+    ),
+    MEDIA_REJECT_BLOCKED: (
+        "\u26a0\ufe0f Attaching `{path}` was refused by the file delivery policy."
+    ),
+    MEDIA_REJECT_INVALID: (
+        "\u26a0\ufe0f A file was promised but its path was unusable, so nothing "
+        "could be attached."
+    ),
+}
+
+_MEDIA_FAILURE_I18N_KEYS = {
+    MEDIA_REJECT_SANDBOX_ONLY: "gateway.media_delivery_failed_sandbox",
+    MEDIA_REJECT_MISSING: "gateway.media_delivery_failed_missing",
+    MEDIA_REJECT_BLOCKED: "gateway.media_delivery_failed_blocked",
+    MEDIA_REJECT_INVALID: "gateway.media_delivery_failed_invalid",
+}
+
+
+def format_media_delivery_failure_notice(rejected) -> str:
+    """Render a user-facing notice for paths that could not be attached.
+
+    A dropped attachment used to be visible only in gateway.log. When the
+    reply consisted of nothing but the MEDIA tag, the user received an empty
+    message and no indication that anything had gone wrong.
+    """
+    lines: List[str] = []
+    for raw, reason in rejected or []:
+        safe = _log_safe_path(raw)
+        key = _MEDIA_FAILURE_I18N_KEYS.get(reason, _MEDIA_FAILURE_I18N_KEYS[MEDIA_REJECT_MISSING])
+        text = ""
+        try:
+            from agent.i18n import t
+            text = t(key, path=safe)
+        except Exception:
+            logger.debug("i18n unavailable for media delivery notice", exc_info=True)
+        if not text or text == key:
+            fallback = _MEDIA_FAILURE_FALLBACKS.get(reason, _MEDIA_FAILURE_FALLBACKS[MEDIA_REJECT_MISSING])
+            text = fallback.format(path=safe)
+        if text not in lines:
+            lines.append(text)
+    return "\n".join(lines)
+
+
 def validate_media_delivery_path(path: str) -> Optional[str]:
+    """Return a safe absolute HOST file path for delivery, else None.
+
+    Tries the path as given first, then its sandbox->host translations (see
+    the block comment above). Every candidate goes through the same
+    ``_validate_host_media_path`` checks -- translation changes which file is
+    considered, never whether it is allowed.
+    """
+    candidate = _normalize_media_candidate(path)
+    if not candidate:
+        return None
+    for cand in _host_visible_media_candidates(candidate):
+        resolved = _validate_host_media_path(cand)
+        if resolved:
+            return resolved
+    return None
+
+
+def _validate_host_media_path(path: str) -> Optional[str]:
     """Return a safe absolute file path for native media delivery, else None.
 
     Default mode (single-user / private gateway): accept any existing regular
@@ -3806,30 +4043,57 @@ class BasePlatformAdapter(ABC):
         return validate_media_delivery_path(path)
 
     @staticmethod
-    def filter_media_delivery_paths(media_files) -> List[Tuple[str, bool]]:
-        """Drop unsafe MEDIA paths and normalize accepted paths."""
-        safe_media: List[Tuple[str, bool]] = []
+    def partition_media_delivery_paths(media_files):
+        """Split MEDIA paths into (accepted, rejected).
+
+        ``rejected`` carries ``(raw_path, reason)`` so the caller can tell the
+        user why an attachment never arrived instead of leaving them with an
+        empty message. Reasons come from classify_media_delivery_rejection().
+        """
+        accepted: List[Tuple[str, bool]] = []
+        rejected: List[Tuple[str, str]] = []
         for media_path, is_voice in media_files or []:
             raw = str(media_path)
             safe_path = validate_media_delivery_path(raw)
             if safe_path:
-                safe_media.append((safe_path, bool(is_voice)))
-            else:
-                logger.warning("Skipping unsafe MEDIA directive path: %s", _log_safe_path(raw))
-        return safe_media
+                accepted.append((safe_path, bool(is_voice)))
+                continue
+            reason = classify_media_delivery_rejection(raw) or MEDIA_REJECT_MISSING
+            rejected.append((raw, reason))
+            logger.warning(
+                "Dropping MEDIA directive path (%s): %s", reason, _log_safe_path(raw)
+            )
+        return accepted, rejected
 
     @staticmethod
-    def filter_local_delivery_paths(file_paths) -> List[str]:
-        """Drop unsafe bare local file paths and normalize accepted paths."""
-        safe_paths: List[str] = []
+    def filter_media_delivery_paths(media_files) -> List[Tuple[str, bool]]:
+        """Drop undeliverable MEDIA paths and normalize accepted paths."""
+        accepted, _rejected = BasePlatformAdapter.partition_media_delivery_paths(media_files)
+        return accepted
+
+    @staticmethod
+    def partition_local_delivery_paths(file_paths):
+        """Split bare local paths into (accepted, rejected) -- see above."""
+        accepted: List[str] = []
+        rejected: List[Tuple[str, str]] = []
         for file_path in file_paths or []:
             raw = str(file_path)
             safe_path = validate_media_delivery_path(raw)
             if safe_path:
-                safe_paths.append(safe_path)
-            else:
-                logger.warning("Skipping unsafe local file path: %s", _log_safe_path(raw))
-        return safe_paths
+                accepted.append(safe_path)
+                continue
+            reason = classify_media_delivery_rejection(raw) or MEDIA_REJECT_MISSING
+            rejected.append((raw, reason))
+            logger.warning(
+                "Dropping bare local file path (%s): %s", reason, _log_safe_path(raw)
+            )
+        return accepted, rejected
+
+    @staticmethod
+    def filter_local_delivery_paths(file_paths) -> List[str]:
+        """Drop undeliverable bare local file paths and normalize the rest."""
+        accepted, _rejected = BasePlatformAdapter.partition_local_delivery_paths(file_paths)
+        return accepted
 
 
     @staticmethod
@@ -5288,7 +5552,7 @@ class BasePlatformAdapter(ABC):
 
                 # Extract MEDIA:<path> tags (from TTS tool) before other processing
                 media_files, response = self.extract_media(response)
-                media_files = self.filter_media_delivery_paths(media_files)
+                media_files, _rejected_media = self.partition_media_delivery_paths(media_files)
 
                 # Extract image URLs and send them as native platform attachments
                 images, text_content = self.extract_images(response)
@@ -5328,6 +5592,18 @@ class BasePlatformAdapter(ABC):
                             self.name, len(_response_pre_extract), event.source.chat_id,
                         )
                         text_content = _recovered
+
+                    # Still nothing to send, but we DID drop an attachment:
+                    # the reply was only a MEDIA tag pointing at a file the
+                    # host cannot see. Delivering silence taught the user
+                    # nothing; say what happened and why.
+                    if not text_content and _rejected_media:
+                        logger.warning(
+                            "[%s] media_delivery_failed: %d attachment(s) dropped "
+                            "and no text remained for %s; sending failure notice.",
+                            self.name, len(_rejected_media), event.source.chat_id,
+                        )
+                        text_content = format_media_delivery_failure_notice(_rejected_media)
 
                 # Final user-visible content (text, TTS, media, files) gets
                 # the existing notify=True marker. Clone once so typing/status

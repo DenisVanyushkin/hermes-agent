@@ -27,6 +27,11 @@ gateway:
   config_read_failed: "⚠️ Nem sikerült olvasni a config.yaml fájlt: {error}"
   config_save_failed: "⚠️ Nem sikerült menteni a konfigurációt: {error}"
 
+  media_delivery_failed_sandbox: "⚠️ A(z) `{path}` a homokozóban jött létre, és a gazdagép nem látja, ezért nem sikerült csatolni. Kérd meg az ügynököt, hogy írja egy megosztott könyvtárba, és küldje el újra."
+  media_delivery_failed_missing: "⚠️ A(z) `{path}` nem létezik, ezért nem sikerült csatolni."
+  media_delivery_failed_blocked: "⚠️ A fájlkézbesítési szabályzat elutasította a(z) `{path}` csatolását."
+  media_delivery_failed_invalid: "⚠️ Egy fájl ígérete elhangzott, de az útvonala használhatatlan, ezért nem volt mit csatolni."
+
   model:
     error_prefix:           "Hiba: {error}"
     switched:               "Modell átváltva: `{model}`"

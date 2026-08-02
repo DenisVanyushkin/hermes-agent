@@ -27,6 +27,11 @@ gateway:
   config_read_failed: "⚠️ Impossible de lire config.yaml : {error}"
   config_save_failed: "⚠️ Impossible de sauvegarder la configuration : {error}"
 
+  media_delivery_failed_sandbox: "⚠️ `{path}` a été créé dans le bac à sable et n'est pas visible depuis l'hôte, il n'a donc pas pu être joint. Demandez à l'agent de l'écrire dans un répertoire partagé et de l'envoyer à nouveau."
+  media_delivery_failed_missing: "⚠️ `{path}` n'existe pas, il n'a donc pas pu être joint."
+  media_delivery_failed_blocked: "⚠️ La politique de livraison de fichiers a refusé de joindre `{path}`."
+  media_delivery_failed_invalid: "⚠️ Un fichier a été promis, mais son chemin était inutilisable, rien n'a donc pu être joint."
+
   model:
     error_prefix:           "Erreur : {error}"
     switched:               "Modèle changé pour `{model}`"

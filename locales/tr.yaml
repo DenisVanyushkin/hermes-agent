@@ -27,6 +27,11 @@ gateway:
   config_read_failed: "⚠️ config.yaml okunamadı: {error}"
   config_save_failed: "⚠️ Yapılandırma kaydedilemedi: {error}"
 
+  media_delivery_failed_sandbox: "⚠️ `{path}` yalıtılmış ortamda oluşturuldu ve ana makineden görünmüyor, bu yüzden eklenemedi. Aracıdan dosyayı paylaşılan bir dizine yazıp yeniden göndermesini isteyin."
+  media_delivery_failed_missing: "⚠️ `{path}` mevcut değil, bu yüzden eklenemedi."
+  media_delivery_failed_blocked: "⚠️ `{path}` dosyasının eklenmesi dosya teslim politikası tarafından reddedildi."
+  media_delivery_failed_invalid: "⚠️ Bir dosya vaat edildi ancak yolu kullanılamaz durumda, bu yüzden eklenecek bir şey yok."
+
   model:
     error_prefix:           "Hata: {error}"
     switched:               "Model `{model}` olarak değiştirildi"

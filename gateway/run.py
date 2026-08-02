@@ -16078,7 +16078,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
 
             media_files, cleaned = adapter.extract_media(response)
-            media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+            media_files, rejected_media = BasePlatformAdapter.partition_media_delivery_paths(media_files)
             # Strip image URLs from the cleaned text for parity with the
             # non-streaming chain, but do NOT run extract_local_files here:
             # post-stream delivery is explicit-only (#20834). Bare local paths
@@ -16087,6 +16087,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter.extract_images(cleaned)
 
             _thread_meta = self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
+
+            # The streamed text has already been sent, and the stream consumer
+            # strips MEDIA tags from it -- so a reply that was ONLY a MEDIA tag
+            # reaches the user as an empty message. Tell them the attachment
+            # was dropped instead of leaving the failure in gateway.log.
+            if rejected_media:
+                from gateway.platforms.base import format_media_delivery_failure_notice
+                notice = format_media_delivery_failure_notice(rejected_media)
+                if notice:
+                    logger.warning(
+                        "media_delivery_failed: %d attachment(s) dropped from a "
+                        "streamed reply for chat=%s; sending failure notice.",
+                        len(rejected_media), event.source.chat_id,
+                    )
+                    try:
+                        await adapter.send(
+                            chat_id=event.source.chat_id,
+                            content=notice,
+                            metadata=_thread_meta,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Could not deliver media failure notice", exc_info=True
+                        )
 
             _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
             _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}

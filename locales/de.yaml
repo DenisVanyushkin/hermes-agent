@@ -27,6 +27,11 @@ gateway:
   config_read_failed: "⚠️ config.yaml konnte nicht gelesen werden: {error}"
   config_save_failed: "⚠️ Konfiguration konnte nicht gespeichert werden: {error}"
 
+  media_delivery_failed_sandbox: "⚠️ `{path}` wurde in der Sandbox erstellt und ist für den Host nicht sichtbar, daher konnte die Datei nicht angehängt werden. Bitte den Agenten, sie in ein gemeinsames Verzeichnis zu schreiben und erneut zu senden."
+  media_delivery_failed_missing: "⚠️ `{path}` existiert nicht, daher konnte die Datei nicht angehängt werden."
+  media_delivery_failed_blocked: "⚠️ Das Anhängen von `{path}` wurde von der Richtlinie für die Dateizustellung abgelehnt."
+  media_delivery_failed_invalid: "⚠️ Eine Datei wurde zugesagt, aber ihr Pfad war unbrauchbar — es konnte nichts angehängt werden."
+
   model:
     error_prefix:           "Fehler: {error}"
     switched:               "Modell gewechselt zu `{model}`"
