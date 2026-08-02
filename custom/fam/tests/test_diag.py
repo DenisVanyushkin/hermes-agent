@@ -392,3 +392,85 @@ def test_first_run_is_not_confirmed(tmp_path):
         _jobs_file(tmp_path), "fam-nightly-report", None)
     assert ok is False
     assert "first run" in detail
+
+
+def test_delivery_not_ok_on_none_jobs_path():
+    # Critical: cfg.get("report_jobs_path", DEFAULT) substitutes the default
+    # only when the key is absent, not when it is present with value null.
+    # Must return False (cost: one redundant raw message) not raise.
+    ok, detail = diag.report_delivery_status(None, "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is False
+    assert "unreadable" in detail
+    assert "TypeError" in detail
+
+
+def test_delivery_with_dict_keyed_by_job_id(tmp_path):
+    # Production jobs.json shape: a dict keyed by job id, not a list.
+    job = {"name": "fam-nightly-report", "last_status": "ok",
+           "last_run_at": "2026-08-02T03:00:12+00:00", "last_delivery_error": None}
+    path = tmp_path / "jobs.json"
+    path.write_text(json.dumps({"job-123": job, "job-456": {}}), encoding="utf-8")
+    ok, detail = diag.report_delivery_status(path, "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is True
+    assert "2026-08-02" in detail
+
+
+def test_delivery_with_jobs_wrapper(tmp_path):
+    # Alternative shape: {"jobs": [...]}
+    job = {"name": "fam-nightly-report", "last_status": "ok",
+           "last_run_at": "2026-08-02T03:00:12+00:00", "last_delivery_error": None}
+    path = tmp_path / "jobs.json"
+    path.write_text(json.dumps({"jobs": [job]}), encoding="utf-8")
+    ok, detail = diag.report_delivery_status(path, "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is True
+    assert "2026-08-02" in detail
+
+
+def test_delivery_not_ok_on_garbage_top_level(tmp_path):
+    # Bare string, number, or other non-dict/list shape.
+    path = tmp_path / "jobs.json"
+    path.write_text(json.dumps("garbage"), encoding="utf-8")
+    ok, detail = diag.report_delivery_status(path, "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is False
+    assert "unexpected shape" in detail
+
+
+def test_delivery_naive_vs_aware_datetimes(tmp_path):
+    # Naive last_run_at (no timezone) compared against aware previous_digest_at,
+    # and vice versa. Neither may raise.
+    job_naive = {"name": "fam-nightly-report", "last_status": "ok",
+                 "last_run_at": "2026-08-02T03:00:12", "last_delivery_error": None}
+    job_aware = {"name": "fam-nightly-report", "last_status": "ok",
+                 "last_run_at": "2026-08-02T03:00:12+00:00", "last_delivery_error": None}
+    path_naive = tmp_path / "jobs-naive.json"
+    path_naive.write_text(json.dumps([job_naive]), encoding="utf-8")
+    path_aware = tmp_path / "jobs-aware.json"
+    path_aware.write_text(json.dumps([job_aware]), encoding="utf-8")
+
+    # Naive job vs aware digest (previous_digest_at is aware by default from isoformat on aware datetime)
+    ok, _ = diag.report_delivery_status(path_naive, "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is True, "naive last_run_at should compare successfully (treated as UTC)"
+
+    # Aware job vs naive digest reference
+    ok, _ = diag.report_delivery_status(path_aware, "fam-nightly-report", "2026-08-01T22:30:01")
+    assert ok is True, "naive previous_digest_at should be treated as UTC"
+
+
+def test_delivery_not_ok_on_unparseable_last_run_at(tmp_path):
+    job = {"name": "fam-nightly-report", "last_status": "ok",
+           "last_run_at": "not a valid timestamp", "last_delivery_error": None}
+    path = tmp_path / "jobs.json"
+    path.write_text(json.dumps([job]), encoding="utf-8")
+    ok, detail = diag.report_delivery_status(path, "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is False
+    assert "unparseable" in detail
+
+
+def test_delivery_not_ok_on_status_not_ok(tmp_path):
+    job = {"name": "fam-nightly-report", "last_status": "failed",
+           "last_run_at": "2026-08-02T03:00:12+00:00", "last_delivery_error": None}
+    path = tmp_path / "jobs.json"
+    path.write_text(json.dumps([job]), encoding="utf-8")
+    ok, detail = diag.report_delivery_status(path, "fam-nightly-report", "2026-08-01T22:30:01+00:00")
+    assert ok is False
+    assert "last_status" in detail

@@ -375,7 +375,11 @@ def report_delivery_status(jobs_path, job_name, previous_digest_at):
         return False, "first run: no previous digest"
     try:
         data = json.loads(Path(jobs_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
+        # TypeError too: a config with "report_jobs_path": null reaches us as
+        # None (cfg.get only substitutes its default for an ABSENT key), and
+        # Path(None) raises. Returning False costs one redundant raw message;
+        # raising would take the whole nightly tick down with it.
         return False, f"jobs.json unreadable: {type(exc).__name__}"
     jobs = data.get("jobs", data) if isinstance(data, dict) else data
     if isinstance(jobs, dict):
