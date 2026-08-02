@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -324,6 +325,60 @@ def test_backups_reports_verify_failure_detail(tmp_path):
         verify=lambda path: (False, {"integrity": "corrupt", "schema_version": None}))
     assert result["verify"] == "corrupt"
     assert result["schema_version"] is None
+
+
+def test_backups_picks_assistant_db_not_state_db(tmp_path):
+    # backup_dir holds two nightly backups (maint.backup_db writes both
+    # assistant-YYYYMMDD.db and state-YYYYMMDD.db there). Sorted
+    # alphabetically "state" comes after "assistant", so a naive newest-
+    # file glob would pick and verify the wrong database -- the bug this
+    # test guards against. The assistant stem comes from resolve_db_path()
+    # (as diag.py itself does), not a hardcoded literal, so this test
+    # tracks whatever FAM_DB the fixture points at.
+    stem = Path(diag.famdb.resolve_db_path()).stem
+    assistant_name = f"{stem}-20260801.db"
+    (tmp_path / assistant_name).write_bytes(b"x")
+    (tmp_path / "state-20260801.db").write_bytes(b"x")
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+
+    seen_paths = []
+
+    def fake_verify(path):
+        seen_paths.append(path.name)
+        return True, {"integrity": "ok", "schema_version": "12"}
+
+    result = diag.collect_backups(
+        {"backup_dir": str(tmp_path), "offsite_enabled": False}, now,
+        verify=fake_verify)
+
+    assert result["last_path"] == assistant_name
+    assert result["verify"] == "ok"
+    assert seen_paths == [assistant_name]
+
+
+def test_backups_state_backup_reports_presence_without_verifying(tmp_path):
+    # The digest may note that a state.db backup exists and its age, but
+    # must never run verify() against it -- its schema isn't ours, so an
+    # integrity/meta check would just be a second copy of the false alarm
+    # this fix removes.
+    stem = Path(diag.famdb.resolve_db_path()).stem
+    (tmp_path / f"{stem}-20260801.db").write_bytes(b"x")
+    (tmp_path / "state-20260730.db").write_bytes(b"x")
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+
+    seen_paths = []
+
+    def fake_verify(path):
+        seen_paths.append(path.name)
+        return True, {"integrity": "ok", "schema_version": "12"}
+
+    result = diag.collect_backups(
+        {"backup_dir": str(tmp_path), "offsite_enabled": False,
+         "state_db_path": "/home/denis/.hermes/state.db"}, now,
+        verify=fake_verify)
+
+    assert result["state_backup"] == {"last_path": "state-20260730.db", "age_days": 2}
+    assert seen_paths == [f"{stem}-20260801.db"]
 
 
 def test_backups_offsite_age_days_computed_from_newest_dump(tmp_path):
