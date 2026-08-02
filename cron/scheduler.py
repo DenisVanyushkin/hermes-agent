@@ -318,6 +318,55 @@ def resolve_cron_audience(job: dict, cfg: Optional[dict] = None) -> str:
     return "operator"
 
 
+#: Контекстная переменная, которой помечается ход задания
+#: (`gateway/session_context.py`, читается в `hermes_cli/run_evidence.py`).
+CRON_AUDIENCE_CONTEXT_VAR = "HERMES_CRON_AUDIENCE"
+
+
+def _set_cron_audience_context(value: str) -> None:
+    """Записать аудиторию текущего задания в контекст хода. Никогда не бросает."""
+    try:
+        from gateway.session_context import _VAR_MAP
+
+        _VAR_MAP[CRON_AUDIENCE_CONTEXT_VAR].set(str(value or ""))
+    except Exception as exc:  # noqa: BLE001 — признак отображения не имеет
+        # права уронить прогон задания.
+        logger.debug("failed to bind cron audience context: %s", exc)
+
+
+def bind_cron_audience_context(job: dict, cfg: Optional[dict] = None) -> str:
+    """Пометить ход задания тем, кто прочитает его результат.
+
+    Канал ХОДА и адресат ДОСТАВКИ у крона -- разные вещи: ход не выполняется
+    ни на какой платформе, а результат уходит по `deliver:`. Конец хода
+    (`agent/turn_finalizer.py`) видит только первое, поэтому инженерные футеры
+    доезжали до конечного пользователя мимо гейта по платформе
+    (наблюдение 2026-08-01, задание 150d115fe905 -- вечерний прогноз погоды
+    Амине пришёл с блоком «Где выполнялись проверки»).
+
+    Признак передаётся строкой через контекст сессии, а не импортом: обратная
+    зависимость `run_evidence -> cron.scheduler` втянула бы планировщик в
+    турн-путь. Сбрасывается `clear_cron_audience_context()` в `finally`
+    `run_job`, иначе протечёт в соседнее задание того же процесса.
+
+    Возвращает записанное значение (пустую строку при любом отказе -- отказ
+    везде означает «не подавлять»).
+    """
+    try:
+        audience = str(resolve_cron_audience(job, cfg) or "")
+    except Exception as exc:  # noqa: BLE001 — resolve_cron_audience сама не
+        # бросает, но её контракт не должен быть единственной защитой.
+        logger.debug("failed to resolve cron audience: %s", exc)
+        audience = ""
+    _set_cron_audience_context(audience)
+    return audience
+
+
+def clear_cron_audience_context() -> None:
+    """Снять пометку аудитории по выходе из задания."""
+    _set_cron_audience_context("")
+
+
 def plan_cron_failure_delivery(
     job: dict, error: Optional[str], cfg: Optional[dict] = None
 ) -> tuple[Optional[str], Optional[str]]:
@@ -3520,6 +3569,12 @@ def run_job(
         except Exception as e:
             logger.warning("Job '%s': failed to load config.yaml, using defaults: %s", job_id, e)
 
+        # Кто прочитает результат этого задания. Кладётся до построения агента:
+        # `contextvars.copy_context()` ниже снимает снимок для рабочего потока,
+        # а конец хода читает признак уже оттуда. Сбрасывается в `finally`.
+        _cron_audience = bind_cron_audience_context(job, _cfg)
+        logger.debug("Job '%s': audience=%s", job_id, _cron_audience or "unknown")
+
         # Fail fast if no model resolved from job / env / config.yaml: an empty
         # model otherwise reaches the provider as an opaque 400 (#23979).
         if not (isinstance(model, str) and model.strip()):
@@ -4060,6 +4115,10 @@ def run_job(
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
+        # Аудитория живёт ровно столько же, сколько задание: `clear_session_vars`
+        # её не трогает (она не HERMES_SESSION_*), а оставленный признак
+        # подавил бы футеры в соседнем задании того же процесса.
+        clear_cron_audience_context()
         if _session_db:
             # Compression can rotate the live agent onto a continuation while
             # this run is in flight. Finalize that continuation, not the stale

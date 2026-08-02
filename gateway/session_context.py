@@ -119,6 +119,20 @@ _CRON_AUTO_DELIVER_PLATFORM: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_P
 _CRON_AUTO_DELIVER_CHAT_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default=_UNSET)
 _CRON_AUTO_DELIVER_THREAD_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_THREAD_ID", default=_UNSET)
 
+# Who reads THIS job's delivery: "operator" or "end_user" (see
+# cron.scheduler.resolve_cron_audience). Set per-job in run_job() next to the
+# delivery vars above and cleared in the same finally.
+#
+# A cron turn has two different channels: the one the TURN runs on (there is
+# none -- ``platform=""`` in the session context, ``platform="cron"`` on the
+# agent) and the one the RESULT is delivered to (``deliver: whatsapp:+7...``).
+# End-of-turn display decisions that are really about the reader -- the
+# engineering footers in agent/turn_finalizer.py -- must follow the second, and
+# only this var carries it into the turn. Passing the audience as a string
+# keeps hermes_cli/run_evidence.py free of an import of the scheduler, which
+# would drag the whole cron machinery into every turn.
+_CRON_AUDIENCE: ContextVar = ContextVar("HERMES_CRON_AUDIENCE", default=_UNSET)
+
 _VAR_MAP = {
     "HERMES_SESSION_PLATFORM": _SESSION_PLATFORM,
     "HERMES_SESSION_SOURCE": _SESSION_SOURCE,
@@ -135,6 +149,7 @@ _VAR_MAP = {
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
+    "HERMES_CRON_AUDIENCE": _CRON_AUDIENCE,
 }
 
 

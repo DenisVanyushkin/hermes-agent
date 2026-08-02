@@ -21,6 +21,9 @@
 from __future__ import annotations
 
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 #: Инструменты, чьи команды физически исполняются ВНУТРИ Docker-песочницы.
 #: Отдельный набор, а не переиспользование `MUTATING_TOOL_NAMES`: там про то,
@@ -123,3 +126,152 @@ def render_execution_locus_block(sandbox_commands: list[str], write_refusals: in
         "сервисы и установленные пакеты там свои."
     )
     return "\n".join(lines)
+
+
+#: Что видит конечный пользователь вместо инженерной объяснялки оборванного
+#: хода. Молчание отвергнуто намеренно: «ничего не пришло» в чате читается как
+#: «меня проигнорировали».
+#:
+#: Строка НЕ зовёт повторить просьбу. Английский оригинал советовал `continue`
+#: -- ВОЗОБНОВИТЬ незаконченное; буквальный русский перевод («напиши ещё раз»)
+#: советует ПОВТОРИТЬ, а ход мог отработать наполовину: на пути бытового CRUD
+#: (`fam shop add`) повтор кладёт позицию в список второй раз. Поэтому здесь
+#: только предложение посмотреть на результат -- действие, которое не может
+#: ничего испортить.
+SUPPRESSED_TURN_NOTICE = "Ответ мог оборваться — проверь, пожалуйста, результат 🙏"
+
+#: Имя контекстной переменной, которой планировщик помечает аудиторию задания
+#: (`gateway/session_context.py`). Читается по имени намеренно: импорт
+#: `cron.scheduler` втянул бы весь планировщик в турн-путь ради одной строки.
+CRON_AUDIENCE_CONTEXT_VAR = "HERMES_CRON_AUDIENCE"
+
+#: Аудитория, при которой результат задания читает конечный пользователь.
+CRON_AUDIENCE_END_USER = "end_user"
+
+#: Формы порчи конфига, о которых уже предупредили в этом процессе. Предикат
+#: зовётся на каждый ход, а `logger.warning` на каждый ход -- это не сигнал,
+#: а фон, который учатся пролистывать.
+_WARNED_CONFIG_SHAPES: set[str] = set()
+
+
+def _warn_once(shape: str, message: str, *args: object) -> None:
+    if shape in _WARNED_CONFIG_SHAPES:
+        return
+    _WARNED_CONFIG_SHAPES.add(shape)
+    logger.warning(message, *args)
+
+
+def cron_end_user_turn() -> bool:
+    """True, когда этот ход выполняет крон ради конечного пользователя.
+
+    У крона канал ХОДА и адресат ДОСТАВКИ -- разные вещи. Ход не выполняется
+    ни на какой платформе (`platform=""` в контексте сессии, `platform="cron"`
+    у агента), а результат уходит туда, куда указывает `deliver:` задания.
+    Признак кладёт `cron/scheduler.py` в контекстную переменную на время
+    задания, взяв его у `resolve_cron_audience` -- у того же механизма, что уже
+    решает, доставлять ли конечному пользователю технический текст отказа.
+
+    Любой отказ (переменной нет, контекст недоступен) -- False, «не подавлять».
+    """
+    try:
+        from gateway.session_context import get_session_env
+
+        value = str(get_session_env(CRON_AUDIENCE_CONTEXT_VAR, "") or "").strip().lower()
+        return value == CRON_AUDIENCE_END_USER
+    except Exception:
+        return False
+
+
+def engineering_footers_suppressed(
+    platform: str | None = None,
+    *,
+    fallback_platform: str | None = None,
+) -> bool:
+    """True, когда канал этого хода -- не инженерный.
+
+    Блок про песочницу, отчёт о неудавшихся записях и объяснялка оборванного
+    хода адресованы ревьюеру кода. На канале конечного пользователя они
+    занимают больше места, чем сам ответ, и не описывают ничего, на что он
+    может отреагировать.
+
+    Платформа берётся по порядку: явный аргумент -> контекст сессии, который
+    гейтвей выставляет на каждый ход -> `fallback_platform` (обычно
+    `agent.platform`, для вызовов вне гейтвея). Контекст стоит выше атрибута
+    агента намеренно: у субагента, порождённого внутри хода, свой агент, но
+    адресат тот же самый.
+
+    Список каналов -- `display.suppress_engineering_footers_platforms`,
+    по умолчанию пуст: без правки конфига поведение прежнее.
+
+    Отдельная ветка -- крон: у него канал хода и адресат доставки не совпадают,
+    поэтому список платформ его не ловит и «cron» в этот список писать нельзя
+    (там оказались бы и операторские задания). Аудитория задания приходит
+    контекстной переменной, см. `cron_end_user_turn`.
+
+    Любой отказ (нет конфига, мусор в значении, недоступен контекст сессии)
+    даёт False. Сломанный конфиг обязан давать «слишком много инженерных
+    подробностей у оператора», а не «анти-оверклейм тихо выключен».
+    """
+    try:
+        # Крон проверяется первым: платформы у его хода нет вовсе, а список
+        # каналов ниже отвечает на другой вопрос.
+        if cron_end_user_turn():
+            return True
+
+        key = str(platform or "").strip().lower()
+        if not key:
+            try:
+                from gateway.session_context import get_session_env
+
+                key = str(
+                    get_session_env("HERMES_SESSION_PLATFORM", "") or ""
+                ).strip().lower()
+            except Exception:
+                key = ""
+        if not key:
+            key = str(fallback_platform or "").strip().lower()
+        if not key:
+            return False
+
+        from hermes_cli.config import cfg_get, load_config_readonly
+
+        try:
+            _cfg = load_config_readonly() or {}
+        except Exception as read_err:
+            # Отдельный warning, а не общий except ниже: конфиг, который вообще
+            # не читается, оператор чинит иначе, чем опечатку в одном ключе.
+            _warn_once(
+                "read-failed",
+                "display.suppress_engineering_footers_platforms not read (%s: %s); "
+                "engineering footers stay on every channel until config.yaml loads",
+                type(read_err).__name__,
+                read_err,
+            )
+            return False
+
+        configured = cfg_get(
+            _cfg,
+            "display",
+            "suppress_engineering_footers_platforms",
+            default=None,
+        )
+        # Ключа нет -- фича просто выключена, это нормальный путь и молчит.
+        if configured is None:
+            return False
+        # Строка тоже итерируема, и `"w" in "whatsapp"` истинно -- принять её за
+        # список значило бы подавлять по случайному совпадению буквы. Форма
+        # руками создаётся легко (потерянное тире списка:
+        # `suppress_engineering_footers_platforms: whatsapp`), а симптом у
+        # оператора один -- «футеры всё ещё приходят», поэтому она говорит.
+        if not isinstance(configured, (list, tuple, set, frozenset)):
+            _warn_once(
+                f"not-a-list:{type(configured).__name__}",
+                "display.suppress_engineering_footers_platforms must be a list, got %r "
+                "-- ignoring it; engineering footers are NOT suppressed anywhere. "
+                "Write it as `suppress_engineering_footers_platforms: [whatsapp]`",
+                configured,
+            )
+            return False
+        return key in {str(item).strip().lower() for item in configured}
+    except Exception:
+        return False
