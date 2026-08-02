@@ -540,6 +540,22 @@ def finalize_turn(
     else:
         logger.info(_diag_msg, *_diag_args)
 
+    # Инженерные футеры не уходят на канал конечного пользователя.
+    #
+    # Считается один раз за финализацию и переиспользуется тремя блоками ниже:
+    # конфиг за ход не меняется, а три независимых чтения -- три шанса разойтись
+    # между собой. Отказ предиката (False) означает «показать всё», поэтому
+    # исключение здесь не может ничего скрыть.
+    _suppress_eng_footers = False
+    try:
+        from hermes_cli.run_evidence import engineering_footers_suppressed
+
+        _suppress_eng_footers = engineering_footers_suppressed(
+            fallback_platform=getattr(agent, "platform", None)
+        )
+    except Exception as _sup_err:
+        logger.debug("engineering footer suppression check failed: %s", _sup_err)
+
     # File-mutation verifier footer.
     # If one or more ``write_file`` / ``patch`` calls failed during this
     # turn and were never superseded by a successful write to the same
@@ -558,7 +574,7 @@ def finalize_turn(
     if final_response and not interrupted:
         try:
             _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
-            if _failed and agent._file_mutation_verifier_enabled():
+            if _failed and not _suppress_eng_footers and agent._file_mutation_verifier_enabled():
                 footer = agent._format_file_mutation_failure_footer(_failed)
                 if footer:
                     final_response = final_response.rstrip() + "\n\n" + footer
@@ -572,7 +588,7 @@ def finalize_turn(
     # агент подал `EXIT=0`, полученный в песочнице без браузерного окружения, как
     # доказательство работоспособности -- и никто не спросил, где он это мерил.
     # Блок не блокирует и ничего не требует: он просто не даёт умолчать о месте.
-    if final_response and not interrupted:
+    if final_response and not interrupted and not _suppress_eng_footers:
         try:
             from hermes_cli.run_evidence import (
                 observed_sandbox_commands,
@@ -631,6 +647,13 @@ def finalize_turn(
                     _explanation = agent._format_turn_completion_explanation(
                         _turn_exit_reason
                     )
+                    if _explanation and _suppress_eng_footers:
+                        # Пустая объяснялка -- признак нормального выхода;
+                        # подставлять вместо неё извинение значило бы
+                        # извиняться за успешный ответ.
+                        from hermes_cli.run_evidence import SUPPRESSED_TURN_NOTICE
+
+                        _explanation = SUPPRESSED_TURN_NOTICE
                     if _explanation:
                         if _is_empty_terminal:
                             # Replace the bare "(empty)"/blank sentinel with
