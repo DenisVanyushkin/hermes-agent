@@ -1,6 +1,5 @@
 """Phase 6a maintenance: audit_log retention + DB backups + verify."""
 from datetime import datetime, timezone, timedelta
-import json
 import os
 import sqlite3
 import subprocess
@@ -8,6 +7,7 @@ import tempfile
 from pathlib import Path
 from . import audit
 from . import db as famdb
+from . import diag
 from . import gate, health
 
 def _now_utc():
@@ -19,85 +19,91 @@ def _summary_watermark(conn, now):
         return val
     return (now - timedelta(hours=24)).isoformat(timespec="seconds")
 
+
+def _problem_lines(digest):
+    """Human-readable problem lines for the emergency fallback only --
+    the LLM report renders from the digest itself. Kept deliberately
+    close to the pre-2026-08 format so a fallback message still reads
+    like the summary Denis is used to, plus counts and age."""
+    sections = digest["sections"]
+    lines = []
+    for finding in sections.get("errors", {}).get("findings", []):
+        where = finding.get("p_where") or finding.get("kind")
+        example = (finding.get("examples") or [""])[0]
+        lines.append(f"{where}: {example} (×{finding['count']}, "
+                     f"{finding['status']}, {finding['age_days']} дн.)")
+    collisions = sections.get("calendar", {}).get("collisions", 0)
+    if collisions:
+        lines.append(f"календарь: {collisions} совпадающих записей, разобрать вручную")
+    for probe in sections.get("probes", []):
+        if probe["status"] != "ok":
+            lines.append(f"{probe['name']}: {probe['detail'] or probe['status']}")
+    for unit in sections.get("timers", {}).get("failed", []):
+        lines.append(f"unit {unit['unit']}: {unit['detail']}")
+    for err in sections.get("maintenance_errors", []):
+        lines.append(f"maintenance: {err}")
+    for name, err in digest.get("section_errors", {}).items():
+        lines.append(f"сборщик {name}: {err}")
+    return lines
+
+
 def problem_summary(cfg, now=None, notify=None, run_errors=None):
-    """Nightly day-wide health sweep. Scans audit_log since the last run
-    for minute-tick failure markers and cal-ext collision counts,
-    snapshots probes, folds in this run's maintenance errors (run_errors),
-    and (if anything is non-clean) delivers ONE consolidated message to
-    Denis. Clean -> silence. notify defaults to gate.notify_denis;
-    injected in tests.
+    """Nightly sweep: collect the digest, publish it for the agent's
+    `fam-nightly-report` job, and guard the delivery contract.
 
-    Watermark contract: maint_summary_last_run advances on a clean sweep
-    (nothing to report) or once notify() has returned truthy. If notify()
-    returns falsy (e.g. Telegram is down), the watermark stays put so the
-    next sweep re-covers the same window instead of the day's problems
-    vanishing behind a fresh watermark.
+    Delivery moved out of fam (design 2026-08-01): the LLM report is
+    rendered and delivered by the agent. What stays here is the invariant
+    this function has always enforced -- the watermark closes a window
+    only once its problems reached Denis. It now advances when the
+    reporter job confirms delivery of the PREVIOUS digest, when the raw
+    fallback gets through, or when the window is clean and there is
+    nothing to carry forward. Anything else holds the window open so the
+    next sweep re-covers it.
 
-    Cal-ext collisions (Task 8, fix-round 1): `cal.ext.sync` audit rows
-    carry a `collisions` count -- the fuzzy-match reconciliation in
-    `extcal.plan_changes` found the same appointment already filed in
-    both Hermes and the iPhone and linked them rather than duplicating,
-    which Denis has to untangle by hand (design doc, "Краевые случаи" #2:
-    Hermes deliberately never touches her copy's alarm). That row is only
-    written on a nonzero/changed tick (a healthy steady-state tick writes
-    nothing), so it is read here over the SAME `since`/watermark window as
-    `tick.error` rather than inventing a second scan or a separate meta
-    counter -- one audit_log pass, one watermark, same contract. Summed
-    across the window into a single counter-only line: no event titles,
-    no calendar names/URLs, no error text from that row is ever surfaced
-    here, matching the spec's audit/summary rule of UID-and-counts-only
-    for anything sourced from iPhone-controlled data."""
+    The fallback stays an emergency channel and is silent on a clean
+    night: daily cadence is the LLM report's contract, not fam's, and
+    making fam chatty while the job is being rolled out would be a
+    regression against today's behaviour."""
     now = now or _now_utc()
     notify = notify or gate.notify_denis
     conn = famdb.connect()
     try:
         since = _summary_watermark(conn, now)
-        rows = conn.execute(
-            "SELECT kind, payload FROM audit_log WHERE ts_utc >= ? "
-            "AND kind IN ('tick.error', 'cal.ext.sync') "
-            "ORDER BY id", (since,)).fetchall()
-        problems = []
-        collisions = 0
-        for r in rows:
-            payload = json.loads(r["payload"])
-            if r["kind"] == "tick.error":
-                problems.append(
-                    f"тик {payload.get('where','?')}: {payload.get('error','')}")
-            else:  # cal.ext.sync -- counter only, see docstring
-                c = payload.get("collisions")
-                if isinstance(c, int):
-                    collisions += c
-        if collisions:
-            problems.append(
-                f"календарь: {collisions} совпадающих записей, разобрать вручную")
-        for e in run_errors or []:
-            problems.append(f"maintenance: {e}")
-        probes = health.all_probes(conn, cfg, now=now)
-        probe_problems = [f"{p['name']}: {p['detail'] or p['status']}"
-                          for p in probes if p["status"] != "ok"]
-        all_problems = problems + probe_problems
-        if not all_problems:
+        previous_digest_at = famdb.meta_get(conn, "maint_digest_last_written")
+        delivered, detail = diag.report_delivery_status(
+            cfg.get("report_jobs_path", gate.CONFIG_DEFAULTS["report_jobs_path"]),
+            cfg.get("report_job_name", gate.CONFIG_DEFAULTS["report_job_name"]),
+            previous_digest_at)
+        digest, new_state = diag.build_digest(
+            conn, cfg, since, now,
+            delivery={"previous_report_ok": delivered,
+                      "previous_digest_at": previous_digest_at,
+                      "detail": detail},
+            state=diag.load_state(conn), verify=verify_backup)
+        digest["sections"]["maintenance_errors"] = list(run_errors or [])
+        diag.save_state(conn, new_state)
+        path = diag.write_digest(
+            digest,
+            cfg.get("diagnostics_dir", diag.DEFAULT_DIAGNOSTICS_DIR), now)
+        famdb.meta_set(conn, "maint_digest_last_written", digest["generated_at"])
+        conn.commit()
+
+        problems = _problem_lines(digest)
+        fallback_sent = False
+        if delivered or not problems:
+            advance = True
+        else:
+            fallback_sent = bool(notify(
+                "Гермес — сводка за сутки (LLM-отчёт не дошёл):\n"
+                + "\n".join(f"• {p}" for p in problems)))
+            advance = fallback_sent
+        if advance:
             famdb.meta_set(conn, "maint_summary_last_run",
                            now.isoformat(timespec="seconds"))
             conn.commit()
-            return {"problems": [], "probes": probes, "sent": False,
-                    "skipped_clean": True}
-        body = ("Гермес — сводка за сутки:\n"
-                + "\n".join(f"• {p}" for p in all_problems))
-        sent = bool(notify(body))
-        # The watermark only advances once the summary actually reached
-        # Denis (go-live review, finding 6): if the alert channel itself
-        # is down, yesterday's problems must survive into the next sweep
-        # instead of vanishing behind a fresh watermark. Trade-off:
-        # run_errors passed by THIS run are args, not audit rows, so a
-        # failed-notify night re-reports audit problems but loses those;
-        # maintenance errors recur if real, acceptable.
-        if sent:
-            famdb.meta_set(conn, "maint_summary_last_run",
-                           now.isoformat(timespec="seconds"))
-            conn.commit()
-        return {"problems": all_problems, "probes": probes,
-                "sent": sent, "skipped_clean": False}
+        return {"digest_path": str(path), "delivery_ok": delivered,
+                "delivery_detail": detail, "fallback_sent": fallback_sent,
+                "problems": problems, "skipped_clean": not problems}
     finally:
         conn.close()
 
