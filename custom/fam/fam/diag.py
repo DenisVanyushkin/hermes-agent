@@ -304,11 +304,21 @@ def collect_timers(runner=None):
 
 
 def collect_backups(cfg, now, verify):
-    """Newest dated backup + its integrity verdict. `verify` is injected
-    (maint.verify_backup) so diag never imports maint -- maint imports
-    diag, and the reverse edge would be a cycle."""
+    """Newest dated backup of the assistant DB + its integrity verdict.
+    `verify` is injected (maint.verify_backup) so diag never imports maint
+    -- maint imports diag, and the reverse edge would be a cycle.
+
+    backup_dir deliberately holds a second, unrelated backup target too:
+    maint.backup_db also drops state-YYYYMMDD.db (the Hermes dialogue DB,
+    cfg["state_db_path"]) in there every night. A broad "*-????????.db"
+    glob would silently pick whichever name sorts last -- "state" beats
+    "assistant" alphabetically -- and verify a DB that was never ours,
+    which is exactly the bug this fix closes (state.db has no meta table,
+    so verify_backup always failed it, producing a nightly false alarm).
+    Narrowing the glob to the assistant DB's own stem is the fix."""
+    stem = Path(famdb.resolve_db_path()).stem
     backup_dir = Path(cfg["backup_dir"])
-    files = sorted(backup_dir.glob("*-????????.db")) if backup_dir.is_dir() else []
+    files = sorted(backup_dir.glob(f"{stem}-????????.db")) if backup_dir.is_dir() else []
     if not files:
         return {"last_path": None, "verify": "missing", "schema_version": None,
                 "offsite_age_days": None}
@@ -328,6 +338,26 @@ def collect_backups(cfg, now, verify):
                 result["offsite_age_days"] = (now - written).days
             except ValueError:
                 result["offsite_age_days"] = None
+    state_db_path = cfg.get("state_db_path")
+    if state_db_path:
+        # Presence/age only -- never verify() this one. Its schema isn't
+        # ours (it's the Hermes dialogue DB), so an integrity/meta check
+        # here would just be the same false alarm this fix removed, aimed
+        # at a database this digest was never meant to police.
+        state_stem = Path(state_db_path).stem
+        state_files = (sorted(backup_dir.glob(f"{state_stem}-????????.db"))
+                       if backup_dir.is_dir() else [])
+        state_backup = {"last_path": None, "age_days": None}
+        if state_files:
+            newest_state = state_files[-1]
+            state_backup["last_path"] = newest_state.name
+            stamp = newest_state.name.split("-")[-1][:8]
+            try:
+                written = datetime.strptime(stamp, "%Y%m%d").replace(tzinfo=now.tzinfo)
+                state_backup["age_days"] = (now - written).days
+            except ValueError:
+                pass
+        result["state_backup"] = state_backup
     return result
 
 
