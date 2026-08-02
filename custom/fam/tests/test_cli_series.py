@@ -41,6 +41,27 @@ def test_cal_add_bad_day_errors(db):
                      "--days", "funday", "--start-time", "10:00"]) == 2
 
 
+def test_cal_add_bad_start_time_gives_clear_message(db, capsys):
+    """Finding 4: iter_occurrences() parses start_time with raw int()/
+    datetime() calls that raise an ugly message ("invalid literal for
+    int() with base 10: 'abc'", "hour must be in 0..23") -- the CLI must
+    validate with series._validate_hhmm first and surface its clearer
+    "time data ... does not match format '%H:%M'" instead."""
+    rc = cli.main(["cal", "add", "--title", "X", "--repeat", "weekly",
+                   "--days", "mon", "--start-time", "abc"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "does not match format" in err
+    assert "invalid literal for int" not in err
+
+    rc = cli.main(["cal", "add", "--title", "X", "--repeat", "weekly",
+                   "--days", "mon", "--start-time", "25:00"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "does not match format" in err
+    assert "hour must be in 0..23" not in err
+
+
 def test_cal_series_list_and_cancel(db, capsys):
     cli.main(["cal", "add", "--title", "Тренировка", "--repeat", "weekly",
               "--days", "mon,wed,fri", "--start-time", "10:00"])

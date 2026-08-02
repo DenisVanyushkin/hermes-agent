@@ -212,11 +212,22 @@ def test_cal_add_rejected_past_start_writes_no_audit_or_event(db, capsys):
     assert db.execute("SELECT COUNT(*) c FROM audit_log WHERE kind='cal.add'").fetchone()["c"] == 0
     assert db.execute("SELECT COUNT(*) c FROM events").fetchone()["c"] == 0
 
-def test_cal_add_past_end_without_past_start_is_not_validated(db, capsys):
+def test_cal_add_end_before_start_now_rejected_by_overlap_guardrail(db, capsys):
+    """Was test_cal_add_past_end_without_past_start_is_not_validated: end
+    before start used to slip through untouched because
+    _check_start_not_past only looks at --start. Since the 2026-08-01
+    occupancy guardrail, cmd_cal_add always calls _check_no_overlap first,
+    which always calls cal.overlaps() (Task 1) -- and that rejects
+    end < start outright. So this nonsensical interval is now caught as a
+    side effect, regardless of --allow-overlap: it is not an overlap, so
+    there is nothing for that flag to override."""
     end_in_past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
     rc = cli.main(["cal", "add", "--title", "X", "--start",
                    "2099-01-01T05:00:00+00:00", "--end", end_in_past, "--json"])
-    assert rc == 0
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "end is before start" in captured.err
+    assert db.execute("SELECT COUNT(*) c FROM events").fetchone()["c"] == 0
 
 def test_cal_update_start_in_past_exit_2(db, capsys):
     e = cal.add(db, "Т", "2099-01-01T05:00:00+00:00")

@@ -385,6 +385,50 @@ def _check_trip_has_transport(place, transport):
             "Transport is unknown."
         )
 
+# Occupancy guardrail (2026-08-01), CLI-layer only -- same split as
+# _check_start_not_past: cal.add()/cal.update() still accept anything.
+# Double-booking is legitimate (Amina may genuinely want two things at
+# once), but it must be HER decision: without --allow-overlap fam writes
+# nothing and names what is already there, so the skill has to ask.
+def _format_conflict(e):
+    """'Интервизия 06.08 10:00–12:15 (id=103)' -- local time, en dash."""
+    start = datetime.fromisoformat(e["start_local"])
+    span = start.strftime("%d.%m %H:%M")
+    if e["end_local"]:
+        span += "–" + datetime.fromisoformat(e["end_local"]).strftime("%H:%M")
+    return f"{e['title']} {span} (id={e['id']})"
+
+
+def _conflict_list(conflicts, limit=3):
+    shown = ", ".join(_format_conflict(e) for e in conflicts[:limit])
+    extra = len(conflicts) - limit
+    return shown + (f" (+{extra} more)" if extra > 0 else "")
+
+
+def _check_no_overlap(conn, start_utc, end_utc, allow_overlap, exclude_id=None):
+    """Raise ValueError (-> main -> exit 2) when the slot is taken and the
+    caller did not pass --allow-overlap. Returns the conflicts it let
+    through, so the caller can audit the acknowledgement."""
+    conflicts = cal.overlaps(conn, start_utc, end_utc, exclude_id=exclude_id)
+    if conflicts and not allow_overlap:
+        n = len(conflicts)
+        raise ValueError(
+            f"overlaps {n} active event{'s' if n > 1 else ''}: "
+            f"{_conflict_list(conflicts)}. Ask Amina whether to keep both, "
+            "then retry with --allow-overlap.")
+    return conflicts
+
+
+def _audit_overlap_ack(conn, scope, conflicts, **ids):
+    """One audit row per acknowledged double-booking -- makes Amina's
+    deliberate overlap distinguishable from an accidental one afterwards."""
+    if not conflicts:
+        return
+    payload = {"scope": scope, "conflicts": sorted({e["id"] for e in conflicts})}
+    payload.update(ids)
+    audit.log(conn, "cal.overlap_ack", payload)
+
+
 def cmd_cal_add(args):
     if getattr(args, "repeat", None):
         return _cmd_cal_add_series(args)
@@ -395,9 +439,11 @@ def cmd_cal_add(args):
     _check_start_not_past(args.start, args.allow_past)
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
+    conflicts = _check_no_overlap(conn, args.start, args.end, args.allow_overlap)
     e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
                 participants=args.with_, transport=args.transport, notes=args.notes,
                 travel_min=args.travel_min, prep_min=args.prep_min)
+    _audit_overlap_ack(conn, "add", conflicts, event_id=e["id"])
     conn.commit()
     _maybe_email_event(conn, e)
     if args.json:
@@ -416,6 +462,57 @@ def _cmd_cal_add_series(args):
         return 2
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
+    # Ref validation must win over the overlap preview below: series.add()
+    # used to be the first thing this function called, so an unknown place
+    # or participant surfaced immediately. Resolving refs here (pure reads,
+    # same as series.add()'s own resolution) keeps that ordering -- a bad
+    # ref is not something the overlap message's "ask Amina" framing fits.
+    # start_time/end_time are validated here, via the same
+    # series._validate_hhmm series.add() itself uses, so a bad value
+    # surfaces with its clear message ("time data '25:00' does not match
+    # format '%H:%M'") -- iter_occurrences below parses the same strings
+    # with raw int()/datetime() calls that raise uglier ones
+    # ("hour must be in 0..23", "invalid literal for int() ...") for the
+    # same input (Finding 4). Validating before the preview keeps the
+    # friendlier message for both paths without touching iter_occurrences.
+    try:
+        cal._resolve_place(conn, args.place)
+        cal._resolve_participants(conn, args.with_)
+        series._validate_hhmm(args.start_time)
+        if args.end_time is not None:
+            series._validate_hhmm(args.end_time)
+    except (ValueError, cal.UnknownRefError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    now_local = datetime.now(timezone.utc).astimezone(cal.ALMATY)
+    # Single clock read shared with series.generate() below (Finding 3):
+    # the preview here and the materialization there must check/write the
+    # same grid. Passed through generate()'s now_utc test seam as a UTC
+    # ISO string, matching how it normalizes the parameter.
+    now_utc_iso = now_local.astimezone(timezone.utc).isoformat(timespec="seconds")
+    horizon_date = (now_local + timedelta(weeks=series.HORIZON_WEEKS)).date()
+    try:
+        occurrences = series.iter_occurrences(
+            args.days, args.start_time, args.end_time, args.until,
+            now_local, horizon_date)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    # Check the whole grid BEFORE anything is written: a series that
+    # collides every week is exactly the case worth asking about once.
+    busy = [(start, cal.overlaps(conn, start, end)) for start, end in occurrences]
+    busy = [(start, hits) for start, hits in busy if hits]
+    if busy and not args.allow_overlap:
+        first_start, first_hits = busy[0]
+        first_local = datetime.fromisoformat(first_start).astimezone(
+            cal.ALMATY).strftime("%d.%m %H:%M")
+        print(f"error: series overlaps {len(busy)} of {len(occurrences)} "
+              f"planned occurrences, first: {_format_conflict(first_hits[0])} "
+              f"vs new {first_local}. Ask Amina, then retry with "
+              "--allow-overlap.", file=sys.stderr)
+        return 2
+
     try:
         s = series.add(conn, args.title, args.days, args.start_time,
                        end_time=args.end_time, place=args.place,
@@ -425,7 +522,10 @@ def _cmd_cal_add_series(args):
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    created = series.generate(conn)
+    created = series.generate(conn, now_utc=now_utc_iso)
+    _audit_overlap_ack(conn, "series",
+                       [e for _, hits in busy for e in hits],
+                       series_id=s["id"])
     conn.commit()
     if args.json:
         print(json.dumps({"series": s, "generated": created}, ensure_ascii=False))
@@ -482,10 +582,43 @@ def cmd_cal_update(args):
     if args.start is not None:
         _check_start_not_past(args.start, args.allow_past)
     conn = famdb.connect()
+    conflicts = []
+    shifted_end_utc = None
+    if args.start is not None or args.end is not None:
+        current = cal.get(conn, args.id)
+        # current is None -> unknown id: leave it to cal.update()'s own
+        # ValueError so the existing "unknown event: N" contract is intact.
+        if current is not None:
+            new_start = args.start if args.start is not None else current["start_utc"]
+            if (args.start is not None and args.end is None
+                    and current["end_utc"] is not None):
+                # --start alone must SHIFT THE END BY THE SAME DELTA,
+                # preserving the event's duration (Denis's ruling): moving
+                # a 10:00-12:15 event to 14:00 must land at 14:00-16:15, not
+                # leave end_utc where it was (which can put end before the
+                # new start -- the exact pre-existing silent-corruption bug
+                # this also fixes). An explicit --end always wins (this
+                # branch is skipped below); an end-less event stays
+                # end-less. Delta computed on real UTC datetimes, then
+                # renormalized through cal._to_utc_iso like every other
+                # stored value.
+                old_start_dt = datetime.fromisoformat(current["start_utc"])
+                old_end_dt = datetime.fromisoformat(current["end_utc"])
+                new_start_dt = datetime.fromisoformat(cal._to_utc_iso(args.start))
+                shifted_end_utc = cal._to_utc_iso(
+                    (old_end_dt + (new_start_dt - old_start_dt)).isoformat())
+                new_end = shifted_end_utc
+            else:
+                new_end = args.end if args.end is not None else current["end_utc"]
+            conflicts = _check_no_overlap(conn, new_start, new_end,
+                                          args.allow_overlap, exclude_id=args.id)
     fields = {}
     if args.title is not None: fields["title"] = args.title
     if args.start is not None: fields["start_utc"] = args.start
-    if args.end is not None: fields["end_utc"] = args.end
+    if args.end is not None:
+        fields["end_utc"] = args.end
+    elif shifted_end_utc is not None:
+        fields["end_utc"] = shifted_end_utc
     if args.place is not None: fields["place"] = args.place
     if args.transport is not None: fields["transport"] = args.transport
     if args.notes is not None: fields["notes"] = args.notes
@@ -494,6 +627,7 @@ def cmd_cal_update(args):
     if args.add_person: fields["add_person"] = args.add_person
     if args.rm_person: fields["rm_person"] = args.rm_person
     e = cal.update(conn, args.id, **fields)
+    _audit_overlap_ack(conn, "update", conflicts, event_id=args.id)
     conn.commit()
     # cal.update()'s "_material_changed" is an internal signal for this
     # hook only (see cal.py's docstring) -- pop it before anything else
@@ -3178,6 +3312,9 @@ def build_parser():
                            "with --repeat, copied onto every occurrence)")
     spa.add_argument("--allow-past", dest="allow_past", action="store_true",
                       help="skip the past-start guardrail (retroactive event entry)")
+    spa.add_argument("--allow-overlap", dest="allow_overlap", action="store_true",
+                      help="record this event even though the slot is already "
+                           "taken (only after Amina confirmed she wants both)")
     spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
@@ -3201,6 +3338,9 @@ def build_parser():
                       help="participant ref to remove (repeatable)")
     spu.add_argument("--allow-past", dest="allow_past", action="store_true",
                       help="skip the past-start guardrail (retroactive event entry)")
+    spu.add_argument("--allow-overlap", dest="allow_overlap", action="store_true",
+                      help="move this event onto a slot that is already taken "
+                           "(only after Amina confirmed she wants both)")
     spu.add_argument("--prep-asked", dest="prep_asked", action="store_true",
                       help="mark this event as having already been asked "
                            "about prep (sets events.prep_asked=1)")
