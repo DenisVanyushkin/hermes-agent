@@ -199,10 +199,17 @@ def test_engineering_channel_keeps_the_english_explainer(not_suppressed):
     assert SUPPRESSED_TURN_NOTICE not in result["final_response"]
 
 
-def test_healthy_turn_gets_no_notice_at_all(suppressed):
-    """Объяснялка пуста на нормальном выходе -- подставлять вместо неё
-    извинение значило бы извиняться за успешный ответ."""
-    result = _finalize(_FooterAgent(), final_response="Добавил гречку 🛒")
+def test_empty_response_on_healthy_exit_stays_empty_on_a_suppressed_channel(suppressed):
+    """Пустой `final_response` при штатном `_turn_exit_reason` (`text_response(...)`)
+    -- это нормальный, тихий выход: форматтер объяснялки сам возвращает пустую
+    строку на этом префиксе (см. `_FooterAgent._format_turn_completion_explanation`
+    и настоящую реализацию в `agent`), и подставлять вместо неё
+    `SUPPRESSED_TURN_NOTICE` было бы неверно -- ход не оборвался, отвечать
+    было просто нечем. Гейт `if _explanation and _suppress_eng_footers:` в
+    `finalize_turn` обязан пропускать пустую `_explanation`, не превращая её
+    в извинение. Если условие ослабить до `if _suppress_eng_footers:`, этот
+    тест краснеет (проверено вручную -- см. отчёт task-2-report.md)."""
+    result = _finalize(_FooterAgent(), final_response="", exit_reason="text_response(stop)")
 
-    assert result["final_response"] == "Добавил гречку 🛒"
+    assert result["final_response"] == ""
     assert SUPPRESSED_TURN_NOTICE not in result["final_response"]
