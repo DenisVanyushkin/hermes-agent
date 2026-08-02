@@ -485,7 +485,7 @@ show after cancel), make a second, separate terminal call.
 | Goal | Command |
 | --- | --- |
 | Record an event (`--start` = время начала, не выезда; `--transport` обязателен при `--place`) | `fam cal add --title T --start ISO [--end ISO] [--place P --transport car\|walk\|public] [--with NAME]... [--notes N] [--allow-overlap]` |
-| Change an event | `fam cal update <id> [--start ISO] [--place P] [--add-person N] [--rm-person N] ...` |
+| Change an event | `fam cal update <id> [--start ISO] [--end ISO] [--place P] [--add-person N] [--rm-person N] [--allow-overlap] ...` (moving with `--start` alone keeps the duration — end shifts with it; pass `--end` to change duration) |
 | Cancel an event | `fam cal cancel <id>` |
 | Mark an event done | `fam cal done <id>` |
 | Take over reminding her about an iPhone-owned event | `fam cal adopt <event_id>` |
