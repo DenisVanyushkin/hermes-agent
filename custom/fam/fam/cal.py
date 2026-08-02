@@ -665,7 +665,13 @@ def overlaps(conn, start_utc, end_utc=None, exclude_id=None):
     start = _to_utc_iso(start_utc)
     end = _to_utc_iso(end_utc) if end_utc is not None else start
     if end < start:
-        raise ValueError(f"end is before start: {end} < {start}")
+        # Local time (Asia/Almaty) + a remedy clause: every other
+        # user-facing time in fam is presented in local time, and a bare
+        # UTC comparison gives the LLM caller nothing to act on.
+        raise ValueError(
+            f"end is before start: {_to_local_iso(end)} < "
+            f"{_to_local_iso(start)} -- check --end"
+        )
 
     from_utc = (datetime.fromisoformat(start) - _OVERLAP_WINDOW).isoformat(
         timespec="seconds")

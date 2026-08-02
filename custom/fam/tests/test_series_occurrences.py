@@ -34,6 +34,7 @@ def test_until_local_caps_the_grid():
     until = (now + timedelta(days=10)).date().isoformat()
     occ = series.iter_occurrences("mon,wed,fri", "10:00", "12:00", until,
                                   now, horizon)
+    assert occ            # non-empty first -- guards against a vacuous pass
     assert all(
         datetime.fromisoformat(s).astimezone(cal.ALMATY).date().isoformat() <= until
         for s, _ in occ)

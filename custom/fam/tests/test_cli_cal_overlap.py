@@ -44,6 +44,20 @@ def test_add_into_busy_slot_exits_2_and_writes_nothing(db, capsys):
     ).fetchone()["c"] == 1      # только seed-событие
 
 
+def test_conflict_message_omits_range_for_point_event(db, capsys):
+    """_format_conflict's end-less branch (Finding 6): every other fixture
+    in this file gives the busy event an end, so the branch that skips the
+    "–HH:MM" range for a point event (no end_local) was never exercised."""
+    busy = cal.add(db, "Летучка", _local(3, 10))    # no --end -> point event
+    db.commit()
+    rc = cli.main(["cal", "add", "--title", "Совпадение", "--start", _local(3, 10)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "Летучка" in err
+    assert f"id={busy['id']}" in err
+    assert "–" not in err     # en dash used only for the end-of-range suffix
+
+
 def test_add_back_to_back_is_allowed(db, capsys):
     _busy(db)
     rc = cli.main(["cal", "add", "--title", "Массаж",
