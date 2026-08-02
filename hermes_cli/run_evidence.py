@@ -123,3 +123,68 @@ def render_execution_locus_block(sandbox_commands: list[str], write_refusals: in
         "сервисы и установленные пакеты там свои."
     )
     return "\n".join(lines)
+
+
+#: Что видит конечный пользователь вместо инженерной объяснялки оборванного
+#: хода. Молчание отвергнуто намеренно: «ничего не пришло» в чате читается как
+#: «меня проигнорировали», адресат пишет повторно -- а ход мог отработать
+#: наполовину. Строка предлагает ровно то действие, которое ему доступно.
+SUPPRESSED_TURN_NOTICE = "Не получилось ответить с первого раза — напиши, пожалуйста, ещё раз 🙏"
+
+
+def engineering_footers_suppressed(
+    platform: str | None = None,
+    *,
+    fallback_platform: str | None = None,
+) -> bool:
+    """True, когда канал этого хода -- не инженерный.
+
+    Блок про песочницу, отчёт о неудавшихся записях и объяснялка оборванного
+    хода адресованы ревьюеру кода. На канале конечного пользователя они
+    занимают больше места, чем сам ответ, и не описывают ничего, на что он
+    может отреагировать.
+
+    Платформа берётся по порядку: явный аргумент -> контекст сессии, который
+    гейтвей выставляет на каждый ход -> `fallback_platform` (обычно
+    `agent.platform`, для вызовов вне гейтвея). Контекст стоит выше атрибута
+    агента намеренно: у субагента, порождённого внутри хода, свой агент, но
+    адресат тот же самый.
+
+    Список каналов -- `display.suppress_engineering_footers_platforms`,
+    по умолчанию пуст: без правки конфига поведение прежнее.
+
+    Любой отказ (нет конфига, мусор в значении, недоступен контекст сессии)
+    даёт False. Сломанный конфиг обязан давать «слишком много инженерных
+    подробностей у оператора», а не «анти-оверклейм тихо выключен».
+    """
+    try:
+        key = str(platform or "").strip().lower()
+        if not key:
+            try:
+                from gateway.session_context import get_session_env
+
+                key = str(
+                    get_session_env("HERMES_SESSION_PLATFORM", "") or ""
+                ).strip().lower()
+            except Exception:
+                key = ""
+        if not key:
+            key = str(fallback_platform or "").strip().lower()
+        if not key:
+            return False
+
+        from hermes_cli.config import cfg_get, load_config_readonly
+
+        configured = cfg_get(
+            load_config_readonly() or {},
+            "display",
+            "suppress_engineering_footers_platforms",
+            default=None,
+        )
+        # Строка тоже итерируема, и `"w" in "whatsapp"` истинно -- принять её за
+        # список значило бы подавлять по случайному совпадению буквы.
+        if not isinstance(configured, (list, tuple, set, frozenset)):
+            return False
+        return key in {str(item).strip().lower() for item in configured}
+    except Exception:
+        return False

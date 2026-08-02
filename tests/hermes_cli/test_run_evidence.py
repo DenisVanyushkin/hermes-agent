@@ -125,3 +125,120 @@ def test_refusals_alone_still_render_when_commands_were_seen():
     # Отказ без единой замеченной команды рендерить нечего: блок висит на
     # командах, а их не было.
     assert render_execution_locus_block([], write_refusals=5) == ""
+
+
+from unittest.mock import patch
+
+import pytest
+
+from hermes_cli.run_evidence import (
+    SUPPRESSED_TURN_NOTICE,
+    engineering_footers_suppressed,
+)
+
+
+@pytest.fixture(autouse=True)
+def _pristine_session_context(monkeypatch):
+    """Платформа не должна протекать между тестами ни через ContextVar, ни через env.
+
+    Возврат делается в сентинел `_UNSET` («никогда не выставлялась»), а не в
+    `""`: пустая строка — это отдельное состояние «явно очищено», которое
+    подавляет fallback на os.environ и исказило бы соседние тесты.
+    """
+    monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+    yield
+    import gateway.session_context as sc
+
+    for var in sc._VAR_MAP.values():
+        var.set(sc._UNSET)
+
+
+def _with_config(cfg):
+    """Подменить чтение config.yaml. Резолв идёт через load_config_readonly."""
+    return patch("hermes_cli.config.load_config_readonly", return_value=cfg)
+
+
+def _suppress_config(platforms):
+    return {"display": {"suppress_engineering_footers_platforms": platforms}}
+
+
+def test_absent_config_key_means_no_suppression():
+    with _with_config({"display": {}}):
+        assert engineering_footers_suppressed("whatsapp") is False
+
+
+def test_listed_platform_is_suppressed():
+    with _with_config(_suppress_config(["whatsapp"])):
+        assert engineering_footers_suppressed("whatsapp") is True
+
+
+def test_unlisted_platform_is_not_suppressed():
+    with _with_config(_suppress_config(["whatsapp"])):
+        assert engineering_footers_suppressed("telegram") is False
+
+
+def test_platform_match_ignores_case_and_padding():
+    with _with_config(_suppress_config([" WhatsApp "])):
+        assert engineering_footers_suppressed("whatsapp") is True
+        assert engineering_footers_suppressed("  WHATSAPP") is True
+
+
+def test_bare_string_instead_of_list_is_not_suppression():
+    """Строка итерируется посимвольно — принять её за список значило бы
+    подавлять всё подряд по случайному совпадению буквы."""
+    with _with_config(_suppress_config("whatsapp")):
+        assert engineering_footers_suppressed("whatsapp") is False
+
+
+def test_empty_list_is_not_suppression():
+    with _with_config(_suppress_config([])):
+        assert engineering_footers_suppressed("whatsapp") is False
+
+
+def test_unknown_platform_is_not_suppressed():
+    with _with_config(_suppress_config(["whatsapp"])):
+        assert engineering_footers_suppressed("") is False
+        assert engineering_footers_suppressed(None) is False
+
+
+def test_config_read_failure_does_not_suppress():
+    """Отказ конфига обязан ронять фичу в сторону «показать всё», а не
+    в сторону «молча выключить анти-оверклейм»."""
+    with patch("hermes_cli.config.load_config_readonly", side_effect=RuntimeError("boom")):
+        assert engineering_footers_suppressed("whatsapp") is False
+
+
+def test_platform_is_taken_from_session_context_when_no_argument():
+    from gateway.session_context import set_session_vars
+
+    set_session_vars(platform="whatsapp", chat_id="77011102626")
+    with _with_config(_suppress_config(["whatsapp"])):
+        assert engineering_footers_suppressed() is True
+
+
+def test_explicit_argument_wins_over_session_context():
+    from gateway.session_context import set_session_vars
+
+    set_session_vars(platform="telegram", chat_id="79564752")
+    with _with_config(_suppress_config(["whatsapp"])):
+        assert engineering_footers_suppressed("whatsapp") is True
+
+
+def test_fallback_platform_used_only_when_context_is_empty():
+    with _with_config(_suppress_config(["whatsapp"])):
+        assert engineering_footers_suppressed(fallback_platform="whatsapp") is True
+
+
+def test_session_context_wins_over_fallback_platform():
+    from gateway.session_context import set_session_vars
+
+    set_session_vars(platform="telegram", chat_id="79564752")
+    with _with_config(_suppress_config(["whatsapp"])):
+        assert engineering_footers_suppressed(fallback_platform="whatsapp") is False
+
+
+def test_notice_carries_no_technical_vocabulary():
+    lowered = SUPPRESSED_TURN_NOTICE.lower()
+    for word in ("continue", "provider", "модел", "провайдер", "ход", "сесси", "/"):
+        assert word not in lowered
+    assert SUPPRESSED_TURN_NOTICE.strip() == SUPPRESSED_TURN_NOTICE
