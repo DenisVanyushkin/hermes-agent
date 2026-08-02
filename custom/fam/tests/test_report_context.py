@@ -175,3 +175,24 @@ def test_digest_that_cannot_fit_gets_an_explicit_hard_cut_marker(tmp_path):
     assert not out.startswith("DIGEST")
     assert out.endswith("DIGEST TRUNCATED: output exceeded the prompt budget")
     assert len(out) <= module.MAX_CHARS
+
+
+def test_malformed_sections_type_does_not_crash_the_budget_shed(tmp_path):
+    # Regression: compact_digest() deliberately returns the digest
+    # unchanged when `sections` is present but not a dict (its own
+    # isinstance guard). `_fit_to_budget` used to do
+    # `compact.get("sections", {}).get("errors")`, which only guards a
+    # MISSING "sections" key, not a present-but-wrong-type value — so
+    # sections=None/[]/"oops" raised AttributeError and the LLM got
+    # nothing instead of a degraded digest. Malformed input that
+    # compact_digest was explicitly written to tolerate must not take the
+    # whole script down.
+    module = _module()
+    generated = datetime(2026, 8, 1, 22, 30)
+    for i, bad_sections in enumerate([None, [], "oops"]):
+        path = tmp_path / f"d{i}.json"
+        path.write_text(json.dumps(
+            {"generated_at": generated.isoformat(), "sections": bad_sections}),
+            encoding="utf-8")
+        out = module.render(path, generated + timedelta(hours=1))
+        assert out, f"render() returned empty output for sections={bad_sections!r}"

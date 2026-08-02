@@ -71,7 +71,15 @@ def _fit_to_budget(compact, budget):
     """
     budget = max(budget, 0)
     body = json.dumps(compact, ensure_ascii=False, indent=1)
-    errors = compact.get("sections", {}).get("errors")
+    # compact_digest() guards `sections` by type, not just by key presence
+    # (it returns the digest unchanged when `sections` is present but not a
+    # dict). A `.get(key, default)` chain here only covers a MISSING key —
+    # `sections` can still be None/[]/a string/a number, and `.get` on any
+    # of those raises AttributeError. Check the type at each step instead.
+    sections = compact.get("sections")
+    errors = sections.get("errors") if isinstance(sections, dict) else None
+    if not isinstance(errors, dict):
+        errors = None
     while len(body) > budget and isinstance(errors, dict) and errors.get("findings"):
         errors["findings"].pop()
         errors["findings_truncated"] = errors.get("findings_truncated", 0) + 1
