@@ -1092,7 +1092,9 @@ def test_writes_digest_instead_of_sending(db, tmp_path, monkeypatch):
     digest = json.loads((tmp_path / "diagnostics" / "fam-digest-latest.json")
                         .read_text(encoding="utf-8"))
     assert digest["sections"]["errors"]["findings"][0]["count"] == 1
-    assert famdb.meta_get(db, "maint_summary_last_run") == NOW.isoformat(timespec="seconds")
+    # To the CONFIRMED digest's timestamp, not NOW: tonight's digest has
+    # not been delivered yet and its window must stay open.
+    assert famdb.meta_get(db, "maint_summary_last_run") == "2026-08-01T22:30:00+00:00"
 
 
 def test_raw_fallback_when_report_not_confirmed(db, tmp_path, monkeypatch):
@@ -1135,10 +1137,11 @@ def test_watermark_held_when_fallback_also_fails(db, tmp_path, monkeypatch):
         "an undelivered problem window must survive into the next sweep"
 
 
-def test_clean_window_is_silent_and_advances(db, tmp_path, monkeypatch):
+def test_clean_window_is_silent_and_holds_the_watermark(db, tmp_path, monkeypatch):
     # Daily cadence is the LLM report's job. The fallback stays an
     # emergency channel: silence on a clean night keeps rollout behaviour
-    # identical to today's.
+    # identical to today's. And with nothing confirmed delivered, the
+    # watermark must not move -- see the next test for why.
     _all_probes_ok(monkeypatch)
     monkeypatch.setattr(maint.diag, "collect_timers",
                         lambda runner=None: {"failed": [], "ok": []})
@@ -1147,7 +1150,30 @@ def test_clean_window_is_silent_and_advances(db, tmp_path, monkeypatch):
                                 notify=lambda t: sent.append(t) or True)
     assert sent == []
     assert out["skipped_clean"] is True
-    assert famdb.meta_get(db, "maint_summary_last_run") == NOW.isoformat(timespec="seconds")
+    assert famdb.meta_get(db, "maint_summary_last_run") is None
+
+
+def test_clean_night_does_not_strand_an_undelivered_digest(db, tmp_path, monkeypatch):
+    # The failure this contract exists to prevent. Night A publishes a
+    # digest holding a real error. Night B finds that digest undelivered
+    # but has a quiet window of its own. If B advanced the watermark,
+    # night A's error would fall behind every future window and be lost
+    # with no fallback ever attempted for it.
+    _all_probes_ok(monkeypatch)
+    monkeypatch.setattr(maint.diag, "collect_timers",
+                        lambda runner=None: {"failed": [], "ok": []})
+    famdb.meta_set(db, "maint_summary_last_run", "2026-07-31T22:30:00+00:00")
+    famdb.meta_set(db, "maint_digest_last_written", "2026-08-01T22:30:00+00:00")
+    db.commit()
+    _confirmed_job(tmp_path, "2026-07-01T03:00:00+00:00")   # never delivered digest A
+
+    sent = []
+    out = maint.problem_summary(_cfg(tmp_path), now=NOW,
+                                notify=lambda t: sent.append(t) or True)
+
+    assert out["delivery_ok"] is False
+    assert sent == [], "a clean window has nothing of its own to report"
+    assert famdb.meta_get(db, "maint_summary_last_run") == "2026-07-31T22:30:00+00:00"
 
 
 def test_run_errors_are_folded_into_the_digest(db, tmp_path, monkeypatch):
@@ -1214,11 +1240,12 @@ def problem_summary(cfg, now=None, notify=None, run_errors=None):
     Delivery moved out of fam (design 2026-08-01): the LLM report is
     rendered and delivered by the agent. What stays here is the invariant
     this function has always enforced -- the watermark closes a window
-    only once its problems reached Denis. It now advances when the
-    reporter job confirms delivery of the PREVIOUS digest, when the raw
-    fallback gets through, or when the window is clean and there is
-    nothing to carry forward. Anything else holds the window open so the
-    next sweep re-covers it.
+    only once its problems reached Denis. The watermark marks how far
+    delivery is CONFIRMED, not when we last looked: on a confirmed report
+    it moves to the previous digest's own timestamp, on a delivered raw
+    fallback to now, and otherwise it does not move at all -- including
+    on a clean night, because a clean window says nothing about an
+    earlier digest that never arrived.
 
     The fallback stays an emergency channel and is silent on a clean
     night: daily cadence is the LLM report's contract, not fam's, and
@@ -1250,16 +1277,27 @@ def problem_summary(cfg, now=None, notify=None, run_errors=None):
 
         problems = _problem_lines(digest)
         fallback_sent = False
-        if delivered or not problems:
-            advance = True
-        else:
+        if delivered:
+            # To the CONFIRMED digest's timestamp, not to now. The digest
+            # written moments ago is still unconfirmed: closing the window
+            # on it would stake this night's problems on a delivery nobody
+            # has verified. Consequence -- consecutive digests overlap by
+            # one night, which is the safety margin: an undelivered
+            # digest's contents reappear in the next one, deduplicated by
+            # signature and marked `known`.
+            advance_to = previous_digest_at
+        elif problems:
             fallback_sent = bool(notify(
                 "Гермес — сводка за сутки (LLM-отчёт не дошёл):\n"
                 + "\n".join(f"• {p}" for p in problems)))
-            advance = fallback_sent
-        if advance:
-            famdb.meta_set(conn, "maint_summary_last_run",
-                           now.isoformat(timespec="seconds"))
+            advance_to = now.isoformat(timespec="seconds") if fallback_sent else None
+        else:
+            # Clean window, report unconfirmed: nothing was delivered, so
+            # nothing may be closed. Advancing here is what would strand an
+            # earlier undelivered digest behind the watermark forever.
+            advance_to = None
+        if advance_to:
+            famdb.meta_set(conn, "maint_summary_last_run", advance_to)
             conn.commit()
         return {"digest_path": str(path), "delivery_ok": delivered,
                 "delivery_detail": detail, "fallback_sent": fallback_sent,
