@@ -1626,19 +1626,34 @@ ssh hermes-home 'python3 -m json.tool ~/.hermes/diagnostics/fam-digest-latest.js
 
 Проверить глазами: находка `meds_row` схлопнута с `count`, есть `status`/`age_days`, в файле **нет** названий лекарств, событий и текстов сообщений. Ожидаемо `delivery.previous_report_ok = false` — джоба ещё нет, поэтому придёт сырой откат. Это штатно.
 
-- [ ] **Step 6: Развернуть контекст-скрипт**
+- [ ] **Step 6: Развернуть контекст-скрипт — копией, не симлинком**
 
 ```bash
-ssh hermes-home 'ln -sf ~/.hermes/hermes-agent/custom/fam/scripts/fam_report_context.py ~/.hermes/scripts/fam_report_context.py && python3 ~/.hermes/scripts/fam_report_context.py | head -30'
+ssh hermes-home 'cp ~/.hermes/hermes-agent/custom/fam/scripts/fam_report_context.py ~/.hermes/scripts/fam_report_context.py && chmod 755 ~/.hermes/scripts/fam_report_context.py && python3 ~/.hermes/scripts/fam_report_context.py | head -30'
 ```
+
+**Симлинк не работает** (проверено на хосте 2026-08-02). `cron/scheduler.py`
+резолвит путь скрипта через `(scripts_dir / raw).resolve()` и затем требует
+`relative_to(scripts_dir_resolved)`, поэтому симлинк, ведущий в чекаут,
+отвергается: «script path resolves outside the scripts directory».
+
+**Следствие — дрейф.** Копия не обновляется вместе с репозиторием. При любом
+изменении `custom/fam/scripts/fam_report_context.py` шаг 6 надо повторить.
+Сверка: `md5sum` обоих файлов.
 
 - [ ] **Step 7: Создать cron-джоб `fam-nightly-report`**
 
 Джоб добавляется через интерфейс планировщика агента (как остальные записи в `~/.hermes/cron/jobs.json`), поля:
 
+**Расписание задаётся по времени Алматы, а не по UTC.** Планировщик берёт «сейчас»
+из `hermes_time.now()`, то есть из настроенной таймзоны Гермеса (`Asia/Almaty`,
++05:00), хотя системные часы хоста стоят в UTC. Поэтому `0 3 * * *` сработало бы
+в 22:00 UTC — за полчаса **до** сборщика, и отчёт каждую ночь читал бы вчерашний
+дайджест с меткой `DIGEST STALE`. Нужные 03:00 UTC записываются как `0 8 * * *`.
+
 ```
 name:     fam-nightly-report
-schedule: {"kind": "cron", "expr": "0 3 * * *"}
+schedule: {"kind": "cron", "expr": "0 8 * * *"}   # 08:00 Алматы = 03:00 UTC
 script:   fam_report_context.py
 model:    gpt-5.6-luna      provider: openai-codex
 no_agent: false             deliver:  telegram:79564752
