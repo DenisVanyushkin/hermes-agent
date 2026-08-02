@@ -467,13 +467,29 @@ def _cmd_cal_add_series(args):
     # or participant surfaced immediately. Resolving refs here (pure reads,
     # same as series.add()'s own resolution) keeps that ordering -- a bad
     # ref is not something the overlap message's "ask Amina" framing fits.
+    # start_time/end_time are validated here, via the same
+    # series._validate_hhmm series.add() itself uses, so a bad value
+    # surfaces with its clear message ("time data '25:00' does not match
+    # format '%H:%M'") -- iter_occurrences below parses the same strings
+    # with raw int()/datetime() calls that raise uglier ones
+    # ("hour must be in 0..23", "invalid literal for int() ...") for the
+    # same input (Finding 4). Validating before the preview keeps the
+    # friendlier message for both paths without touching iter_occurrences.
     try:
         cal._resolve_place(conn, args.place)
         cal._resolve_participants(conn, args.with_)
+        series._validate_hhmm(args.start_time)
+        if args.end_time is not None:
+            series._validate_hhmm(args.end_time)
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     now_local = datetime.now(timezone.utc).astimezone(cal.ALMATY)
+    # Single clock read shared with series.generate() below (Finding 3):
+    # the preview here and the materialization there must check/write the
+    # same grid. Passed through generate()'s now_utc test seam as a UTC
+    # ISO string, matching how it normalizes the parameter.
+    now_utc_iso = now_local.astimezone(timezone.utc).isoformat(timespec="seconds")
     horizon_date = (now_local + timedelta(weeks=series.HORIZON_WEEKS)).date()
     try:
         occurrences = series.iter_occurrences(
@@ -506,7 +522,7 @@ def _cmd_cal_add_series(args):
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    created = series.generate(conn)
+    created = series.generate(conn, now_utc=now_utc_iso)
     _audit_overlap_ack(conn, "series",
                        [e for _, hits in busy for e in hits],
                        series_id=s["id"])
