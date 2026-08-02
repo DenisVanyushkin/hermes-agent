@@ -18,6 +18,15 @@ from . import health
 MAX_EXAMPLES = 3
 MAX_CONTEXT_VALUES = 10
 SIGNATURE_MAX = 300
+# health.py's probe `detail` is unowned free text from gateway.log -- a file
+# this repo does not own, with no allow-list of its own. health.py's other
+# callers (tick readiness alert, maybe_alert_readiness) legitimately need
+# the full line, so the cap lives here instead of in health.py. Today's
+# benign bridge marker line could grow an identifier or a message preview
+# tomorrow with no change to fam at all; re-imposing the same allow-list
+# discipline that governs audit_log payloads (ERROR_SPEC above) by length
+# is the only guard that survives that kind of drift.
+PROBE_DETAIL_MAX = 120
 
 _HEX_RE = re.compile(r"[0-9a-fA-F]{8,}")
 _NUM_RE = re.compile(r"\d+")
@@ -47,7 +56,15 @@ def normalize_signature(text):
 
 
 def collect_errors(conn, since):
-    """Fold every *.error row since `since` into deduplicated findings.
+    """Fold rows of the four kinds in ERROR_SPEC (tick.error, gate.error,
+    mail.error, road.error) since `since` into deduplicated findings.
+
+    This is NOT every `*.error` row fam writes: cal.ext.apply_error,
+    cal.ext.export_error, rem.rule_error, road.hook_error and
+    rem.cancel_error_cap are outside ERROR_SPEC and invisible to this
+    digest -- widening the SQL to cover them is a design decision (each
+    needs its own allow-list entry), not something this function does on
+    its own.
 
     Returns findings sorted by descending count. A row whose payload is
     not a JSON object still produces a finding keyed on its kind alone --
@@ -93,14 +110,35 @@ def collect_errors(conn, since):
             if value is None:
                 continue
             values = bucket["context"].setdefault(field, [])
-            if value not in values and len(values) < MAX_CONTEXT_VALUES:
+            if value in values:
+                continue
+            if len(values) < MAX_CONTEXT_VALUES:
                 values.append(value)
+            else:
+                # Never truncate silently (mirrors the reporter's
+                # findings_truncated/resolved_truncated): 40 distinct
+                # broken intake_ids capped at 10 with no marker is
+                # indistinguishable from exactly 10 -- count what the cap
+                # drops instead of just dropping it.
+                dropped = bucket.setdefault("_context_dropped", {})
+                dropped[field] = dropped.get(field, 0) + 1
         if spec["text"]:
             example = str(payload.get("error") or "")[:200]
-            if example and example not in bucket["examples"] \
-                    and len(bucket["examples"]) < MAX_EXAMPLES:
-                bucket["examples"].append(example)
-    return sorted(buckets.values(), key=lambda b: -b["count"])
+            if example and example not in bucket["examples"]:
+                if len(bucket["examples"]) < MAX_EXAMPLES:
+                    bucket["examples"].append(example)
+                else:
+                    bucket["_examples_dropped"] = bucket.get("_examples_dropped", 0) + 1
+    findings = []
+    for bucket in buckets.values():
+        context_dropped = bucket.pop("_context_dropped", None)
+        if context_dropped:
+            bucket["context_truncated"] = context_dropped
+        examples_dropped = bucket.pop("_examples_dropped", 0)
+        if examples_dropped:
+            bucket["examples_truncated"] = examples_dropped
+        findings.append(bucket)
+    return sorted(findings, key=lambda b: -b["count"])
 
 
 STATE_KEY = "maint_known_issues"
@@ -321,8 +359,24 @@ def build_digest(conn, cfg, since, now, delivery, state, verify, runner=None):
             state, collect_errors(conn, since), now)
         return {"findings": annotated, "resolved": resolved}
 
+    def _probes():
+        # Re-truncate here, not in health.py: health.all_probes' other
+        # callers (tick readiness alert) need the full line, and this
+        # digest leaves the host for an external LLM. name/status/
+        # last_ok_ts are the allow-listed technical fields; detail is
+        # free text from gateway.log and gets capped, not trusted.
+        out = []
+        for probe in health.all_probes(conn, cfg, now=now):
+            out.append({
+                "name": probe["name"],
+                "status": probe["status"],
+                "detail": (probe.get("detail") or "")[:PROBE_DETAIL_MAX],
+                "last_ok_ts": probe.get("last_ok_ts"),
+            })
+        return out
+
     _section("errors", _errors)
-    _section("probes", lambda: health.all_probes(conn, cfg, now=now))
+    _section("probes", _probes)
     _section("calendar", lambda: collect_calendar(conn, since))
     _section("activity", lambda: collect_activity(conn, cfg, since, now))
     _section("timers", lambda: collect_timers(runner=runner))

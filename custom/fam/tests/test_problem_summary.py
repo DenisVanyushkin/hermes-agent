@@ -151,3 +151,61 @@ def test_run_errors_are_folded_into_the_digest(db, tmp_path, monkeypatch):
                         .read_text(encoding="utf-8"))
     assert digest["sections"]["maintenance_errors"] == ["backup /x: disk full"]
     assert out["skipped_clean"] is False
+
+
+def test_diagnostics_dir_none_falls_back_to_default(db, tmp_path, monkeypatch):
+    # Critical-class regression: cfg.get("diagnostics_dir", DEFAULT) only
+    # substitutes the default for an ABSENT key -- "diagnostics_dir": null
+    # in a live config reaches Path(None) inside write_digest and raises
+    # TypeError, which run_maintenance swallows into result["errors"]
+    # silently (no digest written, no fallback, frozen watermark).
+    # diag.DEFAULT_DIAGNOSTICS_DIR is monkeypatched to tmp_path/"diagnostics"
+    # by conftest's autouse _isolate_prod_stores fixture, so the fallback
+    # path is verifiable without touching a real filesystem location.
+    _all_probes_ok(monkeypatch)
+    monkeypatch.setattr(maint.diag, "collect_timers",
+                        lambda runner=None: {"failed": [], "ok": []})
+    cfg = _cfg(tmp_path, diagnostics_dir=None)
+    # A raised TypeError would fail this call directly (not run_maintenance's
+    # try/except path, since we call problem_summary itself here) -- the
+    # assertion is that it returns at all, and that it wrote where the
+    # (monkeypatched) default actually points.
+    maint.problem_summary(cfg, now=NOW, notify=lambda t: True)
+    digest_path = tmp_path / "diagnostics" / "fam-digest-latest.json"
+    assert digest_path.exists(), "diagnostics_dir=None must fall back, not raise"
+    digest = json.loads(digest_path.read_text(encoding="utf-8"))
+    assert digest["generated_at"]
+
+
+def test_published_digest_never_leaks_raw_message_or_event_text(db, tmp_path, monkeypatch):
+    # tests/test_diag.py's privacy assertions (e.g.
+    # test_gate_error_never_exposes_message_text) check collect_errors()'
+    # return value, not the artefact fam actually publishes for the
+    # external LLM to read. This is the end-to-end version: drive the full
+    # problem_summary pipeline and inspect the bytes written to
+    # fam-digest-latest.json -- the check that would have caught FIX 1
+    # (health.py's full, uncapped gateway.log line reaching every probe's
+    # detail, allow-list or not).
+    long_marker = "SENSITIVE-BRIDGE-LOG-LINE-MARKER-" + ("x" * 200)
+    monkeypatch.setattr(
+        maint.health, "all_probes",
+        lambda conn, cfg, now=None: [
+            {"name": "bridge_readiness", "status": "down",
+             "detail": long_marker, "last_ok_ts": None}])
+    monkeypatch.setattr(maint.diag, "collect_timers",
+                        lambda runner=None: {"failed": [], "ok": []})
+    audit.log(db, "gate.error",
+              {"kind": "reminder", "attempt": 1,
+               "raw": {"text": "прими лекарство немедленно"},
+               "final": "Прими лекарство немедленно"})
+    audit.log(db, "cal.ext.sync",
+              {"collisions": 1, "title": "Секретный приём у врача"})
+    db.commit()
+
+    maint.problem_summary(_cfg(tmp_path), now=NOW, notify=lambda t: True)
+
+    raw = (tmp_path / "diagnostics" / "fam-digest-latest.json").read_text(encoding="utf-8")
+    assert "лекарств" not in raw.lower()
+    assert "секрет" not in raw.lower()
+    assert "приём у врача" not in raw.lower()
+    assert long_marker not in raw, "probe detail must be capped, not shipped whole"

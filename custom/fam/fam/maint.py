@@ -83,9 +83,15 @@ def problem_summary(cfg, now=None, notify=None, run_errors=None):
             state=diag.load_state(conn), verify=verify_backup)
         digest["sections"]["maintenance_errors"] = list(run_errors or [])
         diag.save_state(conn, new_state)
+        # `or` not bare `.get(key, default)`: as with report_jobs_path
+        # above, `.get` substitutes its default only for an ABSENT key --
+        # "diagnostics_dir": null in the live config would otherwise reach
+        # Path(None) inside write_digest and raise TypeError, which
+        # run_maintenance swallows into result["errors"] silently (no
+        # digest, no fallback, frozen watermark).
         path = diag.write_digest(
             digest,
-            cfg.get("diagnostics_dir", diag.DEFAULT_DIAGNOSTICS_DIR), now)
+            str(cfg.get("diagnostics_dir") or diag.DEFAULT_DIAGNOSTICS_DIR), now)
         famdb.meta_set(conn, "maint_digest_last_written", digest["generated_at"])
         conn.commit()
 

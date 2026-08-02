@@ -103,6 +103,47 @@ def test_mail_error_event_id_in_context_and_text_in_signature(db):
     assert "DNS resolution failed" in findings[0]["examples"]
 
 
+def test_context_overflow_is_counted_not_silently_dropped(db):
+    # 40 distinct broken intake_ids capped at MAX_CONTEXT_VALUES (10) would
+    # otherwise be indistinguishable from exactly 10 -- the cap must say
+    # how much it dropped, mirroring the reporter's findings_truncated.
+    for intake in range(40):
+        audit.log(db, "tick.error",
+                  {"where": "meds_row", "intake_id": intake, "exc_type": "KeyError",
+                   "error": "No item with that key"}, actor="tick")
+    db.commit()
+    findings = diag.collect_errors(db, "1970-01-01T00:00:00+00:00")
+    assert len(findings) == 1
+    finding = findings[0]
+    assert len(finding["context"]["intake_id"]) == diag.MAX_CONTEXT_VALUES
+    assert finding["context_truncated"] == {"intake_id": 40 - diag.MAX_CONTEXT_VALUES}
+
+
+def test_context_under_cap_gets_no_truncated_marker(db):
+    for intake in (10, 11, 12):
+        audit.log(db, "tick.error",
+                  {"where": "meds_row", "intake_id": intake, "exc_type": "KeyError",
+                   "error": "No item with that key"}, actor="tick")
+    db.commit()
+    findings = diag.collect_errors(db, "1970-01-01T00:00:00+00:00")
+    assert "context_truncated" not in findings[0], \
+        "a marker present when nothing was dropped would be its own false signal"
+
+
+def test_examples_overflow_is_counted_not_silently_dropped(db):
+    # Same mechanism, mirrored for MAX_EXAMPLES (3): distinct example
+    # strings beyond the cap must be counted, not silently discarded.
+    for i in range(6):
+        audit.log(db, "mail.error",
+                  {"event_id": i, "error": f"unique failure {i}"}, actor="mail")
+    db.commit()
+    findings = diag.collect_errors(db, "1970-01-01T00:00:00+00:00")
+    assert len(findings) == 1, "digits normalize to <n> so all six share one signature"
+    finding = findings[0]
+    assert len(finding["examples"]) == diag.MAX_EXAMPLES
+    assert finding["examples_truncated"] == 6 - diag.MAX_EXAMPLES
+
+
 def test_first_sighting_is_new_then_known(db):
     now1 = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
     findings = [{"signature": "tick.error|where=meds_row", "count": 3}]
@@ -298,6 +339,31 @@ def test_backups_offsite_age_days_computed_from_newest_dump(tmp_path):
          "offsite_dir": str(offsite_dir)}, now,
         verify=lambda path: (True, {"integrity": "ok", "schema_version": "12"}))
     assert result["offsite_age_days"] == 4
+
+
+def test_build_digest_truncates_probe_detail_to_120_chars(db, monkeypatch):
+    # health.py's probe detail is unowned free text straight from
+    # gateway.log -- no allow-list, no cap in health.py itself (its other
+    # callers need the full line). build_digest's probes section must
+    # re-impose that discipline by length before the digest leaves the
+    # host, for every probe, not just unhealthy ones.
+    long_line = "✓ whatsapp connected " + ("bridge-detail-" * 20)
+    assert len(long_line) > diag.PROBE_DETAIL_MAX
+    monkeypatch.setattr(diag.health, "all_probes",
+                        lambda conn, cfg, now=None: [
+                            {"name": "bridge_readiness", "status": "ok",
+                             "detail": long_line, "last_ok_ts": None}])
+    now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
+    digest, _ = diag.build_digest(
+        db, {"daily_budget": 8, "backup_dir": "/nonexistent"},
+        "1970-01-01T00:00:00+00:00", now,
+        delivery={"previous_report_ok": True}, state={},
+        verify=lambda p: (True, {}))
+    probe = digest["sections"]["probes"][0]
+    assert probe["name"] == "bridge_readiness"
+    assert probe["status"] == "ok"
+    assert len(probe["detail"]) == diag.PROBE_DETAIL_MAX
+    assert probe["detail"] == long_line[:diag.PROBE_DETAIL_MAX]
 
 
 def test_build_digest_isolates_a_failing_section(db, monkeypatch):
