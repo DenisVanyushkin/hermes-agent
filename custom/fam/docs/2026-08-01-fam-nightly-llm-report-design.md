@@ -64,7 +64,7 @@
 fam-maintenance.timer (22:30 UTC)
  └─ fam tick maintenance
       ├─ prune + backup + offsite               (без изменений)
-      ├─ collect_digest()  ──►  ~/.hermes/diagnostics/fam-digest-latest.json
+      ├─ diag.build_digest() + diag.write_digest()  ──►  ~/.hermes/diagnostics/fam-digest-latest.json
       └─ аварийный откат: если отчёт за прошлую ночь не подтверждён —
          notify_denis(сырой текст)              (нынешнее поведение)
 
@@ -98,7 +98,7 @@ cron-джоб агента "fam-nightly-report" (03:00 UTC)
 ```json
 {
   "generated_at": "2026-08-01T22:30:04+00:00",
-  "window": {"since": "2026-07-31T22:30:01+00:00", "hours": 24.0},
+  "window": {"since": "2026-07-31T22:30:01+00:00"},
   "fam_schema_version": "12",
   "delivery": {
     "previous_report_ok": true,
@@ -111,8 +111,8 @@ cron-джоб агента "fam-nightly-report" (03:00 UTC)
         {
           "signature": "tick.error|meds_row|KeyError: No item with that key",
           "kind": "tick.error",
-          "where": "meds_row",
-          "exc_type": "KeyError",
+          "p_where": "meds_row",
+          "p_exc_type": "KeyError",
           "count": 113,
           "status": "known",
           "first_seen": "2026-07-29T18:02:11+00:00",
@@ -129,8 +129,9 @@ cron-джоб агента "fam-nightly-report" (03:00 UTC)
     "probes": [{"name": "bridge_readiness", "status": "ok", "detail": null}],
     "calendar": {"collisions": 0},
     "activity": {
-      "meds_generated": 6, "meds_taken": 5, "reminders_fired": 12,
-      "messages_sent": 7, "budget_spent": 5, "budget_limit": 8
+      "meds_generated": 6, "meds_taken": 5, "reminder_chains_built": 12,
+      "sent_by_kind": {"reminder": 5, "med": 2}, "messages_sent": 7,
+      "budget_spent": 5, "budget_limit": 8
     },
     "timers": {
       "failed": [{"unit": "fam-car.timer", "detail": "..."}],
