@@ -48,3 +48,47 @@ expansion_mandate. These need round-2 constructions.
 Coverage target was why_attractive >= 60% on shown roles; corpus extraction
 is a leading indicator, now at ~41% from 6.9%. Meaningful progress, target
 not yet met, and the precision question above must be settled first.
+
+---
+
+# CORRECTION (same day): the 40.7% is inflated — do not trust it
+
+A self-check of sample firings, run before asking the owner to review,
+settled the precision question immediately and negatively.
+
+`team_build_mandate` fired on:
+
+- "scale and solve them as a team" — company culture boilerplate — on
+  Project Manager, Senior Data Platform Engineer, Technical Recruiter,
+  Senior AI Engineer
+- "growing team" on Account Specialist, Retail
+
+`strategy_ownership` fired on:
+
+- "setting the strategy" (Key Account Manager), "drive a Talent Acquisition
+  strategy" (Senior Recruitment Manager), "Own the Captivate IQ strategy"
+  (Finance Manager, Commissions)
+
+Two distinct defects:
+
+1. **No duty-context requirement in the provider.** The miner enforces that a
+   sentence states the CANDIDATE's duty (subject check, company-description
+   rejection). The provider's rules do not — they regex the raw text, so
+   company-culture prose matches.
+2. **No role scoping.** Coverage is measured over the whole eligible corpus,
+   which is mostly non-target roles. A recruiter owning a "Talent
+   Acquisition strategy" is a true sentence and a false mandate signal.
+
+**Consequence:** round 1 delivers recall at the cost of precision — the exact
+failure mode that disqualified the LLM on the mandate axis. The 6.9% -> 40.7%
+headline is withdrawn as a quality claim.
+
+**No user impact:** these rules only affect the observe-only shadow; Stage 1
+advisory surfaces feasibility, not mandate, so nothing user-facing changed.
+
+**Next (round 2, before any new rules):** make the provider apply the same
+duty-sentence discipline the miner already has — match patterns only inside
+sentences that pass the subject/duty test — then re-measure. Expect the
+coverage number to fall substantially and to be trustworthy for the first
+time. The 158 controls must be re-verified against that change, since they
+depend on the current match-anywhere behaviour.
