@@ -118,6 +118,7 @@ def evaluate_semantic_shadow(
             "semantic_hash": decision.semantic_hash(),
             "observations_total": sem.diagnostics.observations_total,
             "feasibility": _feasibility_summary(dump),
+            "explanation": _explanation_summary(dump),
         })
         return result
     except Exception as exc:  # observe-only: a shadow failure never propagates
@@ -146,6 +147,22 @@ def _feasibility_summary(dump: dict[str, Any]) -> dict[str, Any]:
         "lane": feas.get("lane"),
         "blockers": _statements(feas.get("blockers") or []),
         "unknowns": _statements(feas.get("unknowns") or []),
+    }
+
+
+def _explanation_summary(dump: dict[str, Any]) -> dict[str, Any]:
+    """Compact explanation payload for Stage 2 (why this verdict).
+
+    Carries the decision engine's own explanation fields verbatim — no
+    re-wording here, so what the user eventually sees is traceable to the
+    decision items rather than invented at render time.
+    """
+    ex = dump.get("explanations") or {}
+    return {
+        "verdict_summary": ex.get("verdict_summary"),
+        "why_attractive": list(ex.get("why_attractive") or []),
+        "why_may_not_work": list(ex.get("why_may_not_work") or []),
+        "unknowns": list(ex.get("unknowns") or []),
     }
 
 
@@ -186,6 +203,7 @@ def run_semantic_shadow(store: Any, run_id: int) -> dict[str, int]:
             shadow_version=res.get("shadow_version", SEMANTIC_SHADOW_VERSION),
             error=res.get("error"),
             feasibility=res.get("feasibility"),
+            explanation=res.get("explanation"),
         )
         tally[res.get("recommendation") or res.get("status", "error")] += 1
     return dict(tally)

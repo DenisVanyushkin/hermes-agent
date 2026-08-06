@@ -751,6 +751,7 @@ class JobIntelStore:
             self._ensure_column(conn, "notifications", "delivery_attempts", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "notifications", "payload_json", "TEXT")
             self._ensure_column(conn, "semantic_shadow_evaluation", "feasibility_json", "TEXT")
+            self._ensure_column(conn, "semantic_shadow_evaluation", "explanation_json", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "vacancy_key", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "canonical_url", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "card_key", "TEXT")
@@ -2217,6 +2218,7 @@ PRAGMA foreign_keys=ON;
         shadow_version: str,
         error: str | None,
         feasibility: dict | None = None,
+        explanation: dict | None = None,
     ) -> None:
         """Persist one observe-only Phase III shadow decision. Never touches
         production evaluation tables."""
@@ -2228,8 +2230,8 @@ PRAGMA foreign_keys=ON;
                 INSERT INTO semantic_shadow_evaluation (
                     run_id, vacancy_key, source, recommendation, action, lane,
                     confidence, applied_caps_json, semantic_hash,
-                    observations_total, shadow_version, error, feasibility_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    observations_total, shadow_version, error, feasibility_json, explanation_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id, vacancy_key) DO UPDATE SET
                     source=excluded.source,
                     recommendation=excluded.recommendation,
@@ -2242,13 +2244,15 @@ PRAGMA foreign_keys=ON;
                     shadow_version=excluded.shadow_version,
                     error=excluded.error,
                     feasibility_json=excluded.feasibility_json,
+                    explanation_json=excluded.explanation_json,
                     created_at=excluded.created_at
                 """,
                 (
                     run_id, vacancy_key, source, recommendation, action, lane,
                     confidence, json.dumps(applied_caps or [], ensure_ascii=False),
                     semantic_hash, observations_total, shadow_version, error,
-                    json.dumps(feasibility, ensure_ascii=False) if feasibility else None, now,
+                    json.dumps(feasibility, ensure_ascii=False) if feasibility else None,
+                    json.dumps(explanation, ensure_ascii=False) if explanation else None, now,
                 ),
             )
 
@@ -2264,6 +2268,7 @@ PRAGMA foreign_keys=ON;
             d = dict(r)
             d["applied_caps"] = json.loads(d.pop("applied_caps_json") or "[]")
             d["feasibility"] = json.loads(d.pop("feasibility_json") or "null")
+            d["explanation"] = json.loads(d.pop("explanation_json") or "null")
             out.append(d)
         return out
 
