@@ -267,6 +267,64 @@ RULES += [
     _R(r"we are a bank\b", "company.is_crypto_exchange=false", _EXP),
 ]
 
+# ---------------------------------------------------------------------------
+# §7.2 round 2 — the facts that never fired on the real corpus.
+#
+# Authored by reading DEV duty sentences on target roles, not from the
+# contract's control phrases. Every pattern below has a real sentence behind
+# it, and every near-miss found in the same reading is a test.
+# All of these signals are duty-scoped, so the provider will only apply them
+# inside a sentence that assigns a duty to the candidate.
+# ---------------------------------------------------------------------------
+RULES += [
+    # "You will own the pricing and incentive structure for the segment";
+    # "You own acquisition, product strategy, onboarding, pricing, incentives".
+    # The duty verb must come BEFORE the noun: "contribute to projects related
+    # to pricing and bundling" is participation, not ownership.
+    _R(r"(?:[Oo]wn|[Ll]ead|[Dd]efine|[Dd]rive|[Ss]et|[Ss]hape)(?:s|ing)?"
+       r"[\w ,'’&-]{0,60}\b(?i:pricing)\b", "pricing_core=true", _DIR,
+       extra_signals=("monetization_core=true",)),
+    _R(r"(?:[Oo]wn|[Ll]ead|[Dd]efine|[Dd]rive|[Ss]hape)(?:s|ing)?"
+       r"[\w ,'’&-]{0,60}\b(?i:moneti[sz]ation)\b", "monetization_core=true", _DIR),
+    _R(r"(?i:pricing and packaging|packaging and pricing)",
+       "monetization_core=true", _DIR, extra_signals=("pricing_core=true",)),
+
+    # "a strategic vision that balances technical acquiring capabilities".
+    # "acquiring" is also an ordinary verb ("acquiring new customers") and
+    # issuing is the opposite side of the card business, so the noun has to be
+    # qualified as the acquiring domain itself.
+    _R(r"(?i:acquiring)\b(?=\s+(?:capabilit|business|product|platform|stack|"
+       r"rails|volume|side|domain))|(?i:merchant acquiring|payment acceptance|"
+       r"card acceptance)",
+       "acquiring_core=true", _DIR, extra_signals=("monetization_core=true",)),
+
+    # "drive the construction of new rails in new markets" (GPNI);
+    # "Market Expansion: Drive end-to-end growth ..."; "penetrate new markets".
+    # Bare "expansion" is far too broad here — "channel expansion", "revenue
+    # expansion" and "access expansion" all occur on target roles and none is
+    # a market mandate — so geography must be explicit.
+    _R(r"(?i:new markets?|new geograph\w*|new regions?|new countr\w*|"
+       r"(?:global|international|geographic(?:al)?|market) expansion)\b",
+       "expansion_mandate=true", _DIR),
+
+    # "including org design, talent development and succession planning";
+    # "design high-performing team structures". A section header such as
+    # "Leadership and Organisational Impact" is not a mandate.
+    _R(r"(?i:org(?:anisational|anizational)? design)\b",
+       "org_design_mandate=true", _DIR),
+    _R(r"(?:[Dd]esign|[Rr]eshape|[Rr]estructure)(?:s|ing)?"
+       r"[\w ,'’-]{0,25}\b(?i:team structures?)\b", "org_design_mandate=true", _DIR),
+
+    # Genuinely rare in this corpus: of 52 DEV target roles exactly one states
+    # board contact ("present results to senior leadership and the board").
+    # That is a property of the source text, not a gap in the rules. "board"
+    # is a substring of "onboarding" and "leaderboards", so it must be a board
+    # noun phrase.
+    _R(r"(?i:board (?:updates?|reporting|reviews?|meetings?|materials?|deck)|"
+       r"the board of directors|supervisory board)\b",
+       "board_exposure=true", _DIR),
+]
+
 # Signals whose truth depends on the sentence being about the CANDIDATE.
 # Company-level prose mentioning the same words is not evidence for them.
 _DUTY_SCOPED = (
