@@ -8,6 +8,9 @@
 """
 from __future__ import annotations
 
+from job_intel.vacancy_understanding.semantic.runtime.mandate_mining import (
+    responsibility_sentences,
+)
 from job_intel.vacancy_understanding.semantic.runtime.mandate_coverage import (
     _extract_mandate_facts,
     coverage_report,
@@ -63,3 +66,46 @@ def test_coverage_can_scope_to_target_roles():
 def test_coverage_reports_population_label_by_default():
     rep = coverage_report([_row("You will own the full P&L.")])
     assert rep["population"] == "all_eligible"
+
+
+# --- defect 3: the duty detector itself has recall holes ---------------------
+# Found by the synthetic controls once duty-scoping made them meaningful: five
+# positive controls stopped passing. All five are genuine duty statements, so
+# the filter is what is wrong, not the controls.
+
+def _is_duty(sentence: str) -> bool:
+    return bool(responsibility_sentences(sentence))
+
+
+def test_present_is_a_duty_verb():
+    assert _is_duty("Present quarterly business reviews to the executive committee.")
+
+
+def test_prepare_is_a_duty_verb():
+    assert _is_duty("Prepare and present board updates for the quarterly cycle.")
+
+
+def test_redesign_is_a_duty_verb():
+    assert _is_duty("Redesign the product operating model across our tribes.")
+
+
+def test_duty_after_a_section_label_is_recognised():
+    """'Responsibilities: Own the P&L' is how postings actually phrase duties."""
+    assert _is_duty("Responsibilities: Own the P&L for the payments business line.")
+
+
+def test_job_title_prefix_is_not_read_as_the_sentence_subject():
+    """In 'Product Lead - Pricing: own ...' the subject sits after the colon;
+    the leading noun made _NON_CANDIDATE_SUBJECT discard the whole sentence."""
+    assert _is_duty("Product Lead - Pricing: own our pricing engine and packaging.")
+
+
+# Guards on HOW the label prefix may be handled: stripping it must not let a
+# company-description sentence in through the back door.
+
+def test_label_prefix_does_not_bypass_the_company_description_gate():
+    assert not _is_duty("We are a fast growing company: build the future with us.")
+
+
+def test_label_prefix_does_not_admit_company_prose_after_the_colon():
+    assert not _is_duty("About us: our platform grows revenue for thousands of merchants.")

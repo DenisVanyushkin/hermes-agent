@@ -31,7 +31,12 @@ _DUTY = (
     r"define(?:s|d)?|defining|manage(?:s|d)?|managing|deliver(?:s|ing)?|"
     r"responsible for|accountable for|report(?:ing|s)? to|oversee(?:s|ing)?|"
     r"set(?:ting|s)? the|shape(?:s|ing)?|scale(?:s|ing)?|launch(?:es|ing)?|"
-    r"grow(?:s|ing)?|establish(?:es|ing)?|partner(?:s|ing)? with"
+    r"grow(?:s|ing)?|establish(?:es|ing)?|partner(?:s|ing)? with|"
+    # Round-2: absent verbs silently cost recall. The synthetic controls
+    # 'present quarterly to the executive committee', 'prepare and present
+    # board updates' and 'redesign the product operating model' were dropped
+    # by the duty filter for no reason other than a gap in this vocabulary.
+    r"present(?:s|ing)?|prepare(?:s|d)?|preparing|redesign(?:s|ing)?"
 )
 _DUTY_RE = re.compile(rf"\b(?:{_DUTY})\b", re.I)
 
@@ -57,6 +62,14 @@ _COMPANY_DESC = re.compile(
 _DUTY_CONTEXT = re.compile(
     rf"(?:^\s*|\byou(?:'ll| will)?\s+(?:\w+\s+){{0,2}}|\bto\s+|\band\s+)"
     rf"(?:{_DUTY})\b|\b(?:responsible|accountable) for\b", re.I)
+# Postings routinely put the duty behind a label — "Responsibilities: Own the
+# P&L", "What you'll do: Lead the roadmap", "Product Lead - Pricing: own our
+# pricing engine". The duty clause starts after the colon, and the label is
+# NOT its grammatical subject: a leading "Product ..." made the subject test
+# discard the whole sentence. Gates below therefore run on the post-label
+# clause as well. The label may not contain sentence-ending punctuation, so
+# stripping it can never cross a sentence boundary.
+_LABEL_PREFIX = re.compile(r"^[^:.!?]{3,60}:\s+(?=\S)")
 
 # Seed vocabulary per target fact. Seeds locate candidate sentences; they are
 # NOT the rules themselves — the mined phrasing is what a rule gets written
@@ -136,15 +149,22 @@ def responsibility_sentences(text: str) -> list[str]:
         s = _WS.sub(" ", raw).strip()
         if not (25 <= len(s) <= 400):
             continue
+        # The company-description gate runs on the FULL sentence first, so a
+        # label cannot smuggle company prose past it: "We are a fast growing
+        # company: build the future with us" is still rejected.
+        if _COMPANY_DESC.search(s):
+            continue
+        body = _LABEL_PREFIX.sub("", s, count=1)
+        if body != s and _COMPANY_DESC.search(body):
+            continue
         # An imperative or second-person opening IS the candidate's duty, so
         # the subject test must not run on it: "Own user acquisition ..."
         # was being misread as subject "user" and discarded.
-        candidate_opening = bool(_CANDIDATE_OPENING.match(s))
-        if _COMPANY_DESC.search(s):
+        candidate_opening = bool(_CANDIDATE_OPENING.match(s)
+                                 or _CANDIDATE_OPENING.match(body))
+        if not candidate_opening and _NON_CANDIDATE_SUBJECT.search(body):
             continue
-        if not candidate_opening and _NON_CANDIDATE_SUBJECT.search(s):
-            continue
-        if _DUTY_CONTEXT.search(s):
+        if _DUTY_CONTEXT.search(s) or _DUTY_CONTEXT.search(body):
             out.append(s)
     return out
 
