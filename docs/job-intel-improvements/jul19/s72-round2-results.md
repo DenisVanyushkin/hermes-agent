@@ -142,3 +142,92 @@ Semantic subset: **349 passed / 0 failed**. 158 synthetic controls green, all
 Full `tests/job_intel/` run: 612 passed / 42 failed against a baseline of
 602 / 45 — the 42 are pre-existing order-dependent failures unrelated to §7.2
 (they pass in isolation).
+
+---
+
+# Addendum — same day: owner decision applied, round-2 rules authored
+
+`17ec09ebf6` strategy scoping · `d2ea35944a` round-2 rules
+
+## Owner decision on `strategy_ownership` (2026-08-06)
+
+Owning a **functional** strategy is not an executive product mandate.
+
+Implemented as a **denylist on the qualifier**, not an allowlist on the
+object, and that difference is load-bearing. An allowlist was the literal
+reading of the decision, and measuring it against the corpus showed it would
+have dropped a flagship: **`strategy_ownership` is GPNI's only mandate fact**,
+and GPNI phrases it bare — *"You'll drive strategy, assess and integrate new
+financial partners"*. The acceptance criterion requires GPNI in the top band,
+so a strict allowlist would have worked against the criterion it was meant to
+serve. On a product role a bare "strategy" is a product strategy by context;
+a qualified one names its function.
+
+Now excluded, all from real firings: design, product marketing, commercial
+risk, regional events, Talent Acquisition, technical sales, global benefits,
+search.
+
+Also folded in from the same sample: *"We set strategy and drive products from
+inception to launch"* produced `strategy_ownership` on a Director of Product.
+The subject is the team. `_COMPANY_DESC` rejected only "we're"/"we are", so
+every other "We &lt;verb&gt;" opening passed. A "We" sentence now counts as a duty
+only if it addresses the candidate (*"We expect you to own the product
+strategy"*).
+
+## Round-2 rules for the facts that never fired
+
+Authored by reading DEV duty sentences on target roles. Holdout was not read.
+17 new tests, all watched failing first; every negative is a real near-miss
+from the same reading.
+
+| Fact | Construction taken from the corpus | Kept out |
+|---|---|---|
+| `pricing_core` | "own the pricing and incentive structure" | "contribute to projects related to pricing" |
+| `acquiring_core` | "technical acquiring capabilities" | "card issuing"; "acquiring new customers" |
+| `expansion_mandate` | "new rails in new markets"; "Market Expansion:"; "penetrate new markets" | "channel expansion"; "revenue expansion" |
+| `org_design_mandate` | "including org design…"; "design high-performing team structures" | "Leadership and Organisational Impact" |
+| `board_exposure` | "board reporting / updates / reviews" | "onboarding"; "leaderboards" |
+
+**`board_exposure` is sparse in the source, not in the rules.** Exactly one of
+52 DEV target roles states board contact. Recorded as a property of the data.
+
+## Final numbers this session
+
+| Slice | Population | Baseline | R1 (withdrawn) | R2 duty-scope | **R2 final** |
+|---|---|---|---|---|---|
+| DEV 2956 | all eligible | 6.90% | 40.73% | 19.22% | **21.45%** |
+| HOLDOUT 1212 | all eligible | 6.60% | 41.75% | 18.65% | **20.79%** |
+| DEV 52 | **target roles** | — | — | 63.46% | **65.38%** |
+| HOLDOUT 22 | **target roles** | — | — | 63.64% | **63.64%** |
+
+Per fact on DEV target roles: expansion 0 → 4, org_design 1 → 3,
+monetization 0 → 2, pricing 0 → 1, acquiring 0 → 1.
+
+## Precision, sampled and read
+
+All **10** target-role firings of the new facts are correct.
+
+Corpus-wide, `expansion_mandate` is noisy on non-target roles, and the
+residual false-positive class has one named cause: **the duty filter tests for
+a company subject only at the START of a sentence.** So *"As we scale into new
+geographies"*, *"allowing us to scale into new markets"* and *"As part of our
+global expansion, we are launching…"* all pass. That is a duty-filter
+limitation rather than an expansion-rule one, and it is left for a later round
+instead of being patched per rule.
+
+## Two caveats that must travel with these numbers
+
+1. **The target-role holdout is 22 rows and none of them gained a new fact.**
+   The corpus-wide slices moved in lockstep (+2.2 pp DEV, +2.1 pp HOLDOUT), so
+   this reads as sparsity rather than overfit — but 22 rows cannot settle it
+   either way. Widening the target population, or waiting for the corpus to
+   grow, is the only real answer.
+2. **Wise APAC is not in the eligible corpus at all** (0 rows). Half of the
+   flagship half of the acceptance criterion currently has nothing to be
+   measured against. GPNI is present and keeps its fact.
+
+## Test posture
+
+Semantic subset: **376 passed / 0 failed** — 158 synthetic controls, golden
+fixtures, all 22 owner-rejected negative fixtures, 4 import-boundary guards,
+and 31 tests added this session.
