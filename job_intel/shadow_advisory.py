@@ -24,10 +24,16 @@ def advisory_enabled() -> bool:
 
 
 def _has_concern(feas: dict | None) -> bool:
+    """Only a CONCRETE statement qualifies as an advisory.
+
+    A bare `uncertain` verdict carries no text to show — on live data 38 of
+    39 candidate roles were exactly that, which would have produced 39 bullet
+    lines with nothing under them. An advisory that cannot say what the
+    concern is, is noise; the verdict alone is not advisory-worthy.
+    """
     if not feas:
         return False
-    return bool(feas.get("blockers") or feas.get("unknowns")
-                or feas.get("verdict") in ("infeasible", "uncertain"))
+    return bool(feas.get("blockers") or feas.get("unknowns"))
 
 
 def build_feasibility_advisory(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

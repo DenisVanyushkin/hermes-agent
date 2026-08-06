@@ -31,6 +31,20 @@ def test_advisory_selects_only_rows_with_concerns():
     assert adv[1]["blockers"] == ["onsite required, remote-only candidate"]
 
 
+def test_bare_uncertain_verdict_without_statements_is_not_advisory():
+    """Live preview finding: 38 of 39 selected roles were `uncertain` with NO
+    concrete blocker/unknown text — an advisory line with nothing to say is
+    noise that would destroy trust in the feature. Only roles with an actual
+    statement qualify."""
+    rows = [
+        _row("A", "T1", {"verdict": "uncertain", "blockers": [], "unknowns": []}),
+        _row("B", "T2", {"verdict": "infeasible", "blockers": [], "unknowns": []}),
+        _row("C", "T3", {"verdict": "uncertain", "blockers": [], "unknowns": ["geo unclear"]}),
+    ]
+    adv = build_feasibility_advisory(rows)
+    assert [a["company"] for a in adv] == ["C"]
+
+
 def test_advisory_never_includes_rejected_rows_by_construction():
     # the builder trusts the store filter (rec != reject); it only gates on
     # feasibility concern, so a feasible row is dropped regardless of rec
