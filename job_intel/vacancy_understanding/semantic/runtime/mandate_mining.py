@@ -39,6 +39,16 @@ _DUTY_RE = re.compile(rf"\b(?:{_DUTY})\b", re.I)
 # "growing" but describes the COMPANY, not the role. That is the exact
 # mandate-from-company-evidence error the owner rejected in review, so the
 # miner must not ingest such sentences in the first place.
+# Round-1 defect: the top revenue_proximity candidate was marketing prose
+# about the company's CUSTOMERS ("The median Ramp customer ... grows revenue
+# 16%"). A duty sentence's subject must be the candidate, not the company,
+# its customers, or its product.
+_NON_CANDIDATE_SUBJECT = re.compile(
+    r"^\s*(?:the\s+)?(?:median\s+|average\s+|typical\s+)?"
+    r"(?:[A-Z][\w&.-]*\s+)?"
+    r"(?:customer|client|merchant|user|partner|company|team|platform|product|"
+    r"business|organisation|organization|firm)s?\b"
+    r"(?!\s+(?:you|we)\b)", re.I)
 _COMPANY_DESC = re.compile(
     r"^\s*(?:we(?:'re| are)\b|our\b|the company\b|founded\b|headquarter|"
     r"[a-z]+ is (?:a|the) (?:leading|global|fast)\b)", re.I)
@@ -78,8 +88,40 @@ FACT_SEEDS: dict[str, tuple[str, ...]] = {
                                "conversion", "funnel"),
 }
 
-_SENT_SPLIT = re.compile(r"(?<=[.!?;])\s+|\n+")
+# Corpus text is cleaned and frequently concatenated without terminal
+# punctuation, so splitting on [.!?;] alone yields blobs that mix salary
+# lines, company blurbs and duties into one "sentence" (round-1 defect).
+# Also break on list glyphs and on a lowercase->Capitalised-word boundary,
+# which is where the scraper joined separate blocks.
+_SENT_SPLIT = re.compile(
+    r"(?<=[.!?;])\s+"
+    r"|\n+"
+    r"|\s*[•·▪●‣◦*]\s*"
+    r"|(?<=[a-z,)])\s+(?=(?:About|What|Who|Why|Requirements|Responsibilities|"
+    r"Qualifications|Benefits|The role|Your role)\b)"
+    r"|(?<=[a-z]{3})\s+(?=[A-Z][a-z]+\s+(?:is|are|was|has|have)\b)")
 _WS = re.compile(r"\s+")
+
+# Mining scope only — NOT a decision rule. The eligible corpus is mostly
+# sales/support/engineering vacancies whose duty language would dominate the
+# frequency ranking and is irrelevant to executive product mandate.
+_TARGET_TITLE = re.compile(
+    r"\b(?:chief product|cpo|head of product|vp,? product|vice president,? product|"
+    r"director,? product|product director|group product manager|"
+    r"director of product|head of.{0,20}product|product lead|"
+    r"senior director.{0,20}product|gm\b|general manager)\b", re.I)
+_NON_TARGET_TITLE = re.compile(
+    r"\b(?:account executive|sales|customer success|support engineer|"
+    r"software engineer|data scientist|recruiter|designer|marketing manager)\b",
+    re.I)
+
+
+def is_target_role(title: str) -> bool:
+    """Whether this vacancy belongs to the population §7.2 cares about."""
+    t = (title or "").strip()
+    if not t or _NON_TARGET_TITLE.search(t):
+        return False
+    return bool(_TARGET_TITLE.search(t))
 
 
 def responsibility_sentences(text: str) -> list[str]:
@@ -91,7 +133,7 @@ def responsibility_sentences(text: str) -> list[str]:
         s = _WS.sub(" ", raw).strip()
         if not (25 <= len(s) <= 400):
             continue
-        if _COMPANY_DESC.search(s):
+        if _COMPANY_DESC.search(s) or _NON_CANDIDATE_SUBJECT.search(s):
             continue
         if _DUTY_CONTEXT.search(s):
             out.append(s)
@@ -119,6 +161,8 @@ def mine_candidates(rows: list[dict[str, Any]], *, top_n: int = 25
         if assign_split(key) != "dev":
             raise HoldoutAccessError(
                 f"mining refused: {key!r} belongs to the holdout slice")
+        if not is_target_role(row.get("title") or ""):
+            continue
         text = row.get("text") or row.get("description") or ""
         for sent in responsibility_sentences(text):
             low = sent.lower()
