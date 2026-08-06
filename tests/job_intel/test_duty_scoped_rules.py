@@ -109,3 +109,33 @@ def test_label_prefix_does_not_bypass_the_company_description_gate():
 
 def test_label_prefix_does_not_admit_company_prose_after_the_colon():
     assert not _is_duty("About us: our platform grows revenue for thousands of merchants.")
+
+
+# --- defect 4: the gates were written with an ASCII apostrophe ---------------
+# The corpus is scraped HTML and writes "We’re" / "You’ll" with U+2019 five
+# times more often than the ASCII form (2724 vs 550 vacancies). Every gate
+# spelling an apostrophe was therefore blind on the majority of the corpus.
+
+CURLY_BOILERPLATE = ("We’re committed to building a diverse team and "
+                     "inclusive culture and believe in your potential.")
+
+
+def test_company_boilerplate_with_typographic_apostrophe_is_rejected():
+    """Largest false-positive source found in the round-2 precision sample."""
+    assert not _is_duty(CURLY_BOILERPLATE)
+
+
+def test_second_person_duty_with_typographic_apostrophe_is_recognised():
+    assert _is_duty("You’ll own the roadmap for the payments business line.")
+
+
+def test_curly_boilerplate_does_not_yield_a_team_build_mandate():
+    assert "mandate.team_build_mandate" not in _extract_mandate_facts(
+        _row(CURLY_BOILERPLATE))
+
+
+def test_curly_second_person_duty_still_yields_the_fact():
+    """Guards the span lookup too: the provider finds duty spans by substring
+    search into the RAW text, so folding must not leak into the return value."""
+    assert "mandate.team_build_mandate" in _extract_mandate_facts(
+        _row("You’ll build the team from scratch over the next year."))

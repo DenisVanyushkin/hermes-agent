@@ -140,6 +140,31 @@ def is_target_role(title: str) -> bool:
     return bool(_TARGET_TITLE.search(t))
 
 
+_APOSTROPHE = re.compile(r"[‘’ʼʻ´′]")
+
+
+def fold_apostrophes(text: str) -> str:
+    """Normalise typographic apostrophes to ASCII, for MATCHING only.
+
+    The corpus is scraped HTML and writes "We’re" / "You’ll" with U+2019 five
+    times more often than the ASCII form (2724 vs 550 vacancies as of
+    2026-08-06). Every gate below spells an apostrophe, so all of them were
+    blind on the majority of the corpus, in both directions:
+
+    - precision: _COMPANY_DESC missed "We’re committed to building a diverse
+      team ..." — the single largest false-positive source in the round-2
+      sample, firing team_build_mandate on Data Analysts and Recruiters;
+    - recall: _DUTY_CONTEXT missed "You’ll own the roadmap ...", the most
+      canonical duty phrasing there is, so the sentence was not a duty
+      sentence at all.
+
+    The ORIGINAL sentence is what gets returned: the provider locates duty
+    spans by substring search into the raw text, so a folded return value
+    would silently stop matching.
+    """
+    return _APOSTROPHE.sub("'", text or "")
+
+
 def responsibility_sentences(text: str) -> list[str]:
     """Sentences that state a duty of the role. Company description, perks and
     location prose are dropped — mining them would reproduce exactly the
@@ -149,22 +174,23 @@ def responsibility_sentences(text: str) -> list[str]:
         s = _WS.sub(" ", raw).strip()
         if not (25 <= len(s) <= 400):
             continue
+        g = fold_apostrophes(s)
         # The company-description gate runs on the FULL sentence first, so a
         # label cannot smuggle company prose past it: "We are a fast growing
         # company: build the future with us" is still rejected.
-        if _COMPANY_DESC.search(s):
+        if _COMPANY_DESC.search(g):
             continue
-        body = _LABEL_PREFIX.sub("", s, count=1)
-        if body != s and _COMPANY_DESC.search(body):
+        body = _LABEL_PREFIX.sub("", g, count=1)
+        if body != g and _COMPANY_DESC.search(body):
             continue
         # An imperative or second-person opening IS the candidate's duty, so
         # the subject test must not run on it: "Own user acquisition ..."
         # was being misread as subject "user" and discarded.
-        candidate_opening = bool(_CANDIDATE_OPENING.match(s)
+        candidate_opening = bool(_CANDIDATE_OPENING.match(g)
                                  or _CANDIDATE_OPENING.match(body))
         if not candidate_opening and _NON_CANDIDATE_SUBJECT.search(body):
             continue
-        if _DUTY_CONTEXT.search(s) or _DUTY_CONTEXT.search(body):
+        if _DUTY_CONTEXT.search(g) or _DUTY_CONTEXT.search(body):
             out.append(s)
     return out
 
