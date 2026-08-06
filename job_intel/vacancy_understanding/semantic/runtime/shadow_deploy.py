@@ -105,7 +105,8 @@ def evaluate_semantic_shadow(
             result["error"] = f"evaluation_error: {decision.error}"
             return result
 
-        overall = decision.semantic_dump()["overall"]
+        dump = decision.semantic_dump()
+        overall = dump["overall"]
         result.update({
             "status": "ok",
             "vacancy_key": vacancy_key,
@@ -116,12 +117,36 @@ def evaluate_semantic_shadow(
             "applied_caps": overall.get("applied_caps") or [],
             "semantic_hash": decision.semantic_hash(),
             "observations_total": sem.diagnostics.observations_total,
+            "feasibility": _feasibility_summary(dump),
         })
         return result
     except Exception as exc:  # observe-only: a shadow failure never propagates
         result["status"] = "error"
         result["error"] = f"{type(exc).__name__}: {exc}"
         return result
+
+
+def _feasibility_summary(dump: dict[str, Any]) -> dict[str, Any]:
+    """Compact, advisory-ready feasibility view: the verdict plus the
+    human-readable statements of the blocker/unknown items. Ids are resolved
+    against the decision items so the advisory can show text, not ids."""
+    feas = dump.get("feasibility") or {}
+    items = {it["id"]: it for it in dump.get("items") or []}
+
+    def _statements(ids: list[str]) -> list[str]:
+        out = []
+        for i in ids or []:
+            it = items.get(i)
+            if it and it.get("statement"):
+                out.append(it["statement"])
+        return out
+
+    return {
+        "verdict": feas.get("verdict"),
+        "lane": feas.get("lane"),
+        "blockers": _statements(feas.get("blockers") or []),
+        "unknowns": _statements(feas.get("unknowns") or []),
+    }
 
 
 def _vacancy_from_row(row: dict[str, Any]) -> Vacancy:
@@ -160,6 +185,7 @@ def run_semantic_shadow(store: Any, run_id: int) -> dict[str, int]:
             observations_total=res.get("observations_total"),
             shadow_version=res.get("shadow_version", SEMANTIC_SHADOW_VERSION),
             error=res.get("error"),
+            feasibility=res.get("feasibility"),
         )
         tally[res.get("recommendation") or res.get("status", "error")] += 1
     return dict(tally)

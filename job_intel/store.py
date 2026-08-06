@@ -568,6 +568,7 @@ CREATE TABLE IF NOT EXISTS semantic_shadow_evaluation (
     observations_total INTEGER,
     shadow_version TEXT NOT NULL,
     error TEXT,
+    feasibility_json TEXT,
     created_at TEXT NOT NULL,
     UNIQUE(run_id, vacancy_key),
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
@@ -749,6 +750,7 @@ class JobIntelStore:
             self._ensure_column(conn, "notifications", "delivery_error", "TEXT")
             self._ensure_column(conn, "notifications", "delivery_attempts", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "notifications", "payload_json", "TEXT")
+            self._ensure_column(conn, "semantic_shadow_evaluation", "feasibility_json", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "vacancy_key", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "canonical_url", "TEXT")
             self._ensure_column(conn, "vacancy_slack_messages", "card_key", "TEXT")
@@ -2150,6 +2152,33 @@ PRAGMA foreign_keys=ON;
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def fetch_shadow_advisory(self, *, run_id: int) -> list[dict]:
+        """Shown vacancies (prod recommendation != reject) with their shadow
+        feasibility, for the Stage 1 advisory. Read-only."""
+        self.bootstrap()
+        import json as _json
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT v.company AS company, v.title AS title, v.url AS url,
+                       ve.recommendation AS prod_recommendation,
+                       sse.feasibility_json AS feasibility_json
+                FROM semantic_shadow_evaluation sse
+                JOIN vacancy_evaluations ve
+                  ON ve.vacancy_key = sse.vacancy_key AND ve.run_id = sse.run_id
+                JOIN vacancies v ON v.vacancy_key = sse.vacancy_key
+                WHERE sse.run_id = ? AND ve.recommendation != 'reject'
+                ORDER BY v.company, v.title
+                """,
+                (run_id,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["feasibility"] = _json.loads(d.pop("feasibility_json") or "null")
+            out.append(d)
+        return out
+
     def fetch_vacancies_for_run(self, run_id: int) -> list[dict]:
         """Vacancy rows evaluated in a given run (for the decoupled Phase III
         shadow job). Joins the run's evaluations back to the vacancies table."""
@@ -2187,6 +2216,7 @@ PRAGMA foreign_keys=ON;
         observations_total: int | None,
         shadow_version: str,
         error: str | None,
+        feasibility: dict | None = None,
     ) -> None:
         """Persist one observe-only Phase III shadow decision. Never touches
         production evaluation tables."""
@@ -2198,8 +2228,8 @@ PRAGMA foreign_keys=ON;
                 INSERT INTO semantic_shadow_evaluation (
                     run_id, vacancy_key, source, recommendation, action, lane,
                     confidence, applied_caps_json, semantic_hash,
-                    observations_total, shadow_version, error, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    observations_total, shadow_version, error, feasibility_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id, vacancy_key) DO UPDATE SET
                     source=excluded.source,
                     recommendation=excluded.recommendation,
@@ -2211,12 +2241,14 @@ PRAGMA foreign_keys=ON;
                     observations_total=excluded.observations_total,
                     shadow_version=excluded.shadow_version,
                     error=excluded.error,
+                    feasibility_json=excluded.feasibility_json,
                     created_at=excluded.created_at
                 """,
                 (
                     run_id, vacancy_key, source, recommendation, action, lane,
                     confidence, json.dumps(applied_caps or [], ensure_ascii=False),
-                    semantic_hash, observations_total, shadow_version, error, now,
+                    semantic_hash, observations_total, shadow_version, error,
+                    json.dumps(feasibility, ensure_ascii=False) if feasibility else None, now,
                 ),
             )
 
@@ -2231,6 +2263,7 @@ PRAGMA foreign_keys=ON;
         for r in rows:
             d = dict(r)
             d["applied_caps"] = json.loads(d.pop("applied_caps_json") or "[]")
+            d["feasibility"] = json.loads(d.pop("feasibility_json") or "null")
             out.append(d)
         return out
 
