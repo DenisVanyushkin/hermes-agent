@@ -1767,6 +1767,24 @@ _EXTCAL_FULL_RESYNC_DAYS_MIN = 1
 _EXTCAL_FULL_RESYNC_DAYS_MAX = 30
 
 
+def _clamp_int_config(cfg, key, default, lo, hi):
+    """Shared validation for a small-int config knob read straight from
+    `fam-config.json`: coerce to `int`, clamp into `[lo, hi]`, and fall
+    back to `default` (never raise) on anything that doesn't coerce --
+    missing key, `None`, a non-numeric string, etc. Pulled out of
+    `_extcal_full_resync_days` (see that function's own comment for the
+    two concrete failure modes an unvalidated config value used to hit:
+    a runaway zero/negative cadence, or a bare `TypeError` wedging the
+    tick) so `_extcal_fail_streak_threshold` below reuses the exact same
+    coercion/clamp/fallback shape instead of a second copy of it."""
+    raw = cfg.get(key, default)
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, val))
+
+
 def _extcal_full_resync_days(cfg):
     """`cfg["extcal_full_resync_days"]` -> a valid int in `[1, 30]`, never
     raises. A missing key or anything that doesn't coerce to `int`
@@ -1776,12 +1794,94 @@ def _extcal_full_resync_days(cfg):
     zero/negative or too-large values are clamped to the nearest bound
     rather than silently accepted (see the module-level comment above
     for why both directions matter)."""
-    raw = cfg.get("extcal_full_resync_days", _EXTCAL_FULL_RESYNC_DAYS_DEFAULT)
+    return _clamp_int_config(cfg, "extcal_full_resync_days",
+                              _EXTCAL_FULL_RESYNC_DAYS_DEFAULT,
+                              _EXTCAL_FULL_RESYNC_DAYS_MIN,
+                              _EXTCAL_FULL_RESYNC_DAYS_MAX)
+
+
+# `extcal_fail_streak_threshold` (streak-alerting hardening, 2026-08):
+# a live-prod week (4 tick.error escalations across ~670 ticks, all four
+# transient and self-healed by the very next tick -- a one-off iCloud
+# stall on a single href, or one bad `discover()` round) showed that
+# escalating EVERY tick error into the nightly `maint.problem_summary`
+# trains Denis to ignore the channel, so a real multi-tick outage would
+# be missed too. This is how many CONSECUTIVE failing ticks (per
+# calendar URL, or per one of the two sentinel keys below) it takes
+# before `cmd_tick_cal_ext` escalates to `tick.error` + exit 1 -- see
+# `_extcal_record_failure`/`_extcal_record_success`. Validated with the
+# exact same shape as `_extcal_full_resync_days` (clamp + safe default on
+# garbage, never raise): a missing/non-numeric config value must not
+# wedge the tick, and neither must an absurdly large one silently turn
+# the whole feature off.
+_EXTCAL_FAIL_STREAK_THRESHOLD_DEFAULT = 3
+_EXTCAL_FAIL_STREAK_THRESHOLD_MIN = 1
+_EXTCAL_FAIL_STREAK_THRESHOLD_MAX = 50
+
+# Sentinel streak keys for failure classes that have no calendar URL of
+# their own to hang a per-calendar counter on: `extcal_read_calendars`
+# configured but 0 calendars matched (discover() degrades to `[]` on ANY
+# failure -- missing credentials, timeout, 5xx, or a genuinely renamed
+# calendar, see `_cal_ext_sync`'s own comment), and `apply_changes`/
+# `export_own` per-row errors (no single calendar to blame -- these are
+# keyed by branch/id or event_id, not calendar URL). Both share the
+# double-underscore shape specifically so neither can ever collide with a
+# real CalDAV URL (which always contains "://").
+_EXTCAL_STREAK_DISCOVERY_KEY = "__discovery__"
+_EXTCAL_STREAK_APPLY_KEY = "__apply__"
+
+
+def _extcal_fail_streak_threshold(cfg):
+    """`cfg["extcal_fail_streak_threshold"]` -> a valid int in `[1, 50]`,
+    never raises -- same coercion/clamp/default shape as
+    `_extcal_full_resync_days` via the shared `_clamp_int_config`
+    helper."""
+    return _clamp_int_config(cfg, "extcal_fail_streak_threshold",
+                              _EXTCAL_FAIL_STREAK_THRESHOLD_DEFAULT,
+                              _EXTCAL_FAIL_STREAK_THRESHOLD_MIN,
+                              _EXTCAL_FAIL_STREAK_THRESHOLD_MAX)
+
+
+def _extcal_streak_meta_key(key):
+    return f"extcal_fail_streak:{key}"
+
+
+def _extcal_alert_meta_key(key):
+    return f"extcal_fail_alerted:{key}"
+
+
+def _extcal_record_failure(conn, key, threshold):
+    """Increment the persistent (meta-backed, survives restart)
+    consecutive-failure streak for `key` (a calendar URL, or one of the
+    `_EXTCAL_STREAK_*_KEY` sentinels above); return True iff this round's
+    streak just crossed `threshold` AND no alert is outstanding for it
+    yet. Edge-triggered exactly like `car.maybe_alert_staleness` /
+    `health.maybe_alert_readiness` (ok/below-threshold -> above-threshold
+    alerts once; staying above threshold stays silent; a call to
+    `_extcal_record_success` below is the only thing that clears the
+    alert flag, so the next failing streak can alert again)."""
+    raw = famdb.meta_get(conn, _extcal_streak_meta_key(key), "0")
     try:
-        days = int(raw)
+        streak = int(raw)
     except (TypeError, ValueError):
-        return _EXTCAL_FULL_RESYNC_DAYS_DEFAULT
-    return max(_EXTCAL_FULL_RESYNC_DAYS_MIN, min(_EXTCAL_FULL_RESYNC_DAYS_MAX, days))
+        streak = 0
+    streak += 1
+    famdb.meta_set(conn, _extcal_streak_meta_key(key), str(streak))
+    if streak < threshold:
+        return False
+    if famdb.meta_get(conn, _extcal_alert_meta_key(key), "0") == "1":
+        return False  # already alerted for this ongoing streak -- stay silent
+    famdb.meta_set(conn, _extcal_alert_meta_key(key), "1")
+    return True
+
+
+def _extcal_record_success(conn, key):
+    """Clear the streak and alert flag for `key` on a clean round --
+    mirrors the reset half of `car.maybe_alert_staleness` /
+    `health.maybe_alert_readiness`, so the next failing streak starts
+    from zero and can alert again."""
+    famdb.meta_set(conn, _extcal_streak_meta_key(key), "0")
+    famdb.meta_set(conn, _extcal_alert_meta_key(key), "0")
 
 
 def _cal_ext_sync(conn, cfg, now, dry_run):
@@ -1924,6 +2024,20 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     bad_hrefs = set()              # ONE resource's data is untrustworthy this round
                                     # (fix-round 2, findings N1/N2)
     tokens_to_persist = {}         # calendar url -> token (only clean, successful calendars)
+    # Streak-alerting hardening: per-calendar error tracking THIS round,
+    # keyed by calendar url -- fed to `cmd_tick_cal_ext`'s consecutive-
+    # failure counters (`_extcal_record_failure`/`_extcal_record_success`)
+    # so a transient, self-healing blip on one calendar doesn't escalate
+    # to `tick.error` on the first occurrence, while still being scoped
+    # to exactly that calendar (a healthy sibling calendar's own counter
+    # must not be touched by it).
+    calendar_had_error = {}        # calendar url -> bool
+    calendar_error_msgs = {}       # calendar url -> [str, ...]
+
+    def _note_calendar_error(url, msg):
+        calendar_had_error[url] = True
+        calendar_error_msgs.setdefault(url, []).append(msg)
+        sync_errors.append(msg)
 
     # C1(a): extcal_read_calendars configured but nothing eligible survived
     # discover()/filtering -- discover() degrades to [] on ANY failure
@@ -1931,7 +2045,8 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     # genuinely-renamed calendar no longer matching the filter, and those
     # two cases must not be silently indistinguishable from "nothing to
     # do" when a filter is actually configured.
-    if not eligible and cfg.get("extcal_read_calendars"):
+    discovery_error = bool(not eligible and cfg.get("extcal_read_calendars"))
+    if discovery_error:
         sync_errors.append(
             "extcal_read_calendars is configured but matched 0 of "
             f"{len(calendars)} discovered calendar(s) -- check config "
@@ -1959,6 +2074,7 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
 
     for calendar in eligible:
         url = calendar.get("url")
+        calendar_had_error[url] = False
         stored_token = famdb.meta_get(conn, f"extcal_sync_token:{url}")
         # Captured BEFORE fetch_changes() below runs -- see this
         # function's own docstring, "Sync-token seeding".
@@ -1988,7 +2104,7 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
 
         if mode == "error":
             errored_urls.add(url)
-            sync_errors.append(f"{calendar.get('name') or url}: {reason}")
+            _note_calendar_error(url, f"{calendar.get('name') or url}: {reason}")
             continue
 
         base = _extcal_url_base(url)
@@ -2030,7 +2146,8 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 # sync_collection mode, silently clearing the way to the
                 # disappearance sweep. `.strip()` closes that.
                 bad_hrefs.add(abs_href)
-                sync_errors.append(
+                _note_calendar_error(
+                    url,
                     f"{calendar.get('name') or url}: no calendar-data "
                     f"for {abs_href} (not marked deleted -- treated as "
                     f"unreadable this round, not gone)")
@@ -2067,7 +2184,8 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 # resource in an incremental delta).
                 if mode != "sync_collection":
                     bad_hrefs.add(abs_href)
-                    sync_errors.append(
+                    _note_calendar_error(
+                        url,
                         f"{calendar.get('name') or url}: 0 VEVENT block(s) "
                         f"found for {abs_href} despite a VEVENT-filtered "
                         f"query (mode={mode})")
@@ -2082,7 +2200,8 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 # have no fresh data on, not every occurrence sharing this
                 # href.
                 bad_hrefs.add(abs_href)
-                sync_errors.append(
+                _note_calendar_error(
+                    url,
                     f"{calendar.get('name') or url}: parse_ics returned "
                     f"{len(parsed)} of {begin_count} VEVENT block(s) "
                     f"(dropped {begin_count - len(parsed)}) for {abs_href}")
@@ -2096,7 +2215,7 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         expanded = extcal.expand(components, window_start, window_end)
         combined_occurrences.extend(expanded["occurrences"])
         for err in expanded["errors"]:
-            sync_errors.append(f"{calendar.get('name') or url}: {err}")
+            _note_calendar_error(url, f"{calendar.get('name') or url}: {err}")
             m = _EXPAND_ERROR_UID_RE.search(err)
             meta = key_meta.get(m.group(1)) if m else None
             if meta and meta.get("href"):
@@ -2233,6 +2352,9 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             "counts": None, "calendars": per_calendar,
             "changeset": changeset, "sync_errors": sync_errors, "tokens": {},
             "export_counts": None, "full_mode_urls": set(),
+            "calendar_had_error": calendar_had_error,
+            "calendar_error_msgs": calendar_error_msgs,
+            "discovery_error": discovery_error,
         }
 
     counts = extcal.apply_changes(conn, changeset, cfg)
@@ -2260,6 +2382,11 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         # this round -- the same "healthy this round" set token
         # persistence already uses).
         "full_mode_urls": full_mode_urls,
+        # Streak-alerting hardening -- see the module-level dict inits
+        # above and `cmd_tick_cal_ext`'s own use of these three.
+        "calendar_had_error": calendar_had_error,
+        "calendar_error_msgs": calendar_error_msgs,
+        "discovery_error": discovery_error,
     }
 
 
@@ -2486,25 +2613,86 @@ def cmd_tick_cal_ext(args):
 
     conn.commit()
 
-    if has_error:
-        # `sync_errors` already includes each errored calendar's own
-        # "<name>: <reason>" message (see _cal_ext_sync's fetch loop) --
-        # fix-round 2, minor #5: this used to ALSO append `calendar_errors`
-        # here, duplicating the identical text and wasting roughly half of
-        # `_audit_tick_error`'s own 200-char slice on a verbatim repeat.
+    # Streak-alerting hardening (2026-08): a live-prod week showed every
+    # one of ~4 tick.error escalations across ~670 ticks was a single,
+    # self-healing blip (see the module-level comment on
+    # `_EXTCAL_FAIL_STREAK_THRESHOLD_DEFAULT`). `has_error` above still
+    # drives every DATA-SAFETY decision unchanged (the `cal.ext.sync`
+    # audit write with its `sync_errors` list, the token-persistence /
+    # `extcal_last_full` / `extcal_last_ok` gates) -- so a below-threshold
+    # failure is still fully recorded, nothing is hidden, only the
+    # ESCALATION to `tick.error` + exit 1 (the thing that lands in
+    # Denis's nightly `maint.problem_summary`) is now gated on a
+    # per-key consecutive-failure streak instead of firing on the very
+    # first occurrence. Three independent streak classes, each edge-
+    # triggered (`_extcal_record_failure`/`_extcal_record_success`,
+    # meta-persisted so a restart doesn't reset them):
+    #   - one per calendar URL (`calendar_had_error` from `_cal_ext_sync`,
+    #     set for a fetch error, a bad/unreadable resource, a parse-count
+    #     mismatch, or an expand() error attributed to that calendar) --
+    #     a flaky calendar never masks or is masked by a healthy sibling;
+    #   - `_EXTCAL_STREAK_DISCOVERY_KEY` for the "extcal_read_calendars
+    #     configured but 0 matched" class -- there is no calendar to
+    #     blame, so it gets its own counter, not folded into any real
+    #     calendar's;
+    #   - `_EXTCAL_STREAK_APPLY_KEY` for `apply_changes`/`export_own`
+    #     per-row errors. These are folded into the SAME streak-gated
+    #     path (not escalated immediately) deliberately: they already
+    #     freeze every calendar's sync-token progress this tick (the
+    #     blanket gate below, untouched by this change) and the design
+    #     doc's own recorded live case is `database is locked` from the
+    #     per-minute `fam-reminders` timer contending on the same WAL
+    #     file -- exactly the transient, self-healing shape this whole
+    #     feature exists to stop paging Denis over. A GENUINE apply
+    #     outage still escalates by the Nth tick, same as a calendar
+    #     outage, and stays covered independently by `health.
+    #     extcal_staleness` if the sync-token freeze holds it back for
+    #     longer than `extcal_stale_hours`.
+    threshold = _extcal_fail_streak_threshold(cfg)
+    escalate_messages = []
+
+    for c in result["calendars"]:
+        c_url = c["url"]
+        if result.get("calendar_had_error", {}).get(c_url):
+            if _extcal_record_failure(conn, c_url, threshold):
+                msgs = result.get("calendar_error_msgs", {}).get(c_url) or [
+                    f"{c.get('name') or c_url}: {c.get('reason') or 'cal-ext error'}"]
+                escalate_messages.extend(_redact_sync_errors(msgs))
+        else:
+            _extcal_record_success(conn, c_url)
+
+    if result.get("discovery_error"):
+        if _extcal_record_failure(conn, _EXTCAL_STREAK_DISCOVERY_KEY, threshold):
+            escalate_messages.extend(_redact_sync_errors(
+                [e for e in result["sync_errors"]
+                 if e.startswith("extcal_read_calendars is configured")]))
+    else:
+        _extcal_record_success(conn, _EXTCAL_STREAK_DISCOVERY_KEY)
+
+    if apply_errors or export_errors:
+        if _extcal_record_failure(conn, _EXTCAL_STREAK_APPLY_KEY, threshold):
+            escalate_messages += [
+                f"{e.get('branch')}.{e.get('action')} id={e.get('id')}: {e.get('error')}"
+                for e in apply_errors]
+            # Task 7: export_own's errors have no "branch" (there is only
+            # one kind of row on this side, events) -- reported as
+            # "export.<action> event_id=<id>: <error>" instead, same
+            # overall shape.
+            escalate_messages += [
+                f"export.{e.get('action')} event_id={e.get('event_id')}: {e.get('error')}"
+                for e in export_errors]
+    else:
+        _extcal_record_success(conn, _EXTCAL_STREAK_APPLY_KEY)
+
+    conn.commit()
+
+    if escalate_messages:
         # Blocker 3: redacted -- this string is what maint.problem_summary
         # copies verbatim into the nightly message to Denis, so an
         # unredacted href/RRULE here is a leak into HER message, not just
         # an audit-log detail.
-        reasons = list(_redact_sync_errors(result["sync_errors"]))
-        reasons += [f"{e.get('branch')}.{e.get('action')} id={e.get('id')}: {e.get('error')}"
-                    for e in apply_errors]
-        # Task 7: export_own's errors have no "branch" (there is only one
-        # kind of row on this side, events) -- reported as "export.<action>
-        # event_id=<id>: <error>" instead, same overall shape.
-        reasons += [f"export.{e.get('action')} event_id={e.get('event_id')}: {e.get('error')}"
-                    for e in export_errors]
-        _audit_tick_error("cal-ext", "; ".join(reasons) or "cal-ext sync had errors")
+        _audit_tick_error(
+            "cal-ext", "; ".join(escalate_messages) or "cal-ext sync had errors")
         if getattr(args, "json", False):
             print(json.dumps({"ok": False, **counts, "export": export_counts,
                                "calendars": result["calendars"]},
@@ -2517,7 +2705,7 @@ def cmd_tick_cal_ext(args):
         return 1
 
     if getattr(args, "json", False):
-        print(json.dumps({"ok": True, **counts, "export": export_counts,
+        print(json.dumps({"ok": not has_error, **counts, "export": export_counts,
                            "calendars": result["calendars"]},
                           ensure_ascii=False))
     else:

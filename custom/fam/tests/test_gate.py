@@ -82,6 +82,7 @@ CFG = {
     "extcal_horizon_weeks": 8,
     "extcal_stale_hours": 6,
     "extcal_full_resync_days": 1,
+    "extcal_fail_streak_threshold": 3,
     # Final review, Should-fix 8: оба ключа доехали до gate.CONFIG_DEFAULTS,
     # значит должны быть и в этом зеркале -- см. комментарий выше.
     "whereami_home_radius_km": 0.3,

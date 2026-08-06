@@ -216,6 +216,23 @@ CONFIG_DEFAULTS = {
     "extcal_horizon_weeks": 8,
     "extcal_stale_hours": 6,
     "extcal_full_resync_days": 1,
+    # Streak-alerting hardening (2026-08): a live-prod week showed every
+    # `fam tick cal-ext` failure escalated straight to `tick.error` --
+    # and therefore into Denis's nightly `maint.problem_summary` -- even
+    # though all of them were single, self-healing blips (one iCloud
+    # resource stalling for a round, one bad discover() pass) gone by
+    # the very next 15-minute tick. `extcal_fail_streak_threshold` is how
+    # many CONSECUTIVE failing ticks (tracked separately per calendar URL
+    # and for the "0 calendars matched" discovery class -- see cli.py's
+    # `_extcal_record_failure`) it takes before escalating; a single
+    # below-threshold failure is still fully recorded in `audit cal.ext.
+    # sync`'s own `sync_errors`, nothing is hidden, only the nightly
+    # escalation is delayed. Validated the same way as
+    # `extcal_full_resync_days` (cli.py's `_extcal_fail_streak_threshold`
+    # via the shared `_clamp_int_config`): clamped to [1, 50], defaults
+    # to 3 on anything that doesn't coerce to an int, never wedges the
+    # tick.
+    "extcal_fail_streak_threshold": 3,
 }
 
 GATE_STYLE_INSTRUCTION = (
