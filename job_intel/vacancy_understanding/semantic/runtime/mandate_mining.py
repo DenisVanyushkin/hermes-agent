@@ -56,6 +56,13 @@ _NON_CANDIDATE_SUBJECT = re.compile(
     r"(?!\s+(?:you|we)\b)", re.I)
 _COMPANY_DESC = re.compile(
     r"^\s*(?:we(?:'re| are)\b|our\b|the company\b|founded\b|headquarter|"
+    # Round-2 sample: "We set strategy and drive products from inception to
+    # launch" produced strategy_ownership on a Director of Product. The
+    # subject is the team, not the candidate — but only "we're"/"we are" were
+    # rejected, so every other "We <verb>" opening passed. A "We" sentence is
+    # the candidate's duty only if it addresses them, as in "We expect you
+    # to own the product strategy".
+    r"we\b(?!.*\byou\b)|"
     r"[a-z]+ is (?:a|the) (?:leading|global|fast)\b)", re.I)
 # The verb must be addressed to the candidate: second person, imperative at
 # sentence start, an infinitive, or an explicit responsibility phrase.

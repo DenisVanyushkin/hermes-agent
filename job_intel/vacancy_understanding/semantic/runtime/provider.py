@@ -34,6 +34,28 @@ _EXP = ObservationBasis.explicit
 _DIR = ObservationBasis.direct
 _WEA = ObservationBasis.weak
 
+# Qualifiers that make a strategy a FUNCTIONAL one — owning it is not an
+# executive product mandate (owner decision 2026-08-06). Sampled from real
+# firings: design, product marketing, commercial risk, regional events,
+# Talent Acquisition, technical sales, global benefits, search.
+_FUNCTIONAL_STRATEGY = (
+    r"design|marketing|brand|risk|benefits?|events?|sales|talent|"
+    r"recruit\w*|hiring|content|search|seo|technical|engineering|data|"
+    r"security|compliance|finance|financial|communications?|people|hr|"
+    r"media|channel|partnerships?|support|operations?|legal|tax|payroll|"
+    r"procurement|workplace|community|social|quota|pipeline"
+)
+# Duty verb, then AT MOST four qualifier words none of which is functional,
+# then the strategy noun. The word-by-word lookahead is what makes this a
+# denylist that a free filler cannot slip past: round 1 used
+# "[\w ,'-]{0,30}" here, which happily swallowed "the design ".
+_STRATEGY_DUTY = (
+    r"(?:[Dd]efine|[Dd]rive|[Ff]ormulate|[Ss]et|[Oo]wn)(?:s|ing)?"
+    r"(?: and (?:execute|drive|define|own|shape|lead)(?:s|ing)?)?"
+    rf"(?:\s+(?!(?i:{_FUNCTIONAL_STRATEGY})\b)[\w'’-]+){{0,4}}"
+    r"\s+(?:strategy|strategic vision|product vision)\b"
+)
+
 RULES: list[SignalRule] = [
     # ---- scope breadth ----
     _R(r"[Oo]wn [\w' ]{0,30}growth and expansion (across|in) (all )?\w+[\w ]{0,20}", "scope_breadth=region", _DIR),
@@ -147,11 +169,21 @@ RULES += [
        extra_signals=("revenue_proximity=direct_pnl",)),
 
     # Strategy: "drive strategy", "Define and drive the long-term product
-    # vision, strategy", "Formulate and execute a strategic vision"
-    _R(r"(?:[Dd]efine|[Dd]rive|[Ff]ormulate|[Ss]et|[Oo]wn)(?:s|ing)?"
-       r"(?: and \w+)?[\w ,'-]{0,30}\b(?:product |long-term |multi-year |"
-       r"commercial )?(?:strategy|strategic vision|product vision)\b",
-       "strategy_ownership=true", _DIR),
+    # vision, strategy", "Formulate and execute a strategic vision".
+    #
+    # Owner decision 2026-08-06: a FUNCTIONAL strategy is not an executive
+    # product mandate — the negative fixture "Senior Director, Enterprise Risk
+    # Strategy" already said so, but the round-1 rule let a free filler run up
+    # to the noun, so "own the design strategy", "the product marketing
+    # strategy" and "a Talent Acquisition strategy" all matched.
+    #
+    # Expressed as a denylist on the QUALIFIER rather than an allowlist on the
+    # object: the flagship GPNI vacancy phrases it bare ("You'll drive
+    # strategy, assess and integrate new financial partners"), and requiring a
+    # product/business object would have dropped a role the acceptance
+    # criterion requires in the top band. On a product role a bare "strategy"
+    # is a product strategy by context; a qualified one names its function.
+    _R(_STRATEGY_DUTY, "strategy_ownership=true", _DIR),
 
     # Team building: "build and lead a team of product managers",
     # "Lead, mentor, and scale a strong organization of Product Managers",
