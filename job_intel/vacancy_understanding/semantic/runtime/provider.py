@@ -235,6 +235,43 @@ RULES += [
     _R(r"we are a bank\b", "company.is_crypto_exchange=false", _EXP),
 ]
 
+# Signals whose truth depends on the sentence being about the CANDIDATE.
+# Company-level prose mentioning the same words is not evidence for them.
+_DUTY_SCOPED = (
+    "team_build_mandate", "strategy_ownership", "org_design_mandate",
+    "executive_exposure", "board_exposure", "pnl_ownership",
+    "revenue_proximity", "scope_breadth", "expansion_mandate",
+    "market_entry_ownership", "monetization_core", "pricing_core",
+    "acquiring_core", "growth_mandate",
+)
+
+
+def _duty_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans of sentences that state the CANDIDATE's duty.
+
+    §7.2 round-2 fix. Rules used to regex the raw text, so company-culture
+    prose matched: "we scale and solve them as a team" produced
+    team_build_mandate on a Recruiter, a Data Engineer and an AI Engineer.
+    Mandate patterns must only fire inside a sentence that actually assigns a
+    duty to the candidate — the same discipline the mining stage already
+    applies. Non-mandate signals are unaffected.
+    """
+    from job_intel.vacancy_understanding.semantic.runtime.mandate_mining import (
+        responsibility_sentences,
+    )
+
+    spans = []
+    for sent in responsibility_sentences(text):
+        idx = text.find(sent[:60])
+        if idx >= 0:
+            spans.append((idx, idx + len(sent)))
+    return spans
+
+
+def _within(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
+    return any(a <= span[0] and span[1] <= b + 1 for a, b in spans)
+
+
 _FACT_PREFIX = {"company.": "company.", "requirements.": "requirements.", "organization.": "organization."}
 
 
@@ -255,11 +292,21 @@ class DeterministicPhraseProvider:
                                       structured: dict) -> list[Observation]:
         out: list[Observation] = []
         n = 0
+        # Mandate patterns may only fire inside a sentence that assigns a duty
+        # to the candidate (§7.2 round-2). Computed once per call.
+        duty = _duty_spans(text) if text else []
         for rule in RULES:
             hay = title if rule.scope == "title" else text
             if not hay:
                 continue
-            m = re.search(rule.pattern, hay)
+            m = None
+            for cand in re.finditer(rule.pattern, hay):
+                if (rule.scope != "title"
+                        and rule.signal.startswith(_DUTY_SCOPED)
+                        and not _within(cand.span(), duty)):
+                    continue  # matched company prose, not a duty of the role
+                m = cand
+                break
             if not m:
                 continue
             n += 1

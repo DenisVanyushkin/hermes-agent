@@ -93,6 +93,9 @@ FACT_SEEDS: dict[str, tuple[str, ...]] = {
 # lines, company blurbs and duties into one "sentence" (round-1 defect).
 # Also break on list glyphs and on a lowercase->Capitalised-word boundary,
 # which is where the scraper joined separate blocks.
+_CANDIDATE_OPENING = re.compile(
+    rf"^\s*(?:you\b|your\b|(?:{_DUTY})\b)", re.I)
+
 _SENT_SPLIT = re.compile(
     r"(?<=[.!?;])\s+"
     r"|\n+"
@@ -133,7 +136,13 @@ def responsibility_sentences(text: str) -> list[str]:
         s = _WS.sub(" ", raw).strip()
         if not (25 <= len(s) <= 400):
             continue
-        if _COMPANY_DESC.search(s) or _NON_CANDIDATE_SUBJECT.search(s):
+        # An imperative or second-person opening IS the candidate's duty, so
+        # the subject test must not run on it: "Own user acquisition ..."
+        # was being misread as subject "user" and discarded.
+        candidate_opening = bool(_CANDIDATE_OPENING.match(s))
+        if _COMPANY_DESC.search(s):
+            continue
+        if not candidate_opening and _NON_CANDIDATE_SUBJECT.search(s):
             continue
         if _DUTY_CONTEXT.search(s):
             out.append(s)

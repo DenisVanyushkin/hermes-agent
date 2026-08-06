@@ -101,16 +101,28 @@ def _extract_mandate_facts(row: dict[str, Any]) -> set[str]:
     return known
 
 
-def coverage_report(rows: list[dict[str, Any]], *, label: Optional[str] = None
-                    ) -> dict[str, Any]:
+def coverage_report(rows: list[dict[str, Any]], *, label: Optional[str] = None,
+                    target_only: bool = False) -> dict[str, Any]:
     """Extraction coverage over a REAL corpus slice — the §7.2 gate metric.
 
     An empty slice reports state=not_applicable with rates of None: a 0.0
     rate would read as "we extract nothing", which is a different claim from
     "there was nothing to measure".
     """
+    # §7.2 round-2 fix: the eligible corpus is mostly non-target roles, so a
+    # corpus-wide rate describes the wrong population. target_only scopes the
+    # measurement to the roles §7.2 is actually about.
+    population = "all_eligible"
+    if target_only:
+        from job_intel.vacancy_understanding.semantic.runtime.mandate_mining import (
+            is_target_role,
+        )
+        rows = [r for r in rows if is_target_role(r.get("title") or "")]
+        population = "target_roles"
+
     if not rows:
-        return {"label": label, "state": "not_applicable", "roles_total": 0,
+        return {"label": label, "population": population,
+                "state": "not_applicable", "roles_total": 0,
                 "roles_with_any_mandate": 0, "roles_with_any_mandate_rate": None,
                 "per_fact": {fid: 0 for fid in MANDATE_FACTS}}
 
@@ -129,6 +141,7 @@ def coverage_report(rows: list[dict[str, Any]], *, label: Optional[str] = None
     total = len(rows)
     return {
         "label": label,
+        "population": population,
         "state": "known_value",
         "roles_total": total,
         "roles_with_any_mandate": with_any,
