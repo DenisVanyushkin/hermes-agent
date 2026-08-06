@@ -1,0 +1,94 @@
+{
+ "source": "owner manual review 5B-5 (step5b5-manual-review-package-MARKED.md)",
+ "meaning": "excerpts the owner judged NOT to support the mandate fact; no rule may fire on them",
+ "cases": [
+  {
+   "fact": "mandate.strategy_ownership",
+   "excerpt": "Senior Director, Enterprise Risk Strategy"
+  },
+  {
+   "fact": "mandate.platform_engineering",
+   "excerpt": "GTPN is Airwallex’s core money-movement platform – it powers how customers collect money, manage t"
+  },
+  {
+   "fact": "mandate.revenue_proximity",
+   "excerpt": "GTPN is Airwallex’s core money-movement platform – it powers how customers collect money, manage t"
+  },
+  {
+   "fact": "mandate.platform_as_business",
+   "excerpt": "unified payments and financial platform for global businesses."
+  },
+  {
+   "fact": "mandate.revenue_proximity",
+   "excerpt": "protect our customers from Payment fraud."
+  },
+  {
+   "fact": "mandate.scope_breadth",
+   "excerpt": "Risk Platform team, building out our Anti-Fraud capabilities"
+  },
+  {
+   "fact": "mandate.executive_exposure",
+   "excerpt": "Head of Strategic Product Sales"
+  },
+  {
+   "fact": "organization.cross_functional_leadership",
+   "excerpt": "a specialized overlay sales team"
+  },
+  {
+   "fact": "mandate.revenue_proximity",
+   "excerpt": "Growth Product team — overseeing the thoughtful strategy and execution of team and technical systems to drive customer acquisition and onboarding."
+  },
+  {
+   "fact": "organization.cross_functional_leadership",
+   "excerpt": "collaborate closely with our Go-to-Market (GTM) teams"
+  },
+  {
+   "fact": "mandate.team_build_mandate",
+   "excerpt": "overseeing the thoughtful strategy and execution of team and technical systems"
+  },
+  {
+   "fact": "mandate.feature_delivery_only",
+   "excerpt": "overseeing the thoughtful strategy and execution of team and technical systems"
+  },
+  {
+   "fact": "mandate.transformation_phase",
+   "excerpt": "Define and deliver the future of how UK businesses manage their money."
+  },
+  {
+   "fact": "organization.cross_functional_leadership",
+   "excerpt": "ambiguity, and can inspire multiple teams to deliver world-class outcomes."
+  },
+  {
+   "fact": "mandate.strategy_ownership",
+   "excerpt": "We are looking for a Product Director to unify and lead OKX's internal HR and Finance system product lines."
+  },
+  {
+   "fact": "organization.cross_functional_leadership",
+   "excerpt": "across multiple departments and time zones"
+  },
+  {
+   "fact": "mandate.team_build_mandate",
+   "excerpt": "Team management experience (3+ people)"
+  },
+  {
+   "fact": "mandate.revenue_proximity",
+   "excerpt": "Internal HR & Finance Systems"
+  },
+  {
+   "fact": "mandate.strategy_ownership",
+   "excerpt": "Director of Product"
+  },
+  {
+   "fact": "mandate.scope_breadth",
+   "excerpt": "Product Lead - Onboarding Experience"
+  },
+  {
+   "fact": "mandate.mandate_summary",
+   "excerpt": "Product Lead - Onboarding Experience"
+  },
+  {
+   "fact": "mandate.scope_breadth",
+   "excerpt": "Product Lead - Pricing"
+  }
+ ]
+}
