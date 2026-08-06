@@ -36,7 +36,8 @@ def main() -> int:
     sys.path.insert(0, str(_resolve_repo()))
     from job_intel.runtime import resolve_db_path
     from job_intel.shadow_advisory import (
-        advisory_enabled, build_feasibility_advisory, format_advisory, post_advisory,
+        advisory_enabled, build_feasibility_advisory, describe_post_result,
+        format_advisory, post_advisory,
     )
     from job_intel.store import JobIntelStore
 
@@ -55,13 +56,11 @@ def main() -> int:
     # posting requires BOTH the enable flag and --post; otherwise dry-run.
     do_post = args.post and advisory_enabled()
     result = post_advisory(message, dry_run=not do_post)
+    print(describe_post_result(result, run_id=run_id, count=len(items)))
     if result.get("dry_run"):
-        print(f"[advisory] run {run_id}: DRY-RUN (flag off or --post absent) — "
-              f"{len(items)} caveat(s). Rendered message:\n")
-        print(message)
-    else:
-        print(f"[advisory] run {run_id}: posted {len(items)} caveat(s) -> {json.dumps(result)}")
-    return 0
+        print("\n" + message)
+    # a failed delivery is a real failure: exit non-zero so systemd/cron sees it
+    return 0 if (result.get("posted") or result.get("dry_run")) else 1
 
 
 if __name__ == "__main__":

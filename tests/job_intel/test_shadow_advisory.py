@@ -75,6 +75,47 @@ def test_advisory_flag_default_off(monkeypatch):
     assert advisory_enabled() is True
 
 
+def test_describe_never_claims_delivery_on_failure():
+    """Live enablement finding: the entrypoint printed 'posted 1 caveat(s)'
+    while delivery had actually failed. A false success report is worse than a
+    failure — the operator believes Slack got it."""
+    from job_intel.shadow_advisory import describe_post_result
+    ok = describe_post_result({"posted": True}, run_id=1, count=2)
+    assert "posted" in ok.lower() and "fail" not in ok.lower()
+    bad = describe_post_result({"posted": False, "error": "boom"}, run_id=1, count=2)
+    assert "boom" in bad
+    low = bad.lower()
+    assert "not posted" in low or "failed" in low
+    assert not low.startswith("[advisory] run 1: posted")
+    dry = describe_post_result({"posted": False, "dry_run": True}, run_id=1, count=2)
+    assert "dry-run" in dry.lower()
+
+
+def test_post_advisory_uses_gateway_not_webhook(monkeypatch):
+    """Cards are delivered through the hermes gateway (the webhook env var is
+    empty in production), so the advisory must use the same path."""
+    from job_intel import shadow_advisory as mod
+    sent = {}
+
+    def fake_send(payload):
+        sent.update(payload)
+        return '{"success": true, "ts": "1.2"}'
+
+    monkeypatch.setattr(mod, "_gateway_send", fake_send)
+    res = mod.post_advisory("hello", dry_run=False, channel="C123")
+    assert res["posted"] is True
+    assert sent["target"] == "slack:C123"
+    assert sent["message"] == "hello"
+
+
+def test_post_advisory_reports_gateway_error(monkeypatch):
+    from job_intel import shadow_advisory as mod
+    monkeypatch.setattr(mod, "_gateway_send", lambda p: '{"error": "nope"}')
+    res = mod.post_advisory("hello", dry_run=False, channel="C123")
+    assert res["posted"] is False
+    assert "nope" in str(res["error"])
+
+
 def test_store_fetch_advisory_joins_shadow_and_prod(tmp_path):
     from job_intel.models import Vacancy, Evaluation
     s = JobIntelStore(str(tmp_path / "t.sqlite3"))

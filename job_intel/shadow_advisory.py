@@ -80,21 +80,47 @@ def format_advisory(items: list[dict[str, Any]], *, run_label: str) -> str | Non
     return "\n".join(lines)
 
 
+# Job-intel cards are delivered through the hermes gateway adapter, not a
+# webhook (JOB_INTEL_SLACK_WEBHOOK_URL is empty in production, so cli.py's
+# _deliver_to_slack always takes the gateway branch). The advisory uses the
+# SAME path so it lands in the same place, with the same auth.
+DEFAULT_ADVISORY_CHANNEL = "C0B4MM6D52A"  # executive_search_report
+
+
+def _gateway_send(payload: dict[str, str]) -> str:
+    from tools.send_message_tool import send_message_tool
+
+    return send_message_tool(payload)
+
+
 def post_advisory(message: str, *, dry_run: bool = True,
                   channel: str | None = None) -> dict[str, Any]:
-    """Post the advisory via the same webhook the pipeline uses. dry_run
-    (default) returns the rendered message and posts nothing."""
+    """Deliver the advisory through the hermes gateway. dry_run (default)
+    renders and posts nothing. Never raises: returns posted=False + error."""
     if dry_run:
         return {"posted": False, "dry_run": True, "message": message}
-    webhook = os.getenv("JOB_INTEL_SLACK_WEBHOOK_URL", "").strip()
-    if not webhook:
-        return {"posted": False, "error": "no JOB_INTEL_SLACK_WEBHOOK_URL"}
-    import requests
+    ch = (channel or os.getenv("SEMANTIC_SHADOW_ADVISORY_CHANNEL", "").strip()
+          or DEFAULT_ADVISORY_CHANNEL)
+    try:
+        import json as _json
 
-    payload: dict[str, str] = {"text": message}
-    ch = channel or os.getenv("SEMANTIC_SHADOW_ADVISORY_CHANNEL", "").strip()
-    if ch:
-        payload["channel"] = ch
-    resp = requests.post(webhook, json=payload, timeout=20)
-    resp.raise_for_status()
-    return {"posted": True, "dry_run": False}
+        raw = _gateway_send({"target": f"slack:{ch}", "message": message})
+        resp = _json.loads(raw) if raw else {}
+    except Exception as exc:
+        return {"posted": False, "error": f"gateway delivery error: {exc}"}
+    if resp.get("error"):
+        return {"posted": False, "error": str(resp["error"])}
+    if resp.get("success"):
+        return {"posted": True, "dry_run": False, "ts": resp.get("ts")}
+    return {"posted": False, "error": f"unexpected gateway response: {resp}"}
+
+
+def describe_post_result(result: dict[str, Any], *, run_id: Any, count: int) -> str:
+    """Single source of truth for the operator-facing line. Reports what
+    ACTUALLY happened — a delivery failure must never read as a success."""
+    if result.get("posted"):
+        return f"[advisory] run {run_id}: posted {count} caveat(s)"
+    if result.get("dry_run"):
+        return f"[advisory] run {run_id}: DRY-RUN — {count} caveat(s), nothing sent"
+    return (f"[advisory] run {run_id}: NOT POSTED (delivery failed) — "
+            f"{count} caveat(s); error: {result.get('error')}")
