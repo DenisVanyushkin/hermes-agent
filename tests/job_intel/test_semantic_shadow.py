@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 
 from job_intel.models import Vacancy
-from job_intel.vacancy_understanding.semantic.runtime.shadow_deploy import (
+from job_intel.vacancy_understanding.shadow_deploy import (
     SEMANTIC_SHADOW_VERSION,
     evaluate_semantic_shadow,
     semantic_shadow_enabled,

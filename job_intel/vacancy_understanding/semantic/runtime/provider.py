@@ -124,6 +124,70 @@ RULES: list[SignalRule] = [
     _R(r"[\w]+ experience a plus", "requirements.overall_transferability=transferable", _WEA),
 ]
 
+# ---------------------------------------------------------------------------
+# §7.2 round 1 — rules authored from REAL vacancy language (T5).
+#
+# Every pattern below was written against duty sentences mined from live
+# target-population vacancies (mandate_mining.py, DEV slice only), NOT from
+# the contract's own control phrases. That inversion is the whole point: the
+# pre-existing rules matched the controls they were derived from and almost
+# nothing in production text (median 1 observation on a ~7000-char vacancy).
+#
+# Precision discipline: the duty must be the CANDIDATE's. The owner-marked
+# negative fixtures (mandate_negative_fixtures.json) guard against the
+# company-boilerplate error these rules could otherwise reintroduce.
+# ---------------------------------------------------------------------------
+
+RULES += [
+    # P&L: "You own a P&L", "owning the full P&L", "Own the Roadmap and P&L",
+    # "own the outcomes of the P&L"
+    _R(r"[Oo]wn(?:ing|s)?\b[\w ,'-]{0,40}\bP&L\b", "pnl_ownership=true", _DIR,
+       extra_signals=("revenue_proximity=direct_pnl",)),
+    _R(r"full ownership of[\w ,'-]{0,30}\bP&L\b", "pnl_ownership=true", _DIR,
+       extra_signals=("revenue_proximity=direct_pnl",)),
+
+    # Strategy: "drive strategy", "Define and drive the long-term product
+    # vision, strategy", "Formulate and execute a strategic vision"
+    _R(r"(?:[Dd]efine|[Dd]rive|[Ff]ormulate|[Ss]et|[Oo]wn)(?:s|ing)?"
+       r"(?: and \w+)?[\w ,'-]{0,30}\b(?:product |long-term |multi-year |"
+       r"commercial )?(?:strategy|strategic vision|product vision)\b",
+       "strategy_ownership=true", _DIR),
+
+    # Team building: "build and lead a team of product managers",
+    # "Lead, mentor, and scale a strong organization of Product Managers",
+    # "hiring, managing, and developing product managers"
+    _R(r"(?:[Bb]uild|[Gg]row|[Ss]cale)(?:s|ing)?\b[\w ,'-]{0,35}"
+       r"\b(?:team|organi[sz]ation)\b", "team_build_mandate=true", _DIR),
+    _R(r"\bhiring\b[\w ,'-]{0,30}\b(?:product managers?|PMs?|leaders?)\b",
+       "team_build_mandate=true", _DIR),
+
+    # Executive exposure: "collaborate with senior leadership",
+    # "present results to senior leadership", "our C-level vision"
+    _R(r"(?:[Pp]resent|[Rr]eport|[Cc]ollaborat|[Ee]ngag|[Pp]artner|[Ww]ork)"
+       r"(?:s|ed|ing)?\b[\w ,'-]{0,30}\b(?:with|to)\b[\w ,'-]{0,20}"
+       r"\b(?:C-level|senior leadership|executive team|executive leadership|"
+       r"leadership team|ExCo)\b", "executive_exposure=true", _DIR),
+
+    # Board exposure: "present results to senior leadership and the board"
+    _R(r"(?:[Pp]resent|[Rr]eport)(?:s|ing)?\b[\w ,'-]{0,40}\bto\b"
+       r"[\w ,'-]{0,30}\bthe board\b", "board_exposure=true", _DIR),
+
+    # Org design: "Unify the Risk and Identity organizations",
+    # "Lead the product organization across multiple product areas"
+    _R(r"[Uu]nify(?:ing)?\b[\w ,'-]{0,35}\borgani[sz]ations?\b",
+       "org_design_mandate=true", _DIR),
+    _R(r"[Ll]ead(?:s|ing)? the product organi[sz]ation\b",
+       "org_design_mandate=true", _DIR),
+
+    # Scope: "Own the Card domain end-to-end" -> domain;
+    # "oversees multiple product portfolios" / "across your portfolio"
+    _R(r"[Oo]wn(?:s|ing)? the [\w ]{0,20}domain end.to.end",
+       "scope_breadth=domain", _DIR),
+    _R(r"(?:multiple product portfolios|across your portfolio)",
+       "scope_breadth=portfolio", _DIR),
+]
+
+
 RULES += [
     # ---- revenue proximity ----
     _R(r"own revenue targets( for [\w ]{0,25})?", "revenue_proximity=direct_revenue", _DIR),

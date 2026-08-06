@@ -47,7 +47,7 @@ def main() -> int:
 
     from job_intel.runtime import resolve_db_path
     from job_intel.store import JobIntelStore
-    from job_intel.vacancy_understanding.semantic.runtime.shadow_deploy import (
+    from job_intel.vacancy_understanding.shadow_deploy import (
         run_semantic_shadow,
         semantic_shadow_enabled,
     )
