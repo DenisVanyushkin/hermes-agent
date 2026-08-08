@@ -881,7 +881,24 @@ def _detail_html(url: str, *, timeout: int = 20) -> str | _DetailSignal | None:
 _SMARTRECRUITERS_SECTIONS = ("jobDescription", "qualifications", "additionalInformation")
 
 
+#: The only URL shape this fetcher can address. A posting's `ref` field in the
+#: listing API is exactly this, which is what lands in vacancies.url for rows
+#: collected through the API path.
+_SMARTRECRUITERS_DETAIL_URL = re.compile(
+    r"^https?://api\.smartrecruiters\.com/v\d+/companies/[^/]+/postings/[^/?#]+",
+    re.I)
+
+
 def fetch_smartrecruiters_detail(url: str) -> str | _DetailSignal | None:
+    if not _SMARTRECRUITERS_DETAIL_URL.match((url or "").strip()):
+        # Not an addressable detail endpoint -- a jobs.smartrecruiters.com page
+        # URL, which is what the JSON-LD fallback at the listing level produces.
+        # Requesting it would return HTML, and since an unparseable 200 is
+        # (correctly) transient, the row would be retried on every sweep for
+        # ever. It is permanently unfetchable BY THIS FETCHER, which is the same
+        # judgement fetch_headhunter_detail makes about a URL carrying no
+        # /vacancy/<id>. No request is issued.
+        return None
     payload = _detail_json(url)
     if is_transient_detail(payload):
         return payload

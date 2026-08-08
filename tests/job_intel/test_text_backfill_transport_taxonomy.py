@@ -322,6 +322,38 @@ def test_a_malformed_job_ad_is_permanent_and_never_raises(monkeypatch, payload):
     assert fetch_smartrecruiters_detail(SR_URL) is None
 
 
+@pytest.mark.parametrize("unaddressable", [
+    "https://jobs.smartrecruiters.com/Wise/744000142223879",
+    "https://jobs.smartrecruiters.com/Wise/744000142223879#dup:12",
+    "https://x/1",
+    "",
+])
+def test_smartrecruiters_refuses_an_unaddressable_url_without_a_request(
+        monkeypatch, unaddressable):
+    """Pre-M3 such a URL returned HTML, resp.json() raised, and the row was
+    retired as `unavailable` -- wrong bucket, but bounded. Post-M3 an unparseable
+    200 is transient, so without this gate the row would be re-fetched on every
+    sweep for ever, and rows_needing_text has no ORDER BY, so it would be the
+    same rows each night, starving the ones that can be filled."""
+    calls = []
+    monkeypatch.setattr(ats_sources, "_http_get",
+                        lambda url, **kw: calls.append(url) or _Resp(200, text="<html/>"))
+    assert fetch_smartrecruiters_detail(unaddressable) is None
+    assert calls == [], "no request may be issued for a URL we cannot address"
+
+
+def test_smartrecruiters_accepts_the_ref_url_shape_the_listing_stores(monkeypatch):
+    """Discrimination control for the gate. This is the verified real shape of a
+    posting's `ref` field (checked live against api.smartrecruiters.com), which is
+    what fetch_smartrecruiters puts in vacancies.url on the API path -- so the
+    gate must not reject the rows the sweep actually holds."""
+    monkeypatch.setattr(ats_sources, "_http_get",
+                        _responder(_Resp(200, payload=SR_OK_PAYLOAD)))
+    text = fetch_smartrecruiters_detail(
+        "https://api.smartrecruiters.com/v1/companies/Wise/postings/744000142223879")
+    assert "own the pricing and incentive structure" in text
+
+
 def test_a_non_string_section_text_is_skipped_not_repr_dumped():
     """`str(node.get("text") or "")` turned a dict or list section body into a
     Python repr and joined it into the stored description -- quiet data

@@ -25,7 +25,18 @@ def store(tmp_path):
 # anything seen within SEEN_RECENTLY_DAYS (2) -- that's the live branch's
 # territory, not the sweep's. A fixture row with a fresh last_seen_at would
 # never be selected, so every fixture here is backdated past that window.
-def _insert(store, url="https://x/1"):
+# The verified real shape of a posting's `ref` field, which is what
+# fetch_smartrecruiters puts in vacancies.url on the API path -- and the only
+# shape fetch_smartrecruiters_detail will address. Tests that drive the REAL
+# fetcher must use it, or they exercise the URL gate rather than the transport
+# taxonomy they mean to test. Tests passing an explicit `fetchers=` stub bypass
+# the fetcher entirely and do not care.
+def _sr_url(n: int = 1) -> str:
+    return f"https://api.smartrecruiters.com/v1/companies/Acme/postings/74400014222{n:04d}"
+
+
+def _insert(store, url=None):
+    url = url or _sr_url(1)
     vid = store.upsert_vacancy(Vacancy(
         source="smartrecruiters", source_id="a", company="Acme",
         title="Head of Product", location="Remote", url=url, description=""), url)
@@ -239,8 +250,8 @@ def test_rows_skipped_by_a_rate_limit_have_no_state_written_at_all(
     """The rows the sweep never got to must be indistinguishable from untouched:
     a persisted state for a row that was never even requested would be a verdict
     invented out of another row's failure."""
-    first_id = _insert(store, url="https://x/1")
-    second_id = _insert(store, url="https://x/2")
+    first_id = _insert(store, url=_sr_url(1))
+    second_id = _insert(store, url=_sr_url(2))
     _serve(monkeypatch, _Resp(429))
 
     report = sweep(store, budget=10)

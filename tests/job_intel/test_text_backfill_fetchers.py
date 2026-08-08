@@ -38,9 +38,15 @@ def test_smartrecruiters_strips_html(monkeypatch):
     assert "<p>" not in text
 
 
+SR_API_URL = "https://api.smartrecruiters.com/v1/companies/Wise/postings/744000142223879"
+
+
 def test_smartrecruiters_returns_none_without_a_job_ad(monkeypatch):
+    """URL must be an addressable api.smartrecruiters.com posting: the fetcher
+    refuses anything else before calling _detail_json, so a placeholder URL here
+    would make this pass without exercising the stub at all."""
     monkeypatch.setattr("job_intel.ats_sources._detail_json", lambda url, **kw: {"id": "1"})
-    assert fetch_smartrecruiters_detail("https://x/1") is None
+    assert fetch_smartrecruiters_detail(SR_API_URL) is None
 
 
 def test_smartrecruiters_returns_none_when_the_posting_is_permanently_absent(monkeypatch):
@@ -50,7 +56,7 @@ def test_smartrecruiters_returns_none_when_the_posting_is_permanently_absent(mon
     tests/job_intel/test_text_backfill_transport_taxonomy.py. This test was
     once named "..._on_transport_failure", which conflated the two."""
     monkeypatch.setattr("job_intel.ats_sources._detail_json", lambda url, **kw: None)
-    assert fetch_smartrecruiters_detail("https://x/1") is None
+    assert fetch_smartrecruiters_detail(SR_API_URL) is None
 
 
 from job_intel.ats_sources import fetch_headhunter_detail
