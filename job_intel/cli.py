@@ -382,6 +382,39 @@ def _skipped_source_status(source: str, *, acquisition: str | None = None) -> di
 
 
 
+def _apply_text_backfill(vacancies: list[Vacancy], *, fetchers=None):
+    """Fill in missing descriptions in place, before anything judges the role.
+
+    Ordering is the point: classification runs on the best available text, so a
+    weak or non-English title is no longer a verdict a vacancy cannot appeal.
+    Never raises — a failed backfill leaves today's behaviour intact.
+    """
+    from job_intel.text_backfill import BackfillReport, backfill
+
+    if (os.getenv("JOB_INTEL_TEXT_BACKFILL_ENABLED", "1") or "1").strip().lower() in {
+            "0", "false", "no"}:
+        return BackfillReport()
+    budget = int(os.getenv("JOB_INTEL_TEXT_BACKFILL_BUDGET", "400") or "400")
+    by_url = {}
+    rows = []
+    for vacancy in vacancies:
+        row = {"source": vacancy.source, "title": vacancy.title,
+               "description": vacancy.description, "url": vacancy.url}
+        rows.append(row)
+        by_url[(vacancy.source, vacancy.url)] = vacancy
+    try:
+        report = backfill(rows, budget=budget, fetchers=fetchers)
+    except Exception:
+        return BackfillReport()
+    for result in report.results:
+        if result.state != "ok" or not result.text:
+            continue
+        target = by_url.get((result.row.get("source"), result.row.get("url")))
+        if target is not None:
+            target.description = result.text
+    return report
+
+
 def _collect_vacancies(
     store: JobIntelStore | None = None,
     performance: RunPerformanceRecorder | None = None,
@@ -671,6 +704,8 @@ def _collect_vacancies(
     _collect_ats("smartrecruiters", fetcher=fetch_smartrecruiters, acquisition="ats-api")
     _collect_ats("personio", fetcher=fetch_personio, acquisition="ats-xml")
     _collect_ats("recruitee", fetcher=fetch_recruitee, acquisition="ats-xml")
+
+    backfill_report = _apply_text_backfill(vacancies)
 
     if not _source_enabled(enabled_sources, "duckduckgo"):
         statuses["duckduckgo"] = _skipped_source_status("duckduckgo")
