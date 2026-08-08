@@ -149,3 +149,111 @@ def test_sweep_persists_later_rows_after_one_persistence_failure(store, monkeypa
                            "FROM vacancies WHERE id=?", (ok_id,)).fetchone()
     assert row[0] == "y" * 400
     assert row[1] == "ok"
+
+
+# --- the taxonomy, as persisted -------------------------------------------
+# These drive the REAL fetchers from a stubbed HTTP layer, so they prove the
+# whole chain: status code -> detail helper -> fetcher -> backfill state ->
+# the row's text_backfill_state on disk -> whether it is ever offered again.
+# This is the path that writes irreversible state into the production DB.
+
+class _Resp:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self.headers = {}
+        self.text = ""
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+@pytest.fixture()
+def no_delay(monkeypatch):
+    monkeypatch.setenv("JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS", "0")
+
+
+def _serve(monkeypatch, resp):
+    import job_intel.ats_sources as ats
+    monkeypatch.setattr(ats, "_http_get", lambda url, **kw: resp)
+
+
+def _state(store, vid):
+    with store.connect(read_only=True) as conn:
+        return conn.execute("SELECT text_backfill_state FROM vacancies WHERE id=?",
+                            (vid,)).fetchone()[0]
+
+
+def test_a_rate_limited_row_stays_eligible_and_is_filled_on_the_next_sweep(
+        store, monkeypatch, no_delay):
+    """The defect this closes: a 429 used to write the TERMINAL `unavailable`
+    state, so one rate-limit burst against a source permanently retired up to
+    `budget` rows from ever being backfilled again."""
+    vid = _insert(store)
+    _serve(monkeypatch, _Resp(429))
+
+    first = sweep(store, budget=10)
+    assert first.failed == 1
+    assert first.unavailable == 0
+    assert _state(store, vid) == "failed"
+    assert [r["id"] for r in store.rows_needing_text(
+        ["smartrecruiters"], limit=10, exclude_seen_since_days=2)] == [vid]
+
+    # The outage passes. The row is recovered rather than lost.
+    second = sweep(store, budget=10, fetchers={"smartrecruiters": lambda url: "y" * 400})
+    assert second.filled == 1
+    with store.connect(read_only=True) as conn:
+        row = conn.execute("SELECT description, text_backfill_state FROM vacancies "
+                           "WHERE id=?", (vid,)).fetchone()
+    assert row[0] == "y" * 400
+    assert row[1] == "ok"
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_a_genuinely_absent_posting_is_still_retired(store, monkeypatch, no_delay,
+                                                     status):
+    """The other direction, and why the taxonomy has to be a distinction rather
+    than "retry everything": a 404 does not become a 200, so retrying it every
+    night forever would burn the budget that eligible rows need."""
+    vid = _insert(store)
+    _serve(monkeypatch, _Resp(status))
+
+    report = sweep(store, budget=10)
+    assert report.unavailable == 1
+    assert report.failed == 0
+    assert _state(store, vid) == "unavailable"
+    assert store.rows_needing_text(["smartrecruiters"], limit=10,
+                                   exclude_seen_since_days=2) == []
+
+
+def test_a_server_error_is_retryable_not_terminal(store, monkeypatch, no_delay):
+    vid = _insert(store)
+    _serve(monkeypatch, _Resp(503))
+    report = sweep(store, budget=10)
+    assert report.failed == 1
+    assert _state(store, vid) == "failed"
+
+
+def test_rows_skipped_by_a_rate_limit_have_no_state_written_at_all(
+        store, monkeypatch, no_delay):
+    """The rows the sweep never got to must be indistinguishable from untouched:
+    a persisted state for a row that was never even requested would be a verdict
+    invented out of another row's failure."""
+    first_id = _insert(store, url="https://x/1")
+    second_id = _insert(store, url="https://x/2")
+    _serve(monkeypatch, _Resp(429))
+
+    report = sweep(store, budget=10)
+
+    assert report.attempted == 1
+    assert report.rate_limited == 1
+    assert len(report.results) == 1
+    attempted, skipped = ((first_id, second_id)
+                          if _state(store, first_id) == "failed"
+                          else (second_id, first_id))
+    assert _state(store, attempted) == "failed"
+    assert _state(store, skipped) is None
+    # Both remain eligible: one as a recorded failure, one as untouched.
+    eligible = {r["id"] for r in store.rows_needing_text(
+        ["smartrecruiters"], limit=10, exclude_seen_since_days=2)}
+    assert eligible == {first_id, second_id}
