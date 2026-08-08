@@ -18,6 +18,8 @@ from job_intel.ats_sources import (
     fetch_headhunter_detail,
     fetch_smartrecruiters_detail,
     fetch_teamtailor_detail,
+    is_rate_limited_detail,
+    is_transient_detail,
 )
 from job_intel.evaluator import _title_function_blocker
 from job_intel.text_thresholds import PARTIAL_MIN
@@ -104,13 +106,18 @@ class BackfillReport:
     filled: int = 0
     failed: int = 0
     unavailable: int = 0
+    #: Rows not attempted because their source answered 429 earlier in this
+    #: run. They produce no BackfillResult, so no state is persisted for them
+    #: and they keep whatever eligibility they had.
+    rate_limited: int = 0
     skipped_budget: int = 0
     per_source: dict = field(default_factory=dict)
     results: list = field(default_factory=list)
 
     def _bump(self, source: str, key: str) -> None:
         bucket = self.per_source.setdefault(
-            source, {"attempted": 0, "filled": 0, "failed": 0, "unavailable": 0})
+            source, {"attempted": 0, "filled": 0, "failed": 0, "unavailable": 0,
+                     "rate_limited": 0})
         bucket[key] += 1
 
 
@@ -120,6 +127,22 @@ def backfill(rows, *, budget: int, fetchers=None) -> BackfillReport:
     Writes nothing. The caller decides what to persist and whether the result
     may reach a user — which is the whole reason the live branch and the sweep
     can share this function without being able to share consequences.
+
+    Two states, and the difference is irreversible. `unavailable` is TERMINAL:
+    JobIntelStore.rows_needing_text never offers such a row again, so it is
+    reserved for positive evidence that there is no text to get — a 404/410, or
+    a well-formed response carrying none. `failed` stays eligible and absorbs
+    everything else, including anything unexpected: a bug must not be able to
+    write terminal state.
+
+    A source that answers 429 is closed for the rest of the call. Its remaining
+    rows are counted in `rate_limited` and produce NO result, so a caller that
+    persists results writes nothing for them and they stay eligible. Each
+    detail request is also preceded by a politeness delay
+    (ats_sources.DETAIL_REQUEST_DELAY_SECONDS, 0.5s, overridable with
+    JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS).
+
+    Never raises.
     """
     fetchers = FETCHERS if fetchers is None else fetchers
     chosen = [r for r in select(rows, budget=budget)
@@ -127,24 +150,61 @@ def backfill(rows, *, budget: int, fetchers=None) -> BackfillReport:
     all_candidates = [r for r in select(rows, budget=len(rows) + 1)
                       if (r.get("source") or "") in fetchers]
     report = BackfillReport(skipped_budget=max(len(all_candidates) - len(chosen), 0))
+    closed_sources: set[str] = set()
+
+    def _failed(row, source) -> None:
+        report.failed += 1
+        report._bump(source, "failed")
+        report.results.append(BackfillResult(row, "failed", None))
+
+    def _unavailable(row, source) -> None:
+        report.unavailable += 1
+        report._bump(source, "unavailable")
+        report.results.append(BackfillResult(row, "unavailable", None))
 
     for row in chosen:
         source = row.get("source") or ""
+        if source in closed_sources:
+            report.rate_limited += 1
+            report._bump(source, "rate_limited")
+            continue
         report.attempted += 1
         report._bump(source, "attempted")
         try:
             text = fetchers[source](row.get("url") or "")
         except Exception:
-            report.failed += 1
-            report._bump(source, "failed")
-            report.results.append(BackfillResult(row, "failed", None))
+            # A fetcher is not supposed to raise, but if one does the reason is
+            # lost, and an unknown reason is never grounds for terminal state.
+            _failed(row, source)
             continue
-        if not text or len(text.strip()) < PARTIAL_MIN:
-            report.unavailable += 1
-            report._bump(source, "unavailable")
-            report.results.append(BackfillResult(row, "unavailable", None))
+        # Signals are checked BEFORE any truthiness or length test: they are
+        # truthy objects, so len(signal.strip()) would raise and a bare
+        # truthiness check would store one as a description.
+        if is_rate_limited_detail(text):
+            closed_sources.add(source)
+            _failed(row, source)
+            continue
+        if is_transient_detail(text):
+            _failed(row, source)
+            continue
+        if text is None:
+            _unavailable(row, source)
+            continue
+        if not isinstance(text, str):
+            # Contract violation by a fetcher. Retryable, never terminal.
+            _failed(row, source)
+            continue
+        stripped = text.strip()
+        if len(stripped) < PARTIAL_MIN:
+            # Terminal on purpose, and unlike the cases above this is a
+            # content judgement on a SUCCESSFUL fetch: the posting's own text
+            # was retrieved and is genuinely too short. A row whose real
+            # description is 150 characters can never pass PARTIAL_MIN, so
+            # retrying it every sweep burns budget for a guaranteed identical
+            # result.
+            _unavailable(row, source)
             continue
         report.filled += 1
         report._bump(source, "filled")
-        report.results.append(BackfillResult(row, "ok", text.strip()))
+        report.results.append(BackfillResult(row, "ok", stripped))
     return report

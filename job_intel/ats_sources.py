@@ -732,20 +732,147 @@ def fetch_smartrecruiters(
     return AtsSourceResult(vacancies=vacancies, errors=errors, discovered_companies=len(companies), pages_fetched=pages)
 
 
-def _detail_json(url: str, *, timeout: int = 20) -> dict[str, Any] | None:
-    """One detail request. Returns None on any transport or decode failure —
-    callers treat a missing detail as 'no text', never as an error to raise."""
+# --- detail requests --------------------------------------------------------
+#
+# The three backfill sources publish a job's description behind a second
+# request. Two properties of that request are load-bearing for the caller:
+#
+#   * It must never raise. job_intel.text_backfill.backfill() contains
+#     exceptions too, but a fetcher that raises loses the *reason* it failed,
+#     and the reason is what decides whether the row may ever be retried.
+#   * "No text" is not one outcome but two. `unavailable` is TERMINAL in
+#     JobIntelStore.rows_needing_text; `failed` stays eligible. So the reason
+#     travels back as a value: a str is text, None means the posting is
+#     permanently absent, and DETAIL_TRANSIENT / DETAIL_RATE_LIMITED mean a
+#     retry is meaningful.
+#
+# The rule: the terminal bucket may only be entered on positive evidence of
+# ABSENCE. Absence of evidence -- an unparseable body, an unrecognised status,
+# a dead connection -- is transient. A wrong transient verdict costs one more
+# request tomorrow; a wrong permanent verdict costs the row forever.
+
+
+class _DetailSignal:
+    """A non-text detail outcome, carried as a value rather than an exception.
+
+    Deliberately truthy: the fetchers guard with `if not payload: return None`
+    and None is the *permanent* verdict, so a falsy sentinel would be silently
+    converted into the terminal state it exists to avoid. Pinned by
+    tests/job_intel/test_text_backfill_transport_taxonomy.py.
+    """
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return f"<{self.name}>"
+
+
+#: The request failed in a way that may resolve on a retry.
+DETAIL_TRANSIENT = _DetailSignal("DETAIL_TRANSIENT")
+#: As above, plus: the source asked us to stop. The caller closes this source
+#: for the rest of the run instead of walking into 399 more 429s.
+DETAIL_RATE_LIMITED = _DetailSignal("DETAIL_RATE_LIMITED")
+
+#: The only statuses that are positive evidence the posting is gone. Every
+#: other non-200 is transient on purpose -- a 403 anti-bot block or a 401 says
+#: nothing about whether the job exists, and 403 is often what a soft
+#: rate-limit looks like.
+_DETAIL_ABSENT_STATUSES = frozenset({404, 410})
+
+#: Pause before every detail request. 400 sequential requests with no delay
+#: against a third-party API is what provokes the 429 in the first place.
+#: Override with JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS (float seconds; 0
+#: disables). The 0.5s default adds ~3.5 minutes to a full 400-row budget.
+DETAIL_REQUEST_DELAY_SECONDS = 0.5
+#: A typo like "999999" must not stall a run for eleven days.
+_DETAIL_MAX_DELAY_SECONDS = 60.0
+
+
+def is_transient_detail(value: object) -> bool:
+    """Whether a fetcher's return value means "retry is meaningful"."""
+    return value is DETAIL_TRANSIENT or value is DETAIL_RATE_LIMITED
+
+
+def is_rate_limited_detail(value: object) -> bool:
+    """Whether the source asked us to back off from it entirely."""
+    return value is DETAIL_RATE_LIMITED
+
+
+def _detail_delay_seconds() -> float:
+    raw = os.getenv("JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS")
+    if raw is None or not raw.strip():
+        return DETAIL_REQUEST_DELAY_SECONDS
     try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DETAIL_REQUEST_DELAY_SECONDS
+    # `not value >= 0` rather than `value < 0`: NaN compares False both ways,
+    # and this spelling sends it to the default instead of into time.sleep.
+    if not value >= 0:
+        return DETAIL_REQUEST_DELAY_SECONDS
+    return min(value, _DETAIL_MAX_DELAY_SECONDS)
+
+
+def _detail_politeness_sleep() -> None:
+    """Runs immediately before each detail request.
+
+    The two helpers below are the only code in this module that issues one, so
+    the delay is charged exactly once per third-party request -- and no test
+    that stubs a fetcher or a transport helper ever pays for it.
+    """
+    delay = _detail_delay_seconds()
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _detail_json(url: str, *, timeout: int = 20) -> dict[str, Any] | _DetailSignal | None:
+    """One detail request.
+
+    Returns the decoded object, None when the posting is permanently absent,
+    or DETAIL_TRANSIENT / DETAIL_RATE_LIMITED when a retry is meaningful.
+    Never raises.
+    """
+    try:
+        _detail_politeness_sleep()
         resp = _http_get(url, timeout=timeout, headers={"Accept": "application/json"})
         if resp.status_code == 429:
             _sleep_retry_after(resp)
+            return DETAIL_RATE_LIMITED
+        if resp.status_code in _DETAIL_ABSENT_STATUSES:
             return None
         if resp.status_code != 200:
-            return None
-        payload = resp.json()
+            return DETAIL_TRANSIENT
+        try:
+            payload = resp.json()
+        except Exception:
+            # A 200 we cannot parse is evidence about the transport -- an
+            # interstitial, a truncated body, an HTML error page served with
+            # status 200 -- never evidence about the posting itself.
+            return DETAIL_TRANSIENT
+        # Valid JSON that is not an object is a well-formed "no job here".
         return payload if isinstance(payload, dict) else None
     except Exception:
-        return None
+        return DETAIL_TRANSIENT
+
+
+def _detail_html(url: str, *, timeout: int = 20) -> str | _DetailSignal | None:
+    """One detail page fetch. Same taxonomy as _detail_json; never raises."""
+    try:
+        _detail_politeness_sleep()
+        resp = _http_get(url, timeout=timeout)
+        if resp.status_code == 429:
+            _sleep_retry_after(resp)
+            return DETAIL_RATE_LIMITED
+        if resp.status_code in _DETAIL_ABSENT_STATUSES:
+            return None
+        if resp.status_code != 200:
+            return DETAIL_TRANSIENT
+        return resp.text
+    except Exception:
+        return DETAIL_TRANSIENT
 
 
 # The job's own text, in reading order. companyDescription is excluded on
@@ -754,20 +881,35 @@ def _detail_json(url: str, *, timeout: int = 20) -> dict[str, Any] | None:
 _SMARTRECRUITERS_SECTIONS = ("jobDescription", "qualifications", "additionalInformation")
 
 
-def fetch_smartrecruiters_detail(url: str) -> str | None:
+def fetch_smartrecruiters_detail(url: str) -> str | _DetailSignal | None:
     payload = _detail_json(url)
-    if not payload:
+    if is_transient_detail(payload):
+        return payload
+    if not isinstance(payload, dict) or not payload:
         return None
-    sections = ((payload.get("jobAd") or {}).get("sections") or {})
+    job_ad = payload.get("jobAd")
+    if not isinstance(job_ad, dict):
+        # A truthy non-dict jobAd (list/str/number) used to raise
+        # AttributeError here via `(payload.get("jobAd") or {}).get(...)`.
+        # Containment made that survivable but filed it as `failed`; the
+        # payload is well-formed JSON carrying no job ad, which is absent.
+        return None
+    sections = job_ad.get("sections")
     if not isinstance(sections, dict):
         return None
     parts = []
     for key in _SMARTRECRUITERS_SECTIONS:
         node = sections.get(key)
-        if isinstance(node, dict):
-            text = _clean_html_text(str(node.get("text") or ""))
-            if text:
-                parts.append(text)
+        if not isinstance(node, dict):
+            continue
+        raw = node.get("text")
+        if not isinstance(raw, str):
+            # A dict or list here used to be str()'d into a Python repr and
+            # joined into the stored description. Skip it instead.
+            continue
+        text = _clean_html_text(raw)
+        if text:
+            parts.append(text)
     joined = " ".join(parts).strip()
     return joined or None
 
@@ -775,36 +917,30 @@ def fetch_smartrecruiters_detail(url: str) -> str | None:
 _HH_VACANCY_ID = re.compile(r"/vacancy/(\d+)")
 
 
-def fetch_headhunter_detail(url: str) -> str | None:
+def fetch_headhunter_detail(url: str) -> str | _DetailSignal | None:
     match = _HH_VACANCY_ID.search(url or "")
     if not match:
+        # A URL we cannot address is permanently unfetchable, not transient.
         return None
     payload = _detail_json(f"https://api.hh.ru/vacancies/{match.group(1)}")
-    if not payload:
+    if is_transient_detail(payload):
+        return payload
+    if not isinstance(payload, dict) or not payload:
         return None
-    text = _clean_html_text(str(payload.get("description") or ""))
+    raw = payload.get("description")
+    text = _clean_html_text(raw) if isinstance(raw, str) else ""
     return text or None
 
 
-def _detail_html(url: str, *, timeout: int = 20) -> str | None:
-    """One detail page fetch. None on any failure -- see _detail_json."""
-    try:
-        resp = _http_get(url, timeout=timeout)
-        if resp.status_code == 429:
-            _sleep_retry_after(resp)
-            return None
-        if resp.status_code != 200:
-            return None
-        return resp.text
-    except Exception:
+def fetch_teamtailor_detail(url: str) -> str | _DetailSignal | None:
+    # Named `page`, not `html`: the module imports `html` at the top and the
+    # old local shadowed it.
+    page = _detail_html(url)
+    if is_transient_detail(page):
+        return page
+    if not isinstance(page, str) or not page:
         return None
-
-
-def fetch_teamtailor_detail(url: str) -> str | None:
-    html = _detail_html(url)
-    if not html:
-        return None
-    found = extract_jobposting_vacancies_from_html(html, source="teamtailor", page_url=url)
+    found = extract_jobposting_vacancies_from_html(page, source="teamtailor", page_url=url)
     for vacancy in found:
         text = (vacancy.description or "").strip()
         if text:

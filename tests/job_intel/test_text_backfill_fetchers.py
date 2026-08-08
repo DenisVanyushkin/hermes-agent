@@ -43,7 +43,12 @@ def test_smartrecruiters_returns_none_without_a_job_ad(monkeypatch):
     assert fetch_smartrecruiters_detail("https://x/1") is None
 
 
-def test_smartrecruiters_returns_none_on_transport_failure(monkeypatch):
+def test_smartrecruiters_returns_none_when_the_posting_is_permanently_absent(monkeypatch):
+    """None from _detail_json means 404/410 -- the posting is gone. It maps to
+    the TERMINAL `unavailable` state. A transport failure is a different thing
+    and returns DETAIL_TRANSIENT instead; see
+    tests/job_intel/test_text_backfill_transport_taxonomy.py. This test was
+    once named "..._on_transport_failure", which conflated the two."""
     monkeypatch.setattr("job_intel.ats_sources._detail_json", lambda url, **kw: None)
     assert fetch_smartrecruiters_detail("https://x/1") is None
 
