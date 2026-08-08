@@ -540,6 +540,36 @@ def finalize_turn(
     else:
         logger.info(_diag_msg, *_diag_args)
 
+    # Инженерные футеры не уходят на канал конечного пользователя.
+    #
+    # Считается один раз за финализацию и переиспользуется тремя блоками ниже:
+    # конфиг за ход не меняется, а три независимых чтения -- три шанса разойтись
+    # между собой. Отказ предиката (False) означает «показать всё», поэтому
+    # исключение здесь не может ничего скрыть.
+    _suppress_eng_footers = False
+    # Замена объяснялки оборванного хода -- отдельный флаг, а не тот же самый.
+    # На cron-ходе её подменять НЕЛЬЗЯ: `cron/scheduler.py` опознаёт аномально
+    # пустой ход сравнением НА РАВЕНСТВО с текстом того же форматтера
+    # (`final_response.strip() == AIAgent._format_turn_completion_explanation(
+    # turn_exit_reason).strip()`) и на совпадении обнуляет ответ, чтобы задание
+    # ничего не доставило. Подставь сюда другую строку -- равенство перестанет
+    # выполняться, и вместо тишины конечный пользователь получит извинение,
+    # а прогон будет помечен успешным. Футеры на cron-ходе глушим, объяснялку
+    # оставляем как была.
+    _replace_turn_explanation = False
+    try:
+        from hermes_cli.run_evidence import (
+            cron_end_user_turn,
+            engineering_footers_suppressed,
+        )
+
+        _suppress_eng_footers = engineering_footers_suppressed(
+            fallback_platform=getattr(agent, "platform", None)
+        )
+        _replace_turn_explanation = _suppress_eng_footers and not cron_end_user_turn()
+    except Exception as _sup_err:
+        logger.debug("engineering footer suppression check failed: %s", _sup_err)
+
     # File-mutation verifier footer.
     # If one or more ``write_file`` / ``patch`` calls failed during this
     # turn and were never superseded by a successful write to the same
@@ -558,7 +588,7 @@ def finalize_turn(
     if final_response and not interrupted:
         try:
             _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
-            if _failed and agent._file_mutation_verifier_enabled():
+            if _failed and not _suppress_eng_footers and agent._file_mutation_verifier_enabled():
                 footer = agent._format_file_mutation_failure_footer(_failed)
                 if footer:
                     final_response = final_response.rstrip() + "\n\n" + footer
@@ -572,7 +602,7 @@ def finalize_turn(
     # агент подал `EXIT=0`, полученный в песочнице без браузерного окружения, как
     # доказательство работоспособности -- и никто не спросил, где он это мерил.
     # Блок не блокирует и ничего не требует: он просто не даёт умолчать о месте.
-    if final_response and not interrupted:
+    if final_response and not interrupted and not _suppress_eng_footers:
         try:
             from hermes_cli.run_evidence import (
                 observed_sandbox_commands,
@@ -631,6 +661,13 @@ def finalize_turn(
                     _explanation = agent._format_turn_completion_explanation(
                         _turn_exit_reason
                     )
+                    if _explanation and _replace_turn_explanation:
+                        # Пустая объяснялка -- признак нормального выхода;
+                        # подставлять вместо неё извинение значило бы
+                        # извиняться за успешный ответ.
+                        from hermes_cli.run_evidence import SUPPRESSED_TURN_NOTICE
+
+                        _explanation = SUPPRESSED_TURN_NOTICE
                     if _explanation:
                         if _is_empty_terminal:
                             # Replace the bare "(empty)"/blank sentinel with

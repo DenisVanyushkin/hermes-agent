@@ -2005,6 +2005,17 @@ DEFAULT_CONFIG = {
         # iteration/budget limit.  Replaces the bare "(empty)" sentinel so the
         # failure isn't silent from the UI's perspective.  Set false to suppress.
         "turn_completion_explainer": True,
+        # Channels whose reader must not receive the three end-of-turn
+        # engineering footers: the execution-locus block ("Где выполнялись
+        # проверки"), the file-mutation failure footer, and the
+        # turn-completion explainer (replaced by one neutral line there).
+        # Empty by default — behaviour is byte-for-byte unchanged until an
+        # operator lists a platform.  Case- and padding-insensitive; anything
+        # that is not a list is ignored (and logged) rather than guessed at.
+        # Cron jobs are NOT covered by this list: their turn has no platform
+        # at all, and the reader is resolved from the job's audience instead
+        # (see docs/ops/engineering-footers-audience.md).
+        "suppress_engineering_footers_platforms": [],
         "show_cost": False,       # Show $ cost in the status bar (off by default)
         # Show a color-coded battery read-out as the first status-bar element in
         # the CLI/TUI (off by default). No-op on machines without a battery.

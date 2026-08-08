@@ -385,6 +385,50 @@ def _check_trip_has_transport(place, transport):
             "Transport is unknown."
         )
 
+# Occupancy guardrail (2026-08-01), CLI-layer only -- same split as
+# _check_start_not_past: cal.add()/cal.update() still accept anything.
+# Double-booking is legitimate (Amina may genuinely want two things at
+# once), but it must be HER decision: without --allow-overlap fam writes
+# nothing and names what is already there, so the skill has to ask.
+def _format_conflict(e):
+    """'Интервизия 06.08 10:00–12:15 (id=103)' -- local time, en dash."""
+    start = datetime.fromisoformat(e["start_local"])
+    span = start.strftime("%d.%m %H:%M")
+    if e["end_local"]:
+        span += "–" + datetime.fromisoformat(e["end_local"]).strftime("%H:%M")
+    return f"{e['title']} {span} (id={e['id']})"
+
+
+def _conflict_list(conflicts, limit=3):
+    shown = ", ".join(_format_conflict(e) for e in conflicts[:limit])
+    extra = len(conflicts) - limit
+    return shown + (f" (+{extra} more)" if extra > 0 else "")
+
+
+def _check_no_overlap(conn, start_utc, end_utc, allow_overlap, exclude_id=None):
+    """Raise ValueError (-> main -> exit 2) when the slot is taken and the
+    caller did not pass --allow-overlap. Returns the conflicts it let
+    through, so the caller can audit the acknowledgement."""
+    conflicts = cal.overlaps(conn, start_utc, end_utc, exclude_id=exclude_id)
+    if conflicts and not allow_overlap:
+        n = len(conflicts)
+        raise ValueError(
+            f"overlaps {n} active event{'s' if n > 1 else ''}: "
+            f"{_conflict_list(conflicts)}. Ask Amina whether to keep both, "
+            "then retry with --allow-overlap.")
+    return conflicts
+
+
+def _audit_overlap_ack(conn, scope, conflicts, **ids):
+    """One audit row per acknowledged double-booking -- makes Amina's
+    deliberate overlap distinguishable from an accidental one afterwards."""
+    if not conflicts:
+        return
+    payload = {"scope": scope, "conflicts": sorted({e["id"] for e in conflicts})}
+    payload.update(ids)
+    audit.log(conn, "cal.overlap_ack", payload)
+
+
 def cmd_cal_add(args):
     if getattr(args, "repeat", None):
         return _cmd_cal_add_series(args)
@@ -395,9 +439,11 @@ def cmd_cal_add(args):
     _check_start_not_past(args.start, args.allow_past)
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
+    conflicts = _check_no_overlap(conn, args.start, args.end, args.allow_overlap)
     e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
                 participants=args.with_, transport=args.transport, notes=args.notes,
                 travel_min=args.travel_min, prep_min=args.prep_min)
+    _audit_overlap_ack(conn, "add", conflicts, event_id=e["id"])
     conn.commit()
     _maybe_email_event(conn, e)
     if args.json:
@@ -416,6 +462,57 @@ def _cmd_cal_add_series(args):
         return 2
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
+    # Ref validation must win over the overlap preview below: series.add()
+    # used to be the first thing this function called, so an unknown place
+    # or participant surfaced immediately. Resolving refs here (pure reads,
+    # same as series.add()'s own resolution) keeps that ordering -- a bad
+    # ref is not something the overlap message's "ask Amina" framing fits.
+    # start_time/end_time are validated here, via the same
+    # series._validate_hhmm series.add() itself uses, so a bad value
+    # surfaces with its clear message ("time data '25:00' does not match
+    # format '%H:%M'") -- iter_occurrences below parses the same strings
+    # with raw int()/datetime() calls that raise uglier ones
+    # ("hour must be in 0..23", "invalid literal for int() ...") for the
+    # same input (Finding 4). Validating before the preview keeps the
+    # friendlier message for both paths without touching iter_occurrences.
+    try:
+        cal._resolve_place(conn, args.place)
+        cal._resolve_participants(conn, args.with_)
+        series._validate_hhmm(args.start_time)
+        if args.end_time is not None:
+            series._validate_hhmm(args.end_time)
+    except (ValueError, cal.UnknownRefError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    now_local = datetime.now(timezone.utc).astimezone(cal.ALMATY)
+    # Single clock read shared with series.generate() below (Finding 3):
+    # the preview here and the materialization there must check/write the
+    # same grid. Passed through generate()'s now_utc test seam as a UTC
+    # ISO string, matching how it normalizes the parameter.
+    now_utc_iso = now_local.astimezone(timezone.utc).isoformat(timespec="seconds")
+    horizon_date = (now_local + timedelta(weeks=series.HORIZON_WEEKS)).date()
+    try:
+        occurrences = series.iter_occurrences(
+            args.days, args.start_time, args.end_time, args.until,
+            now_local, horizon_date)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    # Check the whole grid BEFORE anything is written: a series that
+    # collides every week is exactly the case worth asking about once.
+    busy = [(start, cal.overlaps(conn, start, end)) for start, end in occurrences]
+    busy = [(start, hits) for start, hits in busy if hits]
+    if busy and not args.allow_overlap:
+        first_start, first_hits = busy[0]
+        first_local = datetime.fromisoformat(first_start).astimezone(
+            cal.ALMATY).strftime("%d.%m %H:%M")
+        print(f"error: series overlaps {len(busy)} of {len(occurrences)} "
+              f"planned occurrences, first: {_format_conflict(first_hits[0])} "
+              f"vs new {first_local}. Ask Amina, then retry with "
+              "--allow-overlap.", file=sys.stderr)
+        return 2
+
     try:
         s = series.add(conn, args.title, args.days, args.start_time,
                        end_time=args.end_time, place=args.place,
@@ -425,7 +522,10 @@ def _cmd_cal_add_series(args):
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    created = series.generate(conn)
+    created = series.generate(conn, now_utc=now_utc_iso)
+    _audit_overlap_ack(conn, "series",
+                       [e for _, hits in busy for e in hits],
+                       series_id=s["id"])
     conn.commit()
     if args.json:
         print(json.dumps({"series": s, "generated": created}, ensure_ascii=False))
@@ -482,10 +582,43 @@ def cmd_cal_update(args):
     if args.start is not None:
         _check_start_not_past(args.start, args.allow_past)
     conn = famdb.connect()
+    conflicts = []
+    shifted_end_utc = None
+    if args.start is not None or args.end is not None:
+        current = cal.get(conn, args.id)
+        # current is None -> unknown id: leave it to cal.update()'s own
+        # ValueError so the existing "unknown event: N" contract is intact.
+        if current is not None:
+            new_start = args.start if args.start is not None else current["start_utc"]
+            if (args.start is not None and args.end is None
+                    and current["end_utc"] is not None):
+                # --start alone must SHIFT THE END BY THE SAME DELTA,
+                # preserving the event's duration (Denis's ruling): moving
+                # a 10:00-12:15 event to 14:00 must land at 14:00-16:15, not
+                # leave end_utc where it was (which can put end before the
+                # new start -- the exact pre-existing silent-corruption bug
+                # this also fixes). An explicit --end always wins (this
+                # branch is skipped below); an end-less event stays
+                # end-less. Delta computed on real UTC datetimes, then
+                # renormalized through cal._to_utc_iso like every other
+                # stored value.
+                old_start_dt = datetime.fromisoformat(current["start_utc"])
+                old_end_dt = datetime.fromisoformat(current["end_utc"])
+                new_start_dt = datetime.fromisoformat(cal._to_utc_iso(args.start))
+                shifted_end_utc = cal._to_utc_iso(
+                    (old_end_dt + (new_start_dt - old_start_dt)).isoformat())
+                new_end = shifted_end_utc
+            else:
+                new_end = args.end if args.end is not None else current["end_utc"]
+            conflicts = _check_no_overlap(conn, new_start, new_end,
+                                          args.allow_overlap, exclude_id=args.id)
     fields = {}
     if args.title is not None: fields["title"] = args.title
     if args.start is not None: fields["start_utc"] = args.start
-    if args.end is not None: fields["end_utc"] = args.end
+    if args.end is not None:
+        fields["end_utc"] = args.end
+    elif shifted_end_utc is not None:
+        fields["end_utc"] = shifted_end_utc
     if args.place is not None: fields["place"] = args.place
     if args.transport is not None: fields["transport"] = args.transport
     if args.notes is not None: fields["notes"] = args.notes
@@ -494,6 +627,7 @@ def cmd_cal_update(args):
     if args.add_person: fields["add_person"] = args.add_person
     if args.rm_person: fields["rm_person"] = args.rm_person
     e = cal.update(conn, args.id, **fields)
+    _audit_overlap_ack(conn, "update", conflicts, event_id=args.id)
     conn.commit()
     # cal.update()'s "_material_changed" is an internal signal for this
     # hook only (see cal.py's docstring) -- pop it before anything else
@@ -1009,12 +1143,21 @@ def cmd_rem_active(args):
 def _audit_tick_error(where, exc):
     """Persist a tick.error marker so the nightly problem_summary sweep
     (6b) can see a failure that would otherwise only hit journald.
-    Best-effort: a failure to record must not mask the original error."""
+    Best-effort: a failure to record must not mask the original error.
+
+    `exc_type` (design 2026-08-01, §8): the exception class name, or None
+    when the caller passes a pre-joined string (cli.py's offsite path).
+    str(exc) alone is ambiguous -- "No item with that key" is a KeyError
+    from sqlite3.Row and almost always means the prod schema lags the
+    code, which the text does not say. The nightly reporter keys its
+    diagnosis off this field, so it is worth the five lines."""
     try:
         conn = famdb.connect()
         try:
             audit.log(conn, "tick.error",
-                      {"where": where, "error": str(exc)[:200]}, actor="tick")
+                      {"where": where,
+                       "exc_type": type(exc).__name__ if isinstance(exc, BaseException) else None,
+                       "error": str(exc)[:200]}, actor="tick")
             conn.commit()
         finally:
             conn.close()
@@ -1517,16 +1660,31 @@ _RRULE_IN_TEXT_RE = re.compile(r"RRULE\s+(?:'[^']*'|\"[^\"]*\")")
 # at all before the end of the string, `[^)]*(\))` could not match
 # ANYTHING -- the whole clause, RRULE fragment included, passed through
 # completely unredacted, not merely truncated. Anchored on the actual
-# END of the string instead (single-line diagnostic text, one such
-# clause per string at every call site -- see `_redact_extcal_text`'s
-# own callers): `.*?` lazily consumes the whole tail, and the optional
-# `(\)?)` captures a real trailing `)` when the text has one (the normal
-# case -- `_expand_master`'s own f-string always ends with one) or
-# nothing when it doesn't, so the substitution below never leaves a
-# dangling unredacted fragment on either side of a nested paren, and
-# never fully skips redaction for want of one.
+# END of the string instead (one such clause per string at every call
+# site -- see `_redact_extcal_text`'s own callers): `.*?` lazily
+# consumes the whole tail, and the optional `(\)?)` captures a real
+# trailing `)` when the text has one (the normal case -- `_expand_
+# master`'s own f-string always ends with one) or nothing when it
+# doesn't, so the substitution below never leaves a dangling unredacted
+# fragment on either side of a nested paren, and never fully skips
+# redaction for want of one.
+#
+# Final re-review (pre-prod hardening): `expand()` catches `Exception`
+# broadly around `dateutil.rrulestr`, so `{e}`'s text is NOT guaranteed
+# single-line -- a multi-line exception message (e.g. one `dateutil`
+# variant that embeds `\n` in its own diagnostic) has bare `.` unable to
+# cross the newline without `re.DOTALL`, so `$` (end of string) was
+# never reachable and the WHOLE match failed -- not truncated, not
+# partially redacted, just skipped entirely, leaking the full multi-line
+# tail (RRULE fragment included) into `audit cal.ext.sync.sync_errors`,
+# `tick.error`, and from there verbatim into `maint.problem_summary`'s
+# nightly message to Denis. `re.DOTALL` makes `.` match `\n` too, so the
+# lazy `.*?` can still reach the real end of the string across any
+# embedded newlines; the anchor stays end-of-STRING (not `re.MULTILINE`,
+# which would instead make `$` match before every internal `\n` and stop
+# the redaction short at the first line break).
 _EXPAND_ERROR_DETAIL_RE = re.compile(
-    r"(could not be parsed/evaluated \(\w+: ).*?(\)?)$"
+    r"(could not be parsed/evaluated \(\w+: ).*?(\)?)$", re.DOTALL
 )
 
 # Cap on any single redacted diagnostic string landing in audit_log or a
@@ -1586,6 +1744,144 @@ def _redact_sync_errors(sync_errors):
     verbose foreign HTTP error body wrapped into the message -- must not
     make the audit row/nightly message unbounded either)."""
     return [_redact_extcal_text(e)[:_REDACTED_TEXT_MAX] for e in (sync_errors or [])]
+
+
+# `extcal_full_resync_days` bounds -- final re-review (pre-prod
+# hardening): the value comes straight from `fam-config.json` (`gate.py`
+# default 1) and used to go directly into `timedelta(days=...)` below
+# with no validation at all. Two unguarded failure modes: (1) `0` or a
+# negative value makes `force_full` (`now - last_full_dt) >= timedelta
+# (days=N)`) true on EVERY tick forever instead of roughly once a day --
+# a full `calendar-query` re-baseline every 15 minutes, not the rare/
+# cheap path the whole periodic-full design (fix-round 3, C1) counted
+# on; (2) anything non-numeric (a stray string, `null`, etc.) blows up
+# `timedelta(days=...)` with a `TypeError` that the broad `except
+# Exception` in `cmd_tick_cal_ext` turns into a `tick.error` -- syncing
+# stays dead every 15 minutes until a human edits the config by hand.
+# Clamped to a sane [1, 30]-day range and defaulted (not raised) on
+# anything that doesn't coerce to an int, so a bad config value degrades
+# to "sync keeps working with the default cadence" instead of either
+# runaway full-resyncs or a wedged tick.
+_EXTCAL_FULL_RESYNC_DAYS_DEFAULT = 1
+_EXTCAL_FULL_RESYNC_DAYS_MIN = 1
+_EXTCAL_FULL_RESYNC_DAYS_MAX = 30
+
+
+def _clamp_int_config(cfg, key, default, lo, hi):
+    """Shared validation for a small-int config knob read straight from
+    `fam-config.json`: coerce to `int`, clamp into `[lo, hi]`, and fall
+    back to `default` (never raise) on anything that doesn't coerce --
+    missing key, `None`, a non-numeric string, etc. Pulled out of
+    `_extcal_full_resync_days` (see that function's own comment for the
+    two concrete failure modes an unvalidated config value used to hit:
+    a runaway zero/negative cadence, or a bare `TypeError` wedging the
+    tick) so `_extcal_fail_streak_threshold` below reuses the exact same
+    coercion/clamp/fallback shape instead of a second copy of it."""
+    raw = cfg.get(key, default)
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, val))
+
+
+def _extcal_full_resync_days(cfg):
+    """`cfg["extcal_full_resync_days"]` -> a valid int in `[1, 30]`, never
+    raises. A missing key or anything that doesn't coerce to `int`
+    (non-numeric string, `None`, ...) falls back to the same default
+    (`1`) `gate.CONFIG_DEFAULTS` already documents; an in-range numeric
+    value (including a `float`, truncated) passes straight through;
+    zero/negative or too-large values are clamped to the nearest bound
+    rather than silently accepted (see the module-level comment above
+    for why both directions matter)."""
+    return _clamp_int_config(cfg, "extcal_full_resync_days",
+                              _EXTCAL_FULL_RESYNC_DAYS_DEFAULT,
+                              _EXTCAL_FULL_RESYNC_DAYS_MIN,
+                              _EXTCAL_FULL_RESYNC_DAYS_MAX)
+
+
+# `extcal_fail_streak_threshold` (streak-alerting hardening, 2026-08):
+# a live-prod week (4 tick.error escalations across ~670 ticks, all four
+# transient and self-healed by the very next tick -- a one-off iCloud
+# stall on a single href, or one bad `discover()` round) showed that
+# escalating EVERY tick error into the nightly `maint.problem_summary`
+# trains Denis to ignore the channel, so a real multi-tick outage would
+# be missed too. This is how many CONSECUTIVE failing ticks (per
+# calendar URL, or per one of the two sentinel keys below) it takes
+# before `cmd_tick_cal_ext` escalates to `tick.error` + exit 1 -- see
+# `_extcal_record_failure`/`_extcal_record_success`. Validated with the
+# exact same shape as `_extcal_full_resync_days` (clamp + safe default on
+# garbage, never raise): a missing/non-numeric config value must not
+# wedge the tick, and neither must an absurdly large one silently turn
+# the whole feature off.
+_EXTCAL_FAIL_STREAK_THRESHOLD_DEFAULT = 3
+_EXTCAL_FAIL_STREAK_THRESHOLD_MIN = 1
+_EXTCAL_FAIL_STREAK_THRESHOLD_MAX = 50
+
+# Sentinel streak keys for failure classes that have no calendar URL of
+# their own to hang a per-calendar counter on: `extcal_read_calendars`
+# configured but 0 calendars matched (discover() degrades to `[]` on ANY
+# failure -- missing credentials, timeout, 5xx, or a genuinely renamed
+# calendar, see `_cal_ext_sync`'s own comment), and `apply_changes`/
+# `export_own` per-row errors (no single calendar to blame -- these are
+# keyed by branch/id or event_id, not calendar URL). Both share the
+# double-underscore shape specifically so neither can ever collide with a
+# real CalDAV URL (which always contains "://").
+_EXTCAL_STREAK_DISCOVERY_KEY = "__discovery__"
+_EXTCAL_STREAK_APPLY_KEY = "__apply__"
+
+
+def _extcal_fail_streak_threshold(cfg):
+    """`cfg["extcal_fail_streak_threshold"]` -> a valid int in `[1, 50]`,
+    never raises -- same coercion/clamp/default shape as
+    `_extcal_full_resync_days` via the shared `_clamp_int_config`
+    helper."""
+    return _clamp_int_config(cfg, "extcal_fail_streak_threshold",
+                              _EXTCAL_FAIL_STREAK_THRESHOLD_DEFAULT,
+                              _EXTCAL_FAIL_STREAK_THRESHOLD_MIN,
+                              _EXTCAL_FAIL_STREAK_THRESHOLD_MAX)
+
+
+def _extcal_streak_meta_key(key):
+    return f"extcal_fail_streak:{key}"
+
+
+def _extcal_alert_meta_key(key):
+    return f"extcal_fail_alerted:{key}"
+
+
+def _extcal_record_failure(conn, key, threshold):
+    """Increment the persistent (meta-backed, survives restart)
+    consecutive-failure streak for `key` (a calendar URL, or one of the
+    `_EXTCAL_STREAK_*_KEY` sentinels above); return True iff this round's
+    streak just crossed `threshold` AND no alert is outstanding for it
+    yet. Edge-triggered exactly like `car.maybe_alert_staleness` /
+    `health.maybe_alert_readiness` (ok/below-threshold -> above-threshold
+    alerts once; staying above threshold stays silent; a call to
+    `_extcal_record_success` below is the only thing that clears the
+    alert flag, so the next failing streak can alert again)."""
+    raw = famdb.meta_get(conn, _extcal_streak_meta_key(key), "0")
+    try:
+        streak = int(raw)
+    except (TypeError, ValueError):
+        streak = 0
+    streak += 1
+    famdb.meta_set(conn, _extcal_streak_meta_key(key), str(streak))
+    if streak < threshold:
+        return False
+    if famdb.meta_get(conn, _extcal_alert_meta_key(key), "0") == "1":
+        return False  # already alerted for this ongoing streak -- stay silent
+    famdb.meta_set(conn, _extcal_alert_meta_key(key), "1")
+    return True
+
+
+def _extcal_record_success(conn, key):
+    """Clear the streak and alert flag for `key` on a clean round --
+    mirrors the reset half of `car.maybe_alert_staleness` /
+    `health.maybe_alert_readiness`, so the next failing streak starts
+    from zero and can alert again."""
+    famdb.meta_set(conn, _extcal_streak_meta_key(key), "0")
+    famdb.meta_set(conn, _extcal_alert_meta_key(key), "0")
 
 
 def _cal_ext_sync(conn, cfg, now, dry_run):
@@ -1728,6 +2024,20 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     bad_hrefs = set()              # ONE resource's data is untrustworthy this round
                                     # (fix-round 2, findings N1/N2)
     tokens_to_persist = {}         # calendar url -> token (only clean, successful calendars)
+    # Streak-alerting hardening: per-calendar error tracking THIS round,
+    # keyed by calendar url -- fed to `cmd_tick_cal_ext`'s consecutive-
+    # failure counters (`_extcal_record_failure`/`_extcal_record_success`)
+    # so a transient, self-healing blip on one calendar doesn't escalate
+    # to `tick.error` on the first occurrence, while still being scoped
+    # to exactly that calendar (a healthy sibling calendar's own counter
+    # must not be touched by it).
+    calendar_had_error = {}        # calendar url -> bool
+    calendar_error_msgs = {}       # calendar url -> [str, ...]
+
+    def _note_calendar_error(url, msg):
+        calendar_had_error[url] = True
+        calendar_error_msgs.setdefault(url, []).append(msg)
+        sync_errors.append(msg)
 
     # C1(a): extcal_read_calendars configured but nothing eligible survived
     # discover()/filtering -- discover() degrades to [] on ANY failure
@@ -1735,7 +2045,8 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     # genuinely-renamed calendar no longer matching the filter, and those
     # two cases must not be silently indistinguishable from "nothing to
     # do" when a filter is actually configured.
-    if not eligible and cfg.get("extcal_read_calendars"):
+    discovery_error = bool(not eligible and cfg.get("extcal_read_calendars"))
+    if discovery_error:
         sync_errors.append(
             "extcal_read_calendars is configured but matched 0 of "
             f"{len(calendars)} discovered calendar(s) -- check config "
@@ -1755,11 +2066,15 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     # have a stored sync-token (e.g. right after this fix first deploys)
     # is treated the same as "overdue" -- self-healing, not a special
     # case: the safest assumption about an unknown-age token is that it
-    # might already be stale.
-    full_resync_days = cfg.get("extcal_full_resync_days", 1)
+    # might already be stale. Final re-review: clamped/defaulted via
+    # `_extcal_full_resync_days` (see that function's own comment) --
+    # zero/negative or non-numeric config no longer forces a full pass
+    # every tick or wedges the sync with a `TypeError`.
+    full_resync_days = _extcal_full_resync_days(cfg)
 
     for calendar in eligible:
         url = calendar.get("url")
+        calendar_had_error[url] = False
         stored_token = famdb.meta_get(conn, f"extcal_sync_token:{url}")
         # Captured BEFORE fetch_changes() below runs -- see this
         # function's own docstring, "Sync-token seeding".
@@ -1789,7 +2104,7 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
 
         if mode == "error":
             errored_urls.add(url)
-            sync_errors.append(f"{calendar.get('name') or url}: {reason}")
+            _note_calendar_error(url, f"{calendar.get('name') or url}: {reason}")
             continue
 
         base = _extcal_url_base(url)
@@ -1831,7 +2146,8 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 # sync_collection mode, silently clearing the way to the
                 # disappearance sweep. `.strip()` closes that.
                 bad_hrefs.add(abs_href)
-                sync_errors.append(
+                _note_calendar_error(
+                    url,
                     f"{calendar.get('name') or url}: no calendar-data "
                     f"for {abs_href} (not marked deleted -- treated as "
                     f"unreadable this round, not gone)")
@@ -1868,7 +2184,8 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 # resource in an incremental delta).
                 if mode != "sync_collection":
                     bad_hrefs.add(abs_href)
-                    sync_errors.append(
+                    _note_calendar_error(
+                        url,
                         f"{calendar.get('name') or url}: 0 VEVENT block(s) "
                         f"found for {abs_href} despite a VEVENT-filtered "
                         f"query (mode={mode})")
@@ -1883,7 +2200,8 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 # have no fresh data on, not every occurrence sharing this
                 # href.
                 bad_hrefs.add(abs_href)
-                sync_errors.append(
+                _note_calendar_error(
+                    url,
                     f"{calendar.get('name') or url}: parse_ics returned "
                     f"{len(parsed)} of {begin_count} VEVENT block(s) "
                     f"(dropped {begin_count - len(parsed)}) for {abs_href}")
@@ -1897,7 +2215,7 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         expanded = extcal.expand(components, window_start, window_end)
         combined_occurrences.extend(expanded["occurrences"])
         for err in expanded["errors"]:
-            sync_errors.append(f"{calendar.get('name') or url}: {err}")
+            _note_calendar_error(url, f"{calendar.get('name') or url}: {err}")
             m = _EXPAND_ERROR_UID_RE.search(err)
             meta = key_meta.get(m.group(1)) if m else None
             if meta and meta.get("href"):
@@ -2034,6 +2352,9 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             "counts": None, "calendars": per_calendar,
             "changeset": changeset, "sync_errors": sync_errors, "tokens": {},
             "export_counts": None, "full_mode_urls": set(),
+            "calendar_had_error": calendar_had_error,
+            "calendar_error_msgs": calendar_error_msgs,
+            "discovery_error": discovery_error,
         }
 
     counts = extcal.apply_changes(conn, changeset, cfg)
@@ -2061,6 +2382,11 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
         # this round -- the same "healthy this round" set token
         # persistence already uses).
         "full_mode_urls": full_mode_urls,
+        # Streak-alerting hardening -- see the module-level dict inits
+        # above and `cmd_tick_cal_ext`'s own use of these three.
+        "calendar_had_error": calendar_had_error,
+        "calendar_error_msgs": calendar_error_msgs,
+        "discovery_error": discovery_error,
     }
 
 
@@ -2287,25 +2613,86 @@ def cmd_tick_cal_ext(args):
 
     conn.commit()
 
-    if has_error:
-        # `sync_errors` already includes each errored calendar's own
-        # "<name>: <reason>" message (see _cal_ext_sync's fetch loop) --
-        # fix-round 2, minor #5: this used to ALSO append `calendar_errors`
-        # here, duplicating the identical text and wasting roughly half of
-        # `_audit_tick_error`'s own 200-char slice on a verbatim repeat.
+    # Streak-alerting hardening (2026-08): a live-prod week showed every
+    # one of ~4 tick.error escalations across ~670 ticks was a single,
+    # self-healing blip (see the module-level comment on
+    # `_EXTCAL_FAIL_STREAK_THRESHOLD_DEFAULT`). `has_error` above still
+    # drives every DATA-SAFETY decision unchanged (the `cal.ext.sync`
+    # audit write with its `sync_errors` list, the token-persistence /
+    # `extcal_last_full` / `extcal_last_ok` gates) -- so a below-threshold
+    # failure is still fully recorded, nothing is hidden, only the
+    # ESCALATION to `tick.error` + exit 1 (the thing that lands in
+    # Denis's nightly `maint.problem_summary`) is now gated on a
+    # per-key consecutive-failure streak instead of firing on the very
+    # first occurrence. Three independent streak classes, each edge-
+    # triggered (`_extcal_record_failure`/`_extcal_record_success`,
+    # meta-persisted so a restart doesn't reset them):
+    #   - one per calendar URL (`calendar_had_error` from `_cal_ext_sync`,
+    #     set for a fetch error, a bad/unreadable resource, a parse-count
+    #     mismatch, or an expand() error attributed to that calendar) --
+    #     a flaky calendar never masks or is masked by a healthy sibling;
+    #   - `_EXTCAL_STREAK_DISCOVERY_KEY` for the "extcal_read_calendars
+    #     configured but 0 matched" class -- there is no calendar to
+    #     blame, so it gets its own counter, not folded into any real
+    #     calendar's;
+    #   - `_EXTCAL_STREAK_APPLY_KEY` for `apply_changes`/`export_own`
+    #     per-row errors. These are folded into the SAME streak-gated
+    #     path (not escalated immediately) deliberately: they already
+    #     freeze every calendar's sync-token progress this tick (the
+    #     blanket gate below, untouched by this change) and the design
+    #     doc's own recorded live case is `database is locked` from the
+    #     per-minute `fam-reminders` timer contending on the same WAL
+    #     file -- exactly the transient, self-healing shape this whole
+    #     feature exists to stop paging Denis over. A GENUINE apply
+    #     outage still escalates by the Nth tick, same as a calendar
+    #     outage, and stays covered independently by `health.
+    #     extcal_staleness` if the sync-token freeze holds it back for
+    #     longer than `extcal_stale_hours`.
+    threshold = _extcal_fail_streak_threshold(cfg)
+    escalate_messages = []
+
+    for c in result["calendars"]:
+        c_url = c["url"]
+        if result.get("calendar_had_error", {}).get(c_url):
+            if _extcal_record_failure(conn, c_url, threshold):
+                msgs = result.get("calendar_error_msgs", {}).get(c_url) or [
+                    f"{c.get('name') or c_url}: {c.get('reason') or 'cal-ext error'}"]
+                escalate_messages.extend(_redact_sync_errors(msgs))
+        else:
+            _extcal_record_success(conn, c_url)
+
+    if result.get("discovery_error"):
+        if _extcal_record_failure(conn, _EXTCAL_STREAK_DISCOVERY_KEY, threshold):
+            escalate_messages.extend(_redact_sync_errors(
+                [e for e in result["sync_errors"]
+                 if e.startswith("extcal_read_calendars is configured")]))
+    else:
+        _extcal_record_success(conn, _EXTCAL_STREAK_DISCOVERY_KEY)
+
+    if apply_errors or export_errors:
+        if _extcal_record_failure(conn, _EXTCAL_STREAK_APPLY_KEY, threshold):
+            escalate_messages += [
+                f"{e.get('branch')}.{e.get('action')} id={e.get('id')}: {e.get('error')}"
+                for e in apply_errors]
+            # Task 7: export_own's errors have no "branch" (there is only
+            # one kind of row on this side, events) -- reported as
+            # "export.<action> event_id=<id>: <error>" instead, same
+            # overall shape.
+            escalate_messages += [
+                f"export.{e.get('action')} event_id={e.get('event_id')}: {e.get('error')}"
+                for e in export_errors]
+    else:
+        _extcal_record_success(conn, _EXTCAL_STREAK_APPLY_KEY)
+
+    conn.commit()
+
+    if escalate_messages:
         # Blocker 3: redacted -- this string is what maint.problem_summary
         # copies verbatim into the nightly message to Denis, so an
         # unredacted href/RRULE here is a leak into HER message, not just
         # an audit-log detail.
-        reasons = list(_redact_sync_errors(result["sync_errors"]))
-        reasons += [f"{e.get('branch')}.{e.get('action')} id={e.get('id')}: {e.get('error')}"
-                    for e in apply_errors]
-        # Task 7: export_own's errors have no "branch" (there is only one
-        # kind of row on this side, events) -- reported as "export.<action>
-        # event_id=<id>: <error>" instead, same overall shape.
-        reasons += [f"export.{e.get('action')} event_id={e.get('event_id')}: {e.get('error')}"
-                    for e in export_errors]
-        _audit_tick_error("cal-ext", "; ".join(reasons) or "cal-ext sync had errors")
+        _audit_tick_error(
+            "cal-ext", "; ".join(escalate_messages) or "cal-ext sync had errors")
         if getattr(args, "json", False):
             print(json.dumps({"ok": False, **counts, "export": export_counts,
                                "calendars": result["calendars"]},
@@ -2318,7 +2705,7 @@ def cmd_tick_cal_ext(args):
         return 1
 
     if getattr(args, "json", False):
-        print(json.dumps({"ok": True, **counts, "export": export_counts,
+        print(json.dumps({"ok": not has_error, **counts, "export": export_counts,
                            "calendars": result["calendars"]},
                           ensure_ascii=False))
     else:
@@ -3122,6 +3509,9 @@ def build_parser():
                            "with --repeat, copied onto every occurrence)")
     spa.add_argument("--allow-past", dest="allow_past", action="store_true",
                       help="skip the past-start guardrail (retroactive event entry)")
+    spa.add_argument("--allow-overlap", dest="allow_overlap", action="store_true",
+                      help="record this event even though the slot is already "
+                           "taken (only after Amina confirmed she wants both)")
     spa.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
@@ -3145,6 +3535,9 @@ def build_parser():
                       help="participant ref to remove (repeatable)")
     spu.add_argument("--allow-past", dest="allow_past", action="store_true",
                       help="skip the past-start guardrail (retroactive event entry)")
+    spu.add_argument("--allow-overlap", dest="allow_overlap", action="store_true",
+                      help="move this event onto a slot that is already taken "
+                           "(only after Amina confirmed she wants both)")
     spu.add_argument("--prep-asked", dest="prep_asked", action="store_true",
                       help="mark this event as having already been asked "
                            "about prep (sets events.prep_asked=1)")

@@ -44,6 +44,11 @@ CFG = {
     "offsite_dir": "/mnt/nas-hermes",
     "offsite_age_recipient": "",
     "offsite_keep": 8,
+    # Task 5 (nightly LLM report, schema v12/config): keep this hand-mirror
+    # of gate.CONFIG_DEFAULTS in sync, same as every prior addition above.
+    "diagnostics_dir": "/home/denis/.hermes/diagnostics",
+    "report_jobs_path": "/home/denis/.hermes/cron/jobs.json",
+    "report_job_name": "fam-nightly-report",
     "car_poll_interval_min": 30,
     "car_fuel_low_pct": 25,
     "car_fuel_hysteresis": 5,
@@ -77,6 +82,7 @@ CFG = {
     "extcal_horizon_weeks": 8,
     "extcal_stale_hours": 6,
     "extcal_full_resync_days": 1,
+    "extcal_fail_streak_threshold": 3,
     # Final review, Should-fix 8: оба ключа доехали до gate.CONFIG_DEFAULTS,
     # значит должны быть и в этом зеркале -- см. комментарий выше.
     "whereami_home_radius_km": 0.3,

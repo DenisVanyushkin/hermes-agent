@@ -13,7 +13,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v22 (rule 21: `adopt` stops phone-side edits from being picked up, and does not apply to all-day items)._
+_Body version: v23 (rules 23–24: a taken slot must be confirmed with `--allow-overlap`; a foreign timezone is passed as its own offset and confirmed in both times)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -86,6 +86,8 @@ way to read or change family data.
   the user in Asia/Almaty local time, short form ("ср 15-го, 10:00").
   Every value you pass to fam (`--start`, `--end`, a `day` date) is
   ISO-8601 with an explicit offset, e.g. `2026-07-15T10:00:00+05:00`.
+  If she names a DIFFERENT timezone ("по Москве", "мск"), see rule 24 —
+  you pass that zone's offset, not Almaty's.
 
 ## Rules
 
@@ -450,13 +452,40 @@ show after cancel), make a second, separate terminal call.
     a mutating calendar verb on that row yourself; you may still
     acknowledge what she said in conversation. This is a skill-level
     rule only — fam itself has no owner-check on these verbs yet.
+23. **`overlaps …` ⇒ слот занят: назови чем и спроси, не решай сама.** fam
+    refuses to write an event onto a slot that already has an active one
+    (`overlaps 1 active event: Интервизия 06.08 10:00–12:15 (id=103). Ask
+    Amina whether to keep both, then retry with --allow-overlap.`; for a
+    series: `series overlaps 3 of 24 planned occurrences, first: …`). This
+    is NOT a bug and NOT a reason to move the time yourself. Tell Amina
+    what is already in that slot (title and time come straight from the
+    error) and ask: перенести или оставить оба. Only on an explicit "оставь
+    оба"/"пусть будут вместе" repeat the SAME call with `--allow-overlap`.
+    If she picks another time, make a fresh `cal add` with the new
+    `--start` and NO flag. **Never pass `--allow-overlap` pre-emptively** —
+    the flag exists to record her decision, not to silence the check.
+    Don't confuse this with rule 20: a DUPLICATE (the same thing, already
+    imported from her iPhone) must not be created at all; a CONFLICT
+    (different things at the same time) is hers to decide.
+24. **Чужая таймзона: передавай её оффсет, называй оба времени.** When she
+    names a timezone that isn't Almaty ("в 10 утра по Москве", "18:00 мск",
+    "по Берлину"):
+    - pass that zone's own offset to fam, unchanged — `--start
+      2026-08-03T10:00:00+03:00`. fam stores UTC and converts for display,
+      so this is exact. **Never** attach `+05:00` to a time she named in
+      another zone, and don't convert it in your head first;
+    - name BOTH times in your confirmation: «в 13:00 по Алматы (10:00 мск)»;
+    - put her original wording in `--notes` («Амина сказала: 10 утра по
+      Москве») — nothing else remembers it, and reminders never show notes;
+    - everywhere after that use Almaty time only. If she asks "а во сколько
+      это по Москве?", pull the note back with `fam cal show <id>`.
 
 ## Quick Reference
 
 | Goal | Command |
 | --- | --- |
-| Record an event (`--start` = время начала, не выезда; `--transport` обязателен при `--place`) | `fam cal add --title T --start ISO [--end ISO] [--place P --transport car\|walk\|public] [--with NAME]... [--notes N]` |
-| Change an event | `fam cal update <id> [--start ISO] [--place P] [--add-person N] [--rm-person N] ...` |
+| Record an event (`--start` = время начала, не выезда; `--transport` обязателен при `--place`) | `fam cal add --title T --start ISO [--end ISO] [--place P --transport car\|walk\|public] [--with NAME]... [--notes N] [--allow-overlap]` |
+| Change an event | `fam cal update <id> [--start ISO] [--end ISO] [--place P] [--add-person N] [--rm-person N] [--allow-overlap] ...` (moving with `--start` alone keeps the duration — end shifts with it; pass `--end` to change duration) |
 | Cancel an event | `fam cal cancel <id>` |
 | Mark an event done | `fam cal done <id>` |
 | Take over reminding her about an iPhone-owned event | `fam cal adopt <event_id>` |

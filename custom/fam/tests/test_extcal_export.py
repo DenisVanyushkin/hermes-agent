@@ -29,6 +29,11 @@ def _cfg(**over):
         "extcal_read_calendars": [],
         "extcal_write_calendar": "",
         "extcal_horizon_weeks": 8,
+        # Streak-alerting hardening (2026-08, see test_extcal_tick.py's
+        # own _cfg() for the full rationale): pinned at 1 so every
+        # PRE-EXISTING test below keeps its old "first failure escalates
+        # immediately" behaviour; the dedicated streak test overrides it.
+        "extcal_fail_streak_threshold": 1,
     })
     base.update(over)
     return base
@@ -762,6 +767,14 @@ def test_belt2_filters_our_own_exported_event_even_with_write_url_pointing_elsew
 # ---------------------------------------------------------------------
 
 def test_export_error_reaches_tick_error_same_path_as_import_error(db, monkeypatch):
+    """`_cfg()`'s own default pins `extcal_fail_streak_threshold` at 1, so
+    an export error here still escalates on the FIRST occurrence -- the
+    outer wiring (export errors fold into the same `tick.error` path an
+    import error already uses, `export.` prefix, `cal.ext.export_error`
+    audit row written every time regardless of escalation) is unchanged
+    by the streak-alerting hardening. See
+    `test_export_error_below_streak_threshold_does_not_escalate_but_is_still_audited`
+    below for the NEW streak behaviour at the production default (3)."""
     def fake_open(req, timeout):
         if req.get_method() == "PUT":
             return extcal.Response(500, b"", {})
@@ -790,6 +803,66 @@ def test_export_error_reaches_tick_error_same_path_as_import_error(db, monkeypat
         "SELECT payload FROM audit_log WHERE kind='cal.ext.export_error'"
     ).fetchall()
     assert len(export_error_rows) == 1
+
+
+def test_export_error_below_streak_threshold_does_not_escalate_but_is_still_audited(
+        db, monkeypatch):
+    """Design decision (streak-alerting hardening, 2026-08): export
+    errors are folded into the SAME consecutive-failure streak as
+    import/apply errors (`cli._EXTCAL_STREAK_APPLY_KEY`), not escalated
+    to `tick.error` on the first occurrence. Rationale (see the
+    streak-alerting-report.md for the full writeup): a failing PUT to
+    her "Гермес" collection has the same practical shape as an
+    `apply_changes` per-row error -- both are single-event writes to a
+    WAL-backed sqlite/CalDAV path that this project's own live findings
+    show going transient (one HTTP 500, one `database is locked`) far
+    more often than genuinely broken -- and a real, persistent export
+    outage still reaches Denis by the Nth consecutive tick, same as any
+    other class. `cal.ext.export_error` (the per-attempt audit row) is
+    written by `extcal.export_own` itself, unconditionally, on every
+    attempt regardless of the streak -- nothing about the failure is
+    hidden, only the nightly escalation is delayed."""
+    def fake_open(req, timeout):
+        if req.get_method() == "PUT":
+            return extcal.Response(500, b"", {})
+        return extcal.Response(207, b"<multistatus/>", {})
+    monkeypatch.setattr(extcal, "_default_open", fake_open)
+
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_write_calendar=WRITE_URL,
+                                               extcal_fail_streak_threshold=2))
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [])
+
+    _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
+    db.commit()
+
+    rc1 = cli.cmd_tick_cal_ext(types.SimpleNamespace(now=TEST_NOW, json=False))
+    assert rc1 == 0  # 1st export failure -- below threshold, no tick.error
+
+    tick_error_rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.error' ORDER BY id"
+    ).fetchall()
+    assert tick_error_rows == []
+
+    export_error_rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='cal.ext.export_error'"
+    ).fetchall()
+    assert len(export_error_rows) == 1  # still fully recorded, every attempt
+
+    rc2 = cli.cmd_tick_cal_ext(types.SimpleNamespace(now=TEST_NOW, json=False))
+    assert rc2 == 1  # 2nd consecutive export failure -- threshold reached
+
+    tick_error_rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='tick.error' ORDER BY id"
+    ).fetchall()
+    assert len(tick_error_rows) == 1
+    payload = json.loads(tick_error_rows[0]["payload"])
+    assert "export." in payload["error"]
+
+    export_error_rows = db.execute(
+        "SELECT payload FROM audit_log WHERE kind='cal.ext.export_error'"
+    ).fetchall()
+    assert len(export_error_rows) == 2
 
 
 def test_export_wired_into_tick_and_reported_in_cal_ext_sync_audit(db, monkeypatch):

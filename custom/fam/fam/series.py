@@ -165,7 +165,48 @@ def cancel(conn, sid, now_utc=None):
     return len(future)
 
 
-def generate(conn, now_utc=None, horizon_weeks=8):
+HORIZON_WEEKS = 8
+
+
+def iter_occurrences(weekdays, start_time, end_time, until_local,
+                     now_local, horizon_date):
+    """The recurrence grid of ONE weekly series, as (start_utc, end_utc) pairs.
+
+    Pure: no DB, no wall clock -- now_local (tz-aware, Asia/Almaty) and
+    horizon_date come from the caller. Only occurrences strictly after
+    now_local are returned, capped by horizon_date and until_local.
+
+    Extracted from generate() (2026-08-01) so the CLI can preview a series'
+    slots BEFORE writing anything -- the occupancy guardrail needs to know
+    where the occurrences would land. generate() reads the same function,
+    so there is exactly one definition of "when does this series happen".
+    """
+    wds = {_WD_INDEX[w] for w in canon_weekdays(weekdays).split(",")}
+    until = (datetime.strptime(until_local, "%Y-%m-%d").date()
+             if until_local else None)
+    sh, sm = (int(x) for x in start_time.split(":"))
+    end_hm = tuple(int(x) for x in end_time.split(":")) if end_time else None
+
+    out = []
+    d = now_local.date()
+    while d <= horizon_date:
+        if (until is None or d <= until) and d.weekday() in wds:
+            start_local = datetime(d.year, d.month, d.day, sh, sm,
+                                   tzinfo=cal.ALMATY)
+            if start_local > now_local:
+                end_utc = None
+                if end_hm is not None:
+                    end_local = datetime(d.year, d.month, d.day,
+                                         end_hm[0], end_hm[1], tzinfo=cal.ALMATY)
+                    end_utc = end_local.astimezone(timezone.utc).isoformat(
+                        timespec="seconds")
+                out.append((start_local.astimezone(timezone.utc).isoformat(
+                    timespec="seconds"), end_utc))
+        d += timedelta(days=1)
+    return out
+
+
+def generate(conn, now_utc=None, horizon_weeks=HORIZON_WEEKS):
     """Materialize concrete events from active series up to horizon_weeks
     ahead. Idempotent: an existing occupied (series_id, start_utc) slot is
     skipped -- including one that was individually cancelled (it stays a
@@ -185,43 +226,23 @@ def generate(conn, now_utc=None, horizon_weeks=8):
     for srow in conn.execute(
             "SELECT * FROM event_series WHERE status='active'").fetchall():
         s = dict(srow)
-        wds = {_WD_INDEX[w] for w in s["weekdays"].split(",")}
-        until = (datetime.strptime(s["until_local"], "%Y-%m-%d").date()
-                 if s["until_local"] else None)
-        sh, sm = (int(x) for x in s["start_time"].split(":"))
-        end_hm = None
-        if s["end_time"]:
-            end_hm = tuple(int(x) for x in s["end_time"].split(":"))
         participants = [
             r["person_id"] for r in conn.execute(
                 "SELECT person_id FROM event_series_participants "
                 "WHERE series_id=?", (s["id"],))]
-
-        d = now_local.date()
-        while d <= horizon_date:
-            if (until is None or d <= until) and d.weekday() in wds:
-                start_local = datetime(d.year, d.month, d.day, sh, sm,
-                                       tzinfo=cal.ALMATY)
-                if start_local > now_local:
-                    start_utc = start_local.astimezone(
-                        timezone.utc).isoformat(timespec="seconds")
-                    occupied = conn.execute(
-                        "SELECT 1 FROM events WHERE series_id=? AND start_utc=?",
-                        (s["id"], start_utc)).fetchone()
-                    if not occupied:
-                        end_utc = None
-                        if end_hm is not None:
-                            end_local = datetime(d.year, d.month, d.day,
-                                                 end_hm[0], end_hm[1],
-                                                 tzinfo=cal.ALMATY)
-                            end_utc = end_local.astimezone(
-                                timezone.utc).isoformat(timespec="seconds")
-                        cal.add(conn, s["title"], start_utc, end_utc,
-                                place=s["place_id"], participants=participants,
-                                transport=s["transport"], notes=s["notes"],
-                                series_id=s["id"], prep_min=s["prep_min"])
-                        created += 1
-            d += timedelta(days=1)
+        for start_utc, end_utc in iter_occurrences(
+                s["weekdays"], s["start_time"], s["end_time"],
+                s["until_local"], now_local, horizon_date):
+            occupied = conn.execute(
+                "SELECT 1 FROM events WHERE series_id=? AND start_utc=?",
+                (s["id"], start_utc)).fetchone()
+            if occupied:
+                continue
+            cal.add(conn, s["title"], start_utc, end_utc,
+                    place=s["place_id"], participants=participants,
+                    transport=s["transport"], notes=s["notes"],
+                    series_id=s["id"], prep_min=s["prep_min"])
+            created += 1
     return created
 
 

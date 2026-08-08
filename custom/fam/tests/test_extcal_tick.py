@@ -69,6 +69,15 @@ def _cfg(**over):
         "extcal_read_calendars": [],
         "extcal_write_calendar": "",
         "extcal_horizon_weeks": 8,
+        # Streak-alerting hardening (2026-08): production default is 3
+        # consecutive failing ticks before `tick.error` escalates (see
+        # cli.py's `_extcal_fail_streak_threshold`). Every pre-existing
+        # test in this file was written against the OLD "first failure
+        # escalates immediately" contract, so the shared fixture pins the
+        # threshold at 1 here -- same effective behaviour as before this
+        # feature landed -- and the dedicated streak tests below override
+        # it explicitly to exercise multi-tick escalation/reset/isolation.
+        "extcal_fail_streak_threshold": 1,
     })
     base.update(over)
     return base
@@ -1465,6 +1474,72 @@ def test_periodic_full_still_runs_the_disappearance_sweep_like_any_other_full_mo
 
 
 # ---------------------------------------------------------------------
+# Final re-review (pre-prod hardening): `extcal_full_resync_days` used to
+# go straight from config into `timedelta(days=...)` unvalidated. `0`/
+# negative made `force_full` true on EVERY tick forever (a full
+# `calendar-query` re-baseline every 15 minutes instead of ~once/day);
+# non-numeric blew up `timedelta(...)` with a `TypeError` the broad
+# `except Exception` in `cmd_tick_cal_ext` turns into `tick.error` --
+# sync stays dead until a human edits the config. `cli._extcal_full_
+# resync_days` (unit-tested directly in test_cli.py) clamps/defaults
+# this; these two tests prove the fix reaches all the way through the
+# real `fam tick cal-ext` path, not just the helper in isolation.
+# ---------------------------------------------------------------------
+
+def test_tick_survives_zero_or_negative_full_resync_days_without_forcing_every_tick(
+        db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_full_resync_days=0))
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="SEEDED-TOKEN")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+
+    famdb.meta_set(db, f"extcal_sync_token:{CAL_URL}", "OLD-TOKEN")
+    # One hour stale -- well inside the clamped-to-minimum 1-day interval.
+    # Pre-fix, `timedelta(days=0)` made ANY elapsed time (including this
+    # one hour) count as overdue -- force_full would have been True here.
+    famdb.meta_set(db, f"extcal_last_full:{CAL_URL}", "2037-07-14T23:00:00+00:00")
+    db.commit()
+
+    seen_force_full = []
+
+    def _fetch(cfg, calendar, sync_token=None, request=None, force_full=False):
+        seen_force_full.append(force_full)
+        return ([], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None})
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch)
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0
+    assert seen_force_full == [False]
+
+
+def test_tick_survives_non_numeric_full_resync_days_and_defaults(db, monkeypatch):
+    monkeypatch.setattr(
+        cli.gate, "load_config",
+        lambda *a, **k: _cfg(extcal_full_resync_days="not-a-number"))
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="SEEDED-TOKEN")
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+
+    famdb.meta_set(db, f"extcal_sync_token:{CAL_URL}", "OLD-TOKEN")
+    # Fresh watermark (1h stale, inside the DEFAULTED 1-day interval) --
+    # pre-fix this raised TypeError inside `timedelta(days=...)`, caught
+    # by `cmd_tick_cal_ext`'s broad `except Exception` and turned into a
+    # `tick.error`, wedging sync until a human fixed the config by hand.
+    famdb.meta_set(db, f"extcal_last_full:{CAL_URL}", "2037-07-14T23:00:00+00:00")
+    db.commit()
+
+    seen_force_full = []
+
+    def _fetch(cfg, calendar, sync_token=None, request=None, force_full=False):
+        seen_force_full.append(force_full)
+        return ([], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None})
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch)
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0                    # no tick.error -- sync keeps working
+    assert seen_force_full == [False]  # defaulted to 1 day, not forced
+
+
+# ---------------------------------------------------------------------
 # m4: a malformed --now is a graceful tick.error, not an uncaught traceback
 # ---------------------------------------------------------------------
 
@@ -1495,3 +1570,263 @@ def test_unexpected_exception_marks_tick_error_and_exits_1(db, monkeypatch):
     rc = cli.cmd_tick_cal_ext(_args())
     assert rc == 1
     assert calls == ["cal-ext"]
+
+
+# ---------------------------------------------------------------------
+# Streak-alerting hardening (2026-08): a live-prod week showed every
+# tick.error escalation was a single, self-healing blip (one iCloud
+# resource stalling for a round, one bad discover() pass), gone by the
+# very next 15-minute tick -- escalating on the FIRST failure trained
+# Denis to ignore the nightly summary. `extcal_fail_streak_threshold`
+# (default 3, gate.CONFIG_DEFAULTS) gates the escalation to `tick.error`
+# + exit 1 on N CONSECUTIVE failing ticks, tracked separately per
+# calendar URL and for the "0 calendars matched" discovery class
+# (cli._extcal_record_failure/_extcal_record_success, meta-persisted).
+# `_cfg()`'s own default pins the threshold at 1 (old behaviour) for
+# every OTHER test in this file -- these tests override it explicitly.
+# ---------------------------------------------------------------------
+
+CAL_URL_B = "https://caldav.icloud.com/1/calendars/work/"
+
+
+def _failing_fetch(reason="missing_credentials"):
+    return (lambda cfg, calendar, sync_token=None, request=None, force_full=False:
+            (None, None, {"mode": "error", "reason": reason}))
+
+
+def _ok_fetch(token="TOK-NEXT"):
+    return (lambda cfg, calendar, sync_token=None, request=None, force_full=False:
+            ([], token, {"mode": "sync_collection", "reason": None}))
+
+
+def test_single_failure_below_threshold_is_silent_but_still_audited(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_fail_streak_threshold=3))
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _failing_fetch())
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0                     # below threshold -- no escalation
+    assert calls == []                 # no tick.error at all
+
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert len(rows) == 1              # the failure is still fully recorded
+    assert any("missing_credentials" in e for e in rows[0]["sync_errors"])
+    assert famdb.meta_get(db, f"extcal_fail_streak:{CAL_URL}") == "1"
+
+
+def test_nth_consecutive_failure_escalates(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_fail_streak_threshold=3))
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _failing_fetch())
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert calls == []                 # ticks 1-2: still below threshold
+    rc3 = cli.cmd_tick_cal_ext(_args())
+    assert rc3 == 1                    # tick 3: threshold reached
+    assert len(calls) == 1
+
+
+def test_success_between_failures_resets_the_streak(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_fail_streak_threshold=3))
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
+
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _failing_fetch())
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _ok_fetch())
+    assert cli.cmd_tick_cal_ext(_args()) == 0   # a clean round resets the streak
+    assert famdb.meta_get(db, f"extcal_fail_streak:{CAL_URL}") == "0"
+
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _failing_fetch())
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert calls == []                 # only 2 CONSECUTIVE failures since the reset
+    assert cli.cmd_tick_cal_ext(_args()) == 1   # the 3rd since the reset escalates
+    assert len(calls) == 1
+
+
+def test_no_repeat_tick_error_until_recovery(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_fail_streak_threshold=2))
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _failing_fetch())
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert cli.cmd_tick_cal_ext(_args()) == 1   # escalates at threshold=2
+    assert len(calls) == 1
+    # Still failing, past the threshold -- must stay silent, not re-alert
+    # every 15 minutes (that would just swap one noise source for another).
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert len(calls) == 1
+
+
+def test_recovery_clears_the_alert_and_a_new_series_can_escalate_again(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_fail_streak_threshold=2))
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
+
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _failing_fetch())
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert cli.cmd_tick_cal_ext(_args()) == 1   # first escalation
+    assert len(calls) == 1
+
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _ok_fetch())
+    assert cli.cmd_tick_cal_ext(_args()) == 0   # recovery clears the alert flag
+    assert famdb.meta_get(db, f"extcal_fail_alerted:{CAL_URL}") == "0"
+
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _failing_fetch())
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert cli.cmd_tick_cal_ext(_args()) == 1   # a fresh series escalates anew
+    assert len(calls) == 2
+
+
+def test_streaks_survive_reconnect(db, monkeypatch):
+    """`famdb.connect()` is called fresh inside `cmd_tick_cal_ext` every
+    time (no long-lived connection held across ticks in production) --
+    the streak/alert counters must come back from `meta`, not from any
+    in-process state, so a gateway restart between ticks doesn't reset
+    an in-progress streak."""
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_fail_streak_threshold=3))
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _failing_fetch())
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert famdb.meta_get(db, f"extcal_fail_streak:{CAL_URL}") == "1"
+    # Simulate a process restart: a brand new famdb connection to the SAME
+    # underlying file (matches how `db`/`FAM_DB` are wired by conftest).
+    reconnected = cli.famdb.connect()
+    assert famdb.meta_get(reconnected, f"extcal_fail_streak:{CAL_URL}") == "1"
+    reconnected.close()
+
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    assert cli.cmd_tick_cal_ext(_args()) == 1   # 3rd consecutive failure, counted correctly
+    assert len(calls) == 1
+
+
+def test_streaks_are_isolated_per_calendar(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_fail_streak_threshold=2))
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [_calendar(CAL_URL, "A"),
+                                                     _calendar(CAL_URL_B, "B")])
+
+    def _fetch(cfg, calendar, sync_token=None, request=None, force_full=False):
+        if calendar["url"] == CAL_URL:
+            return (None, None, {"mode": "error", "reason": "boom_a"})
+        return ([], "TOK-B", {"mode": "sync_collection", "reason": None})
+
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _fetch)
+
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    rc2 = cli.cmd_tick_cal_ext(_args())
+    assert rc2 == 1                    # calendar A alone crosses its threshold
+    assert len(calls) == 1
+    assert "boom_a" in calls[0]
+
+    # Calendar B never failed -- its own streak must never have moved.
+    assert famdb.meta_get(db, f"extcal_fail_streak:{CAL_URL_B}") == "0"
+    assert famdb.meta_get(db, f"extcal_fail_alerted:{CAL_URL_B}") == "0"
+
+
+def test_discovery_class_has_its_own_streak_separate_from_any_calendar(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_fail_streak_threshold=2,
+                                               extcal_read_calendars=["Family"]))
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [])
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+
+    assert cli.cmd_tick_cal_ext(_args()) == 0
+    rc2 = cli.cmd_tick_cal_ext(_args())
+    assert rc2 == 1
+    assert len(calls) == 1
+    assert "extcal_read_calendars is configured" in calls[0]
+    assert famdb.meta_get(db, f"extcal_fail_streak:{cli._EXTCAL_STREAK_DISCOVERY_KEY}") == "2"
+    # No real calendar url was ever involved -- nothing to compare against
+    # here beyond the sentinel key itself actually being used.
+
+
+def test_garbage_streak_threshold_config_falls_back_to_default_without_crashing(db, monkeypatch):
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_fail_streak_threshold="banana"))
+    monkeypatch.setattr(cli.extcal, "discover",
+                         lambda cfg, request=None: [_calendar(CAL_URL, "Calendar")])
+    monkeypatch.setattr(cli.extcal, "fetch_changes", _failing_fetch())
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+
+    # Default is 3 (_EXTCAL_FAIL_STREAK_THRESHOLD_DEFAULT) -- the tick must
+    # not raise/wedge, and a single failure must stay below that default.
+    rc = cli.cmd_tick_cal_ext(_args())
+    assert rc == 0
+    assert calls == []
+    assert famdb.meta_get(db, f"extcal_fail_streak:{CAL_URL}") == "1"
+
+
+def test_apply_errors_go_through_the_same_streak_not_immediate_escalation(db, monkeypatch):
+    """Design decision: `apply_changes`/`export_own` per-row errors are
+    folded into the SAME streak-gated path as calendar/discovery errors,
+    not escalated on the first occurrence -- justified in the report
+    (transient `database is locked` contention with the per-minute
+    fam-reminders timer on the same WAL file is the recorded live shape;
+    the blanket sync-token freeze this apply error also triggers is
+    UNCHANGED by this feature, only the nightly escalation is delayed)."""
+    monkeypatch.setattr(cli.gate, "load_config",
+                         lambda *a, **k: _cfg(extcal_fail_streak_threshold=2))
+    cal_a = _calendar(CAL_URL, "Calendar", sync_token="TOK0")
+    item = {"href": CAL_URL + "evt1.ics", "deleted": False, "etag": "e1",
+            "ics": _ics_vevent("evt1@icloud.com", "Йога",
+                                "20370720T130000Z", "20370720T140000Z")}
+    monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [cal_a])
+    monkeypatch.setattr(cli.extcal, "fetch_changes",
+                         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
+                         ([item], "NEXT-TOKEN", {"mode": "sync_collection", "reason": None}))
+    apply_error_result = {
+        "events_inserted": 0, "events_updated": 0, "events_cancelled": 0,
+        "plans_inserted": 0, "plans_updated": 0, "plans_dropped": 0,
+        "collisions": 0,
+        "errors": [{"branch": "events", "action": "insert", "id": None,
+                    "external_uid": "u1:x",
+                    "error": "OperationalError: database is locked"}]}
+    monkeypatch.setattr(cli.extcal, "apply_changes",
+                         lambda conn, changeset, cfg: dict(apply_error_result))
+    calls = []
+    monkeypatch.setattr(cli, "_audit_tick_error", lambda where, exc: calls.append(exc))
+
+    rc1 = cli.cmd_tick_cal_ext(_args())
+    assert rc1 == 0                    # 1st apply error -- below threshold, silent
+    assert calls == []
+    # The blanket token-freeze guard (unrelated to this feature) still holds.
+    assert famdb.meta_get(db, f"extcal_sync_token:{CAL_URL}") is None
+
+    rc2 = cli.cmd_tick_cal_ext(_args())
+    assert rc2 == 1                    # 2nd consecutive apply error -- escalates
+    assert len(calls) == 1
+    assert "database is locked" in calls[0]

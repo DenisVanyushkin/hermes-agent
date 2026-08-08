@@ -41,6 +41,16 @@ logger = logging.getLogger(__name__)
 # transcripts stay disambiguated even if downstream plugins fail before silent_ingest.
 _OWNER_REPLY_PREFIX = "[owner reply] "
 
+# The ack hook must never cost more than this per reaction (_poll_reactions
+# applies events serially, so a hung hook stalls every reaction behind it).
+# The reap that follows a kill is bounded separately and much shorter:
+# asyncio.Process.wait() returns when the inherited pipe transports close,
+# not merely when the pid dies, so a killed hook with a surviving
+# descendant that still holds those pipes (e.g. a shell wrapper that forked
+# instead of exec'ing) would otherwise hang this wait forever.
+_REACTION_HOOK_TIMEOUT_S = 30
+_REACTION_HOOK_REAP_TIMEOUT_S = 5
+
 
 def _listener_pids_on_port(port: int) -> list:
     """PIDs of processes *listening* on ``port`` (POSIX) — never clients.
@@ -1664,8 +1674,67 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+        except Exception as e:
+            print(f"[{self.name}] Reaction hook failed to run: {e}")
+            await self._dispatch_reaction_dialogue(event)
+            return
+        # proc is guaranteed bound from here on -- create_subprocess_exec's
+        # own failures (including a stray TimeoutError, since
+        # asyncio.TimeoutError is a plain OSError subclass on 3.11+) are
+        # handled above, before this block exists to reference proc at all.
+        try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(payload.encode()), timeout=30)
+                proc.communicate(payload.encode()), timeout=_REACTION_HOOK_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # wait_for cancels the communicate() coroutine and awaits the
+            # cancellation; cancellation is not a signal, so the
+            # subprocess keeps running untouched. Kill the whole process
+            # tree, not just proc itself: a hook that forked instead of
+            # exec'ing leaves a live grandchild after a plain proc.kill(),
+            # which both leaks the process this fix exists to stop AND
+            # makes an unbounded proc.wait() hang forever (see the
+            # constants above) -- so both the kill and the reap must be
+            # tree-aware / bounded respectively. Reuses the same
+            # process-tree kill the bridge-process shutdown path uses.
+            #
+            # Only attempt the tree-kill while proc is still alive. A
+            # hook shaped like `sh -c "... &"` forks a grandchild and
+            # exits immediately -- the grandchild keeps the inherited
+            # pipes open, so this branch still fires 30s later even
+            # though proc.returncode is long since set. At that point
+            # proc.pid may already have been recycled by the OS for an
+            # unrelated process, and _terminate_bridge_process's
+            # unguarded psutil.Process(proc.pid) has no way to tell --
+            # it would happily kill that unrelated process and its
+            # whole subtree. A plain proc.kill() doesn't have this
+            # problem (asyncio implements it via Popen.send_signal,
+            # which is itself guarded on self.returncode is None and so
+            # is inherently recycle-safe), so the tree-kill needs the
+            # same guard explicitly. If proc already exited there is
+            # nothing of ours left to kill.
+            if proc.returncode is None:
+                import psutil
+                try:
+                    _terminate_bridge_process(proc, force=True)
+                except psutil.AccessDenied:
+                    # The one failure mode _terminate_bridge_process
+                    # itself does not swallow (psutil.NoSuchProcess is
+                    # already caught inside it). Fall back to a plain
+                    # kill of the direct child at least.
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                except Exception:
+                    pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=_REACTION_HOOK_REAP_TIMEOUT_S)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                pass
+            print(f"[{self.name}] Reaction hook timed out after "
+                  f"{_REACTION_HOOK_TIMEOUT_S}s; killed pid {proc.pid}")
+            await self._dispatch_reaction_dialogue(event)
+            return
         except Exception as e:
             print(f"[{self.name}] Reaction hook failed to run: {e}")
             await self._dispatch_reaction_dialogue(event)
