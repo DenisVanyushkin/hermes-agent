@@ -387,21 +387,50 @@ def _apply_text_backfill(vacancies: list[Vacancy], *, fetchers=None):
 
     Ordering is the point: classification runs on the best available text, so a
     weak or non-English title is no longer a verdict a vacancy cannot appeal.
-    Never raises — a failed backfill leaves today's behaviour intact.
+    Never raises — a failed backfill leaves today's behaviour intact, for ANY
+    input including a malformed environment value.
     """
     from job_intel.text_backfill import BackfillReport, backfill
 
+    # `.strip().lower()` on a str can never raise regardless of the env
+    # value, so this flag parse cannot crash the run under any input.
     if (os.getenv("JOB_INTEL_TEXT_BACKFILL_ENABLED", "1") or "1").strip().lower() in {
             "0", "false", "no"}:
         return BackfillReport()
-    budget = int(os.getenv("JOB_INTEL_TEXT_BACKFILL_BUDGET", "400") or "400")
-    by_url = {}
+
+    raw_budget = os.getenv("JOB_INTEL_TEXT_BACKFILL_BUDGET", "400") or "400"
+    try:
+        budget = int(raw_budget)
+    except (TypeError, ValueError):
+        # A malformed value (e.g. an operator typo like "abc") must fall back
+        # to the documented default rather than crash run_daily. Logged once
+        # at warning level so the typo is visible instead of silently eaten.
+        logger.warning(
+            "text_backfill_budget_invalid raw_value=%r falling_back_to=400",
+            raw_budget,
+        )
+        budget = 400
+    # A negative budget is a *valid* int (int("-5") does not raise) and is
+    # deliberately left as-is rather than clamped to the default here:
+    # select() already applies candidates[:max(budget, 0)], so a negative
+    # value behaves identically to 0 ("fetch nothing this run") downstream.
+    # Treating an explicit negative/zero as "do nothing" respects an operator
+    # who set it that way on purpose, instead of silently overriding their
+    # choice with the default.
+
+    # Each row carries its originating vacancy's list index so results can be
+    # mapped back one-to-one. Keying by (source, url) instead would silently
+    # drop text for one of two vacancies that legitimately share a URL (global
+    # dedup by canonical URL happens later, after this backfill call) — the
+    # fetcher would run twice but only the later vacancy's object would keep
+    # the text. Verified needs_text/_blocked/_priority/select/backfill in
+    # text_backfill.py only ever read "source", "title", "description", "url"
+    # off each row, so an extra "_row_index" key is inert to all of them.
     rows = []
-    for vacancy in vacancies:
-        row = {"source": vacancy.source, "title": vacancy.title,
-               "description": vacancy.description, "url": vacancy.url}
-        rows.append(row)
-        by_url[(vacancy.source, vacancy.url)] = vacancy
+    for index, vacancy in enumerate(vacancies):
+        rows.append({"source": vacancy.source, "title": vacancy.title,
+                      "description": vacancy.description, "url": vacancy.url,
+                      "_row_index": index})
     try:
         report = backfill(rows, budget=budget, fetchers=fetchers)
     except Exception:
@@ -409,9 +438,10 @@ def _apply_text_backfill(vacancies: list[Vacancy], *, fetchers=None):
     for result in report.results:
         if result.state != "ok" or not result.text:
             continue
-        target = by_url.get((result.row.get("source"), result.row.get("url")))
-        if target is not None:
-            target.description = result.text
+        index = result.row.get("_row_index")
+        if index is None or not (0 <= index < len(vacancies)):
+            continue
+        vacancies[index].description = result.text
     return report
 
 
