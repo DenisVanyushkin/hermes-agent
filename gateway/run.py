@@ -2692,10 +2692,54 @@ def _event_media_is_audio(event, index: int) -> bool:
     return getattr(event, "message_type", None) in {MessageType.VOICE, MessageType.AUDIO}
 
 
+# Opus/OGG is what every messenger records a voice note in; an audio *file*
+# attachment is mp3/m4a/wav/flac. WhatsApp drops the ``ptt`` flag when a voice
+# note is forwarded, so a forwarded voice note reaches us as MessageType.AUDIO
+# and the MIME is the only signal left that it is speech, not a music file.
+VOICE_NOTE_MIME_TYPES = frozenset({
+    "audio/ogg",
+    "audio/opus",
+    "audio/x-opus+ogg",
+})
+
+# Ceiling for treating an AUDIO attachment as a voice note. Real voice notes
+# are tens of kilobytes; anything past this is a forwarded recording that would
+# only stall the STT provider, so it keeps file semantics instead.
+VOICE_NOTE_STT_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _is_voice_note_mime(mtype: str) -> bool:
+    """True for the container/codec a recorded voice note arrives in.
+
+    WhatsApp sends ``audio/ogg; codecs=opus``, so compare the bare type.
+    """
+    return mtype.split(";", 1)[0].strip().lower() in VOICE_NOTE_MIME_TYPES
+
+
+def _event_media_is_forwarded_voice_note(event, index: int) -> bool:
+    """True when a MessageType.AUDIO attachment is really a voice note.
+
+    Guards on size as well as MIME: a stat failure means the path is not
+    materialised yet, and STT (which reads the file itself) is the right place
+    for that to surface, so an unknown size does not veto transcription.
+    """
+    if not _is_voice_note_mime(_event_media_type_at(event, index)):
+        return False
+    media_urls = getattr(event, "media_urls", None) or []
+    if index >= len(media_urls):
+        return False
+    try:
+        return os.path.getsize(media_urls[index]) <= VOICE_NOTE_STT_MAX_BYTES
+    except OSError:
+        return True
+
+
 def _event_media_is_stt_input(event, index: int) -> bool:
     """True when an audio attachment should enter the automatic STT pipeline."""
     message_type = getattr(event, "message_type", None)
-    if message_type in {MessageType.AUDIO, MessageType.DOCUMENT}:
+    if message_type == MessageType.AUDIO:
+        return _event_media_is_forwarded_voice_note(event, index)
+    if message_type == MessageType.DOCUMENT:
         return False
     return (
         message_type == MessageType.VOICE
@@ -12826,9 +12870,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # mis-routed here as an image and the provider 400s.
                 if _event_media_is_image(event, i):
                     image_paths.append(path)
-                # MessageType.AUDIO = audio file attachment (e.g. .mp3, .m4a) — never STT
-                # MessageType.VOICE = voice message (Opus/OGG) — always STT
-                if event.message_type == MessageType.AUDIO:
+                # MessageType.VOICE = voice message (Opus/OGG) — always STT.
+                # MessageType.AUDIO = audio file attachment (e.g. .mp3, .m4a) —
+                # file semantics, EXCEPT a forwarded voice note, which loses its
+                # ``ptt`` flag on the way and arrives here as AUDIO/Opus.
+                if event.message_type == MessageType.AUDIO and not _event_media_is_stt_input(event, i):
                     audio_file_paths.append(path)
                 elif not _pending_stt_prepared and _event_media_is_stt_input(event, i):
                     audio_paths.append(path)
