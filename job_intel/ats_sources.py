@@ -288,7 +288,10 @@ def _vacancy(
         title=title,
         location=(location or "Unknown").strip() or "Unknown",
         url=url,
-        description=(description or title).strip() or title,
+        # An absent description stays absent. Substituting the title here made
+        # a connector that never fetched text look like one that did, which is
+        # how 5267 title-only smartrecruiters rows went unnoticed.
+        description=(description or "").strip(),
         posted_at=posted_at,
         salary=salary,
         metadata=metadata or {},
