@@ -11,8 +11,14 @@ content. A budget's mistake is reversible tomorrow; a gate's is not.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 
+from job_intel.ats_sources import (
+    fetch_headhunter_detail,
+    fetch_smartrecruiters_detail,
+    fetch_teamtailor_detail,
+)
 from job_intel.evaluator import _title_function_blocker
 from job_intel.text_thresholds import PARTIAL_MIN
 
@@ -72,3 +78,69 @@ def select(rows: Sequence[Mapping], *, budget: int) -> list[Mapping]:
     candidates = [r for r in rows if needs_text(r) and not _blocked(r.get("title") or "")]
     candidates.sort(key=lambda r: _priority(r.get("title") or ""))
     return candidates[:max(budget, 0)]
+
+
+FETCHERS: dict[str, Callable[[str], "str | None"]] = {
+    "smartrecruiters": fetch_smartrecruiters_detail,
+    "headhunter": fetch_headhunter_detail,
+    "teamtailor": fetch_teamtailor_detail,
+}
+
+
+@dataclass(frozen=True)
+class BackfillResult:
+    row: Mapping
+    state: str          # "ok" | "failed" | "unavailable"
+    text: "str | None"
+
+
+@dataclass
+class BackfillReport:
+    attempted: int = 0
+    filled: int = 0
+    failed: int = 0
+    unavailable: int = 0
+    skipped_budget: int = 0
+    per_source: dict = field(default_factory=dict)
+    results: list = field(default_factory=list)
+
+    def _bump(self, source: str, key: str) -> None:
+        bucket = self.per_source.setdefault(
+            source, {"attempted": 0, "filled": 0, "failed": 0, "unavailable": 0})
+        bucket[key] += 1
+
+
+def backfill(rows, *, budget: int, fetchers=None) -> BackfillReport:
+    """Fetch missing text for as many rows as the budget allows.
+
+    Writes nothing. The caller decides what to persist and whether the result
+    may reach a user — which is the whole reason the live branch and the sweep
+    can share this function without being able to share consequences.
+    """
+    fetchers = FETCHERS if fetchers is None else fetchers
+    chosen = [r for r in select(rows, budget=budget)
+              if (r.get("source") or "") in fetchers]
+    all_candidates = [r for r in select(rows, budget=len(rows) + 1)
+                      if (r.get("source") or "") in fetchers]
+    report = BackfillReport(skipped_budget=max(len(all_candidates) - len(chosen), 0))
+
+    for row in chosen:
+        source = row.get("source") or ""
+        report.attempted += 1
+        report._bump(source, "attempted")
+        try:
+            text = fetchers[source](row.get("url") or "")
+        except Exception:
+            report.failed += 1
+            report._bump(source, "failed")
+            report.results.append(BackfillResult(row, "failed", None))
+            continue
+        if not text or len(text.strip()) < PARTIAL_MIN:
+            report.unavailable += 1
+            report._bump(source, "unavailable")
+            report.results.append(BackfillResult(row, "unavailable", None))
+            continue
+        report.filled += 1
+        report._bump(source, "filled")
+        report.results.append(BackfillResult(row, "ok", text.strip()))
+    return report
