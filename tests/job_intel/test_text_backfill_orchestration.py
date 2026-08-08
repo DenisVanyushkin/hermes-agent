@@ -63,3 +63,30 @@ def test_a_source_without_a_registered_fetcher_is_skipped_not_crashed():
     report = backfill([_row(source="teamtailor", url="https://t/1")], budget=10,
                       fetchers={"smartrecruiters": lambda url: "y" * 400})
     assert report.attempted == 0
+
+
+def test_a_raising_fetcher_does_not_abort_remaining_rows():
+    """A raise on the FIRST row must not stop the loop over the rest.
+
+    A single-row test (test_a_raising_fetcher_is_contained) cannot tell a
+    correct `except Exception: ...; continue` apart from a buggy
+    `except Exception: ...; return report` -- both look identical with one
+    row. This test puts the raise on the first row specifically, so an early
+    return would swallow rows 2 and 3 and this test would catch it. All rows
+    share the same title ("Head of Product", priority bucket 0 under
+    _priority) so select()'s stable sort does not reorder them -- the first
+    row in, with a raising fetcher, stays the first row attempted.
+    """
+    rows = [_row(url="https://x/1"), _row(url="https://x/2"), _row(url="https://x/3")]
+
+    def selective_boom(url):
+        if url == "https://x/1":
+            raise RuntimeError("upstream on fire")
+        return "y" * 400
+
+    report = backfill(rows, budget=10, fetchers={"smartrecruiters": selective_boom})
+
+    assert report.attempted == 3
+    assert report.failed == 1
+    assert report.filled == 2
+    assert [r.state for r in report.results] == ["failed", "ok", "ok"]

@@ -89,6 +89,10 @@ FETCHERS: dict[str, Callable[[str], "str | None"]] = {
 
 @dataclass(frozen=True)
 class BackfillResult:
+    """One row's outcome. frozen=True stops reassigning these three fields,
+    but not mutation of the referenced row mapping's contents -- backfill()
+    itself never mutates row, but a caller holding the same reference can.
+    """
     row: Mapping
     state: str          # "ok" | "failed" | "unavailable"
     text: "str | None"
