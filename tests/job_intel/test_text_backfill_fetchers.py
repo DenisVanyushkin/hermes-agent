@@ -46,3 +46,33 @@ def test_smartrecruiters_returns_none_without_a_job_ad(monkeypatch):
 def test_smartrecruiters_returns_none_on_transport_failure(monkeypatch):
     monkeypatch.setattr("job_intel.ats_sources._detail_json", lambda url, **kw: None)
     assert fetch_smartrecruiters_detail("https://x/1") is None
+
+
+from job_intel.ats_sources import fetch_headhunter_detail
+
+
+def test_headhunter_strips_html_from_description(monkeypatch):
+    monkeypatch.setattr("job_intel.ats_sources._detail_json",
+                        lambda url, **kw: _payload("headhunter_detail.json"))
+    text = fetch_headhunter_detail("https://hh.ru/vacancy/133446873")
+    assert "отвечать за P&L продукта" in text
+    assert "Управление командой" in text
+    assert "<p>" not in text
+
+
+def test_headhunter_calls_the_api_host_not_the_page(monkeypatch):
+    seen = {}
+
+    def _fake(url, **kw):
+        seen["url"] = url
+        return _payload("headhunter_detail.json")
+
+    monkeypatch.setattr("job_intel.ats_sources._detail_json", _fake)
+    fetch_headhunter_detail("https://hh.ru/vacancy/133446873")
+    assert seen["url"] == "https://api.hh.ru/vacancies/133446873"
+
+
+def test_headhunter_returns_none_for_an_unparseable_url(monkeypatch):
+    monkeypatch.setattr("job_intel.ats_sources._detail_json",
+                        lambda url, **kw: _payload("headhunter_detail.json"))
+    assert fetch_headhunter_detail("https://hh.ru/employer/1234") is None

@@ -767,6 +767,20 @@ def fetch_smartrecruiters_detail(url: str) -> str | None:
     return joined or None
 
 
+_HH_VACANCY_ID = re.compile(r"/vacancy/(\d+)")
+
+
+def fetch_headhunter_detail(url: str) -> str | None:
+    match = _HH_VACANCY_ID.search(url or "")
+    if not match:
+        return None
+    payload = _detail_json(f"https://api.hh.ru/vacancies/{match.group(1)}")
+    if not payload:
+        return None
+    text = _clean_html_text(str(payload.get("description") or ""))
+    return text or None
+
+
 def extract_teamtailor_job_urls(html: str, base_url: str, *, limit: int = 80) -> list[str]:
     """Extract job posting URLs from a Teamtailor listing page.
 
