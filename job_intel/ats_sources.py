@@ -307,7 +307,7 @@ def _clean_html_text(value: str) -> str:
 def _json_ld_objects(html: str) -> list[dict[str, Any]]:
     objects: list[dict[str, Any]] = []
     for match in re.finditer(
-        r"<script[^>]+type=[\"']application/ld\\+json[\"'][^>]*>(.*?)</script>",
+        r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>",
         html or "",
         flags=re.I | re.S,
     ):
@@ -779,6 +779,32 @@ def fetch_headhunter_detail(url: str) -> str | None:
         return None
     text = _clean_html_text(str(payload.get("description") or ""))
     return text or None
+
+
+def _detail_html(url: str, *, timeout: int = 20) -> str | None:
+    """One detail page fetch. None on any failure -- see _detail_json."""
+    try:
+        resp = _http_get(url, timeout=timeout)
+        if resp.status_code == 429:
+            _sleep_retry_after(resp)
+            return None
+        if resp.status_code != 200:
+            return None
+        return resp.text
+    except Exception:
+        return None
+
+
+def fetch_teamtailor_detail(url: str) -> str | None:
+    html = _detail_html(url)
+    if not html:
+        return None
+    found = extract_jobposting_vacancies_from_html(html, source="teamtailor", page_url=url)
+    for vacancy in found:
+        text = (vacancy.description or "").strip()
+        if text:
+            return text
+    return None
 
 
 def extract_teamtailor_job_urls(html: str, base_url: str, *, limit: int = 80) -> list[str]:

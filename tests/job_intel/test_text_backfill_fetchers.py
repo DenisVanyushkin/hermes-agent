@@ -76,3 +76,20 @@ def test_headhunter_returns_none_for_an_unparseable_url(monkeypatch):
     monkeypatch.setattr("job_intel.ats_sources._detail_json",
                         lambda url, **kw: _payload("headhunter_detail.json"))
     assert fetch_headhunter_detail("https://hh.ru/employer/1234") is None
+
+
+from job_intel.ats_sources import fetch_teamtailor_detail
+
+
+def test_teamtailor_reads_the_jobposting_description(monkeypatch):
+    html = (FIXTURES / "teamtailor_detail.html").read_text()
+    monkeypatch.setattr("job_intel.ats_sources._detail_html", lambda url, **kw: html)
+    text = fetch_teamtailor_detail("https://acme.teamtailor.com/jobs/1")
+    assert "own the product roadmap" in text
+    assert "<p>" not in text
+
+
+def test_teamtailor_returns_none_without_a_jobposting(monkeypatch):
+    monkeypatch.setattr("job_intel.ats_sources._detail_html",
+                        lambda url, **kw: "<html><body>nothing here</body></html>")
+    assert fetch_teamtailor_detail("https://acme.teamtailor.com/jobs/1") is None
