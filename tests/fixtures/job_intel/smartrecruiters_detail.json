@@ -1,0 +1,13 @@
+{
+  "id": "744000124920382",
+  "name": "Product Lead - Pricing",
+  "company": {"name": "Wise", "identifier": "Wise"},
+  "jobAd": {
+    "sections": {
+      "companyDescription": {"title": "Company Description", "text": "<p>Wise is a global technology company.</p>"},
+      "jobDescription": {"title": "Job Description", "text": "<p>You will own the pricing and incentive structure for the segment.</p>"},
+      "qualifications": {"title": "Qualifications", "text": "<p>10+ years in product.</p>"},
+      "additionalInformation": {"title": "Additional Information", "text": "<p>We offer equity.</p>"}
+    }
+  }
+}

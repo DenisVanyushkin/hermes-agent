@@ -727,6 +727,46 @@ def fetch_smartrecruiters(
     return AtsSourceResult(vacancies=vacancies, errors=errors, discovered_companies=len(companies), pages_fetched=pages)
 
 
+def _detail_json(url: str, *, timeout: int = 20) -> dict[str, Any] | None:
+    """One detail request. Returns None on any transport or decode failure —
+    callers treat a missing detail as 'no text', never as an error to raise."""
+    try:
+        resp = _http_get(url, timeout=timeout, headers={"Accept": "application/json"})
+        if resp.status_code == 429:
+            _sleep_retry_after(resp)
+            return None
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+# The job's own text, in reading order. companyDescription is excluded on
+# purpose: it is company prose, the duty filter drops it anyway, and including
+# it only adds false-positive surface for company-level facts.
+_SMARTRECRUITERS_SECTIONS = ("jobDescription", "qualifications", "additionalInformation")
+
+
+def fetch_smartrecruiters_detail(url: str) -> str | None:
+    payload = _detail_json(url)
+    if not payload:
+        return None
+    sections = ((payload.get("jobAd") or {}).get("sections") or {})
+    if not isinstance(sections, dict):
+        return None
+    parts = []
+    for key in _SMARTRECRUITERS_SECTIONS:
+        node = sections.get(key)
+        if isinstance(node, dict):
+            text = _clean_html_text(str(node.get("text") or ""))
+            if text:
+                parts.append(text)
+    joined = " ".join(parts).strip()
+    return joined or None
+
+
 def extract_teamtailor_job_urls(html: str, base_url: str, *, limit: int = 80) -> list[str]:
     """Extract job posting URLs from a Teamtailor listing page.
 
