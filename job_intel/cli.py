@@ -382,6 +382,18 @@ def _skipped_source_status(source: str, *, acquisition: str | None = None) -> di
 
 
 
+def _merge_backfill_into_statuses(statuses: dict, report) -> None:
+    """Attach backfill counters to the per-source health payload.
+
+    `filled` is the number to watch: it should decline as the backlog drains.
+    If it stays high for weeks, either results are not being persisted or
+    already-filled rows are being re-fetched.
+    """
+    for source, counts in (report.per_source or {}).items():
+        if source in statuses and isinstance(statuses[source], dict):
+            statuses[source]['text_backfill'] = dict(counts)
+
+
 def _apply_text_backfill(vacancies: list[Vacancy], *, fetchers=None):
     """Fill in missing descriptions in place, before anything judges the role.
 
@@ -736,6 +748,7 @@ def _collect_vacancies(
     _collect_ats("recruitee", fetcher=fetch_recruitee, acquisition="ats-xml")
 
     backfill_report = _apply_text_backfill(vacancies)
+    _merge_backfill_into_statuses(statuses, backfill_report)
 
     if not _source_enabled(enabled_sources, "duckduckgo"):
         statuses["duckduckgo"] = _skipped_source_status("duckduckgo")
