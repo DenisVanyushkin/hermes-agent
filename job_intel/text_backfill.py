@@ -14,7 +14,7 @@ import re
 from collections.abc import Mapping, Sequence
 
 from job_intel.evaluator import _title_function_blocker
-from job_intel.vacancy_understanding.semantic.runtime.replay_full import PARTIAL_MIN
+from job_intel.text_thresholds import PARTIAL_MIN
 
 # Sources whose listing endpoint carries no description and which expose a
 # detail endpoint we can call. linkedin and duckduckgo are excluded on purpose:
@@ -37,9 +37,10 @@ _DOMAIN = re.compile(
 def needs_text(row: Mapping) -> bool:
     """Whether this row has no usable description.
 
-    PARTIAL_MIN is imported rather than restated: it is the same line at which
-    classify_corpus calls a vacancy title_only_source_incomplete, and the two
-    answers to "does this row have usable text" must not drift apart.
+    PARTIAL_MIN is imported from job_intel.text_thresholds rather than
+    restated: it is the same constant classify_corpus uses to call a vacancy
+    title_only_source_incomplete, and the two answers to "does this row have
+    usable text" must not drift apart.
     """
     if (row.get("source") or "") not in BACKFILL_SOURCES:
         return False

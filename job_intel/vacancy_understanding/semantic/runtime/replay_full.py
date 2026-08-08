@@ -25,11 +25,11 @@ from job_intel.vacancy_understanding.model import VacancyUnderstanding
 from job_intel.vacancy_understanding.semantic.runtime.models import RUNTIME_VERSION
 from job_intel.vacancy_understanding.semantic.runtime.pipeline import extract_semantic
 from job_intel.vacancy_understanding.semantic.runtime.provider import DeterministicPhraseProvider
+from job_intel.text_thresholds import FULL_MIN, PARTIAL_MIN
 
 DB_PATH = "/var/lib/job-intel/state/job_intel.sqlite3"
 FIXED_TS = datetime(2026, 7, 19, tzinfo=timezone.utc)
 POSITIVE = {"interesting", "applied", "exceptional", "save_for_later"}
-FULL_MIN, PARTIAL_MIN = 600, 200
 
 
 def _clean(text: str) -> str:
