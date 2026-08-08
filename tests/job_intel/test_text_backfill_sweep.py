@@ -85,3 +85,67 @@ def test_sweep_records_unavailable_and_does_not_retry_it(store):
                             (vid,)).fetchone()[0] == "unavailable"
     second = sweep(store, budget=10, fetchers={"smartrecruiters": lambda url: "y" * 400})
     assert second.attempted == 0
+
+
+# --- Fix round 1: the printed counter must never claim a drained backlog ---
+
+def test_sweep_reports_more_eligible_when_backlog_exceeds_budget(store):
+    for i in range(3):
+        _insert(store, url=f"https://x/e{i}")
+    report = sweep(store, budget=2, fetchers={"smartrecruiters": lambda url: "y" * 400})
+    assert report.attempted == 2
+    assert report.more_eligible is True
+
+
+def test_sweep_reports_no_more_eligible_when_backlog_within_budget(store):
+    _insert(store)
+    report = sweep(store, budget=10, fetchers={"smartrecruiters": lambda url: "y" * 400})
+    assert report.more_eligible is False
+
+
+def test_sweep_probe_row_is_not_fetched_or_persisted(store):
+    """The (budget+1)th row exists only to answer 'is there more?' -- it must
+    never reach a fetcher and must never be written to."""
+    for i in range(3):
+        _insert(store, url=f"https://x/p{i}")
+    calls = []
+
+    def fetcher(url):
+        calls.append(url)
+        return "y" * 400
+
+    report = sweep(store, budget=2, fetchers={"smartrecruiters": fetcher})
+    assert len(calls) == 2  # the third row was never handed to a fetcher
+    assert report.more_eligible is True
+    with store.connect(read_only=True) as conn:
+        untouched = conn.execute(
+            "SELECT count(*) FROM vacancies WHERE text_backfill_state IS NULL"
+        ).fetchone()[0]
+    assert untouched == 1  # exactly the probe row was left untouched
+
+
+# --- Fix round 1: per-row persistence isolation ---
+
+def test_sweep_persists_later_rows_after_one_persistence_failure(store, monkeypatch):
+    ok_id = _insert(store, url="https://x/ok")
+    bad_id = _insert(store, url="https://x/bad")
+    original = store.record_text_backfill
+    seen = []
+
+    def flaky(vacancy_id, state, description):
+        seen.append(vacancy_id)
+        if vacancy_id == bad_id:
+            raise RuntimeError("transient db error")
+        return original(vacancy_id, state, description)
+
+    monkeypatch.setattr(store, "record_text_backfill", flaky)
+
+    # Must not raise: a persistence failure on one row must not abort the loop.
+    sweep(store, budget=10, fetchers={"smartrecruiters": lambda url: "y" * 400})
+
+    assert set(seen) == {ok_id, bad_id}  # both rows were attempted
+    with store.connect(read_only=True) as conn:
+        row = conn.execute("SELECT description, text_backfill_state "
+                           "FROM vacancies WHERE id=?", (ok_id,)).fetchone()
+    assert row[0] == "y" * 400
+    assert row[1] == "ok"
