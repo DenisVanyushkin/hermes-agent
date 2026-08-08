@@ -1061,9 +1061,32 @@ PRAGMA foreign_keys=ON;
     def upsert_vacancy(self, vacancy: Vacancy, vacancy_key: str) -> int:
         now = vacancy.scraped_at or datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:
-            row = conn.execute("SELECT id, repost_count FROM vacancies WHERE vacancy_key = ?", (vacancy_key,)).fetchone()
+            row = conn.execute("SELECT id, repost_count, description FROM vacancies WHERE vacancy_key = ?", (vacancy_key,)).fetchone()
             if row:
                 repost_count = int(row[1]) + 1
+                # A listing that carries no description must not erase text we
+                # already have. smartrecruiters, headhunter and teamtailor
+                # publish the description behind a second request, so their
+                # listing rows always arrive here with "" — and this UPDATE used
+                # to write it straight over a backfilled description. The loss
+                # was terminal: rows_needing_text only offers rows whose
+                # text_backfill_state is NULL or 'failed', and a filled row is
+                # 'ok'.
+                #
+                # Only an EMPTY incoming description is refused. A shorter
+                # non-empty one is a real content change and is applied: this
+                # method serves every source, and the store is a mirror of the
+                # source, not a high-water mark of the longest text ever seen.
+                # Empty means empty-after-strip — "  \n " carries exactly as
+                # much information as "". The INSERT branch below is untouched,
+                # so an absent description is still *stored* as absent.
+                incoming_description = vacancy.description or ""
+                stored_description = row[2] or ""
+                description = (
+                    stored_description
+                    if not incoming_description.strip() and stored_description.strip()
+                    else incoming_description
+                )
                 conn.execute(
                     """
                     UPDATE vacancies
@@ -1079,7 +1102,7 @@ PRAGMA foreign_keys=ON;
                         vacancy.title,
                         vacancy.location,
                         vacancy.url,
-                        vacancy.description,
+                        description,
                         vacancy.posted_at,
                         vacancy.scraped_at,
                         vacancy.salary,
