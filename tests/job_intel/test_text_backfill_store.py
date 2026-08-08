@@ -3,6 +3,7 @@ import pytest
 
 from job_intel.models import Vacancy
 from job_intel.store import JobIntelStore
+from job_intel.text_thresholds import PARTIAL_MIN
 
 
 @pytest.fixture()
@@ -68,3 +69,14 @@ def test_rows_needing_text_respects_the_limit(store):
     for i in range(5):
         _insert(store, url=f"https://x/{i}")
     assert len(store.rows_needing_text(["smartrecruiters"], limit=2)) == 2
+
+
+def test_sql_threshold_matches_partial_min():
+    """rows_needing_text hardcodes 200 because SQLite cannot import a Python
+    constant. If PARTIAL_MIN ever moves, this fails loudly instead of the two
+    definitions of "usable text" silently disagreeing."""
+    import inspect
+
+    from job_intel.store import JobIntelStore
+    source = inspect.getsource(JobIntelStore.rows_needing_text)
+    assert f"< {PARTIAL_MIN} " in source
