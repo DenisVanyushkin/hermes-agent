@@ -824,9 +824,57 @@ class JobIntelStore:
             self._ensure_column(conn, "vacancy_scoring_shadow", "score_v3_nr", "INTEGER")
             self._ensure_column(conn, "vacancy_scoring_shadow", "recommendation_v3_nr", "TEXT")
             self._ensure_column(conn, "vacancy_scoring_shadow", "source_key", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "vacancies", "text_backfill_state", "TEXT")
+            self._ensure_column(conn, "vacancies", "text_backfill_at", "TEXT")
             # Phase 3.8: fix URL-dedup gap — widen unique key to (run_id, vacancy_key, url)
             self._migrate_vacancy_observability_unique_key(conn)
             self._backfill_observability_readiness_columns(conn)
+
+    def record_text_backfill(self, vacancy_id: int, state: str,
+                             description: "str | None") -> None:
+        """Persist the outcome of one backfill attempt.
+
+        The description is written only on success: an 'unavailable' or
+        'failed' attempt must never overwrite text we already had.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            if state == "ok" and description:
+                conn.execute(
+                    "UPDATE vacancies SET description = ?, text_backfill_state = ?, "
+                    "text_backfill_at = ? WHERE id = ?",
+                    (description, state, now, int(vacancy_id)))
+            else:
+                conn.execute(
+                    "UPDATE vacancies SET text_backfill_state = ?, text_backfill_at = ? "
+                    "WHERE id = ?", (state, now, int(vacancy_id)))
+            conn.commit()
+
+    def rows_needing_text(self, sources, *, limit: int,
+                          exclude_seen_since_days: "int | None" = None) -> list[dict]:
+        """Rows whose description was never fetched.
+
+        'unavailable' is terminal — a 404 does not become a 200 by being asked
+        again — so those rows are excluded permanently. 'failed' is transient
+        and stays eligible.
+        """
+        placeholders = ",".join("?" for _ in sources)
+        clauses = [
+            f"source IN ({placeholders})",
+            "(text_backfill_state IS NULL OR text_backfill_state = 'failed')",
+            "(description IS NULL OR length(trim(description)) < 200 "
+            " OR trim(description) = trim(title))",
+        ]
+        params = list(sources)
+        if exclude_seen_since_days is not None:
+            clauses.append("julianday('now') - julianday(last_seen_at) > ?")
+            params.append(int(exclude_seen_since_days))
+        params.append(int(limit))
+        sql = ("SELECT id, source, title, description, url, company, location "
+               "FROM vacancies WHERE " + " AND ".join(clauses) + " LIMIT ?")
+        with self.connect(read_only=True) as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(r) for r in conn.execute(sql, params)]
 
     def _migrate_vacancy_observability_unique_key(self, conn: "sqlite3.Connection") -> None:
         """Idempotent migration: widen UNIQUE(run_id, vacancy_key) to
