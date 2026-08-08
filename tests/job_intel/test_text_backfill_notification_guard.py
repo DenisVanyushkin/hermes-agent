@@ -112,3 +112,95 @@ def test_a_sent_delivery_with_unchanged_content_suppresses_renotification(store)
     assert plan.should_notify is False
     assert plan.decision == "suppressed"
     assert plan.suppression_reason == "already_sent_cooldown_active"
+
+
+# The title-only state these rows were actually shown in: description == title,
+# which is what _vacancy() produced for these three sources before Task 1.
+TITLE_ONLY = "Head of Product"
+BACKFILLED = ("You will own the P&L for the payments line and define the "
+              "product strategy. " + "x" * 300)
+
+
+def test_backfilled_text_deliberately_resends_a_previously_delivered_card(store):
+    """OWNER DECISION, 2026-08-08: this re-send is CHOSEN. Do not "fix" it.
+
+    Backfilled text changes the vacancy's description_hash, which makes
+    _material_card_change() return True, which bypasses the
+    `already_sent_cooldown_active` suppression and re-sends the card with reason
+    `description_changed_materially`. That is not an oversight in the guard: the
+    guard deliberately re-sends on material change, and this feature
+    manufactures material change.
+
+    The owner accepted the burst rather than adding an exemption. The reasoning:
+    those roles were shown with no text at all, so a re-scored card carries
+    information rather than noise, and some of them will now fall below the
+    notify threshold and produce no card at all. The bound is roughly 35 roles —
+    the intersection of "previously notified" and "receives text now" — and it
+    is one-time, because the sweep is structurally unable to notify and because
+    upsert_vacancy no longer flips the description back to "" on the next run
+    (see test_text_backfill_upsert_guard.py; before that fix this burst would
+    have recurred on every run indefinitely).
+
+    A future reader who removes this behaviour must revisit that decision, not
+    just this test.
+    """
+    run_id = store.start_run("test")
+    evaluation = _Eval()
+
+    # Delivered once, in the title-only state.
+    title_only = _v(TITLE_ONLY)
+    vacancy_id = store.upsert_vacancy(title_only, title_only.url)
+    card_key = _card_key_for_vacancy(title_only)
+    nid = store.create_notification(
+        run_id, "C1", "vacancy_card", "body", card_key=card_key,
+        payload=_notification_payload(title_only, evaluation, vacancy_id),
+        delivery_status="pending")
+    store.mark_notification_delivery(nid, "sent", attempts=1)
+
+    # Control: with the description unchanged the guard suppresses. This is what
+    # makes the assertion below meaningful — it proves the guard is armed and
+    # that the re-send is caused by the text arriving, not by a missing lookup.
+    unchanged = _card_decision_plan(store, title_only, evaluation,
+                                    repost_window_days=14)
+    assert unchanged.should_notify is False
+    assert unchanged.suppression_reason == "already_sent_cooldown_active"
+
+    # Now the backfill lands real text on the same vacancy.
+    backfilled = _v(BACKFILLED)
+    plan = _card_decision_plan(store, backfilled, evaluation, repost_window_days=14)
+
+    assert plan.should_notify is True
+    assert plan.decision == "sent"
+    assert plan.description_hash_changed is True
+    # CardDecisionPlan reuses the third field for the *reason* on the notify
+    # path — it is only a suppression reason when should_notify is False.
+    assert plan.suppression_reason == "description_changed_materially"
+
+
+def test_the_resend_reason_is_the_description_not_a_score_move(store):
+    """Guards the test above against passing for the wrong reason.
+
+    _card_decision_plan picks its reason in priority order: recommendation
+    improved, then score delta >= JOB_INTEL_CARD_RESEND_SCORE_DELTA, then
+    description hash. Holding the evaluation identical across both calls is what
+    isolates the description as the cause; if a future refactor made the
+    evaluation vary, the reason would silently become something else and the
+    pin above would stop describing the behaviour it claims to pin.
+    """
+    run_id = store.start_run("test")
+    evaluation = _Eval()
+    title_only = _v(TITLE_ONLY)
+    vacancy_id = store.upsert_vacancy(title_only, title_only.url)
+    payload = _notification_payload(title_only, evaluation, vacancy_id)
+    nid = store.create_notification(
+        run_id, "C1", "vacancy_card", "body",
+        card_key=_card_key_for_vacancy(title_only), payload=payload,
+        delivery_status="pending")
+    store.mark_notification_delivery(nid, "sent", attempts=1)
+
+    plan = _card_decision_plan(store, _v(BACKFILLED), evaluation,
+                               repost_window_days=14)
+
+    assert plan.score_delta_since_last_sent == 0
+    assert plan.recommendation_changed_since_last_sent is False
+    assert plan.suppression_reason == "description_changed_materially"
