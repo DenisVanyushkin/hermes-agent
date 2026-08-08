@@ -217,6 +217,12 @@ TOOLSETS = {
         "tools": ["text_to_speech"],
         "includes": []
     },
+
+    "stt": {
+        "description": "Speech-to-text: transcribe an audio file with the configured STT provider",
+        "tools": ["transcribe_audio"],
+        "includes": []
+    },
     
     "todo": {
         "description": "Task planning and tracking for multi-step work",
