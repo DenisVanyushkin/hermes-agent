@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -300,6 +301,10 @@ def _vacancy(
 
 def _clean_html_text(value: str) -> str:
     text = re.sub(r"<[^>]+>", " ", value or "")
+    # Unescape *after* stripping tags, not before: unescaping first would turn
+    # an encoded "&lt;p&gt;" into a literal "<p>" that the tag-strip regex
+    # above would then eat, destroying text the source meant to display as-is.
+    text = html.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
