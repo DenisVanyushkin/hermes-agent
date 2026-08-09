@@ -5780,3 +5780,93 @@ def test_escalated_reviewer_also_sees_the_ops_plan(tmp_path: Path) -> None:
     assert escalation_messages, "escalated reviewer must have been invoked"
     assert "git push origin main" in escalation_messages[0]
     assert _OPS_VERBATIM_REQUEST in escalation_messages[0]
+
+
+# --- инцидент 2026-08-09: подсказка о покрытии ops-каталога ---
+
+import importlib
+
+
+def _packet(next_action: str, blockers: list[str] | None = None) -> dict:
+    return {
+        "present": True,
+        "packet_status": "blocked",
+        "safe_packet": {
+            "engineer_status": "blocked",
+            "engineer_summary": "LSP включён по умолчанию, Python-сервер -- Pyright.",
+            "engineer_sanitized_output": {
+                "status": "blocked",
+                "next_action": next_action,
+                "blockers": blockers or [],
+            },
+            "git": {"changed_files": []},
+            "packet_status": "blocked",
+        },
+    }
+
+
+def test_blocked_message_names_the_operation_missing_from_the_catalog() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._blocked_final_response_text(
+        blocked_reason="engineer_reported_blocked",
+        test_summary={"status": "not_requested"},
+        reviewer_packet=_packet(
+            "В активной среде Hermes выполнить `hermes lsp status`, "
+            "затем `hermes lsp install pyright`."
+        ),
+    )
+
+    assert text is not None
+    assert "━━ Покрытие ops-каталога ━━" in text
+    assert "- `hermes lsp install pyright` — нет операции в каталоге" in text
+    assert "- `hermes lsp status` — нет операции в каталоге" in text
+    assert "Дай уточнение или исправь вводные и повтори." not in text
+    assert "нет нужной операции" in text
+
+
+def test_blocked_message_points_at_propose_ops_when_the_catalog_covers_everything() -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._blocked_final_response_text(
+        blocked_reason="engineer_reported_blocked",
+        test_summary={"status": "not_requested"},
+        reviewer_packet=_packet("Нужно `hermes gateway restart` после правки."),
+    )
+
+    assert text is not None
+    assert "- `hermes gateway restart` — есть операция gateway_restart (mutate)" in text
+    assert "propose_ops" in text
+    assert "нет нужной операции" not in text
+
+
+def test_blocked_message_without_commands_keeps_the_generic_next_step() -> None:
+    """Без команд в тексте подсказке нечего сказать -- и она молчит."""
+
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._blocked_final_response_text(
+        blocked_reason="engineer_reported_blocked",
+        test_summary={"status": "not_requested"},
+        reviewer_packet=_packet("Нужно уточнение требований от владельца."),
+    )
+
+    assert text is not None
+    assert "━━ Покрытие ops-каталога ━━" not in text
+    assert "Дай уточнение или исправь вводные и повтори." in text
+
+
+def test_reviewer_blocked_run_is_not_annotated_with_catalog_coverage() -> None:
+    """Подсказка про каталог осмысленна только когда упёрся инженер."""
+
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+
+    text = module._blocked_final_response_text(
+        blocked_reason="reviewer_verdict_blocked",
+        test_summary={"status": "not_requested"},
+        reviewer_packet=_packet("выполнить `hermes lsp install pyright`"),
+    )
+
+    assert text is not None
+    assert "━━ Покрытие ops-каталога ━━" not in text
+    assert "Посмотри находки ревьюера выше." in text

@@ -2041,9 +2041,27 @@ _REWORK_EXHAUSTED_NEXT_STEP_RU = (
     "Нужна твоя правка требований или ручная доработка — ревьюер не снял замечания за отведённые раунды."
 )
 _GENERIC_NEXT_STEP_RU = "Дай уточнение или исправь вводные и повтори."
+# Каталог операций -- потолок способностей инженера. Когда он упёрся именно в
+# отсутствие операции, «переформулируй и повтори» предлагает переформулировать
+# невыполнимое: сколько ни уточняй задачу, исполнить её нечем.
+_CATALOG_GAP_NEXT_STEP_RU = (
+    "Инженер этого не выполнит: в каталоге операций нет нужной операции. "
+    "Заведи её в hermes_cli/ops_catalog.py либо выполни команду вручную."
+)
+_CATALOG_COVERED_NEXT_STEP_RU = (
+    "Операции в каталоге есть — повтори задачу, попросив инженера предложить их через propose_ops."
+)
 
 
-def _blocked_next_step_ru(blocked_reason: str | None) -> str:
+def _blocked_next_step_ru(blocked_reason: str | None, capability_hints: list | None = None) -> str:
+    if capability_hints:
+        from hermes_cli.ops_capability_hint import has_capability_gap
+
+        return (
+            _CATALOG_GAP_NEXT_STEP_RU
+            if has_capability_gap(capability_hints)
+            else _CATALOG_COVERED_NEXT_STEP_RU
+        )
     if blocked_reason in {
         "review_loop_limit_exceeded",
         "rework_exhausted_after_ordinary_reviewer_findings",
@@ -2231,6 +2249,14 @@ def _blocked_final_response_text(
     engineer_next_action = _safe_test_text(engineer_sanitized_output.get("next_action"))
     if blocked_reason in evidence_preserving_reasons and engineer_next_action:
         lines.append(f"Предложенное следующее действие: {engineer_next_action}")
+    # Команды, названные инженером, сверяем с каталогом операций: непокрытая
+    # команда объясняет блокировку лучше любого пересказа. Ничего не исполняется
+    # и не предлагается к исполнению -- гейт апрува поднимает только propose_ops.
+    capability_hints: list = []
+    if blocked_reason in evidence_preserving_reasons:
+        from hermes_cli.ops_capability_hint import analyze_commands
+
+        capability_hints = analyze_commands([*engineer_blockers, engineer_next_action or ""])
     changed_files = [
         str(item).strip() for item in list((safe_packet.get("git") or {}).get("changed_files") or []) if str(item).strip()
     ]
@@ -2269,7 +2295,15 @@ def _blocked_final_response_text(
         lines.extend(["", "━━ Находки ревьюера ━━"])
         lines.extend(finding_lines)
 
-    lines.extend(["", "━━ Дальше ━━", f"- {_blocked_next_step_ru(blocked_reason)}"])
+    if capability_hints:
+        from hermes_cli.ops_capability_hint import hint_lines
+
+        lines.extend(["", "━━ Покрытие ops-каталога ━━"])
+        lines.extend(hint_lines(capability_hints))
+
+    lines.extend(
+        ["", "━━ Дальше ━━", f"- {_blocked_next_step_ru(blocked_reason, capability_hints)}"]
+    )
     return "\n".join(lines)
 
 
