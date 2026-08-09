@@ -15,7 +15,8 @@ mapfile -t OURS < <(
   comm -23 \
     <(git -C "$WT" ls-tree -r --name-only HEAD tests/ | sort) \
     <(git -C "$WT" ls-tree -r --name-only "$UPSTREAM_REF" tests/ | sort) \
-  | grep -E '\.py$' | grep -v '/fixtures/' | grep -v '__init__\.py$'
+  | grep -E '\.py$' | grep -v '/fixtures/' | grep -v '__init__\.py$' \
+  | grep -v '/[.]_' | grep -v '^[.]_'
 )
 
 # Пустой набор — сбой вычисления, а не «проверять нечего»: у форка собственных
