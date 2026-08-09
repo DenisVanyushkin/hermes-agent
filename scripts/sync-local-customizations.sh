@@ -7,7 +7,7 @@ set -euo pipefail
 # failing command and line in the tail. -E propagates the trap into
 # functions and subshells.
 set -E
-trap 'echo "ERROR: rebase-local-customizations.sh: command failed (rc=$?) at line $LINENO: $BASH_COMMAND" >&2' ERR
+trap 'echo "ERROR: sync-local-customizations.sh: command failed (rc=$?) at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # If there are root-owned files anywhere in the repo, elevate to root so the
 # ownership-repair logic below can fix them and re-exec as the repo owner.
@@ -295,7 +295,7 @@ if [ "$CURRENT_UID" -eq 0 ] && [ "$REPO_UID" != "0" ]; then
     echo "Could not resolve repo owner UID $REPO_UID to a user; refusing to run git as root." >&2
     exit 1
   fi
-  REEXEC_SCRIPT="$REPO/scripts/rebase-local-customizations.sh"
+  REEXEC_SCRIPT="$REPO/scripts/sync-local-customizations.sh"
   if [ ! -r "$REEXEC_SCRIPT" ]; then
     echo "Repo-owned updater is not readable: $REEXEC_SCRIPT" >&2
     exit 1

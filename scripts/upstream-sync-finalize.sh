@@ -7,11 +7,12 @@ set -euo pipefail
 # (sandbox /root/.hermes/state/upstream-sync = this dir on the host) and a
 # systemd path unit invokes this script.
 #
-# Request schema: {"action": "rebase"|"finalize"|"rollback",
+# Request schema: {"action": "sync"|"finalize"|"rollback",
 #                  "upstream_sha": "...", "backup_ref": "..."}
-#  - rebase:   clean path — backup, rebase script, smoketest; rollback on fail
-#  - finalize: agent already rebased in the sandbox — push+restart via the
-#              rebase script (no-op rebase), smoketest; rollback on fail
+#  - sync:     clean path — backup, sync script, smoketest; rollback on fail
+#              ("rebase" is accepted as a legacy alias for this action)
+#  - finalize: agent already merged in the sandbox — push+restart via the
+#              sync script (no-op merge), smoketest; rollback on fail
 #  - rollback: explicit rollback to backup_ref
 # Result written to finalize-result.json in the same dir.
 
@@ -56,6 +57,13 @@ json_field() {
 }
 
 ACTION="$(json_field action)"
+
+# `sync` — каноническое имя действия; `rebase` принимается от скилла,
+# который ещё не обновился до нового контракта. Оба означают одно:
+# применить обновление.
+is_apply_action() {
+  [ "$ACTION" = sync ] || [ "$ACTION" = rebase ]
+}
 UPSTREAM_SHA="$(json_field upstream_sha)"
 BACKUP_REF="$(json_field backup_ref)"
 
@@ -87,7 +95,7 @@ PY
   # On a successful apply (rebase/finalize), clear the consumed decision so a
   # stray reply or the next scheduled sync does not re-trigger against
   # already-applied state. Keep it on rollback/failure so the operator can retry.
-  if { [ "$ACTION" = rebase ] || [ "$ACTION" = finalize ]; } && [ "$1" = ok ]; then
+  if { is_apply_action || [ "$ACTION" = finalize ]; } && [ "$1" = ok ]; then
     rm -f "$STATE_DIR/pending.json"
   fi
 }
@@ -128,7 +136,7 @@ do_rollback() {
 # Apply the sync: rebase, then smoke-test. Each stage reports under its own
 # name so the operator-facing summary never has to guess which one died.
 run_apply_pipeline() {
-  if ! run_logged bash "$SCRIPTS_DIR/rebase-local-customizations.sh"; then
+  if ! run_logged bash "$SCRIPTS_DIR/sync-local-customizations.sh"; then
     FAILED_STAGE=rebase
     do_rollback
     write_result failed "rebase stage failed — the smoketest never ran. $(cat "$DETAIL_LOG")"
@@ -144,7 +152,7 @@ run_apply_pipeline() {
 }
 
 case "$ACTION" in
-  rebase)
+  sync|rebase)
     if [ -z "$BACKUP_REF" ]; then
       BACKUP_REF="backup/pre-upstream-sync-$(date +%Y%m%d-%H%M%S)"
       REPO="${HERMES_REPO:-$HOME/.hermes/hermes-agent}"

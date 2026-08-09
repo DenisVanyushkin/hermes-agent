@@ -26,7 +26,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FINALIZE = REPO_ROOT / "scripts" / "upstream-sync-finalize.sh"
-REBASE = REPO_ROOT / "scripts" / "rebase-local-customizations.sh"
+SYNC = REPO_ROOT / "scripts" / "sync-local-customizations.sh"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -56,7 +56,7 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
     scripts.mkdir()
     calls = tmp_path / "calls.log"
     for name in (
-        "rebase-local-customizations.sh",
+        "sync-local-customizations.sh",
         "upstream-sync-smoketest.sh",
         "upstream-sync-rollback.sh",
     ):
@@ -139,7 +139,7 @@ class TestFinalizeRequiresRebasedHead:
         res = _result(state)
         assert res["status"] == "ok", proc.stderr + res.get("detail", "")
         logged = calls.read_text()
-        assert "rebase-local-customizations.sh" in logged
+        assert "sync-local-customizations.sh" in logged
         assert "upstream-sync-smoketest.sh" in logged
 
 
@@ -300,7 +300,7 @@ class TestPersonalRemoteIntegrationAfterHistoryRewrite:
             }
         )
         return subprocess.run(
-            ["bash", str(REBASE)],
+            ["bash", str(SYNC)],
             cwd=repo,
             env=env,
             capture_output=True,
@@ -418,7 +418,7 @@ class TestFinalizeReportsWhichStageFailed:
         scripts = tmp_path / "scripts"
         scripts.mkdir()
         for name, rc in (
-            ("rebase-local-customizations.sh", rebase_rc),
+            ("sync-local-customizations.sh", rebase_rc),
             ("upstream-sync-smoketest.sh", smoketest_rc),
             ("upstream-sync-rollback.sh", 0),
         ):
@@ -467,7 +467,7 @@ class TestRepoLock:
             # Give the holder a moment to acquire.
             subprocess.run(["sleep", "0.5"])
             proc = subprocess.run(
-                ["bash", str(REBASE)],
+                ["bash", str(SYNC)],
                 cwd=repo,
                 env={**os.environ, "HERMES_REPO_LOCK_TIMEOUT": "1"},
                 capture_output=True,
@@ -479,3 +479,23 @@ class TestRepoLock:
             holder.wait()
         assert proc.returncode != 0
         assert "repo lock" in (proc.stderr + proc.stdout).lower()
+
+
+class TestActionAliasKeepsOldRequestsWorking:
+    """Скилл живёт в репозитории и в рантайм-копии; между их обновлением есть
+    окно, в котором запрос выписывается старым скиллом. Такой запрос обязан
+    отработать, а не упереться в unknown action."""
+
+    def test_sync_action_runs_the_sync_script(self, tmp_path, state):
+        repo = _make_repo(tmp_path)
+        scripts, calls = _stub_scripts(tmp_path)
+        _request(state, "sync", _git(repo, "rev-parse", "HEAD"))
+        _run_finalize(repo, state, scripts)
+        assert "sync-local-customizations.sh" in calls.read_text()
+
+    def test_legacy_rebase_action_runs_the_same_script(self, tmp_path, state):
+        repo = _make_repo(tmp_path)
+        scripts, calls = _stub_scripts(tmp_path)
+        _request(state, "rebase", _git(repo, "rev-parse", "HEAD"))
+        _run_finalize(repo, state, scripts)
+        assert "sync-local-customizations.sh" in calls.read_text()

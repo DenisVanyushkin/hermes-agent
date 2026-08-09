@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage: upstream-sync-rollback.sh <backup-ref>
 # Backup refs follow the convention backup/pre-upstream-sync-YYYYmmdd-HHMMSS.
 
-# Same root-ownership guard as rebase-local-customizations.sh: sandbox
+# Same root-ownership guard as sync-local-customizations.sh: sandbox
 # containers leave root-owned files in the repo; git refuses mixed ownership.
 _default_repo="${HOME:-/home/hermes}/.hermes/hermes-agent"
 if [ "$(id -u)" -ne 0 ] && \
