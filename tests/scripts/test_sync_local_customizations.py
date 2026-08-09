@@ -211,6 +211,26 @@ def test_a_merge_that_breaks_tests_never_reaches_the_branch(world, tmp_path):
     assert _git(fork, "status", "--porcelain") == ""
 
 
+def test_a_merge_that_cannot_run_is_not_reported_as_a_merge_tree_defect(world):
+    """Не всякая неудача merge — расхождение с merge-tree.
+
+    Прогон 2026-08-09 на клоне живого репозитория упал с «merge-tree reported
+    a clean merge but git merge conflicted — this is a defect», а настоящей
+    причиной было отсутствие git-identity. Сообщение уводило расследование в
+    сторону несуществующего дефекта.
+    """
+    fork = world["fork"]
+    _git(fork, "config", "--unset", "user.email")
+    _git(fork, "config", "--unset", "user.name")
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+
+    result = _run_sync(world)
+
+    assert result.returncode != 0
+    assert "could not run" in result.stderr
+    assert "this is a defect" not in result.stderr
+
+
 def test_a_conflict_leaves_the_branch_untouched_and_reports_paths(world):
     fork = world["fork"]
     (fork / "gateway" / "run.py").write_text("PORT = 9090\n")

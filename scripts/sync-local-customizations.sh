@@ -525,7 +525,15 @@ fi
 
 MERGE_LOG="$(mktemp)"
 if ! git -C "$SYNC_WT" merge --no-edit "$UPSTREAM_REF" >"$MERGE_LOG" 2>&1; then
-  echo "FAILED: merge-tree reported a clean merge but git merge conflicted — this is a defect." >&2
+  # Не всякая неудача merge — расхождение с merge-tree. Отсутствующая
+  # git-identity, нехватка места, битый индекс дают тот же ненулевой код, и
+  # обвинять в них merge-tree значит отправить расследование не туда.
+  # Разделяет их наличие незакрытых путей в индексе.
+  if [ -n "$(git -C "$SYNC_WT" ls-files -u)" ]; then
+    echo "FAILED: merge-tree reported a clean merge but git merge conflicted — this is a defect." >&2
+  else
+    echo "FAILED: git merge could not run at all (not a conflict) — see the output below." >&2
+  fi
   echo "Repo: $REPO" >&2
   echo "Base: $UPSTREAM_REF ($BASE_AFTER)" >&2
   cat "$MERGE_LOG" >&2
