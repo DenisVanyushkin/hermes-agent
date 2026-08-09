@@ -155,6 +155,62 @@ def test_no_upstream_changes_is_a_noop(world):
     assert "no upstream changes" in result.stdout.lower()
 
 
+def _staged_test_cmd(tmp_path: Path, baseline: str, post: str) -> Path:
+    """Обманка вместо pytest: первый вызов печатает baseline, второй — post."""
+    marker = tmp_path / "run-count"
+    script = tmp_path / "staged-tests.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'marker="{marker}"\n'
+        'count=$(cat "$marker" 2>/dev/null || echo 0)\n'
+        'echo $((count + 1)) > "$marker"\n'
+        'if [ "$count" -eq 0 ]; then\n'
+        f"cat <<'EOF'\n{baseline}\nEOF\n"
+        "else\n"
+        f"cat <<'EOF'\n{post}\nEOF\n"
+        "fi\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+BASELINE_LOG = (
+    "FAILED tests/known.py::test_flaky - AssertionError\n1 failed, 5 passed in 2.00s"
+)
+SAME_LOG = BASELINE_LOG
+REGRESSED_LOG = (
+    "FAILED tests/known.py::test_flaky - AssertionError\n"
+    "FAILED tests/gate.py::test_ops_gate - AssertionError\n"
+    "2 failed, 4 passed in 2.00s"
+)
+
+
+def test_a_merge_without_new_failures_lands(world, tmp_path):
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+    cmd = _staged_test_cmd(tmp_path, BASELINE_LOG, SAME_LOG)
+
+    result = _run_sync(world, {"HERMES_SYNC_TEST_CMD": str(cmd)})
+
+    assert result.returncode == 0, result.stderr
+    fork = world["fork"]
+    assert (fork / "agent" / "new_module.py").exists()
+    assert _git(fork, "rev-list", "--merges", "--count", "origin/main..HEAD") == "1"
+
+
+def test_a_merge_that_breaks_tests_never_reaches_the_branch(world, tmp_path):
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+    fork = world["fork"]
+    before = _git(fork, "rev-parse", "HEAD")
+    cmd = _staged_test_cmd(tmp_path, BASELINE_LOG, REGRESSED_LOG)
+
+    result = _run_sync(world, {"HERMES_SYNC_TEST_CMD": str(cmd)})
+
+    assert _git(fork, "rev-parse", "HEAD") == before, "ветка не должна двигаться"
+    assert not (fork / "agent" / "new_module.py").exists()
+    assert "tests/gate.py::test_ops_gate" in result.stdout
+    assert _git(fork, "status", "--porcelain") == ""
+
+
 def test_a_conflict_leaves_the_branch_untouched_and_reports_paths(world):
     fork = world["fork"]
     (fork / "gateway" / "run.py").write_text("PORT = 9090\n")

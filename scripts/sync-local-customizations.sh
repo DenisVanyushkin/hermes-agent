@@ -501,21 +501,80 @@ if [ -n "$CONFLICT_PATHS" ]; then
 fi
 rm -f "$MERGE_TREE_OUT"
 
+# Слияние сначала доказывается во временном worktree и только потом
+# приземляется. Живая ветка не должна ни на секунду оказаться в состоянии,
+# которое мы ещё не проверили: гейтвей работает на этом же дереве.
+SYNC_WT="$(mktemp -d -t hermes-upstream-sync-XXXXXX)"
+cleanup_sync_worktree() {
+  git -C "$REPO" worktree remove --force "$SYNC_WT" >/dev/null 2>&1 || true
+  rm -rf "$SYNC_WT"
+}
+trap cleanup_sync_worktree EXIT
+
+git -C "$REPO" worktree add --detach "$SYNC_WT" HEAD >/dev/null 2>&1
+
+TEST_CMD="${HERMES_SYNC_TEST_CMD:-$SCRIPT_DIR/run-fork-tests.sh}"
+[ -x "$TEST_CMD" ] || TEST_CMD="$REPO/scripts/run-fork-tests.sh"
+BASELINE_LOG_FILE="$(mktemp)"
+POST_LOG_FILE="$(mktemp)"
+
+# Ненулевой код прогона здесь нормален: падения и есть предмет измерения.
+if ! "$TEST_CMD" "$SYNC_WT" >"$BASELINE_LOG_FILE" 2>&1; then
+  :
+fi
+
 MERGE_LOG="$(mktemp)"
-if ! git -C "$REPO" merge --no-edit "$UPSTREAM_REF" >"$MERGE_LOG" 2>&1; then
-  abort_merge_if_needed
-  echo "Hermes local-branch update failed during merge." >&2
+if ! git -C "$SYNC_WT" merge --no-edit "$UPSTREAM_REF" >"$MERGE_LOG" 2>&1; then
+  echo "FAILED: merge-tree reported a clean merge but git merge conflicted — this is a defect." >&2
   echo "Repo: $REPO" >&2
-  echo "Branch: $BRANCH" >&2
-  echo "Base: $UPSTREAM_REF" >&2
-  echo "Before: $BEFORE_HEAD" >&2
-  echo "Fetched base: $BASE_AFTER" >&2
-  echo "Merge output:" >&2
+  echo "Base: $UPSTREAM_REF ($BASE_AFTER)" >&2
   cat "$MERGE_LOG" >&2
-  rm -f "$MERGE_LOG"
+  rm -f "$MERGE_LOG" "$BASELINE_LOG_FILE" "$POST_LOG_FILE"
   exit 1
 fi
 rm -f "$MERGE_LOG"
+
+if ! "$TEST_CMD" "$SYNC_WT" >"$POST_LOG_FILE" 2>&1; then
+  :
+fi
+
+# Тот же приём, что и в гейте merge-tree: код 2 означает «сравнить не смогли»
+# и обязан отличаться от «новых падений нет».
+set +e
+NEW_FAILURES="$("$PYTHON_BIN" "$GATE" new-failures \
+  --baseline "$BASELINE_LOG_FILE" --post "$POST_LOG_FILE")"
+NF_RC=$?
+set -e
+if [ "$NF_RC" -eq 2 ]; then
+  echo "FAILED: could not compare test runs; refusing to land the merge." >&2
+  echo "Baseline log tail:" >&2
+  tail -n 5 "$BASELINE_LOG_FILE" >&2
+  echo "Post-merge log tail:" >&2
+  tail -n 5 "$POST_LOG_FILE" >&2
+  rm -f "$BASELINE_LOG_FILE" "$POST_LOG_FILE"
+  exit 1
+fi
+
+if [ -n "$NEW_FAILURES" ]; then
+  echo "Hermes local-branch update: the merge introduces test failures — not landed."
+  echo "Repo: $REPO"
+  echo "Branch: $BRANCH"
+  echo "Base: $UPSTREAM_REF ($BASE_AFTER)"
+  echo "New failures:"
+  printf '%s\n' "$NEW_FAILURES" | sed 's/^/  /'
+  echo "Nothing was changed."
+  rm -f "$BASELINE_LOG_FILE" "$POST_LOG_FILE"
+  exit 0
+fi
+rm -f "$BASELINE_LOG_FILE" "$POST_LOG_FILE"
+
+MERGED_HEAD="$(git -C "$SYNC_WT" rev-parse HEAD)"
+git -C "$REPO" branch "backup/pre-upstream-sync-$(date +%Y%m%d-%H%M%S)" HEAD >/dev/null 2>&1 || true
+
+if ! git -C "$REPO" merge --ff-only "$MERGED_HEAD" >/dev/null 2>&1; then
+  echo "FAILED: the branch moved while the merge was being verified; re-run the sync." >&2
+  exit 1
+fi
 
 AFTER_HEAD="$(git -C "$REPO" rev-parse --short HEAD)"
 if [ "$AFTER_HEAD" = "$BEFORE_HEAD" ]; then

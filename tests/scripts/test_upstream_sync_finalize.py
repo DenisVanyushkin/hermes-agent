@@ -281,10 +281,22 @@ class TestPersonalRemoteIntegrationAfterHistoryRewrite:
     def _run(self, repo: Path, personal: Path, upstream: Path, tmp_path: Path):
         home = tmp_path / "home"
         home.mkdir(exist_ok=True)
+        # Обманка вместо прогона тестов форка: настоящий run-fork-tests.sh
+        # посчитает набор собственных тестов в этом временном репозитории,
+        # получит пустоту и откажется работать — гейт сработал бы не на том
+        # предмете, который проверяет этот класс.
+        inert = tmp_path / "inert-tests.sh"
+        inert.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo FAILED tests/known.py::test_flaky - AssertionError\n"
+            "echo 1 failed, 5 passed in 2.00s\n"
+        )
+        inert.chmod(0o755)
         env = dict(os.environ)
         env.update(
             {
                 "HOME": str(home),
+                "HERMES_SYNC_TEST_CMD": str(inert),
                 "HERMES_PERSONAL_REMOTE_URL": str(personal),
                 "HERMES_UPSTREAM_FETCH_URL": str(upstream),
                 # Any non-empty value: pushing to a local bare repo never
