@@ -274,7 +274,7 @@ def test_search_linkedin_stops_when_login_wall_appears(monkeypatch) -> None:
     """
     login_wall = "<html><body>Sign in to view more jobs</body></html>"
 
-    def fake_fetch(url: str, *, scrolls=None):
+    def fake_fetch(url: str, *, scrolls=None, capture_label=None):
         page_urls.append(url)
         if url.endswith("/feed/"):
             return feed_page
@@ -334,7 +334,7 @@ def test_search_linkedin_occasionally_opens_a_detail_page(monkeypatch) -> None:
     </html>
     """
 
-    def fake_fetch(url: str, *, scrolls=None):
+    def fake_fetch(url: str, *, scrolls=None, capture_label=None):
         page_urls.append(url)
         if url.endswith("/feed/"):
             return feed_page

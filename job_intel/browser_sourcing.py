@@ -107,6 +107,8 @@ class BrowserSessionHealth:
     last_successful_authenticated_request: str | None = None
     browser_profile: str = ""
     auth_attempted: bool = False
+    session_state: str = "unknown"
+    cookie_mismatch: bool = False
     email_challenge_attempted: bool = False
     email_challenge_resolved: bool = False
     status: str = "healthy"
@@ -542,6 +544,18 @@ def _looks_like_degradation(url: str, html: str) -> bool:
             "blocked",
         )
     )
+
+
+def apply_linkedin_verdict(health: BrowserSessionHealth, verdict: Any) -> None:
+    """Записать вердикт в здоровье сессии.
+
+    Счётчики login_walls и auth_redirects остаются нетронутыми: они сохранены
+    ради совместимости дашбордов, но перестают быть основанием для вывода.
+    Решение принимается по session_state, который получен из свидетельств
+    присутствия, а не из подстроки в футере.
+    """
+    health.session_state = verdict.state
+    health.cookie_mismatch = verdict.cookie_mismatch
 
 
 def _session_status(health: BrowserSessionHealth) -> str:
@@ -1139,22 +1153,53 @@ class BrowserSourceClient:
             page.close()
 
     def _validate_linkedin_auth(self) -> None:
+        from job_intel.linkedin_session import (
+            SESSION_MISSING,
+            SESSION_OK,
+            classify_auth_page,
+            read_cookie_inventory,
+            resolve_session_state,
+            session_state_from_cookies,
+        )
+
         url = "https://www.linkedin.com/feed/"
         self._health.auth_attempted = True
-        html = self.fetch_html(url, scrolls=0)
-        self._validate_authenticated_html(
-            source="linkedin",
-            url=url,
-            html=html,
-            required_markers=(
-                "global-nav__me",
-                "feed-identity-module",
-                "nav-item__profile-member-photo",
-                "profile-photo",
-                "my network",
-                "feed",
-            ),
-            login_markers=("sign in", "log in", "join linkedin", "create a new account"),
+        html = self.fetch_html(url, scrolls=0, capture_label="linkedin-auth-validate")
+        page_state = classify_auth_page(url, html)
+
+        cookie_db = Path(self.config.user_data_dir) / "Default" / "Cookies"
+        try:
+            cookie_state = session_state_from_cookies(
+                read_cookie_inventory(cookie_db), now=datetime.now(timezone.utc)
+            )
+        except Exception:
+            # Профиль может быть недоступен для чтения из-под другого
+            # пользователя. Это неизвестность, а не отсутствие сессии:
+            # подменять её на SESSION_MISSING значило бы объявить сессию
+            # мёртвой по причине прав доступа.
+            cookie_state = SESSION_OK if page_state == SESSION_OK else SESSION_MISSING
+
+        verdict = resolve_session_state(cookie_state=cookie_state, page_state=page_state)
+        apply_linkedin_verdict(self._health, verdict)
+
+        if verdict.state == SESSION_OK:
+            self._health.last_successful_authenticated_request = url
+            return
+
+        self._write_attach_diagnostics(
+            label=f"linkedin-auth-{verdict.state}",
+            extra={
+                "requested_url": url,
+                "cookie_state": cookie_state,
+                "page_state": page_state,
+            },
+        )
+        # Подъём исключения — не деталь реализации, а предохранитель: без него
+        # неавторизованный клиент продолжит ходить по страницам поиска, то есть
+        # ровно то поведение, которого мы больше всего избегаем. Раньше это
+        # свойство обеспечивал _validate_authenticated_html.
+        raise BrowserNativeUnavailable(
+            f"linkedin authentication validation: {verdict.state} at {url}"
         )
 
     def _validate_headhunter_auth(self) -> None:
