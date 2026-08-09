@@ -50,3 +50,37 @@ def test_no_secrets_inline() -> None:
     body = _body()
     assert "PrivateKey" not in body
     assert "Endpoint =" not in body
+
+
+# --- Дополнение: резолвер и предусловия --------------------------------
+
+
+def test_resolver_is_written_into_the_namespace() -> None:
+    """wg-quick strip выкидывает строки Address и DNS, поэтому резолвер внутри
+    namespace не появится сам. Оставлять его ручным шагом нельзя: забытый
+    резолвер даёт namespace без разрешения имён — отказ того же молчаливого
+    класса, который вся конструкция и устраняет."""
+    body = _body()
+    assert "/etc/netns/${NETNS}/resolv.conf" in body
+    assert "ensure_resolver" in body
+
+
+def test_resolver_is_taken_from_the_same_config_as_the_tunnel() -> None:
+    """Единственный источник правды — конфиг Firewalla: там DNS уже лежит
+    рядом с ключами, и второй ручной ввод того же адреса означал бы
+    возможность их расхождения."""
+    body = _body()
+    assert 'grep -iE "^[[:space:]]*DNS[[:space:]]*=" "${WG_CONF}"' in body
+
+
+def test_missing_resolver_fails_closed() -> None:
+    body = _body()
+    assert "не содержит строки DNS" in body
+
+
+def test_script_checks_for_wireguard_tools() -> None:
+    """Модуль ядра на VPS есть, а wg и wg-quick не установлены. Без явной
+    проверки скрипт падает на невнятном 'command not found' посреди работы."""
+    body = _body()
+    assert "require_wireguard_tools" in body
+    assert "wireguard-tools" in body

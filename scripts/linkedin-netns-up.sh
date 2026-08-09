@@ -25,6 +25,36 @@ require_root() {
   fi
 }
 
+require_wireguard_tools() {
+  # Модуль ядра и userspace-утилиты ставятся отдельно: на VPS модуль есть,
+  # а wg/wg-quick могут отсутствовать. Без явной проверки скрипт падает на
+  # невнятном "command not found" уже после того, как создал namespace.
+  local missing=()
+  command -v wg >/dev/null 2>&1 || missing+=(wg)
+  command -v wg-quick >/dev/null 2>&1 || missing+=(wg-quick)
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    echo "Не найдены: ${missing[*]}. Установите пакет wireguard-tools." >&2
+    exit 1
+  fi
+}
+
+ensure_resolver() {
+  # wg-quick strip выкидывает строки Address и DNS, поэтому резолвер внутри
+  # namespace не появится сам. Берём его из того же конфига, где лежит
+  # туннель: второй ручной ввод того же адреса означал бы возможность их
+  # расхождения, а расходиться они будут молча.
+  local dns
+  dns="$(grep -iE "^[[:space:]]*DNS[[:space:]]*=" "${WG_CONF}" | head -1 | cut -d= -f2 | tr -d " " | cut -d, -f1)"
+  if [[ -z "${dns}" ]]; then
+    echo "Конфиг ${WG_CONF} не содержит строки DNS: namespace остался бы без" >&2
+    echo "разрешения имён, а это отказ ровно того молчаливого класса, который" >&2
+    echo "вся конструкция устраняет." >&2
+    exit 1
+  fi
+  mkdir -p "/etc/netns/${NETNS}"
+  echo "nameserver ${dns}" > "/etc/netns/${NETNS}/resolv.conf"
+}
+
 ensure_netns() {
   if ! ip netns list | awk '{print $1}' | grep -qx "${NETNS}"; then
     ip netns add "${NETNS}"
@@ -69,9 +99,11 @@ assert_fail_closed() {
 }
 
 require_root
+require_wireguard_tools
 ensure_netns
 ensure_tunnel
 ensure_management_link
+ensure_resolver
 assert_fail_closed
 
 echo "netns ${NETNS} поднят: выход через ${WG_IF}, управление через ${VETH_HOST} (169.254.77.1)"
