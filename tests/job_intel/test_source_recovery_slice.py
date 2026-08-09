@@ -309,3 +309,49 @@ def test_health_reauth_suppressed_when_linkedin_excluded_from_env(tmp_path, monk
 
     problems = _check_health_conditions(store)
     assert not [p for p in problems if "re-auth" in p.lower()]
+
+
+# --- Задача 8: состояния сессии в таксономии источников -------------------
+
+
+def test_session_state_wins_over_the_legacy_login_wall_counter() -> None:
+    """Счётчик login_walls срабатывал и на здоровых прогонах. Пока он остаётся
+    в payload ради совместимости, вывод обязан делаться по session_state."""
+    payload = {
+        "status": "empty",
+        "hits": 0,
+        "session_health": {"login_walls": 1, "auth_redirects": 1, "session_state": "session_ok"},
+    }
+
+    assert derive_source_reason(payload) == "real_empty"
+
+
+def test_missing_cookie_is_reported_as_its_own_reason() -> None:
+    payload = {
+        "status": "empty",
+        "hits": 0,
+        "session_health": {"login_walls": 1, "session_state": "session_missing_cookie"},
+    }
+
+    assert derive_source_reason(payload) == "session_missing_cookie"
+
+
+def test_email_and_hard_challenges_are_distinguishable() -> None:
+    email = {"status": "empty", "hits": 0, "session_health": {"session_state": "challenge_email_otp"}}
+    hard = {"status": "empty", "hits": 0, "session_health": {"session_state": "challenge_hard"}}
+
+    assert derive_source_reason(email) == "challenge_email_otp"
+    assert derive_source_reason(hard) == "challenge_hard"
+
+
+def test_new_reasons_are_declared_in_the_taxonomy() -> None:
+    from job_intel.observability import SOURCE_REASONS
+
+    for reason in ("session_missing_cookie", "challenge_email_otp", "challenge_hard"):
+        assert reason in SOURCE_REASONS
+
+
+def test_hits_still_win_over_everything() -> None:
+    payload = {"status": "ok", "hits": 7, "session_health": {"session_state": "challenge_hard"}}
+
+    assert derive_source_reason(payload) == "ok_non_empty"

@@ -119,7 +119,20 @@ SOURCE_REASONS = (
     "ats_seeds_discovered_only",
     "wrong_path",
     "collection_error",
+    # Состояния, полученные из свидетельств присутствия, а не из подстрок.
+    "session_missing_cookie",
+    "challenge_email_otp",
+    "challenge_hard",
 )
+
+# Состояния сессии, которые сами по себе являются причиной. Проверяются
+# раньше счётчиков login_walls / auth_redirects: те срабатывают и на
+# здоровых прогонах, поэтому их вывод перекрывается более надёжным.
+_SESSION_STATE_REASONS = {
+    "session_missing_cookie": "session_missing_cookie",
+    "challenge_email_otp": "challenge_email_otp",
+    "challenge_hard": "challenge_hard",
+}
 
 
 def derive_source_reason(payload: dict[str, Any]) -> str:
@@ -138,6 +151,11 @@ def derive_source_reason(payload: dict[str, Any]) -> str:
     if hits > 0:
         return "ok_non_empty"
     session = payload.get("session_health") or {}
+    session_state = str(session.get("session_state") or "").strip()
+    if session_state in _SESSION_STATE_REASONS:
+        return _SESSION_STATE_REASONS[session_state]
+    if session_state == "session_ok":
+        return "real_empty"
     if int(session.get("login_walls") or 0) > 0:
         return "login_wall"
     if int(session.get("auth_redirects") or 0) > 0:
