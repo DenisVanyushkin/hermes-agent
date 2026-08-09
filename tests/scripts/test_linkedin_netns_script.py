@@ -129,3 +129,19 @@ def test_ipv6_is_disabled_inside_the_namespace() -> None:
 def test_isolation_is_asserted_not_assumed() -> None:
     body = _body()
     assert "assert_lan_unreachable" in body
+
+
+def test_script_sources_its_env_file_itself() -> None:
+    """browser-desktop-bootstrap.sh зовёт этот скрипт без окружения, а адрес
+    пира обязателен. Без самостоятельной загрузки env-файла запуск десктопа
+    падает на первой строке — то есть ручной вход по ранбуку невозможен."""
+    body = _body()
+    assert "/etc/job-intel/linkedin-netns.env" in body
+    assert "ENV_FILE" in body
+
+
+def test_env_file_is_loaded_before_the_required_variable_is_read() -> None:
+    body = _body()
+    load = body.index("ENV_FILE=")
+    require = body.index("LINKEDIN_WG_ADDR:?")
+    assert load < require

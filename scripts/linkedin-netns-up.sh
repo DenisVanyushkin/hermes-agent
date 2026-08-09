@@ -11,6 +11,17 @@
 # напрямую, с датацентрового адреса, что и есть предотвращаемый отказ.
 set -euo pipefail
 
+# Скрипт вызывается и вручную, и из browser-desktop-bootstrap.sh, который
+# окружения не передаёт. Поэтому env-файл загружается здесь, до чтения
+# обязательных переменных: иначе запуск десктопа падает на первой строке.
+ENV_FILE="${LINKEDIN_NETNS_ENV:-/etc/job-intel/linkedin-netns.env}"
+if [[ -r "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "${ENV_FILE}"
+  set +a
+fi
+
 NETNS="${LINKEDIN_NETNS:-ln-eg}"
 WG_IF="${LINKEDIN_WG_IF:-wg0-ln}"
 WG_CONF="${LINKEDIN_WG_CONF:-/etc/wireguard/wg0-ln.conf}"
