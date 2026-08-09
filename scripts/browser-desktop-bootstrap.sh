@@ -497,19 +497,35 @@ write_browser_launcher
 create_desktop_shortcuts
 PASSWORD="$(get_password)"
 
+# Профиль linkedin живёт в сетевом пространстве имён с резидентным выходом.
+# Xvfb, xfce, x11vnc, noVNC и Chromium запускаются одним и тем же префиксом:
+# abstract unix sockets разделяются по netns, поэтому X-сервер и браузер,
+# разнесённые по разным namespace, друг друга не увидят.
+#
+# noVNC внутри netns обязан слушать не на 127.0.0.1: это его собственный
+# loopback, недостижимый из SSH-туннеля оператора. Слушает на veth-адресе,
+# который скрипт linkedin-netns-up.sh поднял для управления.
+NETNS_PREFIX=()
+NOVNC_BIND="127.0.0.1"
+if [[ "${PROFILE}" == "linkedin" ]]; then
+  bash "${SCRIPT_DIR}/linkedin-netns-up.sh"
+  NETNS_PREFIX=(ip netns exec "${LINKEDIN_NETNS:-ln-eg}")
+  NOVNC_BIND="169.254.77.2"
+fi
+
 ensure_display_free
 if ! process_matches "Xvfb :${DISPLAY_NUM}"; then
-  start_as_browser "${LOG_DIR}/xvfb.log" Xvfb ":${DISPLAY_NUM}" -screen 0 1920x1080x24 -nolisten tcp
+  start_as_browser "${LOG_DIR}/xvfb.log" "${NETNS_PREFIX[@]}" Xvfb ":${DISPLAY_NUM}" -screen 0 1920x1080x24 -nolisten tcp
 fi
 wait_for_display
 
 if ! process_matches "dbus-run-session -- startxfce4"; then
-  start_as_browser "${LOG_DIR}/xfce.log" dbus-run-session -- startxfce4
+  start_as_browser "${LOG_DIR}/xfce.log" "${NETNS_PREFIX[@]}" dbus-run-session -- startxfce4
 fi
 
 ensure_port_free_or_owned "${VNC_PORT}" "x11vnc -display :${DISPLAY_NUM}.*-rfbport ${VNC_PORT}" "VNC"
 if ! process_matches "x11vnc -display :${DISPLAY_NUM}"; then
-  start_as_browser "${LOG_DIR}/x11vnc.log" x11vnc \
+  start_as_browser "${LOG_DIR}/x11vnc.log" "${NETNS_PREFIX[@]}" x11vnc \
     -display ":${DISPLAY_NUM}" \
     -localhost \
     -rfbauth "${VNC_DIR}/passwd" \
@@ -520,9 +536,9 @@ if ! process_matches "x11vnc -display :${DISPLAY_NUM}"; then
     -o "${LOG_DIR}/x11vnc.log"
 fi
 
-ensure_port_free_or_owned "${NOVNC_PORT}" "websockify.*127.0.0.1:${NOVNC_PORT} 127.0.0.1:${VNC_PORT}" "noVNC"
-if ! process_matches "websockify.*127.0.0.1:${NOVNC_PORT} 127.0.0.1:${VNC_PORT}"; then
-  start_as_browser "${LOG_DIR}/websockify.log" websockify --web=/usr/share/novnc "127.0.0.1:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}"
+ensure_port_free_or_owned "${NOVNC_PORT}" "websockify.*${NOVNC_BIND}:${NOVNC_PORT} 127.0.0.1:${VNC_PORT}" "noVNC"
+if ! process_matches "websockify.*${NOVNC_BIND}:${NOVNC_PORT} 127.0.0.1:${VNC_PORT}"; then
+  start_as_browser "${LOG_DIR}/websockify.log" "${NETNS_PREFIX[@]}" websockify --web=/usr/share/novnc "${NOVNC_BIND}:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}"
 fi
 
 # ensure_browser_binary() already resolved a usable Chromium.
@@ -535,13 +551,15 @@ fi
 
 ensure_port_free_or_owned "${CDP_PORT}" "remote-debugging-port=${CDP_PORT}" "Chromium CDP"
 if ! process_matches "remote-debugging-port=${CDP_PORT}"; then
-  start_as_browser "${LOG_DIR}/chromium-${PROFILE}.log" dbus-run-session -- "${CHROMIUM_BIN}" \
+  start_as_browser "${LOG_DIR}/chromium-${PROFILE}.log" "${NETNS_PREFIX[@]}" dbus-run-session -- "${CHROMIUM_BIN}" \
     --user-data-dir="${BASE_DIR}/profiles/${PROFILE}" \
     --profile-directory=Default \
     --no-first-run \
     --disable-dev-shm-usage \
     --no-sandbox \
     --disable-setuid-sandbox \
+    --disable-features=DnsOverHttps \
+    --dns-over-https-mode=off \
     --remote-debugging-address=127.0.0.1 \
     --remote-debugging-port="${CDP_PORT}" \
     --new-window "${URL}"
