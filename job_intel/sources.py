@@ -571,6 +571,17 @@ def fetch_headhunter_vacancies(query: str, *, per_page: int = 20) -> list[Vacanc
         raise SourceFetchError(str(exc)) from exc
 
 
+def fetch_headhunter_detail_html(url: str) -> str:
+    """One detail-page HTML fetch via the persistent, DDoS-Guard-cleared
+    `hh` browser session -- api.hh.ru/vacancies/<id> returns a wholesale
+    403 from this VPS's IP regardless of headers, so the detail fetcher
+    routes through the browser instead of `requests`. Raises
+    SourceFetchError/BrowserNativeUnavailable on failure; the caller decides
+    what that means for the retry taxonomy."""
+    payload = _browser_worker_payload("fetch", url, "--source", "headhunter")
+    return str(payload.get("html") or "")
+
+
 def _format_salary(salary: dict | None) -> str | None:
     if not salary:
         return None

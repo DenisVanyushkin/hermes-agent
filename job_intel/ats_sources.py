@@ -14,6 +14,7 @@ import requests
 
 from .models import Vacancy
 from .runtime import retry_with_backoff, sha256_text
+from .sources import fetch_headhunter_detail_html
 
 
 @dataclass
@@ -939,6 +940,24 @@ def fetch_headhunter_detail(url: str) -> str | _DetailSignal | None:
     if not match:
         # A URL we cannot address is permanently unfetchable, not transient.
         return None
+    # api.hh.ru/vacancies/<id> returns a wholesale 403 from this VPS's IP
+    # (DDoS-Guard IP-reputation block, not a header/UA check -- confirmed
+    # live across 4 different User-Agent values on 2026-08-09). The
+    # browser-native page, fetched through the already-cleared `hh` CDP
+    # session, is the primary path; the api.hh.ru request below is a
+    # fallback for when the browser itself is unavailable or the page has
+    # no JSON-LD JobPosting to read.
+    try:
+        html_text = fetch_headhunter_detail_html(url)
+    except Exception:
+        html_text = ""
+    if html_text:
+        jobs = _jobposting_objects(html_text)
+        if jobs:
+            raw = jobs[0].get("description")
+            text = _clean_html_text(str(raw)) if isinstance(raw, str) else ""
+            if text:
+                return text
     payload = _detail_json(f"https://api.hh.ru/vacancies/{match.group(1)}")
     if is_transient_detail(payload):
         return payload

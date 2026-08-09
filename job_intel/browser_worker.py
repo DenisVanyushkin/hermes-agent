@@ -373,8 +373,24 @@ def _probe(source: str) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
 
 
 def _fetch_page(url: str, *, source: str) -> str:
-    """Render one page and return its HTML (for target-company career pages)."""
+    """Render one page and return its HTML.
+
+    headhunter has a persistent, CDP-attached Chrome session (the `hh`
+    profile) that has already solved DDoS-Guard's challenge -- the same one
+    _run_headhunter uses for listing search. Routing through
+    _with_browser_source attaches to that session instead of local-launching
+    a fresh, cookie-less Chromium the sandboxed user can't even reach the
+    binary for. Other sources (company_career) have no such session and keep
+    the original local-launch behaviour.
+    """
     _prepare_browser_runtime_env()
+    source_key = source.strip().lower().replace("-", "_")
+    if source_key in {"headhunter", "hh"}:
+        def _run(client: BrowserSourceClient) -> tuple[str, dict[str, Any]]:
+            return client.fetch_html(url), client.session_health_snapshot()
+
+        html, _session_health, _search_trace = _with_browser_source("headhunter", _run)
+        return html
     config = resolve_browser_config(source)
     with BrowserSourceClient(config) as client:
         return client.fetch_html(url)

@@ -195,6 +195,12 @@ def test_smartrecruiters_forwards_the_signal(monkeypatch, signal):
 
 @pytest.mark.parametrize("signal", [DETAIL_TRANSIENT, DETAIL_RATE_LIMITED])
 def test_headhunter_forwards_the_signal(monkeypatch, signal):
+    # Exercises the api.hh.ru fallback path specifically -- the browser-native
+    # page is preferred when it succeeds, so it must be forced to fail here or
+    # this test would depend on a real browser fetch instead of the signal
+    # taxonomy under test.
+    monkeypatch.setattr(ats_sources, "fetch_headhunter_detail_html",
+                        lambda url: (_ for _ in ()).throw(RuntimeError("browser unavailable")))
     monkeypatch.setattr(ats_sources, "_detail_json", lambda url, **kw: signal)
     assert fetch_headhunter_detail(HH_URL) is signal
 
