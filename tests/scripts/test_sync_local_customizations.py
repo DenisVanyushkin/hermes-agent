@@ -155,6 +155,23 @@ def test_no_upstream_changes_is_a_noop(world):
     assert "no upstream changes" in result.stdout.lower()
 
 
+def test_a_conflict_leaves_the_branch_untouched_and_reports_paths(world):
+    fork = world["fork"]
+    (fork / "gateway" / "run.py").write_text("PORT = 9090\n")
+    _git(fork, "commit", "-qam", "local port change")
+    before = _git(fork, "rev-parse", "HEAD")
+
+    _add_upstream_commit(world, "gateway/run.py", "PORT = 7070\n", "upstream port change")
+
+    result = _run_sync(world)
+
+    assert result.returncode == 0, result.stderr
+    assert _git(fork, "rev-parse", "HEAD") == before, "ветка не должна двигаться"
+    assert "gateway/run.py" in result.stdout
+    assert "conflict" in result.stdout.lower()
+    assert _git(fork, "status", "--porcelain") == "", "рабочее дерево должно остаться чистым"
+
+
 def test_another_hosts_commits_are_merged_in(world):
     """Резидентный агент пушит в общую ветку сам; его коммиты обязаны уцелеть.
 

@@ -456,6 +456,51 @@ if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor
   exit 0
 fi
 
+# Решение «сливать или звать оператора» принимается детерминированно:
+# merge-tree считает результат слияния, ничего не меняя в репозитории. Пока он
+# не сказал «чисто», рабочее дерево не трогается вовсе.
+# Гейт лежит рядом со скриптом: они одной поставки, и при запуске из
+# рантайм-копии ~/.hermes/scripts оба берутся оттуда же, а не из репозитория.
+GATE="$SCRIPT_DIR/upstream_sync_gate.py"
+[ -f "$GATE" ] || GATE="$REPO/scripts/upstream_sync_gate.py"
+PYTHON_BIN="${HERMES_PYTHON:-$REPO/venv/bin/python}"
+[ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3)"
+
+MERGE_TREE_OUT="$(mktemp)"
+git -C "$REPO" merge-tree --write-tree --name-only HEAD "$UPSTREAM_REF" >"$MERGE_TREE_OUT" 2>&1 || true
+
+# set +e, а не `|| true`: подстановка с `|| true` возвращает код самого
+# присваивания, то есть всегда 0, и код 2 (не смогли разобрать вывод)
+# незаметно превратился бы в «конфликтов нет».
+set +e
+CONFLICT_PATHS="$("$PYTHON_BIN" "$GATE" merge-tree --output "$MERGE_TREE_OUT")"
+GATE_RC=$?
+set -e
+if [ "$GATE_RC" -eq 2 ]; then
+  echo "FAILED: could not read the merge-tree result; refusing to merge blind." >&2
+  cat "$MERGE_TREE_OUT" >&2
+  rm -f "$MERGE_TREE_OUT"
+  exit 1
+fi
+
+if [ -n "$CONFLICT_PATHS" ]; then
+  CONFLICT_TREE="$(head -n1 "$MERGE_TREE_OUT")"
+  echo "Hermes local-branch update: conflicts — operator decision required."
+  echo "Repo: $REPO"
+  echo "Branch: $BRANCH"
+  echo "Base: $UPSTREAM_REF ($BASE_AFTER)"
+  echo "Conflicting files: $(printf '%s\n' "$CONFLICT_PATHS" | wc -l)"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    hunks="$(git -C "$REPO" show "$CONFLICT_TREE:$path" 2>/dev/null | grep -c '^<<<<<<<' || true)"
+    echo "  $path (${hunks:-?} hunk(s))"
+  done <<<"$CONFLICT_PATHS"
+  echo "Nothing was changed. Resolve through the upstream-sync skill."
+  rm -f "$MERGE_TREE_OUT"
+  exit 0
+fi
+rm -f "$MERGE_TREE_OUT"
+
 MERGE_LOG="$(mktemp)"
 if ! git -C "$REPO" merge --no-edit "$UPSTREAM_REF" >"$MERGE_LOG" 2>&1; then
   abort_merge_if_needed
