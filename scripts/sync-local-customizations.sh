@@ -88,7 +88,10 @@ case "$1" in
 esac
 EOF
   chmod 700 "$askpass_script"
-  if ! GIT_ASKPASS="$askpass_script" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$github_token" git -C "$REPO" push --force-with-lease "$PERSONAL_REMOTE" "$BRANCH" >/dev/null; then
+  # Обычный push, без --force-with-lease: слияние не переписывает историю,
+  # поэтому отказ означает, что другой хост что-то добавил, — это чинится
+  # вливанием, а не форсом.
+  if ! GIT_ASKPASS="$askpass_script" GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN="$github_token" git -C "$REPO" push "$PERSONAL_REMOTE" "$BRANCH" >/dev/null; then
     rm -rf "$askpass_dir"
     return 1
   fi
@@ -96,7 +99,7 @@ EOF
   return 0
 }
 
-# The push is the last thing this script does, long after the rebase landed.
+# The push is the last thing this script does, long after the merge landed.
 # A rejected lease means only that the other host pushed inside that window.
 # Swallowing it (pre-2026-07-16) let the two lineages diverge for days; dying
 # on it (pre-2026-07-27) made the finalizer roll back a rebase that was
@@ -124,25 +127,20 @@ push_personal_branch() {
   return 0
 }
 
-# Fold in commits other hosts pushed to the shared personal branch since our
-# last sync. Must run BEFORE the upstream rebase: rebasing first and pushing
-# with a stale view is exactly how the two lineages diverged for days
-# (2026-07-13..16 incident). No token needed — fetch is read-only.
+# Влить коммиты, которые другие хосты отправили в общую личную ветку с нашей
+# последней синхронизации. Раньше здесь была эвристика с prev_tip и
+# cherry-pick: она существовала только потому, что ребейз переписывал SHA и
+# ветка переставала быть потомком общего типа, из-за чего скрипт 2026-07-27
+# принял собственную дорефрешенную линию за 742 чужих коммита и уничтожил
+# законченную работу. Слияние историю не переписывает, поэтому достаточно
+# обычного merge. Токен не нужен — fetch только читает.
 integrate_personal_remote() {
-  # Where the shared branch stood at our last sync. Captured BEFORE the fetch
-  # overwrites the tracking ref — it is the only reliable anchor for "what did
-  # the other host add". Ancestry cannot answer that once our branch has been
-  # rewritten (Mode B rebases it onto upstream before handing it to this
-  # script): no commit keeps its SHA, so the shared tip stops being an ancestor
-  # of HEAD even when it holds nothing new. Patch-equivalence is no better —
-  # on 2026-07-27 `--cherry-pick` called 12 commits foreign where 2 were.
-  local prev_tip
-  prev_tip="$(git -C "$REPO" rev-parse --verify -q "refs/remotes/$PERSONAL_REMOTE/$BRANCH" 2>/dev/null || true)"
-
-  if ! git -C "$REPO" fetch "$PERSONAL_REMOTE_URL" "+refs/heads/$BRANCH:refs/remotes/$PERSONAL_REMOTE/$BRANCH" >/dev/null 2>&1; then
+  if ! git -C "$REPO" fetch "$PERSONAL_REMOTE_URL" \
+       "+refs/heads/$BRANCH:refs/remotes/$PERSONAL_REMOTE/$BRANCH" >/dev/null 2>&1; then
     echo "Warning: could not fetch $PERSONAL_REMOTE_URL; proceeding with local view only." >&2
     return 0
   fi
+
   local remote_tip
   remote_tip="$(git -C "$REPO" rev-parse "$PERSONAL_REMOTE/$BRANCH" 2>/dev/null || true)"
   [ -n "$remote_tip" ] || return 0
@@ -150,49 +148,14 @@ integrate_personal_remote() {
     return 0
   fi
 
-  # Our branch was rewritten since the last sync: the shared tip still descends
-  # from where we were, but our new commits do not. Rebasing them onto that
-  # stale lineage replays the whole upstream sync a second time — through the
-  # very conflicts the operator just resolved. It cost a finished sync on
-  # 2026-07-27. Replay only what the other host added, on top of what we hold.
-  if [ -n "$prev_tip" ] && \
-     ! git -C "$REPO" merge-base --is-ancestor "$prev_tip" HEAD && \
-     git -C "$REPO" merge-base --is-ancestor "$prev_tip" "$remote_tip"; then
-    local incoming incoming_count incoming_merges cherry_log
-    incoming="$(git -C "$REPO" rev-list --reverse "$prev_tip..$remote_tip")"
-    if [ -z "$incoming" ]; then
-      echo "Shared branch on $PERSONAL_REMOTE carries only our pre-rewrite lineage — nothing to integrate." >&2
-      return 0
-    fi
-    incoming_count="$(git -C "$REPO" rev-list --count "$prev_tip..$remote_tip")"
-    incoming_merges="$(git -C "$REPO" rev-list --merges --count "$prev_tip..$remote_tip")"
-    if [ "${incoming_merges:-0}" -gt 0 ]; then
-      echo "FAILED: the shared branch gained $incoming_merges merge commit(s) since $prev_tip; cherry-pick cannot replay them onto the rewritten branch. Integrate manually." >&2
-      return 1
-    fi
-    echo "Shared branch on $PERSONAL_REMOTE has $incoming_count new commit(s) from another host, and our branch was rewritten since the last sync — replaying theirs on top instead of rebasing ours onto the stale lineage..." >&2
-    cherry_log="$(mktemp)"
-    # shellcheck disable=SC2086
-    if ! git -C "$REPO" cherry-pick $incoming >"$cherry_log" 2>&1; then
-      git -C "$REPO" cherry-pick --abort >/dev/null 2>&1 || true
-      echo "FAILED: could not replay the other host's commit(s) onto the rewritten branch." >&2
-      echo "Cherry-pick output:" >&2
-      cat "$cherry_log" >&2
-      rm -f "$cherry_log"
-      return 1
-    fi
-    rm -f "$cherry_log"
-    return 0
-  fi
-
-  echo "Shared branch on $PERSONAL_REMOTE has $(git -C "$REPO" rev-list --count "HEAD..$remote_tip") commit(s) from another host — integrating before the upstream rebase..." >&2
+  echo "Shared branch on $PERSONAL_REMOTE has $(git -C "$REPO" rev-list --count "HEAD..$remote_tip") commit(s) from another host — merging before the upstream merge..." >&2
   local integrate_log
   integrate_log="$(mktemp)"
-  if ! git -C "$REPO" rebase "$remote_tip" >"$integrate_log" 2>&1; then
-    abort_rebase_if_needed
-    echo "FAILED: could not rebase local commits onto $PERSONAL_REMOTE/$BRANCH ($remote_tip)." >&2
-    echo "Another host's commits conflict with unpushed local ones; integrate manually (git rebase $PERSONAL_REMOTE/$BRANCH)." >&2
-    echo "Rebase output:" >&2
+  if ! git -C "$REPO" merge --no-edit "$remote_tip" >"$integrate_log" 2>&1; then
+    abort_merge_if_needed
+    echo "FAILED: could not merge $PERSONAL_REMOTE/$BRANCH ($remote_tip)." >&2
+    echo "Another host's commits conflict with local ones; integrate manually (git merge $PERSONAL_REMOTE/$BRANCH)." >&2
+    echo "Merge output:" >&2
     cat "$integrate_log" >&2
     rm -f "$integrate_log"
     return 1
@@ -216,8 +179,8 @@ resolve_hermes_bin() {
   return 1
 }
 
-abort_rebase_if_needed() {
-  git -C "$REPO" rebase --abort >/dev/null 2>&1 || true
+abort_merge_if_needed() {
+  git -C "$REPO" merge --abort >/dev/null 2>&1 || true
 }
 
 report_noop() {
@@ -398,7 +361,7 @@ for path in sys.stdin.buffer.read().split(b"\0"):
 sys.exit(failed)
 '
   ); then
-    echo "Post-rebase syntax check FAILED — see errors above. Not pushing, not restarting." >&2
+    echo "Post-merge syntax check FAILED — see errors above. Not pushing, not restarting." >&2
     return 1
   fi
 }
@@ -493,32 +456,21 @@ if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor
   exit 0
 fi
 
-# A merge commit in the local range means the branch carries a second
-# lineage; a plain rebase would linearize BOTH parents and replay hundreds
-# of stale commits with guaranteed conflicts (observed 2026-07-16: 1228
-# replayed commits, conflict at #530). Refuse loudly instead.
-MERGE_COUNT="$(git -C "$REPO" rev-list --merges --count "$UPSTREAM_REF..HEAD" 2>/dev/null || echo 0)"
-if [ "${MERGE_COUNT:-0}" -gt 0 ]; then
-  echo "FAILED: $MERGE_COUNT merge commit(s) in $UPSTREAM_REF..HEAD — plain rebase would replay both lineages and conflict." >&2
-  echo "Linearize first: git commit-tree HEAD^{tree} -p <linear-parent> -m 'flatten merge', point $BRANCH at it, then re-run." >&2
-  exit 1
-fi
-
-REBASE_LOG="$(mktemp)"
-if ! git -C "$REPO" rebase "$UPSTREAM_REF" >"$REBASE_LOG" 2>&1; then
-  abort_rebase_if_needed
-  echo "Hermes local-branch update failed during rebase." >&2
+MERGE_LOG="$(mktemp)"
+if ! git -C "$REPO" merge --no-edit "$UPSTREAM_REF" >"$MERGE_LOG" 2>&1; then
+  abort_merge_if_needed
+  echo "Hermes local-branch update failed during merge." >&2
   echo "Repo: $REPO" >&2
   echo "Branch: $BRANCH" >&2
   echo "Base: $UPSTREAM_REF" >&2
   echo "Before: $BEFORE_HEAD" >&2
   echo "Fetched base: $BASE_AFTER" >&2
-  echo "Rebase output:" >&2
-  cat "$REBASE_LOG" >&2
-  rm -f "$REBASE_LOG"
+  echo "Merge output:" >&2
+  cat "$MERGE_LOG" >&2
+  rm -f "$MERGE_LOG"
   exit 1
 fi
-rm -f "$REBASE_LOG"
+rm -f "$MERGE_LOG"
 
 AFTER_HEAD="$(git -C "$REPO" rev-parse --short HEAD)"
 if [ "$AFTER_HEAD" = "$BEFORE_HEAD" ]; then
@@ -533,7 +485,7 @@ if ! verify_tree_compiles; then
   # (upstream-sync finalizer, cron delivery) keep only the tail of the
   # output, so a reason printed before the report gets truncated away
   # and the failure looks causeless (2026-07-16 finalize incident).
-  echo "FAILED: post-rebase syntax check failed — not syncing scripts, not pushing, not restarting (see SYNTAX ERROR lines above)." >&2
+  echo "FAILED: post-merge syntax check failed — not syncing scripts, not pushing, not restarting (see SYNTAX ERROR lines above)." >&2
   exit 1
 fi
 

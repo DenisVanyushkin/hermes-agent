@@ -200,15 +200,10 @@ def _stub_bin(tmp_path: Path) -> Path:
 class TestPersonalRemoteIntegrationAfterHistoryRewrite:
     """2026-07-27: the sync destroyed its own finished work.
 
-    The Mode B agent rebased ``local/customizations`` onto upstream and asked
-    the host finalizer to land it.  The rebase script's first step,
-    ``integrate_personal_remote``, tests ``origin/<branch>`` for ancestry of
-    HEAD — but after a history rewrite *no* commit keeps its SHA, so that test
-    is false even when the shared branch holds nothing new.  The script read
-    its own pre-rewrite lineage as "742 commits from another host" and rebased
-    the 428 fresh commits back onto it.  Conflict, abort, rollback of a good
-    rebase.  Integration must be additive: replay only what the other host
-    actually added, on top of the branch we were handed.
+    The script rebased the fresh commits back onto its own pre-rewrite
+    lineage, hit a conflict, and rolled back a good rebase. The sync now
+    merges instead of rebasing, so it cannot rewrite what it was handed: a
+    conflict stops the run with the work intact.
     """
 
     def _world(
@@ -308,13 +303,19 @@ class TestPersonalRemoteIntegrationAfterHistoryRewrite:
             timeout=120,
         )
 
-    def test_rewritten_branch_keeps_its_rebase_and_gains_the_other_host_work(
-        self, tmp_path
-    ):
+    def test_a_rewritten_branch_is_never_destroyed_by_integration(self, tmp_path):
+        """Работу, которую нам передали, интеграция обязана сохранить.
+
+        В 2026-07-27 скрипт принял собственную дорефрешенную линию за 742
+        чужих коммита, переложил на неё 428 свежих, упёрся в конфликт и
+        откатил законченный ребейз. Теперь синхронизация сливает, а не
+        переписывает: конфликт между внешне переписанной веткой и общей
+        линией останавливает прогон, а не уничтожает работу. Ветка остаётся
+        ровно там, где была, дерево — чистым, оператор получает инструкцию.
+        """
         repo, personal, upstream, u2 = self._world(tmp_path, local_touches_core=True)
-        # Mode B: the agent rebases onto the new upstream and resolves the
-        # both-modified file the way the operator decided (merge-both). Every
-        # local SHA changes, and the resolution exists only on this new branch.
+        # Кто-то переписал ветку снаружи: SHA сменились, разрешение
+        # both-modified файла существует только на новой линии.
         subprocess.run(["git", "rebase", u2], cwd=repo, capture_output=True, text=True)
         (repo / "core.py").write_text("VERSION = 2\nLOCAL_PATCH = True\n")
         _git(repo, "add", "-A")
@@ -330,27 +331,16 @@ class TestPersonalRemoteIntegrationAfterHistoryRewrite:
 
         proc = self._run(repo, personal, upstream, tmp_path)
 
-        assert proc.returncode == 0, proc.stderr
-        # The other host's commit must land — silently skipping integration
-        # after a rewrite would drop their work at the next force-push.
-        assert (repo / "fam.py").exists(), proc.stderr
-        # ...and it must land ON TOP of the rebase we were handed, not by
-        # replaying our history onto the stale shared lineage.
-        assert (
-            subprocess.run(
-                ["git", "merge-base", "--is-ancestor", handed_in, "HEAD"], cwd=repo
-            ).returncode
-            == 0
-        ), (
-            "the handed-in rebase was rewritten instead of built upon\n"
-            f"handed_in={handed_in}\n"
+        assert proc.returncode != 0, "конфликт интеграции обязан быть заметен"
+        assert _git(repo, "rev-parse", "HEAD") == handed_in, (
+            "переданную работу переписали или откатили\n"
             f"{_git(repo, 'log', '--oneline', '--graph', '-12')}\n"
             f"stderr:\n{proc.stderr}"
         )
-        # The operator's resolution survived — it was never replayed onto the
-        # lineage that predates it.
+        assert _git(repo, "status", "--porcelain") == "", "дерево осталось в конфликте"
         assert (repo / "core.py").read_text() == "VERSION = 2\nLOCAL_PATCH = True\n"
         assert (repo / "custom.py").exists()
+        assert "integrate manually" in proc.stderr
 
     def test_unrewritten_branch_still_integrates_the_other_host_work(self, tmp_path):
         # Mode A: nobody rewrote anything; the shared branch is simply ahead.
