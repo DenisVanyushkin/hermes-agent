@@ -74,3 +74,82 @@ def session_state_from_cookies(inventory: Sequence[CookieRecord], *, now: dateti
             return SESSION_MISSING
         return SESSION_OK
     return SESSION_MISSING
+
+
+CHALLENGE_EMAIL_OTP = "challenge_email_otp"
+CHALLENGE_HARD = "challenge_hard"
+REAL_EMPTY = "real_empty"
+
+SESSION_STATES = (
+    SESSION_OK,
+    SESSION_MISSING,
+    CHALLENGE_EMAIL_OTP,
+    CHALLENGE_HARD,
+    REAL_EMPTY,
+)
+
+# Маркеры, встречающиеся только на залогиненной странице. Свидетельство
+# присутствия, а не отсутствия: их нельзя случайно найти в футере.
+_AUTHENTICATED_MARKERS = (
+    "global-nav__me",
+    "feed-identity-module",
+    "nav-item__profile-member-photo",
+)
+
+# Проверяется раньше почтового челленджа: страница капчи тоже содержит слово
+# verification, а перепутать их — значит начать автоматически проходить
+# проверку, которую проходить роботом нельзя.
+_HARD_CHALLENGE_MARKERS = (
+    "/checkpoint/challenge",
+    "security verification",
+    "verify your identity",
+    "recaptcha",
+    "captcha-internal",
+)
+
+_EMAIL_OTP_MARKERS = (
+    "we sent a code",
+    "enter the code",
+    "verification code",
+    "код подтверждения",
+)
+
+_LOGIN_URL_MARKERS = ("/uas/login", "/login")
+
+
+@dataclass(frozen=True)
+class SessionVerdict:
+    state: str
+    cookie_mismatch: bool = False
+
+
+def classify_auth_page(url: str, html: str) -> str:
+    lowered_url = (url or "").lower()
+    lowered_html = (html or "").lower()
+    if any(marker in lowered_html for marker in _AUTHENTICATED_MARKERS):
+        return SESSION_OK
+    if any(marker in lowered_url or marker in lowered_html for marker in _HARD_CHALLENGE_MARKERS):
+        return CHALLENGE_HARD
+    if any(marker in lowered_html for marker in _EMAIL_OTP_MARKERS):
+        return CHALLENGE_EMAIL_OTP
+    if any(marker in lowered_url for marker in _LOGIN_URL_MARKERS):
+        return SESSION_MISSING
+    return REAL_EMPTY
+
+
+def resolve_session_state(*, cookie_state: str, page_state: str) -> SessionVerdict:
+    """Кука говорит, что держит браузер; страница — что LinkedIn с этим сделал.
+
+    Расхождение осмысленно: живая кука при странице челленджа означает
+    челлендж, а отсутствие куки при ленте означает, что инвентарь снят не с
+    того профиля — состояние LinkedIn тут ни при чём, поэтому это флаг, а не
+    шестое состояние.
+    """
+    mismatch = cookie_state == SESSION_MISSING and page_state == SESSION_OK
+    if page_state == SESSION_OK:
+        return SessionVerdict(SESSION_OK, mismatch)
+    if page_state in (CHALLENGE_HARD, CHALLENGE_EMAIL_OTP):
+        return SessionVerdict(page_state)
+    if cookie_state == SESSION_MISSING:
+        return SessionVerdict(SESSION_MISSING)
+    return SessionVerdict(page_state)
