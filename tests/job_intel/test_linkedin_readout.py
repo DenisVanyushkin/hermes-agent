@@ -37,3 +37,32 @@ def test_render_names_the_session_state_on_the_first_line() -> None:
 
     assert "session_missing_cookie" in first_line
     assert "203.0.113.7" in first_line
+
+
+# --- Происхождение измерения ---------------------------------------------
+
+
+def test_report_names_the_namespace_the_probe_ran_in() -> None:
+    """exit_ip измеряет выход того процесса, который запустил readout. Запуск
+    снаружи namespace даёт адрес хоста, который оператор прочитает как «выход
+    браузера» — правдоподобное число вместо ошибки. Число обязано носить своё
+    происхождение с собой."""
+    report = build_report(exit_ip="203.0.113.7", inventory=[], now=NOW, netns="ln-eg")
+
+    assert report["netns"] == "ln-eg"
+    assert report["exit_ip_attributable"] is True
+
+
+def test_measurement_from_the_host_is_marked_unattributable() -> None:
+    report = build_report(exit_ip="203.0.113.7", inventory=[], now=NOW, netns=None)
+
+    assert report["netns"] is None
+    assert report["exit_ip_attributable"] is False
+
+
+def test_render_shows_the_namespace_next_to_the_address() -> None:
+    host = render_report(build_report(exit_ip="75.119.154.183", inventory=[], now=NOW, netns=None))
+    inside = render_report(build_report(exit_ip="213.211.83.79", inventory=[], now=NOW, netns="ln-eg"))
+
+    assert "netns=host" in host.splitlines()[0]
+    assert "netns=ln-eg" in inside.splitlines()[0]

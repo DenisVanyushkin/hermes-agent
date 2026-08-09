@@ -28,11 +28,45 @@ def probe_exit_ip(*, url: str = EXIT_IP_URL, timeout: int = EXIT_IP_TIMEOUT_SECO
         return None
 
 
-def build_report(*, exit_ip: str | None, inventory: Sequence[CookieRecord], now: datetime) -> dict[str, Any]:
+def current_netns() -> str | None:
+    """Имя сетевого пространства имён, в котором выполняется этот процесс.
+
+    Сравнивает inode `/proc/self/ns/net` с именованными namespace в
+    `/var/run/netns`. Возвращает None для хоста — это не ошибка, а факт,
+    который обязан попасть в отчёт.
+    """
+    try:
+        own = Path("/proc/self/ns/net").stat().st_ino
+    except OSError:
+        return None
+    named = Path("/var/run/netns")
+    if not named.is_dir():
+        return None
+    for entry in named.iterdir():
+        try:
+            if entry.stat().st_ino == own:
+                return entry.name
+        except OSError:
+            continue
+    return None
+
+
+def build_report(
+    *,
+    exit_ip: str | None,
+    inventory: Sequence[CookieRecord],
+    now: datetime,
+    netns: str | None = None,
+) -> dict[str, Any]:
     return {
         "checked_at": now.isoformat(),
         "exit_ip": exit_ip,
         "exit_reachable": exit_ip is not None,
+        # exit_ip измеряет выход процесса, который запустил readout, а не
+        # браузера. Снаружи namespace это адрес хоста, и без пометки его
+        # прочитают как «туннель не работает».
+        "netns": netns,
+        "exit_ip_attributable": netns is not None,
         "session_state": session_state_from_cookies(inventory, now=now),
         "cookies": [
             {
@@ -46,7 +80,11 @@ def build_report(*, exit_ip: str | None, inventory: Sequence[CookieRecord], now:
 
 
 def render_report(report: dict[str, Any]) -> str:
-    head = f"{report['session_state']} exit={report['exit_ip'] or 'UNREACHABLE'}"
+    head = (
+        f"{report['session_state']} "
+        f"exit={report['exit_ip'] or 'UNREACHABLE'} "
+        f"netns={report.get('netns') or 'host'}"
+    )
     lines = [head]
     for cookie in report["cookies"]:
         lines.append(f"  {cookie['name']:<12} {cookie['host']:<20} expires={cookie['expires_at']}")
@@ -65,6 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         exit_ip=probe_exit_ip(),
         inventory=inventory,
         now=datetime.now(timezone.utc),
+        netns=current_netns(),
     )
     print(json.dumps(report, indent=2) if args.json else render_report(report))
     return 0
