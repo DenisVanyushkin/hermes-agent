@@ -31,6 +31,10 @@ NOVNC_PORT="6080"
 CDP_PORT="9222"
 BASE_DIR="/var/lib/browser-desktop"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Объявляется здесь, до первого использования: под `set -u` раскрытие
+# необъявленного массива — ошибка. Значение выставляется ниже, после
+# разбора профиля.
+NETNS_PREFIX=()
 PLAYWRIGHT_HELPER="${SCRIPT_DIR}/browser-desktop-ensure-playwright.sh"
 USER_NAME="browser"
 USER_HOME="${BASE_DIR}"
@@ -423,7 +427,11 @@ get_password() {
 start_as_browser() {
   local log_file="$1"
   shift
-  nohup runuser -u "${USER_NAME}" -- env \
+  # Порядок значим: `ip netns exec` требует CAP_SYS_ADMIN, а `runuser`
+  # роняет права до browser. Префикс внутри runuser даёт "setting the network
+  # namespace failed: Operation not permitted" — X-сервер не стартует, и
+  # запуск падает на таймауте ожидания дисплея.
+  nohup "${NETNS_PREFIX[@]}" runuser -u "${USER_NAME}" -- env \
     "DISPLAY=:${DISPLAY_NUM}" \
     "HOME=${USER_HOME}" \
     "USER=${USER_NAME}" \
@@ -476,7 +484,7 @@ ensure_port_free_or_owned() {
 wait_for_display() {
   local tries=100
   while (( tries-- > 0 )); do
-    if runuser -u "${USER_NAME}" -- env "DISPLAY=:${DISPLAY_NUM}" xdpyinfo >/dev/null 2>&1; then
+    if "${NETNS_PREFIX[@]}" runuser -u "${USER_NAME}" -- env "DISPLAY=:${DISPLAY_NUM}" xdpyinfo >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.2
@@ -505,7 +513,6 @@ PASSWORD="$(get_password)"
 # noVNC внутри netns обязан слушать не на 127.0.0.1: это его собственный
 # loopback, недостижимый из SSH-туннеля оператора. Слушает на veth-адресе,
 # который скрипт linkedin-netns-up.sh поднял для управления.
-NETNS_PREFIX=()
 NOVNC_BIND="127.0.0.1"
 if [[ "${PROFILE}" == "linkedin" ]]; then
   bash "${SCRIPT_DIR}/linkedin-netns-up.sh"
@@ -515,17 +522,17 @@ fi
 
 ensure_display_free
 if ! process_matches "Xvfb :${DISPLAY_NUM}"; then
-  start_as_browser "${LOG_DIR}/xvfb.log" "${NETNS_PREFIX[@]}" Xvfb ":${DISPLAY_NUM}" -screen 0 1920x1080x24 -nolisten tcp
+  start_as_browser "${LOG_DIR}/xvfb.log" Xvfb ":${DISPLAY_NUM}" -screen 0 1920x1080x24 -nolisten tcp
 fi
 wait_for_display
 
 if ! process_matches "dbus-run-session -- startxfce4"; then
-  start_as_browser "${LOG_DIR}/xfce.log" "${NETNS_PREFIX[@]}" dbus-run-session -- startxfce4
+  start_as_browser "${LOG_DIR}/xfce.log" dbus-run-session -- startxfce4
 fi
 
 ensure_port_free_or_owned "${VNC_PORT}" "x11vnc -display :${DISPLAY_NUM}.*-rfbport ${VNC_PORT}" "VNC"
 if ! process_matches "x11vnc -display :${DISPLAY_NUM}"; then
-  start_as_browser "${LOG_DIR}/x11vnc.log" "${NETNS_PREFIX[@]}" x11vnc \
+  start_as_browser "${LOG_DIR}/x11vnc.log" x11vnc \
     -display ":${DISPLAY_NUM}" \
     -localhost \
     -rfbauth "${VNC_DIR}/passwd" \
@@ -538,7 +545,7 @@ fi
 
 ensure_port_free_or_owned "${NOVNC_PORT}" "websockify.*${NOVNC_BIND}:${NOVNC_PORT} 127.0.0.1:${VNC_PORT}" "noVNC"
 if ! process_matches "websockify.*${NOVNC_BIND}:${NOVNC_PORT} 127.0.0.1:${VNC_PORT}"; then
-  start_as_browser "${LOG_DIR}/websockify.log" "${NETNS_PREFIX[@]}" websockify --web=/usr/share/novnc "${NOVNC_BIND}:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}"
+  start_as_browser "${LOG_DIR}/websockify.log" websockify --web=/usr/share/novnc "${NOVNC_BIND}:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}"
 fi
 
 # ensure_browser_binary() already resolved a usable Chromium.
@@ -551,7 +558,7 @@ fi
 
 ensure_port_free_or_owned "${CDP_PORT}" "remote-debugging-port=${CDP_PORT}" "Chromium CDP"
 if ! process_matches "remote-debugging-port=${CDP_PORT}"; then
-  start_as_browser "${LOG_DIR}/chromium-${PROFILE}.log" "${NETNS_PREFIX[@]}" dbus-run-session -- "${CHROMIUM_BIN}" \
+  start_as_browser "${LOG_DIR}/chromium-${PROFILE}.log" dbus-run-session -- "${CHROMIUM_BIN}" \
     --user-data-dir="${BASE_DIR}/profiles/${PROFILE}" \
     --profile-directory=Default \
     --no-first-run \
@@ -574,7 +581,7 @@ cat <<EOF
 Browser desktop bootstrap complete.
 
 Connect securely via SSH tunnel:
-  ssh -L ${NOVNC_PORT}:127.0.0.1:${NOVNC_PORT} -L ${CDP_PORT}:127.0.0.1:${CDP_PORT} user@YOUR_VPS
+  ssh -L ${NOVNC_PORT}:${NOVNC_BIND}:${NOVNC_PORT} -L ${CDP_PORT}:127.0.0.1:${CDP_PORT} user@YOUR_VPS
 
 Open noVNC:
   http://127.0.0.1:${NOVNC_PORT}/vnc.html

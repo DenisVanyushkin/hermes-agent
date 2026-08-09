@@ -29,12 +29,37 @@ def test_doh_is_disabled_for_the_linkedin_profile() -> None:
     assert "--dns-over-https-mode=off" in body
 
 
-def test_xvfb_and_chromium_share_the_same_prefix() -> None:
-    """X-сервер и браузер обязаны жить в одном namespace: abstract unix
-    sockets разделяются по netns, и X через них ходит. Разнесённые по разным
-    namespace они дают симптом, неотличимый от мёртвого туннеля."""
+def test_namespace_is_entered_before_privileges_are_dropped() -> None:
+    """ip netns exec требует CAP_SYS_ADMIN, а runuser роняет права до browser.
+    Префикс ВНУТРИ runuser даёт "setting the network namespace failed:
+    Operation not permitted", Xvfb не стартует, и запуск падает на таймауте
+    ожидания дисплея. Проверять надо позицию, а не факт наличия: прошлая
+    версия этого теста считала вхождения и потому пропустила ошибку."""
     body = _body()
-    assert body.count("${NETNS_PREFIX[@]}") >= 2
+    start = body.index("start_as_browser() {")
+    end = body.index("\n}", start)
+    function = body[start:end]
+    prefix = function.index("${NETNS_PREFIX[@]}")
+    runuser = function.index("runuser -u")
+    assert prefix < runuser, "netns exec обязан стоять перед runuser"
+
+
+def test_call_sites_do_not_pass_the_prefix_themselves() -> None:
+    """Префикс применяется в одном месте — в start_as_browser. На пяти
+    вызовах эту ошибку иначе можно повторить пять раз."""
+    body = _body()
+    launches = [line for line in body.splitlines() if "start_as_browser " in line and "()" not in line]
+    assert launches, "вызовы start_as_browser не найдены"
+    for line in launches:
+        assert "${NETNS_PREFIX[@]}" not in line, f"префикс на месте вызова: {line.strip()}"
+
+
+def test_display_wait_observes_the_namespace_where_the_server_lives() -> None:
+    """Проверка дисплея должна смотреть туда, где X-сервер запущен."""
+    body = _body()
+    start = body.index("wait_for_display() {")
+    end = body.index("\n}", start)
+    assert "${NETNS_PREFIX[@]}" in body[start:end]
 
 
 def test_non_linkedin_profiles_are_untouched() -> None:
@@ -51,3 +76,14 @@ def test_novnc_binds_an_address_reachable_from_the_host() -> None:
     assert "NOVNC_BIND" in body
     assert 'NOVNC_BIND="169.254.77.2"' in body
     assert '"${NOVNC_BIND}:${NOVNC_PORT}"' in body
+
+
+def test_printed_tunnel_hint_matches_the_actual_bind_address() -> None:
+    """Скрипт печатает оператору команду туннеля. Для профиля linkedin noVNC
+    слушает на veth-адресе, и статичная подсказка про 127.0.0.1 отправляет
+    оператора в тупик, который выглядит как поломка носителя, а не как
+    неверная инструкция."""
+    body = _body()
+    assert "${NOVNC_BIND}:${NOVNC_PORT}" in body
+    hint = body[body.index("Connect securely via SSH tunnel"):]
+    assert "-L ${NOVNC_PORT}:${NOVNC_BIND}:${NOVNC_PORT}" in hint
