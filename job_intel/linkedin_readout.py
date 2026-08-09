@@ -1,0 +1,74 @@
+"""Снимок двух фактов: откуда namespace выходит наружу и жива ли сессия.
+
+Это не фаза приборов, а две команды: без них единственный доступный сигнал —
+found_count в суточной сводке, который читается сутками.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.request import urlopen
+
+from job_intel.linkedin_session import CookieRecord, read_cookie_inventory, session_state_from_cookies
+
+EXIT_IP_URL = "https://api.ipify.org"
+EXIT_IP_TIMEOUT_SECONDS = 10
+
+
+def probe_exit_ip(*, url: str = EXIT_IP_URL, timeout: int = EXIT_IP_TIMEOUT_SECONDS) -> str | None:
+    try:
+        with urlopen(url, timeout=timeout) as response:  # noqa: S310 — фиксированный адрес
+            return response.read().decode("utf-8").strip() or None
+    except Exception:
+        return None
+
+
+def build_report(*, exit_ip: str | None, inventory: Sequence[CookieRecord], now: datetime) -> dict[str, Any]:
+    return {
+        "checked_at": now.isoformat(),
+        "exit_ip": exit_ip,
+        "exit_reachable": exit_ip is not None,
+        "session_state": session_state_from_cookies(inventory, now=now),
+        "cookies": [
+            {
+                "name": record.name,
+                "host": record.host,
+                "expires_at": record.expires_at.isoformat() if record.expires_at else None,
+            }
+            for record in inventory
+        ],
+    }
+
+
+def render_report(report: dict[str, Any]) -> str:
+    head = f"{report['session_state']} exit={report['exit_ip'] or 'UNREACHABLE'}"
+    lines = [head]
+    for cookie in report["cookies"]:
+        lines.append(f"  {cookie['name']:<12} {cookie['host']:<20} expires={cookie['expires_at']}")
+    return "\n".join(lines)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Снимок выхода и сессии LinkedIn")
+    parser.add_argument("--profile", required=True, type=Path, help="каталог профиля Chromium")
+    parser.add_argument("--json", action="store_true", help="вывести отчёт как JSON")
+    args = parser.parse_args(argv)
+
+    cookie_db = args.profile / "Default" / "Cookies"
+    inventory = read_cookie_inventory(cookie_db) if cookie_db.exists() else []
+    report = build_report(
+        exit_ip=probe_exit_ip(),
+        inventory=inventory,
+        now=datetime.now(timezone.utc),
+    )
+    print(json.dumps(report, indent=2) if args.json else render_report(report))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
