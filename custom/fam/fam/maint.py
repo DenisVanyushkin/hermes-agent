@@ -38,6 +38,11 @@ def _problem_lines(digest):
     for probe in sections.get("probes", []):
         if probe["status"] != "ok":
             lines.append(f"{probe['name']}: {probe['detail'] or probe['status']}")
+    for rejected in sections.get("backups", {}).get("rejected") or []:
+        # Not only through the LLM report: a foreign or corrupt file sitting
+        # in the backup directory is exactly the finding that must not
+        # depend on that report having been delivered.
+        lines.append(f"бэкап отбракован: {rejected['name']} — {rejected['why']}")
     for unit in sections.get("timers", {}).get("failed", []):
         lines.append(f"unit {unit['unit']}: {unit['detail']}")
     for err in sections.get("maintenance_errors", []):
