@@ -53,6 +53,9 @@ _HERMES_CORE_TOOLS = [
     "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
     # Text-to-speech
     "text_to_speech",
+    # Speech-to-text: the sanctioned way to transcribe an audio attachment,
+    # so the model never reaches for whisper/ffmpeg in the terminal.
+    "transcribe_audio",
     # Planning & memory
     "todo", "memory",
     # NOTE: the desktop Project tools (project_list/create/switch) are
@@ -212,6 +215,12 @@ TOOLSETS = {
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI",
         "tools": ["text_to_speech"],
+        "includes": []
+    },
+
+    "stt": {
+        "description": "Speech-to-text: transcribe an audio file with the configured STT provider",
+        "tools": ["transcribe_audio"],
         "includes": []
     },
     
