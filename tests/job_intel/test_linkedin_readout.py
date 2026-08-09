@@ -66,3 +66,14 @@ def test_render_shows_the_namespace_next_to_the_address() -> None:
 
     assert "netns=host" in host.splitlines()[0]
     assert "netns=ln-eg" in inside.splitlines()[0]
+
+
+def test_report_names_the_chrome_profile_it_read() -> None:
+    """session_missing_cookie, полученное из чужого профиля, — не факт о
+    сессии. Отчёт обязан называть каталог, который прочитан."""
+    report = build_report(
+        exit_ip="203.0.113.7", inventory=[], now=NOW, netns="ln-eg", profile_dir="Profile 1"
+    )
+
+    assert report["profile_dir"] == "Profile 1"
+    assert "profile=Profile 1" in render_report(report).splitlines()[0]

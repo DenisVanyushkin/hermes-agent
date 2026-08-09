@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -64,6 +65,31 @@ def read_cookie_inventory(cookie_db: Path, *, host_filter: str = "linkedin") -> 
         for host, name, expires, persistent in rows
         if host_filter in (host or "")
     ]
+
+
+def resolve_profile_dir(user_data_dir: Path) -> Path:
+    """Каталог профиля Chrome, который используется на самом деле.
+
+    Вход в аккаунт Google внутри браузера заставляет Chrome завести второй
+    профиль, и сессия LinkedIn оказывается в нём, а не в Default. Жёстко
+    прочитанный Default тогда пуст, и «сессии нет» — вывод, сделанный по
+    чужому профилю. Наблюдалось 2026-08-09: `Profile 1` держал li_at,
+    `Default` не держал ничего, а браузер показывал живую ленту.
+
+    Имя берётся из `Local State`; нечитаемый файл или несуществующий каталог
+    означают возврат к Default, но не молчаливую подмену другим профилем.
+    """
+    state_path = user_data_dir / "Local State"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        last_used = str(state.get("profile", {}).get("last_used") or "").strip()
+    except Exception:
+        last_used = ""
+    if last_used:
+        candidate = user_data_dir / last_used
+        if candidate.is_dir():
+            return candidate
+    return user_data_dir / "Default"
 
 
 def session_state_from_cookies(inventory: Sequence[CookieRecord], *, now: datetime) -> str:

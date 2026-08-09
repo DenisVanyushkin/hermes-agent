@@ -174,3 +174,47 @@ def test_verdict_flags_mismatch_when_cookie_absent_but_page_authenticated() -> N
 def test_verdict_falls_back_to_cookie_when_page_is_uninformative() -> None:
     verdict = resolve_session_state(cookie_state=SESSION_MISSING, page_state=REAL_EMPTY)
     assert verdict == SessionVerdict(state=SESSION_MISSING, cookie_mismatch=False)
+
+
+# --- Задача: выбор профиля Chrome ----------------------------------------
+
+import json as _json
+
+from job_intel.linkedin_session import resolve_profile_dir
+
+
+def test_last_used_profile_wins_over_default(tmp_path: Path) -> None:
+    """Вход в аккаунт Google внутри браузера заставляет Chrome завести второй
+    профиль, и сессия LinkedIn ложится в него. Жёстко прочитанный Default
+    тогда пуст, а вывод «сессии нет» сделан по чужому профилю — это наблюдалось
+    живьём 2026-08-09: Profile 1 держал li_at, Default не держал ничего."""
+    (tmp_path / "Default").mkdir()
+    (tmp_path / "Profile 1").mkdir()
+    (tmp_path / "Local State").write_text(
+        _json.dumps({"profile": {"last_used": "Profile 1"}}), encoding="utf-8"
+    )
+
+    assert resolve_profile_dir(tmp_path) == tmp_path / "Profile 1"
+
+
+def test_default_is_used_when_local_state_is_absent(tmp_path: Path) -> None:
+    (tmp_path / "Default").mkdir()
+
+    assert resolve_profile_dir(tmp_path) == tmp_path / "Default"
+
+
+def test_unreadable_local_state_falls_back_to_default(tmp_path: Path) -> None:
+    """Битый Local State — это неизвестность, а не отсутствие профиля."""
+    (tmp_path / "Default").mkdir()
+    (tmp_path / "Local State").write_text("{ not json", encoding="utf-8")
+
+    assert resolve_profile_dir(tmp_path) == tmp_path / "Default"
+
+
+def test_named_profile_that_does_not_exist_falls_back_to_default(tmp_path: Path) -> None:
+    (tmp_path / "Default").mkdir()
+    (tmp_path / "Local State").write_text(
+        _json.dumps({"profile": {"last_used": "Profile 7"}}), encoding="utf-8"
+    )
+
+    assert resolve_profile_dir(tmp_path) == tmp_path / "Default"

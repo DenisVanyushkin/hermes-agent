@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
 
-from job_intel.linkedin_session import CookieRecord, read_cookie_inventory, session_state_from_cookies
+from job_intel.linkedin_session import (
+    CookieRecord,
+    read_cookie_inventory,
+    resolve_profile_dir,
+    session_state_from_cookies,
+)
 
 EXIT_IP_URL = "https://api.ipify.org"
 EXIT_IP_TIMEOUT_SECONDS = 10
@@ -57,6 +62,7 @@ def build_report(
     inventory: Sequence[CookieRecord],
     now: datetime,
     netns: str | None = None,
+    profile_dir: str | None = None,
 ) -> dict[str, Any]:
     return {
         "checked_at": now.isoformat(),
@@ -67,6 +73,10 @@ def build_report(
         # прочитают как «туннель не работает».
         "netns": netns,
         "exit_ip_attributable": netns is not None,
+        # Chrome заводит второй профиль при входе в аккаунт Google, и
+        # сессия ложится в него. Состояние, прочитанное из чужого
+        # профиля, — не факт о сессии, поэтому каталог называется.
+        "profile_dir": profile_dir,
         "session_state": session_state_from_cookies(inventory, now=now),
         "cookies": [
             {
@@ -83,7 +93,8 @@ def render_report(report: dict[str, Any]) -> str:
     head = (
         f"{report['session_state']} "
         f"exit={report['exit_ip'] or 'UNREACHABLE'} "
-        f"netns={report.get('netns') or 'host'}"
+        f"netns={report.get('netns') or 'host'} "
+        f"profile={report.get('profile_dir') or '?'}"
     )
     lines = [head]
     for cookie in report["cookies"]:
@@ -97,13 +108,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="вывести отчёт как JSON")
     args = parser.parse_args(argv)
 
-    cookie_db = args.profile / "Default" / "Cookies"
+    profile_dir = resolve_profile_dir(args.profile)
+    cookie_db = profile_dir / "Cookies"
     inventory = read_cookie_inventory(cookie_db) if cookie_db.exists() else []
     report = build_report(
         exit_ip=probe_exit_ip(),
         inventory=inventory,
         now=datetime.now(timezone.utc),
         netns=current_netns(),
+        profile_dir=profile_dir.name,
     )
     print(json.dumps(report, indent=2) if args.json else render_report(report))
     return 0

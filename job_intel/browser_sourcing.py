@@ -1158,6 +1158,7 @@ class BrowserSourceClient:
             SESSION_OK,
             classify_auth_page,
             read_cookie_inventory,
+            resolve_profile_dir,
             resolve_session_state,
             session_state_from_cookies,
         )
@@ -1167,7 +1168,7 @@ class BrowserSourceClient:
         html = self.fetch_html(url, scrolls=0, capture_label="linkedin-auth-validate")
         page_state = classify_auth_page(url, html)
 
-        cookie_db = Path(self.config.user_data_dir) / "Default" / "Cookies"
+        cookie_db = resolve_profile_dir(Path(self.config.user_data_dir)) / "Cookies"
         try:
             cookie_state = session_state_from_cookies(
                 read_cookie_inventory(cookie_db), now=datetime.now(timezone.utc)
