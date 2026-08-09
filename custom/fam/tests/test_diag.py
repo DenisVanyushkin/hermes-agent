@@ -310,7 +310,8 @@ def test_backups_missing_reports_no_backup_found(tmp_path):
         {"backup_dir": str(tmp_path), "offsite_enabled": False}, now,
         verify=lambda path: (True, {"integrity": "ok", "schema_version": "12"}))
     assert result == {"last_path": None, "verify": "missing", "schema_version": None,
-                      "offsite_age_days": None, "offsite_overdue": None}
+                      "offsite_age_days": None, "offsite_overdue": None,
+                      "rejected": []}
 
 
 def test_backups_reports_verify_failure_detail(tmp_path):
@@ -783,3 +784,125 @@ def test_offsite_disabled_is_never_overdue(tmp_path):
         {"backup_dir": str(backup_dir), "offsite_enabled": False}, now,
         verify=lambda p: (True, {"integrity": "ok", "schema_version": "12"}))
     assert result["offsite_overdue"] is False
+
+
+from fam import maint  # noqa: E402  -- appended block, see _problem_lines test
+
+NOW_0809 = datetime(2026, 8, 9, 22, 30, tzinfo=timezone.utc)
+# --- the newest file is not automatically the newest BACKUP ----------------
+#
+# 09.08.2026, live: someone ran a maintenance tick with FAM_DB pointing at a
+# throwaway DB but the real backup_dir, and a 217KB freshly-inited assistant
+# DB landed in the live backup directory. It passed verify_backup outright --
+# integrity ok, schema_version "12", because a `fam init` DB genuinely has
+# the right schema, it just has no data. Sorting by name alone would have had
+# the nightly report attest "бэкап ok" about a backup holding zero doses.
+
+
+def _backup_dir(tmp_path, sizes):
+    """sizes: {"assistant-20260808.db": 8_000_000, ...}"""
+    d = tmp_path / "local"
+    d.mkdir()
+    for name, size in sizes.items():
+        (d / name).write_bytes(b"x" * size)
+    return d
+
+
+def _ok_verify(path):
+    return True, {"integrity": "ok", "schema_version": "12"}
+
+
+def test_a_backup_far_smaller_than_its_peers_is_not_taken_as_newest(tmp_path):
+    d = _backup_dir(tmp_path, {"assistant-20260807.db": 1_000_000,
+                               "assistant-20260808.db": 1_020_000,
+                               "assistant-20260809.db": 217_088})
+    result = diag.collect_backups(
+        {"backup_dir": str(d), "offsite_enabled": False}, NOW_0809,
+        verify=_ok_verify)
+    assert result["last_path"] == "assistant-20260808.db"
+
+
+def test_the_rejected_backup_is_named_with_its_reason(tmp_path):
+    # Silent fallback to the previous file would read as "everything fine"
+    # -- the same failure mode findings_truncated exists to prevent.
+    d = _backup_dir(tmp_path, {"assistant-20260808.db": 1_020_000,
+                               "assistant-20260809.db": 217_088})
+    result = diag.collect_backups(
+        {"backup_dir": str(d), "offsite_enabled": False}, NOW_0809,
+        verify=_ok_verify)
+    assert [r["name"] for r in result["rejected"]] == ["assistant-20260809.db"]
+    assert "217088" in result["rejected"][0]["why"]
+
+
+def test_a_normally_grown_backup_is_accepted(tmp_path):
+    # The live DB grows a few hundred KB a night; that must never trip the
+    # guard, or this fix just trades one false alarm for another.
+    d = _backup_dir(tmp_path, {"assistant-20260808.db": 1_000_000,
+                               "assistant-20260809.db": 1_020_000})
+    result = diag.collect_backups(
+        {"backup_dir": str(d), "offsite_enabled": False}, NOW_0809,
+        verify=_ok_verify)
+    assert result["last_path"] == "assistant-20260809.db"
+    assert result["rejected"] == []
+
+
+def test_a_lone_backup_has_no_peers_to_be_judged_against(tmp_path):
+    d = _backup_dir(tmp_path, {"assistant-20260809.db": 217_088})
+    result = diag.collect_backups(
+        {"backup_dir": str(d), "offsite_enabled": False}, NOW_0809,
+        verify=_ok_verify)
+    assert result["last_path"] == "assistant-20260809.db"
+    assert result["rejected"] == []
+
+
+def test_the_ratio_threshold_is_configurable(tmp_path):
+    # A retention sweep or a VACUUM can legitimately shrink the DB, and the
+    # install that sees it must be able to loosen the guard rather than eat
+    # a nightly false alarm.
+    d = _backup_dir(tmp_path, {"assistant-20260808.db": 1_000_000,
+                               "assistant-20260809.db": 300_000})
+    cfg = {"backup_dir": str(d), "offsite_enabled": False,
+           "backup_min_ratio": 0.1}
+    result = diag.collect_backups(cfg, NOW_0809, verify=_ok_verify)
+    assert result["last_path"] == "assistant-20260809.db"
+    assert result["rejected"] == []
+
+
+def test_a_backup_failing_integrity_is_rejected_too(tmp_path):
+    d = _backup_dir(tmp_path, {"assistant-20260808.db": 1_000_000,
+                               "assistant-20260809.db": 1_020_000})
+
+    def verify(path):
+        if path.name == "assistant-20260809.db":
+            return False, {"integrity": "malformed", "schema_version": "12"}
+        return _ok_verify(path)
+
+    result = diag.collect_backups(
+        {"backup_dir": str(d), "offsite_enabled": False}, NOW_0809,
+        verify=verify)
+    assert result["last_path"] == "assistant-20260808.db"
+    assert result["verify"] == "ok"
+    assert result["rejected"][0]["name"] == "assistant-20260809.db"
+    assert "malformed" in result["rejected"][0]["why"]
+
+
+def test_when_every_candidate_is_rejected_no_backup_is_claimed(tmp_path):
+    d = _backup_dir(tmp_path, {"assistant-20260809.db": 1_000_000})
+    result = diag.collect_backups(
+        {"backup_dir": str(d), "offsite_enabled": False}, NOW_0809,
+        verify=lambda p: (False, {"integrity": "malformed"}))
+    assert result["last_path"] is None
+    assert result["verify"] == "malformed"
+    assert result["rejected"][0]["name"] == "assistant-20260809.db"
+
+
+def test_a_rejected_backup_is_a_problem_line(db):
+    # fam's own fallback channel must say it too: the LLM report is not the
+    # only path to Денис, and this is exactly the kind of finding that must
+    # not depend on the report having been delivered.
+    digest = {"sections": {"backups": {
+        "last_path": "assistant-20260808.db", "verify": "ok",
+        "rejected": [{"name": "assistant-20260809.db",
+                      "why": "size 217088 is 21% of the newest peer"}]}}}
+    lines = maint._problem_lines(digest)
+    assert any("assistant-20260809.db" in line for line in lines)

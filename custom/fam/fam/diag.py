@@ -346,6 +346,61 @@ def collect_timers(runner=None):
 # stopped happening". Overridable per-install via offsite_period_days.
 DEFAULT_OFFSITE_PERIOD_DAYS = 7
 
+# A backup this much smaller than the largest one beside it is not a backup of
+# our database. 09.08.2026, live: a maintenance tick run with FAM_DB pointing
+# at a throwaway DB but the real backup_dir dropped a 217KB freshly-inited
+# assistant DB into the live backup directory. verify_backup passed it --
+# integrity ok, schema_version "12" -- because a `fam init` DB really does
+# have the right schema; it just holds no data. Name order alone would then
+# have had the nightly report attest a healthy backup containing zero doses,
+# which is the one thing this section exists to never do. Overridable via
+# backup_min_ratio: a retention sweep or VACUUM can shrink the DB for real,
+# and an install that sees it must be able to loosen the guard instead of
+# eating a nightly false alarm.
+DEFAULT_BACKUP_MIN_RATIO = 0.5
+
+
+def _rejection_verdict(rejected):
+    """The newest rejection's reason, as the section's verify verdict."""
+    if not rejected:
+        return "missing"
+    why = rejected[0]["why"]
+    return why[len("integrity "):] if why.startswith("integrity ") else why
+
+
+def _pick_backup(files, cfg, verify):
+    """Newest TRUSTWORTHY backup: (chosen, detail, rejected).
+
+    Walks newest-first and returns the first candidate that is neither
+    undersized against its peers nor failing integrity. Everything skipped
+    is returned with its reason -- a silent fall back to yesterday's file
+    reads as "all good", the same failure mode findings_truncated exists to
+    prevent. `chosen` is None when nothing survives.
+    """
+    ratio = cfg.get("backup_min_ratio")
+    if ratio is None:
+        ratio = DEFAULT_BACKUP_MIN_RATIO
+    # The largest peer, not the live DB: this keeps the check inside the
+    # directory it is judging, so it needs no access to the running
+    # database and stays honest in tests and on a restored host alike.
+    peak = max(f.stat().st_size for f in files)
+    rejected = []
+    for cand in reversed(files):
+        size = cand.stat().st_size
+        if size < peak * ratio:
+            rejected.append({
+                "name": cand.name,
+                "why": f"size {size} is under {ratio:.0%} of the largest "
+                       f"backup beside it ({peak})"})
+            continue
+        ok, detail = verify(cand)
+        if not ok:
+            rejected.append({"name": cand.name,
+                             "why": f"integrity {detail.get('integrity')}"})
+            continue
+        return cand, detail, rejected
+    return None, {}, rejected
+
 
 def collect_backups(cfg, now, verify):
     """Newest dated backup of the assistant DB + its integrity verdict.
@@ -365,14 +420,19 @@ def collect_backups(cfg, now, verify):
     files = sorted(backup_dir.glob(f"{stem}-????????.db")) if backup_dir.is_dir() else []
     if not files:
         return {"last_path": None, "verify": "missing", "schema_version": None,
-                "offsite_age_days": None, "offsite_overdue": None}
-    newest = files[-1]
-    ok, detail = verify(newest)
-    result = {"last_path": newest.name,
-              "verify": "ok" if ok else str(detail.get("integrity")),
+                "offsite_age_days": None, "offsite_overdue": None,
+                "rejected": []}
+    chosen, detail, rejected = _pick_backup(files, cfg, verify)
+    # "missing" is reserved for an empty directory. Files that exist but
+    # cannot be trusted keep their own verdict -- collapsing them into
+    # "missing" would hide the difference between "nothing was ever written"
+    # and "what was written is unusable", which are different incidents.
+    result = {"last_path": chosen.name if chosen else None,
+              "verify": "ok" if chosen else _rejection_verdict(rejected),
               "schema_version": detail.get("schema_version"),
               "offsite_age_days": None,
-              "offsite_overdue": False}
+              "offsite_overdue": False,
+              "rejected": rejected}
     if cfg.get("offsite_enabled"):
         offsite = Path(cfg["offsite_dir"])
         dumps = sorted(offsite.glob("*-????????.db.age")) if offsite.is_dir() else []

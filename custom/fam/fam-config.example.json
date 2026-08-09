@@ -30,6 +30,7 @@
   "offsite_age_recipient": "",
   "offsite_keep": 8,
   "offsite_period_days": 7,
+  "backup_min_ratio": 0.5,
   "diagnostics_dir": "/home/denis/.hermes/diagnostics",
   "report_jobs_path": "/home/denis/.hermes/cron/jobs.json",
   "report_job_name": "fam-nightly-report",
