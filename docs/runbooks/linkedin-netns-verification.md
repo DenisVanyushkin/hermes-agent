@@ -132,11 +132,28 @@ loopback свой собственный и из SSH-туннеля недост
 
 ## 4. Зафиксировать состояние сразу после входа
 
-    sudo ~/.hermes/hermes-agent/venv/bin/python -m job_intel.linkedin_readout \
+    sudo ip netns exec ln-eg ~/.hermes/hermes-agent/venv/bin/python \
+      -m job_intel.linkedin_readout \
       --profile /var/lib/browser-desktop/profiles/linkedin --json
 
-Ожидается `"session_state": "session_ok"` и `li_at` в списке куки. Записать вывод
-в журнал проверки — он понадобится для сравнения на шагах 5 и 7.
+**`ip netns exec` здесь обязателен.** `exit_ip` измеряет выход того процесса,
+который запустил readout, а не браузера: снаружи namespace он вернёт адрес
+хоста, и это прочитается как «туннель не работает». Отчёт помечает измерение
+полем `netns`; первая строка обычного вывода печатает `netns=host` либо
+`netns=ln-eg` — сверяйтесь с ней, а не с одним лишь адресом.
+
+Ожидается:
+
+    session_ok exit=<домашний адрес> netns=ln-eg profile=<каталог профиля>
+
+Поле `profile` называет каталог профиля Chrome, из которого прочитаны куки.
+Вход в аккаунт Google внутри браузера заставляет Chrome завести второй профиль
+(`Profile 1`), и сессия LinkedIn ложится туда, а не в `Default`, хотя запуск
+идёт с `--profile-directory=Default`. Инструмент берёт используемый профиль из
+`Local State`; если в поле `profile` оказался не тот каталог, которого вы
+ждали, — это и есть объяснение неожиданного `session_missing_cookie`.
+
+Записать вывод в журнал проверки — он понадобится для сравнения на шагах 5 и 7.
 
 ## 5. Сутки контрольной тишины
 
