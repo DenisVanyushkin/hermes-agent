@@ -1,7 +1,7 @@
 ---
 name: upstream-sync
-description: Safely update local/customizations from upstream NousResearch/hermes-agent - triage the preflight report, auto-rebase clean updates, or negotiate per-feature conflict resolution with the operator over Slack.
-version: 0.3.2
+description: Safely update local/customizations from upstream NousResearch/hermes-agent - merge conflict-free updates automatically, or negotiate per-feature conflict resolution with the operator over Slack.
+version: 0.4.0
 metadata:
   hermes:
     tags: [devops, git, maintenance]
@@ -40,14 +40,15 @@ systemd watcher on the host executes those steps when you write
 `/root/.hermes/state/upstream-sync/finalize-request.json`:
 
 ```json
-{"action": "rebase" | "finalize" | "rollback",
+{"action": "sync" | "finalize" | "rollback",
  "upstream_sha": "<upstream head sha>",
  "backup_ref": "<backup branch name or empty>"}
 ```
 
-- `rebase` — host creates a backup ref, runs the full rebase script
-  (rebase + push + gateway restart), then the smoketest; rolls back on failure.
-- `finalize` — you already rebased the repo yourself; host syncs runtime
+- `sync` — host creates a backup ref, runs the full sync script
+  (merge + push + gateway restart), then the smoketest; rolls back on failure.
+  `rebase` is accepted as a legacy alias for this action.
+- `finalize` — you already merged the repo yourself; host syncs runtime
   scripts, pushes, restarts the gateway, smoketests; rolls back to
   `backup_ref` on failure.
 - `rollback` — explicit rollback to `backup_ref`.
@@ -60,8 +61,8 @@ appears within 10 minutes, report that the finalizer did not respond and stop.
 
 ## Invariants (never violate)
 
-1. Any repo mutation needs a backup ref first. For `rebase` action the host
-   creates it; before your own manual rebase (Mode B) create it yourself:
+1. Any repo mutation needs a backup ref first. For the `sync` action the host
+   creates it; before your own manual merge (Mode B) create it yourself:
    `git -C /workspace/live-hermes branch backup/pre-upstream-sync-$(date +%Y%m%d-%H%M%S) HEAD`.
    Mention the backup ref in every report.
 2. If `pending_decision_present` is true in the preflight JSON and you were
@@ -81,24 +82,47 @@ appears within 10 minutes, report that the finalizer did not respond and stop.
    `take-upstream`. Features already decided from memory are listed separately
    as auto-applied, not asked about.
 3. If `worktree_dirty` lists files that are not routine runtime artifacts,
-   note them in the report; the host rebase script auto-stashes, so this is
+   note them in the report; the host sync script auto-stashes, so this is
    informational, not blocking.
-4. Never `git push` from the sandbox and never force-push; the host rebase
-   script's `--force-with-lease` push is the only push.
+4. Never `git push` from the sandbox. There is no force-push anywhere in this
+   workflow any more: a merge does not rewrite history, so a rejected push
+   means another host added commits — the host script folds them in with a
+   merge and pushes again. A force-push here would mean something is wrong.
 5. If a finalize result comes back `failed`, the host has already rolled back;
    lead your report with the failure, the rollback, and the backup ref.
 
 ## Mode detection
 
-- **Mode A (cron run):** the prompt DATA contains a preflight report. Act per its `risk` field.
+- **Mode A (cron run):** the prompt DATA contains a preflight report. The
+  host script decides for itself whether the update is conflict-free — it runs
+  `git merge-tree` before touching anything — so the `risk` field is advisory
+  context for your report, not the decision.
 - **Mode B (operator reply):** you are in a Slack thread whose earlier message
   is an upstream-sync conflict report, and the operator has replied with
   decisions. Read `/root/.hermes/state/upstream-sync/pending.json` and execute
   the decisions.
 
+## What the host script does on its own
+
+Before any mutation the script runs `git merge-tree` against upstream. Three
+outcomes, and only the first one changes anything:
+
+- **conflict-free** — it merges in a throwaway worktree, runs the fork's own
+  tests there before and after the merge, and lands the result on the live
+  branch only if no new test failures appeared. Then push, gateway restart,
+  smoketest.
+- **conflicts** — nothing is touched at all. It prints the conflicting paths
+  with hunk counts and exits successfully, leaving the decision to you and the
+  operator through the conflict path below.
+- **new test failures** — nothing is landed. It prints which tests the merge
+  broke.
+
+So a clean update needs no decision from you; your job starts where the script
+stops.
+
 ## Mode A — risk: clean
 
-1. Write `finalize-request.json` with `action: "rebase"` and the
+1. Write `finalize-request.json` with `action: "sync"` and the
    `upstream_head` SHA from the preflight JSON.
 2. Poll for the result. On `ok`, respond with a human summary: how many
    commits came in, what areas they touch (use `upstream_commit_count_by_area`
@@ -139,7 +163,7 @@ Do NOT modify the repo yet. First consult decision memory, then branch.
    > `remembered` feature). `record` derives the memory fingerprint from
    > `files` + these subjects; if BOTH are absent the fingerprint will not match
    > and the remembered decision is silently orphaned. Note: the preflight caps
-   > `conflicts` at 60 files; a rebase touching more than 60 conflicted files may
+   > `conflicts` at 60 files; a merge touching more than 60 conflicted files may
    > leave some features partially invisible to the memory system — call this
    > out in the report if the conflict count is near the cap.
 
@@ -147,7 +171,7 @@ Do NOT modify the repo yet. First consult decision memory, then branch.
    a. Create the backup ref (invariant 1).
    b. Write `pending.json` with every feature pre-decided from `remembered`
       (copy each `decision`) and `status: "auto_apply"`.
-   c. Run **Mode B steps 2–5 only** (create backup, rebase applying the
+   c. Run **Mode B steps 2–5 only** (create backup, merge applying the
       remembered decisions, finalize, record) — SKIP Mode B step 1: there is no
       operator reply to match in a full-auto cron run, decisions are already
       known from memory.
@@ -174,17 +198,27 @@ Do NOT modify the repo yet. First consult decision memory, then branch.
    feature's decision is missing or ambiguous, ask one clarifying question in
    the thread and stop.
 2. Create the backup ref (invariant 1).
-3. In `/workspace/live-hermes`, run `git rebase origin/main`. At each conflict
-   stop, resolve per the decided option for the feature owning that file:
-   - `keep-local`: keep the side that contains the local feature. During a
-     rebase, `--ours` is the upstream side and `--theirs` is the local commit
-     being replayed — always verify by inspecting the conflicted file before
-     staging.
+3. In `/workspace/live-hermes`, run
+   `git -c merge.conflictStyle=zdiff3 merge --no-edit origin/main`. One merge
+   raises every conflict at once — there is no per-commit replay. Resolve each
+   per the decided option for the feature owning that file:
+   - `keep-local`: keep the local side. In a merge `--ours` IS the local side
+     and `--theirs` is upstream — the opposite of a rebase, where the sides are
+     inverted. Verify by inspecting the conflicted file before staging.
    - `take-upstream`: keep the upstream side, same verification.
    - `merge-both`: edit the file to combine both changes; keep local behavior
      and adopt upstream structure; then `git add`.
-   Then `git rebase --continue`. Repeat until done. If the rebase becomes
-   unmanageable, `git rebase --abort` and report honestly.
+   `zdiff3` puts the merge base between the two sides, which is what tells
+   "both sides added something here" apart from "upstream moved code we had
+   modified" — the second case needs the local change ported into the new
+   structure, not pasted back.
+   Then `git commit --no-edit`. If the merge becomes unmanageable,
+   `git merge --abort` and report honestly.
+
+   Do NOT enable rerere for this merge. The repository carries recorded
+   resolutions from the rebase era, where "ours" and "theirs" are inverted
+   relative to a merge; applying them here resolves conflicts backwards and
+   silently.
 4. Write `finalize-request.json` with `action: "finalize"`, the upstream head
    SHA, and your backup ref. Poll for the result.
 5. On `ok`: first write the operator's decision into each feature of
