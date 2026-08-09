@@ -870,8 +870,15 @@ class JobIntelStore:
             clauses.append("julianday('now') - julianday(last_seen_at) > ?")
             params.append(int(exclude_seen_since_days))
         params.append(int(limit))
+        # Never-attempted rows (text_backfill_state IS NULL) sort before
+        # previously-failed ones: once a row gets its first attempt and flips
+        # to 'failed', it must not keep monopolizing every future run ahead of
+        # rows nobody has tried yet -- that is what let headhunter's low-id,
+        # permanently-403 rows crowd out smartrecruiters and teamtailor rows
+        # in every observed production run. Tie-broken by id for determinism.
         sql = ("SELECT id, source, title, description, url, company, location "
-               "FROM vacancies WHERE " + " AND ".join(clauses) + " LIMIT ?")
+               "FROM vacancies WHERE " + " AND ".join(clauses) +
+               " ORDER BY (text_backfill_state IS NOT NULL) ASC, id ASC LIMIT ?")
         with self.connect(read_only=True) as conn:
             conn.row_factory = sqlite3.Row
             return [dict(r) for r in conn.execute(sql, params)]

@@ -268,3 +268,74 @@ def test_rows_skipped_by_a_rate_limit_have_no_state_written_at_all(
     eligible = {r["id"] for r in store.rows_needing_text(
         ["smartrecruiters"], limit=10, exclude_seen_since_days=2)}
     assert eligible == {first_id, second_id}
+
+
+# --- Follow-up: priority must survive the sweep's own candidate pool, not
+# just select() in isolation; never-attempted rows must not be crowded out
+# by a low-id row that keeps failing. ---
+
+def test_sweep_picks_priority_title_over_low_id_non_priority_rows(store):
+    """Production finding: the first 78 eligible rows by rowid were all
+    headhunter, low-priority titles -- a budget-5 sweep never reached a
+    higher-id, higher-priority row at all. Seed several low-id
+    non-priority rows, then one high-id executive+domain row, and confirm
+    the fetcher is called for the high-id priority row, not any low-id
+    one."""
+    for i in range(5):
+        _insert(store, url=f"https://x/low{i}")
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE vacancies SET title = 'Warehouse Operative' "
+            "WHERE url LIKE 'https://x/low%'")
+        conn.commit()
+    priority_id = _insert(store, url="https://x/priority")
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE vacancies SET title = 'Head of Product Growth' "
+            "WHERE id = ?", (priority_id,))
+        conn.commit()
+
+    calls = []
+
+    def fetcher(url):
+        calls.append(url)
+        return "y" * 400
+
+    sweep(store, budget=1, fetchers={"smartrecruiters": fetcher})
+    assert calls == ["https://x/priority"]
+
+
+def test_sweep_does_not_let_a_failed_low_id_row_crowd_out_never_attempted_rows(store):
+    """Once a row gets its first attempt and flips to 'failed', it must not
+    keep monopolizing every future run ahead of rows nobody has tried yet.
+    All rows share the same title-priority bucket so priority alone cannot
+    explain the outcome -- only the never-attempted-first rotation can."""
+    failing_id = _insert(store, url="https://x/failing")
+    higher_ids = [_insert(store, url=f"https://x/higher{i}") for i in range(3)]
+
+    # First sweep: the low-id row fails and flips to 'failed'.
+    sweep(store, budget=1, fetchers={"smartrecruiters": lambda url: None
+                                      if url == "https://x/failing" else "y" * 400})
+    with store.connect(read_only=True) as conn:
+        state = conn.execute(
+            "SELECT text_backfill_state FROM vacancies WHERE id = ?",
+            (failing_id,)).fetchone()[0]
+    assert state == "unavailable" or state == "failed"
+    # Force it into 'failed' explicitly regardless of which terminal/
+    # transient bucket the stub fetcher landed it in, so this test is about
+    # ordering, not about the taxonomy already covered elsewhere.
+    with store.connect() as conn:
+        conn.execute("UPDATE vacancies SET text_backfill_state = 'failed' "
+                     "WHERE id = ?", (failing_id,))
+        conn.commit()
+
+    calls = []
+
+    def fetcher(url):
+        calls.append(url)
+        return "y" * 400
+
+    second = sweep(store, budget=1, fetchers={"smartrecruiters": fetcher})
+    assert len(calls) == 1
+    assert calls[0] != "https://x/failing"
+    assert second.attempted == 1

@@ -80,3 +80,18 @@ def test_sql_threshold_matches_partial_min():
     from job_intel.store import JobIntelStore
     source = inspect.getsource(JobIntelStore.rows_needing_text)
     assert f"< {PARTIAL_MIN} " in source
+
+
+def test_rows_needing_text_orders_never_attempted_before_failed(store):
+    """A previously-failed row must not monopolize the front of the queue
+    ahead of a row nobody has tried yet, or a low-id permanently-failing
+    source can crowd out the rest of the backlog forever (the production
+    finding: headhunter's low-id rows were all that a budget-limited sweep
+    ever saw)."""
+    low_id = _insert(store, url="https://x/low")
+    store.record_text_backfill(low_id, "failed", None)
+    high_id = _insert(store, url="https://x/high")
+
+    rows = store.rows_needing_text(["smartrecruiters"], limit=10)
+    ids = [r["id"] for r in rows]
+    assert ids.index(high_id) < ids.index(low_id)

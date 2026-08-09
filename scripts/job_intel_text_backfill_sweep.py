@@ -27,21 +27,28 @@ logger = logging.getLogger(__name__)
 # only what the listing no longer returns belongs to the sweep.
 SEEN_RECENTLY_DAYS = 2
 
+# How many eligible rows to hand to backfill()'s own priority sort, not how
+# many get fetched -- backfill(rows, budget=budget) truncates the real work.
+# Wide enough that a title-priority row anywhere in the current ~4600-row
+# backlog can still be selected ahead of a low-priority row with a lower id;
+# cheap because this is a single indexed-enough SELECT, not a network call.
+CANDIDATE_POOL_LIMIT = 5000
+
 
 def sweep(store: JobIntelStore, *, budget: int, fetchers=None):
     """Fetch and persist text for up to `budget` eligible rows.
 
-    Asks for one row beyond the budget purely to learn whether the backlog
-    outgrows this pass -- that extra row is sliced off before `backfill()`
-    ever sees it, so it is never fetched and never written. The answer is
-    attached to the returned report as `more_eligible`, a plain presence
-    check rather than an exact count: one probe row proves "at least one
-    more", nothing about how many.
+    Pulls a wide candidate pool (CANDIDATE_POOL_LIMIT rows, not budget + 1)
+    so that `backfill()`'s own priority sort and the store's
+    never-attempted-first rotation operate over the true backlog rather than
+    a rowid-limited slice that arrived pre-truncated. `backfill()` truncates
+    to the real `budget` internally. `more_eligible` still means the same
+    thing: the pool held more eligible rows than this run's budget could
+    attempt.
     """
-    rows = store.rows_needing_text(sorted(BACKFILL_SOURCES), limit=budget + 1,
+    rows = store.rows_needing_text(sorted(BACKFILL_SOURCES), limit=CANDIDATE_POOL_LIMIT,
                                    exclude_seen_since_days=SEEN_RECENTLY_DAYS)
     more_eligible = len(rows) > budget
-    rows = rows[:budget]
     report = backfill(rows, budget=budget, fetchers=fetchers)
     report.more_eligible = more_eligible
     for result in report.results:
