@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -39,3 +40,31 @@ def parse_merge_tree(output: str) -> MergeTreeReport:
             break
         paths.append(line.strip())
     return MergeTreeReport(tree_oid=tree_oid, conflicted_paths=paths)
+
+
+_FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
+_SUMMARY_LINE = re.compile(
+    r"^=*\s*\d+\s+(?:failed|passed|error)\b.*\bin\s+[\d.]+s", re.MULTILINE
+)
+
+
+def _failures(log: str) -> set[str]:
+    if not _SUMMARY_LINE.search(log):
+        raise ValueError(
+            "pytest log has no summary line: the run was killed, not clean"
+        )
+    found: set[str] = set()
+    for line in log.split("\n"):
+        m = _FAILED_LINE.match(line)
+        if m:
+            found.add(m.group(1))
+    return found
+
+
+def new_failures(baseline_log: str, post_log: str) -> list[str]:
+    """Тесты, упавшие после слияния и не падавшие до него.
+
+    Пропавшие падения не возвращаются: слияние, которое что-то починило, —
+    не повод его блокировать.
+    """
+    return sorted(_failures(post_log) - _failures(baseline_log))
