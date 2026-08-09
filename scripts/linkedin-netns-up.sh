@@ -17,6 +17,9 @@ WG_CONF="${LINKEDIN_WG_CONF:-/etc/wireguard/wg0-ln.conf}"
 WG_ADDR="${LINKEDIN_WG_ADDR:?LINKEDIN_WG_ADDR не задан (адрес пира из Firewalla)}"
 VETH_HOST="veth-ln-host"
 VETH_NS="veth-ln-ns"
+# Подсеть туннеля выводится из адреса пира: она лежит внутри 10.0.0.0/8, но
+# резать её нельзя — на ней шлюз, который обслуживает DNS.
+GATEWAY_NET="${LINKEDIN_GATEWAY_NET:-$(echo "${WG_ADDR}" | cut -d. -f1-3).0/24}"
 
 require_root() {
   if [[ "$(id -u)" -ne 0 ]]; then
@@ -88,6 +91,41 @@ ensure_management_link() {
   ip -n "${NETNS}" link set "${VETH_NS}" up
 }
 
+disable_ipv6() {
+  # Резолвер отдаёт AAAA, а маршрута наружу по IPv6 в туннеле нет: каждое
+  # соединение тратит попытку в никуда, а запрос, жёстко предпочитающий IPv6,
+  # зависает — по симптомам неотличимо от антибот-блокировки.
+  ip netns exec "${NETNS}" sysctl -qw net.ipv6.conf.all.disable_ipv6=1
+  ip netns exec "${NETNS}" sysctl -qw net.ipv6.conf.default.disable_ipv6=1
+}
+
+block_private_networks() {
+  # Правило на Firewalla отрезает соседние хосты, но не сам роутер: блокировка
+  # «доступа в локальную сеть» ложится на форвардинг, а трафик, адресованный
+  # самому устройству, идёт другой цепочкой. Это наблюдалось живьём —
+  # 192.168.1.1 отвечал на HTTP, ICMP и tcp/22 при, казалось бы, настроенном
+  # правиле. Второй слой ставится там, где мы управляем всем сами.
+  #
+  # Порядок правил значим: разрешение подсети туннеля идёт первым, иначе
+  # запрет на 10.0.0.0/8 унесёт вместе с LAN и собственный резолвер.
+  ip netns exec "${NETNS}" iptables -F OUTPUT
+  ip netns exec "${NETNS}" iptables -A OUTPUT -d "${GATEWAY_NET}" -j ACCEPT
+  ip netns exec "${NETNS}" iptables -A OUTPUT -d 169.254.77.0/30 -j ACCEPT
+  for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+    ip netns exec "${NETNS}" iptables -A OUTPUT -d "${net}" -j REJECT
+  done
+}
+
+assert_lan_unreachable() {
+  # Изоляция проверяется, а не предполагается. Пробник целится в адрес, для
+  # которого запрет обязан сработать; успешный ответ означает, что правила
+  # собраны неправильно, и запускать браузер нельзя.
+  if ip netns exec "${NETNS}" timeout 3 bash -c "echo > /dev/tcp/192.168.1.1/80" 2>/dev/null; then
+    echo "LAN достижим из ${NETNS} несмотря на правила — браузер не запускается." >&2
+    exit 1
+  fi
+}
+
 assert_fail_closed() {
   local routes
   routes="$(ip -n "${NETNS}" route show default)"
@@ -104,6 +142,9 @@ ensure_netns
 ensure_tunnel
 ensure_management_link
 ensure_resolver
+disable_ipv6
+block_private_networks
 assert_fail_closed
+assert_lan_unreachable
 
 echo "netns ${NETNS} поднят: выход через ${WG_IF}, управление через ${VETH_HOST} (169.254.77.1)"

@@ -84,3 +84,48 @@ def test_script_checks_for_wireguard_tools() -> None:
     body = _body()
     assert "require_wireguard_tools" in body
     assert "wireguard-tools" in body
+
+
+# --- Дополнение: изоляция от LAN и IPv6 ---------------------------------
+
+
+def test_private_networks_are_blocked_inside_the_namespace() -> None:
+    """Правило на Firewalla отрезало соседние хосты, но не сам роутер: блок
+    «доступа в локальную сеть» ложится на форвардинг, а трафик к самому
+    устройству идёт другой цепочкой. Полагаться на механизм, которым мы не
+    управляем, здесь нельзя — тот же критерий, по которому выбран netns."""
+    body = _body()
+    assert "block_private_networks" in body
+    for prefix in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
+        assert prefix in body
+
+
+def test_tunnel_subnet_is_allowed_before_the_private_block() -> None:
+    """Шлюз туннеля лежит внутри 10.0.0.0/8 и обслуживает DNS. Разрешающее
+    правило обязано стоять раньше запрещающего, иначе namespace останется без
+    разрешения имён.
+
+    Порядок проверяется внутри самой функции: сравнивать первые вхождения по
+    всему файлу бесполезно, потому что оба адреса упоминаются ещё и в
+    комментариях."""
+    body = _body()
+    start = body.index("block_private_networks() {")
+    end = body.index("\n}", start)
+    function = body[start:end]
+    allow = function.index('-d "${GATEWAY_NET}" -j ACCEPT')
+    deny = function.index('for net in 10.0.0.0/8')
+    assert allow < deny
+
+
+def test_ipv6_is_disabled_inside_the_namespace() -> None:
+    """Резолвер отдаёт AAAA, а маршрута наружу по IPv6 в туннеле нет. Попытка
+    в никуда на каждом соединении, а при жёстком предпочтении IPv6 — зависание,
+    по симптомам неотличимое от антибот-блокировки."""
+    body = _body()
+    assert "disable_ipv6" in body
+    assert "net.ipv6.conf.all.disable_ipv6=1" in body
+
+
+def test_isolation_is_asserted_not_assumed() -> None:
+    body = _body()
+    assert "assert_lan_unreachable" in body
