@@ -225,15 +225,12 @@ def test_activity_counts_by_message_kind(db):
     audit.log(db, "gate.sent", {"kind": "reminder", "raw": {"text": "секрет"}})
     audit.log(db, "gate.sent", {"kind": "med", "raw": {"text": "секрет"}})
     audit.log(db, "gate.sent", {"kind": "med", "raw": {"text": "секрет"}})
-    audit.log(db, "tick.med", {"intake_id": 1})
-    audit.log(db, "meds.take", {"intake_id": 1})
     db.commit()
     now = datetime(2026, 8, 1, 22, 30, tzinfo=timezone.utc)
     activity = diag.collect_activity(db, {"daily_budget": 8},
-                                     "1970-01-01T00:00:00+00:00", now)
+                                     "1970-01-01T00:00:00+00:00",
+                                     "2100-01-01T00:00:00+00:00")
     assert activity["sent_by_kind"] == {"reminder": 1, "med": 2}
-    assert activity["meds_generated"] == 1
-    assert activity["meds_taken"] == 1
     assert activity["budget_limit"] == 8
     assert "секрет" not in json.dumps(activity, ensure_ascii=False)
 
@@ -313,7 +310,7 @@ def test_backups_missing_reports_no_backup_found(tmp_path):
         {"backup_dir": str(tmp_path), "offsite_enabled": False}, now,
         verify=lambda path: (True, {"integrity": "ok", "schema_version": "12"}))
     assert result == {"last_path": None, "verify": "missing", "schema_version": None,
-                      "offsite_age_days": None}
+                      "offsite_age_days": None, "offsite_overdue": None}
 
 
 def test_backups_reports_verify_failure_detail(tmp_path):
@@ -595,3 +592,194 @@ def test_delivery_not_ok_on_status_not_ok(tmp_path):
     ok, detail = diag.report_delivery_status(path, "fam-nightly-report", "2026-08-01T22:30:01+00:00")
     assert ok is False
     assert "last_status" in detail
+
+
+# --- reported calendar day (Asia/Almaty) ------------------------------------
+#
+# The nightly digest runs at 22:30 UTC, which is 03:30 Almaty on the NEXT
+# local day. "Как прошли сутки" therefore means the last COMPLETE Almaty day
+# (08.08 here), whose UTC bounds are 07.08 19:00Z .. 08.08 19:00Z -- not the
+# calendar day the collector happens to be standing in, and not the errors
+# section's deliberately overlapping `since` window.
+DIGEST_NOW = datetime(2026, 8, 8, 22, 30, tzinfo=timezone.utc)
+
+
+def _audit_at(conn, ts_utc, kind, payload, actor="tick"):
+    """audit.log() stamps rows with the real clock; day-boundary tests need
+    to place a row at an exact instant, so they insert directly."""
+    conn.execute(
+        "INSERT INTO audit_log(ts_utc, kind, actor, payload) VALUES(?,?,?,?)",
+        (ts_utc, kind, actor, json.dumps(payload, ensure_ascii=False)))
+
+
+def _seed_dose(conn, intake_id, plan_ts_utc, status="pending", taken_ts_utc=None):
+    conn.execute(
+        "INSERT OR IGNORE INTO meds(id, name, dose, times, remaining, threshold,"
+        " enabled, created_at, updated_at)"
+        " VALUES(1,'мисол','1 таблетка','[\"09:00\"]',39,10,1,?,?)",
+        ("2026-07-20T00:00:00+00:00", "2026-07-20T00:00:00+00:00"))
+    conn.execute(
+        "INSERT INTO med_intakes(id, med_id, plan_ts_utc, taken_ts_utc, status,"
+        " created_at) VALUES(?,1,?,?,?,?)",
+        (intake_id, plan_ts_utc, taken_ts_utc, status, plan_ts_utc))
+
+
+def test_reported_day_is_the_last_complete_almaty_day():
+    assert diag.reported_day_bounds(DIGEST_NOW) == (
+        "2026-08-07T19:00:00+00:00", "2026-08-08T19:00:00+00:00", "2026-08-08")
+
+
+def test_repeated_med_reminders_do_not_inflate_the_dose_count(db):
+    # The live 09.08 digest said "создано 3 дозы, принято 2" for a single
+    # daily dose: the counter read audit kind tick.med -- reminder SENDS,
+    # two of which were retries for one dose -- instead of the doses.
+    _seed_dose(db, 19, "2026-08-08T04:00:00+00:00", "taken",
+               "2026-08-08T07:01:42+00:00")
+    _audit_at(db, "2026-08-08T04:00:19+00:00", "tick.med",
+              {"intake_id": 19, "mode": "take", "status": "sent"})
+    _audit_at(db, "2026-08-08T04:45:20+00:00", "tick.med",
+              {"intake_id": 19, "mode": "take", "status": "sent"})
+    db.commit()
+    day_from, day_to, _ = diag.reported_day_bounds(DIGEST_NOW)
+    activity = diag.collect_activity(db, {"daily_budget": 8},
+                                     day_from, day_to)
+    assert activity["meds_planned"] == 1
+    assert activity["meds_taken"] == 1
+
+
+def test_doses_outside_the_reported_day_are_not_counted(db):
+    # meds_gen runs at 19:00 UTC = 00:00 Almaty, so the NEXT day's dose
+    # already exists in the table when the digest is built. Counting by
+    # plan_ts_utc keeps it out; counting audit events at that exact
+    # boundary would be one second away from misfiling it.
+    _seed_dose(db, 18, "2026-08-07T04:00:00+00:00", "taken",
+               "2026-08-07T04:47:19+00:00")
+    _seed_dose(db, 19, "2026-08-08T04:00:00+00:00", "taken",
+               "2026-08-08T07:01:42+00:00")
+    _seed_dose(db, 20, "2026-08-09T04:00:00+00:00")
+    db.commit()
+    day_from, day_to, _ = diag.reported_day_bounds(DIGEST_NOW)
+    activity = diag.collect_activity(db, {"daily_budget": 8},
+                                     day_from, day_to)
+    assert activity["meds_planned"] == 1
+    assert activity["meds_taken"] == 1
+
+
+def test_a_planned_dose_left_untaken_is_visible_as_such(db):
+    _seed_dose(db, 19, "2026-08-08T04:00:00+00:00", "missed")
+    db.commit()
+    day_from, day_to, _ = diag.reported_day_bounds(DIGEST_NOW)
+    activity = diag.collect_activity(db, {"daily_budget": 8},
+                                     day_from, day_to)
+    assert activity["meds_planned"] == 1
+    assert activity["meds_taken"] == 0
+
+
+def test_messages_are_counted_for_the_reported_day_only(db):
+    _audit_at(db, "2026-08-07T18:59:00+00:00", "gate.sent", {"kind": "reminder"})
+    _audit_at(db, "2026-08-08T06:00:00+00:00", "gate.sent", {"kind": "reminder"})
+    _audit_at(db, "2026-08-08T19:00:00+00:00", "gate.sent", {"kind": "reminder"})
+    db.commit()
+    day_from, day_to, _ = diag.reported_day_bounds(DIGEST_NOW)
+    activity = diag.collect_activity(db, {"daily_budget": 8},
+                                     day_from, day_to)
+    assert activity["messages_sent"] == 1
+    assert activity["sent_by_kind"] == {"reminder": 1}
+
+
+def test_budget_is_reported_for_the_reported_day_not_for_today(db):
+    # 03:30 Almaty is 3.5h into a fresh budget day, so "today" is always
+    # near zero at digest time -- the live digest read "Бюджет: 0 из 8"
+    # while the day being reported had actually spent one unit.
+    _audit_at(db, "2026-08-08T06:00:00+00:00", "gate.sent",
+              {"kind": "reminder", "raw": {"event_id": 1}})
+    db.commit()
+    day_from, day_to, _ = diag.reported_day_bounds(DIGEST_NOW)
+    activity = diag.collect_activity(db, {"daily_budget": 8},
+                                     day_from, day_to)
+    assert activity["budget_spent"] == 1
+
+
+def test_digest_publishes_the_reported_day_alongside_the_error_window(db):
+    digest, _ = diag.build_digest(
+        db, {"daily_budget": 8, "backup_dir": "/nonexistent"},
+        "2026-08-06T22:30:00+00:00", DIGEST_NOW,
+        delivery={"previous_report_ok": True}, state={},
+        verify=lambda p: (True, {}))
+    assert digest["window"]["day"] == "2026-08-08"
+    assert digest["window"]["since"] == "2026-08-06T22:30:00+00:00"
+
+
+# --- offsite cadence --------------------------------------------------------
+
+
+def _offsite_cfg(tmp_path, dump_name, **extra):
+    backup_dir = tmp_path / "local"
+    backup_dir.mkdir()
+    (backup_dir / "assistant-20260808.db").write_bytes(b"x")
+    offsite_dir = tmp_path / "offsite"
+    offsite_dir.mkdir()
+    (offsite_dir / dump_name).write_bytes(b"x")
+    return {"backup_dir": str(backup_dir), "offsite_enabled": True,
+            "offsite_dir": str(offsite_dir), **extra}
+
+
+def test_offsite_inside_its_weekly_period_is_not_overdue(tmp_path):
+    # The weekly timer fires Sun 23:30 UTC, so by Saturday night the newest
+    # dump is legitimately 6 days old. Reporting the raw age with no notion
+    # of the period made every weekend digest cry data-loss risk.
+    cfg = _offsite_cfg(tmp_path, "assistant-20260802.db.age")
+    now = datetime(2026, 8, 8, 22, 30, tzinfo=timezone.utc)
+    result = diag.collect_backups(
+        cfg, now, verify=lambda p: (True, {"integrity": "ok",
+                                           "schema_version": "12"}))
+    assert result["offsite_age_days"] == 6
+    assert result["offsite_overdue"] is False
+
+
+def test_offsite_past_its_period_and_grace_is_overdue(tmp_path):
+    cfg = _offsite_cfg(tmp_path, "assistant-20260731.db.age")
+    now = datetime(2026, 8, 8, 22, 30, tzinfo=timezone.utc)
+    result = diag.collect_backups(
+        cfg, now, verify=lambda p: (True, {"integrity": "ok",
+                                           "schema_version": "12"}))
+    assert result["offsite_age_days"] == 8
+    assert result["offsite_overdue"] is True
+
+
+def test_offsite_period_is_configurable(tmp_path):
+    cfg = _offsite_cfg(tmp_path, "assistant-20260802.db.age",
+                       offsite_period_days=1)
+    now = datetime(2026, 8, 8, 22, 30, tzinfo=timezone.utc)
+    result = diag.collect_backups(
+        cfg, now, verify=lambda p: (True, {"integrity": "ok",
+                                           "schema_version": "12"}))
+    assert result["offsite_overdue"] is True
+
+
+def test_missing_offsite_dump_is_overdue_not_merely_unknown(tmp_path):
+    # No dump at all is the worst case, but age_days is None there -- a
+    # bare `age > period` comparison would quietly call it fine.
+    backup_dir = tmp_path / "local"
+    backup_dir.mkdir()
+    (backup_dir / "assistant-20260808.db").write_bytes(b"x")
+    offsite_dir = tmp_path / "offsite"
+    offsite_dir.mkdir()
+    now = datetime(2026, 8, 8, 22, 30, tzinfo=timezone.utc)
+    result = diag.collect_backups(
+        {"backup_dir": str(backup_dir), "offsite_enabled": True,
+         "offsite_dir": str(offsite_dir)}, now,
+        verify=lambda p: (True, {"integrity": "ok", "schema_version": "12"}))
+    assert result["offsite_age_days"] is None
+    assert result["offsite_overdue"] is True
+
+
+def test_offsite_disabled_is_never_overdue(tmp_path):
+    backup_dir = tmp_path / "local"
+    backup_dir.mkdir()
+    (backup_dir / "assistant-20260808.db").write_bytes(b"x")
+    now = datetime(2026, 8, 8, 22, 30, tzinfo=timezone.utc)
+    result = diag.collect_backups(
+        {"backup_dir": str(backup_dir), "offsite_enabled": False}, now,
+        verify=lambda p: (True, {"integrity": "ok", "schema_version": "12"}))
+    assert result["offsite_overdue"] is False

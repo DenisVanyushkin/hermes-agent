@@ -9,7 +9,7 @@ import json
 import os
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from . import db as famdb
 from . import gate
@@ -204,19 +204,43 @@ def diff_known_issues(state, findings, now):
 SYSTEMCTL_TIMEOUT = 30
 
 
-def collect_activity(conn, cfg, since, now):
+def reported_day_bounds(now):
+    """UTC bounds + label of the last COMPLETE Asia/Almaty day.
+
+    The collector runs at 22:30 UTC -- 03:30 Almaty, barely three hours
+    into a day that has not happened yet. Neither window already at hand
+    answers "как прошли сутки": the collector's own local day would cover
+    only those three hours, and the errors window covers 48h (it overlaps
+    by one night on purpose, so an undelivered digest is never lost). For
+    medication counters that ambiguity is not cosmetic -- it is what made
+    one daily dose read as "создано 3, принято 2". Activity is therefore
+    reported against the day that just ended, and only that day.
+    """
+    yesterday = (now - timedelta(days=1)).astimezone(timezone.utc)
+    day_from, day_to = gate._almaty_day_utc_bounds(yesterday.isoformat())
+    return day_from, day_to, yesterday.astimezone(gate.ALMATY).date().isoformat()
+
+
+def collect_activity(conn, cfg, day_from, day_to):
     """Counters only -- never message text. `sent_by_kind` uses the inner
     payload["kind"] (reminder/med/digest), which is a fixed vocabulary,
-    not user content."""
+    not user content.
+
+    Bounded by the reported calendar day (reported_day_bounds), NOT by the
+    errors window: that one overlaps by a night on purpose, and counters
+    summed over it are read as a day's worth by anyone the report reaches.
+    """
     def _count(kind):
         return conn.execute(
-            "SELECT COUNT(*) FROM audit_log WHERE kind=? AND ts_utc >= ?",
-            (kind, since)).fetchone()[0]
+            "SELECT COUNT(*) FROM audit_log "
+            "WHERE kind=? AND ts_utc >= ? AND ts_utc < ?",
+            (kind, day_from, day_to)).fetchone()[0]
 
     sent_by_kind = {}
     for row in conn.execute(
-            "SELECT payload FROM audit_log WHERE kind='gate.sent' AND ts_utc >= ?",
-            (since,)):
+            "SELECT payload FROM audit_log WHERE kind='gate.sent' "
+            "AND ts_utc >= ? AND ts_utc < ?",
+            (day_from, day_to)):
         try:
             payload = json.loads(row["payload"])
         except (TypeError, ValueError):
@@ -225,17 +249,31 @@ def collect_activity(conn, cfg, since, now):
             continue
         kind = payload.get("kind") or "?"
         sent_by_kind[kind] = sent_by_kind.get(kind, 0) + 1
+    # Doses come from med_intakes, not from audit_log. Two reasons the
+    # audit route was wrong: kind="tick.med" is a reminder SEND (one dose
+    # gets several when the med gate holds it, which is how one dose came
+    # out as three), and meds_gen fires at 19:00 UTC == 00:00 Almaty, i.e.
+    # exactly on the day boundary -- a second of timer drift would file
+    # the dose under the wrong day. plan_ts_utc has neither problem: it
+    # answers "what was due that day", which is the question asked.
+    planned, taken = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(status = 'taken'), 0) FROM med_intakes "
+        "WHERE plan_ts_utc >= ? AND plan_ts_utc < ?",
+        (day_from, day_to)).fetchone()
     return {
         "sent_by_kind": sent_by_kind,
         "messages_sent": sum(sent_by_kind.values()),
-        "meds_generated": _count("tick.med"),
-        "meds_taken": _count("meds.take"),
+        "meds_planned": planned,
+        "meds_taken": taken,
         "reminder_chains_built": _count("rem.regenerate"),
-        # gate.budget_spent_today's now_utc contract is a string (its
-        # _parse_utc calls datetime.fromisoformat directly) -- every other
-        # caller in the codebase passes one; `now` here is a datetime.
-        "budget_spent": gate.budget_spent_today(
-            conn, now_utc=now.isoformat(timespec="seconds")),
+        # day_from, not `now`: budget_spent_today resolves its own Almaty
+        # day from the instant given, and `now` is 03:30 Almaty -- three
+        # hours into a fresh budget, which is why a busy day was reported
+        # as "0 из 8". day_from is midnight Almaty of the reported day, so
+        # the bounds it derives are exactly [day_from, day_to). It also
+        # satisfies that function's string contract (its _parse_utc calls
+        # datetime.fromisoformat directly).
+        "budget_spent": gate.budget_spent_today(conn, now_utc=day_from),
         "budget_limit": cfg.get("daily_budget", 8),
     }
 
@@ -303,6 +341,12 @@ def collect_timers(runner=None):
     return {"failed": failed, "ok": ok}
 
 
+# The fam-offsite timer's own cadence (OnCalendar=Sun 23:30 UTC), so the
+# digest can tell "waiting for the weekly run" from "the weekly run
+# stopped happening". Overridable per-install via offsite_period_days.
+DEFAULT_OFFSITE_PERIOD_DAYS = 7
+
+
 def collect_backups(cfg, now, verify):
     """Newest dated backup of the assistant DB + its integrity verdict.
     `verify` is injected (maint.verify_backup) so diag never imports maint
@@ -321,13 +365,14 @@ def collect_backups(cfg, now, verify):
     files = sorted(backup_dir.glob(f"{stem}-????????.db")) if backup_dir.is_dir() else []
     if not files:
         return {"last_path": None, "verify": "missing", "schema_version": None,
-                "offsite_age_days": None}
+                "offsite_age_days": None, "offsite_overdue": None}
     newest = files[-1]
     ok, detail = verify(newest)
     result = {"last_path": newest.name,
               "verify": "ok" if ok else str(detail.get("integrity")),
               "schema_version": detail.get("schema_version"),
-              "offsite_age_days": None}
+              "offsite_age_days": None,
+              "offsite_overdue": False}
     if cfg.get("offsite_enabled"):
         offsite = Path(cfg["offsite_dir"])
         dumps = sorted(offsite.glob("*-????????.db.age")) if offsite.is_dir() else []
@@ -338,6 +383,15 @@ def collect_backups(cfg, now, verify):
                 result["offsite_age_days"] = (now - written).days
             except ValueError:
                 result["offsite_age_days"] = None
+        # A raw age is not a verdict. The offsite timer is WEEKLY, so on the
+        # Saturday before it fires the newest dump is legitimately six days
+        # old -- and the reporter, told only "растущий offsite_age_days",
+        # cried data-loss risk every weekend. Compare against the cadence
+        # instead: age > period is late, and a missing dump (age None) is
+        # the worst case, not an unknown one.
+        age = result["offsite_age_days"]
+        period = cfg.get("offsite_period_days") or DEFAULT_OFFSITE_PERIOD_DAYS
+        result["offsite_overdue"] = age is None or age > period
     state_db_path = cfg.get("state_db_path")
     if state_db_path:
         # Presence/age only -- never verify() this one. Its schema isn't
@@ -408,12 +462,17 @@ def build_digest(conn, cfg, since, now, delivery, state, verify, runner=None):
     _section("errors", _errors)
     _section("probes", _probes)
     _section("calendar", lambda: collect_calendar(conn, since))
-    _section("activity", lambda: collect_activity(conn, cfg, since, now))
+    day_from, day_to, day_label = reported_day_bounds(now)
+    _section("activity", lambda: collect_activity(conn, cfg, day_from, day_to))
     _section("timers", lambda: collect_timers(runner=runner))
     _section("backups", lambda: collect_backups(cfg, now, verify))
     return {
         "generated_at": now.isoformat(timespec="seconds"),
-        "window": {"since": since},
+        # Two windows, deliberately: `since` is the overlapping error
+        # window (delivery safety), `day` is the calendar day the
+        # activity counters actually describe. The reporter must not
+        # have to guess which one a number belongs to.
+        "window": {"since": since, "day": day_label},
         "fam_schema_version": famdb.meta_get(conn, "schema_version"),
         "delivery": delivery,
         "sections": sections,
