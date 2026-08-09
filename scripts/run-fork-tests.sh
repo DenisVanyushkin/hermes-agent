@@ -8,7 +8,13 @@ set -uo pipefail
 
 WT="${1:?usage: run-fork-tests.sh <worktree>}"
 UPSTREAM_REF="${HERMES_UPSTREAM_REMOTE:-origin}/${HERMES_UPSTREAM_BRANCH:-main}"
-PYTHON_BIN="${HERMES_PYTHON:-$WT/venv/bin/python}"
+# Интерпретатор берём из ГЛАВНОГО чекаута, а не из worktree: venv лежит в
+# основном рабочем дереве и в worktree не копируется. Взять оттуда python3 без
+# зависимостей проекта — значит получить два одинаково рассыпавшихся прогона,
+# совпадающие множества падений и гейт, который пропускает что угодно.
+MAIN_CHECKOUT="$(dirname "$(git -C "$WT" rev-parse --git-common-dir)")"
+PYTHON_BIN="${HERMES_PYTHON:-$MAIN_CHECKOUT/venv/bin/python}"
+[ -x "$PYTHON_BIN" ] || PYTHON_BIN="$WT/venv/bin/python"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3)"
 
 mapfile -t OURS < <(
