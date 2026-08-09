@@ -1,14 +1,17 @@
 # LinkedIn Re-auth Runbook
 
-> **STATUS (2026-07-04): RETIRED as daily production source** — reason:
-> `retired_auth_instability`. Re-auth was validated on 2026-07-04: the session
-> authenticated correctly, but LinkedIn invalidated the `li_at` cookie within
-> ~30 minutes of the first automated CDP jobs-search from this VPS (same
-> pattern as the 2026-06-06 session loss). Decision: do not run LinkedIn as an
-> automated daily source; no anti-detection work. The profile and this
-> procedure remain available for **manual-only** use. In env:
-> `JOB_INTEL_ENABLED_SOURCES` excludes `linkedin` → source reports
-> `disabled_by_config`.
+> **STATUS (2026-08-09): ре-авторизация выполняется внутри сетевого
+> пространства имён `ln-eg`.** Решение 2026-07-04 о выводе источника из
+> эксплуатации (`retired_auth_instability`) опиралось на счётчик `login_walls`,
+> который срабатывал и на здоровых прогонах, поэтому «инвалидация после
+> автоматического доступа» была интерпретацией, а не измерением. Гипотеза,
+> проверяемая сейчас, — расхождение географии: аккаунт используется из Алматы,
+> сессией управлял хост в немецком дата-центре.
+>
+> **Порядок действий — в `docs/runbooks/linkedin-netns-verification.md`.**
+> Вход выполняется через `scripts/browser-desktop-linkedin.sh`, который сам
+> поднимает namespace; вход вне namespace обесценивает проверку. `linkedin`
+> остаётся исключённым из `JOB_INTEL_ENABLED_SOURCES` до чистых замеров.
 
 Symptom: `source_kpi_run` shows `linkedin` with `login_walls > 0` on consecutive daily
 runs, `found_count = 0`, `skip_reason = login_wall`. The health report emits
