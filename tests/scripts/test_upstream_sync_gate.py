@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from scripts.upstream_sync_gate import new_failures, parse_merge_tree
@@ -87,3 +91,55 @@ def test_a_log_without_a_summary_line_is_a_killed_run_not_a_clean_one():
         new_failures(before, killed)
     with pytest.raises(ValueError):
         new_failures(killed, before)
+
+
+GATE = Path(__file__).resolve().parents[2] / "scripts" / "upstream_sync_gate.py"
+
+
+def _cli(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(GATE), *args], capture_output=True, text=True
+    )
+
+
+def test_cli_merge_tree_exits_zero_and_prints_nothing_when_clean(tmp_path):
+    f = tmp_path / "mt.txt"
+    f.write_text(CLEAN)
+    r = _cli("merge-tree", "--output", str(f))
+    assert r.returncode == 0
+    assert r.stdout.strip() == ""
+
+
+def test_cli_merge_tree_exits_one_and_lists_paths_when_conflicted(tmp_path):
+    f = tmp_path / "mt.txt"
+    f.write_text(CONFLICTED)
+    r = _cli("merge-tree", "--output", str(f))
+    assert r.returncode == 1
+    assert r.stdout.split() == ["f.txt", "gateway/run.py"]
+
+
+def test_cli_new_failures_exits_one_and_lists_them(tmp_path):
+    before, after = tmp_path / "b.log", tmp_path / "a.log"
+    before.write_text(_log(["tests/a.py::test_one"]))
+    after.write_text(_log(["tests/a.py::test_one", "tests/b.py::test_two"]))
+    r = _cli("new-failures", "--baseline", str(before), "--post", str(after))
+    assert r.returncode == 1
+    assert r.stdout.split() == ["tests/b.py::test_two"]
+
+
+def test_cli_new_failures_exits_zero_when_the_sets_match(tmp_path):
+    before, after = tmp_path / "b.log", tmp_path / "a.log"
+    same = _log(["tests/a.py::test_one"])
+    before.write_text(same)
+    after.write_text(same)
+    r = _cli("new-failures", "--baseline", str(before), "--post", str(after))
+    assert r.returncode == 0
+
+
+def test_cli_exits_two_on_a_killed_run(tmp_path):
+    before, after = tmp_path / "b.log", tmp_path / "a.log"
+    before.write_text(_log(["tests/a.py::test_one"]))
+    after.write_text("FAILED tests/a.py::test_one - boom\n")
+    r = _cli("new-failures", "--baseline", str(before), "--post", str(after))
+    assert r.returncode == 2
+    assert "killed" in r.stderr

@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -68,3 +70,40 @@ def new_failures(baseline_log: str, post_log: str) -> list[str]:
     не повод его блокировать.
     """
     return sorted(_failures(post_log) - _failures(baseline_log))
+
+
+def _main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="upstream-sync gate decisions")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_mt = sub.add_parser("merge-tree", help="list conflicting paths")
+    p_mt.add_argument("--output", required=True, help="file with git merge-tree output")
+
+    p_nf = sub.add_parser("new-failures", help="list failures the merge introduced")
+    p_nf.add_argument("--baseline", required=True)
+    p_nf.add_argument("--post", required=True)
+
+    args = parser.parse_args(argv)
+
+    try:
+        if args.cmd == "merge-tree":
+            report = parse_merge_tree(Path(args.output).read_text(encoding="utf-8"))
+            items = report.conflicted_paths
+        else:
+            items = new_failures(
+                Path(args.baseline).read_text(encoding="utf-8"),
+                Path(args.post).read_text(encoding="utf-8"),
+            )
+    except (ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    for item in items:
+        print(item)
+    return 1 if items else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
