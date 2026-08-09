@@ -8,11 +8,21 @@ from tools.approval import check_execute_code_guard
 
 @pytest.fixture
 def cron_env(monkeypatch):
+    # The gate resolves "am I cron?" through gateway.session_context first and
+    # only falls back to os.environ when the context variable was never set.
+    # The cron scheduler sets that variable in production, so a test that only
+    # sets the env var silently stops being a cron session as soon as anything
+    # else in the process engages the session-context layer. Set both.
+    from gateway import session_context as _sc
+
+    _token = _sc._VAR_MAP["HERMES_CRON_SESSION"].set("1")
     monkeypatch.setenv("HERMES_CRON_SESSION", "1")
     monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
     monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
     monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
+    yield
+    _sc._VAR_MAP["HERMES_CRON_SESSION"].reset(_token)
 
 
 SCRIPT = "import shutil; shutil.rmtree('/var/lib/job-intel/state')"

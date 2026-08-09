@@ -8,10 +8,18 @@ from tools.approval import request_tool_approval
 
 @pytest.fixture
 def cron_env(monkeypatch):
+    # See tests/tools/test_execute_code_guard_cron.py: the gate reads the
+    # session-context variable first, so the env var alone is not enough once
+    # anything else in the process engages that layer.
+    from gateway import session_context as _sc
+
+    _token = _sc._VAR_MAP["HERMES_CRON_SESSION"].set("1")
     monkeypatch.setenv("HERMES_CRON_SESSION", "1")
     monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
     monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
+    yield
+    _sc._VAR_MAP["HERMES_CRON_SESSION"].reset(_token)
 
 
 def test_smart_deny_blocks_plugin_escalation(cron_env):

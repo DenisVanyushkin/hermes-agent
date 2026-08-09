@@ -29,12 +29,19 @@ def _make_agent(session_db, session_id=SESSION_ID):
 
 
 def _break_append(db, exc):
-    """Заставить append_message детерминированно падать — форма бага 27.07."""
+    """Заставить запись сообщений детерминированно падать — форма бага 27.07.
+
+    Флаш пишет партиями через ``append_messages_batch``; одиночный
+    ``append_message`` остался для других путей. Ломаем оба, иначе тест
+    молча перестаёт проверять что-либо, как только апстрим меняет путь
+    записи.
+    """
 
     def _raise(*args, **kwargs):
         raise exc
 
     db.append_message = _raise
+    db.append_messages_batch = _raise
 
 
 def test_single_failure_stays_warning(caplog):
@@ -91,12 +98,14 @@ def test_success_between_failures_resets_the_counter(caplog):
         try:
             agent = _make_agent(db)
             healthy_append = db.append_message
+            healthy_batch = db.append_messages_batch
 
             _break_append(db, TypeError("boom"))
             agent._flush_messages_to_session_db([{"role": "user", "content": "a"}], [])
             assert agent._consecutive_flush_failures == 1
 
             db.append_message = healthy_append
+            db.append_messages_batch = healthy_batch
             agent._flush_messages_to_session_db([{"role": "user", "content": "b"}], [])
             assert agent._consecutive_flush_failures == 0
 

@@ -35,14 +35,21 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 # because `conn.autocommit = True` is the idiomatic form and a bare
 # `autocommit=` pattern would miss it.
 #
-# `sqlite3.Blob`, `sqlite3.LEGACY_TRANSACTION_CONTROL` and the `SQLITE_*`
-# constants are CPython 3.12 stdlib exports pysqlite3 0.5.x does not provide.
-# Zero uses today (latent), added so a future one is caught rather than
-# breaking at runtime once sqlite3 is aliased to pysqlite3.
+# `sqlite3.Blob` and `sqlite3.LEGACY_TRANSACTION_CONTROL` are CPython 3.12
+# stdlib exports pysqlite3 does not provide. Zero uses today (latent), added
+# so a future one is caught rather than breaking at runtime once sqlite3 is
+# aliased to pysqlite3.
+#
+# The `SQLITE_*` authorizer constants were listed here too, on the assumption
+# they were stdlib-only. They are NOT: the deployed pysqlite3 0.6.0 exports
+# SQLITE_OK / SQLITE_DENY / SQLITE_READ (verified against the live runtime),
+# so matching them made the guard fire on legitimate authorizer callbacks.
+# Checked with:
+#   venv/bin/python -c "import sqlite3; print(hasattr(sqlite3,'SQLITE_OK'))"
 STDLIB_ONLY = re.compile(
     r"\.autocommit\s*=|\bautocommit\s*=\s*(?:True|False|sqlite3\.)"
     r"|\.blobopen\(|\bcreate_window_function\b|\.setlimit\(|\.getlimit\("
-    r"|\bsqlite3\.(?:Blob|LEGACY_TRANSACTION_CONTROL|SQLITE_[A-Z_]+)\b"
+    r"|\bsqlite3\.(?:Blob|LEGACY_TRANSACTION_CONTROL)\b"
 )
 
 # Matches any import statement that brings the sqlite3 module into scope:
@@ -132,14 +139,22 @@ def test_the_guard_can_actually_fire():
 
 
 def test_the_guard_catches_cpython_312_only_sqlite3_exports():
-    """sqlite3.Blob, LEGACY_TRANSACTION_CONTROL and the SQLITE_* constants
-    are stdlib-only exports pysqlite3 0.5.x lacks. Zero uses today, but a
-    future one must trip this guard, not fail silently at import time once
-    sqlite3 is aliased."""
+    """sqlite3.Blob and LEGACY_TRANSACTION_CONTROL are stdlib-only exports
+    pysqlite3 lacks. Zero uses today, but a future one must trip this guard,
+    not fail silently at import time once sqlite3 is aliased."""
     assert STDLIB_ONLY.search("b = sqlite3.Blob(conn, 't', 'c', 1)")
     assert STDLIB_ONLY.search("conn.autocommit = sqlite3.LEGACY_TRANSACTION_CONTROL")
-    assert STDLIB_ONLY.search("flags = sqlite3.SQLITE_DENY")
     assert not STDLIB_ONLY.search("driver = 'sqlite3.Blobber'")
+
+
+def test_the_authorizer_constants_are_not_treated_as_stdlib_only():
+    """The deployed pysqlite3 exports them, so flagging them is a false alarm.
+
+    Asserted against the live runtime rather than a version constant: the
+    point of the guard is what this deployment's sqlite3 actually provides.
+    """
+    assert hasattr(sqlite3, "SQLITE_OK")
+    assert not STDLIB_ONLY.search("flags = sqlite3.SQLITE_DENY")
 
 
 def test_the_import_scoping_actually_discriminates():

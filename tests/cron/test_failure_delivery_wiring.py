@@ -24,7 +24,11 @@ def _patch_pipeline(monkeypatch, *, success=True, final="final response", error=
     delivered = []
     alerted = []
 
-    def fake_run_job(job, *, defer_agent_teardown=None):
+    # **_kwargs: run_job grows keyword arguments upstream (extra_prompt, ...);
+    # a double with a frozen signature turns every such addition into a
+    # "job failed" swallowed by the scheduler's except, which looks exactly
+    # like the delivery bug this file is meant to catch.
+    def fake_run_job(job, *, defer_agent_teardown=None, **_kwargs):
         return (success, "out", final, error)
 
     monkeypatch.setattr(s, "run_job", fake_run_job)

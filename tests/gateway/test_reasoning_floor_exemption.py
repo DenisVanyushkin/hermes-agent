@@ -72,7 +72,11 @@ def test_every_agent_the_gateway_hands_out_gets_the_session_override():
 
     src = pathlib.Path("gateway/run.py").read_text()
 
-    assert src.count("agent._reasoning_session_override = ") == 3
+    # Два места раздачи агента: TurnRunner.run_sync (обычный ход гейтвея) и
+    # _run_background_task_inner. Раньше их было три — третье присвоение
+    # стояло на пути создания агента внутри того же run_sync и полностью
+    # перекрывалось попутным присвоением в блоке per-message state ниже.
+    assert src.count("agent._reasoning_session_override = ") == 2
     assert "_reasoning_floor_exempt" not in src
 
 
@@ -84,4 +88,9 @@ def test_the_override_is_never_shared_state_on_the_gateway():
     src = pathlib.Path("gateway/run.py").read_text()
 
     assert "self._reasoning_session_override" not in src
-    assert src.count("_session_override = reasoning_config if self._session_reasoning_override_active(") == 2
+    # Признак считается локально на каждом из двух путей. В TurnRunner
+    # гейтвей доступен как self._runner, поэтому форм вызова две.
+    assert (
+        src.count("_session_override = reasoning_config if self._session_reasoning_override_active(")
+        + src.count("_session_override = reasoning_config if self._runner._session_reasoning_override_active(")
+    ) == 2

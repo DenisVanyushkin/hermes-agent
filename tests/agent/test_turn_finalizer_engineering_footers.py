@@ -79,7 +79,11 @@ class _FooterAgent:
     def _turn_completion_explainer_enabled(self):
         return True
 
-    def _format_turn_completion_explanation(self, reason):
+    # *_args: the finalizer now also passes the persistence-error cause. A
+    # frozen signature raises TypeError inside the explainer's `except
+    # Exception`, so the explanation silently becomes empty instead of failing
+    # loudly — the tests below would then assert against a blank string.
+    def _format_turn_completion_explanation(self, reason, *_args):
         if str(reason).startswith("text_response"):
             return ""
         return "⚠️ No reply: switch model/provider or send `continue`."
