@@ -32,13 +32,16 @@ DEFAULT_CONFIG = {
         "mode": "observe",
         "reviewer_tier": "code_review",
     },
+    # "Full" engineering execution uses the autonomous runtime. Each run is
+    # isolated in a worktree and commit, push, and restart remain separately
+    # approval-gated by the engineering pipeline contract.
     "pipelines": {
-        "enabled": False,
+        "enabled": True,
         "orchestrator": {
-            "mode": "disabled",
+            "mode": "autonomous",
         },
         "router": {
-            "mode": "disabled",
+            "mode": "autonomous",
             "strategy": "llm",
             "llm": {
                 # Source-of-truth default: route through the dedicated router
@@ -52,13 +55,14 @@ DEFAULT_CONFIG = {
             },
         },
         "execution": {
-            "mode": "disabled",
-            "enable_gateway_execution_controller": False,
+            "mode": "autonomous",
+            "enable_gateway_execution_controller": True,
+            "allow_real_provider_execution": True,
             "allow_pipelines": ["engineering_review_pipeline", "recruiter_decision_support_pipeline"],
-            "allowed_subagents": ["hermes_engineer_core"],
-            "allow_actual_subagent_invocation": False,
-            "allow_actual_reviewer_invocation": False,
-            "allow_actual_rework_loop": False,
+            "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+            "allow_actual_subagent_invocation": True,
+            "allow_actual_reviewer_invocation": True,
+            "allow_actual_rework_loop": True,
             "min_router_confidence": 0.90,
         },
     },

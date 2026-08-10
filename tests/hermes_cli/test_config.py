@@ -71,21 +71,36 @@ class TestLoadConfigDefaults:
             config = load_config()
             assert config["model"] == DEFAULT_CONFIG["model"]
             assert config["agent"]["max_turns"] == DEFAULT_CONFIG["agent"]["max_turns"]
-            assert config["pipelines"]["enabled"] is False
-            assert config["pipelines"]["router"]["mode"] == "disabled"
-            assert config["pipelines"]["orchestrator"]["mode"] == "disabled"
-            assert config["pipelines"]["execution"]["mode"] == "disabled"
-            assert config["pipelines"]["execution"]["enable_gateway_execution_controller"] is False
+            assert config["pipelines"]["enabled"] is True
+            assert config["pipelines"]["router"]["mode"] == "autonomous"
+            assert config["pipelines"]["orchestrator"]["mode"] == "autonomous"
+            assert config["pipelines"]["execution"]["mode"] == "autonomous"
+            assert config["pipelines"]["execution"]["enable_gateway_execution_controller"] is True
+            assert config["pipelines"]["execution"]["allow_real_provider_execution"] is True
             assert config["pipelines"]["execution"]["allow_pipelines"] == ["engineering_review_pipeline", "recruiter_decision_support_pipeline"]
-            assert config["pipelines"]["execution"]["allowed_subagents"] == ["hermes_engineer_core"]
-            assert config["pipelines"]["execution"]["allow_actual_subagent_invocation"] is False
-            assert config["pipelines"]["execution"]["allow_actual_reviewer_invocation"] is False
-            assert config["pipelines"]["execution"]["allow_actual_rework_loop"] is False
+            assert config["pipelines"]["execution"]["allowed_subagents"] == ["hermes_engineer_core", "hermes_code_reviewer"]
+            assert config["pipelines"]["execution"]["allow_actual_subagent_invocation"] is True
+            assert config["pipelines"]["execution"]["allow_actual_reviewer_invocation"] is True
+            assert config["pipelines"]["execution"]["allow_actual_rework_loop"] is True
             assert config["pipelines"]["execution"]["min_router_confidence"] == 0.9
             assert "max_turns" not in config
             assert "terminal" in config
             assert config["terminal"]["backend"] == "local"
             assert config["display"]["interim_assistant_messages"] is True
+
+    def test_explicit_existing_pipeline_override_is_preserved(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            (tmp_path / "config.yaml").write_text(
+                "pipelines:\n  enabled: false\n  execution:\n    mode: disabled\n",
+                encoding="utf-8",
+            )
+
+            config = load_config()
+
+            assert config["pipelines"]["enabled"] is False
+            assert config["pipelines"]["execution"]["mode"] == "disabled"
+            # Unspecified leaves still resolve from the new defaults.
+            assert config["pipelines"]["execution"]["allow_real_provider_execution"] is True
 
     def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
