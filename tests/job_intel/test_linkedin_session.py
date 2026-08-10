@@ -106,6 +106,20 @@ from job_intel.linkedin_session import (
     resolve_session_state,
 )
 
+# Структура снята с живой страницы 2026-08-10: LinkedIn перешёл на
+# хэшированные имена классов (_3f0deaea, _79edae89), генерируемые сборкой и
+# меняющиеся с каждым деплоем. Семантических классов (artdeco, global-nav,
+# voyager, feed-identity-module) в разметке больше нет вовсе.
+REDESIGNED_FEED = """
+<html><body data-color-scheme="light" data-rehydrated="true">
+  <header class="_3f0deaea _3e52c8e4"><nav class="_79edae89" data-testid="primary-nav">
+    <a href="/feed/">Home</a><a href="/mynetwork/">My Network</a>
+    <a href="/messaging/">Messaging</a><a href="/notifications/">Notifications</a>
+  </nav></header>
+  <main class="_303c51f5" data-testid="mainFeed">...</main>
+</body></html>
+"""
+
 FEED_HTML = """
 <html><body>
   <nav><div class="global-nav__me">Me</div></nav>
@@ -129,8 +143,16 @@ CAPTCHA_HTML = """
 
 def test_feed_is_authenticated_despite_sign_in_in_the_footer() -> None:
     """Ровно тот случай, на котором врал старый детектор: прогоны 291 и 307
-    отдали 20 и 7 вакансий и одновременно записали login_walls=1."""
-    assert classify_auth_page("https://www.linkedin.com/feed/", FEED_HTML) == SESSION_OK
+    отдали 20 и 7 вакансий и одновременно записали login_walls=1.
+
+    Фикстура пересобрана на разметку после редизайна: прежняя опиралась на
+    классы, которых у LinkedIn больше нет, и потому проверяла свойство на
+    странице, которая не существует."""
+    html = REDESIGNED_FEED.replace(
+        "</body>", '<footer><a href="/uas/login">Sign in</a> · <span>Log in</span></footer></body>'
+    )
+
+    assert classify_auth_page("https://www.linkedin.com/feed/", html) == SESSION_OK
 
 
 def test_login_page_is_missing_cookie() -> None:
@@ -151,7 +173,9 @@ def test_captcha_page_is_a_hard_challenge_even_though_it_says_verification() -> 
 
 
 def test_second_authenticated_marker_also_counts() -> None:
-    html = FEED_HTML.replace("global-nav__me", "feed-identity-module")
+    """Одного testid достаточно: навигация на странице поиска другая."""
+    html = REDESIGNED_FEED.replace('data-testid="primary-nav"', "")
+
     assert classify_auth_page("https://www.linkedin.com/jobs/search/", html) == SESSION_OK
 
 
@@ -218,3 +242,61 @@ def test_named_profile_that_does_not_exist_falls_back_to_default(tmp_path: Path)
     )
 
     assert resolve_profile_dir(tmp_path) == tmp_path / "Default"
+
+
+# --- Маркеры после редизайна LinkedIn 2026-08 ----------------------------
+
+GUEST_PAGE = """
+<html><body>
+  <a href="/uas/login">Sign in</a><a href="/signup">Join now</a>
+  <main class="_303c51f5">Make the most of your professional life</main>
+</body></html>
+"""
+
+
+def test_redesigned_feed_is_recognised_as_authenticated() -> None:
+    """Прогон 2026-08-10 упал на этой странице: title был «Feed | LinkedIn»,
+    кука жива, а классификатор вернул real_empty, потому что искал классы,
+    которых в новой вёрстке нет."""
+    assert classify_auth_page("https://www.linkedin.com/feed/", REDESIGNED_FEED) == SESSION_OK
+
+
+def test_authenticated_nav_destinations_alone_are_enough() -> None:
+    """Гостю LinkedIn не показывает ни My Network, ни Messaging, ни
+    Notifications. Это свойство продукта, а не сборки, поэтому переживёт
+    следующий редизайн — в отличие от имён классов."""
+    html = REDESIGNED_FEED.replace('data-testid="primary-nav"', "").replace('data-testid="mainFeed"', "")
+
+    assert classify_auth_page("https://www.linkedin.com/feed/", html) == SESSION_OK
+
+
+def test_guest_page_is_not_mistaken_for_a_session() -> None:
+    assert classify_auth_page("https://www.linkedin.com/", GUEST_PAGE) == SESSION_MISSING
+
+
+def test_authwall_is_a_missing_session() -> None:
+    assert classify_auth_page("https://www.linkedin.com/authwall?trk=x", "<html></html>") == SESSION_MISSING
+
+
+def test_live_cookie_plus_unrecognised_page_is_not_a_dead_session() -> None:
+    """Кука жива, признаков логин-стены и челленджа нет, а разметка не
+    опознана. Это дрейф вёрстки, а не отсутствие сессии: склеив их, прогон
+    2026-08-10 отказался работать при полностью живой авторизации."""
+    verdict = resolve_session_state(cookie_state=SESSION_OK, page_state=REAL_EMPTY)
+
+    assert verdict.state == SESSION_OK
+    assert verdict.page_unrecognised is True
+
+
+def test_unrecognised_page_without_a_cookie_stays_missing() -> None:
+    verdict = resolve_session_state(cookie_state=SESSION_MISSING, page_state=REAL_EMPTY)
+
+    assert verdict.state == SESSION_MISSING
+    assert verdict.page_unrecognised is False
+
+
+def test_recognised_feed_does_not_raise_the_drift_flag() -> None:
+    verdict = resolve_session_state(cookie_state=SESSION_OK, page_state=SESSION_OK)
+
+    assert verdict.state == SESSION_OK
+    assert verdict.page_unrecognised is False

@@ -109,6 +109,7 @@ class BrowserSessionHealth:
     auth_attempted: bool = False
     session_state: str = "unknown"
     cookie_mismatch: bool = False
+    page_unrecognised: bool = False
     email_challenge_attempted: bool = False
     email_challenge_resolved: bool = False
     status: str = "healthy"
@@ -556,6 +557,7 @@ def apply_linkedin_verdict(health: BrowserSessionHealth, verdict: Any) -> None:
     """
     health.session_state = verdict.state
     health.cookie_mismatch = verdict.cookie_mismatch
+    health.page_unrecognised = getattr(verdict, "page_unrecognised", False)
 
 
 def _session_status(health: BrowserSessionHealth) -> str:
@@ -1185,6 +1187,14 @@ class BrowserSourceClient:
 
         if verdict.state == SESSION_OK:
             self._health.last_successful_authenticated_request = url
+            if verdict.page_unrecognised:
+                # Сессия жива по куке, но разметку опознать не удалось.
+                # Улику сохраняем: следующий редизайн иначе заметят только
+                # тогда, когда проверка окончательно перестанет работать.
+                self._write_attach_diagnostics(
+                    label="linkedin-auth-page-unrecognised",
+                    extra={"requested_url": url, "cookie_state": cookie_state},
+                )
             return
 
         self._write_attach_diagnostics(

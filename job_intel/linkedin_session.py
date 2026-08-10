@@ -116,11 +116,24 @@ SESSION_STATES = (
 
 # Маркеры, встречающиеся только на залогиненной странице. Свидетельство
 # присутствия, а не отсутствия: их нельзя случайно найти в футере.
+#
+# Прежний набор (global-nav__me, feed-identity-module,
+# nav-item__profile-member-photo) умер вместе с редизайном: 2026-08-10 живая
+# лента с title «Feed | LinkedIn» не содержала ни одного из них, как и слов
+# artdeco, global-nav и voyager вообще. LinkedIn перешёл на хэшированные
+# имена классов вида _3f0deaea, которые генерирует сборка и которые меняются
+# с каждым деплоем. Опираться на имена классов больше нельзя в принципе.
 _AUTHENTICATED_MARKERS = (
-    "global-nav__me",
-    "feed-identity-module",
-    "nav-item__profile-member-photo",
+    'data-testid="mainfeed"',
+    'data-testid="primary-nav"',
 )
+
+# Пункты навигации, которых у гостя нет. Это свойство продукта, а не сборки,
+# поэтому переживёт следующий редизайн: страница без сессии не предлагает ни
+# сети контактов, ни сообщений, ни уведомлений. Требуется не меньше двух,
+# чтобы случайная ссылка в подвале не сошла за признак авторизации.
+_AUTHENTICATED_NAV = ("/mynetwork", "/messaging", "/notifications")
+_AUTHENTICATED_NAV_MIN = 2
 
 # Проверяется раньше почтового челленджа: страница капчи тоже содержит слово
 # verification, а перепутать их — значит начать автоматически проходить
@@ -140,13 +153,16 @@ _EMAIL_OTP_MARKERS = (
     "код подтверждения",
 )
 
-_LOGIN_URL_MARKERS = ("/uas/login", "/login")
+_LOGIN_URL_MARKERS = ("/uas/login", "/login", "/authwall")
+# Разметка гостевой страницы: приглашение войти или зарегистрироваться.
+_GUEST_MARKERS = ('href="/uas/login"', 'href="/signup"')
 
 
 @dataclass(frozen=True)
 class SessionVerdict:
     state: str
     cookie_mismatch: bool = False
+    page_unrecognised: bool = False
 
 
 def classify_auth_page(url: str, html: str) -> str:
@@ -154,6 +170,10 @@ def classify_auth_page(url: str, html: str) -> str:
     lowered_html = (html or "").lower()
     if any(marker in lowered_html for marker in _AUTHENTICATED_MARKERS):
         return SESSION_OK
+    if sum(item in lowered_html for item in _AUTHENTICATED_NAV) >= _AUTHENTICATED_NAV_MIN:
+        return SESSION_OK
+    if any(marker in lowered_html for marker in _GUEST_MARKERS):
+        return SESSION_MISSING
     if any(marker in lowered_url or marker in lowered_html for marker in _HARD_CHALLENGE_MARKERS):
         return CHALLENGE_HARD
     if any(marker in lowered_html for marker in _EMAIL_OTP_MARKERS):
@@ -178,4 +198,8 @@ def resolve_session_state(*, cookie_state: str, page_state: str) -> SessionVerdi
         return SessionVerdict(page_state)
     if cookie_state == SESSION_MISSING:
         return SessionVerdict(SESSION_MISSING)
-    return SessionVerdict(page_state)
+    # Кука жива, логин-стены и челленджа нет, а разметку опознать не удалось.
+    # Это дрейф вёрстки, а не отсутствие сессии. Склеив эти два случая, прогон
+    # 2026-08-10 отказался работать при полностью живой авторизации: LinkedIn
+    # сменил разметку, и «страницу не узнал» было прочитано как «сессии нет».
+    return SessionVerdict(SESSION_OK, page_unrecognised=True)

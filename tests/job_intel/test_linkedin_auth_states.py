@@ -55,3 +55,14 @@ def test_cookie_mismatch_flag_is_carried_through() -> None:
     apply_linkedin_verdict(health, SessionVerdict(state=SESSION_OK, cookie_mismatch=True))
 
     assert health.snapshot()["cookie_mismatch"] is True
+
+
+def test_layout_drift_is_visible_in_the_snapshot() -> None:
+    """Сессия живёт, но разметку опознать не удалось — это надо видеть до
+    того, как маркеры протухнут окончательно и проверка станет бесполезной."""
+    health = BrowserSessionHealth(source="linkedin")
+
+    apply_linkedin_verdict(health, SessionVerdict(state=SESSION_OK, page_unrecognised=True))
+
+    assert health.session_state == SESSION_OK
+    assert health.snapshot()["page_unrecognised"] is True
