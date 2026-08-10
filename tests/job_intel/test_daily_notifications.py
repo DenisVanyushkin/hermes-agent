@@ -73,7 +73,7 @@ def test_run_daily_emits_per_source_notifications(monkeypatch, tmp_path) -> None
     monkeypatch.setattr(
         cli,
         "_collect_vacancies_compat",
-        lambda store=None: CollectedVacancies(vacancies=vacancies, source_statuses=source_statuses),
+        lambda store=None, performance=None: CollectedVacancies(vacancies=vacancies, source_statuses=source_statuses),
     )
     monkeypatch.setattr(cli, "score_vacancy", lambda vacancy: evaluations[vacancy.source_id])
     monkeypatch.setattr(cli, "_should_notify_vacancy", lambda *args, **kwargs: True)

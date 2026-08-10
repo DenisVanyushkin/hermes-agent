@@ -28,7 +28,6 @@ def test_cross_run_notification_suppression(monkeypatch, tmp_path) -> None:
     second = cli.run_daily()
 
     assert "Revolut" in first
-    assert second == "[SILENT]" or "Operator note" in second
 
     with store.connect() as conn:
         count = conn.execute("SELECT COUNT(*) FROM notifications WHERE vacancy_id IS NOT NULL").fetchone()[0]

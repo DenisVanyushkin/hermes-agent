@@ -880,6 +880,14 @@ def _deliver_to_slack(
     if thread_ts:
         prefer_gateway = True
 
+    if (prefer_gateway or not webhook) and os.getenv("JOB_INTEL_RUN_TYPE", "").strip() != "production":
+        return SlackDeliveryResult(
+            success=False,
+            attempts=0,
+            error="gateway delivery requires JOB_INTEL_RUN_TYPE=production",
+            status="suppressed",
+        )
+
     if prefer_gateway or not webhook:
         target_channel = _resolve_logical_slack_channel_id(channel) or channel
         if target_channel and thread_ts:
@@ -1683,7 +1691,7 @@ def _deliver_vacancy_notifications(
             delivery_status="pending",
             delivery_attempts=0,
         )
-        delivery = _deliver_to_slack(body, channel, prefer_gateway=True)
+        delivery = _deliver_to_slack(body, channel)
         _finalize_notifications(store, [notification_id], delivery)
         resolved_channel_id, tracked_message_ts = _delivery_tracking_identity(channel, delivery)
         if delivery.success:

@@ -23,14 +23,15 @@ def test_daily_run_marks_notification_sent_after_retries(monkeypatch, tmp_path) 
     )
     monkeypatch.setattr(cli, "_collect_vacancies", lambda: ([vacancy], {"duckduckgo": {"status": "ok"}}))
 
-    attempts = {"count": 0}
+    attempts = {"summary": 0, "vacancy": 0}
 
     def fake_post(url, json, timeout):
-        attempts["count"] += 1
+        kind = "summary" if json["text"].startswith("📊") else "vacancy"
+        attempts[kind] += 1
 
         class Response:
             def raise_for_status(self):
-                if attempts["count"] < 3:
+                if kind == "vacancy" and attempts[kind] < 3:
                     raise RuntimeError("temporary slack failure")
 
         return Response()
@@ -42,7 +43,7 @@ def test_daily_run_marks_notification_sent_after_retries(monkeypatch, tmp_path) 
     result = cli.run_daily()
 
     assert "Revolut" in result
-    assert attempts["count"] == 3
+    assert attempts == {"summary": 1, "vacancy": 3}
 
     with store.connect() as conn:
         row = conn.execute(
@@ -71,10 +72,11 @@ def test_daily_run_marks_failed_notification_after_retry_exhaustion(monkeypatch,
     )
     monkeypatch.setattr(cli, "_collect_vacancies", lambda: ([vacancy], {"duckduckgo": {"status": "ok"}}))
 
-    attempts = {"count": 0}
+    attempts = {"summary": 0, "vacancy": 0}
 
     def failing_post(url, json, timeout):
-        attempts["count"] += 1
+        kind = "summary" if json["text"].startswith("📊") else "vacancy"
+        attempts[kind] += 1
 
         class Response:
             def raise_for_status(self):
@@ -89,7 +91,7 @@ def test_daily_run_marks_failed_notification_after_retry_exhaustion(monkeypatch,
     result = cli.run_daily()
 
     assert "Operator note" in result or "Adapty" in result
-    assert attempts["count"] == 3
+    assert attempts == {"summary": 3, "vacancy": 3}
 
     with store.connect() as conn:
         row = conn.execute(

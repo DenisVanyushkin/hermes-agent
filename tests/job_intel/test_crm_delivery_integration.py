@@ -252,6 +252,7 @@ def test_reaction_after_delivery_mapping_hits_crm(tmp_path, monkeypatch):
 
 
 def test_deliver_to_slack_bootstraps_hermes_env_before_send(monkeypatch):
+    monkeypatch.setenv("JOB_INTEL_RUN_TYPE", "production")
     monkeypatch.delenv("JOB_INTEL_SLACK_WEBHOOK_URL", raising=False)
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
 
@@ -275,3 +276,19 @@ def test_deliver_to_slack_bootstraps_hermes_env_before_send(monkeypatch):
     assert result.channel_id == "C0B4MM6D52A"
     assert result.message_ts == "1780675333.782909"
     assert calls == ["bootstrap", "send"]
+
+
+def test_deliver_to_slack_blocks_gateway_for_nonproduction_run(monkeypatch):
+    monkeypatch.setenv("JOB_INTEL_RUN_TYPE", "test")
+    monkeypatch.delenv("JOB_INTEL_SLACK_WEBHOOK_URL", raising=False)
+
+    calls: list[dict[str, str]] = []
+    monkeypatch.setattr(cli, "send_message_tool", lambda args: calls.append(args))
+
+    result = cli._deliver_to_slack("test card", "executive_search_report", prefer_gateway=True)
+
+    assert result.success is False
+    assert result.status == "suppressed"
+    assert result.attempts == 0
+    assert result.error == "gateway delivery requires JOB_INTEL_RUN_TYPE=production"
+    assert calls == []
