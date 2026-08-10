@@ -167,8 +167,51 @@ loopback свой собственный и из SSH-туннеля недост
 
 ## 6. Один контролируемый прогон
 
-    sudo ip netns exec ln-eg env PYTHONPATH=/home/hermes/.hermes/hermes-agent \
-      ~/.hermes/hermes-agent/venv/bin/python -m job_intel.cli --sources linkedin --dry-run
+Проверено 2026-08-10: у `job_intel.cli` **нет** флага `--sources`, а подкоманда
+`browser-health` проверяет только статику (venv, бинарь Chromium, хелпер) и
+никакого поиска по LinkedIn не выполняет. Прежняя версия этого шага предлагала
+несуществующую команду.
+
+Путь, который надо пройти, — тот самый, после которого в июле умирала сессия:
+проверка авторизации плюс поиск вакансий через CDP. Его выполняет
+`fetch_linkedin_vacancies`, и он не пишет в базу и ничего не шлёт в Slack.
+
+Предполётная проверка — CDP обязан отдавать контекст с живой сессией, иначе
+поиск пойдёт под разлогиненным профилем:
+
+    sudo ip netns exec ln-eg /var/lib/browser-desktop/playwright-venv/bin/python - <<'PY'
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        b = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
+        for i, ctx in enumerate(b.contexts):
+            names = {c["name"] for c in ctx.cookies() if "linkedin" in (c.get("domain") or "")}
+            print(i, len(names), "li_at" in names)
+        b.close()
+    PY
+
+Ожидается один контекст с `li_at=True`.
+
+Сам прогон:
+
+    sudo ip netns exec ln-eg env \
+      $(grep -E '^JOB_INTEL_' /etc/job-intel/job-intel.env | xargs) \
+      JOB_INTEL_BROWSER_CDP_URL=http://127.0.0.1:9222 \
+      PYTHONPATH=/home/hermes/.hermes/hermes-agent \
+      /home/hermes/.hermes/hermes-agent/venv/bin/python - <<'PY'
+    from job_intel.sources import fetch_linkedin_vacancies
+    found = fetch_linkedin_vacancies("Head of Product", max_pages=1)
+    print("найдено:", len(found))
+    print("health:", fetch_linkedin_vacancies.last_health)
+    print("trace:", fetch_linkedin_vacancies.last_trace)
+    PY
+
+**`JOB_INTEL_BROWSER_CDP_URL` обязателен.** В `/etc/job-intel/job-intel.env` он
+не задан, а без него клиент не присоединяется к работающему браузеру, а пытается
+поднять второй Chromium на том же каталоге профиля — то есть на заблокированном.
+
+В выводе `health` смотреть на `session_state`: `session_ok` означает, что
+проверка авторизации прошла по свидетельствам присутствия, а не по счётчику
+`login_walls`, который врёт в обе стороны.
 
 ## 7. Замеры
 
