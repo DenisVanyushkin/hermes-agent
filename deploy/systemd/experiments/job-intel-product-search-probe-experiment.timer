@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule bounded Product Search acquisition probe attempts
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:15:00 Asia/Almaty
+Persistent=true
+RandomizedDelaySec=5m
+Unit=job-intel-product-search-probe-experiment.service
+
+[Install]
+WantedBy=timers.target

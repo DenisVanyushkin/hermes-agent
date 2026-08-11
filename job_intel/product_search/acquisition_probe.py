@@ -1,0 +1,519 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import sqlite3
+import time
+from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from pydantic import BaseModel, ConfigDict
+
+from .search_contract import SearchContract
+
+
+SLACK_CREDENTIAL_NAMES = frozenset(
+    {"SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "JOB_INTEL_SLACK_WEBHOOK_URL"}
+)
+FORBIDDEN_PROBE_ROOTS = (
+    Path("/var/lib/job-intel/state"),
+    Path("/home/hermes/.hermes/job_intel"),
+    Path("/home/hermes/.hermes/hermes-agent/.worktrees"),
+)
+
+
+class ProbeSourceBlocked(RuntimeError):
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(detail or reason)
+        self.reason = reason
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class SourceIsolation:
+    mode: str
+    path: Path | None
+
+
+class ProbeQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query_id: str
+    cell_id: str
+    source_family: str
+    query: str
+
+
+class EvidencePackage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str
+    query_id: str
+    source_family: str
+    source_id: str
+    raw_content_sha256: str
+    raw_reference: str
+    capture_version: str
+    parser_version: str
+    source_version: str
+    captured_at: str
+    redaction_class: str
+    identity_hints: dict[str, str]
+
+
+class ProbeResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str
+    stage_counts: dict[str, int]
+    provisional_labels: dict[str, int]
+    source_states: dict[str, str]
+    cell_states: dict[str, str]
+    duplicates: int
+    evidence: tuple[EvidencePackage, ...]
+    cost: dict[str, float]
+    latency_seconds: float
+
+
+def expand_queries(contract: SearchContract, *, role_terms: tuple[str, ...]) -> tuple[ProbeQuery, ...]:
+    expanded: list[ProbeQuery] = []
+    for lane_id, lane in sorted(contract.lanes.items()):
+        for cell_id, cell in sorted(lane.cells.items()):
+            for family in sorted(cell.source_families):
+                for role in sorted(role_terms):
+                    query = f"{role} {cell.primary_geography}".strip()
+                    digest = hashlib.sha256(
+                        f"{lane_id}\0{cell_id}\0{family}\0{query}".encode()
+                    ).hexdigest()[:20]
+                    expanded.append(
+                        ProbeQuery(
+                            query_id=digest,
+                            cell_id=cell_id,
+                            source_family=family,
+                            query=query,
+                        )
+                    )
+    return tuple(sorted(expanded, key=lambda item: item.query_id))
+
+
+def _ensure_safe_output(path: Path) -> None:
+    resolved = path.resolve()
+    for forbidden in FORBIDDEN_PROBE_ROOTS:
+        forbidden_resolved = forbidden.resolve()
+        if resolved == forbidden_resolved or forbidden_resolved in resolved.parents:
+            raise ValueError(f"forbidden probe path: {resolved}")
+
+
+def _ensure_slack_blind(environment: Mapping[str, str]) -> None:
+    present = sorted(name for name in SLACK_CREDENTIAL_NAMES if environment.get(name))
+    if present:
+        raise ValueError(f"Slack credentials are forbidden in acquisition probe: {', '.join(present)}")
+
+
+def _canonical_url(raw: str) -> str:
+    split = urlsplit(raw.strip())
+    filtered = [
+        (key, value)
+        for key, value in parse_qsl(split.query, keep_blank_values=True)
+        if not key.casefold().startswith("utm_")
+    ]
+    return urlunsplit((split.scheme.casefold(), split.netloc.casefold(), split.path.rstrip("/"), urlencode(filtered), ""))
+
+
+def _as_mapping(record: Any) -> dict[str, Any]:
+    if isinstance(record, Mapping):
+        return dict(record)
+    if hasattr(record, "__dict__"):
+        return dict(record.__dict__)
+    raise TypeError(f"unsupported source record: {type(record).__name__}")
+
+
+def _minimum_evidence_sufficient(record: Mapping[str, Any]) -> bool:
+    return all(str(record.get(field) or "").strip() for field in ("url", "title", "company", "description"))
+
+
+def run_probe(
+    *,
+    run_id: str,
+    queries: Iterable[ProbeQuery | Mapping[str, Any]],
+    sources: Mapping[str, Callable[[str], Iterable[Any]]],
+    output_dir: Path | str,
+    isolation: Mapping[str, SourceIsolation],
+    max_attempts: int = 2,
+    environment: Mapping[str, str] | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> ProbeResult:
+    started = time.monotonic()
+    output = Path(output_dir)
+    _ensure_safe_output(output)
+    _ensure_slack_blind(environment or {})
+    if max_attempts < 1 or max_attempts > 3:
+        raise ValueError("max_attempts must be between 1 and 3")
+    clock = now or (lambda: datetime.now(timezone.utc))
+    raw_dir = output / "raw-evidence"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    evidence: list[EvidencePackage] = []
+    observations: list[dict[str, Any]] = []
+    source_states: dict[str, str] = {}
+    cell_attempts: dict[str, list[str]] = {}
+
+    for raw_query in queries:
+        query = raw_query if isinstance(raw_query, ProbeQuery) else ProbeQuery.model_validate(raw_query)
+        cell_attempts.setdefault(query.cell_id, []).append(query.source_family)
+        source = sources.get(query.source_family)
+        source_isolation = isolation.get(query.source_family)
+        if source_isolation is None or source_isolation.mode not in {"cloned_profile", "exclusive_lock"}:
+            source_states[query.source_family] = "blocked_no_safe_isolation"
+            continue
+        if source is None:
+            source_states[query.source_family] = "blocked_missing_public_interface"
+            continue
+
+        records: list[Any] | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                records = list(source(query.query))
+                source_states[query.source_family] = "observed"
+                break
+            except ProbeSourceBlocked as exc:
+                source_states[query.source_family] = f"blocked_{exc.reason}"
+                if attempt == max_attempts:
+                    records = None
+            except TimeoutError:
+                source_states[query.source_family] = "blocked_rate_limit_or_timeout"
+                if attempt == max_attempts:
+                    records = None
+        if records is None:
+            continue
+
+        for raw_record in records:
+            record = _as_mapping(raw_record)
+            canonical = _canonical_url(str(record.get("url") or ""))
+            captured_at = str(record.get("captured_at") or clock().isoformat())
+            normalized = dict(record)
+            normalized["canonical_url"] = canonical
+            normalized["query_id"] = query.query_id
+            normalized["cell_id"] = query.cell_id
+            normalized["source_family"] = query.source_family
+            raw_bytes = json.dumps(normalized, sort_keys=True, separators=(",", ":"), default=str).encode()
+            content_hash = hashlib.sha256(raw_bytes).hexdigest()
+            relative = Path("raw-evidence") / f"{content_hash}.json"
+            target = output / relative
+            if not target.exists():
+                target.write_bytes(raw_bytes)
+            source_id = str(record.get("source_id") or content_hash[:20])
+            evidence.append(
+                EvidencePackage(
+                    run_id=run_id,
+                    query_id=query.query_id,
+                    source_family=query.source_family,
+                    source_id=source_id,
+                    raw_content_sha256=content_hash,
+                    raw_reference=relative.as_posix(),
+                    capture_version="product-search-probe-v1",
+                    parser_version="existing-public-interface",
+                    source_version="pinned-runtime-commit",
+                    captured_at=captured_at,
+                    redaction_class="vacancy_public_evidence",
+                    identity_hints={
+                        "canonical_url": canonical,
+                        "company": str(record.get("company") or ""),
+                        "title": str(record.get("title") or ""),
+                    },
+                )
+            )
+            observations.append(normalized)
+
+    canonical_records: dict[str, dict[str, Any]] = {}
+    for record in observations:
+        identity = str(record.get("canonical_url") or "") or hashlib.sha256(
+            f"{record.get('company')}\0{record.get('title')}".encode()
+        ).hexdigest()
+        canonical_records.setdefault(identity, record)
+
+    labels: dict[str, int] = {}
+    sufficient = 0
+    for record in canonical_records.values():
+        if record.get("known_hard_block"):
+            label = "known_hard_block"
+        elif _minimum_evidence_sufficient(record):
+            sufficient += 1
+            label = "provisionally_eligible"
+        else:
+            label = "unresolved_for_decision_v2"
+        labels[label] = labels.get(label, 0) + 1
+
+    cell_states: dict[str, str] = {}
+    for cell_id in cell_attempts:
+        cell_records = [record for record in observations if record.get("cell_id") == cell_id]
+        cell_blocked = all(source_states.get(family, "").startswith("blocked") for family in cell_attempts[cell_id])
+        if cell_records:
+            cell_states[cell_id] = "qualified_results_found"
+        elif cell_blocked:
+            cell_states[cell_id] = "blocked"
+        else:
+            cell_states[cell_id] = "searched_no_qualified_results"
+
+    result = ProbeResult(
+        run_id=run_id,
+        stage_counts={
+            "raw_observed": len(observations),
+            "canonical_current": len(canonical_records),
+            "minimum_evidence_sufficient": sufficient,
+        },
+        provisional_labels=dict(sorted(labels.items())),
+        source_states=dict(sorted(source_states.items())),
+        cell_states=dict(sorted(cell_states.items())),
+        duplicates=len(observations) - len(canonical_records),
+        evidence=tuple(evidence),
+        cost={"provider_cost_usd": 0.0},
+        latency_seconds=round(time.monotonic() - started, 6),
+    )
+    (output / "summary.json").write_text(
+        result.model_dump_json(indent=2), encoding="utf-8"
+    )
+    with sqlite3.connect(output / "experiment.sqlite3") as conn:
+        conn.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS probe_runs (
+                run_id TEXT PRIMARY KEY,
+                summary_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS probe_evidence (
+                run_id TEXT NOT NULL,
+                raw_content_sha256 TEXT NOT NULL,
+                query_id TEXT NOT NULL,
+                source_family TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                raw_reference TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                redaction_class TEXT NOT NULL,
+                PRIMARY KEY (run_id, raw_content_sha256, query_id, source_id),
+                FOREIGN KEY (run_id) REFERENCES probe_runs(run_id)
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO probe_runs (run_id, summary_json) VALUES (?, ?)",
+            (run_id, result.model_dump_json()),
+        )
+        conn.executemany(
+            """
+            INSERT INTO probe_evidence (
+                run_id, raw_content_sha256, query_id, source_family, source_id,
+                raw_reference, captured_at, redaction_class
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    item.run_id,
+                    item.raw_content_sha256,
+                    item.query_id,
+                    item.source_family,
+                    item.source_id,
+                    item.raw_reference,
+                    item.captured_at,
+                    item.redaction_class,
+                )
+                for item in evidence
+            ],
+        )
+    return result
+
+
+def resolve_public_sources() -> dict[str, Callable[[str], Iterable[Any]]]:
+    from job_intel.sources import (
+        fetch_headhunter_vacancies,
+        fetch_linkedin_vacancies,
+        normalize_search_hit,
+        search_duckduckgo,
+        search_remoteok_jobs,
+        search_remotive_jobs,
+    )
+
+    return {
+        "linkedin": lambda query: fetch_linkedin_vacancies(query, max_pages=2),
+        "headhunter": lambda query: fetch_headhunter_vacancies(query, per_page=10),
+        "duckduckgo": lambda query: [
+            normalize_search_hit(hit) for hit in search_duckduckgo(query, max_results=10)
+        ],
+        "remoteok": lambda _query: search_remoteok_jobs(max_results=25),
+        "remotive": lambda _query: search_remotive_jobs(max_results=25),
+    }
+
+
+def _inside(path: str, root: Path) -> bool:
+    candidate = Path(path).resolve()
+    resolved_root = root.resolve()
+    return candidate == resolved_root or resolved_root in candidate.parents
+
+
+def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
+    if manifest.get("gate") != "gate-a" or manifest.get("environment_id") != "product-search-gate-a":
+        raise ValueError("wrong gate or environment identity")
+    root = Path(str(manifest.get("root") or ""))
+    if not root.is_absolute():
+        raise ValueError("experiment root must be absolute")
+    for name, value in dict(manifest.get("paths") or {}).items():
+        if not _inside(str(value), root):
+            raise ValueError(f"path outside experiment root: {name}")
+    python = dict(manifest.get("python") or {})
+    if not _inside(str(python.get("executable_path") or ""), root / "python-runtime"):
+        raise ValueError("Python executable must be experiment-local")
+    if not _inside(str(manifest.get("environment", {}).get("import_root") or ""), root / "runtime"):
+        raise ValueError("import root must be experiment-local")
+    editable = list(manifest.get("environment", {}).get("editable_installs") or [])
+    if editable:
+        raise ValueError("editable installs are forbidden")
+    for section, keys in {
+        "python": ("executable_sha256", "stdlib_tree_sha256"),
+        "environment": (
+            "dependency_lock_sha256",
+            "installed_distributions_sha256",
+            "sys_path_sha256",
+        ),
+    }.items():
+        values = dict(manifest.get(section) or {})
+        for key in keys:
+            if len(str(values.get(key) or "")) != 64:
+                raise ValueError(f"invalid identity hash: {section}.{key}")
+
+
+def _tree_sha256(root: Path, *, relative_to: Path | None = None) -> str:
+    digest = hashlib.sha256()
+    anchor = relative_to or root
+    if not root.exists():
+        return digest.hexdigest()
+    paths = [root] if root.is_file() else sorted(path for path in root.rglob("*") if path.is_file())
+    for path in paths:
+        digest.update(path.relative_to(anchor).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def build_experiment_manifest(
+    *,
+    root: Path,
+    commit: str,
+    python_executable: Path,
+    python_version: str,
+    stdlib_root: Path,
+    sys_path: tuple[str, ...],
+) -> dict[str, Any]:
+    runtime = root / "runtime"
+    python_runtime = root / "python-runtime"
+    installed = python_runtime / "installed-distributions.txt"
+    lock = runtime / "uv.lock"
+    paths = {
+        "runtime": str(runtime),
+        "experiment.sqlite3": str(root / "experiment.sqlite3"),
+        "raw-evidence": str(root / "raw-evidence"),
+        "logs": str(root / "logs"),
+        "locks": str(root / "locks"),
+        "browser-profile": str(root / "browser-profile"),
+        "cache": str(root / "cache"),
+        "tmp": str(root / "tmp"),
+    }
+    manifest: dict[str, Any] = {
+        "schema_version": "1.0.0",
+        "gate": "gate-a",
+        "environment_id": "product-search-gate-a",
+        "commit": commit,
+        "root": str(root),
+        "paths": paths,
+        "python": {
+            "executable_path": str(python_executable),
+            "executable_sha256": _tree_sha256(python_executable),
+            "version": python_version,
+            "implementation": "CPython",
+            "stdlib_root": str(stdlib_root),
+            "stdlib_tree_sha256": _tree_sha256(stdlib_root),
+        },
+        "environment": {
+            "dependency_lock_sha256": _tree_sha256(lock),
+            "installed_distributions_sha256": _tree_sha256(installed),
+            "import_root": str(runtime),
+            "sys_path_sha256": hashlib.sha256("\n".join(sys_path).encode()).hexdigest(),
+            "editable_installs": [],
+        },
+        "runtime_sha256": _tree_sha256(runtime),
+        "config_sha256": _tree_sha256(runtime / "config/product_search", relative_to=runtime),
+        "source_sha256": _tree_sha256(runtime / "job_intel/product_search", relative_to=runtime),
+        "unit_sha256": _tree_sha256(runtime / "deploy/systemd/experiments", relative_to=runtime),
+    }
+    validate_experiment_manifest(manifest)
+    return manifest
+
+
+def main() -> int:
+    import argparse
+    import yaml
+
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    validate = subparsers.add_parser("validate-manifest")
+    validate.add_argument("path", type=Path)
+    write = subparsers.add_parser("write-manifest")
+    write.add_argument("root", type=Path)
+    write.add_argument("commit")
+    run = subparsers.add_parser("run-manifest")
+    run.add_argument("path", type=Path)
+    args = parser.parse_args()
+    if args.command == "validate-manifest":
+        manifest = yaml.safe_load(args.path.read_text(encoding="utf-8"))
+        validate_experiment_manifest(manifest)
+    elif args.command == "write-manifest":
+        import platform
+        import sys
+        import sysconfig
+
+        manifest = build_experiment_manifest(
+            root=args.root,
+            commit=args.commit,
+            python_executable=Path(sys.executable),
+            python_version=platform.python_version(),
+            stdlib_root=Path(sysconfig.get_paths()["stdlib"]),
+            sys_path=tuple(sys.path),
+        )
+        (args.root / "manifest.yaml").write_text(
+            yaml.safe_dump(manifest, sort_keys=True), encoding="utf-8"
+        )
+    elif args.command == "run-manifest":
+        manifest = yaml.safe_load(args.path.read_text(encoding="utf-8"))
+        validate_experiment_manifest(manifest)
+        runtime = Path(manifest["environment"]["import_root"])
+        contract = __import__(
+            "job_intel.product_search.search_contract", fromlist=["load_search_contract"]
+        ).load_search_contract(runtime / "config/product_search/search_contract.v1.yaml")
+        queries = expand_queries(
+            contract,
+            role_terms=("Chief Product Officer", "VP Product", "Head of Product", "GM Digital"),
+        )
+        isolation = {
+            family: SourceIsolation(
+                mode=str(settings.get("mode") or "blocked"),
+                path=Path(settings["path"]) if settings.get("path") else None,
+            )
+            for family, settings in dict(manifest.get("source_isolation") or {}).items()
+        }
+        run_probe(
+            run_id=f"gate-a-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+            queries=queries,
+            sources=resolve_public_sources(),
+            output_dir=Path(manifest["root"]),
+            isolation=isolation,
+            environment=os.environ,
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

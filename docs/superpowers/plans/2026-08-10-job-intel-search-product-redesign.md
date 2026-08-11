@@ -759,17 +759,17 @@ git diff --check
 
 **Checklist:**
 
-- [ ] Write failing tests for deterministic query expansion, per-cell/family attempts, content-addressed evidence bundles, identity hints, freshness, bounded retries, rate limits, and named auth/anti-bot failures.
-- [ ] Add safety tests proving no production DB write, no portfolio reservation, no Slack call, no production source-config mutation, and no protected scraper edit.
-- [ ] Write failing experiment-runner tests for an immutable tracked-file export plus dedicated read-only venv: pinned interpreter/stdlib/dependency-lock/installed-distribution/import-root/`sys.path` hashes, empty editable-install set, gate/environment identity, separate DB/evidence/log/lock/profile/cache/tmp paths, missed/overlap runs, teardown, and rejection of shared mutable venvs, every Slack credential, and every production path.
-- [ ] Define one portable immutable evidence-package format shared with Task 13: run/query/source IDs, raw content hash/reference, capture/parser/source versions, timestamps, and redaction class.
-- [ ] Invoke only existing public scraper interfaces and store results in a separate probe directory/DB; never patch adapters from inside the probe.
-- [ ] Canonicalize/deduplicate for measurement while preserving raw observations and query/source provenance.
-- [ ] Implement only the Gate A provisional prefilter: `provisionally_eligible`, `known_hard_block`, or `unresolved_for_decision_v2`; do not emit stage 4, verdict, or delivery eligibility.
-- [ ] Produce daily stages 1–3 counts, provisional labels, source/cell states, duplicates, cost, and latency.
-- [ ] Package the temporary `User=hermes` service/timer/export wrapper so it creates `runtime/` from the already-integrated canonical commit, builds `python-runtime/venv` with a copied interpreter and non-editable locked dependencies, executes only that code/runtime pair with `PYTHONNOUSERSITE=1`/`PYTHONDONTWRITEBYTECODE=1`, and fails closed on bundle/Python/dependency/import/config/source drift.
-- [ ] Add browser-profile clone/validation and source-level exclusive-lock modes; a source with neither safe mode must return `blocked` without invocation.
-- [ ] Run fixture/fake-source smoke tests, systemd syntax checks, scope guard, and ruff before commit. Do not invoke a real browser/source until Task 6 has stopped the legacy collectors.
+- [x] Write failing tests for deterministic query expansion, per-cell/family attempts, content-addressed evidence bundles, identity hints, freshness, bounded retries, rate limits, and named auth/anti-bot failures.
+- [x] Add safety tests proving no production DB write, no portfolio reservation, no Slack call, no production source-config mutation, and no protected scraper edit.
+- [x] Write failing experiment-runner tests for an immutable tracked-file export plus dedicated read-only venv: pinned interpreter/stdlib/dependency-lock/installed-distribution/import-root/`sys.path` hashes, empty editable-install set, gate/environment identity, separate DB/evidence/log/lock/profile/cache/tmp paths, missed/overlap runs, teardown, and rejection of shared mutable venvs, every Slack credential, and every production path.
+- [x] Define one portable immutable evidence-package format shared with Task 13: run/query/source IDs, raw content hash/reference, capture/parser/source versions, timestamps, and redaction class.
+- [x] Invoke only existing public scraper interfaces and store results in a separate probe directory/DB; never patch adapters from inside the probe.
+- [x] Canonicalize/deduplicate for measurement while preserving raw observations and query/source provenance.
+- [x] Implement only the Gate A provisional prefilter: `provisionally_eligible`, `known_hard_block`, or `unresolved_for_decision_v2`; do not emit stage 4, verdict, or delivery eligibility.
+- [x] Produce daily stages 1–3 counts, provisional labels, source/cell states, duplicates, cost, and latency.
+- [x] Package the temporary `User=hermes` service/timer/export wrapper so it creates `runtime/` from the already-integrated canonical commit, builds `python-runtime/venv` with a copied interpreter and non-editable locked dependencies, executes only that code/runtime pair with `PYTHONNOUSERSITE=1`/`PYTHONDONTWRITEBYTECODE=1`, and fails closed on bundle/Python/dependency/import/config/source drift.
+- [x] Add browser-profile clone/validation and source-level exclusive-lock modes; a source with neither safe mode must return `blocked` without invocation.
+- [x] Run fixture/fake-source smoke tests, systemd syntax checks, scope guard, and ruff before commit. Do not invoke a real browser/source until Task 6 has stopped the legacy collectors.
 
 **Acceptance criteria:**
 

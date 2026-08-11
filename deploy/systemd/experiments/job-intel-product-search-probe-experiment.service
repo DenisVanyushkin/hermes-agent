@@ -1,0 +1,21 @@
+[Unit]
+Description=Bounded Job Intel Product Search acquisition probe experiment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+Environment=PYTHONNOUSERSITE=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/etc/job-intel/product-search-probe-experiment.env
+ExecStart=/usr/bin/env bash ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_product_search_experiment.sh run ${PRODUCT_SEARCH_EXPERIMENT_MANIFEST}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/hermes/.hermes/job_intel/experiments/gate-a
+
+[Install]
+WantedBy=multi-user.target
