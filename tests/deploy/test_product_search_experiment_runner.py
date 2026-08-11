@@ -9,6 +9,7 @@ import yaml
 from job_intel.product_search.acquisition_probe import (
     build_experiment_manifest,
     validate_experiment_manifest,
+    verify_experiment_runtime,
 )
 
 
@@ -99,6 +100,62 @@ def test_manifest_builder_hashes_runtime_python_dependencies_and_paths(tmp_path:
     assert manifest["paths"]["experiment.sqlite3"] == str(root / "experiment.sqlite3")
     assert len(manifest["runtime_sha256"]) == 64
     assert len(manifest["python"]["stdlib_tree_sha256"]) == 64
+
+    runtime.joinpath("job_intel/product_search/acquisition_probe.py").write_text(
+        "drifted", encoding="utf-8"
+    )
+    try:
+        verify_experiment_runtime(
+            manifest,
+            python_executable=executable,
+            python_version="3.12.13",
+            stdlib_root=stdlib,
+            sys_path=(str(runtime), str(stdlib)),
+        )
+    except ValueError as exc:
+        assert "runtime drift" in str(exc)
+    else:
+        raise AssertionError("runtime content drift accepted")
+
+
+def test_runtime_verifier_rejects_sys_path_drift(tmp_path: Path) -> None:
+    root = tmp_path / "gate-a" / ("a" * 40)
+    runtime = root / "runtime"
+    python_runtime = root / "python-runtime"
+    executable = python_runtime / "venv/bin/python"
+    stdlib = python_runtime / "stdlib"
+    for path in (
+        runtime / "uv.lock",
+        runtime / "config/product_search/search_contract.v1.yaml",
+        runtime / "job_intel/product_search/acquisition_probe.py",
+        runtime / "deploy/systemd/experiments/probe.service",
+        executable,
+        stdlib / "os.py",
+        python_runtime / "installed-distributions.txt",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("identity", encoding="utf-8")
+    manifest = build_experiment_manifest(
+        root=root,
+        commit="a" * 40,
+        python_executable=executable,
+        python_version="3.12.13",
+        stdlib_root=stdlib,
+        sys_path=(str(runtime), str(stdlib)),
+    )
+
+    try:
+        verify_experiment_runtime(
+            manifest,
+            python_executable=executable,
+            python_version="3.12.13",
+            stdlib_root=stdlib,
+            sys_path=("/unexpected", str(stdlib)),
+        )
+    except ValueError as exc:
+        assert "environment" in str(exc)
+    else:
+        raise AssertionError("sys.path drift accepted")
 
 
 def test_manifest_rejects_shared_venv_and_production_paths(tmp_path: Path) -> None:

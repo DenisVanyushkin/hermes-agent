@@ -491,6 +491,43 @@ def build_experiment_manifest(
     return manifest
 
 
+def verify_experiment_runtime(
+    manifest: Mapping[str, Any],
+    *,
+    python_executable: Path | None = None,
+    python_version: str | None = None,
+    stdlib_root: Path | None = None,
+    sys_path: tuple[str, ...] | None = None,
+) -> None:
+    import platform
+    import sys
+    import sysconfig
+
+    validate_experiment_manifest(manifest)
+    expected = build_experiment_manifest(
+        root=Path(str(manifest["root"])),
+        commit=str(manifest["commit"]),
+        python_executable=python_executable or Path(sys.executable),
+        python_version=python_version or platform.python_version(),
+        stdlib_root=stdlib_root or Path(sysconfig.get_paths()["stdlib"]),
+        sys_path=sys_path or tuple(sys.path),
+    )
+    identity_fields = (
+        "commit",
+        "root",
+        "paths",
+        "python",
+        "environment",
+        "runtime_sha256",
+        "config_sha256",
+        "source_sha256",
+        "unit_sha256",
+    )
+    drifted = [name for name in identity_fields if manifest.get(name) != expected.get(name)]
+    if drifted:
+        raise ValueError(f"experiment runtime drift: {', '.join(drifted)}")
+
+
 def main() -> int:
     import argparse
     import yaml
@@ -507,7 +544,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "validate-manifest":
         manifest = yaml.safe_load(args.path.read_text(encoding="utf-8"))
-        validate_experiment_manifest(manifest)
+        verify_experiment_runtime(manifest)
     elif args.command == "write-manifest":
         import platform
         import sys
@@ -526,7 +563,7 @@ def main() -> int:
         )
     elif args.command == "run-manifest":
         manifest = yaml.safe_load(args.path.read_text(encoding="utf-8"))
-        validate_experiment_manifest(manifest)
+        verify_experiment_runtime(manifest)
         runtime = Path(manifest["environment"]["import_root"])
         contract = __import__(
             "job_intel.product_search.search_contract", fromlist=["load_search_contract"]
