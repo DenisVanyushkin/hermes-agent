@@ -29,6 +29,32 @@ def test_all_tools_are_registered():
     assert EXPECTED <= set(fitness_tool.REGISTERED_NAMES)
 
 
+def test_module_is_picked_up_by_tool_autodiscovery():
+    """Дискавери импортирует файл, только если найдёт ЛИТЕРАЛЬНЫЙ вызов
+    registry.register(...) среди statement'ов модуля (_module_registers_tools).
+
+    Обёртка-хелпер прячет вызов внутрь функции — файл молча перестаёт быть
+    тулфайлом, и тулсет не появляется ни в одной платформе. Прямой импорт в
+    остальных тестах этого не ловит, поэтому проверяем именно дискавери.
+    """
+    from tools.registry import _module_registers_tools
+
+    path = REPO / "tools" / "fitness_tool.py"
+    assert _module_registers_tools(path) is True
+
+
+def test_autodiscovery_actually_imports_the_module():
+    from tools.registry import discover_builtin_tools
+
+    assert "tools.fitness_tool" in discover_builtin_tools()
+
+
+def test_registry_exposes_the_whole_toolset():
+    from tools.registry import registry
+
+    assert EXPECTED <= set(registry.get_tool_names_for_toolset("fitness_booking"))
+
+
 def test_toolset_name_is_declared_in_toolsets():
     from toolsets import TOOLSETS
 

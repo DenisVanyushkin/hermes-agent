@@ -30,23 +30,8 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _register(fn, description: str, parameters: dict) -> None:
-    REGISTERED_NAMES.append(fn.__name__)
-    registry.register(
-        name=fn.__name__,
-        toolset=TOOLSET,
-        schema={
-            "name": fn.__name__,
-            "description": description,
-            "parameters": parameters,
-        },
-        handler=lambda args, **kw: str(fn(**(args or {}))),
-        requires_env=[],
-        is_async=False,
-        description=description,
-        emoji=_EMOJI,
-        max_result_size_chars=8000,
-    )
+def _schema(name: str, description: str, parameters: dict) -> dict:
+    return {"name": name, "description": description, "parameters": parameters}
 
 
 def _obj(properties: dict, required: list[str] | None = None) -> dict:
@@ -226,69 +211,160 @@ def fitness_watch_remove(rule_id: str) -> str:
     )
 
 
-_register(
-    fitness_schedule,
-    "Расписание групповых программ Invictus на дату (клубное время, Asia/Almaty)",
-    _obj(
-        {
-            "date": {"type": "string", "description": "Дата в формате YYYY-MM-DD"},
-            "club_id": {"type": "string", "description": "Идентификатор клуба (необязательно)"},
-        },
-        ["date"],
-    ),
-)
-_register(
-    fitness_my_bookings,
-    "Мои записи на групповые программы Invictus и состояние блокировки записи",
-    _obj({}),
-)
-_register(
-    fitness_book,
-    "Записаться на занятие Invictus по class_id из fitness_schedule",
-    _obj(
-        {"class_id": {"type": "string", "description": "Идентификатор занятия"}},
-        ["class_id"],
-    ),
-)
-_register(
-    fitness_cancel,
-    "Отменить запись на занятие Invictus. После дедлайна бесплатной отмены "
-    "требует confirm_penalty=True: санкция клуба — блокировка записи на 3 дня",
-    _obj(
-        {
-            "class_id": {"type": "string", "description": "Идентификатор занятия"},
-            "confirm_penalty": {
-                "type": "boolean",
-                "description": "Подтверждение отмены со штрафом (после дедлайна)",
+
+
+# --- регистрация -----------------------------------------------------------
+#
+# Вызовы registry.register(...) обязаны стоять ЛИТЕРАЛЬНО на верхнем уровне
+# модуля: discover_builtin_tools() парсит файл через ast и импортирует его,
+# только если найдёт среди statement'ов модуля выражение вида
+# `registry.register(...)` (_module_registers_tools). Обёртка-хелпер прячет
+# вызов внутрь функции — файл перестаёт считаться тулфайлом, молча не
+# импортируется, и тулсет не появляется ни в одной платформе. Тесты этого не
+# ловят: они импортируют модуль напрямую, минуя дискавери.
+
+registry.register(
+    name="fitness_schedule",
+    toolset=TOOLSET,
+    schema=_schema(
+        "fitness_schedule",
+        "Расписание групповых программ Invictus на дату (клубное время, Asia/Almaty)",
+        _obj(
+            {
+                "date": {"type": "string", "description": "Дата в формате YYYY-MM-DD"},
+                "club_id": {"type": "string", "description": "Идентификатор клуба"},
             },
-        },
-        ["class_id"],
+            ["date"],
+        ),
     ),
+    handler=lambda args, **kw: fitness_schedule(**(args or {})),
+    requires_env=[],
+    is_async=False,
+    emoji=_EMOJI,
+    max_result_size_chars=8000,
 )
-_register(
-    fitness_watch_add,
-    "Создать правило автозаписи Invictus (повторяющееся или разовое)",
-    _obj(
-        {
-            "title_pattern": {"type": "string", "description": "Подстрока названия занятия"},
-            "kind": {"type": "string", "enum": ["recurring", "oneshot"]},
-            "weekday": {
-                "type": "integer",
-                "description": "0=понедельник .. 6=воскресенье, клубное время",
+
+registry.register(
+    name="fitness_my_bookings",
+    toolset=TOOLSET,
+    schema=_schema(
+        "fitness_my_bookings",
+        "Мои записи на групповые программы Invictus и состояние блокировки записи",
+        _obj({}),
+    ),
+    handler=lambda args, **kw: fitness_my_bookings(),
+    requires_env=[],
+    is_async=False,
+    emoji=_EMOJI,
+    max_result_size_chars=8000,
+)
+
+registry.register(
+    name="fitness_book",
+    toolset=TOOLSET,
+    schema=_schema(
+        "fitness_book",
+        "Записаться на занятие Invictus по class_id из fitness_schedule",
+        _obj({"class_id": {"type": "string", "description": "Идентификатор занятия"}},
+             ["class_id"]),
+    ),
+    handler=lambda args, **kw: fitness_book(**(args or {})),
+    requires_env=[],
+    is_async=False,
+    emoji=_EMOJI,
+    max_result_size_chars=8000,
+)
+
+registry.register(
+    name="fitness_cancel",
+    toolset=TOOLSET,
+    schema=_schema(
+        "fitness_cancel",
+        "Отменить запись на занятие Invictus. После дедлайна бесплатной отмены "
+        "требует confirm_penalty=True: санкция клуба — блокировка записи на 3 дня",
+        _obj(
+            {
+                "class_id": {"type": "string", "description": "Идентификатор занятия"},
+                "confirm_penalty": {
+                    "type": "boolean",
+                    "description": "Подтверждение отмены со штрафом (после дедлайна)",
+                },
             },
-            "at_time": {"type": "string", "description": "Время занятия HH:MM, клубное"},
-            "target_date": {"type": "string", "description": "YYYY-MM-DD для разового правила"},
-            "club_id": {"type": "string"},
-            "trainer": {"type": "string"},
-            "window_minutes": {"type": "integer", "description": "Допуск по времени, минуты"},
-            "waitlist_ok": {"type": "boolean", "description": "Вставать ли в лист ожидания"},
-        },
-        ["title_pattern"],
+            ["class_id"],
+        ),
     ),
+    handler=lambda args, **kw: fitness_cancel(**(args or {})),
+    requires_env=[],
+    is_async=False,
+    emoji=_EMOJI,
+    max_result_size_chars=8000,
 )
-_register(fitness_watch_list, "Показать правила автозаписи Invictus", _obj({}))
-_register(
-    fitness_watch_remove,
-    "Удалить правило автозаписи Invictus по его id",
-    _obj({"rule_id": {"type": "string"}}, ["rule_id"]),
+
+registry.register(
+    name="fitness_watch_add",
+    toolset=TOOLSET,
+    schema=_schema(
+        "fitness_watch_add",
+        "Создать правило автозаписи Invictus (повторяющееся или разовое)",
+        _obj(
+            {
+                "title_pattern": {"type": "string", "description": "Подстрока названия"},
+                "kind": {"type": "string", "enum": ["recurring", "oneshot"]},
+                "weekday": {
+                    "type": "integer",
+                    "description": "0=понедельник .. 6=воскресенье, клубное время",
+                },
+                "at_time": {"type": "string", "description": "Время занятия HH:MM, клубное"},
+                "target_date": {"type": "string", "description": "YYYY-MM-DD, разовое правило"},
+                "club_id": {"type": "string"},
+                "trainer": {"type": "string"},
+                "window_minutes": {"type": "integer", "description": "Допуск по времени"},
+                "waitlist_ok": {"type": "boolean", "description": "Вставать ли в лист ожидания"},
+            },
+            ["title_pattern"],
+        ),
+    ),
+    handler=lambda args, **kw: fitness_watch_add(**(args or {})),
+    requires_env=[],
+    is_async=False,
+    emoji=_EMOJI,
+    max_result_size_chars=8000,
+)
+
+registry.register(
+    name="fitness_watch_list",
+    toolset=TOOLSET,
+    schema=_schema("fitness_watch_list", "Показать правила автозаписи Invictus", _obj({})),
+    handler=lambda args, **kw: fitness_watch_list(),
+    requires_env=[],
+    is_async=False,
+    emoji=_EMOJI,
+    max_result_size_chars=8000,
+)
+
+registry.register(
+    name="fitness_watch_remove",
+    toolset=TOOLSET,
+    schema=_schema(
+        "fitness_watch_remove",
+        "Удалить правило автозаписи Invictus по его id",
+        _obj({"rule_id": {"type": "string"}}, ["rule_id"]),
+    ),
+    handler=lambda args, **kw: fitness_watch_remove(**(args or {})),
+    requires_env=[],
+    is_async=False,
+    emoji=_EMOJI,
+    max_result_size_chars=8000,
+)
+
+REGISTERED_NAMES.extend(
+    [
+        "fitness_schedule",
+        "fitness_my_bookings",
+        "fitness_book",
+        "fitness_cancel",
+        "fitness_watch_add",
+        "fitness_watch_list",
+        "fitness_watch_remove",
+    ]
 )
