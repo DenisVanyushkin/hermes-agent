@@ -634,14 +634,15 @@ git diff --check
 
 **Checklist:**
 
-- [ ] Write failing fixture tests for unique delivery, user decisions, completed actions, actual review minutes, duplicates, company identity, and `activated * 60 / actual_minutes`.
-- [ ] Add edge tests: unknown/zero minutes are non-computable; unfinished sessions are not zero; machine verdicts are not outcomes; repeated delivery is counted once.
-- [ ] Implement a bounded read-only extractor that emits aggregate data and source snapshot hashes only—no message bodies, tokens, application artifacts, Candidate Facts text, or user notes.
-- [ ] Capture the 45-day Slack category counts, DB-accounted sends, root/reply totals, legacy unit/cron inventory, current bot identity/scopes, and current production flags without posting.
-- [ ] Inventory and classify each outbound code path as `typed_product_search` (currently none), `live_adapter_generic`, `standalone_sender`, `webhook`, `raw_slack_api`, `legacy_job_intel`, or `unknown`.
-- [ ] Capture current reaction/thread/action routing and confirm that the same Hermes Slack app receives them over Socket Mode.
-- [ ] Determine whether historical attention is comparable; when it is not, record `not_computable` and a prospective baseline period instead of imputing 60 minutes.
-- [ ] Run tests, scope guard, ruff, and redaction inspection; all must pass before commit.
+- [x] Write failing fixture tests for unique delivery, user decisions, completed actions, actual review minutes, duplicates, company identity, and `activated * 60 / actual_minutes`.
+- [x] Add edge tests: unknown/zero minutes are non-computable; unfinished sessions are not zero; machine verdicts are not outcomes; repeated delivery is counted once.
+- [x] Implement a bounded read-only extractor that emits aggregate data and source snapshot hashes only—no message bodies, tokens, application artifacts, Candidate Facts text, or user notes.
+- [x] Capture the 45-day Slack category counts, DB-accounted sends, root/reply totals, legacy unit/cron inventory, current bot identity/scopes, and current production flags without posting.
+  - ➕ The immutable planning audit retains 104 DB-accounted cards; the later live snapshot replay returned 103. Both observations and their evidence hashes are preserved without rewriting history.
+- [x] Inventory and classify each outbound code path as `typed_product_search` (currently none), `live_adapter_generic`, `standalone_sender`, `webhook`, `raw_slack_api`, `legacy_job_intel`, or `unknown`.
+- [x] Capture current reaction/thread/action routing and confirm that the same Hermes Slack app receives them over Socket Mode.
+- [x] Determine whether historical attention is comparable; when it is not, record `not_computable` and a prospective baseline period instead of imputing 60 minutes.
+- [x] Run tests, scope guard, ruff, and redaction inspection; all must pass before commit.
 
 **Acceptance criteria:**
 

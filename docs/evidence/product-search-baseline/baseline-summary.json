@@ -1,0 +1,127 @@
+{
+  "schema_version": "1.0.0",
+  "baseline_id": "product-search-pre-pilot-2026-08-10",
+  "captured_at": "2026-08-11T06:30:00Z",
+  "window": {
+    "description": "45-day pre-pilot audit ending 2026-08-10",
+    "timezone": "Asia/Almaty"
+  },
+  "slack_audit": {
+    "channel_id": "C0B4MM6D52A",
+    "root_total": 634,
+    "reply_total": 336,
+    "root_categories": {
+      "individual_vacancy_card": 487,
+      "daily_executive_review": 45,
+      "system_health_warning": 45,
+      "weekly_source_quality": 7,
+      "strategic_report": 3,
+      "other": 47
+    },
+    "source_snapshot": {
+      "kind": "prior_read_only_slack_audit_record",
+      "git_commit": "bbf2ae0f4885dcbd4be5a08692d6d757372fd0d8",
+      "record_sha256": "fb1e524811ef2adfa8648bf53dabbaafdfd440c5a863ca96485bcd72d3d4ca45"
+    }
+  },
+  "database_audit": {
+    "vacancy_cards_accounted": 104,
+    "current_snapshot_replay": {
+      "vacancy_cards_accounted": 103,
+      "unique_vacancy_cards": 72,
+      "daily_summary": 45,
+      "health_warning": 45,
+      "weekly_source_quality": 7
+    },
+    "drift_note": "The immutable planning audit recorded 104. The later live database snapshot replay recorded 103 in the same rolling window; neither value is rewritten.",
+    "source_snapshot": {
+      "kind": "sqlite_database_file",
+      "filename": "job_intel.sqlite3",
+      "sha256": "374feda37bdd7a78b69999888b2cd35bee6cda74a3cac0cd79ef587298c97cb1"
+    }
+  },
+  "attention": {
+    "status": "not_computable",
+    "reason": "Historical records do not contain compatible completed review sessions with measured duration.",
+    "prospective_period": "Start at the Gate C shadow attention prototype with one locked measurement definition.",
+    "actual_completed_review_minutes": null,
+    "activated_opportunities_per_60_review_minutes": null
+  },
+  "outbound_inventory": {
+    "typed_product_search": [],
+    "live_adapter_generic": [
+      "plugins/platforms/slack/adapter.py:SlackAdapter.send"
+    ],
+    "standalone_sender": [
+      "tools/send_message_tool.py:registry standalone dispatch",
+      "plugins/platforms/slack/adapter.py:_standalone_send"
+    ],
+    "webhook": [
+      "job_intel/cli.py:_deliver_to_slack optional webhook branch"
+    ],
+    "raw_slack_api": [
+      "plugins/platforms/slack/adapter.py:internal Web API calls",
+      "scripts/upstream-sync-finalize.sh:direct Web API call"
+    ],
+    "legacy_job_intel": [
+      "job_intel/cli.py:_deliver_to_slack",
+      "job_intel/universe/__init__.py:_deliver_to_slack caller"
+    ],
+    "unknown": []
+  },
+  "inbound_routing": {
+    "same_app_socket_mode": true,
+    "receives_reactions": true,
+    "receives_thread_replies": true,
+    "receives_registered_actions": true
+  },
+  "slack_identity": {
+    "bot_id": "B0B3XV1UCDC",
+    "bot_user_id": "U0B3WKPC84V",
+    "team_id": "T0B32RP330D",
+    "oauth_scopes": [
+      "app_mentions:read",
+      "channels:history",
+      "channels:read",
+      "chat:write",
+      "files:read",
+      "files:write",
+      "groups:history",
+      "groups:read",
+      "im:history",
+      "im:read",
+      "im:write",
+      "reactions:read",
+      "users:read"
+    ],
+    "protected_channel": {
+      "id": "C0B4MM6D52A",
+      "conversation_type": "public_channel",
+      "app_is_member": true
+    }
+  },
+  "production_flags": {
+    "job_intel_slack_webhook_url": "empty",
+    "slack_bot_credential": "present",
+    "slack_app_credential": "present",
+    "source_search_updates": "default_off_absent",
+    "healthy_health_reports": "default_off_absent"
+  },
+  "enabled_timers": [
+    "job-intel-daily.timer",
+    "job-intel-health.timer",
+    "job-intel-semantic-shadow.timer",
+    "job-intel-universe.timer",
+    "job-intel-weekly-kpi.timer"
+  ],
+  "runtime_processes": [
+    "job-intel-exporter"
+  ],
+  "source_hashes": {
+    "job_intel/cli.py": "bf3518eea0f578cad09c6860fd1fafd87b930b594c87cb57f4cbb77be875337f",
+    "plugins/platforms/slack/adapter.py": "a8d4f4878b590f77779d3c8ce8346ca62596463d062ed0515d1e70e4d7be1103",
+    "tools/send_message_tool.py": "259db47346643cf414663f96ed64fb6121b34ef46b6726965c7cb4501efe62f3",
+    "job_intel/reaction_triggers.py": "93aa74acc2b1c241133e4d689d385c753617f31e38716a896b461efb0853ccca",
+    "job_intel/feedback_service.py": "d3b9e7fb5c9bde26234025f2a349efe4305581607b749a4df3c641741d2a848c"
+  }
+}
