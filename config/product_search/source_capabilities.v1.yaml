@@ -1,0 +1,153 @@
+version: 1.0.0
+coverage_dimensions:
+  search_cells:
+    europe_country_cells: unknown
+    apac_country_cells: unknown
+    gcc_country_cells: unknown
+    americas_country_cells: unknown
+    global_remote: partial
+    australia: partial
+    new_zealand: unknown
+    kazakhstan: partial
+    other_central_asia_country_cells: unknown
+  mandate_vocabularies:
+    - executive_product
+    - digital_business
+    - customer_growth_commercial_hybrid
+    - product_business_unit
+    - general_management
+    - growth_monetization
+    - transformation_builder
+    - hybrid_executive_exploration
+  industry_business_models:
+    - financial_services
+    - adjacent_non_fintech
+    - b2c
+    - b2b2c
+    - marketplace
+    - subscription
+    - transaction
+    - platform_as_business
+sources:
+  - &target
+    source_id: target_companies
+    family: target_company_monitoring
+    status: partial
+    public_interface: job_intel.company_intel.monitor_target_companies
+    seed_dependencies: [target_company_seed]
+    query_controls: [configured_career_urls]
+    geography_controls: []
+    freshness: live_on_attempt
+    auth_state: mixed_public_and_browser
+    evidence_completeness: company_career_listing
+    limits: [preselected_companies, not_broad_market]
+    failure_domain: per_company_or_shared_browser
+    inspection: &inspection
+      commit: bbf2ae0f4885dcbd4be5a08692d6d757372fd0d8
+      inspected_at: '2026-08-11'
+  - source_id: linkedin
+    family: linkedin
+    status: partial
+    public_interface: job_intel.sources.fetch_linkedin_vacancies
+    seed_dependencies: []
+    query_controls: [query, max_pages]
+    geography_controls: [query_text_location]
+    freshness: live_on_attempt
+    auth_state: authenticated_browser_session_required
+    evidence_completeness: listing_plus_optional_detail
+    limits: [anti_bot, shared_profile, no_structured_country_cell]
+    failure_domain: linkedin_session
+    inspection: *inspection
+  - source_id: headhunter
+    family: headhunter
+    status: partial
+    public_interface: job_intel.sources.fetch_headhunter_vacancies
+    seed_dependencies: []
+    query_controls: [query, per_page]
+    geography_controls: [query_text_location]
+    freshness: live_on_attempt
+    auth_state: browser_first_with_public_fallback
+    evidence_completeness: listing_plus_detail_backfill
+    limits: [anti_bot, regional_backend_bias, no_structured_country_cell]
+    failure_domain: headhunter_session
+    inspection: *inspection
+  - &greenhouse
+    source_id: greenhouse
+    family: greenhouse
+    status: partial
+    public_interface: job_intel.ats_sources.fetch_greenhouse
+    seed_dependencies: [company_registry_ats_slug]
+    query_controls: [role_query]
+    geography_controls: []
+    freshness: live_on_attempt
+    auth_state: public_api
+    evidence_completeness: tenant_openings
+    limits: [known_tenants_only, not_broad_market]
+    failure_domain: per_tenant
+    inspection: *inspection
+  - <<: *greenhouse
+    source_id: lever
+    family: lever
+    public_interface: job_intel.ats_sources.fetch_lever
+  - <<: *greenhouse
+    source_id: ashby
+    family: ashby
+    public_interface: job_intel.ats_sources.fetch_ashby
+  - <<: *greenhouse
+    source_id: teamtailor
+    family: teamtailor
+    public_interface: job_intel.ats_sources.fetch_teamtailor
+    auth_state: public_web
+  - <<: *greenhouse
+    source_id: smartrecruiters
+    family: smartrecruiters
+    public_interface: job_intel.ats_sources.fetch_smartrecruiters
+  - <<: *greenhouse
+    source_id: personio
+    family: personio
+    public_interface: job_intel.ats_sources.fetch_personio
+    evidence_completeness: tenant_xml_feed
+  - <<: *greenhouse
+    source_id: recruitee
+    family: recruitee
+    public_interface: job_intel.ats_sources.fetch_recruitee
+    evidence_completeness: tenant_xml_feed
+  - source_id: duckduckgo
+    family: duckduckgo
+    status: unknown
+    public_interface: job_intel.sources.search_duckduckgo
+    seed_dependencies: []
+    query_controls: [broad_market, query, max_results]
+    geography_controls: [query_text_location]
+    freshness: live_on_attempt
+    auth_state: public_search_subject_to_rate_limits
+    evidence_completeness: search_result_snippet
+    limits: [disabled_by_default, result_quality_unproven, shared_backend]
+    failure_domain: duckduckgo_backend
+    inspection: *inspection
+  - source_id: remoteok
+    family: remoteok
+    status: partial
+    public_interface: job_intel.sources.search_remoteok_jobs
+    seed_dependencies: []
+    query_controls: [max_results]
+    geography_controls: [global_remote_feed]
+    freshness: live_on_attempt
+    auth_state: public_api
+    evidence_completeness: feed_listing
+    limits: [disabled_by_default, low_executive_density, no_query]
+    failure_domain: remoteok_api
+    inspection: *inspection
+  - source_id: remotive
+    family: remotive
+    status: partial
+    public_interface: job_intel.sources.search_remotive_jobs
+    seed_dependencies: []
+    query_controls: [max_results]
+    geography_controls: [global_remote_feed]
+    freshness: live_on_attempt
+    auth_state: public_api
+    evidence_completeness: feed_listing
+    limits: [disabled_by_default, low_executive_density, no_query]
+    failure_domain: remotive_api
+    inspection: *inspection

@@ -677,13 +677,13 @@ git diff --check
 
 **Checklist:**
 
-- [ ] Write failing schema tests for source ID/family, public invocation interface, seed dependency, supported query/geography controls, freshness, auth/anti-bot state, evidence completeness, limits, and failure independence.
-- [ ] Add tests proving multiple query variants against one backend remain one family and a known ATS tenant collector does not independently prove broad-market discovery.
-- [ ] Inventory current collectors from actual invocation paths and populate `proven`, `partial`, `blocked`, or `unknown` with code/runtime evidence and inspection timestamp.
-- [ ] Produce a matrix by search cell, mandate vocabulary, industry/business model, and independent family; name capability gaps without changing scraper code/config.
-- [ ] Add drift tests for unregistered live sources and stale registry pointers.
-- [ ] Run the scope guard and prove protected scraper hashes still match Task 1.
-- [ ] Run tests and ruff; all must pass before commit.
+- [x] Write failing schema tests for source ID/family, public invocation interface, seed dependency, supported query/geography controls, freshness, auth/anti-bot state, evidence completeness, limits, and failure independence.
+- [x] Add tests proving multiple query variants against one backend remain one family and a known ATS tenant collector does not independently prove broad-market discovery.
+- [x] Inventory current collectors from actual invocation paths and populate `proven`, `partial`, `blocked`, or `unknown` with code/runtime evidence and inspection timestamp.
+- [x] Produce a matrix by search cell, mandate vocabulary, industry/business model, and independent family; name capability gaps without changing scraper code/config.
+- [x] Add drift tests for unregistered live sources and stale registry pointers.
+- [x] Run the scope guard and prove protected scraper hashes still match Task 1.
+- [x] Run tests and ruff; all must pass before commit.
 
 **Acceptance criteria:**
 
