@@ -17,6 +17,7 @@ WRAPPER = ROOT / "scripts/job_intel_product_search_experiment.sh"
 SERVICE = ROOT / "deploy/systemd/experiments/job-intel-product-search-probe-experiment.service"
 TIMER = ROOT / "deploy/systemd/experiments/job-intel-product-search-probe-experiment.timer"
 EXPORTER = ROOT / "scripts/export_job_intel_product_search_experiment.sh"
+PROBE = ROOT / "scripts/job_intel_product_search_probe.sh"
 
 
 def valid_manifest(tmp_path: Path) -> dict:
@@ -157,3 +158,41 @@ def test_exporter_skips_project_build_and_pins_copied_python() -> None:
     assert "--no-install-project" in exporter
     assert '--python "$destination/python-runtime/venv/bin/python"' in exporter
     assert "--no-editable" not in exporter
+
+
+def test_wrapper_preflight_uses_pinned_python_outside_checkout(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.yaml"
+    manifest_path.write_text("gate: gate-a\n", encoding="utf-8")
+    calls = tmp_path / "python-calls.txt"
+    fake_python = tmp_path / "pinned-python"
+    fake_python.write_text(
+        f"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> {calls!s}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        PRODUCT_SEARCH_PYTHON=str(fake_python),
+        PRODUCT_SEARCH_RUNTIME_ROOT=str(ROOT),
+    )
+
+    result = subprocess.run(
+        ["bash", str(WRAPPER), "preflight", str(manifest_path)],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "job_intel.product_search.acquisition_probe validate-manifest" in calls.read_text()
+
+
+def test_probe_bootstrap_never_uses_ambient_python() -> None:
+    wrapper = WRAPPER.read_text(encoding="utf-8")
+    probe = PROBE.read_text(encoding="utf-8")
+
+    assert "python3" not in wrapper
+    assert "python3" not in probe
+    assert "PRODUCT_SEARCH_PYTHON" in wrapper
+    assert "PRODUCT_SEARCH_PYTHON" in probe

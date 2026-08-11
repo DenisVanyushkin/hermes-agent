@@ -11,11 +11,14 @@ for name in SLACK_BOT_TOKEN SLACK_APP_TOKEN JOB_INTEL_SLACK_WEBHOOK_URL; do
   fi
 done
 
-python3 -m job_intel.product_search.acquisition_probe validate-manifest "$manifest"
+python_path="${PRODUCT_SEARCH_PYTHON:?pinned PRODUCT_SEARCH_PYTHON is required}"
+runtime_root="${PRODUCT_SEARCH_RUNTIME_ROOT:?pinned PRODUCT_SEARCH_RUNTIME_ROOT is required}"
+export PYTHONPATH="$runtime_root"
+"$python_path" -m job_intel.product_search.acquisition_probe validate-manifest "$manifest"
 [[ "$command" == "preflight" ]] && exit 0
 [[ "$command" == "run" ]] || { echo "unknown command: $command" >&2; exit 64; }
 
-lock_path="$(python3 - "$manifest" <<'PY'
+lock_path="$("$python_path" - "$manifest" <<'PY'
 from pathlib import Path
 import sys, yaml
 print(Path(yaml.safe_load(Path(sys.argv[1]).read_text())["paths"]["locks"]) / "scheduled-run.lock")
@@ -28,4 +31,4 @@ if ! flock -n 9; then
   exit 75
 fi
 
-exec "$(dirname "$0")/job_intel_product_search_probe.sh" "$manifest"
+exec "$runtime_root/scripts/job_intel_product_search_probe.sh" "$manifest"
