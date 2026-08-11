@@ -8,6 +8,7 @@ import yaml
 
 from job_intel.product_search.acquisition_probe import (
     build_experiment_manifest,
+    relocate_experiment_manifest,
     validate_experiment_manifest,
     verify_experiment_runtime,
 )
@@ -156,6 +157,25 @@ def test_runtime_verifier_rejects_sys_path_drift(tmp_path: Path) -> None:
         assert "environment" in str(exc)
     else:
         raise AssertionError("sys.path drift accepted")
+
+
+def test_manifest_relocation_repins_all_runtime_paths(tmp_path: Path) -> None:
+    manifest = valid_manifest(tmp_path)
+    old_root = Path(manifest["root"])
+    manifest["environment"]["sys_path"] = [
+        str(old_root / "runtime"),
+        str(old_root / "python-runtime/cpython/lib/python3.12"),
+        str(old_root / "python-runtime/venv/lib/python3.12/site-packages"),
+    ]
+    new_root = Path("/home/hermes/.hermes/job_intel/experiments/gate-a") / ("a" * 40)
+
+    relocated = relocate_experiment_manifest(manifest, new_root=new_root)
+
+    assert relocated["root"] == str(new_root)
+    assert relocated["python"]["executable_path"].startswith(str(new_root))
+    assert relocated["environment"]["import_root"] == str(new_root / "runtime")
+    assert all(str(old_root) not in path for path in relocated["environment"]["sys_path"])
+    assert relocated["environment"]["sys_path_sha256"] != manifest["environment"]["sys_path_sha256"]
 
 
 def test_manifest_rejects_shared_venv_and_production_paths(tmp_path: Path) -> None:

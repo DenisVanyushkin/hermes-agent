@@ -479,6 +479,7 @@ def build_experiment_manifest(
             "dependency_lock_sha256": _tree_sha256(lock),
             "installed_distributions_sha256": _tree_sha256(installed),
             "import_root": str(runtime),
+            "sys_path": list(sys_path),
             "sys_path_sha256": hashlib.sha256("\n".join(sys_path).encode()).hexdigest(),
             "editable_installs": [],
         },
@@ -489,6 +490,34 @@ def build_experiment_manifest(
     }
     validate_experiment_manifest(manifest)
     return manifest
+
+
+def relocate_experiment_manifest(
+    manifest: Mapping[str, Any], *, new_root: Path
+) -> dict[str, Any]:
+    validate_experiment_manifest(manifest)
+    old_root = str(manifest["root"])
+    if not new_root.is_absolute():
+        raise ValueError("relocated experiment root must be absolute")
+
+    def relocate(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: relocate(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [relocate(item) for item in value]
+        if isinstance(value, str) and (value == old_root or value.startswith(f"{old_root}/")):
+            return f"{new_root}{value[len(old_root):]}"
+        return value
+
+    relocated = relocate(dict(manifest))
+    relocated_sys_path = tuple(relocated["environment"].get("sys_path") or ())
+    if not relocated_sys_path:
+        raise ValueError("manifest sys.path is required for relocation")
+    relocated["environment"]["sys_path_sha256"] = hashlib.sha256(
+        "\n".join(relocated_sys_path).encode()
+    ).hexdigest()
+    validate_experiment_manifest(relocated)
+    return relocated
 
 
 def verify_experiment_runtime(
@@ -539,6 +568,10 @@ def main() -> int:
     write = subparsers.add_parser("write-manifest")
     write.add_argument("root", type=Path)
     write.add_argument("commit")
+    relocate = subparsers.add_parser("relocate-manifest")
+    relocate.add_argument("source", type=Path)
+    relocate.add_argument("new_root", type=Path)
+    relocate.add_argument("destination", type=Path)
     run = subparsers.add_parser("run-manifest")
     run.add_argument("path", type=Path)
     args = parser.parse_args()
@@ -560,6 +593,12 @@ def main() -> int:
         )
         (args.root / "manifest.yaml").write_text(
             yaml.safe_dump(manifest, sort_keys=True), encoding="utf-8"
+        )
+    elif args.command == "relocate-manifest":
+        manifest = yaml.safe_load(args.source.read_text(encoding="utf-8"))
+        relocated = relocate_experiment_manifest(manifest, new_root=args.new_root)
+        args.destination.write_text(
+            yaml.safe_dump(relocated, sort_keys=True), encoding="utf-8"
         )
     elif args.command == "run-manifest":
         manifest = yaml.safe_load(args.path.read_text(encoding="utf-8"))
