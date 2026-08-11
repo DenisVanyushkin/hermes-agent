@@ -806,7 +806,7 @@ git diff --check
 
 **Checklist:**
 
-- [ ] Write failing acceptance assertions for pinned-commit scheduled attempts, missed/overlap behavior, isolated state/profile/locks, evidence hashes, family accounting, cell-state closure, stages 1–3, provisional prefilter, new-company candidates, cost/latency, and zero live-DB/Slack/product-state effects.
+- [x] Write failing acceptance assertions for pinned-commit scheduled attempts, missed/overlap behavior, isolated state/profile/locks, evidence hashes, family accounting, cell-state closure, stages 1–3, provisional prefilter, new-company candidates, cost/latency, and zero live-DB/Slack/product-state effects.
 - [ ] Without mutating production, recheck canonical state, rebase the experiment-ready feature slice, run the approved suite/scope checks in the worktree, and pin the final candidate plus manifest including code, Python, dependency, import, config, source, state, and unit hashes.
 - [ ] Present that exact post-rebase candidate/manifest, window, stop list, state/backup paths, and proposed hold outcomes; obtain owner checkpoint approval. Any subsequent SHA/manifest drift returns to rebase/test/pin/approval.
 - [ ] Only after approval, stop/mask all named Job Intel timers/services/cron/manual callbacks and overlapping collectors, record their prior state, confirm no relevant process remains, integrate the exact approved commit into canonical `local/customizations`, and verify canonical HEAD.

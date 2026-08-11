@@ -385,6 +385,44 @@ def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
                 raise ValueError(f"invalid identity hash: {section}.{key}")
 
 
+def validate_gate_a_run_evidence(evidence: Mapping[str, Any]) -> None:
+    allowed_stages = {
+        "raw_observed",
+        "canonical_current",
+        "minimum_evidence_sufficient",
+    }
+    stages = set(dict(evidence.get("stage_counts") or {}))
+    if stages != allowed_stages:
+        raise ValueError("Gate A may contain stages 1-3 only; stage 4 is forbidden")
+    allowed_labels = {
+        "provisionally_eligible",
+        "known_hard_block",
+        "unresolved_for_decision_v2",
+    }
+    labels = set(dict(evidence.get("provisional_labels") or {}))
+    if not labels <= allowed_labels:
+        raise ValueError("unknown Gate A provisional label")
+    scheduled = int(evidence.get("scheduled_attempts") or 0)
+    completed = int(evidence.get("completed_attempts") or 0)
+    missed = int(evidence.get("missed_attempts") or 0)
+    if scheduled < 1:
+        raise ValueError("scheduled attempts are required")
+    if scheduled != completed + missed:
+        raise ValueError("attempt accounting does not close")
+    if not dict(evidence.get("family_attempts") or {}):
+        raise ValueError("family attempts are required")
+    if not dict(evidence.get("cell_states") or {}):
+        raise ValueError("cell states are required")
+    if evidence.get("evidence_hashes_verified") is not True:
+        raise ValueError("evidence hashes must be verified")
+    for name, path in dict(evidence.get("isolated_paths") or {}).items():
+        if "/experiments/gate-a/" not in str(path):
+            raise ValueError(f"invalid isolated path: {name}")
+    for name, count in dict(evidence.get("side_effects") or {}).items():
+        if int(count or 0) != 0:
+            raise ValueError(f"forbidden side effect: {name}")
+
+
 def _tree_sha256(root: Path, *, relative_to: Path | None = None) -> str:
     digest = hashlib.sha256()
     anchor = relative_to or root
