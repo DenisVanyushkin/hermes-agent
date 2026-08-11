@@ -126,6 +126,18 @@ categories:
       - get_act_downloads
       - healthcheck_source
       - legal_answer_review
+  fitness_booking:
+    description: >-
+      Invictus (entryx.io): расписание групповых программ, запись и отмена
+      записи, правила автозаписи. Вынесено отдельной категорией, потому что
+      запись и отмена меняют внешнее состояние и стоят санкции клуба.
+    tools:
+      - fitness_schedule
+      - fitness_my_bookings
+      - fitness_book
+      - fitness_watch_add
+      - fitness_watch_list
+      - fitness_watch_remove
   image_generation:
     description: >-
       Image generation and editing via the unified image_generate tool

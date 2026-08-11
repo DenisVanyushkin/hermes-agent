@@ -150,6 +150,15 @@ TOOLSETS = {
         "tools": ["image_generate"],
         "includes": []
     },
+    "fitness_booking": {
+        "description": "Invictus: расписание групповых программ, запись, правила автозаписи",
+        "tools": [
+            "fitness_schedule", "fitness_my_bookings", "fitness_book",
+            "fitness_cancel", "fitness_watch_add", "fitness_watch_list",
+            "fitness_watch_remove",
+        ],
+        "includes": []
+    },
     "legal_research": {
         "description": "Kazakhstan legal acts research via adilet.zan.kz",
         "tools": [

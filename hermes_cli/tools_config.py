@@ -103,6 +103,7 @@ CONFIGURABLE_TOOLSETS = [
     ("video",           "🎬 Video Analysis",            "video_analyze (requires video-capable model)"),
     ("image_gen",       "🎨 Image Generation",          "image_generate"),
     ("legal_research",  "⚖️ Legal Research (Adilet KZ)", "search_acts"),
+    ("fitness_booking",  "🏋️ Invictus Fitness", "schedule, book, cancel, autobook rules"),
     ("video_gen",       "🎬 Video Generation",          "video_generate (text/image/reference)"),
     ("bfl",             "🎬 BFL FLUX 3 Video",          "bfl_flux3_*"),
     ("x_search",        "🐦 X (Twitter) Search",        "x_search (requires xAI OAuth or XAI_API_KEY)"),
