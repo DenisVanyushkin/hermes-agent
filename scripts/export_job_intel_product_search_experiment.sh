@@ -26,7 +26,14 @@ UV_PROJECT_ENVIRONMENT="$destination/python-runtime/venv" uv sync \
   --python "$destination/python-runtime/venv/bin/python"
 uv pip freeze --python "$destination/python-runtime/venv/bin/python" \
   >"$destination/python-runtime/installed-distributions.txt"
-(cd "$destination/runtime" && PYTHONPATH="$destination/runtime" \
+(cd "$destination/runtime" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$destination/runtime" \
   "$destination/python-runtime/venv/bin/python" -m job_intel.product_search.acquisition_probe \
   write-manifest "$destination" "$commit")
+bytecode_path="$(find "$destination/runtime" \
+  \( -type d -name __pycache__ -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) \
+  -print -quit)"
+[[ -z "$bytecode_path" ]] || {
+  echo "immutable runtime contains Python bytecode: $bytecode_path" >&2
+  exit 64
+}
 chmod -R a-w "$destination/runtime" "$destination/python-runtime/venv"

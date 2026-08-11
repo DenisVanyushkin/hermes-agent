@@ -257,6 +257,8 @@ def test_exporter_skips_project_build_and_pins_copied_python() -> None:
     assert "--no-install-project" in exporter
     assert '--python "$destination/python-runtime/venv/bin/python"' in exporter
     assert "--no-editable" not in exporter
+    assert "PYTHONDONTWRITEBYTECODE=1" in exporter
+    assert "immutable runtime contains Python bytecode" in exporter
 
 
 def test_wrapper_preflight_uses_pinned_python_outside_checkout(tmp_path: Path) -> None:
