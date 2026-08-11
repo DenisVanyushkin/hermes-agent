@@ -24,6 +24,7 @@ FORBIDDEN_PROBE_ROOTS = (
     Path("/home/hermes/.hermes/job_intel"),
     Path("/home/hermes/.hermes/hermes-agent/.worktrees"),
 )
+GATE_A_EXPERIMENT_ROOT = Path("/home/hermes/.hermes/job_intel/experiments/gate-a")
 
 
 class ProbeSourceBlocked(RuntimeError):
@@ -149,12 +150,23 @@ def expand_queries(contract: SearchContract, *, role_terms: tuple[str, ...]) -> 
     return tuple(sorted(expanded, key=lambda item: item.query_id))
 
 
-def _ensure_safe_output(path: Path) -> None:
+def validate_probe_output_path(path: Path) -> None:
     resolved = path.resolve()
+    gate_root = GATE_A_EXPERIMENT_ROOT.resolve()
+    if (
+        resolved.parent == gate_root
+        and len(resolved.name) == 40
+        and all(character in "0123456789abcdef" for character in resolved.name)
+    ):
+        return
     for forbidden in FORBIDDEN_PROBE_ROOTS:
         forbidden_resolved = forbidden.resolve()
         if resolved == forbidden_resolved or forbidden_resolved in resolved.parents:
             raise ValueError(f"forbidden probe path: {resolved}")
+
+
+def _ensure_safe_output(path: Path) -> None:
+    validate_probe_output_path(path)
 
 
 def _ensure_slack_blind(environment: Mapping[str, str]) -> None:

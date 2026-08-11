@@ -12,6 +12,7 @@ from job_intel.product_search.acquisition_probe import (
     expand_queries,
     resolve_public_sources,
     run_probe,
+    validate_probe_output_path,
 )
 from job_intel.product_search.search_contract import load_search_contract
 
@@ -166,6 +167,24 @@ def test_probe_rejects_production_paths_and_slack_credentials(tmp_path: Path) ->
         assert "Slack credentials are forbidden" in str(exc)
     else:
         raise AssertionError("accepted Slack credentials")
+
+
+def test_output_path_allows_only_direct_gate_a_commit_root() -> None:
+    approved = Path("/home/hermes/.hermes/job_intel/experiments/gate-a") / ("a" * 40)
+
+    validate_probe_output_path(approved)
+
+    for forbidden in (
+        Path("/home/hermes/.hermes/job_intel/experiments/gate-a/not-a-commit"),
+        approved / "nested",
+        Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3"),
+    ):
+        try:
+            validate_probe_output_path(forbidden)
+        except ValueError as exc:
+            assert "forbidden probe path" in str(exc)
+        else:
+            raise AssertionError(f"accepted unsafe Gate A path: {forbidden}")
 
 
 def test_probe_registry_exposes_only_existing_public_scraper_interfaces() -> None:
