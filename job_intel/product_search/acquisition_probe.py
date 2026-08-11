@@ -371,6 +371,13 @@ def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
     editable = list(manifest.get("environment", {}).get("editable_installs") or [])
     if editable:
         raise ValueError("editable installs are forbidden")
+    for family, settings in dict(manifest.get("source_isolation") or {}).items():
+        mode = str(dict(settings).get("mode") or "")
+        path = str(dict(settings).get("path") or "")
+        if mode not in {"cloned_profile", "exclusive_lock"}:
+            raise ValueError(f"invalid source isolation mode: {family}")
+        if not _inside(path, root):
+            raise ValueError(f"source isolation path outside experiment root: {family}")
     for section, keys in {
         "python": ("executable_sha256", "stdlib_tree_sha256"),
         "environment": (
@@ -516,6 +523,28 @@ def relocate_experiment_manifest(
     relocated["environment"]["sys_path_sha256"] = hashlib.sha256(
         "\n".join(relocated_sys_path).encode()
     ).hexdigest()
+    relocated["source_isolation"] = {
+        "duckduckgo": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/duckduckgo.lock"),
+        },
+        "headhunter": {
+            "mode": "cloned_profile",
+            "path": str(new_root / "browser-profile/headhunter"),
+        },
+        "linkedin": {
+            "mode": "cloned_profile",
+            "path": str(new_root / "browser-profile/linkedin"),
+        },
+        "remoteok": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/remoteok.lock"),
+        },
+        "remotive": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/remotive.lock"),
+        },
+    }
     validate_experiment_manifest(relocated)
     return relocated
 

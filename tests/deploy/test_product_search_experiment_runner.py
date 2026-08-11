@@ -176,6 +176,28 @@ def test_manifest_relocation_repins_all_runtime_paths(tmp_path: Path) -> None:
     assert relocated["environment"]["import_root"] == str(new_root / "runtime")
     assert all(str(old_root) not in path for path in relocated["environment"]["sys_path"])
     assert relocated["environment"]["sys_path_sha256"] != manifest["environment"]["sys_path_sha256"]
+    assert relocated["source_isolation"] == {
+        "duckduckgo": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/duckduckgo.lock"),
+        },
+        "headhunter": {
+            "mode": "cloned_profile",
+            "path": str(new_root / "browser-profile/headhunter"),
+        },
+        "linkedin": {
+            "mode": "cloned_profile",
+            "path": str(new_root / "browser-profile/linkedin"),
+        },
+        "remoteok": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/remoteok.lock"),
+        },
+        "remotive": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/remotive.lock"),
+        },
+    }
 
 
 def test_manifest_rejects_shared_venv_and_production_paths(tmp_path: Path) -> None:
