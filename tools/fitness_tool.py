@@ -112,6 +112,51 @@ def fitness_book(class_id: str) -> str:
     return f"✅ Записал: «{booking.title}» {booking.local_start:%d.%m %H:%M}."
 
 
+def fitness_cancel(class_id: str, confirm_penalty: bool = False) -> str:
+    """Отменить запись. При отмене после дедлайна клуба требуется confirm_penalty=True.
+
+    Гейт информирующий: он выносит цену отмены на поверхность, чтобы решение
+    принимал человек, а не модель по умолчанию. Цена здесь — не одно занятие, а
+    блокировка записи на 3 дня, то есть остановка всей автоматики.
+    """
+    try:
+        client = _client()
+        booking = next((b for b in client.my_bookings() if b.class_id == class_id), None)
+    except SessionDead as exc:
+        return f"⚠️ Сессия Invictus недействительна ({exc})."
+    if booking is None:
+        return f"Запись {class_id} не найдена среди активных."
+
+    rules = load_club_rules()
+    hours_left = (booking.starts_at - _now()).total_seconds() / 3600
+
+    if not confirm_penalty:
+        if rules.cancel_deadline_hours is None:
+            # Доказать, что отмена бесплатна, нечем — считаем её платной.
+            return (
+                f"Дедлайн бесплатной отмены неизвестен, поэтому отмена «{booking.title}» "
+                f"{booking.local_start:%d.%m %H:%M} может стоить санкции клуба. "
+                "Подтвердить — вызвать повторно с confirm_penalty=True."
+            )
+        if hours_left < rules.cancel_deadline_hours:
+            penalty = rules.no_show_penalty or "санкция по правилам клуба"
+            return (
+                f"До занятия «{booking.title}» {booking.local_start:%d.%m %H:%M} осталось "
+                f"{hours_left:.1f} ч, дедлайн бесплатной отмены — "
+                f"{rules.cancel_deadline_hours} ч. "
+                f"Отмена сейчас: {penalty}. "
+                "Подтвердить — вызвать повторно с confirm_penalty=True."
+            )
+
+    try:
+        client.cancel(class_id)
+    except BookingRejected as exc:
+        return f"Отменить не удалось: {exc.reason}. {exc.detail}"
+    except SessionDead as exc:
+        return f"⚠️ Сессия Invictus недействительна ({exc})."
+    return f"Отменил запись: «{booking.title}» {booking.local_start:%d.%m %H:%M}."
+
+
 # --- правила автозаписи -----------------------------------------------------
 
 
@@ -202,6 +247,21 @@ _register(
     "Записаться на занятие Invictus по class_id из fitness_schedule",
     _obj(
         {"class_id": {"type": "string", "description": "Идентификатор занятия"}},
+        ["class_id"],
+    ),
+)
+_register(
+    fitness_cancel,
+    "Отменить запись на занятие Invictus. После дедлайна бесплатной отмены "
+    "требует confirm_penalty=True: санкция клуба — блокировка записи на 3 дня",
+    _obj(
+        {
+            "class_id": {"type": "string", "description": "Идентификатор занятия"},
+            "confirm_penalty": {
+                "type": "boolean",
+                "description": "Подтверждение отмены со штрафом (после дедлайна)",
+            },
+        },
         ["class_id"],
     ),
 )

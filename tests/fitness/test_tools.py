@@ -11,6 +11,7 @@ EXPECTED = {
     "fitness_schedule",
     "fitness_my_bookings",
     "fitness_book",
+    "fitness_cancel",
     "fitness_watch_add",
     "fitness_watch_list",
     "fitness_watch_remove",
