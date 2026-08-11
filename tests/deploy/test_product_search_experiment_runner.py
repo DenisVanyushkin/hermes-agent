@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = ROOT / "scripts/job_intel_product_search_experiment.sh"
 SERVICE = ROOT / "deploy/systemd/experiments/job-intel-product-search-probe-experiment.service"
 TIMER = ROOT / "deploy/systemd/experiments/job-intel-product-search-probe-experiment.timer"
+EXPORTER = ROOT / "scripts/export_job_intel_product_search_experiment.sh"
 
 
 def valid_manifest(tmp_path: Path) -> dict:
@@ -148,3 +149,11 @@ def test_systemd_runner_is_temporary_hermes_user_and_overlap_safe() -> None:
     assert "Persistent=true" in timer
     assert "OnCalendar=" in timer
     assert "flock" in (ROOT / "scripts/job_intel_product_search_experiment.sh").read_text(encoding="utf-8")
+
+
+def test_exporter_skips_project_build_and_pins_copied_python() -> None:
+    exporter = EXPORTER.read_text(encoding="utf-8")
+
+    assert "--no-install-project" in exporter
+    assert '--python "$destination/python-runtime/venv/bin/python"' in exporter
+    assert "--no-editable" not in exporter

@@ -22,7 +22,8 @@ copied_python="$(find "$destination/python-runtime/cpython/bin" -maxdepth 1 -typ
 [[ -n "$copied_python" ]] || { echo "copied Python 3.12 interpreter not found" >&2; exit 64; }
 uv venv "$destination/python-runtime/venv" --python "$copied_python"
 UV_PROJECT_ENVIRONMENT="$destination/python-runtime/venv" uv sync \
-  --project "$destination/runtime" --frozen --no-editable --no-dev
+  --project "$destination/runtime" --frozen --no-install-project --no-dev \
+  --python "$destination/python-runtime/venv/bin/python"
 uv pip freeze --python "$destination/python-runtime/venv/bin/python" \
   >"$destination/python-runtime/installed-distributions.txt"
 (cd "$destination/runtime" && PYTHONPATH="$destination/runtime" \
