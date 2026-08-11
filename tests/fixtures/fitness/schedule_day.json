@@ -1,0 +1,88 @@
+{
+  "docs": [
+    {
+      "_id": "694f96adc11075c757399215",
+      "time": {
+        "start": "2026-08-12T02:00:00.000Z",
+        "end": "2026-08-12T02:50:00.000Z",
+        "duration": 50
+      },
+      "groupTraining": {
+        "_id": "64ae8f3235b31e00dff033ea",
+        "name": "FUNCTIONAL TRAINING",
+        "level": 2,
+        "nameDictionary": {
+          "ru": "FUNCTIONAL TRAINING",
+          "kk": "ФУНКЦИОНАЛДЫ ЖАТТЫҒУ",
+          "en": "FUNCTIONAL TRAINING"
+        },
+        "groupTrainingCategory": {
+          "_id": "65785f56670a4c001e5d3181",
+          "name": "Функциональные"
+        },
+        "calories": 500
+      },
+      "clubId": {
+        "_id": "62212767097e5c317055385a",
+        "name": "Invictus Fitness Gagarin",
+        "type": "Fitness"
+      },
+      "coachId": {
+        "_id": "000000000000000000000001",
+        "firstName": "REDACTED",
+        "lastName": "REDACTED",
+        "fullName": "Тренер Один ",
+        "isVip": false
+      },
+      "zone": {"_id": "63fa2927f28e0a015f801e50", "name": "Bootcamp"},
+      "maxPerson": 16,
+      "waitlist": [],
+      "participantsList": [
+        {"user": "6221276709aaaaaaaaaaaaaa", "accessType": "subscription", "accessId": "REDACTED"},
+        {"user": "000000000000000000000002", "accessType": "visits", "accessId": "REDACTED"}
+      ]
+    },
+    {
+      "_id": "694f78e6efa26fa2b7dff5f4",
+      "time": {
+        "start": "2026-08-12T13:00:00.000Z",
+        "end": "2026-08-12T14:00:00.000Z",
+        "duration": 60
+      },
+      "groupTraining": {
+        "_id": "64ae8f3235b31e00dff03400",
+        "name": "YOGA",
+        "level": 1,
+        "nameDictionary": {"ru": "ЙОГА", "kk": "ЙОГА", "en": "YOGA"},
+        "groupTrainingCategory": {"_id": "65785f56670a4c001e5d3182", "name": "Mind&Body"},
+        "calories": 200
+      },
+      "clubId": {
+        "_id": "62212767097e5c317055385a",
+        "name": "Invictus Fitness Gagarin",
+        "type": "Fitness"
+      },
+      "coachId": {
+        "_id": "000000000000000000000003",
+        "firstName": "REDACTED",
+        "lastName": "REDACTED",
+        "fullName": "Тренер Два",
+        "isVip": false
+      },
+      "zone": {"_id": "63fa2927f28e0a015f801e51", "name": "Mind&Body"},
+      "maxPerson": 12,
+      "waitlist": ["6221276709aaaaaaaaaaaaaa"],
+      "participantsList": [
+        {"user": "000000000000000000000004", "accessType": "subscription", "accessId": "REDACTED"}
+      ]
+    }
+  ],
+  "total": 2,
+  "limit": 24,
+  "page": 1,
+  "pages": 1,
+  "totalDocs": 2,
+  "totalPages": 1,
+  "hasNextPage": false,
+  "nextPage": null
+}

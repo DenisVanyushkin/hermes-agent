@@ -1,0 +1,16 @@
+{
+  "records": [
+    {
+      "_id": "694f96adc11075c757399215",
+      "title": "FUNCTIONAL TRAINING",
+      "date": "2026-08-12T02:00:00.000Z",
+      "startDate": "2026-08-12T02:00:00.000Z",
+      "endDate": "2026-08-12T02:50:00.000Z",
+      "type": "gp",
+      "isSection": false,
+      "club": {"name": "Invictus Fitness Gagarin"}
+    }
+  ],
+  "bookingsBannedTill": null,
+  "banReason": null
+}
