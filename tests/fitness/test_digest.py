@@ -63,7 +63,7 @@ def test_digest_is_none_when_nothing_to_say():
     assert render_digest(bookings=[], slots=[], rules=[], now=NOW) is None
 
 
-def test_digest_lists_my_bookings_first():
+def test_digest_lists_my_bookings():
     booking = Booking(
         class_id="c1",
         title="Йога",
@@ -71,32 +71,52 @@ def test_digest_lists_my_bookings_first():
         status="booked",
     )
     text = render_digest(bookings=[booking], slots=[], rules=[], now=NOW)
-    assert text.index("Йога") < len(text)
+    assert "Йога" in text
     assert "19:00" in text
 
 
-def test_digest_mentions_rules_firing_within_a_day():
+def test_digest_shows_only_my_bookings_not_free_classes():
+    booking = Booking(
+        class_id="c1",
+        title="Йога",
+        starts_at=datetime(2026, 8, 11, 14, 0, tzinfo=timezone.utc),
+        status="booked",
+    )
+    free_slot = _slot(class_id="free", title="Бокс", my_status="none", capacity=20, taken=1)
+    text = render_digest(bookings=[booking], slots=[free_slot], rules=[], now=NOW)
+    assert "Йога" in text
+    assert "Бокс" not in text
+    assert "есть места" not in text.lower()
+
+
+def test_digest_is_none_when_only_free_slots_available():
+    free_slot = _slot(class_id="free", title="Бокс", my_status="none", capacity=20, taken=1)
+    assert render_digest(bookings=[], slots=[free_slot], rules=[], now=NOW) is None
+
+
+def test_digest_ignores_rules_without_a_booking():
     rule = WatchRule(
         rule_id="r1", kind="recurring", title_pattern="функционал", club_id=None,
         weekday=1, at_time=time(19, 0), window_minutes=30, trainer=None,
         waitlist_ok=True, target_date=None,
         expires_at=NOW + timedelta(days=30), active=True,
     )
-    text = render_digest(bookings=[], slots=[_slot()], rules=[rule], now=NOW)
-    assert "функционал" in text.lower()
+    assert render_digest(bookings=[], slots=[_slot()], rules=[rule], now=NOW) is None
 
 
 def test_digest_only_covers_today():
-    tomorrow = _slot(
+    tomorrow_booking = Booking(
+        class_id="c1", title="Йога",
         starts_at=datetime(2026, 8, 12, 14, 0, tzinfo=timezone.utc),
-        ends_at=datetime(2026, 8, 12, 15, 0, tzinfo=timezone.utc),
+        status="booked",
     )
-    assert render_digest(bookings=[], slots=[tomorrow], rules=[], now=NOW) is None
+    assert render_digest(bookings=[tomorrow_booking], slots=[], rules=[], now=NOW) is None
 
 
-def test_digest_skips_classes_that_already_started():
-    past = _slot(
+def test_digest_skips_bookings_that_already_started():
+    past_booking = Booking(
+        class_id="c1", title="Йога",
         starts_at=NOW - timedelta(hours=1),
-        ends_at=NOW,
+        status="booked",
     )
-    assert render_digest(bookings=[], slots=[past], rules=[], now=NOW) is None
+    assert render_digest(bookings=[past_booking], slots=[], rules=[], now=NOW) is None

@@ -1,9 +1,9 @@
 """Рендер расписания и утреннего дайджеста. Всё время — клубное."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fitness.models import CLUB_TZ, Booking, ClassSlot
-from fitness.rules import WatchRule, rule_matches
+from fitness.rules import WatchRule
 
 
 def _spots(slot: ClassSlot) -> str:
@@ -28,40 +28,21 @@ def render_schedule(slots: list[ClassSlot]) -> str:
 
 def render_digest(*, bookings: list[Booking], slots: list[ClassSlot],
                   rules: list[WatchRule], now: datetime) -> str | None:
+    """Утренний дайджест: только сегодняшние занятия, на которые есть моя запись.
+
+    Весь список свободных занятий и предсказания автозаписи сознательно не
+    показываем — владелец хочет видеть только то, куда уже записан. `slots` и
+    `rules` остаются в сигнатуре ради совместимости с вызывающим кодом.
+    """
     today = now.astimezone(CLUB_TZ).date()
-    mine = [b for b in bookings if b.local_start.date() == today and b.starts_at >= now]
-    today_slots = [s for s in slots if s.local_start.date() == today and s.starts_at >= now]
-    free = [s for s in today_slots if s.my_status == "none" and (s.spots_left or 0) > 0]
-
-    horizon = now + timedelta(days=1)
-    pending = [
-        (rule, slot)
-        for slot in slots
-        if now < slot.starts_at <= horizon and slot.my_status == "none"
-        for rule in rules
-        if rule.active and rule_matches(rule, slot)
+    mine = [
+        b for b in bookings
+        if b.local_start.date() == today and b.starts_at >= now
     ]
-
-    if not mine and not free and not pending:
+    if not mine:
         return None
-
-    blocks = []
-    if mine:
-        rows = "\n".join(
-            f"• {b.local_start:%H:%M} — {b.title}"
-            for b in sorted(mine, key=lambda b: b.starts_at)
-        )
-        blocks.append(f"Сегодня ты записан:\n{rows}")
-    if free:
-        rows = "\n".join(
-            f"• {s.local_start:%H:%M} — {s.title}{_spots(s)}"
-            for s in sorted(free, key=lambda s: s.starts_at)[:10]
-        )
-        blocks.append(f"Есть места сегодня:\n{rows}")
-    if pending:
-        rows = "\n".join(
-            f"• {slot.local_start:%d.%m %H:%M} — {slot.title} (правило {rule.rule_id})"
-            for rule, slot in sorted(pending, key=lambda pair: pair[1].starts_at)[:10]
-        )
-        blocks.append(f"Автозапись отработает в ближайшие сутки:\n{rows}")
-    return "\n\n".join(blocks)
+    rows = "\n".join(
+        f"• {b.local_start:%H:%M} — {b.title}"
+        for b in sorted(mine, key=lambda b: b.starts_at)
+    )
+    return f"Сегодня ты записан:\n{rows}"
