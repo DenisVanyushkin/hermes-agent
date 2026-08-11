@@ -716,13 +716,13 @@ git diff --check
 
 **Checklist:**
 
-- [ ] Write failing tests for the eight exact lanes and their required cells, including Kazakhstan as normal and each other Central Asian country independently.
-- [ ] Add tests for mandate/role vocabulary, transferable patterns, industry families, primary business models, Open Market/Watchlist origin, `Core|Exploration`, freshness, minimum evidence, and observability states.
-- [ ] Define independent-family attempt evidence and distinguish `searched_no_qualified_results`, `blocked`, and `not_observed`.
-- [ ] Encode ceilings/diagnostic ranges—never minimum-fill rules—including 35/week, Exploration range, employer/fintech concentration, and no geographic delivery quota.
-- [ ] Validate that every search cell has an invocation plan through an existing public scraper interface or an explicit named capability gap from Task 3.
-- [ ] Version/hash the contract as technical execution policy subordinate to Product SoT v1.
-- [ ] Run tests, scope guard, and ruff; all must pass before commit.
+- [x] Write failing tests for the eight exact lanes and their required cells, including Kazakhstan as normal and each other Central Asian country independently.
+- [x] Add tests for mandate/role vocabulary, transferable patterns, industry families, primary business models, Open Market/Watchlist origin, `Core|Exploration`, freshness, minimum evidence, and observability states.
+- [x] Define independent-family attempt evidence and distinguish `searched_no_qualified_results`, `blocked`, and `not_observed`.
+- [x] Encode ceilings/diagnostic ranges—never minimum-fill rules—including 35/week, Exploration range, employer/fintech concentration, and no geographic delivery quota.
+- [x] Validate that every search cell has an invocation plan through an existing public scraper interface or an explicit named capability gap from Task 3.
+- [x] Version/hash the contract as technical execution policy subordinate to Product SoT v1.
+- [x] Run tests, scope guard, and ruff; all must pass before commit.
 
 **Acceptance criteria:**
 

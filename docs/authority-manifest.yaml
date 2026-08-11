@@ -23,6 +23,14 @@ candidate_facts:
   scope: candidate_experience_and_constraints
   broadening: prohibited
 
+technical_contracts:
+  search_contract_v1:
+    version: 1.0.0
+    status: technical_execution_policy
+    path: config/product_search/search_contract.v1.yaml
+    sha256: faf9a81564d29b3b71b67908f47e54d2c6bbbf416db19914176f410e24df4ab1
+    subordinate_to: PS-SOT-2026-08-10-v1
+
 precedence:
   - candidate_facts_for_candidate_experience
   - official_vacancy_evidence_for_vacancy_facts

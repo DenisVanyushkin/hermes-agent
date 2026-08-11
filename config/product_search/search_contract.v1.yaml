@@ -1,0 +1,209 @@
+version: 1.0.0
+product_authority_id: PS-SOT-2026-08-10-v1
+selection_modes: [Core, Exploration]
+observability_states:
+  - qualified_results_found
+  - searched_no_qualified_results
+  - blocked
+  - not_observed
+discovery_origins: [Open Market, Strategic Watchlist]
+mandate_role_families: &roles
+  - executive_product
+  - digital_business
+  - customer_growth_commercial_hybrid
+  - product_business_unit
+  - general_management
+  - growth_monetization
+  - transformation_builder
+  - hybrid_executive_exploration
+transferable_patterns:
+  - business_and_pnl_ownership
+  - monetization_and_growth
+  - portfolio_and_go_to_market
+  - organization_building
+  - operating_model_transformation
+  - turnaround
+  - new_business_launch
+  - executive_stakeholder_leadership
+industry_families:
+  - financial_services
+  - telecom
+  - marketplace
+  - travel
+  - retail_and_commerce
+  - consumer_services
+  - media_and_entertainment
+  - mobility_and_logistics
+  - healthcare
+  - enterprise_software
+  - other
+primary_business_models:
+  - b2c
+  - b2b2c
+  - b2b
+  - marketplace
+  - subscription
+  - transaction
+  - platform_as_business
+  - advertising
+family_attempt_contract:
+  - one backend counts as one family regardless of query count
+  - every attempt records query cell family timestamp and result state
+  - searched_no_qualified_results requires the complete cell plan without critical degradation
+  - a seeded ATS tenant never proves broad-market discovery
+
+lanes:
+  europe_including_uk:
+    cells:
+      uk: &standard_cell
+        cell_id: uk
+        primary_geography: United Kingdom
+        role_families: *roles
+        search_window_days: 14
+        minimum_independent_families: 2
+        source_families: [linkedin, duckduckgo]
+      dach:
+        <<: *standard_cell
+        cell_id: dach
+        primary_geography: DACH
+      benelux:
+        <<: *standard_cell
+        cell_id: benelux
+        primary_geography: Benelux
+      nordics:
+        <<: *standard_cell
+        cell_id: nordics
+        primary_geography: Nordics
+      cee:
+        <<: *standard_cell
+        cell_id: cee
+        primary_geography: Central and Eastern Europe
+      remaining_europe:
+        <<: *standard_cell
+        cell_id: remaining_europe
+        primary_geography: Remaining Europe
+  apac_excluding_australia_new_zealand:
+    cells:
+      singapore: &apac_cell
+        <<: *standard_cell
+        cell_id: singapore
+        primary_geography: Singapore
+      india:
+        <<: *apac_cell
+        cell_id: india
+        primary_geography: India
+      japan:
+        <<: *apac_cell
+        cell_id: japan
+        primary_geography: Japan
+      south_korea:
+        <<: *apac_cell
+        cell_id: south_korea
+        primary_geography: South Korea
+      southeast_asia_other:
+        <<: *apac_cell
+        cell_id: southeast_asia_other
+        primary_geography: Southeast Asia excluding Singapore
+      east_asia_other:
+        <<: *apac_cell
+        cell_id: east_asia_other
+        primary_geography: East Asia excluding Japan and South Korea
+  gcc:
+    cells:
+      bahrain: &gcc_cell
+        <<: *standard_cell
+        cell_id: bahrain
+        primary_geography: Bahrain
+      kuwait:
+        <<: *gcc_cell
+        cell_id: kuwait
+        primary_geography: Kuwait
+      oman:
+        <<: *gcc_cell
+        cell_id: oman
+        primary_geography: Oman
+      qatar:
+        <<: *gcc_cell
+        cell_id: qatar
+        primary_geography: Qatar
+      saudi_arabia:
+        <<: *gcc_cell
+        cell_id: saudi_arabia
+        primary_geography: Saudi Arabia
+      united_arab_emirates:
+        <<: *gcc_cell
+        cell_id: united_arab_emirates
+        primary_geography: United Arab Emirates
+  americas:
+    cells:
+      canada:
+        <<: *standard_cell
+        cell_id: canada
+        primary_geography: Canada
+      latin_america:
+        <<: *standard_cell
+        cell_id: latin_america
+        primary_geography: Latin America
+      us_feasibility:
+        <<: *standard_cell
+        cell_id: us_feasibility
+        primary_geography: United States with remote eligibility or sponsorship evidence
+  global_remote:
+    cells:
+      genuinely_location_independent:
+        <<: *standard_cell
+        cell_id: genuinely_location_independent
+        primary_geography: Global remote
+        source_families: [remoteok, remotive]
+  australia_new_zealand:
+    cells:
+      australia:
+        <<: *standard_cell
+        cell_id: australia
+        primary_geography: Australia
+      new_zealand:
+        <<: *standard_cell
+        cell_id: new_zealand
+        primary_geography: New Zealand
+  kazakhstan:
+    minimum_delivery: 0
+    fallback: false
+    lowered_bar: false
+    cells:
+      kazakhstan:
+        <<: *standard_cell
+        cell_id: kazakhstan
+        primary_geography: Kazakhstan
+        source_families: [headhunter, linkedin]
+  other_central_asia:
+    minimum_delivery: 0
+    fallback: false
+    lowered_bar: false
+    cells:
+      kyrgyzstan: &central_asia_cell
+        <<: *standard_cell
+        cell_id: kyrgyzstan
+        primary_geography: Kyrgyzstan
+        source_families: [headhunter, linkedin]
+      tajikistan:
+        <<: *central_asia_cell
+        cell_id: tajikistan
+        primary_geography: Tajikistan
+      turkmenistan:
+        <<: *central_asia_cell
+        cell_id: turkmenistan
+        primary_geography: Turkmenistan
+      uzbekistan:
+        <<: *central_asia_cell
+        cell_id: uzbekistan
+        primary_geography: Uzbekistan
+
+portfolio:
+  weekly_delivery_cap: 35
+  daily_working_range: [5, 7]
+  exploration_weekly_range: [5, 7]
+  geographic_delivery_quota: null
+  minimum_fill: null
+  concentration_diagnostics:
+    employer_max_share: 0.20
+    financial_services_working_range: [0.30, 0.40]
