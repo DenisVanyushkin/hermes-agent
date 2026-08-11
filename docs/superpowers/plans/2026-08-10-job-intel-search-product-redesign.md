@@ -95,6 +95,8 @@ Checkpoint integration is not product cutover authority: Product Search Slack de
 
 No rebase, amendment, or commit substitution is allowed after checkpoint approval. Any candidate or manifest drift voids the approval and returns execution to steps 2–6. The owner's approval of this plan authorizes the topology only; each checkpoint still requires post-rebase approval of its exact candidate before any production mutation.
 
+**Gate A owner-authorized exception (2026-08-11):** the owner approved Gate A as a bounded program and explicitly waived repeated human approval for each technical candidate commit or manifest produced while completing this gate. The executing agent may repin, integrate, and run successive Gate A candidates without pausing for another owner response only when every iteration remains within the existing Gate A scope, keeps legacy Job Intel masked and paused, keeps Slack and production DB/state unreachable, leaves protected scraper and production source-configuration paths unchanged, and repeats the required rebase, test, scope-guard, deterministic-export, manifest-hash, backup, and drift checks before mutation. Any SoT amendment, source-capability expansion, protected-path change, legacy-runtime restoration, Slack access, production-state access, transition beyond Gate A, or weakening of these safeguards is outside this exception and still requires explicit owner approval. The exception expires when Gate A is closed or torn down; all later gates retain their exact-candidate approval requirements.
+
 ## Production-host experiment execution contract
 
 Gate A and Gate C use temporary system-level units with `User=hermes`, installed only for the bounded experiment and removed afterward:
