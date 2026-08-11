@@ -8,6 +8,7 @@ import sqlite3
 from job_intel.product_search.acquisition_probe import (
     ProbeSourceBlocked,
     SourceIsolation,
+    build_isolated_probe_environment,
     expand_queries,
     resolve_public_sources,
     run_probe,
@@ -172,3 +173,82 @@ def test_probe_registry_exposes_only_existing_public_scraper_interfaces() -> Non
 
     assert set(sources) == {"linkedin", "headhunter", "duckduckgo", "remoteok", "remotive"}
     assert all(callable(source) for source in sources.values())
+
+
+def test_isolated_environment_overrides_ambient_production_paths(tmp_path: Path) -> None:
+    root = tmp_path / "gate-a" / ("a" * 40)
+    manifest = {
+        "root": str(root),
+        "paths": {
+            "experiment.sqlite3": str(root / "experiment.sqlite3"),
+            "browser-profile": str(root / "browser-profile"),
+            "cache": str(root / "cache"),
+            "logs": str(root / "logs"),
+            "tmp": str(root / "tmp"),
+        },
+        "python": {"executable_path": str(root / "python-runtime/venv/bin/python")},
+        "source_isolation": {
+            "linkedin": {
+                "mode": "cloned_profile",
+                "path": str(root / "browser-profile/linkedin"),
+            },
+            "headhunter": {
+                "mode": "cloned_profile",
+                "path": str(root / "browser-profile/headhunter"),
+            },
+        },
+    }
+
+    environment = build_isolated_probe_environment(
+        manifest,
+        ambient={
+            "JOB_INTEL_DB_PATH": "/var/lib/job-intel/state/job_intel.sqlite3",
+            "JOB_INTEL_BROWSER_PROFILE_DIR": "/var/lib/browser-desktop/profiles",
+            "SLACK_BOT_TOKEN": "must-still-fail-closed",
+        },
+    )
+
+    assert environment["JOB_INTEL_DB_PATH"] == str(root / "experiment.sqlite3")
+    assert environment["JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN"] == str(
+        root / "browser-profile/linkedin"
+    )
+    assert environment["JOB_INTEL_BROWSER_PROFILE_DIR_HH"] == str(
+        root / "browser-profile/headhunter"
+    )
+    assert environment["JOB_INTEL_BROWSER_PYTHON"] == str(
+        root / "python-runtime/venv/bin/python"
+    )
+    assert environment["XDG_CACHE_HOME"] == str(root / "cache")
+    assert environment["TMPDIR"] == str(root / "tmp")
+    assert environment["SLACK_BOT_TOKEN"] == "must-still-fail-closed"
+    for key, value in environment.items():
+        if key.startswith("JOB_INTEL_") and key.endswith(("_PATH", "_DIR")):
+            assert not value.startswith("/var/lib/job-intel/state")
+            assert not value.startswith("/var/lib/browser-desktop")
+
+
+def test_probe_records_unexpected_source_failure_without_aborting_run(tmp_path: Path) -> None:
+    def unavailable(_query: str):
+        raise RuntimeError("Playwright is unavailable")
+
+    result = run_probe(
+        run_id="run-failure",
+        queries=(
+            {
+                "query_id": "q1",
+                "cell_id": "uk",
+                "source_family": "linkedin",
+                "query": "VP Product UK",
+            },
+        ),
+        sources={"linkedin": unavailable},
+        output_dir=tmp_path / "probe",
+        isolation={
+            "linkedin": SourceIsolation(
+                mode="cloned_profile", path=tmp_path / "profiles/linkedin"
+            )
+        },
+    )
+
+    assert result.source_states == {"linkedin": "blocked_extraction_failure"}
+    assert result.stage_counts["raw_observed"] == 0

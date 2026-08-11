@@ -48,6 +48,55 @@ class ProbeQuery(BaseModel):
     query: str
 
 
+def build_isolated_probe_environment(
+    manifest: Mapping[str, Any], *, ambient: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    root = Path(str(manifest.get("root") or ""))
+    if not root.is_absolute():
+        raise ValueError("experiment root must be absolute")
+    paths = dict(manifest.get("paths") or {})
+    isolation = dict(manifest.get("source_isolation") or {})
+    linkedin = Path(str(dict(isolation.get("linkedin") or {}).get("path") or ""))
+    headhunter = Path(str(dict(isolation.get("headhunter") or {}).get("path") or ""))
+    required = {
+        "experiment.sqlite3": Path(str(paths.get("experiment.sqlite3") or "")),
+        "browser-profile": Path(str(paths.get("browser-profile") or "")),
+        "cache": Path(str(paths.get("cache") or "")),
+        "logs": Path(str(paths.get("logs") or "")),
+        "tmp": Path(str(paths.get("tmp") or "")),
+        "linkedin": linkedin,
+        "headhunter": headhunter,
+        "python": Path(str(dict(manifest.get("python") or {}).get("executable_path") or "")),
+    }
+    for name, path in required.items():
+        if not _inside(str(path), root):
+            raise ValueError(f"isolated environment path outside experiment root: {name}")
+
+    environment = dict(ambient or {})
+    browser_profile = required["browser-profile"]
+    environment.update(
+        {
+            "HOME": str(root),
+            "JOB_INTEL_DB_PATH": str(required["experiment.sqlite3"]),
+            "JOB_INTEL_STATE_DIR": str(root),
+            "JOB_INTEL_BROWSER_PROFILE_DIR": str(browser_profile),
+            "JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN": str(linkedin),
+            "JOB_INTEL_BROWSER_PROFILE_DIR_HH": str(headhunter),
+            "JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER": str(
+                browser_profile / "company-career"
+            ),
+            "JOB_INTEL_BROWSER_PYTHON": str(required["python"]),
+            "JOB_INTEL_BROWSER_RUNTIME_DIR": str(root / "browser-runtime"),
+            "BROWSER_DESKTOP_BASE_DIR": str(root / "browser-runtime"),
+            "JOB_INTEL_BROWSER_DIAGNOSTICS_DIR": str(required["logs"]),
+            "XDG_CACHE_HOME": str(required["cache"]),
+            "PLAYWRIGHT_BROWSERS_PATH": str(required["cache"] / "ms-playwright"),
+            "TMPDIR": str(required["tmp"]),
+        }
+    )
+    return environment
+
+
 class EvidencePackage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -186,6 +235,10 @@ def run_probe(
                     records = None
             except TimeoutError:
                 source_states[query.source_family] = "blocked_rate_limit_or_timeout"
+                if attempt == max_attempts:
+                    records = None
+            except Exception:
+                source_states[query.source_family] = "blocked_extraction_failure"
                 if attempt == max_attempts:
                     records = None
         if records is None:
@@ -633,6 +686,10 @@ def main() -> int:
         manifest = yaml.safe_load(args.path.read_text(encoding="utf-8"))
         verify_experiment_runtime(manifest)
         runtime = Path(manifest["environment"]["import_root"])
+        probe_environment = build_isolated_probe_environment(
+            manifest, ambient=os.environ
+        )
+        os.environ.update(probe_environment)
         contract = __import__(
             "job_intel.product_search.search_contract", fromlist=["load_search_contract"]
         ).load_search_contract(runtime / "config/product_search/search_contract.v1.yaml")
@@ -653,7 +710,7 @@ def main() -> int:
             sources=resolve_public_sources(),
             output_dir=Path(manifest["root"]),
             isolation=isolation,
-            environment=os.environ,
+            environment=probe_environment,
         )
     return 0
 
