@@ -271,3 +271,46 @@ def test_probe_records_unexpected_source_failure_without_aborting_run(tmp_path: 
 
     assert result.source_states == {"linkedin": "blocked_extraction_failure"}
     assert result.stage_counts["raw_observed"] == 0
+
+
+def test_source_state_preserves_observation_when_later_query_fails(tmp_path: Path) -> None:
+    def partial(query: str):
+        if query == "works":
+            return [
+                {
+                    "source_id": "one",
+                    "url": "https://example.com/jobs/one",
+                    "title": "VP Product",
+                    "company": "Acme",
+                    "description": "Own product strategy",
+                }
+            ]
+        raise RuntimeError("later extraction failure")
+
+    result = run_probe(
+        run_id="run-partial",
+        queries=(
+            {
+                "query_id": "q1",
+                "cell_id": "uk",
+                "source_family": "duckduckgo",
+                "query": "works",
+            },
+            {
+                "query_id": "q2",
+                "cell_id": "canada",
+                "source_family": "duckduckgo",
+                "query": "fails",
+            },
+        ),
+        sources={"duckduckgo": partial},
+        output_dir=tmp_path / "probe",
+        isolation={
+            "duckduckgo": SourceIsolation(
+                mode="exclusive_lock", path=tmp_path / "locks/duckduckgo.lock"
+            )
+        },
+    )
+
+    assert result.source_states == {"duckduckgo": "observed_with_failures"}
+    assert result.stage_counts["raw_observed"] == 1

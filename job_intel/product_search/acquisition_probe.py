@@ -175,6 +175,16 @@ def _ensure_slack_blind(environment: Mapping[str, str]) -> None:
         raise ValueError(f"Slack credentials are forbidden in acquisition probe: {', '.join(present)}")
 
 
+def _record_source_state(states: dict[str, str], family: str, state: str) -> None:
+    previous = states.get(family)
+    if previous is None or previous == state:
+        states[family] = state
+    elif previous.startswith("observed") or state == "observed":
+        states[family] = "observed_with_failures"
+    else:
+        states[family] = "blocked_multiple_failures"
+
+
 def _canonical_url(raw: str) -> str:
     split = urlsplit(raw.strip())
     filtered = [
@@ -229,28 +239,40 @@ def run_probe(
         source = sources.get(query.source_family)
         source_isolation = isolation.get(query.source_family)
         if source_isolation is None or source_isolation.mode not in {"cloned_profile", "exclusive_lock"}:
-            source_states[query.source_family] = "blocked_no_safe_isolation"
+            _record_source_state(
+                source_states, query.source_family, "blocked_no_safe_isolation"
+            )
             continue
         if source is None:
-            source_states[query.source_family] = "blocked_missing_public_interface"
+            _record_source_state(
+                source_states, query.source_family, "blocked_missing_public_interface"
+            )
             continue
 
         records: list[Any] | None = None
         for attempt in range(1, max_attempts + 1):
             try:
                 records = list(source(query.query))
-                source_states[query.source_family] = "observed"
+                _record_source_state(source_states, query.source_family, "observed")
                 break
             except ProbeSourceBlocked as exc:
-                source_states[query.source_family] = f"blocked_{exc.reason}"
+                _record_source_state(
+                    source_states, query.source_family, f"blocked_{exc.reason}"
+                )
                 if attempt == max_attempts:
                     records = None
             except TimeoutError:
-                source_states[query.source_family] = "blocked_rate_limit_or_timeout"
+                _record_source_state(
+                    source_states,
+                    query.source_family,
+                    "blocked_rate_limit_or_timeout",
+                )
                 if attempt == max_attempts:
                     records = None
             except Exception:
-                source_states[query.source_family] = "blocked_extraction_failure"
+                _record_source_state(
+                    source_states, query.source_family, "blocked_extraction_failure"
+                )
                 if attempt == max_attempts:
                     records = None
         if records is None:
