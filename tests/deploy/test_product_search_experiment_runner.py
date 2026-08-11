@@ -223,7 +223,7 @@ def test_wrapper_preflight_uses_pinned_python_outside_checkout(tmp_path: Path) -
     calls = tmp_path / "python-calls.txt"
     fake_python = tmp_path / "pinned-python"
     fake_python.write_text(
-        f"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> {calls!s}\n",
+        f"#!/usr/bin/env bash\nprintf 'cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> {calls!s}\n",
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
@@ -242,6 +242,7 @@ def test_wrapper_preflight_uses_pinned_python_outside_checkout(tmp_path: Path) -
     )
 
     assert result.returncode == 0, result.stderr
+    assert f"cwd={ROOT}" in calls.read_text()
     assert "job_intel.product_search.acquisition_probe validate-manifest" in calls.read_text()
 
 

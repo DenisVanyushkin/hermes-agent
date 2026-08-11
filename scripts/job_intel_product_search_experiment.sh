@@ -13,6 +13,7 @@ done
 
 python_path="${PRODUCT_SEARCH_PYTHON:?pinned PRODUCT_SEARCH_PYTHON is required}"
 runtime_root="${PRODUCT_SEARCH_RUNTIME_ROOT:?pinned PRODUCT_SEARCH_RUNTIME_ROOT is required}"
+cd "$runtime_root"
 export PYTHONPATH="$runtime_root"
 "$python_path" -m job_intel.product_search.acquisition_probe validate-manifest "$manifest"
 [[ "$command" == "preflight" ]] && exit 0
