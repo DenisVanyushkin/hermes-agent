@@ -590,15 +590,17 @@ Task 1 must reconcile expected paths against the real feature worktree before ed
 
 **Checklist:**
 
-- [ ] Recheck canonical root, branch, HEAD, `git status --short --untracked-files=all`, `git worktree list --porcelain`, protected stashes, and current `.worktrees/` ignore rule on `ssh hermes-agent`.
-- [ ] Detect an existing `/home/hermes/.hermes/hermes-agent/.worktrees/job-intel-product-search`; verify it is a linked worktree on `codex/job-intel-product-search` and resume it only if clean/understood.
-- [ ] If absent, create branch `codex/job-intel-product-search` from the rechecked `local/customizations` HEAD and add the ignored linked worktree at the exact required path.
-- [ ] Install/reuse project dependencies within the worktree and run the repository's focused Job Intel/Slack baseline suites before edits; record failures and stop for owner direction if baseline is not green.
-- [ ] Write failing tests requiring SoT ID/version/status/hash, authority scope, precedence, supersession, recognized message kinds, parallel authorities, unresolved conflicts, and fail-closed behavior.
-- [ ] Create the manifest and impact analysis across Candidate Facts/Profile, Semantic, Decision v1/v2, CRM, search policy, feedback/reactions, Slack adapter, schedulers, metrics, and dashboards.
-- [ ] Implement the scope guard to assert execution root/branch, record the current base commit/hashes, and reject feature-branch changes to the four protected scraper files or production source configuration relative to the current merge-base unless a separately recorded amendment explicitly authorizes them.
-- [ ] Add a rebase-checkpoint test proving an upstream-only protected-file change is recorded/repinned after review but is not misattributed to the Product Search feature diff.
-- [ ] Run authority/scope tests, focused baseline tests, ruff, and `git diff --check`; all must pass before commit.
+- [x] Recheck canonical root, branch, HEAD, `git status --short --untracked-files=all`, `git worktree list --porcelain`, protected stashes, and current `.worktrees/` ignore rule on `ssh hermes-agent`.
+- [x] Detect an existing `/home/hermes/.hermes/hermes-agent/.worktrees/job-intel-product-search`; verify it is a linked worktree on `codex/job-intel-product-search` and resume it only if clean/understood.
+- [x] If absent, create branch `codex/job-intel-product-search` from the rechecked `local/customizations` HEAD and add the ignored linked worktree at the exact required path.
+- [x] Install/reuse project dependencies within the worktree and run the repository's focused Job Intel/Slack baseline suites before edits; record failures and stop for owner direction if baseline is not green.
+  - ➕ Owner decision 2026-08-11: continue with the exact `36 failed, 1273 passed, 15 warnings` result recorded as a known-red baseline; this is not a waiver for new Product Search failures.
+  - ➕ Post-change control rerun: the same 36 failing node IDs and 1273 passes; warning aggregation varied to 16 within the same unawaited Slack coroutine family.
+- [x] Write failing tests requiring SoT ID/version/status/hash, authority scope, precedence, supersession, recognized message kinds, parallel authorities, unresolved conflicts, and fail-closed behavior.
+- [x] Create the manifest and impact analysis across Candidate Facts/Profile, Semantic, Decision v1/v2, CRM, search policy, feedback/reactions, Slack adapter, schedulers, metrics, and dashboards.
+- [x] Implement the scope guard to assert execution root/branch, record the current base commit/hashes, and reject feature-branch changes to the four protected scraper files or production source configuration relative to the current merge-base unless a separately recorded amendment explicitly authorizes them.
+- [x] Add a rebase-checkpoint test proving an upstream-only protected-file change is recorded/repinned after review but is not misattributed to the Product Search feature diff.
+- [x] Run authority/scope tests, focused baseline tests, ruff, and `git diff --check`; all must pass before commit, except the owner-accepted exact known-red baseline recorded above.
 
 **Acceptance criteria:**
 

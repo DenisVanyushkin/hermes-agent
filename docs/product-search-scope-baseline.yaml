@@ -1,0 +1,14 @@
+schema_version: "1.0.0"
+base_branch: local/customizations
+base_commit: bbf2ae0f4885dcbd4be5a08692d6d757372fd0d8
+protected_paths:
+  job_intel/sources.py: b767db50daef9a7f29e64eb544b57591d0375b63a34207515acf560fdcd6f3f5
+  job_intel/ats_sources.py: 9f287293d13a0b16da8c2379ad5dede1560f54c59b217ef13b14415fed06fa2d
+  job_intel/browser_sourcing.py: 1321b47ae7ee57ea2eee20f7742829ff15afd7dd364a71eb76b07239f21fb093
+  job_intel/browser_worker.py: a4310a793af6d8f69a25246e2aebfa7abd6e1262cbb91b79bc000f16fd048d10
+production_source_config_paths:
+  - job_intel/seed/search_criteria.yaml
+  - job_intel/seed/target_companies.yaml
+production_source_config_hashes:
+  job_intel/seed/search_criteria.yaml: 9693b5095c9f13581adb6f5d2334b7f1b2bab857cf197b95b91421c0ba772c3b
+  job_intel/seed/target_companies.yaml: f540eb1870382d0b9476f993fb6135f71a62c4eb66036e3c74de54746f6e12cf

@@ -1,0 +1,69 @@
+schema_version: "1.0.0"
+manifest_id: product-search-authority-manifest-v1
+recognized_authority_ids:
+  - PS-SOT-2026-08-10-v1
+  - REACTION-TRIGGERS-2026-07-06-v1
+
+authorities:
+  product_search_sot:
+    id: PS-SOT-2026-08-10-v1
+    version: 1.0.0
+    status: Approved
+    path: docs/superpowers/specs/2026-08-10-job-intel-search-product-redesign-design.md
+    sha256: 430340de2613ee733926d73ce276c93676fe64b1841bb2f68f3f9303b61fc3a8
+    scope: product_search_behavior
+  reaction_triggers:
+    id: REACTION-TRIGGERS-2026-07-06-v1
+    status: Approved
+    path: docs/superpowers/specs/2026-07-06-vacancy-reaction-triggers-design.md
+    scope: vacancy_evaluation_and_application_package_triggers
+
+candidate_facts:
+  authority: structured_resume_and_candidate_facts
+  scope: candidate_experience_and_constraints
+  broadening: prohibited
+
+precedence:
+  - candidate_facts_for_candidate_experience
+  - official_vacancy_evidence_for_vacancy_facts
+  - product_search_sot_for_product_behavior
+  - semantic_contract_v1_for_evidence_semantics
+  - decision_contract_v2_for_deterministic_product_decisions
+  - crm_for_application_and_outreach_lifecycle
+
+conflicts:
+  unresolved: fail_closed
+  requires: named_versioned_migration_or_owner_decision
+
+parallel_authorities:
+  crm: application_and_outreach_lifecycle
+  reaction_triggers: vacancy_evaluation_and_application_package_triggers
+  feedback: feedback_capture_without_protected_channel_root_fallback
+  semantic_contract_v1: vacancy_evidence_semantics_until_versioned_migration
+  decision_contract_v1: legacy_counterfactual_only
+
+supersession:
+  product_search_sot:
+    - legacy_opportunity_theses
+    - legacy_scoring_policy_where_named_by_product_sot_appendix_b
+    - legacy_company_discovery_rules_where_named_by_product_sot_appendix_b
+  never_supersedes:
+    - candidate_facts
+    - structured_resume
+    - crm_lifecycle
+    - source_specific_evidence_contracts
+
+protected_channel:
+  channel_id: C0B4MM6D52A
+  unknown_authority: deny_and_record_operational_error
+  message_authorities:
+    daily_digest: PS-SOT-2026-08-10-v1
+    urgent_exception: PS-SOT-2026-08-10-v1
+    weekly_market_company_review: PS-SOT-2026-08-10-v1
+    monthly_strategy_review: PS-SOT-2026-08-10-v1
+    opportunity_detail: PS-SOT-2026-08-10-v1
+    review_detail: PS-SOT-2026-08-10-v1
+    user_decision_prompt: PS-SOT-2026-08-10-v1
+    user_decision_ack: PS-SOT-2026-08-10-v1
+    vacancy_evaluation: REACTION-TRIGGERS-2026-07-06-v1
+    application_package: REACTION-TRIGGERS-2026-07-06-v1
