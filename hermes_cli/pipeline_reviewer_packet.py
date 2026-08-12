@@ -14,6 +14,7 @@ _SCHEMA_VERSION = "reviewer_packet.v1"
 _MAX_TEXT_LENGTH = 2000
 _MAX_UNTRACKED_FILE_BYTES = 4096
 _MAX_UNTRACKED_FILE_LINES = 120
+_MAX_CHANGE_ENTRIES = 64
 _BLOCKING_GIT_STATUSES = {
     "baseline_invalid",
     "post_snapshot_invalid",
@@ -409,6 +410,9 @@ def _sanitize_engineer_output_payload(payload: Mapping[str, Any]) -> dict[str, A
         "findings": _sanitize_findings(payload.get("findings")),
         "validation_errors": _sanitize_validation_errors(payload.get("validation_errors")),
     }
+    raw_changes = payload.get("changes")
+    if isinstance(raw_changes, list) and len(raw_changes) > _MAX_CHANGE_ENTRIES:
+        safe_payload["changes_truncated"] = len(raw_changes) - _MAX_CHANGE_ENTRIES
     return {key: value for key, value in safe_payload.items() if value not in (None, [], {})}
 
 
@@ -448,6 +452,11 @@ def _sanitize_changes(value: Any) -> list[dict[str, str]]:
     упирались в исчерпание раундов доработки -- ревьюер не мог увидеть описание,
     что бы инженер ни написал.
 
+    Потолок записей поднят с 8 до 64: при девяти и более изменённых файлах
+    правило `undescribed_changed_file` было невыполнимо по построению. Если
+    усечение всё же случилось, оно объявляется полем `changes_truncated` --
+    ревьюер обязан отличать усечение от умолчания инженера.
+
     Запись без `kind` теперь сохраняется: вид изменения полезен, но его
     отсутствие -- не повод спрятать от ревьюера объяснение. Запись без `path`
     выбрасывается: её не с чем сопоставить. Запись без `summary` доходит как
@@ -457,7 +466,7 @@ def _sanitize_changes(value: Any) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
     sanitized: list[dict[str, str]] = []
-    for item in value[:8]:
+    for item in value[:_MAX_CHANGE_ENTRIES]:
         if not isinstance(item, Mapping):
             continue
         path = _clean_optional_text(item.get("path"), max_length=256)
