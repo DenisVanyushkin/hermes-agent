@@ -67,22 +67,53 @@ def read_cookie_inventory(cookie_db: Path, *, host_filter: str = "linkedin") -> 
     ]
 
 
-def _profile_candidates(user_data_dir: Path) -> list[Path]:
-    """Каталоги профилей с куки-базой, в устойчивом порядке."""
+def _cookie_db_state(profile_dir: Path) -> str:
+    """`present`, `absent` или `unreadable` для куки-базы профиля.
+
+    `Path.exists()` здесь не годится: при отказе в правах он возвращает False,
+    а не ошибку, из-за чего профиль отсеивался ещё до попытки чтения и список
+    нечитаемых оставался пустым — отчёт выглядел полным, будучи неполным.
+    Каталоги профилей имеют права drwx------ browser:browser, так что под
+    любым другим пользователем это происходит всегда.
+    """
+    try:
+        (profile_dir / "Cookies").stat()
+    except PermissionError:
+        return "unreadable"
+    except OSError:
+        return "absent"
+    return "present"
+
+
+def _profile_candidates(user_data_dir: Path) -> tuple[list[Path], list[str]]:
+    """Каталоги профилей с куки-базой и имена тех, что прочитать не удалось.
+
+    Порядок устойчив: Default первым, остальные по алфавиту.
+    """
     candidates: list[Path] = []
+    unreadable: list[str] = []
+
+    def classify(directory: Path) -> None:
+        state = _cookie_db_state(directory)
+        if state == "present":
+            candidates.append(directory)
+        elif state == "unreadable":
+            unreadable.append(directory.name)
+
     default = user_data_dir / "Default"
-    if (default / "Cookies").exists():
-        candidates.append(default)
+    if default.is_dir():
+        classify(default)
     try:
         others = sorted(
             entry
             for entry in user_data_dir.iterdir()
-            if entry.is_dir() and entry.name != "Default" and (entry / "Cookies").exists()
+            if entry.is_dir() and entry.name != "Default"
         )
     except OSError:
         others = []
-    candidates.extend(others)
-    return candidates
+    for entry in others:
+        classify(entry)
+    return candidates, unreadable
 
 
 @dataclass(frozen=True)
@@ -113,8 +144,8 @@ def resolve_profile(user_data_dir: Path) -> ProfileResolution:
     Каждая ступень — возврат к менее точному ответу, но не молчаливая
     подмена: вызывающий получает каталог и печатает его имя в отчёте.
     """
-    unreadable: list[str] = []
-    for candidate in _profile_candidates(user_data_dir):
+    candidates, unreadable = _profile_candidates(user_data_dir)
+    for candidate in candidates:
         try:
             inventory = read_cookie_inventory(candidate / "Cookies")
         except Exception:

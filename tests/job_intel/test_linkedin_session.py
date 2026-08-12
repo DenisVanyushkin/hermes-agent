@@ -416,3 +416,32 @@ def test_fallback_to_default_names_itself(tmp_path: Path) -> None:
     resolution = resolve_profile(tmp_path)
 
     assert resolution.reason == "default"
+
+
+def test_profile_dir_without_read_permission_is_reported(tmp_path: Path) -> None:
+    """Каталог Profile 1 имеет права drwx------ browser:browser. Path.exists()
+    при отказе в правах возвращает False, а не ошибку, поэтому профиль
+    отсеивался ещё до попытки чтения: список нечитаемых оставался пустым, и
+    отчёт выглядел полным, будучи неполным."""
+    import os
+
+    if os.geteuid() == 0:
+        import pytest
+
+        pytest.skip("root читает что угодно, права здесь ничего не значат")
+
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    (tmp_path / "Default").mkdir()
+    _make_cookie_db(tmp_path / "Default" / "Cookies", [(".linkedin.com", "bcookie", future, 1)])
+    locked = tmp_path / "Profile 1"
+    locked.mkdir()
+    _make_cookie_db(locked / "Cookies", [(".www.linkedin.com", "li_at", future, 1)])
+    locked.chmod(0o000)
+
+    try:
+        resolution = resolve_profile(tmp_path)
+    finally:
+        locked.chmod(0o700)
+
+    assert "Profile 1" in resolution.unreadable
+    assert resolution.reason != "session_cookie"
