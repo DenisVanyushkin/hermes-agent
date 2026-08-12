@@ -238,7 +238,16 @@ def _controlled_manual_executor_context(
                 "raw_metadata": {
                     "structured_output": _engineer_output(
                         summary="Updated engineer_notes.txt",
-                        changes=[{"path": "engineer_notes.txt", "kind": "modify"}],
+                        # Описание обязательно: проверка полноты пакета вернёт
+                        # запись без `summary` инженеру на починку, и фикстура
+                        # без описания моделировала бы нарушителя контракта.
+                        changes=[
+                            {
+                                "path": "engineer_notes.txt",
+                                "kind": "modify",
+                                "summary": "Записан промпт прогона в файл заметок инженера.",
+                            }
+                        ],
                     )
                 },
             }
