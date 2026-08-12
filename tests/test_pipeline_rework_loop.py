@@ -5870,3 +5870,19 @@ def test_reviewer_blocked_run_is_not_annotated_with_catalog_coverage() -> None:
     assert text is not None
     assert "━━ Покрытие ops-каталога ━━" not in text
     assert "Посмотри находки ревьюера выше." in text
+
+
+def test_packet_repair_context_names_the_paths_and_the_reason():
+    # Инженеру мало сказать «заполни поле»: он должен узнать, какие именно пути
+    # и зачем -- оператор видит ровно эти строки в запросе на коммит.
+    from hermes_cli.pipeline_rework_loop import _build_packet_repair_context
+
+    context = _build_packet_repair_context(
+        undescribed_paths=["a.py", "b.py"],
+        attempt=1,
+    )
+    assert context["kind"] == "packet_completeness_repair"
+    assert context["attempt"] == 1
+    assert context["undescribed_paths"] == ["a.py", "b.py"]
+    assert "a.py" in context["instruction"]
+    assert "operator" in context["instruction"].lower()

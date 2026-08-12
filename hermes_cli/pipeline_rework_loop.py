@@ -3675,6 +3675,28 @@ def _build_format_retry_context(*, reason: str, attempt: int) -> dict[str, Any]:
     }
 
 
+def _build_packet_repair_context(*, undescribed_paths: list[str], attempt: int) -> dict[str, Any]:
+    listed = ", ".join(undescribed_paths)
+    return {
+        "source": "controlled_execution_contract",
+        "kind": "packet_completeness_repair",
+        "attempt": attempt,
+        "undescribed_paths": list(undescribed_paths),
+        "instruction": (
+            "Your changes are on disk and are NOT lost -- do NOT redo the work and "
+            "do NOT revert anything. The reviewer packet is incomplete: these changed "
+            f"files have no usable description: {listed}. Re-emit your "
+            "StructuredOutputEnvelope with a `changes` entry for EACH of those paths, "
+            "each with a non-empty `summary` saying what changed there and why. The "
+            "operator is shown exactly these descriptions when asked to approve the "
+            "commit, so an undescribed file means approving a change nobody explained. "
+            "Avoid the words token/secret/password/credential/env and diff markers in "
+            "the summary: the packet sanitizer drops such lines entirely and your "
+            "description would arrive empty."
+        ),
+    }
+
+
 def _build_test_failure_rework_context(*, test_summary: Mapping[str, Any], attempt: int, changed_files: list[str] | None = None) -> dict[str, Any]:
     failures = []
     for result in list(test_summary.get("results") or []):
