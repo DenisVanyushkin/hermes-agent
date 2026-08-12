@@ -64,3 +64,11 @@ def test_the_permissive_note_no_longer_stands_alone():
     assert notes.index("at least one of findings or changes") < notes.index("changes is required"), (
         "уточнение обязано идти после общего правила, иначе читается как противоречие"
     )
+
+
+def test_the_reviewer_stands_down_after_the_system_already_tried():
+    # Полноту пакета теперь проверяет код и сам просит инженера её закрыть.
+    # Если бюджет починки исчерпан, повторная находка ревьюера стоила бы раунда
+    # за то, на что раунды уже потрачены.
+    text = REVIEWER_PROMPT.read_text(encoding="utf-8")
+    assert "incomplete_after_repair" in text
