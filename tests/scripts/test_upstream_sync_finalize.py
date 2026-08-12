@@ -501,3 +501,164 @@ class TestActionAliasKeepsOldRequestsWorking:
         _request(state, "rebase", _git(repo, "rev-parse", "HEAD"))
         _run_finalize(repo, state, scripts)
         assert "sync-local-customizations.sh" in calls.read_text()
+
+
+# ---------------------------------------------------------------------------
+# apply-merge — ingesting a merge the sandboxed agent built in a scratch clone
+# ---------------------------------------------------------------------------
+#
+# The live checkout is bind-mounted :ro into sandboxes (config.yaml), so the
+# Mode B agent cannot create a backup ref or commit a merge in it — the
+# 2026-08-12 apply died on exactly that. It now merges in a writable
+# ``git clone --shared`` under the state dir and hands the host the resulting
+# SHA; the host re-derives trust from the commit's parents rather than taking
+# the agent's word, then fast-forwards.
+
+
+def _make_divergent_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    """Repo on ``local/customizations`` plus a divergent ``up`` branch.
+
+    Returns (repo, local_head, upstream_head) — the two sides a Mode B merge
+    is expected to join.
+    """
+    repo = _make_repo(tmp_path)
+    local_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-qb", "up", "HEAD~1")
+    (repo / "g.txt").write_text("upstream\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "upstream work")
+    upstream_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "local/customizations")
+    return repo, local_head, upstream_head
+
+
+def _scratch_merge(repo: Path, state: Path, base: str, other: str, name="scratch") -> str:
+    """Clone *repo* into the state dir, merge *other* into *base*, return the SHA."""
+    scratch = state / name
+    subprocess.run(
+        ["git", "clone", "-q", "--shared", str(repo), str(scratch)],
+        check=True,
+        capture_output=True,
+    )
+    _git(scratch, "config", "user.email", "t@t")
+    _git(scratch, "config", "user.name", "t")
+    _git(scratch, "checkout", "-q", "--detach", base)
+    _git(scratch, "-c", "rerere.enabled=false", "merge", "--no-edit", "-q", other)
+    return _git(scratch, "rev-parse", "HEAD")
+
+
+def _apply_request(state: Path, *, upstream_sha, merge_sha, scratch_repo="scratch"):
+    (state / "finalize-request.json").write_text(
+        json.dumps(
+            {
+                "action": "apply-merge",
+                "upstream_sha": upstream_sha,
+                "backup_ref": "",
+                "merge_sha": merge_sha,
+                "scratch_repo": scratch_repo,
+            }
+        )
+    )
+
+
+class TestApplyMergeFromScratchClone:
+    def test_merge_parented_on_head_and_upstream_is_fast_forwarded(
+        self, tmp_path, state
+    ):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        # The live branch actually advanced to the agent's merge...
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "local/customizations"
+        # ...the host made the backup ref itself (the agent cannot), ...
+        assert res["backup_ref"]
+        assert _git(repo, "rev-parse", res["backup_ref"]) == local_head
+        # ...and the usual push/smoketest pipeline ran afterwards.
+        logged = calls.read_text()
+        assert "sync-local-customizations.sh" in logged
+        assert "upstream-sync-smoketest.sh" in logged
+
+    def test_merge_not_parented_on_live_head_is_refused(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        stale_base = _git(repo, "rev-parse", "HEAD~1")
+        merge_sha = _scratch_merge(repo, state, stale_base, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert "parent" in res["detail"]
+        # Untouched: the branch did not move, nothing was pushed, and no
+        # rollback fired (there is nothing to roll back from).
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "rollback" not in calls.read_text()
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+
+    def test_merge_of_the_wrong_upstream_point_is_refused(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        # A second upstream-ish commit the operator never saw or decided on.
+        _git(repo, "checkout", "-q", "up")
+        (repo / "h.txt").write_text("later\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "later upstream work")
+        later = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+
+        merge_sha = _scratch_merge(repo, state, local_head, later)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        # The request still claims the approved head; the commit says otherwise.
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert "parent" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+
+    @pytest.mark.parametrize("name", ["../escape", "/etc", "nested/dir", ""])
+    def test_scratch_repo_outside_the_state_dir_is_refused(self, tmp_path, state, name):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(
+            state,
+            upstream_sha=upstream_head,
+            merge_sha=merge_sha,
+            scratch_repo=name,
+        )
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert "scratch_repo" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+
+    def test_unfetchable_scratch_repo_leaves_the_repo_untouched(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(
+            state,
+            upstream_sha=upstream_head,
+            merge_sha="0" * 40,
+            scratch_repo="never-created",
+        )
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "rollback" not in calls.read_text()

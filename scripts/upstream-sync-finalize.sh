@@ -62,7 +62,7 @@ ACTION="$(json_field action)"
 # который ещё не обновился до нового контракта. Оба означают одно:
 # применить обновление.
 is_apply_action() {
-  [ "$ACTION" = sync ] || [ "$ACTION" = rebase ]
+  [ "$ACTION" = sync ] || [ "$ACTION" = rebase ] || [ "$ACTION" = apply-merge ]
 }
 UPSTREAM_SHA="$(json_field upstream_sha)"
 BACKUP_REF="$(json_field backup_ref)"
@@ -174,6 +174,71 @@ case "$ACTION" in
       exit 0
     fi
     run_apply_pipeline
+    ;;
+  apply-merge)
+    # The live checkout is bind-mounted :ro into sandboxes, so the Mode B agent
+    # cannot create a backup ref or commit a merge in it (2026-08-12: an apply
+    # died on exactly that, having been told to do both). It merges in a
+    # writable `git clone --shared` under the state dir instead and hands us the
+    # SHA. Trust is re-derived HERE from the commit own parents rather than
+    # taken on the agent word: a merge that is not parented exactly on our
+    # current HEAD and on the operator-approved upstream point is refused.
+    MERGE_SHA="$(json_field merge_sha)"
+    SCRATCH_NAME="$(json_field scratch_repo)"
+    # A bare directory name resolved from OUR state dir — never a path carried
+    # in the request, so there is no traversal to validate away.
+    case "$SCRATCH_NAME" in
+      "" | . | .. | */*)
+        write_result failed "invalid scratch_repo [$SCRATCH_NAME] — must be a bare directory name under the state dir; repo untouched, no rollback."
+        exit 0
+        ;;
+    esac
+    SCRATCH="$STATE_DIR/$SCRATCH_NAME"
+    if [ -z "$MERGE_SHA" ] || [ -z "$UPSTREAM_SHA" ]; then
+      write_result failed "apply-merge needs both merge_sha and upstream_sha; repo untouched, no rollback."
+      exit 0
+    fi
+    # Fetch the scratch clone HEAD, then insist it is the commit we were
+    # promised — a mismatch means the clone moved between the agent writing
+    # the request and this running.
+    if ! run_logged git -C "$REPO" fetch --no-tags "$SCRATCH" HEAD; then
+      write_result failed "could not fetch the merge from scratch_repo [$SCRATCH_NAME] — repo untouched, no rollback. $(cat "$DETAIL_LOG")"
+      exit 0
+    fi
+    FETCHED="$(git -C "$REPO" rev-parse FETCH_HEAD 2>>"$DETAIL_LOG")"
+    if [ "$FETCHED" != "$MERGE_SHA" ]; then
+      write_result failed "scratch_repo HEAD $FETCHED is not the promised merge_sha $MERGE_SHA — repo untouched, no rollback."
+      exit 0
+    fi
+    HEAD_SHA="$(git -C "$REPO" rev-parse HEAD 2>>"$DETAIL_LOG")"
+    UPSTREAM_FULL="$(git -C "$REPO" rev-parse "$UPSTREAM_SHA" 2>>"$DETAIL_LOG")"
+    MERGE_PARENTS="$(git -C "$REPO" rev-list --parents -n1 "$MERGE_SHA" 2>>"$DETAIL_LOG" | cut -d" " -f2-)"
+    PARENT_LOCAL="$(printf %s "$MERGE_PARENTS" | cut -d" " -f1)"
+    PARENT_UPSTREAM="$(printf %s "$MERGE_PARENTS" | cut -d" " -f2)"
+    if [ "$PARENT_LOCAL" != "$HEAD_SHA" ] || [ "$PARENT_UPSTREAM" != "$UPSTREAM_FULL" ]; then
+      write_result failed "merge_sha parent mismatch: parents ($MERGE_PARENTS) are not (HEAD $HEAD_SHA, approved upstream $UPSTREAM_FULL) — refusing; repo untouched, no rollback."
+      exit 0
+    fi
+    # Invariant 1 (back up before touching the branch) is the host job now:
+    # the agent has no write access to make a backup ref.
+    if [ -z "$BACKUP_REF" ]; then
+      BACKUP_REF="backup/pre-upstream-sync-$(date +%Y%m%d-%H%M%S)"
+    fi
+    run_logged git -C "$REPO" branch -f "$BACKUP_REF" HEAD || true
+    # --ff-only, not merge: the parent check already proved this commit sits
+    # directly on our HEAD, so anything that still needs a real merge here is a
+    # race we must lose rather than paper over.
+    if ! run_logged git -C "$REPO" merge --ff-only "$MERGE_SHA"; then
+      FAILED_STAGE=fast-forward
+      write_result failed "fast-forward to the agent merge failed — repo untouched, no rollback. $(cat "$DETAIL_LOG")"
+      exit 0
+    fi
+    run_apply_pipeline
+    # The clone is a full working copy; keep it only when it may still be
+    # needed for diagnosis.
+    if [ "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['status'])" "$RESULT" 2>/dev/null)" = ok ]; then
+      rm -rf "$SCRATCH"
+    fi
     ;;
   rollback)
     if [ -z "$BACKUP_REF" ]; then
