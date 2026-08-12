@@ -12,6 +12,7 @@ SAFE_LOOP_POLICY_DEFAULTS = {
     "max_peer_discussion_rounds": 0,
     "max_disagreement_rounds": 0,
     "max_invalid_output_retries": 0,
+    "max_packet_repair_retries": 0,
     "max_tool_retries": 0,
     "max_model_escalations": 0,
     "max_clarification_rounds": 0,
@@ -43,6 +44,7 @@ class LoopLimitPolicy:
     max_peer_discussion_rounds: int
     max_disagreement_rounds: int
     max_invalid_output_retries: int
+    max_packet_repair_retries: int
     max_tool_retries: int
     max_model_escalations: int
     max_clarification_rounds: int
@@ -56,6 +58,7 @@ class LoopLimitPolicy:
             "max_peer_discussion_rounds": self.max_peer_discussion_rounds,
             "max_disagreement_rounds": self.max_disagreement_rounds,
             "max_invalid_output_retries": self.max_invalid_output_retries,
+            "max_packet_repair_retries": self.max_packet_repair_retries,
             "max_tool_retries": self.max_tool_retries,
             "max_model_escalations": self.max_model_escalations,
             "max_clarification_rounds": self.max_clarification_rounds,
@@ -218,6 +221,7 @@ def resolve_loop_limit_policy(pipeline_spec: Mapping[str, Any] | None) -> LoopLi
         max_peer_discussion_rounds=max(0, int(values["max_peer_discussion_rounds"])),
         max_disagreement_rounds=max(0, int(values["max_disagreement_rounds"])),
         max_invalid_output_retries=max(0, int(values["max_invalid_output_retries"])),
+        max_packet_repair_retries=max(0, int(values["max_packet_repair_retries"])),
         max_tool_retries=max(0, int(values["max_tool_retries"])),
         max_model_escalations=max(0, int(values["max_model_escalations"])),
         max_clarification_rounds=max(0, int(values["max_clarification_rounds"])),
@@ -304,6 +308,7 @@ def _counter_name_for_limit(limit_name: str) -> str:
         "max_peer_discussion_rounds": "peer_discussion_rounds",
         "max_disagreement_rounds": "disagreement_rounds",
         "max_invalid_output_retries": "invalid_output_retries",
+        "max_packet_repair_retries": "packet_repair_retries",
         "max_tool_retries": "tool_retries",
         "max_model_escalations": "model_escalations",
         "max_clarification_rounds": "clarification_rounds",

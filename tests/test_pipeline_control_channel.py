@@ -163,3 +163,19 @@ def test_runner_not_invoked_does_not_produce_fake_message_exchange() -> None:
     assert decision.status is PipelineControlStatus.RUNNER_NOT_INVOKED
     assert decision.blocked_reason == "runner_not_invoked"
     assert plan.execution_enabled is False
+
+
+def test_packet_repair_budget_defaults_to_zero():
+    # Fail-closed, как и все остальные лимиты: пайплайн, который про этот
+    # бюджет не знает, не должен молча получить лишние прогоны инженера.
+    from hermes_cli.pipeline_control_channel import resolve_loop_limit_policy
+
+    policy = resolve_loop_limit_policy({})
+    assert policy.max_packet_repair_retries == 0
+
+
+def test_packet_repair_budget_is_read_from_the_pipeline_spec():
+    from hermes_cli.pipeline_control_channel import resolve_loop_limit_policy
+
+    policy = resolve_loop_limit_policy({"loop_policy": {"max_packet_repair_retries": 2}})
+    assert policy.max_packet_repair_retries == 2
