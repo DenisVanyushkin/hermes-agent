@@ -359,7 +359,7 @@ Version=1.0
 Type=Application
 Name=Chromium LinkedIn
 Comment=Open LinkedIn in the persistent Chromium profile
-Exec=${CHROMIUM_LAUNCHER} --user-data-dir=${BASE_DIR}/profiles/linkedin --profile-directory=Default --new-window https://www.linkedin.com/
+Exec=${CHROMIUM_LAUNCHER} --user-data-dir=${BASE_DIR}/profiles/linkedin --profile-directory=${PROFILE_DIRECTORY} --new-window https://www.linkedin.com/
 Icon=chromium
 Terminal=false
 Categories=Network;WebBrowser;
@@ -502,6 +502,30 @@ ensure_user
 mkdirs
 ensure_browser_binary
 write_browser_launcher
+
+# Каталог профиля Chromium вычисляется ДО создания ярлыков: иначе иконка на
+# рабочем столе открывала бы Default, пока автоматика ходит в профиль с
+# сессией, и оператор видел бы разлогиненный LinkedIn при живой сессии.
+#
+# Вход в аккаунт Google внутри браузера заставляет Chrome завести второй
+# профиль, и логин LinkedIn ложится туда. Зашитый Default приводил к тому,
+# что ночной перезапуск открывал пустой профиль — симптом, неотличимый от
+# потери сессии (наблюдалось 2026-08-12).
+PROFILE_DIRECTORY="Default"
+if [[ "${PROFILE}" == "linkedin" ]]; then
+  resolver_python="${SCRIPT_DIR}/../venv/bin/python"
+  if [[ -x "${resolver_python}" ]]; then
+    resolved="$(PYTHONPATH="${SCRIPT_DIR}/.." "${resolver_python}" -m job_intel.linkedin_session \
+      --user-data-dir "${BASE_DIR}/profiles/${PROFILE}" 2>/dev/null || true)"
+    # Пустой ответ означает «резолвер не отработал», а не «профиль Default»:
+    # подставлять пустую строку в аргумент Chromium нельзя.
+    if [[ -n "${resolved}" ]]; then
+      PROFILE_DIRECTORY="${resolved}"
+    fi
+  fi
+  echo "Профиль Chromium: ${PROFILE_DIRECTORY}"
+fi
+
 create_desktop_shortcuts
 PASSWORD="$(get_password)"
 
@@ -560,7 +584,7 @@ ensure_port_free_or_owned "${CDP_PORT}" "remote-debugging-port=${CDP_PORT}" "Chr
 if ! process_matches "remote-debugging-port=${CDP_PORT}"; then
   start_as_browser "${LOG_DIR}/chromium-${PROFILE}.log" dbus-run-session -- "${CHROMIUM_BIN}" \
     --user-data-dir="${BASE_DIR}/profiles/${PROFILE}" \
-    --profile-directory=Default \
+    --profile-directory="${PROFILE_DIRECTORY}" \
     --no-first-run \
     --disable-dev-shm-usage \
     --no-sandbox \

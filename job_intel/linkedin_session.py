@@ -67,18 +67,46 @@ def read_cookie_inventory(cookie_db: Path, *, host_filter: str = "linkedin") -> 
     ]
 
 
+def _profile_candidates(user_data_dir: Path) -> list[Path]:
+    """Каталоги профилей с куки-базой, в устойчивом порядке."""
+    candidates: list[Path] = []
+    default = user_data_dir / "Default"
+    if (default / "Cookies").exists():
+        candidates.append(default)
+    try:
+        others = sorted(
+            entry
+            for entry in user_data_dir.iterdir()
+            if entry.is_dir() and entry.name != "Default" and (entry / "Cookies").exists()
+        )
+    except OSError:
+        others = []
+    candidates.extend(others)
+    return candidates
+
+
 def resolve_profile_dir(user_data_dir: Path) -> Path:
-    """Каталог профиля Chrome, который используется на самом деле.
+    """Каталог профиля Chrome, в котором лежит сессия LinkedIn.
 
-    Вход в аккаунт Google внутри браузера заставляет Chrome завести второй
-    профиль, и сессия LinkedIn оказывается в нём, а не в Default. Жёстко
-    прочитанный Default тогда пуст, и «сессии нет» — вывод, сделанный по
-    чужому профилю. Наблюдалось 2026-08-09: `Profile 1` держал li_at,
-    `Default` не держал ничего, а браузер показывал живую ленту.
+    Отвечает на вопрос «где сессия», а не «что браузер открыл последним».
+    Разница стоила ложной тревоги 2026-08-12: ночной перезапуск десктопа
+    открыл Default, `last_used` переключился туда, и замер ушёл в профиль с
+    одиннадцатью анонимными куками — при живой сессии в соседнем каталоге.
+    Причина второго профиля — вход в аккаунт Google внутри браузера: Chrome
+    заводит под него отдельный профиль, и логин LinkedIn ложится туда.
 
-    Имя берётся из `Local State`; нечитаемый файл или несуществующий каталог
-    означают возврат к Default, но не молчаливую подмену другим профилем.
+    Порядок: профиль с сессионной кукой, затем `last_used`, затем Default.
+    Каждая ступень — возврат к менее точному ответу, но не молчаливая
+    подмена: вызывающий получает каталог и печатает его имя в отчёте.
     """
+    for candidate in _profile_candidates(user_data_dir):
+        try:
+            inventory = read_cookie_inventory(candidate / "Cookies")
+        except Exception:
+            continue
+        if any(record.name == SESSION_COOKIE for record in inventory):
+            return candidate
+
     state_path = user_data_dir / "Local State"
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -196,6 +224,12 @@ def resolve_session_state(*, cookie_state: str, page_state: str) -> SessionVerdi
         return SessionVerdict(SESSION_OK, mismatch)
     if page_state in (CHALLENGE_HARD, CHALLENGE_EMAIL_OTP):
         return SessionVerdict(page_state)
+    if page_state == SESSION_MISSING:
+        # Страница прямо показывает гостя или логин-форму. Живая кука,
+        # найденная в другом профиле, этого не отменяет: поиск пойдёт в том
+        # контексте, который открыт в браузере. Без этого правила ночной
+        # перезапуск в Default отчитывался бы как здоровая сессия.
+        return SessionVerdict(SESSION_MISSING)
     if cookie_state == SESSION_MISSING:
         return SessionVerdict(SESSION_MISSING)
     # Кука жива, логин-стены и челленджа нет, а разметку опознать не удалось.
@@ -203,3 +237,25 @@ def resolve_session_state(*, cookie_state: str, page_state: str) -> SessionVerdi
     # 2026-08-10 отказался работать при полностью живой авторизации: LinkedIn
     # сменил разметку, и «страницу не узнал» было прочитано как «сессии нет».
     return SessionVerdict(SESSION_OK, page_unrecognised=True)
+
+
+def main(argv: "Sequence[str] | None" = None) -> int:
+    """Печатает имя каталога профиля, в котором лежит сессия LinkedIn.
+
+    Нужен запускалке десктопа: она на bash и умеет читать только строку.
+    Печатается имя, а не путь — Chromium принимает --profile-directory
+    именно в таком виде.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Профиль Chrome с сессией LinkedIn")
+    parser.add_argument("--user-data-dir", required=True, type=Path)
+    args = parser.parse_args(argv)
+    print(resolve_profile_dir(args.user_data_dir).name)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())
