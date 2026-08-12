@@ -798,3 +798,210 @@ class TestAclHealStaysInsideHome:
         assert "setfacl" in calls, "the production handoff dir must still self-heal"
         # ...and never above the home it belongs to.
         assert f"{tmp_path}\n" not in calls
+
+
+# ---------------------------------------------------------------------------
+# The applied merge must join the point the operator actually decided about
+# ---------------------------------------------------------------------------
+
+
+class TestApplyMergeHonoursTheGatedUpstreamPoint:
+    """``upstream_sha`` in the request is the agent's claim. ``pending.json``
+    is the record written at gate time, before the operator answered — so when
+    the two disagree, the request is applying a decision to a point the
+    operator never saw. Upstream keeps moving while the operator sleeps on it
+    (10 commits arrived during the 2026-08-12 gate alone), and new commits can
+    change the conflict set the decision was made against.
+    """
+
+    def _pending(self, state: Path, upstream_head: str):
+        (state / "pending.json").write_text(
+            json.dumps(
+                {
+                    "schema": "upstream-sync-pending/v1",
+                    "upstream_head": upstream_head,
+                    "features": [{"id": "F1", "decision": "merge-both"}],
+                }
+            )
+        )
+
+    def test_merge_against_an_undecided_upstream_point_is_refused(
+        self, tmp_path, state
+    ):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        _git(repo, "checkout", "-q", "up")
+        (repo / "h.txt").write_text("later\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream moved on")
+        later = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+
+        # The operator was gated on `upstream_head`; the agent merged `later`
+        # and says so honestly — the parents match its own claim.
+        self._pending(state, upstream_head)
+        merge_sha = _scratch_merge(repo, state, local_head, later)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=later, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert "pending" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+        # The decision survives for a re-gate.
+        assert (state / "pending.json").exists()
+
+    def test_merge_against_the_gated_point_proceeds(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        self._pending(state, upstream_head)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        assert "sync-local-customizations.sh" in calls.read_text()
+
+
+# ---------------------------------------------------------------------------
+# A consumed decision is archived, not destroyed
+# ---------------------------------------------------------------------------
+
+
+class TestAppliedPendingIsArchived:
+    """Recording the operator's decision into memory is the *last* step of
+    Mode B, but the host cleared ``pending.json`` the moment the apply
+    succeeded — so the input for that step was gone before it ran. On
+    2026-08-12 the decision was lost exactly that way and had to be
+    reconstructed by hand.
+
+    Archiving instead of deleting keeps the retrigger protection (the file is
+    no longer named ``pending.json``) while leaving the record to record from.
+    """
+
+    def test_successful_apply_archives_the_decision(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(
+            json.dumps(
+                {
+                    "schema": "upstream-sync-pending/v1",
+                    "upstream_head": upstream_head,
+                    "features": [{"id": "F1", "decision": "merge-both"}],
+                }
+            )
+        )
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        # Consumed: a stray reply or the next scheduled sync finds nothing armed.
+        assert not (state / "pending.json").exists()
+        # ...but still recordable.
+        archived = list(state.glob("pending.json.applied-*"))
+        assert len(archived) == 1, archived
+        kept = json.loads(archived[0].read_text())
+        assert kept["features"][0]["decision"] == "merge-both"
+        assert kept["upstream_head"] == upstream_head
+
+
+# ---------------------------------------------------------------------------
+# The documented Mode B recipe, walked end to end against a read-only source
+# ---------------------------------------------------------------------------
+
+
+class TestModeBRecipeAgainstReadOnlyCheckout:
+    """Mode B exists for one case: a real conflict the operator has decided.
+    This walks the recipe the skill documents — clone --shared a checkout the
+    agent cannot write, resolve there, hand the host a SHA — and asserts the
+    read-only constraint that makes the detour necessary in the first place.
+    """
+
+    @staticmethod
+    def _chmod_tree(root: Path, writable: bool):
+        mode_dir = 0o755 if writable else 0o555
+        mode_file = 0o644 if writable else 0o444
+        for path in sorted(root.rglob("*"), reverse=True):
+            path.chmod(mode_dir if path.is_dir() else mode_file)
+        root.chmod(mode_dir)
+
+    def test_conflict_resolved_in_a_clone_lands_on_the_live_branch(
+        self, tmp_path, state
+    ):
+        repo = _make_repo(tmp_path)
+        # Both sides edit the same line — a genuine textual conflict.
+        (repo / "f.txt").write_text("local change\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "local edit")
+        local_head = _git(repo, "rev-parse", "HEAD")
+
+        _git(repo, "checkout", "-qb", "up", "HEAD~1")
+        (repo / "f.txt").write_text("upstream change\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream edit")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+
+        scratch = state / "scratch"
+        self._chmod_tree(repo, writable=False)
+        try:
+            # The constraint the whole detour exists for: the agent cannot make
+            # a backup ref or commit in the live checkout.
+            failed = subprocess.run(
+                ["git", "-C", str(repo), "branch", "backup/attempt"],
+                capture_output=True,
+                text=True,
+            )
+            assert failed.returncode != 0, "expected the read-only checkout to refuse"
+
+            subprocess.run(
+                ["git", "clone", "-q", "--shared", str(repo), str(scratch)],
+                check=True,
+                capture_output=True,
+            )
+            _git(scratch, "config", "user.email", "t@t")
+            _git(scratch, "config", "user.name", "t")
+            _git(scratch, "checkout", "-q", "--detach", local_head)
+            conflicted = subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "rerere.enabled=false",
+                    "-c",
+                    "merge.conflictStyle=zdiff3",
+                    "merge",
+                    "--no-edit",
+                    upstream_head,
+                ],
+                cwd=scratch,
+                capture_output=True,
+                text=True,
+            )
+            assert conflicted.returncode != 0, "expected a conflict to resolve"
+            # merge-both: keep both sides, the operator's decision.
+            (scratch / "f.txt").write_text("local change\nupstream change\n")
+            _git(scratch, "add", "f.txt")
+            _git(scratch, "-c", "rerere.enabled=false", "commit", "--no-edit", "-q")
+            merge_sha = _git(scratch, "rev-parse", "HEAD")
+        finally:
+            self._chmod_tree(repo, writable=True)
+
+        scripts, calls = _stub_scripts(tmp_path)
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        assert (repo / "f.txt").read_text() == "local change\nupstream change\n"
+        assert _git(repo, "rev-parse", res["backup_ref"]) == local_head
+        assert "upstream-sync-smoketest.sh" in calls.read_text()
+        # The clone is disposable and the host cleans it up on success.
+        assert not scratch.exists()

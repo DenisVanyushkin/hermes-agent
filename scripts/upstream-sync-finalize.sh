@@ -109,7 +109,16 @@ PY
   # stray reply or the next scheduled sync does not re-trigger against
   # already-applied state. Keep it on rollback/failure so the operator can retry.
   if { is_apply_action || [ "$ACTION" = finalize ]; } && [ "$1" = ok ]; then
-    rm -f "$STATE_DIR/pending.json"
+    # Archive rather than delete. Recording the operator's decision into
+    # decision-memory.json is the LAST step of Mode B and reads this file, so
+    # deleting it here destroyed the step's own input (2026-08-12: the decision
+    # was lost and had to be rebuilt by hand). Renaming still disarms it: only
+    # a file named exactly pending.json is treated as outstanding.
+    if [ -f "$STATE_DIR/pending.json" ]; then
+      mv -f "$STATE_DIR/pending.json" \
+        "$STATE_DIR/pending.json.applied-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || \
+        rm -f "$STATE_DIR/pending.json"
+    fi
   fi
 }
 
@@ -221,6 +230,16 @@ case "$ACTION" in
     FETCHED="$(git -C "$REPO" rev-parse FETCH_HEAD 2>>"$DETAIL_LOG")"
     if [ "$FETCHED" != "$MERGE_SHA" ]; then
       write_result failed "scratch_repo HEAD $FETCHED is not the promised merge_sha $MERGE_SHA — repo untouched, no rollback."
+      exit 0
+    fi
+    # pending.json is the gate-time record, written before the operator
+    # answered; the request field is only the agent's claim. Where they differ,
+    # the merge joins a point nobody decided about — upstream keeps moving
+    # while the gate waits, and later commits can change the conflict set the
+    # decision was made against.
+    PENDING_HEAD="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"upstream_head\") or \"\")" "$STATE_DIR/pending.json" 2>/dev/null || true)"
+    if [ -n "$PENDING_HEAD" ] && [ "$PENDING_HEAD" != "$UPSTREAM_SHA" ]; then
+      write_result failed "upstream_sha $UPSTREAM_SHA is not the point the operator was gated on (pending.json records $PENDING_HEAD) — refusing; repo untouched, no rollback, decision kept for a re-gate."
       exit 0
     fi
     HEAD_SHA="$(git -C "$REPO" rev-parse HEAD 2>>"$DETAIL_LOG")"

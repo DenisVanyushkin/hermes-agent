@@ -61,10 +61,12 @@ appears within 10 minutes, report that the finalizer did not respond and stop.
 
 ## Invariants (never violate)
 
-1. Any repo mutation needs a backup ref first. For the `sync` action the host
-   creates it; before your own manual merge (Mode B) create it yourself:
-   `git -C /workspace/live-hermes branch backup/pre-upstream-sync-$(date +%Y%m%d-%H%M%S) HEAD`.
-   Mention the backup ref in every report.
+1. Any repo mutation needs a backup ref first — and **the host always makes
+   it**, for every action including `apply-merge`. You cannot: the live
+   checkout is mounted read-only, so `git -C /workspace/live-hermes branch ...`
+   fails. Never write to `/workspace/live-hermes` at all; read it freely.
+   The backup ref comes back in the finalize result — mention it in every
+   report.
 2. If `pending_decision_present` is true in the preflight JSON and you were
    started by cron: do not begin a new sync. If `pending.json` is younger than
    7 days, post a reminder that a decision is still awaited; if older, post the
@@ -168,17 +170,19 @@ Do NOT modify the repo yet. First consult decision memory, then branch.
    > out in the report if the conflict count is near the cap.
 
 2. **If `new` is empty (full auto-apply):**
-   a. Create the backup ref (invariant 1).
-   b. Write `pending.json` with every feature pre-decided from `remembered`
-      (copy each `decision`) and `status: "auto_apply"`.
-   c. Run **Mode B steps 2–5 only** (create backup, merge applying the
-      remembered decisions, finalize, record) — SKIP Mode B step 1: there is no
-      operator reply to match in a full-auto cron run, decisions are already
-      known from memory.
-   d. On `ok`: record the applied decisions —
-      `python3 .../upstream_sync_decisions.py record --pending <pending.json> \
+   a. Write `pending.json` with every feature pre-decided from `remembered`
+      (copy each `decision`) and `status: "auto_apply"`. The host will make the
+      backup ref when it applies the merge; you cannot (invariant 1).
+   b. Run **Mode B steps 2–5 only** (staleness check, scratch-clone merge
+      applying the remembered decisions, hand-off, record) — SKIP Mode B step
+      1: there is no operator reply to match in a full-auto cron run, the
+      decisions are already known from memory.
+   c. On `ok`: record the applied decisions from the file the host archived as
+      `pending.json.applied-<timestamp>` (it moves `pending.json` aside rather
+      than deleting it, precisely so this step still has its input) —
+      `python3 .../upstream_sync_decisions.py record --pending <the archived file> \
         --memory .../decision-memory.json --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"`
-      — then delete `pending.json` and post a **post-facto Slack notice**:
+      — then post a **post-facto Slack notice**:
       list each auto-resolved feature, its decision, and that it was applied
       automatically from a prior operator decision (cite the memory entry's
       `apply_count`/`last_applied_at` if useful). On `failed`: host rolled back;
@@ -194,44 +198,102 @@ Do NOT modify the repo yet. First consult decision memory, then branch.
 
 ## Mode B — applying operator decisions
 
+`/workspace/live-hermes` is mounted **read-only**. You cannot create a backup
+ref there, cannot commit, and must not try: on 2026-08-12 an apply died doing
+exactly that, after having already told the operator their decision was being
+applied. You build the merge in your own writable clone and hand the host a
+SHA — the host owns every write to the live repository.
+
 1. Read `pending.json`. Match the operator's reply to feature ids. If any
    feature's decision is missing or ambiguous, ask one clarifying question in
    the thread and stop.
-2. Create the backup ref (invariant 1).
-3. In `/workspace/live-hermes`, run
-   `git -c merge.conflictStyle=zdiff3 merge --no-edit origin/main`. One merge
-   raises every conflict at once — there is no per-commit replay. Resolve each
-   per the decided option for the feature owning that file:
+
+2. Make your scratch clone, and check there that the decision still applies.
+   Everything from here happens in the clone — never in the live checkout:
+
+   ```
+   rm -rf /root/.hermes/state/upstream-sync/scratch
+   git clone --shared /workspace/live-hermes /root/.hermes/state/upstream-sync/scratch
+   cd /root/.hermes/state/upstream-sync/scratch
+   git merge-tree --write-tree --name-only HEAD <upstream_head from pending.json>
+   git merge-tree --write-tree --name-only HEAD origin/main
+   ```
+
+   Run these in the clone, not against `/workspace/live-hermes`:
+   `--write-tree` puts objects in the object database, which a read-only mount
+   refuses.
+
+   Upstream keeps moving while the gate waits — 10 commits arrived during the
+   2026-08-12 gate alone. If the two conflict sets differ, the operator decided
+   about a different picture: report that, keep `pending.json`, and ask for a
+   fresh gate rather than applying. Either way, merge the point the operator
+   was gated on, never whatever `origin/main` happens to be now — the host
+   refuses anything else.
+
+3. Merge in the clone and resolve:
+
+   ```
+   git checkout --detach <local_head from pending.json>
+   git -c merge.conflictStyle=zdiff3 merge --no-edit <upstream_head from pending.json>
+   ```
+
+   `--shared` borrows objects from the read-only original instead of copying
+   them, so the clone is cheap. It also gets a fresh config and an empty
+   `rr-cache`, which is what keeps this merge away from the repository's
+   rebase-era rerere recordings — do NOT re-enable rerere here. Those
+   resolutions were recorded when the sync was a rebase, where "ours" and
+   "theirs" are inverted relative to a merge; replaying them resolves
+   conflicts backwards, and silently.
+
+   One merge raises every conflict at once — there is no per-commit replay.
+   Resolve each per the decided option for the feature owning that file:
    - `keep-local`: keep the local side. In a merge `--ours` IS the local side
      and `--theirs` is upstream — the opposite of a rebase, where the sides are
      inverted. Verify by inspecting the conflicted file before staging.
    - `take-upstream`: keep the upstream side, same verification.
    - `merge-both`: edit the file to combine both changes; keep local behavior
      and adopt upstream structure; then `git add`.
+
    `zdiff3` puts the merge base between the two sides, which is what tells
    "both sides added something here" apart from "upstream moved code we had
    modified" — the second case needs the local change ported into the new
    structure, not pasted back.
-   Then `git commit --no-edit`. If the merge becomes unmanageable,
-   `git merge --abort` and report honestly.
 
-   Do NOT enable rerere for this merge. The repository carries recorded
-   resolutions from the rebase era, where "ours" and "theirs" are inverted
-   relative to a merge; applying them here resolves conflicts backwards and
-   silently.
-4. Write `finalize-request.json` with `action: "finalize"`, the upstream head
-   SHA, and your backup ref. Poll for the result.
-5. On `ok`: first write the operator's decision into each feature of
-   `pending.json` (set `"decision"` to the chosen option; leave `remembered`
-   features' decisions as-is), then record them:
-   `python3 /workspace/live-hermes/scripts/upstream_sync_decisions.py record \
-      --pending /root/.hermes/state/upstream-sync/pending.json \
+   Then `git commit --no-edit`. If the merge becomes unmanageable, report
+   honestly and stop: nothing has touched the live repository, so there is
+   nothing to undo.
+
+4. Hand the merge to the host. Write `finalize-request.json`:
+
+   ```json
+   {"action": "apply-merge",
+    "upstream_sha": "<upstream_head from pending.json>",
+    "merge_sha": "<rev-parse HEAD of the scratch clone>",
+    "scratch_repo": "scratch"}
+   ```
+
+   `scratch_repo` is a bare directory name under the state dir, not a path.
+   The host fetches that commit and refuses it unless its parents are exactly
+   the live HEAD and the gated upstream point; then it creates the backup ref
+   itself, fast-forwards, pushes, smoke-tests and restarts, rolling back on
+   failure. Poll for the result.
+
+5. On `ok`: the host archived the decision next to `pending.json` as
+   `pending.json.applied-<timestamp>` — record from that file (write each
+   feature's chosen option into its `decision` field first if it is not
+   already there; leave `remembered` features as they are):
+
+   ```
+   python3 /workspace/live-hermes/scripts/upstream_sync_decisions.py record \
+      --pending /root/.hermes/state/upstream-sync/pending.json.applied-<timestamp> \
       --memory /root/.hermes/state/upstream-sync/decision-memory.json \
-      --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"`.
-   Then delete `pending.json` and summarize per-feature what was done, marking
-   which features were auto-applied from memory vs freshly decided. On
-   `failed`: the host rolled back; keep both `pending.json` and memory
-   unchanged and report.
+      --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   ```
+
+   Then summarize per-feature what was done, marking which features were
+   auto-applied from memory vs freshly decided. On `failed`: the host either
+   left the repository untouched or rolled it back, and kept the decision
+   armed — leave memory unchanged and report.
 
 ## Reporting style
 
