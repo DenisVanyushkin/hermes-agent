@@ -173,7 +173,13 @@ def _send_result_error(result: Any) -> Optional[str]:
 
 def _is_thread_not_found_delivery_error(result: Any) -> bool:
     error = _send_result_error(result)
-    return bool(error and "thread not found" in error.lower())
+    if not error:
+        return False
+    normalized = error.lower()
+    return (
+        "thread not found" in normalized
+        or "direct messages topic not found" in normalized
+    )
 
 
 def _send_result_error_kind(result: Any) -> Optional[str]:
@@ -580,7 +586,11 @@ class DeliveryRouter:
                         f"Failed to create Telegram private DM topic '{target_thread_id}'"
                     )
                 target_thread_id = str(created_thread_id)
-                send_metadata["thread_id"] = target_thread_id
+                # Telegram direct-message topics require the Bot API's
+                # direct_messages_topic_id parameter.  message_thread_id is
+                # accepted for a private chat but routes the message to its
+                # General topic instead of the named DM topic.
+                send_metadata["direct_messages_topic_id"] = target_thread_id
                 send_metadata["telegram_dm_topic_created_for_send"] = True
             elif (
                 target.platform == Platform.TELEGRAM
@@ -591,8 +601,8 @@ class DeliveryRouter:
             ):
                 # Legacy private topic/thread ids that were not created by this
                 # send path may still need a reply anchor to stay visible in the
-                # requested lane. Named targets are created above via
-                # createForumTopic and can use message_thread_id directly.
+                # requested lane. Named targets are created above and routed via
+                # the Bot API's direct_messages_topic_id field.
                 reply_anchor = send_metadata.get("telegram_reply_to_message_id")
                 if reply_anchor is None:
                     raise RuntimeError(
@@ -629,7 +639,8 @@ class DeliveryRouter:
                     raise RuntimeError(
                         f"Failed to refresh Telegram private DM topic '{named_telegram_private_topic_name}'"
                     )
-                send_metadata["thread_id"] = str(refreshed_thread_id)
+                send_metadata.pop("thread_id", None)
+                send_metadata["direct_messages_topic_id"] = str(refreshed_thread_id)
                 send_metadata["telegram_dm_topic_created_for_send"] = True
                 result = await transport.send(
                     target.platform,
