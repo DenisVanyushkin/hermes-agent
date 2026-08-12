@@ -370,3 +370,49 @@ def test_module_prints_the_resolved_profile_name(tmp_path: Path) -> None:
     )
 
     assert out.stdout.strip() == "Profile 1"
+
+
+# --- Нечитаемый профиль не равен профилю без сессии ----------------------
+
+from job_intel.linkedin_session import resolve_profile
+
+
+def test_unreadable_profile_is_reported_not_swallowed(tmp_path: Path) -> None:
+    """Каталог Profile 1 имеет права drwx------ browser:browser. Под другим
+    пользователем чтение падает, и `except: continue` превращал «не смог
+    посмотреть» в «сессии тут нет»: резолвер от hermes отвечал Default, от
+    root — Profile 1, на одних и тех же данных."""
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    (tmp_path / "Default").mkdir()
+    _make_cookie_db(tmp_path / "Default" / "Cookies", [(".linkedin.com", "bcookie", future, 1)])
+    locked = tmp_path / "Profile 1"
+    locked.mkdir()
+    _make_cookie_db(locked / "Cookies", [(".www.linkedin.com", "li_at", future, 1)])
+    (locked / "Cookies").chmod(0o000)
+
+    try:
+        resolution = resolve_profile(tmp_path)
+    finally:
+        (locked / "Cookies").chmod(0o600)
+
+    assert "Profile 1" in resolution.unreadable
+
+
+def test_resolution_names_the_reason(tmp_path: Path) -> None:
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    (tmp_path / "Profile 1").mkdir()
+    _make_cookie_db(tmp_path / "Profile 1" / "Cookies", [(".www.linkedin.com", "li_at", future, 1)])
+
+    resolution = resolve_profile(tmp_path)
+
+    assert resolution.reason == "session_cookie"
+    assert resolution.path == tmp_path / "Profile 1"
+    assert resolution.unreadable == ()
+
+
+def test_fallback_to_default_names_itself(tmp_path: Path) -> None:
+    (tmp_path / "Default").mkdir()
+
+    resolution = resolve_profile(tmp_path)
+
+    assert resolution.reason == "default"

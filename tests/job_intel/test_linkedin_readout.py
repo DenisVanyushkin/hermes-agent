@@ -77,3 +77,15 @@ def test_report_names_the_chrome_profile_it_read() -> None:
 
     assert report["profile_dir"] == "Profile 1"
     assert "profile=Profile 1" in render_report(report).splitlines()[0]
+
+
+def test_report_carries_how_the_profile_was_chosen() -> None:
+    """`session_missing_cookie`, полученное после того, как профиль с сессией
+    не удалось прочитать, — не факт о сессии, а факт о правах доступа."""
+    report = build_report(
+        exit_ip="203.0.113.7", inventory=[], now=NOW, netns="ln-eg",
+        profile_dir="Default", profile_reason="default", unreadable_profiles=("Profile 1",),
+    )
+
+    assert report["profile_reason"] == "default"
+    assert report["unreadable_profiles"] == ["Profile 1"]

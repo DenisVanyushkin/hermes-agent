@@ -85,7 +85,21 @@ def _profile_candidates(user_data_dir: Path) -> list[Path]:
     return candidates
 
 
-def resolve_profile_dir(user_data_dir: Path) -> Path:
+@dataclass(frozen=True)
+class ProfileResolution:
+    """Каталог профиля и то, как он был выбран.
+
+    Причина и список нечитаемых профилей — часть ответа, а не служебная
+    деталь: `session_missing_cookie`, полученное после того, как профиль с
+    сессией не удалось прочитать, есть факт о правах доступа, а не о сессии.
+    """
+
+    path: Path
+    reason: str
+    unreadable: tuple[str, ...] = ()
+
+
+def resolve_profile(user_data_dir: Path) -> ProfileResolution:
     """Каталог профиля Chrome, в котором лежит сессия LinkedIn.
 
     Отвечает на вопрос «где сессия», а не «что браузер открыл последним».
@@ -99,13 +113,20 @@ def resolve_profile_dir(user_data_dir: Path) -> Path:
     Каждая ступень — возврат к менее точному ответу, но не молчаливая
     подмена: вызывающий получает каталог и печатает его имя в отчёте.
     """
+    unreadable: list[str] = []
     for candidate in _profile_candidates(user_data_dir):
         try:
             inventory = read_cookie_inventory(candidate / "Cookies")
         except Exception:
+            # Каталог профиля имеет права drwx------ browser:browser, поэтому
+            # под другим пользователем чтение падает. Пропустить молча —
+            # значит выдать «сессии тут нет» вместо «не смог посмотреть»:
+            # резолвер от hermes отвечал Default, от root — Profile 1, на
+            # одних и тех же данных.
+            unreadable.append(candidate.name)
             continue
         if any(record.name == SESSION_COOKIE for record in inventory):
-            return candidate
+            return ProfileResolution(candidate, "session_cookie", tuple(unreadable))
 
     state_path = user_data_dir / "Local State"
     try:
@@ -116,8 +137,13 @@ def resolve_profile_dir(user_data_dir: Path) -> Path:
     if last_used:
         candidate = user_data_dir / last_used
         if candidate.is_dir():
-            return candidate
-    return user_data_dir / "Default"
+            return ProfileResolution(candidate, "last_used", tuple(unreadable))
+    return ProfileResolution(user_data_dir / "Default", "default", tuple(unreadable))
+
+
+def resolve_profile_dir(user_data_dir: Path) -> Path:
+    """Тонкая обёртка для вызывающих, которым нужен только каталог."""
+    return resolve_profile(user_data_dir).path
 
 
 def session_state_from_cookies(inventory: Sequence[CookieRecord], *, now: datetime) -> str:
@@ -247,11 +273,21 @@ def main(argv: "Sequence[str] | None" = None) -> int:
     именно в таком виде.
     """
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description="Профиль Chrome с сессией LinkedIn")
     parser.add_argument("--user-data-dir", required=True, type=Path)
     args = parser.parse_args(argv)
-    print(resolve_profile_dir(args.user_data_dir).name)
+    resolution = resolve_profile(args.user_data_dir)
+    if resolution.unreadable:
+        # В stderr, чтобы stdout остался пригодным для подстановки в аргумент.
+        print(
+            "предупреждение: не удалось прочитать профили: "
+            + ", ".join(resolution.unreadable)
+            + " — выбор мог быть сделан по неполным данным",
+            file=sys.stderr,
+        )
+    print(resolution.path.name)
     return 0
 
 
